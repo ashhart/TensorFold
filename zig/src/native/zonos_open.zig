@@ -4,6 +4,22 @@ const api = @import("engine_api");
 const zonos_host = @import("zonos_host.zig");
 const Allocator = std.mem.Allocator;
 const setting = @import("cuda_device.zig").setting;
+const memory = @import("cuda_family_memory.zig");
+const cuda = @import("cuda");
+
+/// The pool as every CUDA family reads it (the reserve, TENSORFOLD_CUDA_MEMORY_LIMIT_GB), less what this process holds.
+const Room = struct {
+    var gpa: Allocator = undefined;
+    var io: std.Io = undefined;
+
+    fn room(_: *anyopaque, ctx: *const cuda.Context) anyerror!u64 {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var problem: []const u8 = "";
+        const pool = try memory.pool(arena.allocator(), io, ctx, &problem) orelse return error.UnreadableMemoryPool;
+        return pool.room(cuda.usage(false).device);
+    }
+};
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = @import("sys").environment;
@@ -49,7 +65,16 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "ZONOS3 Mini uses one prompt segment at a time: use --segments 1";
         return null;
     }
-    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames }) catch |e| {
+    Room.gpa = gpa;
+    Room.io = io;
+    var refusal: zonos_host.Refusal = .{};
+    const admit: zonos_host.Admit = .{ .ptr = &Room.gpa, .room = Room.room };
+    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .admit = admit, .refusal = &refusal }) catch |e| {
+        if (e == error.InsufficientDeviceMemory) {
+            const text = "ZONOS3 Mini needs {d:.2} GiB of device memory at --context {d}; {d:.2} GiB is free for it after the reserve";
+            problem.* = try std.fmt.allocPrint(a, text, .{ memory.toGib(refusal.need), window, memory.toGib(refusal.room) });
+            return null;
+        }
         problem.* = try std.fmt.allocPrint(a, "the native ZONOS3 Mini CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };

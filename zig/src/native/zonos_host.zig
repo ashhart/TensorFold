@@ -14,6 +14,38 @@ pub const Options = struct {
     context: u32 = 4096,
     device: u32 = 0,
     max_frames: ?u32 = null,
+    admit: ?Admit = null, // null: nothing is asked, as the tool and tests load
+    refusal: ?*Refusal = null,
+};
+
+/// Who knows the pool: the device bytes a load may still take, on the context given.
+pub const Admit = struct { ptr: *anyopaque, room: *const fn (*anyopaque, *const cuda.Context) anyerror!u64 };
+
+/// A refused load's sizes, in bytes.
+pub const Refusal = struct { need: u64 = 0, room: u64 = 0 };
+
+/// The pinned release's weights as the device holds them: the backbone's bf16 and the keep2_plain decoder's fp32.
+pub const weight_bytes: u64 = 2_531_483_136;
+/// The clip encoder's weights, state and workspaces: the acoustic encoder, the SSL teacher and the quantizers.
+pub const clip_bytes: u64 = 5_643_510_688;
+
+/// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
+pub fn need(context: u32, frames: u32) u64 {
+    return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
+}
+
+const Door = struct {
+    o: Options,
+    need: u64,
+
+    fn check(p: *anyopaque, ctx: *const cuda.Context) anyerror!void {
+        const d: *Door = @ptrCast(@alignCast(p));
+        const a = d.o.admit orelse return;
+        const room = try a.room(a.ptr, ctx);
+        if (d.need <= room) return;
+        if (d.o.refusal) |r| r.* = .{ .need = d.need, .room = room };
+        return error.InsufficientDeviceMemory;
+    }
 };
 
 /// The frame budget and the prompt rows a context leaves.
@@ -103,6 +135,7 @@ const Host = struct {
     e: *z3.Engine,
     codec: *z3.Codec,
     clip: ?*z3.clip.Clip = null, // the clip encoder, loaded by the first request that brings a clip
+    admit: ?Admit = null,
     dir: []const u8,
     info_: api.Info,
     mutex: std.Io.Mutex = .init,
@@ -220,6 +253,11 @@ const Host = struct {
             var samples: usize = 0;
             const reason = h.serve(job, &samples) catch |err| switch (err) {
                 error.Cancelled => api.Reason.cancelled,
+                // refused before anything ran on the device: the engine is as it was
+                error.ClipEncoderNeedsMoreDeviceMemory => {
+                    h.finish(job, .failed, 0, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free");
+                    continue;
+                },
                 else => {
                     h.lock();
                     h.failed = true;
@@ -242,8 +280,12 @@ const Host = struct {
         defer gpa.free(cloned);
         if (r.reference_audio.len != 0) {
             if (h.clip == null) {
+                if (h.admit) |a| if (clip_bytes > try a.room(a.ptr, &h.e.ctx)) return error.ClipEncoderNeedsMoreDeviceMemory;
+                const before = cuda.usage(false).device;
                 h.clip = try z3.clip.Clip.create(gpa, h.io, &h.e.driver, h.e.stream, h.dir, h.rel.generator, h.codec.w);
-                std.log.info("zonos3: clip encoder loaded, {d} MiB of weights", .{h.clip.?.bytes() >> 20});
+                const took = cuda.usage(false).device - before;
+                std.log.info("zonos3: clip encoder loaded, {d} bytes on the device ({d} admitted)", .{ took, clip_bytes });
+                if (took > clip_bytes) return error.ClipEncoderOverItsAdmission;
             }
             const codes = try h.clip.?.encode(gpa, r.reference_audio);
             defer gpa.free(codes);
@@ -317,10 +359,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     errdefer gpa.destroy(h);
     var rel = try z3.release.open(gpa, io, dir, null);
     errdefer rel.deinit();
-    const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context });
+    var door: Door = .{ .o = o, .need = need(o.context, b.frames) };
+    const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check } });
     errdefer e.destroy();
     const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
     errdefer codec.destroy();
+    if (cuda.usage(false).device > door.need) return error.LoadOverItsAdmission;
     const kept = try gpa.dupe(u8, dir);
     errdefer gpa.free(kept);
     h.* = .{
@@ -330,6 +374,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         .rel = rel,
         .e = e,
         .codec = codec,
+        .admit = o.admit,
         .info_ = .{
             .name = "ZONOS3 Mini",
             .text_generation = false,
@@ -341,8 +386,18 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         },
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
-    std.log.info("zonos3: decoder {s}, {d} MiB of weights, {d} frames a request", .{ h.rel.decoder, (e.w.bytes + codec.w.bytes) >> 20, b.frames });
+    const held = cuda.usage(false).device;
+    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, held, door.need });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
+}
+
+test "need: the weights, then state that grows with the context and with the frame budget" {
+    const t = std.testing;
+    const base = need(4096, 2000);
+    try t.expectEqual(@as(u64, 3_828_406_528), base);
+    try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
+    // two attention layers keep a key row and a value row a position
+    try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
 }
 
 test "budget: the release's frame budget where the context holds it, the rest for the prompt" {

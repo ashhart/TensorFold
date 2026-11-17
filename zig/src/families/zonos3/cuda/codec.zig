@@ -37,6 +37,7 @@ pub const Codec = struct {
     k: kern.Kernels,
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
+    counted: ?usize, // set: allocations are counted, not made
     frames: usize = 0, // code frames decoded
     emitted: usize = 0, // samples handed out
     // state
@@ -72,6 +73,7 @@ pub const Codec = struct {
         c.frames = 0;
         c.emitted = 0;
         c.bufs = .empty;
+        c.counted = null;
         for (&c.kv) |*layers| layers.* = &.{};
         c.k = try kern.Kernels.load(d);
         errdefer c.k.unload();
@@ -102,10 +104,23 @@ pub const Codec = struct {
     }
 
     fn alloc(c: *Codec, bytes: usize) !u64 {
+        if (c.counted) |*n| {
+            n.* += @max(bytes, 256);
+            return 0;
+        }
         var b = try Buf.alloc(c.d, @max(bytes, 256));
         errdefer b.free();
         try c.bufs.append(c.gpa, b);
         return b.ptr;
+    }
+
+    /// Device bytes of the state and workspaces `o` allocates: the allocation code itself, counting.
+    pub fn stateBytes(o: Options) usize {
+        var c: Codec = undefined;
+        c.o = o;
+        c.counted = 0;
+        c.allocState() catch unreachable;
+        return c.counted.?;
     }
 
     fn allocState(c: *Codec) !void {
@@ -117,8 +132,12 @@ pub const Codec = struct {
         for (&c.sem_hist, 0..) |*h, i| h.* = c.hist + i * one;
         for (&c.head_hist, 0..) |*h, i| h.* = c.hist + (wts.sem_blocks + i) * one;
         for (&c.kv, wts.stages, 0..) |*layers, shape, si| {
-            layers.* = try c.gpa.alloc([2]u64, c.w.stages[si].layers.len);
             const bytes = (T << @intCast(si)) * shape.d * 4;
+            if (c.counted != null) {
+                for (0..2 * shape.layers) |_| _ = try c.alloc(bytes);
+                continue;
+            }
+            layers.* = try c.gpa.alloc([2]u64, shape.layers);
             for (layers.*) |*pair| pair.* = .{ try c.alloc(bytes), try c.alloc(bytes) };
         }
         for (&c.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
