@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's decode-window row kernels: each source reserves the threads a group it launches (64; by unique
-//! expert, 32 a window row up to 16 rows).
+//! GLM-5.3-Flash's decode-window row kernels: each reserves the threads a group it launches (unique-expert: 32 a row).
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
