@@ -105,6 +105,11 @@ pub const GpuTarget = struct {
         if (t.own_prefill and t.prompt_tail == .verify) {
             // the rows before the last token prefill; the last token is the pending row of the first verify window
             const sp = pk.promptSplit(rest.len, .verify);
+            // a hand-off's armed cut hears of each segment, so its export streams while the rest prefills
+            if (slot < t.cut.len) if (t.cut[slot]) |c| if (c.progress) |progress| {
+                t.f.segment_done = .{ .ptr = c.ptr, .run = progress };
+            };
+            defer t.f.segment_done = null;
             pf.state(t.f).taps_rows = 0; // a one-token prompt prefills nothing: no stale taps handed over
             // sessions: the prompt's snapshot at its replay point: its rows prefilled, an entry, then the rest
             const save_at: ?u64 = if (t.sessions != null) ced.savePoint(ids.len, at) else null;

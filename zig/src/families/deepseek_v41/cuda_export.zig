@@ -50,6 +50,9 @@ pub const Built = struct {
     exp: producer.Export,
     /// the parts' bytes: what a table counts against its cap
     bytes: u64,
+    /// a streamed export's parts and shape (`skeleton`): converted as the prompt prefills, the rest by `complete`
+    parts: []ex.Part = &.{},
+    shape: plan.Shape = undefined,
 
     /// Frees the arena and the frames a responder planned into `exp` with `gpa`; the caller destroys no `Built` itself.
     pub fn deinit(b: *Built, gpa: std.mem.Allocator) void {
@@ -136,7 +139,7 @@ pub fn cudaOf(arena: std.mem.Allocator, st: State, ds_rows: *u32) Error!ex.Cuda 
     const carries = try arena.alloc([]const u8, geo.sources.len);
     for (geo.sources, carries) |s, *c| c.* = if (s.ratio == 2) (piece(st.pieces, s.layer, "carry") orelse return error.MissingCarry) else &.{};
     out.carries = carries;
-    out.sources = try sourcesOf(arena, st);
+    out.sources = if (st.pages.len == 0) &.{} else try sourcesOf(arena, st); // none: the pages were streamed, converted already
     // the drafter's three rings ride whole or not at all; a short run of valid rows is zero-filled below it
     var drows: u32 = 0;
     const drafter = try arena.alloc(ex.Ring, geo.mtp_layers);
@@ -175,7 +178,54 @@ pub fn build(gpa: std.mem.Allocator, id: [16]u8, tokens: []const u32, st: State)
     const laid = try p2.layers(a, parts);
     b.exp = .{ .handoff = id, .tokens = try a.dupe(u32, tokens), .first_token = 0, .tokens_per_row = 1, .layers = laid.layers, .sources = laid.sources };
     b.bytes = bytes;
+    b.parts = &.{};
     return b;
+}
+
+/// The shape of the export of `pos` tokens with the drafter rows the state will hold (`ds_rows`: 0 for none).
+pub fn shapeOf(pos: u64, ds_rows: u32) plan.Shape {
+    return .{ .upto = pos, .ds_rows = ds_rows, .shard = 0, .shards = 1, .split = false };
+}
+
+/// An export whose parts are allocated, none converted: its manifest is announced now, its frames ready one by one.
+pub fn skeleton(gpa: std.mem.Allocator, id: [16]u8, tokens: []const u32, shape: plan.Shape) Error!*Built {
+    if (tokens.len == 0 or shape.upto != tokens.len) return error.NotAHandoffPrompt;
+    const b = try gpa.create(Built);
+    errdefer gpa.destroy(b);
+    b.arena = .init(gpa);
+    errdefer b.arena.deinit();
+    const a = b.arena.allocator();
+    const list = try plan.specs(a, shape);
+    const parts = try a.alloc(ex.Part, list.len);
+    var bytes: u64 = 0;
+    for (list, parts) |spec, *p| {
+        p.* = .{ .spec = spec, .bytes = try a.alloc(u8, @intCast(spec.bytes())) };
+        bytes += p.bytes.len;
+    }
+    const laid = try p2.layers(a, parts);
+    const progress = try a.create(producer.Progress);
+    progress.* = .{ .ready = try a.alloc(std.atomic.Value(u8), parts.len) };
+    for (progress.ready) |*r| r.* = .init(0);
+    b.exp = .{ .handoff = id, .tokens = try a.dupe(u32, tokens), .first_token = 0, .tokens_per_row = 1, .layers = laid.layers, .sources = laid.sources, .progress = progress };
+    b.bytes = bytes;
+    b.parts = parts;
+    b.shape = shape;
+    return b;
+}
+
+/// The parts a `skeleton` export has not converted yet, converted from `st`; then the export is whole.
+pub fn complete(b: *Built, st: State) Error!void {
+    const progress = b.exp.progress.?;
+    var ds: u32 = 0;
+    const cuda = try cudaOf(b.arena.allocator(), st, &ds);
+    if (st.pos != b.shape.upto or ds != b.shape.ds_rows) return error.BadSnapshot; // the manifest announced another export
+    try ex.checkRings(b.shape, cuda);
+    for (b.parts, 0..) |*p, i| {
+        if (progress.isReady(i)) continue;
+        try ex.convert(p, b.shape, cuda);
+        progress.mark(i);
+    }
+    progress.whole.store(true, .release);
 }
 
 /// The bytes of the parts a hand-off at `upto` tokens holds (what `build` allocates), for the table's cap.

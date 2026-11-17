@@ -30,6 +30,7 @@ test {
 }
 test {
     _ = @import("p2_test.zig");
+    _ = @import("p2_stream_test.zig");
 }
 test {
     _ = @import("guard_test.zig");

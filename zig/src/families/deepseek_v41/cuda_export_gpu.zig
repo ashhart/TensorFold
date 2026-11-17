@@ -8,6 +8,7 @@ const ex = @import("handoff/export.zig");
 const ced = @import("ced.zig");
 const kvs = @import("cuda_kv.zig");
 const plan = @import("handoff/plan.zig");
+const g = @import("handoff/geometry.zig");
 
 pub const Error = error{ BadWindow, UnsupportedKvFormat };
 
@@ -80,8 +81,33 @@ fn readPages(gpa: std.mem.Allocator, kx: *kvs.Kv, at: u64, bufs: *std.ArrayList(
     return out;
 }
 
-/// The active slot's state at `at` tokens, on the engine thread with the slot standing there.
-pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
+/// The drafter rows an export of `pos` tokens carries: the window's when the slot holds all the rings, else none.
+pub fn drafterRows(ss: *const sg.Sessions, pos: u64) u32 {
+    const geo = g.release;
+    const replay = pf.state(ss.f).mode == .replay;
+    var found: u32 = 0;
+    for (0..geo.mtp_layers) |i| {
+        var v: [24]u8 = undefined;
+        var sc: [24]u8 = undefined;
+        const roles = [2][]const u8{ std.fmt.bufPrint(&v, "s.L{d}.ring.v", .{geo.layers + i}) catch continue, std.fmt.bufPrint(&sc, "s.L{d}.ring.s", .{geo.layers + i}) catch continue };
+        var both: u32 = 0;
+        for (roles) |role| {
+            for (ss.pieces) |p| if (std.mem.eql(u8, p.role, role)) {
+                both += 1;
+                break;
+            };
+            if (replay) for (ss.drafter_rings) |p| if (std.mem.eql(u8, p.role, role)) {
+                both += 1;
+                break;
+            };
+        }
+        if (both == 2) found += 1;
+    }
+    return if (found == geo.mtp_layers) @intCast(@min(pos, geo.window)) else 0;
+}
+
+/// The active slot's state at `at` tokens, on the engine thread at that position; `pages`: the pool's pages read too.
+pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64, pages: bool) !*Capture {
     const f = ss.f;
     const kx = ss.kx;
     if (f.slot.pos != at or f.slot.pending != null or ss.hist[ss.cur()].items.len != at) return error.BadWindow;
@@ -121,7 +147,7 @@ pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
             out.* = .{ .role = p.role, .bytes = bytes };
         }
     }
-    c.pages = try readPages(gpa, kx, at, &bufs);
+    if (pages) c.pages = try readPages(gpa, kx, at, &bufs);
     c.bufs = try bufs.toOwnedSlice(gpa);
     c.st = .{
         .pos = at,
@@ -140,6 +166,8 @@ pub fn capture(gpa: std.mem.Allocator, ss: *sg.Sessions, at: u64) !*Capture {
 /// The `cuda_export.Source` over the engine's session store.
 pub const Source = struct {
     ss: *sg.Sessions,
+    /// the pool's pages were converted while the prompt prefilled: the next state read leaves them out
+    streamed: bool = false,
 
     pub fn source(s: *Source) cx.Source {
         return .{ .ptr = s, .take = take, .release = release };
@@ -147,7 +175,8 @@ pub const Source = struct {
 
     fn take(ptr: *anyopaque, gpa: std.mem.Allocator, at: u64) anyerror!cx.Captured {
         const s: *Source = @ptrCast(@alignCast(ptr));
-        const c = try capture(gpa, s.ss, at);
+        const c = try capture(gpa, s.ss, at, !s.streamed);
+        s.streamed = false;
         return .{ .ctx = c, .state = c.st };
     }
 

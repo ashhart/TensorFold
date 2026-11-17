@@ -16,6 +16,8 @@ pub const Export = struct {
     layers: []const manifest.Layer,
     sources: []const frames.Source,
     frames: []frames.Frame = &.{},
+    /// a streamed export, whose parts are converted while its prompt still prefills (null: whole from the start)
+    progress: ?*Progress = null,
 
     /// Protocol 2 when a layer is recurrent, so a protocol 1 decoder refuses it; else protocol 1, byte for byte.
     pub fn protocol(e: *const Export) u16 {
@@ -25,6 +27,35 @@ pub const Export = struct {
 
     pub fn toManifest(e: *const Export, model: []const u8, tp_rank: u64, tp_size: u64) manifest.Manifest {
         return .{ .protocol = e.protocol(), .handoff = e.handoff, .model = model, .prompt_tokens = e.tokens.len, .first_token = e.first_token, .token_sha256 = wire.tokenSha256(e.tokens), .block_size = e.tokens_per_row, .tp_rank = tp_rank, .tp_size = tp_size, .layers = e.layers, .frames = e.frames.len };
+    }
+};
+
+/// Which frames of a streamed export are ready to serve, and whether it is whole or failed (the converter sets it).
+pub const Progress = struct {
+    ready: []std.atomic.Value(u8),
+    whole: std.atomic.Value(bool) = .init(false),
+    broken: std.atomic.Value(bool) = .init(false),
+    why: [96]u8 = undefined,
+    why_len: usize = 0,
+
+    pub fn isReady(p: *const Progress, frame: usize) bool {
+        return p.ready[frame].load(.acquire) != 0;
+    }
+
+    pub fn mark(p: *Progress, frame: usize) void {
+        p.ready[frame].store(1, .release);
+    }
+
+    /// No more frames will come: the decoder is told `text` at its next PULL.
+    pub fn fail(p: *Progress, text: []const u8) void {
+        if (p.broken.load(.acquire)) return;
+        p.why_len = @min(text.len, p.why.len);
+        @memcpy(p.why[0..p.why_len], text[0..p.why_len]);
+        p.broken.store(true, .release);
+    }
+
+    pub fn reason(p: *const Progress) []const u8 {
+        return p.why[0..p.why_len];
     }
 };
 
@@ -185,7 +216,10 @@ pub const Responder = struct {
 
     fn open(r: *Responder, seq: u32, h: wire.Header, msg: []const u8, exp: ?*Export) !void {
         const e = exp orelse return r.reply(seq, .wait, h.handoff, "", 0);
-        try r.checksums.put(r.gpa, h.handoff, try checksumOption(r.gpa, wire.body(msg, h)));
+        const body = wire.body(msg, h);
+        // a streamed export not whole yet is offered to a decoder that asked ("stream"); the rest wait for it
+        if (e.progress) |pg| if (!pg.whole.load(.acquire) and !pg.broken.load(.acquire) and !try flagOption(r.gpa, body, "stream", false)) return r.reply(seq, .wait, h.handoff, "", 0);
+        try r.checksums.put(r.gpa, h.handoff, try checksumOption(r.gpa, body));
         if (e.frames.len == 0) {
             const rows = try r.gpa.alloc(frames.LayerRows, e.layers.len);
             defer r.gpa.free(rows);
@@ -208,6 +242,10 @@ pub const Responder = struct {
     fn pull(r: *Responder, seq: u32, h: wire.Header, exp: ?*Export) !void {
         const e = exp orelse return r.noFrame(seq, h);
         if (h.frame >= e.frames.len) return r.noFrame(seq, h);
+        if (e.progress) |pg| {
+            if (pg.broken.load(.acquire)) return r.reply(seq, .@"error", h.handoff, pg.reason(), 0);
+            if (!pg.isReady(h.frame)) return r.reply(seq, .wait, h.handoff, "", 0);
+        }
         const f = e.frames[h.frame];
         const area = r.out.area[wire.header_bytes..];
         const nbytes = try e.sources[f.position].gather(f.row_start, f.rows, area);
@@ -256,11 +294,16 @@ pub const Serving = struct {
 
 /// bool(json.loads(body or "{}").get("checksum", True)), with unparsable options read as {} as responder.py does.
 fn checksumOption(gpa: Allocator, body: []const u8) !bool {
+    return flagOption(gpa, body, "checksum", true);
+}
+
+/// `checksumOption` for any key; `default` when the options do not name it.
+fn flagOption(gpa: Allocator, body: []const u8, key: []const u8, default: bool) !bool {
     const text = if (body.len == 0) "{}" else body;
-    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch return true;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch return default;
     defer parsed.deinit();
     if (parsed.value != .object) return error.OptionsNotObject;
-    const v = parsed.value.object.get("checksum") orelse return true;
+    const v = parsed.value.object.get(key) orelse return default;
     return switch (v) {
         .null => false,
         .bool => |b| b,

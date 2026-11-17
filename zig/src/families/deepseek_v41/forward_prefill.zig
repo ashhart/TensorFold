@@ -383,6 +383,7 @@ fn segmentPair(f: *Forward, ia: []const u32, ib: []const u32) !bool {
     f.last_rows = 0;
     st.taps_at = start;
     st.taps_rows = 0;
+    if (f.segment_done) |d| d.run(d.ptr, f.slot.pos);
     return true;
 }
 
@@ -455,6 +456,7 @@ fn segment(f: *Forward, ids: []const u32, head: bool) !void {
     f.last_rows = if (replay) 0 else n;
     st.taps_at = start;
     st.taps_rows = if (replay) 0 else n;
+    if (f.segment_done) |d| d.run(d.ptr, f.slot.pos);
 }
 
 pub const MultiSeg = ft.MultiSeg;

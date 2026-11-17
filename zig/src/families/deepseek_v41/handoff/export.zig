@@ -15,11 +15,13 @@ pub const Ring = struct { values: []const u8, scales: []const u8 };
 pub const Paged = struct {
     split: bool,
     ranks: []const []const u8,
+    /// the logical page the first bytes of `ranks[0]` hold (a window of a replicated pool, read page by page)
+    first: u64 = 0,
 
     fn row(v: Paged, row_bytes: usize, page_rows: u32, r: u64) Error![]const u8 {
         const pg = r / page_rows;
         const owner: usize = if (v.split) @intCast(pg % v.ranks.len) else 0;
-        const local = if (v.split) pg / v.ranks.len else pg;
+        const local = (if (v.split) pg / v.ranks.len else pg) - v.first;
         const bytes = v.ranks[owner];
         if (bytes.len == 0) return error.MissingShard;
         const off = std.math.mul(usize, @intCast(local * page_rows + r % page_rows), row_bytes) catch return error.ShortPool;
@@ -67,38 +69,49 @@ fn sourceOf(cuda: Cuda, layer: u32) ?SourceState {
     return null;
 }
 
+/// The rings a build needs: the engine's ring rows cover the window, and the drafter's the rows that ride.
+pub fn checkRings(shape: plan.Shape, cuda: Cuda) Error!void {
+    if (cuda.rings.rows < shape.geo.window or !std.math.isPowerOfTwo(cuda.rings.rows) or !std.math.isPowerOfTwo(cuda.rings.drafter_rows)) return error.BadRingRows;
+    if (cuda.rings.drafter_rows < shape.ds_rows) return error.BadRingRows;
+}
+
 /// All of a shard's parts, converted, in plan order. `shape` says which producer this is (shard, split, drafter rows).
 pub fn build(arena: std.mem.Allocator, shape: plan.Shape, cuda: Cuda) Error![]Part {
     const list = try plan.specs(arena, shape);
-    const geo = shape.geo;
-    if (cuda.rings.rows < geo.window or !std.math.isPowerOfTwo(cuda.rings.rows) or !std.math.isPowerOfTwo(cuda.rings.drafter_rows)) return error.BadRingRows;
-    if (cuda.rings.drafter_rows < shape.ds_rows) return error.BadRingRows;
+    try checkRings(shape, cuda);
     const parts = try arena.alloc(Part, list.len);
     for (list, parts) |spec, *p| {
         p.* = .{ .spec = spec, .bytes = try arena.alloc(u8, @intCast(spec.bytes())) };
-        switch (spec.kind) {
-            .swa => {
-                const ring = if (spec.layer < cuda.swa.len) cuda.swa[spec.layer] else null;
-                try ringPart(p.bytes, ring orelse return error.MissingRing, shape.upto, spec.rows, cuda.rings.rows);
-            },
-            .ring => {
-                const i = spec.layer - geo.layers;
-                if (i >= cuda.drafter.len) return error.MissingRing;
-                try ringPart(p.bytes, cuda.drafter[i], shape.upto, spec.rows, cuda.rings.drafter_rows);
-            },
-            .carry => {
-                const s = geo.sourceIndex(spec.layer).?;
-                if (s >= cuda.carries.len) return error.MissingCarry;
-                if (cuda.carries[s].len != p.bytes.len) return error.BadCarry;
-                @memcpy(p.bytes, cuda.carries[s]);
-            },
-            .comp, .ixk => try pages(p, shape, cuda, sourceOf(cuda, spec.layer) orelse return error.MissingSource),
-        }
+        try convert(p, shape, cuda);
     }
     return parts;
 }
 
-fn pages(p: *Part, shape: plan.Shape, cuda: Cuda, src: SourceState) Error!void {
+/// One part's bytes, converted from the engine's state in `cuda` (a paged part needs its pages' bytes there).
+pub fn convert(p: *const Part, shape: plan.Shape, cuda: Cuda) Error!void {
+    const spec = p.spec;
+    const geo = shape.geo;
+    switch (spec.kind) {
+        .swa => {
+            const ring = if (spec.layer < cuda.swa.len) cuda.swa[spec.layer] else null;
+            try ringPart(p.bytes, ring orelse return error.MissingRing, shape.upto, spec.rows, cuda.rings.rows);
+        },
+        .ring => {
+            const i = spec.layer - geo.layers;
+            if (i >= cuda.drafter.len) return error.MissingRing;
+            try ringPart(p.bytes, cuda.drafter[i], shape.upto, spec.rows, cuda.rings.drafter_rows);
+        },
+        .carry => {
+            const s = geo.sourceIndex(spec.layer).?;
+            if (s >= cuda.carries.len) return error.MissingCarry;
+            if (cuda.carries[s].len != p.bytes.len) return error.BadCarry;
+            @memcpy(p.bytes, cuda.carries[s]);
+        },
+        .comp, .ixk => try pages(p, shape, cuda, sourceOf(cuda, spec.layer) orelse return error.MissingSource),
+    }
+}
+
+fn pages(p: *const Part, shape: plan.Shape, cuda: Cuda, src: SourceState) Error!void {
     const si = shape.geo.sourceIndex(src.layer).?;
     const page_rows = shape.geo.pageRows(si);
     var it = plan.partPages(shape, si, p.spec.kind, p.spec.first_page).?;

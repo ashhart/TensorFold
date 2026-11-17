@@ -19,6 +19,10 @@ pub const Exporter = struct {
     exported: *const fn (ptr: *anyopaque, h: Handoff, tokens: []const u32, saved: pc.Saved) void,
     /// No state will come for `h`: the decoder is told why.
     failed: *const fn (ptr: *anyopaque, h: Handoff, why: []const u8) void,
+    /// The request for `h` starts, its prompt before the cut being `tokens`: a streaming exporter announces now.
+    begin: ?*const fn (ptr: *anyopaque, h: Handoff, tokens: []const u32) void = null,
+    /// The prompt of `h` stands at `at` tokens, before its cut: what the GPU finished may stream to the decoder.
+    progress: ?*const fn (ptr: *anyopaque, h: Handoff, at: u64) void = null,
     /// Held exports as `GET /v1/handoff/<id>` on the server's own port, for decoders with no fabric link (null: off).
     serve: ?Serve = null,
 };
@@ -71,6 +75,8 @@ pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool
     if (reuse.at >= job.cut[0]) below(h, job, reuse); // a restore at the cut leaves no chunk ending there, so no export
     reuse.marks = handoffMarks(h, job, reuse.marks, reuse.at);
     reuse.hook = .{ .ptr = job, .at = exportAt };
+    if (h.exporter) |x| if (x.begin) |begin| begin(x.ptr, job.request.handoff.?, job.request.prompt[0..job.cut[0]]);
+    reuse.progress = .{ .ptr = job, .at = progressAt };
     return true;
 }
 
@@ -124,6 +130,14 @@ fn exportAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
     const saved = x.snapshots.vtable.save(x.snapshots.ptr, s, at) catch |err| return x.failed(x.ptr, h, @errorName(err));
     x.exported(x.ptr, h, job.request.prompt[0..at], saved);
     if (keeps(job, at)) Job.kept(ptr, s, at);
+}
+
+fn progressAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+    const job: *Job = @ptrCast(@alignCast(ptr));
+    const x = job.host.exporter orelse return;
+    const progress = x.progress orelse return;
+    const h = job.request.handoff orelse return;
+    if (!job.exported and !s.isCancelled()) progress(x.ptr, h, at);
 }
 
 /// Whether a stream's pass keeps its state at its mark `at`: a handoff's cut only where its store could resume it.

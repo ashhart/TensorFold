@@ -27,8 +27,17 @@ pub const Options = struct {
 /// What `save` hands `exported`: the engine's state, read back.
 pub const Saved = struct { cap: cx.Captured, read_ns: u64 = 0 };
 
+/// The engine's side of a streamed export (cuda_export_stream.zig): fed the prompt's progress, stopped before release.
+pub const Feeder = struct {
+    ptr: *anyopaque,
+    progress: *const fn (ptr: *anyopaque, pos: u64) void,
+    /// waits for the segments queued; whether every paged part is converted
+    drain: *const fn (ptr: *anyopaque) bool,
+    stop: *const fn (ptr: *anyopaque) void,
+};
+
 /// One export the producer holds; a reading stream pins it, so expiry or release only marks it `gone` until it closes.
-pub const Held = struct { built: *cx.Built, name: [32]u8, pins: u32 = 0, gone: bool = false };
+pub const Held = struct { built: *cx.Built, name: [32]u8, pins: u32 = 0, gone: bool = false, feeder: ?Feeder = null };
 
 pub const Produce = struct {
     gpa: std.mem.Allocator,
@@ -154,6 +163,7 @@ pub const Produce = struct {
     }
 
     fn release(p: *Produce, h: *Held) void {
+        if (h.feeder) |f| f.stop(f.ptr); // before its parts go: the converting thread writes them
         h.built.deinit(p.gpa); // the frames the responder planned at OPEN go with it
         p.gpa.destroy(h);
     }
@@ -266,6 +276,7 @@ pub const Produce = struct {
 
     /// `exported` with the conversion on its own thread (a file-only producer or a full set of converters: inline).
     pub fn exportedBg(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
+        if (p.lease(id)) |h| return p.exportedStream(h, id, tokens, saved);
         if ((p.opts.link == null and !p.opts.http) or p.building.load(.acquire) >= max_building) return p.exported(id, tokens, saved);
         const own = p.gpa.dupe(u32, tokens) catch return p.exported(id, tokens, saved);
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
@@ -282,6 +293,70 @@ pub const Produce = struct {
             return p.exported(id, tokens, saved);
         };
         t.detach();
+    }
+
+    /// A streamed export under `id` (`cx.skeleton`'s): announced now, its frames served as `feeder` converts them.
+    pub fn beginStream(p: *Produce, id: [16]u8, built: *cx.Built, feeder: Feeder) !void {
+        if (p.opts.link == null) return error.NoLink;
+        const held = try p.gpa.create(Held);
+        errdefer p.gpa.destroy(held);
+        held.* = .{ .built = built, .name = undefined, .feeder = feeder };
+        _ = std.fmt.bufPrint(&held.name, "{x}", .{&id}) catch unreachable;
+        {
+            while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+            defer p.lock.unlock();
+            const slot = try p.held.getOrPut(p.gpa, id);
+            if (slot.found_existing) return error.HandoffHeld;
+            slot.value_ptr.* = held;
+        }
+        p.table.addSized(id, &held.name, .{ .ready = &built.exp }, built.bytes) catch |err| {
+            while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+            _ = p.held.remove(id);
+            p.lock.unlock();
+            return err;
+        };
+    }
+
+    /// The streamed export `id`, pinned (null: none), so a release waits for `unlease`.
+    fn lease(p: *Produce, id: [16]u8) ?*Held {
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        defer p.lock.unlock();
+        const h = p.held.get(id) orelse return null;
+        if (h.feeder == null) return null;
+        h.pins += 1;
+        _ = p.streams.fetchAdd(1, .acq_rel); // as a reading: `stop` waits for it, `unlease` ends it
+        return h;
+    }
+
+    /// The engine thread: the prompt of streamed export `id` stands at `pos`.
+    pub fn feedStream(p: *Produce, id: [16]u8, pos: u64) void {
+        const h = p.lease(id) orelse return;
+        h.feeder.?.progress(h.feeder.?.ptr, pos);
+        p.unlease(h);
+    }
+
+    /// Streamed export `id`: its queued segments done, and whether every paged part is converted (null: not streamed).
+    pub fn drainStream(p: *Produce, id: [16]u8) ?bool {
+        const h = p.lease(id) orelse return null;
+        defer p.unlease(h);
+        return h.feeder.?.drain(h.feeder.?.ptr);
+    }
+
+    /// The cut of streamed export `id`: the parts left converted from `saved`, and the export is whole.
+    fn exportedStream(p: *Produce, h: *Held, id: [16]u8, tokens: []const u32, saved: *Saved) void {
+        defer p.unlease(h);
+        defer p.drop(saved);
+        const t0 = fabric.words.nowNs();
+        cx.complete(h.built, saved.cap.state) catch |err| return p.failStream(h, id, @errorName(err));
+        const ms = (fabric.words.nowNs() - t0) / std.time.ns_per_ms;
+        log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows streamed; read back {d} ms, completed {d} ms", .{ &id, tokens.len, h.built.parts.len, h.built.bytes >> 20, saved.read_ns / std.time.ns_per_ms, ms });
+        if (p.opts.dump != null) p.dump(h.built, tokens) catch |err| log.warn("handoff {x}: not written to a file ({t})", .{ &id, err });
+    }
+
+    fn failStream(p: *Produce, h: *Held, id: [16]u8, why: []const u8) void {
+        _ = p;
+        log.warn("mcdma handoff {x}: no export ({s})", .{ &id, why });
+        h.built.exp.progress.?.fail(why);
     }
 
     fn convert(p: *Produce, id: [16]u8, tokens: []u32, saved: *Saved) void {
@@ -361,6 +436,10 @@ pub const Produce = struct {
 
     /// No state will come for `id`: the decoder is told why (a link), and the reason lands in `<id>.error` (a dump).
     pub fn failed(p: *Produce, id: [16]u8, reason: []const u8) void {
+        if (p.lease(id)) |h| {
+            defer p.unlease(h);
+            return p.failStream(h, id, reason);
+        }
         const why = if (std.mem.eql(u8, reason, "HeldExportsFull")) "the producer already holds TF_PRODUCE_HELD_GIB of exports; it refuses more until the decoder closes some" else reason;
         log.warn("mcdma handoff {x}: no export ({s})", .{ &id, why });
         if (p.opts.dump) |dir| {

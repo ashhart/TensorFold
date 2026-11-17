@@ -6,6 +6,7 @@ const serve = @import("cuda_export_serve.zig");
 const gpu = @import("cuda_export_gpu.zig");
 const cx = @import("cuda_export.zig");
 const split = @import("cuda_export_split.zig");
+const streams = @import("cuda_export_stream.zig");
 const ff = @import("forward_follow.zig");
 const pc = api.prompt_cache;
 const Handoff = api.LaneHost.Export.Handoff;
@@ -30,6 +31,8 @@ pub const Export = struct {
     f: *@import("forward.zig").Forward,
     /// a KV_SPLIT pool: this export is shard 0 and the followers export theirs (cuda_export_split.zig)
     split: bool,
+    /// the export being streamed while its prompt prefills (one slot: one at a time)
+    streaming: ?[16]u8 = null,
 
     /// The exporter for `m`, or null with `problem` set; `link` is a `--mcdma-produce` name or `http`.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !?*Export {
@@ -65,7 +68,7 @@ pub const Export = struct {
 
     pub fn exporter(x: *Export) api.LaneHost.Export.Exporter {
         const over_http = x.produce.opts.http;
-        return .{ .ptr = x, .snapshots = .{ .ptr = x, .vtable = &snapshots }, .exported = exported, .failed = failed, .serve = if (over_http) .{ .ptr = x, .open = readOpen, .release = readRelease } else null };
+        return .{ .ptr = x, .snapshots = .{ .ptr = x, .vtable = &snapshots }, .exported = exported, .failed = failed, .begin = begin, .progress = progress, .serve = if (over_http) .{ .ptr = x, .open = readOpen, .release = readRelease } else null };
     }
 
     /// `GET /v1/handoff/<id>`: the held export's replies, a message at a time.
@@ -101,7 +104,45 @@ pub const Export = struct {
 
     /// The active slot read back; the stream is armed on the engine thread at its cut, so only one slot stands there.
     fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        return @ptrCast(try self(ptr).produce.save(at));
+        const x = self(ptr);
+        // the pool's pages are read back already when every part they feed was converted as the prompt prefilled
+        if (x.streaming) |id| x.source.streamed = x.produce.drainStream(id) orelse false;
+        return @ptrCast(try x.produce.save(at));
+    }
+
+    /// The request starts: its export is announced now (MKVH link, one replicated pool) and fed as segments finish.
+    fn begin(ptr: *anyopaque, h: Handoff, tokens: []const u32) void {
+        const x = self(ptr);
+        x.streaming = null;
+        if (x.split or x.produce.opts.link == null) return;
+        x.stream(h.id, tokens) catch |err| log.warn("handoff {x}: not streamed ({t}); it is exported whole at the cut", .{ &h.id, err });
+    }
+
+    fn stream(x: *Export, id: [16]u8, tokens: []const u32) !void {
+        const ss = x.source.ss;
+        const built = try cx.skeleton(x.gpa, id, tokens, cx.shapeOf(tokens.len, gpu.drafterRows(ss, tokens.len)));
+        errdefer built.deinit(x.gpa);
+        const s = try streams.Stream.open(x.gpa, x.produce.io, ss.kx, built);
+        errdefer s.stop();
+        try x.produce.beginStream(id, built, .{ .ptr = s, .progress = feedFn, .drain = drainFn, .stop = stopFn });
+        x.streaming = id;
+    }
+
+    fn feedFn(ptr: *anyopaque, pos: u64) void {
+        streams.Stream.progress(@ptrCast(@alignCast(ptr)), pos);
+    }
+
+    fn drainFn(ptr: *anyopaque) bool {
+        return streams.Stream.drain(@ptrCast(@alignCast(ptr)));
+    }
+
+    fn stopFn(ptr: *anyopaque) void {
+        streams.Stream.stop(@ptrCast(@alignCast(ptr)));
+    }
+
+    fn progress(ptr: *anyopaque, h: Handoff, at: u64) void {
+        const x = self(ptr);
+        if (x.streaming) |id| if (std.mem.eql(u8, &id, &h.id)) x.produce.feedStream(id, at);
     }
 
     fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
@@ -116,11 +157,13 @@ pub const Export = struct {
         const x = self(ptr);
         // the followers read their pages now, at the cut, while this rank converts its own
         if (x.split) ff.sendExport(x.f, h.id, tokens.len) catch |err| log.warn("handoff {x}: the followers were not asked for their shards ({t})", .{ &h.id, err });
+        x.streaming = null;
         x.produce.exportedBg(h.id, tokens, @ptrCast(@alignCast(saved)));
     }
 
     fn failed(ptr: *anyopaque, h: Handoff, why: []const u8) void {
         const x = self(ptr);
+        x.streaming = null;
         x.produce.failed(h.id, why);
         if (x.split) ff.sendExportFail(x.f, h.id) catch {};
     }
