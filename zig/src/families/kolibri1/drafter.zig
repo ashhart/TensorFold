@@ -17,6 +17,8 @@ const E = cuda.eagle3;
 /// The one checkpoint of model type kolibri1: the target a published release names.
 pub const target_repo = "Aleph-Alpha/Kolibri-1";
 const chain = release.most_chain;
+/// Stream counts a hold pass is timed at (the lane core interpolates between them and extends past the widest).
+const hold_streams = [_]u32{ 1, 2, 4, 8 };
 
 /// The target the server loaded, as a release's adapter compares it.
 pub fn adapter(c: @import("config.zig").Config) release.Adapter {
@@ -41,6 +43,8 @@ pub const Drafter = struct {
     depth: u32,
     step_ms: f64 = 0,
     costs: [row_costs.widths.len]lanes.config.Cost = undefined, // the target's round ms by rows (timed at reserve)
+    holds: [2 * hold_streams.len]lanes.hold_price.HoldCost = undefined, // a hold pass's ms by streams and depth
+    n_holds: usize = 0,
     timed: bool = false,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
     free: []bool = &.{}, // drafter slot i is free (the last slot times a step and is never a stream's)
@@ -204,17 +208,18 @@ pub const Drafter = struct {
         x.gpa.destroy(x);
     }
 
-    /// Caches for `streams` streams and one more that times a step, then the step's cost (the depth rule's price).
+    /// Caches for `streams` streams and one more that times a step, then the step's and hold pass's costs.
     pub fn reserve(x: *Drafter, streams: u32) !void {
         if (streams + 1 <= x.free.len) return;
         if (x.lanes.count() != 0) return error.DraftReserveWithStreams;
         try x.e.reserve(streams + 1);
-        for (x.e.caches.items) |b| try x.kb.d.check(x.kb.d.api.cuMemsetD8Async(b.ptr, 0, b.len, x.kb.s.handle), "cuMemsetD8Async");
         x.gpa.free(x.free);
         x.free = try x.gpa.alloc(bool, streams + 1);
         @memset(x.free, true);
         x.free[streams] = false;
         x.step_ms = try x.time(streams);
+        x.n_holds = try x.timeHolds(streams); // on the streams' slots: zeroed after, before any stream opens
+        for (x.e.caches.items) |b| try x.kb.d.check(x.kb.d.api.cuMemsetD8Async(b.ptr, 0, b.len, x.kb.s.handle), "cuMemsetD8Async");
         try row_costs.time(x.kb, x.io, &x.costs); // without them the depth rule cannot trade drafts against rows
         x.timed = true;
     }
@@ -234,6 +239,35 @@ pub const Drafter = struct {
         return @max(best[1] - best[0], 0) / @as(f64, @floatFromInt(steps[1] - 1));
     }
 
+    /// A hold pass of n streams at depth 1 and at the serving depth, best of three, on slots no stream holds yet.
+    fn timeHolds(x: *Drafter, streams: u32) !usize {
+        var out: [hold_streams[hold_streams.len - 1]][chain]u32 = undefined;
+        var outs: [out.len][]u32 = undefined;
+        var items: [out.len]E.Row = undefined;
+        for (&outs, &out, &items, 0..) |*o, *b, *it, slot| {
+            o.* = b;
+            it.* = .{ .slot = @intCast(slot), .pos = 64, .token = 0 };
+        }
+        var n: usize = 0;
+        for (hold_streams) |k| {
+            if (k > streams) break;
+            for ([2]u32{ 1, @max(x.depth, 2) }) |depth| {
+                var best = std.math.inf(f64);
+                for (0..4) |round| {
+                    const t0 = std.Io.Clock.awake.now(x.io);
+                    try x.e.chain(items[0..k], depth, x.vocab, outs[0..k]);
+                    const ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(x.io)).toNanoseconds())) / 1e6;
+                    if (round > 0) best = @min(best, ms);
+                }
+                x.holds[n] = .{ .streams = k, .depth = depth, .ms = best };
+                n += 1;
+            }
+        }
+        if (n == 0) return 0;
+        std.log.info("Kolibri drafter hold pass: 1 stream {d:.2}/{d:.2} ms, {d} streams {d:.2}/{d:.2} ms (depth 1/{d})", .{ x.holds[0].ms, x.holds[1].ms, x.holds[n - 1].streams, x.holds[n - 2].ms, x.holds[n - 1].ms, x.holds[1].depth });
+        return n;
+    }
+
     pub fn drafter(x: *Drafter) dr.Drafter {
         return .{ .kind = "EAGLE-3", .ptr = x, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
@@ -251,7 +285,8 @@ pub const Drafter = struct {
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
         const costs: []const lanes.config.Cost = if (x.timed) &x.costs else &.{};
-        return .{ .limit_shared_drafts = true, .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs };
+        const holds: []const lanes.hold_price.HoldCost = if (x.timed) x.holds[0..x.n_holds] else &.{};
+        return .{ .limit_shared_drafts = true, .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs, .hold_costs = holds };
     }
 
     fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
