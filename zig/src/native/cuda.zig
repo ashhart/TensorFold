@@ -404,7 +404,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
         const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else if (comptime cuda_disk.keptDisk(F)) |K| &K.image else null;
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
-        store.* = pc.Store.init(gpa, copies, snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded)), if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
+        var rules = snaps.passRules(F, @import("cuda_startup.zig").rows(F, loaded));
+        if (o.tp != 1) rules.warm = .off; // no warm passes across ranks: the cache keeps as without warm turns
+        store.* = pc.Store.init(gpa, copies, rules, if (@hasDecl(F, "snap_slots")) cache else try snaps.cacheBudget(F, loaded.target, cache));
         errdefer {
             const disk = store.disk;
             store.deinit();
@@ -473,7 +475,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .decode_share = o.decode_share,
         .default_decode_share = 0.25, // #3397: shares long fills only (past Share.default_arm_rows); short prompts keep main's cells
         .prompt_cache_capacity = cache_capacity,
-        .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
+        .warm_turns = if (h.store) |s| s.rules.warm != .off else false, // a family's warm_quiet on one rank
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
