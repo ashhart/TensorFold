@@ -241,6 +241,9 @@ pub const Metal = struct {
             .handle => |h| std.math.cast(u32, h) orelse return error.InvalidLfmToken,
         };
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
+        const best = self.scratch.best.slice(u32, 2);
+        const greedy_row = if (stream.sampling) |settings| settings.temperature <= 0 else true;
+        if (greedy_row and best[1] == 0) return best[0];
         return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
     }
 
