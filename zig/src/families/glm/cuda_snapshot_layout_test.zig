@@ -106,7 +106,11 @@ test "cache shape: GLM-5.3-Flash's pages keep their bytes, full GLM-5.3's 79 cac
     try t.expectEqual(@as(usize, 576), full.row);
     try t.expectEqual(@as(usize, 512 * 576 * 2), full.latentBytes());
     try t.expectEqual(@as(usize, 512 * 128 * 2), full.pkBytes());
-    try t.expectEqual(@as(u64, 79 * (576 * 2 + 128 * 2) * state.page_rows), full.pageBytes());
+    // 79 caches' 56,950,784 bytes, padded to whole 576-wide rows and 512 tokens (4,608 bytes): 4,096 more
+    try t.expectEqual(@as(u64, 79 * (576 * 2 + 128 * 2) * state.page_rows + 4096), full.pageBytes());
+    try t.expectEqual(@as(u64, 0), full.pageBytes() % (576 * 2));
+    try t.expectEqual(@as(u64, 0), full.pageBytes() % state.page_rows);
+    try t.expectEqual(@as(u64, 49_440), full.pageBytes() / (576 * 2)); // dsa_block's page_rows: a token list's rows
 }
 
 /// Full GLM-5.3's caches on a state: 78 DSA layers and no KDA, 576-wide latent rows, a pooled key a row.

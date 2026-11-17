@@ -55,9 +55,10 @@ pub const Modules = struct {
     pack_dense: cuda.Function,
     quant: quant.Kernels,
     q4: q4.Kernels,
+    mla: ?cuda.mla.Mla, // `roped` (Config.rope: full GLM-5.3's 576-wide latent rows): the roped MLA image
 
     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values, roped: bool) !Modules {
         try cuda_pdl.bind(ctx);
         const k = cuda.kernels;
         var m: Modules = undefined;
@@ -85,6 +86,8 @@ pub const Modules = struct {
         m.exl3 = try exl3.Kernels.load(d);
         errdefer m.exl3.unload();
         m.mm = try mm_mod.Kernels.load(m.mods[7]);
+        m.mla = if (roped) try cuda.mla.Mla.load(d) else null;
+        errdefer if (m.mla) |*x| x.unload();
         m.index = null;
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
@@ -119,6 +122,7 @@ pub const Modules = struct {
     pub fn deinit(m: *Modules) void {
         if (m.index) |*x| x.unload();
         if (m.dscore) |*x| x.unload();
+        if (m.mla) |*x| x.unload();
         m.exl3.unload();
         for (&m.mods) |*x| x.unload();
         m.lane.unload();
@@ -177,7 +181,7 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null };
     }
 
     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
