@@ -40,13 +40,14 @@ pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, is_ch
     var choices: [most]prompt_list.Choice = undefined;
     var runs: [most]openai.Run = undefined;
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
+    const forgets = @import("warm.zig").forgets.load(.seq_cst);
     for (0..n) |i| {
         choices[i] = .{ .fan = &fan, .i = @intCast(i) };
         var p = plan;
         p.input.choice = @intCast(i);
         p.input.choices = plan.choices;
         if (i > 0) p.input.prompt_logprobs = null; // the prompt's rows are choice 0's: the merge copies them
-        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = is_chat, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .warm = i == 0 };
+        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = is_chat, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .warm = i == 0, .forgets = forgets };
     }
     // every choice in flight at once: a later one's prompt waits for the first fill's cut and resumes it
     var threads: [most]?std.Thread = @splat(null);

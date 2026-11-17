@@ -142,6 +142,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
         return flush.post(srv, conn, a);
     }
+    if (std.mem.eql(u8, route, imprint.forget_path)) return imprint.forgetOne(srv, conn, a); // admin too
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
     const is_voices = srv.config.voice.manage and std.mem.eql(u8, route, "/v1/voices");
