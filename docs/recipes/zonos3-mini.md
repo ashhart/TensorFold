@@ -54,14 +54,14 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   conformer layers over log-mel features computed on the host), then the quantizer: the teacher's rows pooled onto
   the frames give the semantic code, and nine residual codebooks take what its decoded prediction leaves. A clip
   runs in the publisher's lanes: 20 s each, a later lane carrying 10 s of what came before.
-- **Served route** (`native/zonos_host.zig`, `server/zonos_speech.zig`): one request at a time; the release's 27
+- **Served route** (`native/zonos_host.zig`, `server/zonos_speech.zig`): `--parallel` requests at once; the release's 27
   default voices by their reference codes; a caller's own voice as `ref_audio` (a WAV file in base64, encoded by the
   engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
   The clip encoder's weights load on the first request that brings a clip.
 
 Refused or absent: clips in formats other than WAV, steering controls and their guidance (`controls_cfg_scale`),
 LACI, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts, the `full_mr` decoder,
-concurrency, Metal.
+Metal.
 
 ## Text normalization
 
@@ -120,6 +120,28 @@ to noise, the reference decoding on the CPU. Sampled: a guided request repeats b
 bytes, also with a cloned clip; scale 1 gives the unguided bytes; `condition_values` give the bytes of the buckets
 they resolve to, and all-unknown buckets the bytes of a request that names none. One 13-word sentence in the
 `rupert` voice lasted 6.53 s at `speaking_rate` 8, 4.40 s with none and 2.47 s at 25.
+
+## Requests at once
+
+`--parallel N` (1 to 16; 1 without the flag) serves N requests at once. Each has its own lane: a set of the
+backbone's caches and recurrent state, and a set of the decoder's. One worker gives every request in progress a turn,
+a frame each: its lanes are put in use, the frame is sampled, decoded when its audio is due, and run. The kernels and
+the single-stream passes are the ones already checked, so a request's arithmetic does not depend on what runs beside
+it; the workspaces are shared, and each pass writes what it reads.
+
+- **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
+  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,828,406,528 bytes at
+  `--parallel 1`, 7,538,995,456 at 4. A guided request's twin lane is still made by its slot's first guided request.
+- **Speed:** the requests share one stream of single-row passes, so the total stays what one request gets alone and
+  each of N gets about a share of it. Nothing is batched across requests yet.
+- **A clip is encoded in its request's first turn**, about half a second in which the other requests wait.
+- A request past N is refused with 503, as the second one was before.
+
+Checked on the RTX 5090 at `--parallel 4`: eight kinds of request (a long passage, a short one, guided, streamed,
+a condition value with normalized text, a cloned clip, a guided clone, a guided stream) were each asked alone, then
+four at once in three mixes; all twelve replies equalled the same request's reply alone, byte for byte. Four copies
+of the 17.8 s passage at once took 2.42 s, 29.4 times real time in total against 29.1 alone, each reply the solo
+bytes. Of six at once, four were spoken and two got 503.
 
 ## Precision
 
@@ -224,8 +246,8 @@ TensorFold's keyed sampler instead. The checks of it are on the served build, at
 
 - **Repeatability:** one seeded request of 1,569,960 PCM bytes (784,980 samples, 17.8 s at 44.1 kHz) returned the
   same bytes sent whole three times, streamed three times, and once while two other requests arrived.
-- **No concurrent decoding to compare:** the server runs one lane and does not queue. The two requests that arrived
-  while it spoke were refused with 503 `engine_busy`, so there is no solo against concurrent comparison yet.
+- **At `--parallel 1`** the two requests that arrived while it spoke were refused with 503 `engine_busy`; "Requests
+  at once" compares solo replies with concurrent ones.
 - **Transcription:** Whisper large-v3-turbo (resampled to 16 kHz) transcribed that 17.8 s reply, 49 words in the
   Rupert voice, with no errors.
 - **Cloned voices:** two clips sent as `ref_audio` (the release's Cillian clip, and its Thaddeus clip as 48 kHz

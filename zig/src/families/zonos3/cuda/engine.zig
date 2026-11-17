@@ -59,7 +59,8 @@ pub const Engine = struct {
     gstate: [cfg.layers]u64, // GDN layers: fp32 [4][128][128]
     state: u64, // the conv and recurrent states in one block (zeroed per request)
     state_bytes: usize,
-    other: ?Lane, // a second stream's state (a guided request's twin), allocated when first asked for
+    lanes: std.ArrayList(Lane), // every stream's state; lanes[active] is stale while the fields above run it
+    active: usize,
     // scratch (R = max_rows)
     rows: u64, // i32 [R][11]
     bank: u64, // fp32 [sources][R][D]
@@ -94,7 +95,8 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.o = o;
         e.position = 0;
-        e.other = null;
+        e.lanes = .empty;
+        e.active = 0;
         e.bufs = .empty;
         e.counted = null;
         e.c = try cfg.Config.load(gpa, io, model_dir);
@@ -133,6 +135,7 @@ pub const Engine = struct {
     fn freeState(e: *Engine) void {
         for (e.bufs.items) |*b| b.free();
         e.bufs.deinit(e.gpa);
+        e.lanes.deinit(e.gpa);
     }
 
     fn alloc(e: *Engine, bytes: usize) !u64 {
@@ -164,21 +167,37 @@ pub const Engine = struct {
         return e.counted.?;
     }
 
-    /// The second lane, allocated by the first call; `reset` zeroes both.
-    pub fn twin(e: *Engine) !void {
-        if (e.other == null) e.other = try e.allocLane();
+    /// One more stream's state on the device; its index for `use`. `reset` zeroes the lane in use.
+    pub fn addLane(e: *Engine) !usize {
+        try e.lanes.ensureUnusedCapacity(e.gpa, 1);
+        e.lanes.appendAssumeCapacity(try e.allocLane());
+        return e.lanes.items.len - 1;
     }
 
-    /// Exchanges the running lane with the second one.
+    /// Runs lane `i` from here on: its caches and its position.
+    pub fn use(e: *Engine, i: usize) void {
+        if (i == e.active) return;
+        e.lanes.items[e.active] = .{ .kv = e.kv, .conv = e.conv, .gstate = e.gstate, .state = e.state, .position = e.position };
+        e.load(e.lanes.items[i]);
+        e.active = i;
+    }
+
+    fn load(e: *Engine, l: Lane) void {
+        e.kv = l.kv;
+        e.conv = l.conv;
+        e.gstate = l.gstate;
+        e.state = l.state;
+        e.position = l.position;
+    }
+
+    /// A guided request's two lanes when one request runs alone: lane 1 is made by the first call.
+    pub fn twin(e: *Engine) !void {
+        if (e.lanes.items.len < 2) _ = try e.addLane();
+    }
+
+    /// Exchanges lanes 0 and 1.
     pub fn swap(e: *Engine) void {
-        const mine: Lane = .{ .kv = e.kv, .conv = e.conv, .gstate = e.gstate, .state = e.state, .position = e.position };
-        const o = e.other.?;
-        e.kv = o.kv;
-        e.conv = o.conv;
-        e.gstate = o.gstate;
-        e.state = o.state;
-        e.position = o.position;
-        e.other = mine;
+        e.use(e.active ^ 1);
     }
 
     fn allocLane(e: *Engine) !Lane {
@@ -210,10 +229,8 @@ pub const Engine = struct {
     fn allocState(e: *Engine) !void {
         const R = e.o.max_rows;
         const l = try e.allocLane();
-        e.kv = l.kv;
-        e.conv = l.conv;
-        e.gstate = l.gstate;
-        e.state = l.state;
+        e.load(l);
+        if (e.counted == null) try e.lanes.append(e.gpa, l);
         e.rows = try e.alloc(R * W * 4);
         e.bank = try e.alloc(cfg.sources * R * D * 4);
         e.mixed = try e.alloc(R * D * 4);
@@ -253,17 +270,11 @@ pub const Engine = struct {
         try e.stream.synchronize();
     }
 
-    /// A new request: zero recurrent states, position 0. Cache rows are written before they are read.
+    /// A new request on the lane in use: zero recurrent states, position 0. Cache rows are written before read.
     pub fn reset(e: *Engine) !void {
         var b = e.buf(e.state);
         b.len = e.state_bytes;
         try b.fill8(0, e.stream.handle);
-        if (e.other) |*o| {
-            var ob = e.buf(o.state);
-            ob.len = e.state_bytes;
-            try ob.fill8(0, e.stream.handle);
-            o.position = 0;
-        }
         try e.stream.synchronize();
         e.position = 0;
     }

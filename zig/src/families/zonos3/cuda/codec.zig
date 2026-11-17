@@ -29,6 +29,19 @@ pub const Probe = struct {
     f: *const fn (ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize) anyerror!void,
 };
 
+/// One request's decoding state: the histories, the caches, the frames' spectra and the tail's samples so far.
+pub const Lane = struct {
+    sem_hist: [wts.sem_blocks]u64,
+    head_hist: [wts.head_blocks]u64,
+    hist: u64,
+    kv: [5][][2]u64,
+    spec_frames: [2]u64,
+    branches: u64,
+    mixed: u64,
+    frames: usize = 0,
+    emitted: usize = 0,
+};
+
 pub const Codec = struct {
     gpa: std.mem.Allocator,
     o: Options,
@@ -38,6 +51,8 @@ pub const Codec = struct {
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
     counted: ?usize, // set: allocations are counted, not made
+    lanes: std.ArrayList(Lane), // every request's state; lanes[active] is stale while the fields below run it
+    active: usize,
     frames: usize = 0, // code frames decoded
     emitted: usize = 0, // samples handed out
     // state
@@ -58,7 +73,7 @@ pub const Codec = struct {
     // the tail, whole request
     branches: u64, // [2][internal samples]
     mixed: u64, // [internal samples]
-    audio: u64, // [samples]
+    audio: u64, // [samples], scratch: an emit writes and downloads it
 
     /// The codec on a context the caller made current, launching on `stream`.
     pub fn create(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, generator: []const u8, head: []const u8, o: Options) !*Codec {
@@ -74,6 +89,8 @@ pub const Codec = struct {
         c.emitted = 0;
         c.bufs = .empty;
         c.counted = null;
+        c.lanes = .empty;
+        c.active = 0;
         for (&c.kv) |*layers| layers.* = &.{};
         c.k = try kern.Kernels.load(d);
         errdefer c.k.unload();
@@ -100,7 +117,45 @@ pub const Codec = struct {
     fn freeState(c: *Codec) void {
         for (c.bufs.items) |*b| b.free();
         c.bufs.deinit(c.gpa);
-        for (c.kv) |layers| c.gpa.free(layers);
+        if (c.lanes.items.len == 0) for (c.kv) |layers| c.gpa.free(layers);
+        for (c.lanes.items) |l| for (l.kv) |layers| c.gpa.free(layers);
+        c.lanes.deinit(c.gpa);
+    }
+
+    /// Device bytes of one more request's state under `o`.
+    pub fn laneBytes(o: Options) usize {
+        var c: Codec = undefined;
+        c.o = o;
+        c.counted = 0;
+        _ = c.allocLane() catch unreachable;
+        return c.counted.?;
+    }
+
+    /// One more request's state on the device; its index for `use`. `reset` zeroes the lane in use.
+    pub fn addLane(c: *Codec) !usize {
+        try c.lanes.ensureUnusedCapacity(c.gpa, 1);
+        c.lanes.appendAssumeCapacity(try c.allocLane());
+        return c.lanes.items.len - 1;
+    }
+
+    /// Decodes lane `i`'s request from here on.
+    pub fn use(c: *Codec, i: usize) void {
+        if (i == c.active) return;
+        c.lanes.items[c.active] = .{ .sem_hist = c.sem_hist, .head_hist = c.head_hist, .hist = c.hist, .kv = c.kv, .spec_frames = c.spec_frames, .branches = c.branches, .mixed = c.mixed, .frames = c.frames, .emitted = c.emitted };
+        c.load(c.lanes.items[i]);
+        c.active = i;
+    }
+
+    fn load(c: *Codec, l: Lane) void {
+        c.sem_hist = l.sem_hist;
+        c.head_hist = l.head_hist;
+        c.hist = l.hist;
+        c.kv = l.kv;
+        c.spec_frames = l.spec_frames;
+        c.branches = l.branches;
+        c.mixed = l.mixed;
+        c.frames = l.frames;
+        c.emitted = l.emitted;
     }
 
     fn alloc(c: *Codec, bytes: usize) !u64 {
@@ -123,15 +178,19 @@ pub const Codec = struct {
         return c.counted.?;
     }
 
-    fn allocState(c: *Codec) !void {
+    fn allocLane(c: *Codec) !Lane {
+        var l: Lane = undefined;
+        l.frames = 0;
+        l.emitted = 0;
+        for (&l.kv) |*layers| layers.* = &.{};
+        errdefer for (l.kv) |layers| c.gpa.free(layers);
         const T = c.o.max_frames;
-        const R = head_rate * c.o.pass_frames;
         const one = W * 6 * 4;
         c.hist_bytes = (wts.sem_blocks + wts.head_blocks) * one;
-        c.hist = try c.alloc(c.hist_bytes);
-        for (&c.sem_hist, 0..) |*h, i| h.* = c.hist + i * one;
-        for (&c.head_hist, 0..) |*h, i| h.* = c.hist + (wts.sem_blocks + i) * one;
-        for (&c.kv, wts.stages, 0..) |*layers, shape, si| {
+        l.hist = try c.alloc(c.hist_bytes);
+        for (&l.sem_hist, 0..) |*h, i| h.* = l.hist + i * one;
+        for (&l.head_hist, 0..) |*h, i| h.* = l.hist + (wts.sem_blocks + i) * one;
+        for (&l.kv, wts.stages, 0..) |*layers, shape, si| {
             const bytes = (T << @intCast(si)) * shape.d * 4;
             if (c.counted != null) {
                 for (0..2 * shape.layers) |_| _ = try c.alloc(bytes);
@@ -140,7 +199,21 @@ pub const Codec = struct {
             layers.* = try c.gpa.alloc([2]u64, shape.layers);
             for (layers.*) |*pair| pair.* = .{ try c.alloc(bytes), try c.alloc(bytes) };
         }
-        for (&c.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
+        for (&l.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
+        l.branches = try c.alloc(2 * T * internal_frame * 4);
+        l.mixed = try c.alloc(T * internal_frame * 4);
+        return l;
+    }
+
+    fn allocState(c: *Codec) !void {
+        const T = c.o.max_frames;
+        const R = head_rate * c.o.pass_frames;
+        const l = try c.allocLane();
+        if (c.counted == null) {
+            errdefer for (l.kv) |layers| c.gpa.free(layers);
+            try c.lanes.append(c.gpa, l);
+            c.load(l);
+        }
         c.codes = try c.alloc(c.o.pass_frames * 10 * 4);
         c.xa = try c.alloc(R * W * 4);
         c.xb = try c.alloc(R * W * 4);
@@ -148,8 +221,6 @@ pub const Codec = struct {
         c.o_ = try c.alloc(R * W * 4);
         c.att = try c.alloc(R * W * 4);
         c.big = try c.alloc(R * 3072 * 4);
-        c.branches = try c.alloc(2 * T * internal_frame * 4);
-        c.mixed = try c.alloc(T * internal_frame * 4);
         c.audio = try c.alloc(T * frame_samples * 4);
     }
 
@@ -162,7 +233,7 @@ pub const Codec = struct {
         try c.stream.synchronize();
     }
 
-    /// A new request: zero histories, no frames. Cache rows are written before they are read.
+    /// A new request on the lane in use: zero histories, no frames. Cache rows are written before they are read.
     pub fn reset(c: *Codec) !void {
         var b = c.buf(c.hist);
         b.len = c.hist_bytes;
