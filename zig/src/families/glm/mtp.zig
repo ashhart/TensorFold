@@ -65,8 +65,7 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
 }
 
-/// Drafts for `rows` pre-norm head outputs at `out`: the head's norm, then the LM head over the draft vocabulary (the
-/// MTP layer's own shared_head.head when the checkpoint stores one: drafts only, every token is verified by lm_head).
+/// Drafts for `rows` head outputs at `out`: the norm, then shared_head.head when stored, else lm_head (drafts only).
 pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, picks: Ref) void {
     const c = x.c;
     const D = c.hidden;
