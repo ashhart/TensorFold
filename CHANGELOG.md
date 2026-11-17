@@ -73,6 +73,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Templates: the chat template compiler accepts Jinja's `float` filter, `float(value, default=0.0)`, instead of refusing the template, and reads text as ASCII only (#3577). Thanks to @Nipale-ai.
 
+- Inkling 2 Small: add validated EXL3 pack admission and per-rank weight loading through the shared family plan; no serving path is enabled (#3612).
+
 - Tests: `tf-nemotron-hip-test invariance` checks Nemotron-H within-path bit invariance on HIP (prompt chunk cuts with the single-row first-token head, decode window widths and multi-stream grouping, and served prompt-cache resume against fresh prefill) (#3580, refs #3409).
 
 - Qwen3.8-Flash-Next on HIP: `tf_fn_idx_scores` exits inactive decode-graph tiles before synchronization and stages each tile's q rows once in LDS before walking the four key-position slots, cutting kernel time from 276.0 ms to 141.5 ms at 8K and 2,873.9 ms to 2,091.4 ms at 32K on gfx1151 with identical tokens (#3601).
@@ -194,9 +196,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   is identical to the release's own `infer` in torch bf16, or departs from it only where two candidate tokens lie
   within one bf16 step of each other, the same two torch's float32 run weighs. The five-page document is served the
   same way; its departures are listed in the recipe beside float32's (#2074). Thanks to @BobClawblaw.
-
-- Inkling 2 Small: add validated EXL3 pack admission and per-rank weight loading through the shared family plan; no serving path is enabled (#3612).
-
 ## 1.2.9
 
 - Flash Next on CUDA: a lone stream draws on its own path again; the batched draws #2927 added now run only when two or more streams share a step, so one sampled stream no longer pays the group's whole-buffer download each step. Tokens are unchanged (#3391, after #2927).
