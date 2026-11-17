@@ -184,7 +184,8 @@ extern "C" __global__ void zc_spec(float* __restrict__ y, int half) {
   float* r = y + (size_t)blockIdx.y * 2 * half;
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= half) return;
-  const float mag = expf(fminf(r[i], 4.605170185988092f));
+  const float lm = r[i];
+  const float mag = expf(lm > 4.605170185988092f ? 4.605170185988092f : lm);  // a comparison: a NaN stays NaN
   const float ph = r[half + i];
   r[i] = mag * cosf(ph);
   r[half + i] = mag * sinf(ph);

@@ -39,14 +39,16 @@ pub const Norm = struct {
     rig: rig_.Rig,
     which: Which,
     f: cuda.Function,
+    /// control: the launch's epsilon is one more than the reference's
+    fault: bool = false,
     r: ?rows.Rows = null,
     x: u64 = 0,
     w: u64 = 0,
     b: u64 = 0,
     out: u64 = 0,
 
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module, which: Which) !Norm {
-        return .{ .rig = .{ .gpu = gpu, .s = s }, .which = which, .f = try mod.function(if (which == .rmsnorm) "z3_rmsnorm" else "zc_layernorm") };
+    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module, which: Which, fault: bool) !Norm {
+        return .{ .rig = .{ .gpu = gpu, .s = s }, .which = which, .f = try mod.function(if (which == .rmsnorm) "z3_rmsnorm" else "zc_layernorm"), .fault = fault };
     }
 
     pub fn deinit(self: *Norm) void {
@@ -55,7 +57,9 @@ pub const Norm = struct {
     }
 
     pub fn kernel(self: *Norm) g.Kernel {
-        return .{ .spec = normSpec(self.which), .ctx = self, .vt = &vt };
+        var spec = normSpec(self.which);
+        if (self.fault) spec.name = if (self.which == .rmsnorm) "control: zonos3 z3_rmsnorm with its epsilon one too large" else "control: zonos3 zc_layernorm with its epsilon one too large";
+        return .{ .spec = spec, .ctx = self, .vt = &vt, .control = if (self.fault) .shapes else null };
     }
 
     const vt = g.hooks(Norm);
@@ -102,7 +106,7 @@ pub const Norm = struct {
             a.add(self.out);
         }
         a.add(k);
-        a.add(r.eps);
+        a.add(if (self.fault) r.eps + 1 else r.eps);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(r.shape.rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -149,14 +153,16 @@ pub const Linear = struct {
     rig: rig_.Rig,
     weights: Weights,
     f: cuda.Function,
+    /// control: the launch is one block of eight outputs short
+    fault: bool = false,
     d: ?Dense = null,
     x: u64 = 0,
     w: u64 = 0,
     out: u64 = 0,
 
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module, weights: Weights) !Linear {
+    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module, weights: Weights, fault: bool) !Linear {
         const f = try mod.function(if (weights == .bf16) "z3_linear" else "zc_linear");
-        return .{ .rig = .{ .gpu = gpu, .s = s }, .weights = weights, .f = f };
+        return .{ .rig = .{ .gpu = gpu, .s = s }, .weights = weights, .f = f, .fault = fault };
     }
 
     pub fn deinit(self: *Linear) void {
@@ -165,7 +171,9 @@ pub const Linear = struct {
     }
 
     pub fn kernel(self: *Linear) g.Kernel {
-        return .{ .spec = linearSpec(self.weights), .ctx = self, .vt = &vt };
+        var spec = linearSpec(self.weights);
+        if (self.fault) spec.name = if (self.weights == .bf16) "control: zonos3 z3_linear launched one block short" else "control: zonos3 zc_linear launched one block short";
+        return .{ .spec = spec, .ctx = self, .vt = &vt, .control = if (self.fault) .shapes else null };
     }
 
     const vt = g.hooks(Linear);
@@ -225,7 +233,7 @@ pub const Linear = struct {
             a.add(@as(u64, 0));
             a.add(@as(i64, 0));
         }
-        try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast((d.shape.n + 7) / 8), .y = @intCast(d.shape.rows), .z = 1 }, .block = .{ .x = 256 }, .shared = @intCast(d.shape.k * 4) }, self.rig.s, &a);
+        try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast((d.shape.n + 7) / 8 - ref.one(self.fault)), .y = @intCast(d.shape.rows), .z = 1 }, .block = .{ .x = 256 }, .shared = @intCast(d.shape.k * 4) }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
 
@@ -242,39 +250,123 @@ pub const Linear = struct {
     }
 };
 
-/// The family's registered kernels: the backbone's image and the codec's.
+const ref = @import("contract_zonos3_ref.zig");
+const point = @import("contract_zonos3_point.zig");
+const pick = @import("contract_zonos3_pick.zig");
+const backbone = @import("contract_zonos3_backbone.zig");
+const gdn = @import("contract_zonos3_gdn.zig");
+const attn = @import("contract_zonos3_attn.zig");
+const windows = @import("contract_zonos3_windows.zig");
+const conv = @import("contract_zonos3_conv.zig");
+
+fn Pair(comptime K: type) type {
+    return [2]ref.Gated(K);
+}
+
+/// The family's registered kernels over its four images: each kernel, then the control planted for it.
 pub const Set = struct {
     gpa: std.mem.Allocator,
-    backbone: cuda.Module,
-    codec: cuda.Module,
-    norms: [2]Norm,
-    linears: [2]Linear,
+    mods: ref.Mods,
+    norms: [4]Norm,
+    linears: [4]Linear,
+    points: [2 * point.kinds.len]ref.Gated(point.Point),
+    route: [2]ref.Checked(pick.Route),
+    nearest: [2]ref.Checked(pick.Nearest),
+    embed: Pair(backbone.Embed),
+    attnres: Pair(backbone.AttnRes),
+    conv_silu: Pair(backbone.ConvSilu),
+    gdn_prep: Pair(gdn.GdnPrep),
+    gdn: Pair(gdn.Gdn),
+    gated_norm: Pair(gdn.GatedNorm),
+    attn_prep: Pair(attn.Prep),
+    attention: [3]Pair(attn.Attention),
+    codec_prep: Pair(attn.CodecPrep),
+    dwconv: [2]Pair(windows.DwConv),
+    latent: Pair(windows.Latent),
+    ola: Pair(windows.Ola),
+    fir: [3]Pair(windows.Fir),
+    conv: Pair(conv.Conv),
+
+    /// The fields that hold a kernel and its control side by side, in the order they register.
+    const pairs = .{ "embed", "attnres", "conv_silu", "gdn_prep", "gdn", "gated_norm", "attn_prep", "codec_prep", "latent", "ola", "conv" };
+    const groups = .{ "attention", "dwconv", "fir" };
 
     /// The set, its kernels appended to `list`.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
         const set = try gpu.gpa.create(Set);
         errdefer gpu.gpa.destroy(set);
-        var backbone = try cuda.Module.load(gpu.d, cuda.kernels.zonos3);
-        errdefer backbone.unload();
-        var codec = try cuda.Module.load(gpu.d, cuda.kernels.zonos3_codec);
-        errdefer codec.unload();
-        set.* = .{
-            .gpa = gpu.gpa,
-            .backbone = backbone,
-            .codec = codec,
-            .norms = .{ try Norm.init(gpu, s, backbone, .rmsnorm), try Norm.init(gpu, s, codec, .layernorm) },
-            .linears = .{ try Linear.init(gpu, s, backbone, .bf16), try Linear.init(gpu, s, codec, .f32) },
+        var m: ref.Mods = undefined;
+        m.backbone = try cuda.Module.load(gpu.d, cuda.kernels.zonos3);
+        errdefer m.backbone.unload();
+        m.codec = try cuda.Module.load(gpu.d, cuda.kernels.zonos3_codec);
+        errdefer m.codec.unload();
+        m.encoder = try cuda.Module.load(gpu.d, cuda.kernels.zonos3_encoder);
+        errdefer m.encoder.unload();
+        m.teacher = try cuda.Module.load(gpu.d, cuda.kernels.zonos3_teacher);
+        errdefer m.teacher.unload();
+        const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
+        set.gpa = gpu.gpa;
+        set.mods = m;
+        for (0..4) |i| {
+            const codec = i >= 2;
+            const fault = i % 2 == 1;
+            set.norms[i] = try Norm.init(gpu, s, if (codec) m.codec else m.backbone, if (codec) .layernorm else .rmsnorm, fault);
+            set.linears[i] = try Linear.init(gpu, s, if (codec) m.codec else m.backbone, if (codec) .f32 else .bf16, fault);
+        }
+        for (point.kinds, 0..) |kind, i| for (0..2) |j| {
+            set.points[2 * i + j] = .{ .rig = rig, .k = try point.Point.init(m, kind, j == 1) };
         };
+        const f = struct {
+            fn of(mod: cuda.Module, comptime symbol: [:0]const u8) !cuda.Function {
+                return mod.function(symbol);
+            }
+        }.of;
+        for (0..2) |j| {
+            const fault = j == 1;
+            set.route[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_route"), .fault = fault } };
+            set.nearest[j] = .{ .rig = rig, .k = .{ .f = try f(m.encoder, "ze_nearest"), .fault = fault } };
+            set.embed[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_embed"), .fault = fault } };
+            set.attnres[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_attnres"), .fault = fault } };
+            set.conv_silu[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_conv_silu"), .fault = fault } };
+            set.gdn_prep[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_gdn_prep"), .fault = fault } };
+            set.gdn[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_gdn"), .fault = fault } };
+            set.gated_norm[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_gated_norm"), .fault = fault } };
+            set.attn_prep[j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_attn_prep"), .fault = fault } };
+            set.attention[0][j] = .{ .rig = rig, .k = .{ .f = try f(m.backbone, "z3_attention"), .which = .backbone, .fault = fault } };
+            set.attention[1][j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_attention"), .which = .codec, .fault = fault } };
+            set.attention[2][j] = .{ .rig = rig, .k = .{ .f = try f(m.teacher, "zt_attention"), .which = .teacher, .fault = fault } };
+            set.codec_prep[j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_attn_prep"), .fault = fault } };
+            set.dwconv[0][j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_dwconv"), .which = .codec, .fault = fault } };
+            set.dwconv[1][j] = .{ .rig = rig, .k = .{ .f = try f(m.teacher, "zt_dwconv"), .which = .teacher, .fault = fault } };
+            set.latent[j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_latent"), .fault = fault } };
+            set.ola[j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_ola"), .fault = fault } };
+            set.fir[0][j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_mix"), .which = .mix, .fault = fault } };
+            set.fir[1][j] = .{ .rig = rig, .k = .{ .f = try f(m.codec, "zc_resample"), .which = .resample, .fault = fault } };
+            set.fir[2][j] = .{ .rig = rig, .k = .{ .f = try f(m.encoder, "ze_resample_in"), .which = .resample_in, .fault = fault } };
+            set.conv[j] = .{ .rig = rig, .k = .{ .f = try f(m.encoder, "ze_conv"), .fault = fault } };
+        }
         for (&set.norms) |*x| try list.append(a, x.kernel());
         for (&set.linears) |*x| try list.append(a, x.kernel());
+        for (&set.points) |*x| try list.append(a, x.kernel());
+        for (&set.route) |*x| try list.append(a, x.kernel());
+        for (&set.nearest) |*x| try list.append(a, x.kernel());
+        inline for (pairs) |field| for (&@field(set, field)) |*x| try list.append(a, x.kernel());
+        inline for (groups) |field| for (&@field(set, field)) |*pair| for (pair) |*x| try list.append(a, x.kernel());
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        inline for (groups) |field| for (&@field(set, field)) |*pair| for (pair) |*x| x.deinit();
+        inline for (pairs) |field| for (&@field(set, field)) |*x| x.deinit();
+        for (&set.nearest) |*x| x.deinit();
+        for (&set.route) |*x| x.deinit();
+        for (&set.points) |*x| x.deinit();
         for (&set.linears) |*x| x.deinit();
         for (&set.norms) |*x| x.deinit();
-        set.codec.unload();
-        set.backbone.unload();
+        set.mods.teacher.unload();
+        set.mods.encoder.unload();
+        set.mods.codec.unload();
+        set.mods.backbone.unload();
         set.gpa.destroy(set);
     }
 };

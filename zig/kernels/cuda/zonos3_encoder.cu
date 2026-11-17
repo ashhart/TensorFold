@@ -76,14 +76,14 @@ extern "C" __global__ void ze_sub(float* __restrict__ x, const float* __restrict
   if (i < n) x[i] -= y[i];
 }
 
-// A row's nearest code by cosine: codes[row * 10 + col] = argmax_c e . C[c], C [4096][8] unit rows, ties to the lower.
+// codes[row * 10 + col] = argmax_c e . C[c], C [4096][8]: ties to the lower, a NaN dot never wins, none finite: 0.
 extern "C" __global__ void __launch_bounds__(256) ze_nearest(const float* __restrict__ e, const float* __restrict__ C,
                                                              int* __restrict__ codes, int col) {
   __shared__ float best[256];
   __shared__ int which[256];
   const float* x = e + (size_t)blockIdx.x * 8;
   float bv = -INFINITY;
-  int bi = 0x7FFFFFFF;
+  int bi = threadIdx.x;
   for (int c = threadIdx.x; c < 4096; c += blockDim.x) {
     const float* row = C + (size_t)c * 8;
     float d = 0.f;
