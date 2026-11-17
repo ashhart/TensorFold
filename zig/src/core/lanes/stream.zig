@@ -92,6 +92,7 @@ pub const Reuse = struct {
 pub const MarkHook = struct {
     ptr: *anyopaque,
     at: *const fn (ptr: *anyopaque, s: *Stream, at: u32) void,
+    interrupted: ?*const fn (ptr: *anyopaque, s: *Stream, at: u32) void = null,
 };
 
 /// Drafts the backend holds for the stream's next round; a tree keeps its tokens and parents on the host.
@@ -381,7 +382,7 @@ pub const Stream = struct {
     /// Keep a completed, resumable prompt prefix before cancellation releases the backend's state.
     pub fn keepInterruptedPrefill(s: *Stream, at: u32) void {
         if (at <= s.cached or at >= s.prompt_len) return;
-        if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
+        if (s.reuse.hook) |hook| (hook.interrupted orelse hook.at)(hook.ptr, s, at);
     }
 
     /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.
