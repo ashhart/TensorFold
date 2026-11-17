@@ -509,29 +509,19 @@ pub const SlotPass = struct {
 
 /// TF_DSV41_DRAFT_OVERLAP: 1 = a device-started round's ingests overlapped with its window's tail, unset / 0 = serial.
 pub fn overlapFromEnv() !bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_OVERLAP") orelse return false);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDraftOverlap;
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFT_OVERLAP", false);
 }
 
 /// TF_DSV41_DRAFT_CAPTURE: 1 = a new pass key runs the regular path once (captured); unset / 0 = never captures.
 pub fn captureFromEnv() !bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_CAPTURE") orelse return false);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDraftCapture;
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFT_CAPTURE", false);
 }
 
 /// TF_DSV41_DRAFT_BATCH_PROJ: 1 = one main_proj over a round's slots, `check` = also compared per slot, 0 = per slot.
 pub const BatchProj = enum { off, on, check };
 
 pub fn batchProjFromEnv() !BatchProj {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_BATCH_PROJ") orelse return .off);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return .off;
-    if (std.mem.eql(u8, v, "1")) return .on;
-    if (std.mem.eql(u8, v, "check")) return .check;
-    return error.BadDraftBatchProj;
+    return @fromBackingInt(@intCast(try @import("sys").environment.read(u8, "TF_DSV41_DRAFT_BATCH_PROJ", 0)));
 }
 
 /// The batched projection's most rows: a row window's (rowtab's largest bucket; linear.cu takes up to 128).

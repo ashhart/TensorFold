@@ -50,7 +50,7 @@ pub const SchedHost = struct {
         // TF_DSV41_PF_TBO: a round's piece holds a pair of segments (forward_prefill.prompt runs them on two streams)
         if (gt.f.opts.pf_tbo) s.rows *= 2;
         s.sessions = gt.sessions != null;
-        if (flag("TF_DSV41_PIECES_FLOOR")) try s.withFloorFromEnv();
+        if (try flag("TF_DSV41_PIECES_FLOOR")) try s.withFloorFromEnv();
         return s;
     }
 
@@ -201,9 +201,8 @@ pub const SchedHost = struct {
     }
 };
 
-fn flag(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+fn flag(name: [:0]const u8) !bool {
+    return @import("sys").environment.read(bool, name, false);
 }
 
 /// /proc/meminfo's lines the floor reads, in bytes.

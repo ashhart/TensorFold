@@ -15,11 +15,7 @@ pub const Mode = enum { host, device, graphs };
 
 /// TF_DSV41_DRAFT_GRAPHS: 1 = device candidates + graphed passes, `device` = eager device candidates, 0 = host step.
 pub fn modeFromEnv() !Mode {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_GRAPHS") orelse return .host);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return .host;
-    if (std.mem.eql(u8, v, "1")) return .graphs;
-    if (std.mem.eql(u8, v, "device")) return .device;
-    return error.BadDraftGraphs;
+    return @fromBackingInt(@intCast(try @import("sys").environment.read(u8, "TF_DSV41_DRAFT_GRAPHS", 0)));
 }
 
 pub const check_passes = 8;
@@ -62,8 +58,7 @@ pub const Dev = struct {
         errdefer gpa.destroy(x);
         const W: usize = comm.world();
         const pk = rows_max * 2 * k * 4;
-        var max: u32 = 32;
-        if (std.c.getenv("TF_DSV41_DRAFT_GRAPHS_MAX")) |v| max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        const max = try @import("sys").environment.read(u32, "TF_DSV41_DRAFT_GRAPHS_MAX", 32);
         var send = try cuda.DeviceBuffer.alloc(d, pk);
         errdefer send.free();
         var gathered = try cuda.DeviceBuffer.alloc(d, pk * W);
@@ -100,7 +95,7 @@ pub const Dev = struct {
             .region_bytes = region_bytes,
             .regions = regions,
         };
-        const hold = if (std.c.getenv("TF_DSV41_GRAPH_FLOOR")) |v| std.mem.eql(u8, std.mem.span(v), "hold") else false;
+        const hold = try @import("sys").environment.read(bool, "TF_DSV41_GRAPH_FLOOR", false);
         x.cache = graphs.gc.Cache(u32).init(gpa, x.engine.engine(), .{ .on = true, .max = max, .min_keep = 2, .hold = hold });
         x.cache.agree = x.agreement.agree();
         x.cache.room = graphs.room;
@@ -255,10 +250,7 @@ pub const Dev = struct {
 
 /// TF_DSV41_DRAFT_CHAIN: 1 = the chain on the device (with TF_DSV41_DRAFT_GRAPHS' device path), unset / 0 = the host's.
 pub fn chainFromEnv() !bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_CHAIN") orelse return false);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDraftChain;
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFT_CHAIN", false);
 }
 
 /// One strided copy of ds_out's reorder: `height` rows of `width` bytes; `ids`: into cand, else cval.

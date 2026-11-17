@@ -62,7 +62,6 @@ pub const Progress = struct {
 
 /// Seconds, default off. Overflow and malformed operator settings refuse before boot.
 pub fn timeoutNs(value: ?[]const u8) !u64 {
-    const text = value orelse return 0;
-    const seconds = std.fmt.parseInt(u64, text, 10) catch return error.BadStallTimeout;
-    return std.math.mul(u64, seconds, std.time.ns_per_s) catch error.BadStallTimeout;
+    const seconds = try @import("sys").environment.value(u64, "TF_DSV41_STALL_EXIT_S", value, 0);
+    return seconds * std.time.ns_per_s;
 }

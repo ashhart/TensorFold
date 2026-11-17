@@ -69,10 +69,7 @@ pub const PfDense = struct {
     }
 
     pub fn parseOverride(raw: []const u8) ![2]u32 {
-        var it = std.mem.tokenizeScalar(u8, raw, ',');
-        const id = std.fmt.parseInt(u32, std.mem.trim(u8, it.next() orelse return error.BadKnob, " "), 10) catch return error.BadKnob;
-        const g: u32 = if (it.next()) |x| std.fmt.parseInt(u32, std.mem.trim(u8, x, " "), 10) catch return error.BadKnob else 8;
-        if (it.next() != null or id >= pfd.cfgs.len or g < 1 or g > 1024) return error.BadKnob;
-        return .{ id, g };
+        std.debug.assert(@import("sys").environment.rule("TF_DSV41_PF_DENSE_CFG").max + 1 == pfd.cfgs.len);
+        return (try @import("sys").environment.pair("TF_DSV41_PF_DENSE_CFG", raw)) orelse error.InvalidEnvironment;
     }
 };

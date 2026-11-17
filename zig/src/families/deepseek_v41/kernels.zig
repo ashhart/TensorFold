@@ -62,8 +62,7 @@ const Lin2Blob = struct {
 pub const lin2_image: []const u8 = &Lin2Blob.bytes;
 
 fn env(name: [:0]const u8) ?[]const u8 {
-    const v = std.c.getenv(name) orelse return null;
-    return std.mem.span(v);
+    return @import("sys").environment.Process.get(.{}, name);
 }
 
 pub const Kernels = struct {

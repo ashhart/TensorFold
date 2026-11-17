@@ -8,7 +8,7 @@ const model = @import("cuda_model.zig");
 const t = std.testing;
 
 fn refused(name: [:0]const u8) !void {
-    try t.expectEqual(@as(c_int, 0), env.setenv(name, "mistyped value", 1));
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, if (@import("sys").environment.rule(name).kind == .path) "bad\npath" else "mistyped value", 1));
     defer _ = env.unsetenv(name);
     try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
     try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());
@@ -18,18 +18,17 @@ fn blank(name: [:0]const u8) !void {
     try t.expectEqual(@as(c_int, 0), env.setenv(name, " ", 1));
     defer _ = env.unsetenv(name);
     try t.expectError(error.ExperimentalDeepSeekRequired, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
-    _ = try @import("aot_needs.zig").Served.fromEnv();
 }
 
 test "DeepSeek strict env: every malformed setting stops the real loader before resources" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
-    for (rules) |r| if (r.scope == .dsv41) try refused(r.name);
+    for (rules) |r| if (r.scope == .dsv41 and @import("sys").environment.rule(r.name).word_fallback == null) try refused(r.name);
 }
 
-test "DeepSeek strict env: a blank setting is unset, so the loader and planner pass the check" {
+test "DeepSeek strict env: a blank setting is unset by startup validation before resources" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
     _ = env.unsetenv("TF_EXPERIMENTAL");
-    for (rules) |r| if (r.scope == .dsv41) try blank(r.name);
+    for (rules) |r| if (r.scope == .dsv41 and r.blank_default) try blank(r.name);
 }
 
 test "DeepSeek strict env: empty served-knob reads retain their local defaults" {

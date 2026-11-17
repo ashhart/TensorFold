@@ -56,18 +56,15 @@ pub const Phases = struct {
     last_end: u64 = 0,
 
     pub fn parseMode(v: []const u8) !Mode {
-        if (std.mem.eql(u8, v, "0") or v.len == 0) return .off;
-        if (std.mem.eql(u8, v, "1")) return .wall;
-        if (std.mem.eql(u8, v, "sync")) return .sync;
-        return error.BadPhasesMode;
+        return @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_PHASES", v, 0)));
     }
 
     /// From TF_DSV41_PHASES / TF_DSV41_PHASES_OUT; null when off.
     pub fn fromEnv(gpa: std.mem.Allocator) !?*Phases {
-        const mode = try parseMode(if (std.c.getenv("TF_DSV41_PHASES")) |v| std.mem.span(v) else "0");
+        const mode = try parseMode(if (@import("sys").environment.Process.get(.{}, "TF_DSV41_PHASES")) |v| v else "0");
         if (mode == .off) return null;
         const p = try gpa.create(Phases);
-        p.* = .{ .mode = mode, .t0 = nowNs(), .path = if (std.c.getenv("TF_DSV41_PHASES_OUT")) |v| std.mem.span(v) else null };
+        p.* = .{ .mode = mode, .t0 = nowNs(), .path = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_PHASES_OUT")) |v| v else null };
         return p;
     }
 
@@ -202,5 +199,5 @@ test "phases: the reference engine's names and report shape; sync mode syncs at 
     try std.testing.expect(o.get("draft.pass") != null and o.get("window") != null);
     try std.testing.expect(o.get("host") != null); // the gap between the two top-level phases above
     try std.testing.expectEqual(Mode.off, try Phases.parseMode("0"));
-    try std.testing.expectError(error.BadPhasesMode, Phases.parseMode("nvtx"));
+    try std.testing.expectError(error.InvalidEnvironment, Phases.parseMode("nvtx"));
 }

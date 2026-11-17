@@ -86,9 +86,9 @@ test "serve knob readers: PF_DENSE modes, prefill rows, prefetch ahead, prefill 
     const p = (try pk.pfDense(aa, testing.io, &Fake.get)).?;
     try testing.expectEqual(@as(?[2]u32, .{ 3, 16 }), p.override);
     Fake.pairs = &.{.{ "TF_DSV41_PF_DENSE", "tiles" }};
-    try testing.expectError(error.BadKnob, pk.pfDense(aa, testing.io, &Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pfDense(aa, testing.io, &Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_PREFILL_ROWS", "1000" }};
-    try testing.expectError(error.BadKnob, pk.prefillRows(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.prefillRows(&Fake.get));
     // the served table file through the reader
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -107,7 +107,7 @@ test "TF_DSV41_PROMPT_TAIL: Python's server splits a prompt at its last token, F
     Fake.pairs = &.{.{ "TF_DSV41_PROMPT_TAIL", "prefill" }};
     try testing.expectEqual(pk.PromptTail.prefill, try pk.promptTail(&Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_PROMPT_TAIL", "decode" }};
-    try testing.expectError(error.BadKnob, pk.promptTail(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.promptTail(&Fake.get));
     // pieces prefill [0, n - 1), the finals make prompt[-1] the pending row (a 1-token prompt: no piece)
     for ([_]usize{ 1, 2, 45, 2048, 2049, 4097 }) |n| {
         const v = pk.promptSplit(n, .verify);

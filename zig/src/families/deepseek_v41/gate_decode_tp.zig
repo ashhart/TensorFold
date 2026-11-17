@@ -53,9 +53,9 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     const layers = try a.alloc(u32, hi - lo + 1);
     for (layers, 0..) |*l, i| l.* = lo + @as(u32, @intCast(i));
     // TF_DSV41_DECODE_TP_LANES (lanes checks, below): 1 drafts off, 2 the oracle's drafts, 3 DSpark's GPU pass
-    const lanes_mode: u32 = if (std.c.getenv("TF_DSV41_DECODE_TP_LANES")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 0;
+    const lanes_mode: u32 = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_LANES")) |v| try std.fmt.parseInt(u32, v, 10) else 0;
     // TF_DSV41_DECODE_TP_PREFILL=1: our prefill runs the reference's prompt from an empty slot; state equals its
-    const own_prefill = if (std.c.getenv("TF_DSV41_DECODE_TP_PREFILL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    const own_prefill = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_PREFILL")) |v| std.mem.eql(u8, v, "1") else false;
 
     var driver = try cuda.Driver.open();
     defer driver.close();
@@ -69,8 +69,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     const session = try gpa.create(tp.Session);
     defer gpa.destroy(session);
     // TF_TP_KERNEL_IMAGE: tp_mailbox.fatbin; TF_COMM_BACKEND=roce then takes small exchanges over RoCE; unset: NCCL
-    const image: []const u8 = if (std.c.getenv("TF_TP_KERNEL_IMAGE")) |p|
-        try cwd.readFileAllocOptions(io, std.mem.span(p), a, .limited(1 << 26), .@"16", null)
+    const image: []const u8 = if (@import("sys").environment.Process.get(.{}, "TF_TP_KERNEL_IMAGE")) |p|
+        try cwd.readFileAllocOptions(io, p, a, .limited(1 << 26), .@"16", null)
     else
         &.{};
     try session.open(&driver, tcfg, image);
@@ -114,7 +114,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     runner.prof = if (try @import("profile.zig").Profile.fromEnv(gpa, &driver)) |p| p.timer() else null;
     defer if (runner.prof) |p| p.close(io);
     // TF_DSV41_DECODE_TP_TOPP (the reference's TF_DSV41_EXPERT_TOPP): unset = no top-p prune, else prune at that mass
-    const topp: ?f64 = if (std.c.getenv("TF_DSV41_DECODE_TP_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
+    const topp: ?f64 = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_TOPP")) |v| try std.fmt.parseFloat(f64, v) else null;
     // R1 when the reference ran its knobs (ref.json's env)
     const r1 = blk: {
         const env = meta.object.get("env") orelse break :blk false;
@@ -138,8 +138,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
         // plan every row count the windows run (drafts, TF_DSV41_DECODE_TP_PROF_ROWS): decode-only roles that deep
         var rows: std.ArrayList(u32) = .empty;
         try rows.appendSlice(a, if (lanes_mode != 0) rows_lanes[0 .. cfg.dspark_block + 1] else &.{1});
-        if (std.c.getenv("TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
-            var it = std.mem.tokenizeScalar(u8, std.mem.span(spec), ' ');
+        if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
+            var it = std.mem.tokenizeScalar(u8, spec, ' ');
             while (it.next()) |word| {
                 const n = try std.fmt.parseInt(u32, word, 10);
                 if (std.mem.indexOfScalar(u32, rows.items, n) == null) try rows.append(a, n);
@@ -305,8 +305,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     // the decode steps' tallies before anything else runs (a fault in the timed rows below still leaves them)
     std.debug.print("rank {d}: decode steps: tokens {d}/{d}, logits {d}/{d}\n", .{ rank, tokens_equal, steps, logits_equal, steps });
     // TF_DSV41_DECODE_TP_PROF_ROWS ("1 4 8"): after the check, each row count's windows timed (3 warm + 16, synced)
-    if (std.c.getenv("TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
-        var it = std.mem.tokenizeScalar(u8, std.mem.span(spec), ' ');
+    if (@import("sys").environment.Process.get(.{}, "TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
+        var it = std.mem.tokenizeScalar(u8, spec, ' ');
         while (it.next()) |word| {
             const n = try std.fmt.parseInt(u32, word, 10);
             const ids = try a.alloc(u32, n);

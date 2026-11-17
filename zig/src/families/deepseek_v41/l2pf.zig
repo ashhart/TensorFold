@@ -16,10 +16,10 @@ pub const Settings = struct {
     rows: u32 = 16,
 };
 
-pub const Error = error{ BadL2pf, L2pfTable, L2pfSpan };
+pub const Error = error{ L2pfTable, L2pfSpan };
 
 fn get(name: [:0]const u8) ?[]const u8 {
-    const v = std.mem.span(std.c.getenv(name) orelse return null);
+    const v = @import("sys").environment.Process.get(.{}, name) orelse return null;
     const t = std.mem.trim(u8, v, " \t");
     return if (t.len == 0) null else t;
 }
@@ -27,17 +27,9 @@ fn get(name: [:0]const u8) ?[]const u8 {
 /// The knobs as l2pf.settings reads them; the emitter's fixed values checked against their own knobs.
 pub fn settings(o: block.Options) !Settings {
     var s: Settings = .{};
-    const raw = get("TF_DSV41_L2PF") orelse return s;
-    var low: [16]u8 = undefined;
-    if (raw.len > low.len) return error.BadL2pf;
-    const m = std.ascii.lowerString(&low, raw);
-    if (eq(m, "0") or eq(m, "off") or eq(m, "none") or eq(m, "false")) return s;
-    if (!(eq(m, "1") or eq(m, "on") or eq(m, "true") or eq(m, "bulk"))) {
-        log.err("TF_DSV41_L2PF={s}: the Zig engine runs the reference's bulk prefetch (0 | 1 | bulk)", .{raw});
-        return error.BadL2pf;
-    }
-    s.mode = .bulk;
-    if (get("TF_DSV41_L2PF_ROWS")) |v| s.rows = std.fmt.parseInt(u32, v, 10) catch return error.BadL2pf;
+    s.mode = @fromBackingInt(@intCast(try @import("sys").environment.read(u8, "TF_DSV41_L2PF", 0)));
+    if (s.mode == .off) return s;
+    s.rows = try @import("sys").environment.read(u32, "TF_DSV41_L2PF_ROWS", s.rows);
     // the emitter's launches carry these values (block.Options defaults): another value is refused
     const fixed = [_]struct { name: [:0]const u8, want: f64 }{
         .{ .name = "TF_DSV41_L2PF_MB", .want = @as(f64, @floatFromInt(o.l2pf_budget)) / (1 << 20) },
@@ -47,38 +39,15 @@ pub fn settings(o: block.Options) !Settings {
         .{ .name = "TF_DSV41_L2PF_DELAY_US", .want = 0 },
     };
     for (fixed) |k| if (get(k.name)) |v| {
-        const x = std.fmt.parseFloat(f64, v) catch return error.BadL2pf;
+        const x = @import("sys").environment.value(f64, k.name, v, k.want) catch return error.InvalidEnvironment;
         if (x != k.want) {
             log.err("{s}={s}: the Zig emitter's L2 prefetch launches use {d} (the reference's)", .{ k.name, v, k.want });
-            return error.BadL2pf;
+            return error.InvalidEnvironment;
         }
     };
-    for ([_]struct { name: [:0]const u8, want: []const u8 }{ .{ .name = "TF_DSV41_L2PF_SITES", .want = "x,o,f" }, .{ .name = "TF_DSV41_L2PF_PACE_SITES", .want = "x,f" }, .{ .name = "TF_DSV41_L2PF_AT", .want = "before" } }) |k| if (get(k.name)) |v| {
-        if (!sameSet(v, k.want)) {
-            log.err("{s}={s}: the Zig emitter's L2 prefetch sites are {s} (the reference's)", .{ k.name, v, k.want });
-            return error.BadL2pf;
-        }
-    };
+    for ([_][:0]const u8{ "TF_DSV41_L2PF_SITES", "TF_DSV41_L2PF_PACE_SITES", "TF_DSV41_L2PF_AT" }) |name|
+        try @import("sys").environment.check(name, get(name));
     return s;
-}
-
-fn eq(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
-}
-
-/// The same comma-separated items, in any order.
-fn sameSet(a: []const u8, b: []const u8) bool {
-    var n: usize = 0;
-    var it = std.mem.tokenizeScalar(u8, a, ',');
-    while (it.next()) |x| {
-        const t = std.mem.trim(u8, x, " ");
-        var found = false;
-        var jt = std.mem.tokenizeScalar(u8, b, ',');
-        while (jt.next()) |y| found = found or std.ascii.eqlIgnoreCase(t, y);
-        if (!found) return false;
-        n += 1;
-    }
-    return n == std.mem.count(u8, b, ",") + 1;
 }
 
 /// A span to prefetch: a 16-byte-aligned start and a multiple of 16 bytes.
@@ -251,5 +220,4 @@ test "l2pf.take: l2pf.py's spans (aligned starts, whole sources, the last one's 
     out.clearRetainingCapacity();
     try take(&out, a, &srcs, &all, 1 << 20);
     try std.testing.expectEqual(rowsOf(&srcs, 1 << 20), out.items.len);
-    try std.testing.expect(sameSet("f, x", "x,f") and !sameSet("x", "x,f") and sameSet("o,x,f", "x,o,f"));
 }
