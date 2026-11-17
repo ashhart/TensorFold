@@ -71,6 +71,9 @@ jobs:
           python3 tools/zig/cuda_common_check.py
           python3 tools/zig/cuda_fragment_check.py
           python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
+      # check-pdl-loads needs nvcc; its SASS rules and planted early reads are checked here on fixtures.
+      - name: Dependent-launch SASS checker fixtures
+        run: python3 tools/test_pdl_early_loads.py -v
       # The lean rule (600-line files, one-line comments within 120 columns, no direct getenv of a setting): no problem the base branch lacks.
       - name: lean check
         if: ${{ github.event_name != 'schedule' }}
