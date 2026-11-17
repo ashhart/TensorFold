@@ -29,6 +29,11 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/zonos3_metal.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "zonos3_metallib", .module = bytes } } });
 }
 
+/// ZONOS3 in the Metal engines as `zonos3`, over the core Drama's addNative gave them (torch_pth and wav).
+pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, native: *std.Build.Module, lanes: *std.Build.Module, metal_std: []const u8) void {
+    native.addImport("zonos3", module(b, target, optimize, metal, native.import_table.get("core").?, lanes, metal_std));
+}
+
 pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, lanes: *std.Build.Module, metal_std: []const u8, test_step: *std.Build.Step) void {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });

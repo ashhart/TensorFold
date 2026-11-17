@@ -25,13 +25,11 @@ pub const deviceName = metal_shared.deviceName;
 const prefillStep = metal_shared.prefillStep;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
-
 pub const backends: []const []const u8 = &.{"metal"};
 /// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
 pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
 const spill = @import("metal_spill.zig");
-
 /// Every checkpoint-wide MLX affine width the per-module readers take (oQ quants): 2-8 bits but 7, groups 32-128.
 const affine_widths = blk: {
     var out: [18][]const u8 = undefined;
@@ -51,6 +49,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
+    .{ .model_type = "zonos3", .formats = &.{"bf16"} },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
     .{ .model_type = "nemotron_h_puzzle", .formats = affine_widths },
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
@@ -140,6 +139,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "zonos3")) return @import("zonos_open.zig").openMetal(a, gpa, io, o, problem);
     if (o.cfg_enabled or o.cfg_batched) {
         problem.* = "--cfg-* guidance requires a Drama 3 speech model";
         return null;

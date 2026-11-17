@@ -1,4 +1,4 @@
-//! ZONOS3 Mini's open on CUDA: the flags it serves, then the host.
+//! ZONOS3 Mini's open on CUDA and on Metal: the flags it serves, then the host.
 const std = @import("std");
 const api = @import("engine_api");
 const zonos_host = @import("zonos_host.zig");
@@ -77,6 +77,46 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             return null;
         }
         problem.* = try std.fmt.allocPrint(a, "the native ZONOS3 Mini CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
+        return null;
+    };
+}
+
+/// On a Mac: one request at a time on the Metal device, the same flags refused as on CUDA.
+pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
+    if (o.cfg_enabled or o.cfg_batched) {
+        problem.* = "ZONOS3 Mini is served without guidance: serve without --cfg";
+        return null;
+    }
+    if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and o.lanes != 1) or (o.device != null and o.device.? != 0) or (o.segments != null and o.segments.? != 1)) {
+        problem.* = "ZONOS3 Mini serves one request at a time on the Mac's GPU: use --parallel 1, device 0 and one segment, without tensor parallelism";
+        return null;
+    }
+    if (o.silence.enabled()) {
+        problem.* = "ZONOS3 Mini has no silence guard: serve without the silence flags";
+        return null;
+    }
+    const window = o.context orelse (zonos_host.Options{}).context;
+    _ = zonos_host.budget(std.math.cast(u32, window) orelse 0, o.max_frames) catch |e| {
+        problem.* = switch (e) {
+            error.BadZonosContext => "ZONOS3 Mini supports --context 1025 through 32768",
+            error.BadZonosFrames => "ZONOS3 Mini's --max-frames must be at least 12 and below --context",
+        };
+        return null;
+    };
+    if (o.vision != null or o.precision != null or o.record != null or o.recall or o.learn != null or
+        o.learn_conversations or o.speed_up != null or o.slide or o.drafter != null or o.mtp_drafts != null or o.mtp_confidence != null or
+        (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or
+        (o.keep != null and o.keep.? != 0) or o.policy.len != 0)
+    {
+        problem.* = "ZONOS3 Mini does not support learned weights, speculative drafts, retained prompt caches, or text-engine policies";
+        return null;
+    }
+    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .max_frames = o.max_frames }) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native ZONOS3 Mini Metal engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };
 }

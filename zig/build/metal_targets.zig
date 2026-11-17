@@ -210,6 +210,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
     engines.addImport("living", mods.living);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
+    @import("zonos3_metal.zig").addNative(b, target, optimize, metal, engines, mods.lanes, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
     @import("zonos3_metal.zig").targets(b, target, optimize, metal, mods.lanes, metal_std, test_step);
 
@@ -573,6 +574,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
     @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
+    @import("zonos3_metal.zig").addNative(b, target, .fast, m.metal, engines, m.lanes, mlxMetalStd(b));
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
     engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);

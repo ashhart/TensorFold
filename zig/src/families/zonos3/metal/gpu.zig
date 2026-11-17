@@ -47,6 +47,8 @@ pub const Gpu = struct {
     pipes: [n_pipes]mtl.Pipeline,
     bufs: std.ArrayList(mtl.Buffer), // by slot; slot 0 is never used, so address 0 is null
     counted: ?usize = null, // set: allocations are counted, not made
+    held: usize = 0, // bytes of the buffers made
+    peak: usize = 0, // the most `held` has been
     pool: ?mtl.objc.Pool = null,
     cb: ?mtl.CommandBuffer = null,
     enc: ?mtl.ComputeEncoder = null,
@@ -86,7 +88,10 @@ pub const Gpu = struct {
     pub fn releaseFrom(g: *Gpu, first: usize) void {
         g.flush() catch {};
         std.debug.assert(first >= 1 and first <= g.bufs.items.len);
-        for (g.bufs.items[first..]) |b| b.deinit();
+        for (g.bufs.items[first..]) |b| {
+            g.held -= b.length();
+            b.deinit();
+        }
         g.bufs.shrinkRetainingCapacity(first);
     }
 
@@ -107,6 +112,8 @@ pub const Gpu = struct {
         errdefer b.deinit();
         @memset(b.contents()[0..len], 0);
         try g.bufs.append(g.gpa, b);
+        g.held += len;
+        g.peak = @max(g.peak, g.held);
         return @as(u64, g.bufs.items.len - 1) << slot_shift;
     }
 
