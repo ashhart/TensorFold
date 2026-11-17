@@ -10,7 +10,7 @@ __device__ __forceinline__ void trigger() {
 #endif
 }
 
-// Returns once the grid before has completed and its writes are visible; nothing above it may read their data.
+// Returns once the grid before has completed and its writes are visible; read those coherently (no const __restrict__).
 __device__ __forceinline__ void wait() {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
   asm volatile("griddepcontrol.wait;" ::: "memory");

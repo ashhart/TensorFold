@@ -126,9 +126,9 @@ extern "C" __global__ void df_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_
 }
 
 // Each block's 8 rows attend to their ring's window (max(from, p - 2047) .. start - 1) and all 8 block keys.
-extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kb,
-                                                          const __nv_bfloat16* __restrict__ vb, const uint64_t* __restrict__ rings,
-                                                          const long long* __restrict__ starts, const long long* __restrict__ froms,
+extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* q, const __nv_bfloat16* kb,
+                                                          const __nv_bfloat16* vb, const uint64_t* rings,
+                                                          const long long* starts, const long long* froms,
                                                           int layer, float scale, __nv_bfloat16* __restrict__ o) {
     glm_pdl::enter();
     const int s = blockIdx.x, kh = blockIdx.y;
