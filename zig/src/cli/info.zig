@@ -365,7 +365,8 @@ test "info prices a Qwen3.8-27B start from serve's charge: context, streams and 
     try std.testing.expect(has(small.text, "this Mac: fits beside its "));
     try std.testing.expect(std.mem.indexOf(u8, small.text, "memory floor") == null);
     const big = try price27(a, io, dir, 4096, .{ .context = 262144, .streams = 1, .fixed = true });
-    try std.testing.expect(gibOf(big.text) > gibOf(small.text) + 10); // 16 attention layers of 4x256 K and V at 262,144 tokens: 16 GiB
+    // 16 attention layers of 4x256 K and V at 262,144 tokens
+    try std.testing.expect(gibOf(big.text) > gibOf(small.text) + 10);
     const two = try price27(a, io, dir, 4096, .{ .context = 8192, .streams = 2, .fixed = true });
     try std.testing.expect(has(two.text, "2 streams of KV and state"));
     try std.testing.expect(gibOf(two.text) > gibOf(small.text));
