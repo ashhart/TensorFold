@@ -4,7 +4,8 @@
 ptxas may schedule a non-coherent load (const __restrict__, __ldg) above griddepcontrol.wait (ACQBULK); under a
 dependent launch that reads the predecessor's data early. Every function compiled for sm_90 or later must issue no
 global read before its first ACQBULK, and wait at all unless it is a plain-only entry (PLAIN); only the
-weight-first bodies (qmmf_kernel, glm_mm's matmuls) may start their weights' async copies there. Exit 1 on any early
+weight-first bodies (qmmf_kernel, glm_mm's matmuls) may start their weights' async copies there. The wait must hold
+on every path: no predicated ACQBULK, and no branch before it to past it except to an EXIT. Exit 1 on any early
 read, a failed disassembly, or images with no such function.
 """
 import re
@@ -14,20 +15,29 @@ import sys
 READ = re.compile(r"\b(LDG|LD|ULDG|TEX|TLD|TLD4|TXD|TMML|SULD)\b(?=[.\s])")
 ASYNC = re.compile(r"\b(LDGSTS|UBLKCP|UTMALDG|UBLKPF)\b")
 WEIGHT_FIRST = re.compile(r"qmmf_kernel|^glm_mm\d+_(\d+|rows)$")
+ADDR = re.compile(r"/\*([0-9a-f]{4,})\*/")
+BRANCH = re.compile(r"\b(BRA|BRX|BRXU|JMP|JMX|JMXU|CALL)\b(\S*)\s+(.*?);")
 PLAIN = re.compile(r"qmmf_prompt_k32_kernel|^tf_qmmf_shared|^tf_qmmf_native_fp4_check$")  # launched plain only
 
 
 def scan(text):
     """Problems in one `cuobjdump -sass` dump, and how many sm_90+ functions it checked (plain-only entries are not)."""
     problems, functions = [], 0
-    arch, fn, waited, early = 0, None, False, []
+    arch, fn, waited, early, at, wait_at, jumps, code = 0, None, False, [], 0, 0, [], {}
 
     def close():
         nonlocal functions
         if fn is None or arch < 90 or PLAIN.search(fn):
             return
         functions += 1
-        problems.extend(early if waited else [f"sm_{arch} {fn}: no dependency wait, yet not a plain-only entry"])
+        if not waited:
+            problems.append(f"sm_{arch} {fn}: no dependency wait, yet not a plain-only entry")
+            return
+        problems.extend(early)
+        for src, target in jumps:
+            if target is None or (target > wait_at and code.get(target, "").split(";")[0].strip() != "EXIT"):
+                where = "an indirect branch" if target is None else f"a branch to {target:#x}"
+                problems.append(f"sm_{arch} {fn}: {where} at {src:#x} passes the wait at {wait_at:#x}")
 
     for line in text.splitlines():
         m = re.search(r"code for sm_(\d+)", line)
@@ -38,12 +48,24 @@ def scan(text):
         m = re.search(r"Function : (\S+)", line)
         if m:
             close()
-            fn, waited, early = m.group(1), False, []
+            fn, waited, early, jumps, code = m.group(1), False, [], [], {}
             continue
-        if fn is None or arch < 90 or waited:
+        if fn is None or arch < 90:
+            continue
+        m = ADDR.search(line)
+        if not m:
+            continue
+        at = int(m.group(1), 16)
+        code[at] = line[m.end():].strip()
+        if waited:
             continue
         if "ACQBULK" in line:
-            waited = True
+            waited, wait_at = True, at
+            if code[at].startswith("@"):
+                early.append(f"sm_{arch} {fn}: a predicated wait at {at:#x}: {' '.join(line.split())[:80]}")
+        elif (b := BRANCH.search(line)) is not None:
+            t = re.search(r"0x([0-9a-f]+)\s*$", b.group(3).strip())
+            jumps.append((at, int(t.group(1), 16) if t and b.group(1) in ("BRA", "JMP", "CALL") else None))
         elif READ.search(line):
             early.append(f"sm_{arch} {fn}: global read before the wait: {' '.join(line.split())[:80]}")
         elif ASYNC.search(line) and not WEIGHT_FIRST.search(fn):
