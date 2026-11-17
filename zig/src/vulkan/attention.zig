@@ -36,7 +36,6 @@ const tile_max_rows: u32 = 64;
 /// A 1-row decode over at least this many keys takes the tiled path too: the decode kernel runs 8 workgroups (one per head) and
 /// walks every key in one of them, so it leaves the GPU idle on long prefixes. Below it the single dispatch wins.
 const decode_tile_keys: u64 = 512;
-const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;
 
 // The compiled shader images Attention runs; every field is a real SPIR-V image of the named variant.
 pub const Shaders = struct {
@@ -296,6 +295,8 @@ pub const Attention = struct {
     // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.
     /// Public mirror of tile_max_rows for the contract gate: the tiled probs' head stride is tile_rows * max_visible_keys.
     pub const tile_rows: u64 = tile_max_rows;
+    /// The tiled score scratch's size in f32 words, for the gate's full-scratch fetch.
+    pub const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;
 
     pub fn gateOutput(a: *Attention, cmds: *Commands, out: View, ctx: View, qraw: View, rows: u64, timeout_ns: u64) Error!void {
         const plan = try gatePlan(out.elements, ctx.elements, qraw.elements, rows);

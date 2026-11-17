@@ -256,7 +256,6 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
     const keys_view = try vk.tensor.View.init(&kbuf, .bf16, 0, @intCast(k_bits.len));
     const values_view = try vk.tensor.View.init(&vbuf, .bf16, 0, @intCast(v_bits.len));
     const stream_view = try vk.tensor.View.init(&stream_buf, .f32, 0, @intCast(stream_words));
-    const head_stride_words: u64 = vk.Attention.tile_rows * ca.max_visible_keys;
     var got: [2][]El = .{ &.{}, &.{} };
     defer a.free(got[0]);
     defer a.free(got[1]);
@@ -278,24 +277,31 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
             probs[i] = try a.alloc(u32, stream_words);
             try fetch(cmds, staging, stream_buf, std.mem.sliceAsBytes(probs[i]), timeout);
         } else {
-            // The tiled probs live in per-head strips at h * tile_rows * max_visible_keys; fetch each strip through the 1 MiB
-            // staging buffer separately instead of one oversized download that would corrupt the heap past staging.
-            probs[i] = try a.alloc(u32, @intCast(fx.heads * ca.max_visible_keys));
-            for (0..@intCast(fx.heads)) |h| {
-                try vk.orExit(vk.download(cmds, attn.score_scratch, @intCast(h * head_stride_words * 4), staging, std.mem.sliceAsBytes(probs[i][h * @as(usize, @intCast(ca.max_visible_keys)) .. (h + 1) * @as(usize, @intCast(ca.max_visible_keys))]), timeout));
-            }
+            // The API chunks any download through staging; fetch the whole scratch and locate each head's qrow-0 strip empirically
+            // instead of assuming the head stride.
+            probs[i] = try a.alloc(u32, @intCast(vk.Attention.score_scratch_words));
+            try fetch(cmds, staging, attn.score_scratch, std.mem.sliceAsBytes(probs[i]), timeout);
+        }
+    }
+    const nk: usize = @intCast(keys);
+    var head_at: [fx.heads]usize = undefined;
+    var located: usize = 0;
+    for (0..@intCast(fx.heads)) |h| {
+        head_at[h] = std.math.maxInt(usize);
+        if (std.mem.indexOf(u32, probs[1], probs[0][h * nk .. (h + 1) * nk])) |o| {
+            head_at[h] = o;
+            located += 1;
         }
     }
     var pmis: usize = 0;
     var pfirst_h: usize = 0;
     var pfirst_k: usize = 0;
     var pmag: f64 = 0;
-    const nk: usize = @intCast(keys);
-    const head_stride: usize = @intCast(ca.max_visible_keys);
     for (0..@intCast(fx.heads)) |h| {
+        if (head_at[h] == std.math.maxInt(usize)) continue;
         for (0..nk) |k| {
             const s = probs[0][h * nk + k];
-            const t = probs[1][h * head_stride + k];
+            const t = probs[1][head_at[h] + k];
             if (s == t) continue;
             if (pmis == 0) {
                 pfirst_h = h;
@@ -316,9 +322,15 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
         const tv: f64 = if (wide) @as(f32, @bitCast(t)) else cx.fromBf16(t);
         omag = @max(omag, @abs(sv - tv));
     }
-    const ok = pmis == 0 and omis == 0;
-    std.debug.print("{s} probs keys={d} {s} data={s}: prob_mismatched={d} of {d} first=(head {d}, key {d}) prob_max_abs={e} | out_mismatched={d} of {d} first={d} max_abs={e}\n", .{
-        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", pmis, @as(usize, @intCast(fx.heads * keys)), pfirst_h, pfirst_k, pmag, omis, row_elems, ofirst, omag,
+    const ok = located == fx.heads and pmis == 0 and omis == 0;
+    const strides = struct {
+        fn f(ws: []const usize) void {
+            for (ws, 0..) |v, h| std.debug.print("{s}{d}={d}", .{ if (h == 0) "" else " ", h, v });
+        }
+    };
+    strides.f(&head_at);
+    std.debug.print("\n{s} probs keys={d} {s} data={s}: located={d} prob_mismatched={d} of {d} first=(head {d}, key {d}) prob_max_abs={e} | out_mismatched={d} of {d} first={d} max_abs={e}\n", .{
+        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", located, pmis, @as(usize, @intCast(fx.heads * keys)), pfirst_h, pfirst_k, pmag, omis, row_elems, ofirst, omag,
     });
     return ok;
 }
