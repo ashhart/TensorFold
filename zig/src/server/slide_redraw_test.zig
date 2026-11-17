@@ -235,7 +235,7 @@ test "slide redraw: a repeated writer cannot remove existing unseen checks" {
     plan.wordings = entries;
     const id = srv.slide.add("I like blue.", "chat", 0);
     var redraw = true;
-    const continued = try @import("slide_redraw.zig").prepare(srv, &cx, plan, 1, id, fixture.Stays{}, &redraw);
+    const continued = try @import("slide_redraw.zig").prepare(srv, &cx, plan, 1, fixture.Stays{}, &redraw);
     try t.expect(!redraw);
     try t.expect(continued.full.asked.ptr == plan.full.asked.ptr and continued.probes.ptr == plan.probes.ptr);
     try t.expectEqual(@as(usize, 4), plan.probes.len);

@@ -229,7 +229,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, initial: teach.Plan, g
     var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
     var ever = false; // a round whose held-out questions all came back when asked
     for (0..teach.rounds + teach.reroutes + recheck.repairs) |round| {
-        plan = @import("slide_redraw.zig").prepare(srv, cx, plan, @intCast(round), id, gone, &redraw) catch |e| {
+        plan = @import("slide_redraw.zig").prepare(srv, cx, plan, @intCast(round), gone, &redraw) catch |e| {
             out.why = words(cx, e);
             return out;
         };
@@ -530,7 +530,6 @@ pub fn engineWords(message: []const u8) []const u8 {
 
 /// A lesson failure in words, without the delete path's put-back claims.
 pub fn lessonWords(message: []const u8) []const u8 {
-    if (std.mem.eql(u8, message, "WordingsUnsupported")) return "sub-check wordings failed: this learner cannot refresh its router rows";
     return if (std.mem.eql(u8, message, "LayerRoundsAgain"))
         "a fitted layer would change its 4-bit values when saved, so this lesson could not be accepted"
     else

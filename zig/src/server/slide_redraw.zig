@@ -155,7 +155,7 @@ pub fn first(srv: *Server, cx: *Cx, parts: *teach.Parts, spec: Spec, gone: anyty
 }
 
 /// Preserve every original answer, safety row and unseen check; replace only the extra router rows.
-pub fn next(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, _: u32, gone: anytype) !teach.Plan {
+pub fn next(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, gone: anytype) !teach.Plan {
     if (plan.wordings.len == 0) return plan;
     const a = cx.a;
     var asked: std.ArrayList(api.Example) = .empty;
@@ -188,9 +188,9 @@ pub fn next(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, _: u32, gone: a
 }
 
 /// A refused draw leaves the existing wordings and ordinary continuation in place.
-pub fn prepare(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, id: u32, gone: anytype, redraw: *bool) !teach.Plan {
+pub fn prepare(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, gone: anytype, redraw: *bool) !teach.Plan {
     if (!redraw.*) return plan;
-    return next(srv, cx, plan, round, id, gone) catch |e| {
+    return next(srv, cx, plan, round, gone) catch |e| {
         if (e != error.NoFreshRouterWordings) return e;
         log.line("slide: NoFreshRouterWordings; continuing the open fit without router refresh", .{});
         redraw.* = false;

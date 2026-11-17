@@ -21,7 +21,7 @@ pub const Lesson = struct {
     more: bool = false,
     kept: []const Example = &.{}, // questions the open lesson took, each with its answer as it was (a reroute's)
     refresh_wordings: bool = false, // refresh only the open pocket router before more output steps
-    reroute: bool = false, // refit the open router; a full lesson refreshes its asked/unasked rows
+    reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
     shrink: enum { none, next, keep, restore } = .none, // one provisional neuron removal, resolved by the server checks
@@ -123,13 +123,6 @@ pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize,
     }
     if (dropped > 0) std.log.info("slide: {d} prompts in a conversation are left out: longer than this learner reads", .{dropped});
     return out;
-}
-
-/// New wording rows use the same admission bounds as an ordinary lesson before a reroute can touch it.
-pub fn forReroute(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, whole: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
-    if (!lesson.reroute or lesson.train.len == 0 or lesson.undo or lesson.save or lesson.drop) return lesson;
-    if (!whole) return error.WordingsUnsupported;
-    return readable(gpa, lesson, taps, rows, bufs);
 }
 
 /// Both wording lists owned before the open pocket is undone; install only after its old rows are no longer read.

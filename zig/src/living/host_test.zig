@@ -338,7 +338,7 @@ pub fn finishRound(l: anytype) !void {
     return error.RoundDidNotFinish;
 }
 
-test "round wordings: the real pocket rereads fresh router rows and retains its original answers" {
+test "round wordings: reroute keeps the owned router rows despite a supplied full lesson" {
     const gpa = std.testing.allocator;
     const H = Host(families.nemotron_h);
     var seen: H.Seen = .{};
@@ -361,24 +361,18 @@ test "round wordings: the real pocket rereads fresh router rows and retains its 
     const original_answers = l.owned.train.ptr;
     const original_held = l.owned.held.ptr;
     const original_keep = l.owned.keep.ptr;
-    const invalid_ids = try a.alloc(u32, H.max_rows + 2);
-    @memset(invalid_ids, 1);
-    var invalid = fresh;
-    invalid[0].ids = invalid_ids;
-    try std.testing.expectError(error.ExampleTooLong, l.begin(.{ .train = &train, .asked = &invalid, .reroute = true }));
-    try std.testing.expectEqualSlices(u32, old[0].ids, l.owned.asked[0].ids);
     try l.begin(.{ .train = &train, .asked = &fresh, .unasked = &negative, .more = true, .reroute = true });
     try finishRound(&l);
-    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.owned.asked[0].ids);
-    try std.testing.expectEqualSlices(u32, negative[0].ids, l.owned.unasked[0].ids);
-    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.pockets.prompts[0].ids);
-    try std.testing.expect(l.owned.asked[0].ids.ptr != fresh[0].ids.ptr);
+    try std.testing.expectEqualSlices(u32, old[0].ids, l.owned.asked[0].ids);
+    try std.testing.expectEqual(@as(usize, 0), l.owned.unasked.len);
+    try std.testing.expectEqualSlices(u32, old[0].ids, l.pockets.prompts[0].ids);
+    try std.testing.expect(l.owned.asked[0].ids.ptr != old[0].ids.ptr);
     try std.testing.expect(l.owned.train.ptr == original_answers);
     try std.testing.expect(l.owned.held.ptr == original_held);
     try std.testing.expect(l.owned.keep.ptr == original_keep);
     try l.begin(.{ .train = &train, .more = true });
     try finishRound(&l);
-    try std.testing.expectEqualSlices(u32, fresh[0].ids, l.pockets.prompts[0].ids);
+    try std.testing.expectEqualSlices(u32, old[0].ids, l.pockets.prompts[0].ids);
 }
 
 pub fn optimizerHash(v: *const @import("pocket_values.zig").State) u64 {
