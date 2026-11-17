@@ -46,6 +46,7 @@ pub const Modules = struct {
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
     dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
+    moe_direct: bool, // TF_GLM_MOE_DIRECT (default off): a decode window's EXL3 MoE without row copies (cuda_moe.direct)
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
@@ -91,6 +92,8 @@ pub const Modules = struct {
         };
         m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
         if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
+        m.moe_direct = try @import("sys").environment.read(bool, "TF_GLM_MOE_DIRECT", false);
+        if (m.moe_direct) std.log.info("TF_GLM_MOE_DIRECT=1: a decode window's EXL3 experts read flat picks, one slot sum", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
@@ -255,7 +258,7 @@ pub const Forward = struct {
     }
 
     fn moeKernels(f: *const Forward) moe.Kernels {
-        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof };
+        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof, .direct = f.m.moe_direct };
     }
 
     pub const Site = enum { mixer, ffn };

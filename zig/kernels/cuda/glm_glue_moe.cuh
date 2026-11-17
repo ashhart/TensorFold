@@ -25,7 +25,7 @@ extern "C" __global__ void __launch_bounds__(128)
 // glue._topk, a warp a row: top_k by sigmoid + bias (ties to lower id), normed if `norm`, x scale; then shared expert.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_topk(const float* logits, const float* bias, int* pick, float* wts, float scale, int ne, int top_k,
-                int norm) {
+                int norm, int* flat) {
   glm_pdl::enter();
   constexpr int MAXE = 16;  // 512 experts a row
   const int64_t r = blockIdx.x;
@@ -62,6 +62,7 @@ extern "C" __global__ void __launch_bounds__(32)
   if (lane < top_k) {
     const float v = norm ? div_full(mine, total + 1e-20f) : mine;
     pick[r * (top_k + 1) + lane] = mine_id;
+    if (flat) flat[r * top_k + lane] = mine_id;  // the EXL3 grouper's [rows][top_k] picks (#3570)
     wts[r * (top_k + 1) + lane] = __fmul_rn(v, scale);
   } else if (lane == top_k) {
     pick[r * (top_k + 1) + lane] = ne;
