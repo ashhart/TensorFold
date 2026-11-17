@@ -346,6 +346,7 @@ pub const Produce = struct {
     fn exportedStream(p: *Produce, h: *Held, id: [16]u8, tokens: []const u32, saved: *Saved) void {
         defer p.unlease(h);
         defer p.drop(saved);
+        _ = h.feeder.?.drain(h.feeder.?.ptr); // no segment is converting while the cut converts what is left
         const t0 = fabric.words.nowNs();
         cx.complete(h.built, saved.cap.state) catch |err| return p.failStream(h, id, @errorName(err));
         const ms = (fabric.words.nowNs() - t0) / std.time.ns_per_ms;

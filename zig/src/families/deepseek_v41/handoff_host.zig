@@ -11,4 +11,5 @@ test {
     _ = @import("handoff_file_test.zig");
     _ = @import("cuda_export_serve_test.zig");
     _ = @import("cuda_export_stream_test.zig");
+    _ = @import("cuda_export_serve_stream_test.zig");
 }

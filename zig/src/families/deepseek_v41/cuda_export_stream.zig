@@ -24,6 +24,7 @@ pub const Stream = struct {
     queued: std.atomic.Value(u32) = .init(0), // jobs queued or under way
     closing: std.atomic.Value(bool) = .init(false),
     broken: std.atomic.Value(bool) = .init(false),
+    slot: usize = 0, // the slot the engine fed `progress` from (its address; the engine thread's)
     converted: []bool,
 
     /// A stream feeding `built`'s paged parts from `kx`'s pool; the pool's pages are read for each `progress`.
@@ -61,6 +62,8 @@ pub const Stream = struct {
         const at = @min(pos, s.built.shape.upto);
         const npages: usize = @intCast((at + kx.pool.page - 1) / kx.pool.page);
         if (kx.slot.len < npages) return error.BadWindow;
+        if (s.slot != 0 and s.slot != @intFromPtr(kx.slot)) return error.BadWindow; // a stream reads one slot's pages
+        s.slot = @intFromPtr(kx.slot);
         const fence = try kx.dev.store().fence();
         const pages = try s.gpa.dupe(u32, kx.slot.pages[0..npages]);
         errdefer s.gpa.free(pages);
@@ -74,6 +77,8 @@ pub const Stream = struct {
     pub fn drain(s: *Stream) bool {
         while (s.queued.load(.acquire) > 0 and !s.broken.load(.acquire)) std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
         if (s.broken.load(.acquire)) return false;
+        if (s.slot != @intFromPtr(s.kx.slot)) return false; // the slot at the cut is another's: its pages are not this stream's
+        s.closing.store(true, .release); // nothing is queued after the cut: the worker ends, its stream and buffer freed
         const pg = s.built.exp.progress.?;
         for (s.built.parts, 0..) |p, i| if (paged(p.spec.kind) and !pg.isReady(i)) return false;
         return true;

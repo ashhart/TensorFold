@@ -16,7 +16,7 @@ const io = std.testing.io;
 const model = "dsv41-test";
 
 /// A source whose state is a synthetic world's; counts what it hands out and gets back.
-const Fake = struct {
+pub const Fake = struct {
     arena: std.heap.ArenaAllocator,
     snap: cxt.Snap,
     pos: u64,
@@ -26,7 +26,7 @@ const Fake = struct {
     shard: u32 = 0,
     shards: u32 = 1,
 
-    fn init(upto: u64) !*Fake {
+    pub fn init(upto: u64) !*Fake {
         return initShard(upto, 0, 1);
     }
 
@@ -44,12 +44,12 @@ const Fake = struct {
         return f;
     }
 
-    fn deinit(f: *Fake) void {
+    pub fn deinit(f: *Fake) void {
         f.arena.deinit();
         gpa.destroy(f);
     }
 
-    fn source(f: *Fake) cx.Source {
+    pub fn source(f: *Fake) cx.Source {
         return .{ .ptr = f, .take = take, .release = release };
     }
 
@@ -69,7 +69,7 @@ const Fake = struct {
     }
 };
 
-fn tokensOf(arena: std.mem.Allocator, n: u64) ![]u32 {
+pub fn tokensOf(arena: std.mem.Allocator, n: u64) ![]u32 {
     const t = try arena.alloc(u32, n);
     for (t, 0..) |*x, i| x.* = @intCast(i * 11 + 2);
     return t;
