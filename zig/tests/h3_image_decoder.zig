@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const dec = @import("h3_image_decoder");
 const resample = @import("picture_writer").resample;
-const png = @import("picture_writer").png;
+const png_file = @import("picture_writer").png;
 const selftest = @import("h3_image_decoder_selftest.zig");
 
 const vae = dec.vae;
@@ -28,6 +28,43 @@ fn read(init: std.process.Init, a: std.mem.Allocator, path: []const u8, most: us
     };
 }
 
+/// The image decoder loaded once: its config and weights, its kernels built.
+pub const Vae = struct {
+    config: vae.Config,
+    d: *dec.Decoder,
+
+    pub fn load(init: std.process.Init, a: std.mem.Allocator, model_dir: []const u8) !Vae {
+        const vae_dir = try std.fs.path.join(a, &.{ model_dir, "vae" });
+        const config = try vae.config(a, try read(init, a, try std.fs.path.join(a, &.{ vae_dir, "config.json" }), 1 << 20));
+        const device = try mtl.Device.init();
+        const loading = mtl.clock.seconds();
+        const d = try dec.Decoder.init(init.gpa, device, vae.layers, config.rope_theta);
+        errdefer d.deinit();
+        try d.load(try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
+        std.debug.print("{s}: decoder weights in bf16 in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
+        return .{ .config = config, .d = d };
+    }
+
+    /// The normalised `latent` [24, rows, cols] decoded and written to `path` as a PNG of `want` (default the canvas).
+    pub fn png(v: *const Vae, init: std.process.Init, a: std.mem.Allocator, latent: []f32, rows: usize, cols: usize, want: ?dec.host.Size, path: []const u8) !void {
+        if (latent.len != try dec.host.latentLength(rows, cols)) return error.H3BadLatentLength;
+        const tiles = try dec.host.tiles(a, &v.config, rows, cols);
+        const width = cols * vae.cell_pixels;
+        const height = rows * vae.cell_pixels;
+        const size = want orelse dec.host.Size{ .width = width, .height = height };
+        try vae.denormalize(&v.config, latent);
+        const started = mtl.clock.seconds();
+        const decoded = try a.alloc(f32, 3 * width * height);
+        const took = try v.d.decode(a, &v.config, latent, rows, cols, vae.layers, batch, decoded);
+        const rgb = try a.alloc(u8, 3 * width * height);
+        try vae.pixels(decoded, height, width, rgb);
+        const picture = if (size.width == width and size.height == height) rgb else try resample.resizeWith(a, .pillow, .lanczos, resample.View.of(rgb, width, height), size.width, size.height);
+        const file = try png_file.encode(a, picture, size.width, size.height);
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = file });
+        std.debug.print("{d}x{d} canvas: decoded {d} tiles in {d:.2} s ({d:.2} s on the GPU), {d:.2} s in all; wrote {s} at {d}x{d}\n", .{ width, height, tiles.total(), took.wall, took.gpu, mtl.clock.seconds() - started, path, size.width, size.height });
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
@@ -41,13 +78,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const rows = std.fmt.parseInt(usize, args[3], 10) catch return error.H3BadPictureGrid;
     const cols = std.fmt.parseInt(usize, args[4], 10) catch return error.H3BadPictureGrid;
-    const vae_dir = try std.fs.path.join(a, &.{ args[1], "vae" });
-    const config = try vae.config(a, try read(init, a, try std.fs.path.join(a, &.{ vae_dir, "config.json" }), 1 << 20));
     const n = try dec.host.latentLength(rows, cols);
-    const tiles = try dec.host.tiles(a, &config, rows, cols);
-    const width = cols * vae.cell_pixels;
-    const height = rows * vae.cell_pixels;
-    const want = if (args.len == 7) try dec.host.size(args[6]) else dec.host.Size{ .width = width, .height = height };
     const bytes = try read(init, a, args[2], n * 4 + 1);
     if (bytes.len != n * 4) {
         std.debug.print("{s} holds {d} bytes; a [24, {d}, {d}] float32 latent is {d}\n", .{ args[2], bytes.len, rows, cols, n * 4 });
@@ -55,22 +86,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const latent = try a.alloc(f32, n);
     @memcpy(std.mem.sliceAsBytes(latent), bytes);
-    try vae.denormalize(&config, latent);
-
-    const device = try mtl.Device.init();
-    const loading = mtl.clock.seconds();
-    const d = try dec.Decoder.init(init.gpa, device, vae.layers, config.rope_theta);
-    defer d.deinit();
-    try d.load(try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
-    std.debug.print("{s}: {d}x{d} canvas, {d} x {d} tiles of {d} x {d} cells, weights in bf16 in {d:.1} s\n", .{ device.name(), width, height, tiles.rows.len, tiles.cols.len, tiles.h, tiles.w, mtl.clock.seconds() - loading });
-
-    const started = mtl.clock.seconds();
-    const decoded = try a.alloc(f32, 3 * width * height);
-    const took = try d.decode(a, &config, latent, rows, cols, vae.layers, batch, decoded);
-    const rgb = try a.alloc(u8, 3 * width * height);
-    try vae.pixels(decoded, height, width, rgb);
-    const picture = if (want.width == width and want.height == height) rgb else try resample.resizeWith(a, .pillow, .lanczos, resample.View.of(rgb, width, height), want.width, want.height);
-    const file = try png.encode(a, picture, want.width, want.height);
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[5], .data = file });
-    std.debug.print("decoded {d} tiles in {d:.2} s ({d:.2} s on the GPU), {d:.2} s in all; wrote {s} at {d}x{d}\n", .{ tiles.total(), took.wall, took.gpu, mtl.clock.seconds() - started, args[5], want.width, want.height });
+    const v = try Vae.load(init, a, args[1]);
+    defer v.d.deinit();
+    try v.png(init, a, latent, rows, cols, if (args.len == 7) try dec.host.size(args[6]) else null, args[5]);
 }

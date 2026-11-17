@@ -3,7 +3,8 @@ const std = @import("std");
 
 /// `test-h3-image-prompt` (the rules, no GPU) and on macOS `compile-h3-image-prompt` (the tool, no shader compiled).
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
-    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/picture_prompt_test.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "qwen_vl_rope", .module = rope(b, target) }, .{ .name = "picture", .module = picture(b, target) } } });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/picture_prompt_test.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
     b.step("test-h3-image-prompt", "MiniMax-H3-Image's prompt rules: ids, tags, positions, rotary, Qwen copy sizes, configs").dependOn(&run.step);
     test_step.dependOn(&run.step);
@@ -24,18 +25,13 @@ pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 }
 
 fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module) *std.Build.Module {
-    const st = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target, .optimize = optimize });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/prompt_kernels.zig") });
-    const prompt = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "h3_prompt_kernels", .module = kernels }, .{ .name = "qwen_vl_rope", .module = rope(b, target) }, .{ .name = "picture", .module = picture(b, target) } } });
+    const prompt = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
+        .{ .name = "metal", .module = metal },
+        .{ .name = "core", .module = core },
+        .{ .name = "h3_prompt_kernels", .module = kernels },
+    } });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const fixture = b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target, .optimize = optimize });
-    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_prompt", .module = prompt }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "checkpoint_fixture", .module = fixture }, .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) } } });
-}
-
-fn rope(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen_vl/rope.zig"), .target = target });
-}
-
-fn picture(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/picture/picture.zig"), .target = target, .link_libc = true });
+    return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_prompt.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3_prompt", .module = prompt }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "core", .module = core }, .{ .name = "moss_noise", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/noise.zig"), .target = target, .optimize = optimize }) } } });
 }

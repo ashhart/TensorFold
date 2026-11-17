@@ -1,9 +1,9 @@
 //! MiniMax-H3-Image's transformer on Metal from a picture case: six steps teacher-forced and gated, then free.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const h3 = @import("h3");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 
 const picture = h3.picture;
 
@@ -80,6 +80,159 @@ fn image(a: std.mem.Allocator, entries: []fixture.Entry) ![]u8 {
 
 const Gate = struct { failed: bool = false, gated: bool = false };
 
+/// The model folder: the transformer's weights read in, the distilled schedule and its per-step heads.
+pub const Folder = struct {
+    dir: []const u8,
+    ck: h3.Checkpoint,
+    heads: h3.Tensors,
+    pdd: picture.Pdd,
+    hidden: usize,
+    layers: usize,
+
+    pub fn open(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !Folder {
+        // the folder: the image pipeline, an audio-free transformer, the distilled schedule and its heads
+        const heads_name = try picture.checkIndex(a, try read(init, a, dir, "model_index.json"));
+        const transformer_dir = try std.fs.path.join(a, &.{ dir, "transformer" });
+        try picture.checkTransformer(a, try read(init, a, transformer_dir, "config.json"));
+        const shards = try picture.shardCount(a, try read(init, a, transformer_dir, "model.safetensors.index.json"));
+        const pdd = try picture.pdd(a, try read(init, a, std.fs.path.dirname(try std.fs.path.join(a, &.{ dir, heads_name })) orelse dir, "pdd_config.json"));
+        const ck = try h3.Model.open(init.gpa, init.io, transformer_dir, shards);
+        const heads = try h3.Tensors.open(init.gpa, try mtl.Device.init(), try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, heads_name }, 0));
+        const hidden = (ck.entry("final_layer.norm.weight") orelse return error.MissingTensor).shape[0];
+        var name: [32]u8 = undefined;
+        var layers: usize = 0;
+        while (ck.entry(try std.fmt.bufPrint(&name, "blocks.{d}.norm1.weight", .{layers})) != null) layers += 1;
+        return .{ .dir = dir, .ck = ck, .heads = heads, .pdd = pdd, .hidden = hidden, .layers = layers };
+    }
+
+    /// A model for `case`'s rows over the folder's weights, its AdaLN tables for the distilled schedule.
+    pub fn bind(f: *const Folder, gpa: std.mem.Allocator, a: std.mem.Allocator, case: *const Case) !*h3.Model {
+        const model = try h3.Model.bind(gpa, f.ck, case.file, .{});
+        errdefer model.release();
+        if (!model.base or model.step_heads != f.pdd.steps() or model.audio != 0) return error.H3NotPictureModel;
+        model.dense = true;
+        const schedule = h3.schedule.Schedule{ .sigmas = f.pdd.sigmas, .timesteps = f.pdd.timesteps };
+        _ = try h3.modulation.reschedule(model, a, schedule, schedule, false);
+        return model;
+    }
+};
+
+/// A picture case laid out for the transformer: its rows' positions and rotary table, and the case file.
+pub const Case = struct {
+    canvas: picture.Size,
+    grid: picture.Grid,
+    layout: picture.Layout,
+    rows: usize,
+    pos: [][3]f32,
+    cos: []f32,
+    sin: []f32,
+    noise: []const f32,
+    file: *h3.Tensors,
+
+    /// `pic`'s rows packed as the transformer reads them, written to OUT_PREFIX.h3case.safetensors and opened.
+    pub fn write(init: std.process.Init, a: std.mem.Allocator, f: *const Folder, pic: *const h3.Tensors, prefix: []const u8) !Case {
+        // the picture's rows: the canvas's target grid, the text, each reference's grid
+        const width = picture.row_width;
+        const hidden = f.hidden;
+        const steps = f.pdd.steps();
+        const canvas_v = pic.values(i32, try pic.at("canvas", .i32, 2), 2);
+        const canvas = picture.Size{ .width = @intCast(@max(canvas_v[0], 0)), .height = @intCast(@max(canvas_v[1], 0)) };
+        const target_grid = try picture.gridOf(canvas);
+        const target = try picture.gridRows(target_grid);
+        const text_entry = pic.names.get("text") orelse return error.MissingTensor;
+        if (text_entry.rank != 2 or text_entry.shape[1] != hidden) return error.BadTensor;
+        const text = text_entry.shape[0];
+        var refs: []picture.Grid = &.{};
+        if (pic.names.get("references")) |e| {
+            if (e.rank != 2 or e.shape[1] != 2) return error.BadTensor;
+            const v = pic.values(i32, try pic.at("references", .i32, 2 * e.shape[0]), 2 * e.shape[0]);
+            refs = try a.alloc(picture.Grid, e.shape[0]);
+            for (refs, 0..) |*g, k| g.* = .{ .rows = @intCast(@max(v[2 * k], 0)), .columns = @intCast(@max(v[2 * k + 1], 0)) };
+        }
+        const layout = picture.Layout{ .text = text, .references = refs, .target = target_grid };
+        const held = try layout.referenceRows();
+        const rows = try layout.rows();
+        const tags = try optional(pic, i32, "text_tags", .i32, text);
+        if (tags) |t| for (t) |tag| if (tag != 0 and tag != 1) return error.BadTensor;
+
+        // positions and the rotary table from the checkpoint's frequencies, the tile map of a dense forward
+        const pos = try picture.positions(a, layout);
+        const rot = try picture.rotary(a, pos, try f.ck.floats(a, "rope.inv_freq"));
+        const map = try picture.tiles(a, text + held, target);
+
+        // the transformer's case: these rows, the float projections, the step heads, and placeholder tables
+        const noise = pic.values(f32, try pic.at("noise", .f32, target * width), target * width);
+        const reference = try optional(pic, f32, "velocity", .f32, steps * target * width);
+        const anchors: ?[]const f32 = if (held > 0) pic.values(f32, try pic.at("anchors", .f32, held * width), held * width) else null;
+        const geometry = [_]i32{ @intCast(map.prefix), @intCast(map.target), @intCast(map.target), @intCast(text), 0, @intCast(target), @intCast(held) };
+        const adaln = try a.alloc(i32, steps * rows);
+        for (0..steps) |k| for (0..rows) |r| {
+            adaln[k * rows + r] = if (r < text) (if (tags) |t| t[r] else 1) else 0;
+        };
+        const times = try a.alloc(i32, steps * rows);
+        @memset(times, 0);
+        const video_step = try a.alloc(f32, 2 * steps);
+        for (0..steps) |k| video_step[2 * k ..][0..2].* = .{ f.pdd.sigmas[k], f.pdd.deltas[k] };
+        const zero_velocity = try a.alloc(f32, target * width);
+        @memset(zero_velocity, 0);
+        const tables = try a.alloc(u16, 6 * 3 * hidden);
+        @memset(tables, 0);
+        const final = try a.alloc(u16, 2 * hidden);
+        @memset(final, 0);
+        const text_bytes = pic.map.bytes[pic.data + text_entry.begin ..][0 .. text * hidden * 2];
+        const heads = &f.heads;
+        var entries: std.ArrayList(fixture.Entry) = .empty;
+        const shape = struct {
+            fn of(al: std.mem.Allocator, dims: anytype) ![]const usize {
+                return al.dupe(usize, &dims);
+            }
+        };
+        try entries.appendSlice(a, &.{
+            .{ .name = "geometry", .dtype = "I32", .shape = try shape.of(a, [_]usize{7}), .bytes = bytes(i32, &geometry) },
+            .{ .name = "text", .dtype = "BF16", .shape = try shape.of(a, [_]usize{ text, hidden }), .bytes = text_bytes },
+            .{ .name = "final", .dtype = "BF16", .shape = try shape.of(a, [_]usize{ 1, 2 * hidden }), .bytes = bytes(u16, final) },
+            .{ .name = "final_norm.weight", .dtype = "BF16", .shape = try shape.of(a, [_]usize{hidden}), .bytes = try raw(&f.ck, "final_layer.norm.weight", .bf16, hidden) },
+            .{ .name = "video_in.weight", .dtype = "F32", .shape = try shape.of(a, [_]usize{ hidden, width }), .bytes = try raw(&f.ck, "video_patch_proj.weight", .f32, hidden * width) },
+            .{ .name = "video_in.bias", .dtype = "F32", .shape = try shape.of(a, [_]usize{hidden}), .bytes = try raw(&f.ck, "video_patch_proj.bias", .f32, hidden) },
+            .{ .name = "video_out.weight", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, width, hidden }), .bytes = bytes(f32, heads.values(f32, try heads.at("video_out.weight", .f32, steps * width * hidden), steps * width * hidden)) },
+            .{ .name = "video_out.bias", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, width }), .bytes = bytes(f32, heads.values(f32, try heads.at("video_out.bias", .f32, steps * width), steps * width)) },
+            .{ .name = "video", .dtype = "F32", .shape = try shape.of(a, [_]usize{ target, width }), .bytes = bytes(f32, noise) },
+            .{ .name = "video_velocity", .dtype = "F32", .shape = try shape.of(a, [_]usize{ target, width }), .bytes = bytes(f32, if (reference) |v| v[0 .. target * width] else zero_velocity) },
+            .{ .name = "video_step", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, 2 }), .bytes = bytes(f32, video_step) },
+            .{ .name = "cos", .dtype = "F32", .shape = try shape.of(a, [_]usize{ rows, picture.rotated }), .bytes = bytes(f32, rot.cos) },
+            .{ .name = "sin", .dtype = "F32", .shape = try shape.of(a, [_]usize{ rows, picture.rotated }), .bytes = bytes(f32, rot.sin) },
+            .{ .name = "adaln", .dtype = "I32", .shape = try shape.of(a, [_]usize{ steps, rows }), .bytes = bytes(i32, adaln) },
+            .{ .name = "times", .dtype = "I32", .shape = try shape.of(a, [_]usize{ steps, rows }), .bytes = bytes(i32, times) },
+            .{ .name = "tile_slot", .dtype = "I32", .shape = try shape.of(a, [_]usize{rows}), .bytes = bytes(i32, map.slot) },
+            .{ .name = "tile_sizes", .dtype = "I32", .shape = try shape.of(a, [_]usize{map.sizes.len}), .bytes = bytes(i32, map.sizes) },
+        });
+        if (anchors) |v| try entries.append(a, .{ .name = "condition", .dtype = "F32", .shape = try shape.of(a, [_]usize{ held, width }), .bytes = bytes(f32, v) });
+        for (0..f.layers) |i| try entries.append(a, .{ .name = try std.fmt.allocPrint(a, "tables.{d}", .{i}), .dtype = "BF16", .shape = try shape.of(a, [_]usize{ 6, 3, hidden }), .bytes = bytes(u16, tables) });
+        const case_path = try std.fmt.allocPrintSentinel(a, "{s}.h3case.safetensors", .{prefix}, 0);
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = case_path, .data = try image(a, entries.items) });
+        const file = try a.create(h3.Tensors);
+        file.* = try h3.Tensors.open(init.gpa, try mtl.Device.init(), case_path);
+        return .{ .canvas = canvas, .grid = target_grid, .layout = layout, .rows = rows, .pos = pos, .cos = rot.cos, .sin = rot.sin, .noise = noise, .file = file };
+    }
+};
+
+/// The six steps from the case's noise: OUT_PREFIX.rows.f32 and .latent.f32 written, both returned.
+pub fn free(a: std.mem.Allocator, model: *h3.Model, f: *const Folder, case: *const Case, prefix: []const u8) !struct { rows: []f32, latent: []f32 } {
+    const x = try a.dupe(f32, case.noise);
+    const velocity = try a.alloc(f32, x.len);
+    for (0..f.pdd.steps()) |k| {
+        const took = try model.forward(x, &.{}, k, velocity, &.{});
+        picture.euler(x, velocity, f.pdd.deltas[k]);
+        std.debug.print("step {d}/{d}: {d:.2} s wall, {d:.2} s GPU\n", .{ k + 1, f.pdd.steps(), took.wall, took.gpu });
+    }
+    try write(a, prefix, ".rows.f32", x);
+    const out = try a.alloc(f32, x.len);
+    try picture.unpatchify(x, case.grid, out);
+    try write(a, prefix, ".latent.f32", out);
+    std.debug.print("wrote {s}.latent.f32: [{d}, {d}, {d}] normalised float32\n", .{ prefix, picture.channels, case.grid.rows, case.grid.columns });
+    return .{ .rows = x, .latent = out };
+}
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4 and args.len != 5) {
@@ -88,56 +241,22 @@ pub fn main(init: std.process.Init) !void {
     }
     const a = init.arena.allocator();
     const gpa = init.gpa;
-    const dir = args[1];
     const mode: enum { all, once, free } = if (args.len == 4) .all else if (std.mem.eql(u8, args[4], "once")) .once else if (std.mem.eql(u8, args[4], "free")) .free else {
         std.debug.print("{s}", .{usage});
         return error.BadArguments;
     };
 
-    // the folder: the image pipeline, an audio-free transformer, the distilled schedule and its heads
-    const heads_name = try picture.checkIndex(a, try read(init, a, dir, "model_index.json"));
-    const transformer_dir = try std.fs.path.join(a, &.{ dir, "transformer" });
-    try picture.checkTransformer(a, try read(init, a, transformer_dir, "config.json"));
-    const shards = try picture.shardCount(a, try read(init, a, transformer_dir, "model.safetensors.index.json"));
-    const pdd = try picture.pdd(a, try read(init, a, std.fs.path.dirname(try std.fs.path.join(a, &.{ dir, heads_name })) orelse dir, "pdd_config.json"));
+    const loading = mtl.clock.seconds();
+    var folder = try Folder.open(init, a, args[1]);
+    defer folder.heads.deinit();
+    const pdd = folder.pdd;
     const steps = pdd.steps();
-
-    const device = try mtl.Device.init();
-    const ck = try h3.Checkpoint.open(gpa, device, transformer_dir, shards);
-    var heads = try h3.Tensors.open(gpa, device, try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, heads_name }, 0));
-    defer heads.deinit();
-    var pic = try h3.Tensors.open(gpa, device, args[2]);
+    var pic = try h3.Tensors.open(gpa, try mtl.Device.init(), args[2]);
     defer pic.deinit();
-
-    // the picture's rows: the canvas's target grid, the text, each reference's grid
-    const width = picture.row_width;
-    const hidden_entry = ck.entry("final_layer.norm.weight") orelse return error.MissingTensor;
-    const hidden = hidden_entry.shape[0];
-    const canvas_v = pic.values(i32, try pic.at("canvas", .i32, 2), 2);
-    const canvas = picture.Size{ .width = @intCast(@max(canvas_v[0], 0)), .height = @intCast(@max(canvas_v[1], 0)) };
-    const target_grid = try picture.gridOf(canvas);
-    const target = try picture.gridRows(target_grid);
-    const text_entry = pic.names.get("text") orelse return error.MissingTensor;
-    if (text_entry.rank != 2 or text_entry.shape[1] != hidden) return error.BadTensor;
-    const text = text_entry.shape[0];
-    var refs: []picture.Grid = &.{};
-    if (pic.names.get("references")) |e| {
-        if (e.rank != 2 or e.shape[1] != 2) return error.BadTensor;
-        const v = pic.values(i32, try pic.at("references", .i32, 2 * e.shape[0]), 2 * e.shape[0]);
-        refs = try a.alloc(picture.Grid, e.shape[0]);
-        for (refs, 0..) |*g, k| g.* = .{ .rows = @intCast(@max(v[2 * k], 0)), .columns = @intCast(@max(v[2 * k + 1], 0)) };
-    }
-    const layout = picture.Layout{ .text = text, .references = refs, .target = target_grid };
-    const held = try layout.referenceRows();
-    const rows = try layout.rows();
-    const tags = try optional(&pic, i32, "text_tags", .i32, text);
-    if (tags) |t| for (t) |tag| if (tag != 0 and tag != 1) return error.BadTensor;
-
-    // positions and the rotary table from the checkpoint's frequencies, the tile map of a dense forward
-    const pos = try picture.positions(a, layout);
-    const inv_freq = try ck.floats(a, "rope.inv_freq");
-    const rot = try picture.rotary(a, pos, inv_freq);
-    const map = try picture.tiles(a, text + held, target);
+    const case = try Case.write(init, a, &folder, &pic, args[3]);
+    defer case.file.deinit();
+    const rows = case.rows;
+    const pos = case.pos;
     var gate = Gate{};
     exact: {
         const theirs = (try optional(&pic, f32, "positions", .f32, rows * 3)) orelse break :exact;
@@ -154,7 +273,7 @@ pub fn main(init: std.process.Init) !void {
         var same: usize = 0;
         var worst: u32 = 0;
         for (0..rows) |i| for (0..picture.angles) |j| {
-            const ours = [2]u16{ picture.bf16(rot.cos[i * picture.rotated + j]), picture.bf16(rot.sin[i * picture.rotated + j]) };
+            const ours = [2]u16{ picture.bf16(case.cos[i * picture.rotated + j]), picture.bf16(case.sin[i * picture.rotated + j]) };
             const want = [2]u16{ c[i * picture.angles + j], s[i * picture.angles + j] };
             for (ours, want) |x, y| {
                 same += @intFromBool(x == y);
@@ -171,70 +290,14 @@ pub fn main(init: std.process.Init) !void {
         gate.failed = gate.failed or !same;
     }
 
-    // the transformer's case: these rows, the float projections, the step heads, and placeholder tables
-    const noise = pic.values(f32, try pic.at("noise", .f32, target * width), target * width);
+    const target = try picture.gridRows(case.grid);
+    const width = picture.row_width;
     const reference = try optional(&pic, f32, "velocity", .f32, steps * target * width);
     const step_in = try optional(&pic, f32, "step_in", .f32, steps * target * width);
     const latent = try optional(&pic, f32, "latent", .f32, target * width);
-    const anchors: ?[]const f32 = if (held > 0) pic.values(f32, try pic.at("anchors", .f32, held * width), held * width) else null;
-    const geometry = [_]i32{ @intCast(map.prefix), @intCast(map.target), @intCast(map.target), @intCast(text), 0, @intCast(target), @intCast(held) };
-    const adaln = try a.alloc(i32, steps * rows);
-    for (0..steps) |k| for (0..rows) |r| {
-        adaln[k * rows + r] = if (r < text) (if (tags) |t| t[r] else 1) else 0;
-    };
-    const times = try a.alloc(i32, steps * rows);
-    @memset(times, 0);
-    const video_step = try a.alloc(f32, 2 * steps);
-    for (0..steps) |k| video_step[2 * k ..][0..2].* = .{ pdd.sigmas[k], pdd.deltas[k] };
-    const zero_velocity = try a.alloc(f32, target * width);
-    @memset(zero_velocity, 0);
-    const tables = try a.alloc(u16, 6 * 3 * hidden);
-    @memset(tables, 0);
-    const final = try a.alloc(u16, 2 * hidden);
-    @memset(final, 0);
-    const text_bytes = pic.map.bytes[pic.data + text_entry.begin ..][0 .. text * hidden * 2];
-    var entries: std.ArrayList(fixture.Entry) = .empty;
-    const shape = struct {
-        fn of(al: std.mem.Allocator, dims: anytype) ![]const usize {
-            return al.dupe(usize, &dims);
-        }
-    };
-    try entries.appendSlice(a, &.{
-        .{ .name = "geometry", .dtype = "I32", .shape = try shape.of(a, [_]usize{7}), .bytes = bytes(i32, &geometry) },
-        .{ .name = "text", .dtype = "BF16", .shape = try shape.of(a, [_]usize{ text, hidden }), .bytes = text_bytes },
-        .{ .name = "final", .dtype = "BF16", .shape = try shape.of(a, [_]usize{ 1, 2 * hidden }), .bytes = bytes(u16, final) },
-        .{ .name = "final_norm.weight", .dtype = "BF16", .shape = try shape.of(a, [_]usize{hidden}), .bytes = try raw(&ck, "final_layer.norm.weight", .bf16, hidden) },
-        .{ .name = "video_in.weight", .dtype = "F32", .shape = try shape.of(a, [_]usize{ hidden, width }), .bytes = try raw(&ck, "video_patch_proj.weight", .f32, hidden * width) },
-        .{ .name = "video_in.bias", .dtype = "F32", .shape = try shape.of(a, [_]usize{hidden}), .bytes = try raw(&ck, "video_patch_proj.bias", .f32, hidden) },
-        .{ .name = "video_out.weight", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, width, hidden }), .bytes = bytes(f32, heads.values(f32, try heads.at("video_out.weight", .f32, steps * width * hidden), steps * width * hidden)) },
-        .{ .name = "video_out.bias", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, width }), .bytes = bytes(f32, heads.values(f32, try heads.at("video_out.bias", .f32, steps * width), steps * width)) },
-        .{ .name = "video", .dtype = "F32", .shape = try shape.of(a, [_]usize{ target, width }), .bytes = bytes(f32, noise) },
-        .{ .name = "video_velocity", .dtype = "F32", .shape = try shape.of(a, [_]usize{ target, width }), .bytes = bytes(f32, if (reference) |v| v[0 .. target * width] else zero_velocity) },
-        .{ .name = "video_step", .dtype = "F32", .shape = try shape.of(a, [_]usize{ steps, 2 }), .bytes = bytes(f32, video_step) },
-        .{ .name = "cos", .dtype = "F32", .shape = try shape.of(a, [_]usize{ rows, picture.rotated }), .bytes = bytes(f32, rot.cos) },
-        .{ .name = "sin", .dtype = "F32", .shape = try shape.of(a, [_]usize{ rows, picture.rotated }), .bytes = bytes(f32, rot.sin) },
-        .{ .name = "adaln", .dtype = "I32", .shape = try shape.of(a, [_]usize{ steps, rows }), .bytes = bytes(i32, adaln) },
-        .{ .name = "times", .dtype = "I32", .shape = try shape.of(a, [_]usize{ steps, rows }), .bytes = bytes(i32, times) },
-        .{ .name = "tile_slot", .dtype = "I32", .shape = try shape.of(a, [_]usize{rows}), .bytes = bytes(i32, map.slot) },
-        .{ .name = "tile_sizes", .dtype = "I32", .shape = try shape.of(a, [_]usize{map.sizes.len}), .bytes = bytes(i32, map.sizes) },
-    });
-    if (anchors) |v| try entries.append(a, .{ .name = "condition", .dtype = "F32", .shape = try shape.of(a, [_]usize{ held, width }), .bytes = bytes(f32, v) });
-    var name: [32]u8 = undefined;
-    var layers: usize = 0;
-    while (ck.entry(try std.fmt.bufPrint(&name, "blocks.{d}.norm1.weight", .{layers})) != null) layers += 1;
-    for (0..layers) |i| try entries.append(a, .{ .name = try std.fmt.allocPrint(a, "tables.{d}", .{i}), .dtype = "BF16", .shape = try shape.of(a, [_]usize{ 6, 3, hidden }), .bytes = bytes(u16, tables) });
-    const case_path = try std.fmt.allocPrintSentinel(a, "{s}.h3case.safetensors", .{args[3]}, 0);
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = case_path, .data = try image(a, entries.items) });
-    var case = try h3.Tensors.open(gpa, device, case_path);
-    defer case.deinit();
-
-    const loading = mtl.clock.seconds();
-    const model = try h3.Model.load(gpa, transformer_dir, shards, &case, .{});
-    if (!model.base or model.step_heads != steps or model.audio != 0) return error.H3NotPictureModel;
-    model.dense = true;
-    const schedule = h3.schedule.Schedule{ .sigmas = pdd.sigmas, .timesteps = pdd.timesteps };
-    _ = try h3.modulation.reschedule(model, a, schedule, schedule, false);
-    std.debug.print("{s}: {d}x{d} canvas, {d} rows (text {d}, references {d}, target {d}), {d} tiles, {d} blocks, {d} steps, {d} timesteps, loaded in {d:.1} s\n", .{ device.name(), canvas.width, canvas.height, rows, text, held, target, map.prefix + map.target, model.blocks.len, steps, model.lines / h3.schedule.modalities, mtl.clock.seconds() - loading });
+    const model = try folder.bind(gpa, a, &case);
+    const layout = case.layout;
+    std.debug.print("{s}: {d}x{d} canvas, {d} rows (text {d}, references {d}, target {d}), {d} tiles, {d} blocks, {d} steps, {d} timesteps, loaded in {d:.1} s\n", .{ model.device.name(), case.canvas.width, case.canvas.height, rows, layout.text, try layout.referenceRows(), target, model.tiles, model.blocks.len, steps, model.lines / h3.schedule.modalities, mtl.clock.seconds() - loading });
 
     const velocity = try a.alloc(f32, target * width);
     const x = try a.alloc(f32, target * width);
@@ -258,24 +321,14 @@ pub fn main(init: std.process.Init) !void {
     }
     // free-running: our own rows from the noise through every step
     if (mode != .once) {
-        @memcpy(x, noise);
-        for (0..steps) |k| {
-            const took = try model.forward(x, &.{}, k, velocity, &.{});
-            picture.euler(x, velocity, pdd.deltas[k]);
-            std.debug.print("step {d}/{d}: {d:.2} s wall, {d:.2} s GPU\n", .{ k + 1, steps, took.wall, took.gpu });
-        }
-        try write(a, args[3], ".rows.f32", x);
-        const out = try a.alloc(f32, x.len);
-        try picture.unpatchify(x, target_grid, out);
-        try write(a, args[3], ".latent.f32", out);
+        const out = try free(a, model, &folder, &case, args[3]);
         if (latent) |want| {
-            const d = try picture.distance(x, want, width);
+            const d = try picture.distance(out.rows, want, width);
             const ok = d.cosine >= picture.gates.latent_cosine;
             gate.gated = true;
             gate.failed = gate.failed or !ok;
             std.debug.print("final latent against the reference's: cosine {d:.6}, relative error {d:.5}, worst row {d:.5} ({s})\n", .{ d.cosine, d.relative, d.worst_row, if (ok) "pass" else "FAIL" });
         }
-        std.debug.print("wrote {s}.latent.f32: [{d}, {d}, {d}] normalised float32\n", .{ args[3], picture.channels, target_grid.rows, target_grid.columns });
     }
     if (gate.failed) std.process.exit(1);
     if (!gate.gated and mode != .free) std.process.exit(2);

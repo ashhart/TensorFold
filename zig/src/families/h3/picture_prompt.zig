@@ -1,7 +1,7 @@
 //! MiniMax-H3-Image's prompt rules on the host: the encoder's ids, tags and positions, references' sizes, configs.
 const std = @import("std");
-const rope = @import("qwen_vl_rope");
-const picture = @import("picture");
+const rope = @import("core").qwen_vl.rope;
+const picture = @import("core").picture;
 const bf16_round = @import("bf16_round");
 
 /// Each text segment (a reference's label, the prompt) is cut to its first this many tokens on its own.
