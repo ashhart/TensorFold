@@ -618,10 +618,14 @@ CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
 CUDA also checks Flash Next's GPTQ int4 experts and head (`fn_int4.cu`, `zig/tests/cuda/contract_int4.zig`) at the
 checkpoint's widths: gate/up with SwiGLU, down to fp32 and bf16, the head's dense rows and the two prompt forms
-bit-equal to the plain ones, each output against float64 at the weights `qweight` and the fp16 scales store. Two
+bit-equal to the plain ones, each output against float64 at the weights `qweight` and the fp16 scales store. A gate/up
+output's allowance is derived from its own epilogue (`int4_ref.zig`): the two fp32 sums through silu's slope and the up
+value, then bf(g), bf(u), bf(silu) and the store, each at its own value's size, and the silu 0 that expf's fp32
+overflow leaves where float64 keeps a denormal-sized value. Gate 4's bf16 proof of that epilogue stops at
+1 / (4.1 u) = 62x, because a mirrored row cancels exactly in the halves order, so the registration states 60. Two
 controls: a group sum rounded to bf16 before its scale (gate 4), and a head whose words are packed unshuffled (gate 3).
-A plan whose shared expert's slot is skipped must leave those rows untouched. Their device run and the compiled-limits
-receipts are pending.
+A plan whose shared expert's slot is skipped must leave those rows untouched. nvcc 13.3's usage of its 21 launches is in
+`measurements/pending_133.zig`; a 13.0 record stays pending.
 CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
 and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
