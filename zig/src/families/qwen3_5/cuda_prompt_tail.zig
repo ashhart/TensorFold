@@ -48,7 +48,7 @@ pub fn unread(e: anytype, images: bool) bool {
 
 /// The tail's first row for engine `e`'s prompt chunk of `total` rows in `nseg` parts, or null.
 pub fn first(e: anytype, total: usize, nseg: usize, hidden: bool, taps_active: bool, tap_from: ?usize) ?usize {
-    const last = e.layers.len - 1;
+    const last = e.steps[e.steps.len - 1].layer;
     const tapped = lastTapped(e);
     const f: Facts = .{
         .hidden = hidden,
