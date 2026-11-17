@@ -40,6 +40,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the kernel contract checks each qwen27 control's source edit on every chip, for both tensor-unit settings, so a run on a chip without tensor units fails on a stale M5 edit too (#3343, follow-up to #2106). Thanks to @cshintov.
 
 - GLM-5.3-Flash on Metal: checkpoints whose routed experts are not 4/64 read each expert once a drafted window for every row that picked it, and the shared expert once; replies are unchanged, and on an M5 Ultra an 8-bit build's greedy decode goes from 50.0 to 53.0 tok/s and sampled from 46.5 to 48.8 (#3631).
+- GLM-5.3-Flash on Metal: a checkpoint that stores `layers.45.shared_head.head` drafts MTP tokens through it on one Mac while `lm_head` verifies every token, so replies are unchanged (#3632).
 - Docs: the GLM-5.3-Flash CUDA recipe's Verified copy drafts section lists, for one checkpoint at TP=2 with `--parallel 4`, the loads that `TF_GLM_COPIES=1` sped up and the ones it slowed, and says the default stays off (#3335). Thanks to @Bizuayeu.
 - Tests: the Qwen 3.8 27B Metal residency fixtures compile again on macOS after the DFlash2 target became a value (#3572).
 - Tests: the kernel contract's Llama `gemm_untransposed` control edits the `TF_GEMM_NAX_KERNEL` instance line again, so its planted fault fails as it should (#3157, thanks @gilby, who found and fixed it first).
