@@ -90,7 +90,7 @@ the difference. The port has no bf16 path and none is planned as an option.
 ## How it was checked
 
 All figures below were measured on one RTX 5090 (driver 615.71, nvcc 13.3, Zig 0.17.0, `-Dsm=120`). The table of
-port-side checks was last run in full on the branch rebased onto main `9489c3817`, with the contract tests and the
+port-side checks was last run in full on the branch rebased onto main `6d0a128b0`, with the contract tests and the
 two kernel changes they brought in; the reference dumps are one set, regenerated before the first full run.
 
 ### The reference side
@@ -178,12 +178,12 @@ warm-up request:
 
 | Measure | Value |
 | --- | --- |
-| The 17.8 s sampled reply, whole (three runs) | 0.61 to 0.62 s (29 times real time) |
+| The 17.8 s sampled reply, whole (three runs) | 0.61 s (29 times real time) |
 | The same reply streamed (three runs) | first response byte at 0.04 s, done at 0.62 s, bytes equal to the whole reply |
 | Device memory in use after it | 3.57 GiB (2.36 GiB of it weights) |
 | Device memory once a clip has been cloned | 8.82 GiB (the clip encoder adds 4.43 GiB of weights) |
 | The first request with a clip (9.7 s), which loads the encoder | 9.0 s |
-| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 0.93 s, 1.32 s |
+| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 0.92 s, 1.31 to 1.32 s |
 | A second and a third request while one runs | 503 each |
 | An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes`, a `ref_audio` that is no WAV or is under half a second | 400 with the reason |
 
@@ -211,8 +211,8 @@ browser by an automated test.
 
 ### Repo checks
 
-On the branch rebased onto main `9489c3817`, the no-GPU workflow's steps were run on one Linux machine as the
-workflow runs them (`-Dfixed-cpu`, its test timeouts) and all passed:
+On the branch rebased onto main `6d0a128b0`, the no-GPU workflow's steps were run on one Linux machine as the
+workflow runs them (`-Dfixed-cpu`, its test timeouts) and passed:
 
 - `zig fmt --check build.zig zig`; `tools/zig/lean_check.py` against the base with `lean_new.py` (221 problems on
   both, 0 new); `tools/zig/cuda_common_check.py` (0 violations), `cuda_fragment_check.py` (0 misses) and their unit
@@ -224,12 +224,19 @@ workflow runs them (`-Dfixed-cpu`, its test timeouts) and all passed:
   (`test-drama-host test-cuda-host`).
 
 They ran under umask 022: with 0002 one unrelated test (`serve --config`, which refuses a group-writable file)
-fails.
+fails. In the first run of `test-host-a` one real-clock test of the rank bring-up (`two ranks settle on the real
+clock and agree on one plan and view`) failed while other jobs shared the CPU; the step passed when run again alone.
 
-On macOS (an M5 Ultra) the default build and `zig build native` succeed, and `zig build test` fails one test, GLM's
-`a failed compile releases every pipeline built before it` (expected 52, found 64), which fails the same way on main
-`9489c3817` there. The family has no Metal path; the Metal contract jobs were not run, and neither was any quality
-suite.
+On macOS (an M5 Ultra) the default build, `zig build native` and `zig build test` pass. The family has no Metal
+path; the Metal contract jobs were not run, and neither was any quality suite.
+
+The branch changes the speech route Drama 3 is served through and moves Drama's `torch.save` reader and WAV code to
+core, so Drama 3 (`fishaudio/drama-3`) was run on that M5 Ultra from main `6d0a128b0` and from the branch: six
+`drama3-generate` runs (greedy, seeded, a reference clip encoded, a cloned voice, streamed PCM, frames) three times
+each, and four `/v1/audio/speech` requests (seeded whole, seeded streamed PCM, default, sampled) twice from each of
+two server starts. Every output is byte-identical between the two, and the speeds agree (the cloned run 73.2 to 73.6
+frames a second on main, 73.3 to 73.5 on the branch). Drama on CUDA was not run: the checkpoint does not fit the
+5090.
 
 The family registers four kernel images, so `zig/tests/fixtures/gradient-serving.tsv` re-pins
 `zig/src/cuda/kernels.zig`, as earlier image registrations did.
@@ -297,10 +304,10 @@ frames, codes and audio figures.
 On an RTX 5090 (driver 615.71.09, images from nvcc 13.0.88, the runner built for sm_80, 86, 89, 120 and 121),
 `tf-cuda-test kernel-contract zonos3` ended with
 
-    (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6450 ms, limits 9 ms
+    (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6395 ms, limits 8 ms
 
 The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates and 15 of limits,
-while other builds shared the machine's CPU) ended with
+while other builds shared the machine's CPU), made on the earlier base `9489c3817` and not repeated since, ended with
 
     SUMMARY 684 kernels: 684 pass gates 1-4, 0 fail, 8 known findings; 459 controls: 459 red as planted, 0 missed; 186 limit problems; gates 4966609 ms, limits 899084 ms
 
