@@ -307,6 +307,7 @@ test "background Responses: the request id cancel route, DELETE while running, a
     const deleted = try send(srv, a, "DELETE", try urlOf(a, second, ""), "", null);
     try t.expectEqual(@as(u16, 200), deleted.status);
     try t.expectEqual(true, deleted.body.get("deleted").?.bool);
+    try t.expectEqual(@as(u16, 404), (try send(srv, a, "GET", try urlOf(a, second, ""), "", null)).status);
     try waitFor(idle, .{srv});
     try t.expectEqual(@as(usize, 2), lane.cancels.load(.monotonic));
     try t.expectEqual(@as(u16, 404), (try send(srv, a, "GET", try urlOf(a, second, ""), "", null)).status);
