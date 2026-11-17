@@ -535,7 +535,10 @@ pub const Run = struct {
                 return r.unsent(&cx, e, field);
             }
             switch (e) {
-                error.Cancelled => { r.log.cancelled(); return; },
+                error.Cancelled => {
+                    r.log.cancelled();
+                    return;
+                },
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {
                     r.log.refused(&cx);
                     logRefused(r.id, cx.message);

@@ -414,7 +414,7 @@ test "request log: reply bytes are identical with the log on and off" {
     defer logged.deinit();
     const on = try logged.ask(a, "/v1/chat/completions", chat_body);
 
-    try t.expectEqualStrings(off[0 .. std.mem.indexOf(u8, off, "\r\n").?], on[0 .. std.mem.indexOf(u8, on, "\r\n").?]);
+    try t.expectEqualStrings(off[0..std.mem.indexOf(u8, off, "\r\n").?], on[0..std.mem.indexOf(u8, on, "\r\n").?]);
     try t.expectEqualStrings(try normalizedBody(a, off), try normalizedBody(a, on));
     // with the log off there is no log and no reply line to write
     try t.expectEqual(@as(usize, 0), (try logValues(a, &plain)).len);

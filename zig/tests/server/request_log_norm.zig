@@ -9,7 +9,7 @@ pub fn requestOnly(a: std.mem.Allocator, text: []const u8) ![]const u8 {
         if (line.len == 0) continue;
         var parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
         defer parsed.deinit();
-        const v = parsed.value;
+        var v = parsed.value; // var: the id is removed from this copy before it is written out
         if (v == .object) {
             if (v.object.get("kind")) |k| {
                 if (k == .string and std.mem.eql(u8, k.string, "reply")) continue;
