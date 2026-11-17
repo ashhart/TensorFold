@@ -23,6 +23,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nemo_audio_cuda_records.zig").cuda ++
     @import("idol_cuda_sets.zig").cuda ++
     @import("qwen3_asr_cuda_records.zig").cuda ++
+    @import("zonos3_cuda_records.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
@@ -165,4 +166,5 @@ test {
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("h3_image_cuda_records.zig");
     _ = @import("inkling2_vision_metal_records.zig");
+    _ = @import("zonos3_cuda_records.zig");
 }
