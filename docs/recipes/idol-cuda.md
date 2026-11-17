@@ -4,13 +4,17 @@ Idol's denoiser (see `idol.md`) on the CUDA runtime, beside the Metal family and
 (`zig/tests/idol_run.zig`): `tf-idol` on Metal and on CUDA reads the same case and runs the same gates. The image
 encoders, the decoders and the PLY writer are not ported, and nothing registers with the lane engine or the server.
 
-**Where it has run.** The kernel contract has passed on a GB10 (sm_121) and on an RTX 5090 (sm_120); the synthetic
-case has run on the RTX 5090. A case run on a GB10 is still to come.
+**Where it has run.** The kernel contract and the synthetic case have passed on a GB10 (sm_121) and on an RTX 5090
+(sm_120).
 
-- GB10, `idol-contract` on `776a3335d` ([run][gb10]):
-  `SUMMARY idol: 13 kernels, 13 pass gates 1-4, 0 fail; 3 controls: 3 red as planted, 0 missed`.
-  The rerun on `c3a6c0cb7`, after the controls moved to their own header, gave the same: 13 of 13 kernels pass gates
-  1-4 and 3 of 3 controls are red as planted ([run][gb10-rerun]).
+- GB10, nvcc 13.0, on `05ab1990a` (GustavBlack's run of 15 Nov on #1767): `idol-contract` gives
+  `SUMMARY idol: 13 kernels, 13 pass gates 1-4, 0 fail; 3 controls: 3 red as planted, 0 missed`, and `tf-idol` on the
+  shared synthetic case (`idol-synthetic-case-2731c229`) has 100 of 100 branch-steps within the gate, all 23 joint
+  blocks passing at `blocks 0` and a repeat with identical bytes; its 50 steps took 53.04 s. Its peak memory is not
+  recorded yet.
+- Earlier GB10 contract runs on `776a3335d` ([run][gb10]) and on `c3a6c0cb7`, after the controls moved to their own
+  header ([run][gb10-rerun]), gave the same SUMMARY line. Both come before `36828402d`, which recompiled the norm
+  kernels.
 - RTX 5090, CUDA 13.3 (nvcc 13.3.73), on `f5b88dd98` ([run][rtx5090]): `idol-contract` gives the same SUMMARY line,
   and `tf-idol` on the shared synthetic case (`idol-synthetic-case-2731c229`) has 100 of 100 branch-steps within the
   gate and a repeat with identical bytes. Idol's CUDA sources are unchanged since `f5b88dd98`.
