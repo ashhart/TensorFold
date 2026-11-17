@@ -103,19 +103,19 @@
       "targets": [
         {
           "expr": "tensorfold:requests_running{instance=~\"$instance\"}",
-          "legendFormat": "running",
+          "legendFormat": "{{instance}} running",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:requests_waiting{instance=~\"$instance\"}",
-          "legendFormat": "waiting",
+          "legendFormat": "{{instance}} waiting",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:generation_tokens_running{instance=~\"$instance\"}",
-          "legendFormat": "live generation tokens",
+          "legendFormat": "{{instance}} live generation tokens",
           "refId": "C",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
@@ -132,7 +132,7 @@
       "targets": [
         {
           "expr": "tensorfold:kv_cache_usage_ratio{instance=~\"$instance\"}",
-          "legendFormat": "pool {{pool}}",
+          "legendFormat": "{{instance}} pool {{pool}}",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
@@ -163,13 +163,13 @@
         },
         {
           "expr": "rate(tensorfold:mtp_drafted_total{instance=~\"$instance\"}[$__rate_interval])",
-          "legendFormat": "drafted / s",
+          "legendFormat": "{{instance}} drafted / s",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "rate(tensorfold:mtp_accepted_total{instance=~\"$instance\"}[$__rate_interval])",
-          "legendFormat": "accepted / s",
+          "legendFormat": "{{instance}} accepted / s",
           "refId": "C",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
@@ -203,13 +203,13 @@
       "targets": [
         {
           "expr": "tensorfold:prompt_cache_bytes{instance=~\"$instance\"}",
-          "legendFormat": "used bytes",
+          "legendFormat": "{{instance}} used bytes",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:prompt_cache_budget_bytes{instance=~\"$instance\"}",
-          "legendFormat": "budget bytes",
+          "legendFormat": "{{instance}} budget bytes",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
@@ -226,37 +226,37 @@
       "targets": [
         {
           "expr": "tensorfold:process_footprint_bytes{instance=~\"$instance\"}",
-          "legendFormat": "process footprint (macOS)",
+          "legendFormat": "{{instance}} process footprint (macOS)",
           "refId": "A",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:process_footprint_peak_bytes{instance=~\"$instance\"}",
-          "legendFormat": "process footprint peak (macOS)",
+          "legendFormat": "{{instance}} process footprint peak (macOS)",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:process_resident_bytes{instance=~\"$instance\"}",
-          "legendFormat": "process resident RSS (Linux)",
+          "legendFormat": "{{instance}} process resident RSS (Linux)",
           "refId": "C",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:device_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "device memory active (CUDA)",
+          "legendFormat": "{{instance}} device memory active (CUDA)",
           "refId": "D",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:device_memory_peak_bytes{instance=~\"$instance\"}",
-          "legendFormat": "device memory peak (CUDA)",
+          "legendFormat": "{{instance}} device memory peak (CUDA)",
           "refId": "E",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         },
         {
           "expr": "tensorfold:pinned_memory_bytes{instance=~\"$instance\"}",
-          "legendFormat": "pinned host memory (CUDA)",
+          "legendFormat": "{{instance}} pinned host memory (CUDA)",
           "refId": "F",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
@@ -279,7 +279,7 @@
         },
         {
           "expr": "rate(tensorfold:client_disconnections_total{instance=~\"$instance\"}[$__rate_interval])",
-          "legendFormat": "client disconnections / s",
+          "legendFormat": "{{instance}} client disconnections / s",
           "refId": "B",
           "datasource": {"type": "prometheus", "uid": "${datasource}"}
         }
