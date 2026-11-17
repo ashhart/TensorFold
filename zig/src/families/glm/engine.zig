@@ -370,6 +370,7 @@ pub const Engine = struct {
     pub const profile = checks.profile;
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
+    pub const promptNll = checks.promptNll;
 
     /// One reply, greedy or sampled by `e.sampling`; `depth` drafts a round (drafted equals plain, depth 0).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {

@@ -226,3 +226,50 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
         if (mask != 0 and !only and mask != all) std.debug.print("  class {d:8.2} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
     }
 }
+
+/// Per-token loss through the prompt path: `ids` read in chunks of `rows` (the prompt kernels a reply's prompt runs),
+/// the head over every chunk row, row i scored on ids[i + 1]: -log p into out[i] (a quality gate for prompt kernels).
+pub fn promptNll(e: *Engine, ids: []const u32, rows: u32, out: []f32) !void {
+    const c = &e.c;
+    const V: usize = c.vocab;
+    const pr = &(e.pr orelse return error.NoPromptChunks);
+    const P: u32 = @intCast(ids.len);
+    if (P < 2 or out.len < P - 1) return error.BadArguments;
+    if (P + 1 > e.s.cap) return error.ContextFull;
+    const R: u32 = @min(rows, e.chunk_rows);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const logits = try e.device.buffer(@as(usize, R) * V * 2, mtl.ResourceOptions.shared);
+    defer logits.deinit();
+    e.sync();
+    e.s.reset();
+    @memcpy(Engine.u32s(e.prompt_ids, P), ids);
+    var x = e.ctx();
+    var at: u32 = 0;
+    while (at < P - 1) {
+        const n: u32 = @min(R, P - at);
+        const b = e.begin();
+        var px = x;
+        px.sc = &pr.streams;
+        prompt_mod.backbone(pr, &px, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+        fwd.flipKda(&x);
+        fwd.qmv(&x, b.enc, x.k.qmv_head, pr.streams.hidden, x.w.head, .{ .buf = logits }, n);
+        try e.finish(b.cb, b.enc);
+        const l = logits.slice(u16, @as(usize, n) * V);
+        for (0..n) |r| {
+            const i = at + @as(u32, @intCast(r)); // row i predicts ids[i + 1]
+            if (i + 1 >= P) break;
+            const row = l[r * V ..][0..V];
+            var m: f32 = -std.math.inf(f32);
+            for (row) |v| m = @max(m, bf16f(v));
+            var s: f64 = 0;
+            for (row) |v| s += @exp(@as(f64, bf16f(v) - m));
+            out[i] = @floatCast(@as(f64, m) + @log(s) - @as(f64, bf16f(row[ids[i + 1]])));
+        }
+        at += n;
+    }
+}
+
+fn bf16f(v: u16) f32 {
+    return @bitCast(@as(u32, v) << 16);
+}
