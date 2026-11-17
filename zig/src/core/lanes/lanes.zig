@@ -53,6 +53,13 @@ pub const Engine = engine.Engine;
 pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
+
+/// The cut points a cut-invariant CUDA pass honors: the one place to switch from `s.chunks` to
+/// D920's every-message-start list. No other family calls it, so no cut outside them changes.
+pub fn cutPoints(s: *const Stream) []const u32 {
+    return s.chunks;
+}
+
 pub const Sampling = sampling.Sampling;
 pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;

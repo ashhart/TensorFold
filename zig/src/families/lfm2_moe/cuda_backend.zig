@@ -272,12 +272,13 @@ pub const Lfm = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line, mark or message start; true at the last row's logits.
+    /// One chunk from `l.fill` (cold or resumed) to the next line, mark or named start; true at the last row's logits.
     fn chunk(x: *Lfm, s: *Stream, l: *Lane) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        const c = cut(at, p.len, s.reuse.marks, s.chunks);
+        const points = lanes.cutPoints(s); // cold and resumed passes cut at the same named starts
+        const c = cut(at, p.len, s.reuse.marks, points);
         const done = c.end == p.len;
         var rows: [mdl.max_taps]usize = undefined;
         for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
@@ -290,7 +291,8 @@ pub const Lfm = struct {
             x.tapped = .{ .stream = s, .cut = c };
             defer x.tapped = null;
             for (c.taps()) |t| hk.at(hk.ptr, s, @intCast(t));
-            if (isCut(@intCast(c.end), s.reuse.marks) or isCut(@intCast(c.end), s.chunks)) hk.at(hk.ptr, s, @intCast(c.end));
+            const end_at: u32 = @intCast(c.end);
+            if (isCut(end_at, s.reuse.marks) or isCut(end_at, points)) hk.at(hk.ptr, s, end_at);
         }
         return done;
     }

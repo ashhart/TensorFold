@@ -1,6 +1,7 @@
 //! LFM2.5-24B-A2B on CUDA: message starts keep a resumable state each, exact on resume, without a GPU.
 const std = @import("std");
 const be = @import("cuda_backend.zig");
+const lanes = @import("lanes");
 const cut = be.Lfm.cut;
 const t = std.testing;
 
@@ -64,4 +65,25 @@ test "a resume at a kept message start recomputes the chunk ends a fresh pass di
     for (fresh.ends) |e| {
         if (e > 2100) try t.expect(std.mem.indexOfScalar(usize, resumed.ends, e) != null);
     }
+}
+
+test "lfm: cold and reused passes both bound chunks by the shared cut points" {
+    var prompt: [2000]u32 = undefined;
+    for (&prompt, 0..) |*v, i| v.* = @intCast(i);
+    const starts = [_]u32{ 1, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129 };
+    var s = try lanes.Stream.init(t.allocator, .{
+        .id = "cold-and-reused", .prompt = &prompt, .max_new = 1, .drafts = false, .chunks = &starts,
+    });
+    defer s.deinit(t.allocator);
+    const points = lanes.cutPoints(&s);
+    try t.expectEqualSlices(u32, &starts, points);
+    const cold = try walk(0, prompt.len, &.{}, points);
+    defer t.allocator.free(cold.ends);
+    defer t.allocator.free(cold.kept);
+    for (starts) |at| try t.expect(std.mem.indexOfScalar(usize, cold.kept, at) != null);
+    // A state kept at 128 resumes there; with no store marks the starts after it still end chunks.
+    const reused = try walk(128, prompt.len, &.{}, points);
+    defer t.allocator.free(reused.ends);
+    defer t.allocator.free(reused.kept);
+    for (starts) |at| if (at > 128) try t.expect(std.mem.indexOfScalar(usize, reused.kept, at) != null);
 }

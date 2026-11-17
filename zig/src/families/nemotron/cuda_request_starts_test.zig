@@ -2,6 +2,8 @@
 const std = @import("std");
 const pass = @import("cuda_prompt.zig");
 const t = std.testing;
+const lanes = @import("lanes");
+const state = @import("cuda_state.zig");
 
 /// Chunk ends a pass walks, as serialChunks does: each end is a cut where a state is kept.
 fn walk(out: []usize, from: usize, len: usize, step: usize, chunks: []const u32, marks: []const u32) usize {
@@ -48,4 +50,19 @@ test "nemotron: with no message starts the grid step is unchanged" {
     var out: [8]usize = undefined;
     const n = walk(&out, 0, 5000, 2048, &.{}, &.{});
     try t.expectEqualSlices(usize, &.{ 2048, 4096, 5000 }, out[0..n]);
+}
+
+test "nemotron: cache-off passes still cut at the request's starts through the shared source" {
+    // No keep callback and no store marks: only the stream's chunks can end a chunk.
+    const prompt = [_]u32{1} ** 12;
+    const starts = [_]u32{ 1, 2, 3 };
+    var s = try lanes.Stream.init(t.allocator, .{
+        .id = "cache-off", .prompt = &prompt, .max_new = 1, .drafts = false, .chunks = &starts,
+    });
+    defer s.deinit(t.allocator);
+    const points = lanes.cutPoints(&s);
+    try t.expectEqualSlices(u32, &starts, points);
+    var out: [8]usize = undefined;
+    const n = walk(&out, 0, prompt.len, state.pass_rows, points, &.{});
+    try t.expectEqualSlices(usize, &.{ 1, 2, 3, 12 }, out[0..n]);
 }
