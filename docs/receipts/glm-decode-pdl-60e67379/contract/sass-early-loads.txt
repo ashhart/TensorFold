@@ -1,0 +1,19 @@
+## the earlier head 79c9ffe97f: inputs const __restrict__ (served images, sm_121)
+# python3 tools/pdl_early_loads.py cuobjdump (nvcc 13.5) glm_dflash.fatbin glm_glue.fatbin glm_index.fatbin glm_kda.fatbin glm_mm.fatbin glm_ops.fatbin glm_quant.fatbin glm_vision.fatbin qmmf.fatbin 
+EARLY glm_dflash.fatbin sm_121 df_attn: global read before the wait: /*0100*/ LDG.E.64.CONSTANT R38, desc[UR8][R38.64] ; /* 0x0000000826267981 */
+EARLY glm_glue.fatbin sm_121 tf_glm_dsel_merge: global read before the wait: /*0070*/ LDG.E.CONSTANT R4, desc[UR12][R2.64] ; /* 0x0000000c02047981 */
+EARLY glm_glue.fatbin sm_121 tf_glm_dsel_scan: global read before the wait: /*0080*/ LDG.E.CONSTANT R2, desc[UR16][R2.64] ; /* 0x0000001002027981 */
+EARLY glm_index.fatbin sm_121 tf_glm_index_pools: global read before the wait: /*0050*/ LDG.E.CONSTANT R4, desc[UR14][R2.64] ; /* 0x0000000e02047981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_unmark: global read before the wait: /*0050*/ LDG.E.CONSTANT R6, desc[UR4][R4.64] ; /* 0x0000000404067981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_keep: global read before the wait: /*0060*/ LDG.E.CONSTANT R6, desc[UR4][R6.64] ; /* 0x0000000406067981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_copy_cached: global read before the wait: /*0060*/ LDG.E.CONSTANT R2, desc[UR4][R2.64] ; /* 0x0000000402027981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_prev_mark: global read before the wait: /*0050*/ LDG.E.CONSTANT R3, desc[UR6][R2.64] ; /* 0x0000000602037981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_rows: global read before the wait: /*0090*/ LDG.E.CONSTANT R6, desc[UR8][R2.64] ; /* 0x0000000802067981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_reset: global read before the wait: /*0060*/ LDG.E.CONSTANT R4, desc[UR4][R4.64] ; /* 0x0000000404047981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_kvh_copy: global read before the wait: /*0060*/ LDG.E.CONSTANT R6, desc[UR4][R6.64] ; /* 0x0000000406067981 */
+EARLY glm_ops.fatbin sm_121 tf_glm_dsa_tokens: global read before the wait: /*0070*/ LDG.E.CONSTANT R4, desc[UR14][R2.64] ; /* 0x0000000e02047981 */
+12 early read(s) in 201 function(s) of 9 image(s)
+
+## this head 60e673799f (served images, sm_121)
+# python3 tools/pdl_early_loads.py cuobjdump (nvcc 13.5) glm_dflash.fatbin glm_glue.fatbin glm_index.fatbin glm_kda.fatbin glm_mm.fatbin glm_ops.fatbin glm_quant.fatbin glm_vision.fatbin qmmf.fatbin 
+0 early read(s) in 201 function(s) of 9 image(s)
