@@ -99,31 +99,31 @@ pub const Model = struct {
     }
 
     /// One decoder layer: attention, the exchange, the MLP or the experts, the exchange into `next`'s norm.
-    fn layer(m: *Model, L: *const ly.Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, rows: u32, last_pos: u32, next: Ref) !void {
+    fn layer(m: *Model, L: *const ly.Layer, s: *const gpu.Scratch, e: *mtl.ComputeEncoder, rows: u32, last_pos: u32, next: Ref) !void {
         const p = m.pair;
         const hid = m.c.hidden;
-        try ly.attention(&m.K, L, s, e, &m.c, rows, last_pos, null, .{ .buf = s.x }, p.part());
+        try ly.attention(&m.K, L, s, e.*, &m.c, rows, last_pos, null, .{ .buf = s.x }, p.part());
         e.barrier();
-        p.addRms(e, .{ .buf = s.h }, L.k.at(L.w.post_norm), .{ .buf = s.x }, rows, hid, m.c.eps);
+        try p.addRms(e, .{ .buf = s.h }, L.k.at(L.w.post_norm), .{ .buf = s.x }, rows, hid, m.c.eps);
         e.barrier();
         const o = p.part();
         if (L.w.mlp == .moe) {
-            try ly.route(&m.K, L, s, e, &m.c, rows, .{ .buf = s.x }, null, null);
-            try ly.expertsGpu(&m.K, L, s, e, &m.c, rows, o);
-        } else try ly.denseMlp(&m.K, L, s, e, &m.c, rows, .{ .buf = s.x }, o);
+            try ly.route(&m.K, L, s, e.*, &m.c, rows, .{ .buf = s.x }, null, null);
+            try ly.expertsGpu(&m.K, L, s, e.*, &m.c, rows, o);
+        } else try ly.denseMlp(&m.K, L, s, e.*, &m.c, rows, .{ .buf = s.x }, o);
         e.barrier();
-        p.addRms(e, .{ .buf = s.h }, next, .{ .buf = s.x }, rows, hid, m.c.eps);
+        try p.addRms(e, .{ .buf = s.h }, next, .{ .buf = s.x }, rows, hid, m.c.eps);
         e.barrier();
     }
 
     /// The window's rows through every backbone layer: s.h the last hidden state, s.x it after the final norm.
-    pub fn backbone(m: *Model, s: *const gpu.Scratch, e: mtl.ComputeEncoder, rows: u32, last_pos: u32, ids: Ref) !void {
+    pub fn backbone(m: *Model, s: *const gpu.Scratch, e: *mtl.ComputeEncoder, rows: u32, last_pos: u32, ids: Ref) !void {
         const hid = m.c.hidden;
         const v = &m.vocab;
-        kn.embed(&m.K.k, e, ids, v.k.at(v.embed_fp8), v.k.at(v.embed_scale), m.glue(hid, hid), .{ .buf = s.h }, rows);
+        kn.embed(&m.K.k, e.*, ids, v.k.at(v.embed_fp8), v.k.at(v.embed_scale), m.glue(hid, hid), .{ .buf = s.h }, rows);
         e.barrier();
         const L0 = &m.layers[0];
-        kn.addRms(&m.K.k, e, .{ .buf = s.h }, .{ .buf = s.y }, L0.k.at(L0.w.in_norm), m.glue(hid, hid), .{ .buf = s.x }, rows);
+        kn.addRms(&m.K.k, e.*, .{ .buf = s.h }, .{ .buf = s.y }, L0.k.at(L0.w.in_norm), m.glue(hid, hid), .{ .buf = s.x }, rows);
         e.barrier();
         for (m.layers, 0..) |*L, i| {
             const next = if (i + 1 < m.layers.len) m.layers[i + 1].k.at(m.layers[i + 1].w.in_norm) else v.k.at(v.norm);
@@ -132,29 +132,29 @@ pub const Model = struct {
     }
 
     /// Each row's next token over the whole vocabulary from normed rows `x` (1-16; the two Macs' halves) into `picks`.
-    pub fn pick(m: *Model, e: mtl.ComputeEncoder, x: Ref, rows: u32, picks: Ref) !void {
+    pub fn pick(m: *Model, e: *mtl.ComputeEncoder, x: Ref, rows: u32, picks: Ref) !void {
         const v = &m.vocab;
         const n = v.part[1] - v.part[0];
-        try dg.encodeProject(&m.K.dg, e, x, v.k.dense(v.groups[0]), .{ .buf = m.logits }, rows, m.c.hidden, n, true);
+        try dg.encodeProject(&m.K.dg, e.*, x, v.k.dense(v.groups[0]), .{ .buf = m.logits }, rows, m.c.hidden, n, true);
         e.barrier();
-        m.pair.argmax(e, .{ .buf = m.logits }, n, v.part[0], n, rows, picks);
+        try m.pair.argmax(e, .{ .buf = m.logits }, n, v.part[0], n, rows, picks);
         e.barrier();
     }
 
     /// The MTP layer on token ids[r] and row r of `hidden`: s.h its output (the next draft's), s.x that normed.
-    pub fn draft(m: *Model, s: *const gpu.Scratch, e: mtl.ComputeEncoder, rows: u32, last_pos: u32, ids: Ref, hidden: Ref) !void {
+    pub fn draft(m: *Model, s: *const gpu.Scratch, e: *mtl.ComputeEncoder, rows: u32, last_pos: u32, ids: Ref, hidden: Ref) !void {
         const L = &(m.mtp orelse return error.NoMtpHead);
         const t = L.w.mtp.?;
         const hid = m.c.hidden;
         const v = &m.vocab;
-        kn.embed(&m.K.k, e, ids, v.k.at(v.embed_fp8), v.k.at(v.embed_scale), m.glue(hid, hid), .{ .buf = s.h }, rows);
+        kn.embed(&m.K.k, e.*, ids, v.k.at(v.embed_fp8), v.k.at(v.embed_scale), m.glue(hid, hid), .{ .buf = s.h }, rows);
         e.barrier();
-        kn.addRms(&m.K.k, e, .{ .buf = s.h }, .{ .buf = s.y }, L.k.at(t.enorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat }, rows);
-        kn.addRms(&m.K.k, e, hidden, .{ .buf = s.y }, L.k.at(t.hnorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat, .off = hid * 4 }, rows);
+        kn.addRms(&m.K.k, e.*, .{ .buf = s.h }, .{ .buf = s.y }, L.k.at(t.enorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat }, rows);
+        kn.addRms(&m.K.k, e.*, hidden, .{ .buf = s.y }, L.k.at(t.hnorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat, .off = hid * 4 }, rows);
         e.barrier();
-        try ly.linear(&m.K, L, e, t.eh, L.groups[ly.Layer.eh_g], .{ .buf = m.head.cat }, 2 * hid, .{ .buf = s.rot }, .{ .buf = s.h }, hid, rows);
+        try ly.linear(&m.K, L, e.*, t.eh, L.groups[ly.Layer.eh_g], .{ .buf = m.head.cat }, 2 * hid, .{ .buf = s.rot }, .{ .buf = s.h }, hid, rows);
         e.barrier();
-        kn.addRms(&m.K.k, e, .{ .buf = s.h }, .{ .buf = s.y }, L.k.at(L.w.in_norm), m.glue(hid, hid), .{ .buf = s.x }, rows);
+        kn.addRms(&m.K.k, e.*, .{ .buf = s.h }, .{ .buf = s.y }, L.k.at(L.w.in_norm), m.glue(hid, hid), .{ .buf = s.x }, rows);
         e.barrier();
         try m.layer(L, s, e, rows, last_pos, L.k.at(t.head_norm));
     }

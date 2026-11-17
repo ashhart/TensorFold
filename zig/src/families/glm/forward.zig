@@ -1,6 +1,7 @@
-//! A 1-16 row window through GLM-5.3-Flash on one serial encoder, each op in the Python family's decode arithmetic.
+//! A 1-16 row window through GLM-5.3-Flash, each op in the Python family's decode arithmetic.
 const std = @import("std");
 const mtl = @import("metal");
+const Pass = @import("pass.zig").Pass;
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const st = @import("state.zig");
@@ -216,7 +217,8 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
 }
 
 /// KDA layer `ki` on `normed`: the stacked projection (kept for replay), each stream's fused step, the out-projection.
-fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) void {
+fn kda(x: *Ctx, pass: *Pass, ki: usize, w: *const wts.Kda, rows: u32) void {
+    const e = pass.enc;
     const sc = x.sc;
     const tp = x.c.tp > 1; // TP2: this Mac's heads, their out-projection partial summed with the peer's
     const proj = x.s.kda[ki].proj; // every stream's state shares it: the window's rows
@@ -232,7 +234,7 @@ fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) 
     if (!on(x, "kda_out")) return;
     if (!tp) return qmv(x, e, x.k.qmv_kda_out, sc.y, w.o_proj, sc.branch, rows);
     qmv(x, e, x.k.qmvp_kda_out, sc.y, w.o_proj, sc.yp, rows);
-    x.ep.?.reduce(e, sc.yp, sc.branch, rows);
+    x.ep.?.reduce(pass, sc.yp, sc.branch, rows);
 }
 
 /// The fused KDA step over `rows` of stacked projections `proj`: state and conv window from slot cur to the other.
@@ -266,9 +268,9 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
 }
 
 /// MLA layer `mi` (its index among MLA caches) for rows at positions pos.. on `x_in`, into `branch`.
-pub fn mla(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, rows: u32, pos: u32) void {
-    mlaKeys(x, e, mi, w, x_in, rows, pos);
-    mlaAttend(x, e, mi, w, rows, pos);
+pub fn mla(x: *Ctx, pass: *Pass, mi: usize, w: *const wts.Mla, x_in: Ref, rows: u32, pos: u32) void {
+    mlaKeys(x, pass.enc, mi, w, x_in, rows, pos);
+    mlaAttend(x, pass, mi, w, rows, pos);
 }
 
 /// The rows' x_proj into `xp` and each segment's key, indexer and pool writes into its cache (and `iw`).
@@ -284,7 +286,8 @@ pub fn mlaKeys(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_i
 }
 
 /// The rows' queries (from `xp`), attention over each segment's cache as written, unabsorb and o_proj into `branch`.
-pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, rows: u32, pos: u32) void {
+pub fn mlaAttend(x: *Ctx, pass: *Pass, mi: usize, w: *const wts.Mla, rows: u32, pos: u32) void {
+    const e = pass.enc;
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
@@ -299,7 +302,7 @@ pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, r
     if (!on(x, "mla_out")) return;
     if (c.tp == 1) return qmv(x, e, k.qmv_mla_out, sc.vals, w.o_proj, sc.branch, rows);
     qmv(x, e, k.qmvp_mla_out, sc.vals, w.o_proj, sc.yp, rows); // TP2: this Mac's heads' partial, summed with the peer's
-    x.ep.?.reduce(e, sc.yp, sc.branch, rows);
+    x.ep.?.reduce(pass, sc.yp, sc.branch, rows);
 }
 
 /// Rows' indexer weights from their x_proj outputs (a row `xp_stride` apart), into `iw`.
@@ -451,7 +454,8 @@ pub fn attendIndexed(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, i
     e.dispatchThreads(size(1024, n * c.mla_heads, 1), size(1024, 1, 1));
 }
 
-fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref, rows: u32) void {
+fn denseMlp(x: *const Ctx, pass: *Pass, w: *const wts.Dense, x_in: Ref, rows: u32) void {
+    const e = pass.enc;
     if (!on(x, "dense")) return;
     const c = x.c;
     const sc = x.sc;
@@ -462,63 +466,64 @@ fn denseMlp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Dense, x_in: Ref
     e.dispatchThreads(size(c.dense_inter, rows, 1), size(256, 1, 1));
     if (c.tp == 1) return qmv(x, e, x.k.qmv_dense_down, sc.actd, w.down, sc.branch, rows);
     qmv(x, e, x.k.qmvp_dense_down, sc.actd, w.down, sc.yp, rows); // TP2: this Mac's half, summed with the peer's
-    x.ep.?.reduce(e, sc.yp, sc.branch, rows);
+    x.ep.?.reduce(pass, sc.yp, sc.branch, rows);
 }
 
 /// The backbone over the window (its tokens in `ids`) at positions pos..: final-normed rows into `hidden`.
-pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) void {
+pub fn backbone(x: *Ctx, pass: *Pass, ids: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const sc = x.sc;
     const k = x.skip;
-    if (k & Class.ends == 0) embed(x, e, ids, rows, pos);
+    if (k & Class.ends == 0) embed(x, pass.enc, ids, rows, pos);
     const plane = @as(usize, rows) * c.hidden * 2;
-    snap(x, e, sc.h, plane);
+    snap(x, pass.enc, sc.h, plane);
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
     for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
-        if (k & Class.hc == 0) boundary(x, e, rows, pending, hcs[0], L.in_norm);
-        snap(x, e, sc.normed, plane);
+        if (k & Class.hc == 0) boundary(x, pass.enc, rows, pending, hcs[0], L.in_norm);
+        snap(x, pass.enc, sc.normed, plane);
         switch (L.attn) {
             .kda => |*a| {
-                if (k & Class.kda == 0) kda(x, e, ki, a, rows);
+                if (k & Class.kda == 0) kda(x, pass, ki, a, rows);
                 ki += 1;
             },
             .mla => |*a| {
-                if (k & Class.mla == 0) mla(x, e, mi, a, sc.normed, rows, pos);
+                if (k & Class.mla == 0) mla(x, pass, mi, a, sc.normed, rows, pos);
                 mi += 1;
             },
         }
-        snap(x, e, sc.branch, plane);
-        if (k & Class.hc == 0) boundary(x, e, rows, true, hcs[1], L.post_norm);
-        snap(x, e, sc.normed, plane);
+        snap(x, pass.enc, sc.branch, plane);
+        if (k & Class.hc == 0) boundary(x, pass.enc, rows, true, hcs[1], L.post_norm);
+        snap(x, pass.enc, sc.normed, plane);
         switch (L.mlp) {
-            .dense => |*d| if (k & Class.dense == 0) denseMlp(x, e, d, sc.normed, rows),
-            .moe => |*m| moe(x, e, m, sc.normed, rows),
+            .dense => |*d| if (k & Class.dense == 0) denseMlp(x, pass, d, sc.normed, rows),
+            .moe => |*m| moe(x, pass, m, sc.normed, rows),
         }
-        snap(x, e, sc.branch, plane);
+        snap(x, pass.enc, sc.branch, plane);
         pending = true;
     }
-    if (k & Class.hc == 0) boundary(x, e, rows, true, null, null);
+    if (k & Class.hc == 0) boundary(x, pass.enc, rows, true, null, null);
     if (k & Class.ends == 0) {
-        e.setPipeline(x.k.stream_mean);
-        bind(e, 0, .{ sc.x[x.xi], sc.raw });
-        e.setValue([2]u32{ c.hidden, rows }, 2);
-        e.dispatchThreads(size(c.hidden, rows, 1), size(256, 1, 1));
-        rms(x, e, sc.raw, x.w.norm, sc.hidden, rows, c.hidden, c.hidden, c.hidden, c.eps);
+        pass.enc.setPipeline(x.k.stream_mean);
+        bind(pass.enc, 0, .{ sc.x[x.xi], sc.raw });
+        pass.enc.setValue([2]u32{ c.hidden, rows }, 2);
+        pass.enc.dispatchThreads(size(c.hidden, rows, 1), size(256, 1, 1));
+        rms(x, pass.enc, sc.raw, x.w.norm, sc.hidden, rows, c.hidden, c.hidden, c.hidden, c.eps);
     }
-    snap(x, e, sc.hidden, plane);
+    snap(x, pass.enc, sc.hidden, plane);
 }
 
 /// LM head logits and draws for `rows` rows of `in` into `logits` and `picks` (u32): each row its rule's draw.
-pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
-    headOver(x, e, in, logits, picks, rows, x.c.vocab, false);
+pub fn head(x: *const Ctx, pass: *Pass, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
+    headOver(x, pass, in, logits, picks, rows, x.c.vocab, false);
 }
 
 /// `head` over the first `vocab` tokens; `greedy` forces the MTP draft head's argmax draws.
-pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
+pub fn headOver(x: *const Ctx, pass: *Pass, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
+    const e = pass.enc;
     if (x.skip & Class.head != 0) return;
     const part = x.c.vocabPart(); // TP2: this Mac's half, its picks merged with the peer's
     const n: u32 = if (vocab > part[0]) @min(vocab, part[1]) - part[0] else 0;
@@ -530,7 +535,7 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
         // draw_dispatch splits the rows into runs of one mode: sampled tf_sample_full, else argmax.
         @import("draw_dispatch.zig").encode(e, x.k.sample, x.k.argmax, logits.buf, logits.off, picks.buf, picks.off, &payload, n);
     }
-    if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
+    if (x.c.tp > 1) x.ep.?.argmax(pass, logits, picks, n, part[0], rows);
 }
 
 /// A judged window's first `keep` of `rows` in each KDA layer, replayed from the round's entry state on a rejection.

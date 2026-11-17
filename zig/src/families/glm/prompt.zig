@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
+const Pass = @import("pass.zig").Pass;
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const st = @import("state.zig");
@@ -244,7 +245,8 @@ fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const 
 }
 
 /// Shared expert, route, experts gathered by expert; by rows, this Mac's halves summed in slot order and swapped.
-fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, ep: ?*ep_mod.Ep) void {
+fn moe(p: *const Prompt, x: *const fwd.Ctx, pass: *Pass, w: *const wts.Moe, x_in: Ref, M: u32, ep: ?*ep_mod.Ep) void {
+    const e = pass.enc;
     const c = x.c;
     const k = x.k;
     const D = c.hidden;
@@ -253,8 +255,9 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     const out = p.streams.branch;
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
+    const exchange = s & Class.exchange == 0;
     if (ep) |t| {
-        if (s & Class.exchange == 0) t.begin();
+        if (exchange) t.begin();
     } else if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
@@ -262,9 +265,12 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
             gateUp(p, p.mm.mm_bf16, x, e, w, x_in, M, n);
             affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
-        if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
-        if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
-        if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
+        if (exchange) t.sendRows(pass, p.yf, p.wts, M);
+        if (s & Class.shared == 0) shared(p, x, pass.enc, w, x_in, M);
+        if (exchange) {
+            t.wait(pass);
+            if (s & Class.combine == 0) t.receiveRows(pass.enc, p.ys, out, M);
+        }
         return;
     }
     const path = wide.routed(w.gate, w.up, w.down);
@@ -430,7 +436,8 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
 }
 
 /// MLA layer `mi` at pos..: tensor-unit projections, decode cache writes, each row's key list in the sparse kernel.
-fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, M: u32, pos: u32) void {
+fn mla(p: *const Prompt, x: *const fwd.Ctx, pass: *Pass, mi: usize, w: *const wts.Mla, x_in: Ref, M: u32, pos: u32) void {
+    const e = pass.enc;
     const c = x.c;
     const XP: u32 = @intCast(std.mem.alignForward(usize, c.xProj(), 64));
     const width = c.keyWidth();
@@ -485,69 +492,69 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     if (!fwd.on(x, "mla_out")) return;
     if (c.tp == 1) return qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
     qmmF32(p, e, p.vals, w.o_proj, p.part, M); // TP2: this Mac's heads' partial, summed with the peer's
-    x.ep.?.reduce(e, p.part, p.streams.branch, M);
+    x.ep.?.reduce(pass, p.part, p.streams.branch, M);
 }
 
 /// The backbone over a chunk (tokens in `ids`) at positions pos..: final-normed rows into `streams.hidden`.
-pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, M: u32, pos: u32) void {
+pub fn backbone(p: *const Prompt, x: *fwd.Ctx, pass: *Pass, ids: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const ss = &p.streams;
     std.debug.assert(x.sc == ss and M <= p.rows);
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
-    if (s & Class.ends == 0) fwd.embed(x, e, ids, M, pos);
+    if (s & Class.ends == 0) fwd.embed(x, pass.enc, ids, M, pos);
     const plane = @as(usize, M) * c.hidden * 2; // a trace's capture points: the decode backbone's
-    fwd.snap(x, e, ss.h, plane);
+    fwd.snap(x, pass.enc, ss.h, plane);
     var pending = false;
     var ki: usize = 0;
     var mi: usize = 0;
     for (0..c.run) |li| {
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
-        if (s & Class.hc == 0) fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);
-        fwd.snap(x, e, ss.normed, plane);
+        if (s & Class.hc == 0) fwd.boundary(x, pass.enc, M, pending, hcs[0], L.in_norm);
+        fwd.snap(x, pass.enc, ss.normed, plane);
         switch (L.attn) {
             .kda => |*a| {
                 if (s & Class.kda == 0) {
-                    if (fwd.on(x, "kda_in")) qmm(p, e, ss.normed, a.in_proj, p.proj, M);
-                    kdaChunk(p, x, e, ki, a, M);
+                    if (fwd.on(x, "kda_in")) qmm(p, pass.enc, ss.normed, a.in_proj, p.proj, M);
+                    kdaChunk(p, x, pass.enc, ki, a, M);
                     if (c.tp > 1) { // TP2: this Mac's heads' out-projection partial, summed with the peer's
-                        qmmF32(p, e, p.y, a.o_proj, p.part, M);
-                        x.ep.?.reduce(e, p.part, ss.branch, M);
-                    } else if (fwd.on(x, "kda_out")) qmm(p, e, p.y, a.o_proj, ss.branch, M);
+                        qmmF32(p, pass.enc, p.y, a.o_proj, p.part, M);
+                        x.ep.?.reduce(pass, p.part, ss.branch, M);
+                    } else if (fwd.on(x, "kda_out")) qmm(p, pass.enc, p.y, a.o_proj, ss.branch, M);
                 }
                 ki += 1;
             },
             .mla => |*a| {
-                if (s & Class.mla == 0) mla(p, x, e, mi, a, ss.normed, M, pos);
+                if (s & Class.mla == 0) mla(p, x, pass, mi, a, ss.normed, M, pos);
                 mi += 1;
             },
         }
-        fwd.snap(x, e, ss.branch, plane);
-        if (s & Class.hc == 0) fwd.boundary(x, e, M, true, hcs[1], L.post_norm);
-        fwd.snap(x, e, ss.normed, plane);
+        fwd.snap(x, pass.enc, ss.branch, plane);
+        if (s & Class.hc == 0) fwd.boundary(x, pass.enc, M, true, hcs[1], L.post_norm);
+        fwd.snap(x, pass.enc, ss.normed, plane);
         switch (L.mlp) {
             .dense => |*d| if (s & Class.dense == 0) {
-                qmm(p, e, ss.normed, d.gate_up, p.gu, M);
-                swiglu(x, e, p.gu, p.actd, M, c.dense_inter);
+                qmm(p, pass.enc, ss.normed, d.gate_up, p.gu, M);
+                swiglu(x, pass.enc, p.gu, p.actd, M, c.dense_inter);
                 if (c.tp > 1) { // TP2: this Mac's half, summed with the peer's
-                    qmmF32(p, e, p.actd, d.down, p.part, M);
-                    x.ep.?.reduce(e, p.part, ss.branch, M);
-                } else qmm(p, e, p.actd, d.down, ss.branch, M);
+                    qmmF32(p, pass.enc, p.actd, d.down, p.part, M);
+                    x.ep.?.reduce(pass, p.part, ss.branch, M);
+                } else qmm(p, pass.enc, p.actd, d.down, ss.branch, M);
             },
-            .moe => |*m| moe(p, x, e, m, ss.normed, M, if (c.byRows()) x.ep else null),
+            .moe => |*m| moe(p, x, pass, m, ss.normed, M, if (c.byRows()) x.ep else null),
         }
-        fwd.snap(x, e, ss.branch, plane);
+        fwd.snap(x, pass.enc, ss.branch, plane);
         pending = true;
     }
-    if (s & Class.hc == 0) fwd.boundary(x, e, M, true, null, null);
+    if (s & Class.hc == 0) fwd.boundary(x, pass.enc, M, true, null, null);
     if (s & Class.ends != 0) return;
-    e.setPipeline(x.k.stream_mean);
-    bind(e, 0, .{ ss.x[x.xi], ss.raw });
-    e.setValue([2]u32{ c.hidden, M }, 2);
-    e.dispatchThreads(size(c.hidden, M, 1), size(256, 1, 1));
-    fwd.rms(x, e, ss.raw, x.w.norm, ss.hidden, M, c.hidden, c.hidden, c.hidden, c.eps);
-    fwd.snap(x, e, ss.hidden, plane);
+    pass.enc.setPipeline(x.k.stream_mean);
+    bind(pass.enc, 0, .{ ss.x[x.xi], ss.raw });
+    pass.enc.setValue([2]u32{ c.hidden, M }, 2);
+    pass.enc.dispatchThreads(size(c.hidden, M, 1), size(256, 1, 1));
+    fwd.rms(x, pass.enc, ss.raw, x.w.norm, ss.hidden, M, c.hidden, c.hidden, c.hidden, c.eps);
+    fwd.snap(x, pass.enc, ss.hidden, plane);
 }
 
 /// MTP head over M prompt rows (`h`, next tokens) at head positions pos..: cache entries only (the output is unread).

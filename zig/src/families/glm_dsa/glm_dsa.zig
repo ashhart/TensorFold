@@ -18,6 +18,7 @@ test {
     _ = kernels;
     _ = moe;
     _ = @import("../../core/pair.zig");
+    _ = @import("request_gate.zig");
 }
 
 pub const residency = @import("residency.zig");

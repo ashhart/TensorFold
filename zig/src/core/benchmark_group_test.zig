@@ -138,6 +138,32 @@ test "benchmark group: Metal endpoint inventories and legacy HELLO peers preserv
     };
 }
 
+test "benchmark group: a bounded inventory refuses a silent peer" {
+    const Device = struct {
+        pub fn name(_: @This()) [*:0]const u8 {
+            return "Test GPU";
+        }
+    };
+    const Link = struct {
+        bytes: [8192]u8 align(8) = @splat(0),
+        pub fn size(_: *@This()) u32 {
+            return 2;
+        }
+        pub fn rank(_: *@This()) u32 {
+            return 0;
+        }
+        pub fn window(x: *@This()) []u8 {
+            return &x.bytes;
+        }
+        pub fn write2Signal(_: *@This(), _: u32, _: usize, _: []const u8, _: []const u8, _: usize, _: u64) !void {}
+        pub fn flush(_: *@This()) !void {}
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var silent: Link = .{};
+    try std.testing.expectError(error.PairPeerSilent, g.metalFor(arena.allocator(), std.testing.io, Device{}, &silent, 4096, 64, 2, 0));
+}
+
 test "benchmark group: a delayed Metal peer retains the startup wait without a new deadline" {
     if (!probeNamesNode()) return error.SkipZigTest;
     const Clock = struct {

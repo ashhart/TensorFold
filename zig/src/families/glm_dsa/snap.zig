@@ -55,10 +55,13 @@ fn copy(e: *Engine, i: u32, at: u32, buf: mtl.Buffer, out: bool) !void {
         std.log.err("glm_dsa: a prompt state copy failed: {s}", .{msg});
         return error.GpuFailure;
     }
+    if (e.pair.failed.load(.acquire)) return error.PairLinkFailed;
 }
 
 /// Slot i's state after its first `at` prompt tokens, kept as `id`.
 pub fn save(e: *Engine, id: u32, i: u32, at: u32) !*Snap {
+    e.request_gate.begin();
+    defer e.request_gate.end();
     if (i >= e.slots.len or !e.slots[i].used or e.slots[i].len != at or at == 0 or e.snaps.contains(id)) return error.SnapshotOutOfStep;
     const s = try e.gpa.create(Snap);
     errdefer e.gpa.destroy(s);
@@ -72,6 +75,8 @@ pub fn save(e: *Engine, id: u32, i: u32, at: u32) !*Snap {
 
 /// Kept state `id` into slot i, begun with a prompt that starts with its tokens: the next chunk starts at its end.
 pub fn restore(e: *Engine, i: u32, id: u32) !void {
+    e.request_gate.begin();
+    defer e.request_gate.end();
     const s = e.snaps.get(id) orelse return error.SnapshotOutOfStep;
     if (i >= e.slots.len or !e.slots[i].used or e.slots[i].len != 0 or s.at >= e.slots[i].prompt.items.len) return error.SnapshotOutOfStep;
     try copy(e, i, s.at, s.buf, false);
@@ -79,6 +84,8 @@ pub fn restore(e: *Engine, i: u32, id: u32) !void {
 }
 
 pub fn drop(e: *Engine, id: u32) void {
+    e.request_gate.begin();
+    defer e.request_gate.end();
     const kv = e.snaps.fetchRemove(id) orelse return;
     if (e.resident) |*r| r.remove(kv.value.buf);
     kv.value.buf.deinit();

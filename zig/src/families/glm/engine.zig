@@ -13,6 +13,7 @@ const prompt_mod = @import("prompt.zig");
 const Fence = @import("../../core/fence.zig").Fence;
 const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
+const Pass = @import("pass.zig").Pass;
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
@@ -233,6 +234,7 @@ pub const Engine = struct {
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
             e.ep = try ep_mod.Ep.init(gpa, io, e.device, s, me);
         }
+        errdefer if (e.ep) |ep| ep.deinit(gpa);
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step
@@ -314,7 +316,7 @@ pub const Engine = struct {
     }
 
     /// A command buffer ordered after the last one this engine committed.
-    pub fn begin(e: *Engine) struct { cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder } {
+    pub fn begin(e: *Engine) Pass {
         const cb = e.queue.commandBuffer();
         if (e.ev > 0) cb.waitFor(e.event, e.ev);
         return .{ .cb = cb, .enc = cb.compute(.serial) };
@@ -331,6 +333,7 @@ pub const Engine = struct {
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
+        if (e.ep) |ep| ep.submit();
         e.committed = platform.c.mach_absolute_time();
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
@@ -339,10 +342,14 @@ pub const Engine = struct {
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it
             std.log.err("glm: command buffer failed: {s}", .{msg});
-            if (e.ep) |ep| ep.failed.store(true, .release); // its exchanges are out of step with the peer's
+            if (e.ep) |ep| ep.gpuFailed();
             return error.GpuFailed;
         }
-        if (e.ep) |ep| if (ep.failed.load(.acquire) or ep.gaveUp() > 0) return error.EpLinkFailed;
+        try e.checkPair();
+    }
+
+    pub fn checkPair(e: *const Engine) !void {
+        if (e.ep) |ep| if (ep.failed.load(.acquire)) return error.EpLinkFailed;
     }
 
     /// Wait until every command buffer this engine committed has completed (before the host touches shared state).
@@ -373,6 +380,7 @@ pub const Engine = struct {
 
     /// One reply, greedy or sampled by `e.sampling`; `depth` drafts a round (drafted equals plain, depth 0).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
+        try e.checkPair();
         const c = &e.c;
         const D = c.hidden;
         const P: u32 = @intCast(prompt.len);
@@ -399,7 +407,7 @@ pub const Engine = struct {
             const n = @min(@as(u32, if (chunk) e.chunk_rows else st.max_rows), end - at);
             const last = at + n == P;
             const absorb = if (last) n - 1 else n;
-            const b = e.begin();
+            var b = e.begin();
             if (last and e.trace_last != null) {
                 x.dump = e.trace_last;
                 x.dump_at = 0;
@@ -411,20 +419,20 @@ pub const Engine = struct {
                 const pr = &e.pr.?;
                 var px = x;
                 px.sc = &pr.streams;
-                prompt_mod.backbone(pr, &px, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+                prompt_mod.backbone(pr, &px, &b, e.prompt_ids.at(@as(usize, at) * 4), n, at);
                 fwd.flipKda(&x);
                 const hidden = pr.streams.hidden;
                 if (last) { // the last row into the decode scratch: the head's first token, the MTP head's first row
                     copyRow(&x, b.enc, hidden.at(@as(usize, n - 1) * D * 2), e.sc.hidden, D);
-                    fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, 1);
+                    fwd.head(&x, &b, e.sc.hidden, e.sc.logits, e.sc.picks, 1);
                 }
                 if (d > 0 and absorb > 0) prompt_mod.mtp(pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
                 last_n = 1;
             } else {
-                fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+                fwd.backbone(&x, &b, e.prompt_ids.at(@as(usize, at) * 4), n, at);
                 fwd.flipKda(&x);
-                if (last) fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * D * 2), e.sc.logits, e.sc.picks, 1);
-                if (d > 0 and absorb > 0) mtp.run(&x, b.enc, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
+                if (last) fwd.head(&x, &b, e.sc.hidden.at(@as(usize, n - 1) * D * 2), e.sc.logits, e.sc.picks, 1);
+                if (d > 0 and absorb > 0) mtp.run(&x, &b, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
                 last_n = n;
             }
             if (d > 0 and absorb > 0) e.s.mtp_pos = at + absorb; // both prompt paths set it after their MTP absorb
@@ -469,7 +477,7 @@ pub const Engine = struct {
         var round_draws: fwd.Draws = .{}; // the current decode round's rules, rebuilt each round
         while (true) {
             const t_enc = platform.c.mach_absolute_time();
-            const b = e.begin();
+            var b = e.begin();
             if (window > 0) { // the last window's kept rows (the prompt's windows kept all theirs)
                 fwd.keepKda(&x, b.enc, window, keep);
                 fwd.flipKda(&x);
@@ -503,24 +511,24 @@ pub const Engine = struct {
             }
             if (d > 0) {
                 const next = if (window == 0) e.sc.next else e.sc.picks;
-                mtp.run(&x, b.enc, e.sc.hidden.at(@as(usize, h0) * D * 2), next, keep, e.s.mtp_pos, if (copied > 0) null else e.sc.ids.at(4));
+                mtp.run(&x, &b, e.sc.hidden.at(@as(usize, h0) * D * 2), next, keep, e.s.mtp_pos, if (copied > 0) null else e.sc.ids.at(4));
                 const base = e.s.mtp_pos + keep;
                 if (copied == 0) for (1..d) |j| {
                     const h = if (j == 1) e.sc.m_x.at(@as(usize, keep - 1) * D * 2) else e.sc.m_x;
                     if (e.rank_log) x.m_row = @intCast(j);
-                    mtp.chain(&x, b.enc, h, e.sc.ids.at(j * 4), base + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
+                    mtp.chain(&x, &b, h, e.sc.ids.at(j * 4), base + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
                 };
                 x.m_row = 0;
                 e.s.mtp_pos = base;
             }
             const R = if (copied > 0) copied + 1 else d + 1;
-            fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
+            fwd.backbone(&x, &b, e.sc.ids, R, e.s.pos);
             // The decode rows draw keyed at their context positions; the MTP head's drafts drew greedily.
             x.draws = if (e.sampling) |p| if (p.temperature > 0) blk: {
                 round_draws = fwd.rulesFor(p, e.s.pos + 1, c.vocab, R);
                 break :blk &round_draws;
             } else null else null;
-            fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
+            fwd.head(&x, &b, e.sc.hidden, e.sc.logits, e.sc.picks, R);
             try e.finish(b.cb, b.enc);
             res.encode_seconds += @as(f64, @floatFromInt(e.committed - t_enc)) / 24e6;
             res.gpu_seconds += e.gpu[1] - e.gpu[0];

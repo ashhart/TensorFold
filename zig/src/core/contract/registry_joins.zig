@@ -59,6 +59,8 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
     @import("simd_half_records.zig").records ++
+    @import("glm_ep_records.zig").records ++
+    @import("glm_dsa_pair_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
     @import("weight_only_records.zig").metal ++
