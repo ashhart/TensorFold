@@ -689,18 +689,17 @@ const EXPLORE_TOOLS = TOOL_SCHEMAS.filter((t) => EXPLORE_TOOL_NAMES.includes(t.f
 // Resolve a requested tool-name subset down to ones that are both known (have a schema)
 // and provably read-only. Pure + exported so the safety filtering is unit-testable without
 // driving a real model. Empty/absent `requested` => the Explore default toolset.
-// `parentOffered` is the parent run's own tool set: a child never gets a tool its parent was
-// not offered, so disabled tools and local-only modes stay off for the child too.
+// `parentOffered` is the parent's tool set: a child never gets a tool its parent was not offered.
 export function delegateChildToolSchemas(requested?: string[] | null, parentOffered?: ReadonlySet<string>) {
-  if (!requested || !requested.length) return EXPLORE_TOOLS
-  const allowed = requested.filter((name) => isReadOnlyTool(name) && (!parentOffered || parentOffered.has(name)))
+  const offered = parentOffered ?? new Set<string>()
+  const defaults = EXPLORE_TOOLS.filter((t) => offered.has(t.function.name))
+  if (!requested || !requested.length) return defaults
+  const allowed = requested.filter((name) => isReadOnlyTool(name) && offered.has(name))
   const schemas = TOOL_SCHEMAS.filter((t) => allowed.includes(t.function.name))
-  return schemas.length ? schemas : EXPLORE_TOOLS
+  return schemas
 }
 
-// A child runs unattended on untrusted files, and a model can name a tool it was never offered.
-// Returns why a child tool call must not run, or null: only an offered tool runs, and web_fetch
-// keeps the parent's rule that it only reaches hosts the user typed.
+// Returns why a child tool call must not run, or null: only offered tools run and web_fetch keeps the typed-host rule.
 export function childToolRefusal(
   name: string,
   args: Record<string, any>,
