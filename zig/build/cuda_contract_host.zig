@@ -3,6 +3,26 @@ const std = @import("std");
 
 /// Each contract reference joins test-cuda-host and its own step; none needs a GPU.
 pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    const mhc = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cuda/mhc_ref.zig"),
+        .target = host,
+        .optimize = .debug,
+    }) }));
+    step.dependOn(&mhc.step);
+    const mhc_sig = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cuda/mhc_sig.zig"),
+        .target = host,
+    }) }));
+    step.dependOn(&mhc_sig.step);
+    const mhc_sums = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_mhc_sums.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+    }) }));
+    b.step("test-mhc-sums-host", "mHC FP32 accumulator stress without a device").dependOn(&mhc_sums.step);
+    step.dependOn(&mhc_sums.step);
     const glm_fact = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/contract_nvfp4_glm_host.zig"),
         .target = host,
