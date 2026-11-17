@@ -17,8 +17,8 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("ceff4ee13e97b5aa93cbe7a1edc9a524c78aaa145dd1e5c82dcb05a3011aae23", &hash(group[0..16095]));
     try std.testing.expectEqualStrings("8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0", &hash(group));
     try std.testing.expectEqualStrings("45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5", &hash(@embedFile("kernels/cuda/qmm_prefill.cu")));
-    // #2933's bytes: served one-row steps skip the rollback copy nothing reads (#2908); replies unchanged
-    try std.testing.expectEqualStrings("f16fa3d48336cfe7bcdc071ef791247d8ef3c06e26a9eaa95a54e1febd803332", &hash(@embedFile("kernels/cuda/qwen35.cu")));
+    // the join variant's bytes: tf_q35_attn_rows_join for streams on shared pages; main's kernels' SASS unchanged
+    try std.testing.expectEqualStrings("77ac41e5764a79cca2313ecd09664479b8b4736747c79188e1ad5cae29fd03e4", &hash(@embedFile("kernels/cuda/qwen35.cu")));
     // #1879's bytes: a comment names cuda_scratch.zig, where max_chunks moved; the code is unchanged
     try std.testing.expectEqualStrings("f9e4a040cf219aac8db211df25d264dba390fce4a7e8da45557652c6ff0f28ba", &hash(@embedFile("kernels/cuda/qwen35.cuh")));
     // 67711a6aa7's bytes: the opt-in DSpine draft kernels (#2633); default serving unchanged
