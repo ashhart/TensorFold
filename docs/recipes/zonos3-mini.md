@@ -1,4 +1,4 @@
-# ZONOS3 Mini on CUDA
+# ZONOS3 Mini on CUDA and Metal
 
 `zig/src/families/zonos3` runs Zyphra's ZONOS3 Mini text-to-speech model on the CUDA runtime, from the files the
 publisher released, and serves it on `POST /v1/audio/speech` (speech edits on `POST /v1/audio/edit`). This page
@@ -857,8 +857,8 @@ They ran under umask 022: with 0002 one unrelated test (`serve --config`, which 
 fails. In the first run of `test-host-a` one real-clock test of the rank bring-up (`two ranks settle on the real
 clock and agree on one plan and view`) failed while other jobs shared the CPU; the step passed when run again alone.
 
-On macOS (an M5 Ultra) the default build, `zig build native` and `zig build test` pass. The family has no Metal
-path; the Metal contract jobs were not run, and neither was any quality suite.
+On macOS (an M5 Ultra) the default build, `zig build native` and `zig build test` pass; the Metal port's own checks
+are in [On Metal](#on-metal). No quality suite was run.
 
 The branch changes the speech route Drama 3 is served through and moves Drama's `torch.save` reader and WAV code to
 core, so Drama 3 (`fishaudio/drama-3`) was run on that M5 Ultra from main `6d0a128b0` and from the branch: six
@@ -972,6 +972,56 @@ checks pass, and the three live failures are `flashnext_mtp fn_row_topk` and `ex
 
 The layer norm's test adds a term to its bound: the kernel scales in fp32 and then adds the bias, so the roundings
 before the bias are a fraction of the scaled value and not of the sum, which gate 4's rows make cancel.
+
+## On Metal
+
+`zig/src/families/zonos3/metal/` and `zig/kernels/metal/zonos3/` port every CUDA kernel to Metal kernel for kernel:
+the same threads, the same sums in the same order (a warp's butterfly is a simdgroup's `simd_shuffle_xor` butterfly),
+fp32 throughout. The metallib is compiled with safe math, precise fp32 functions and `-ffp-contract=off`, as the CUDA
+images are compiled with `--fmad=false`; the few places where a CUDA kernel's shared memory exceeds Metal's 32 KiB
+fold their sums in two halves through threadgroup memory, each value's terms still in thread order. The host side
+(prompt, sampler, generation, speech, release and voices) is the CUDA port's, unchanged.
+
+`zig build zonos3-generate -Doptimize=ReleaseFast` builds the tool on a Mac; the checks are the table's above, with
+the same commands and dumps, on an M5 Ultra (256 GB, macOS 27.2):
+
+| Check | Result on Metal |
+| --- | --- |
+| Backbone, embedding and reference prompts (109 captures each) | every row's cosine 1.0000000; worst relative difference 2.3e-6 and 5.0e-6 |
+| Greedy frames, both voices, `--max-rows` 1, 7, 64 and 256 | 78 of 78 and 80 of 80 frames identical at every chunk size |
+| Codec decoder, 171 frames | cosine 1.0000000, audio SNR 114.0 dB; in chunks bit-identical to one pass |
+| Text to audio, both voices, greedy | prompt rows equal, every frame identical, audio SNR 102.7 and 106.7 dB |
+| Teacher's features | cosine 1.0000000; largest difference 2.4e-7 |
+| Encoder, acoustic branch | every row's cosine 1.000000 |
+| SSL teacher | worst row's cosine 0.9999253 |
+| Clip to codes, one lane and four lanes | 1,450 of 1,450 and 7,100 of 7,100 codes equal |
+
+Served (`tensorfold-native serve RELEASE --parallel 1`, `native/zonos_open.zig`'s `openMetal`, the same flags and
+refusals as on CUDA), measured through the recipe harness's speech plan: the 17.8 s Rupert reply whole in 0.93 s
+(19.1 times real time) and streamed with its first byte at 0.07 s; a cloned 5.13 s reply in 1.31 s, the first
+request with a clip 9.16 s (it loads the encoder); repeated and streamed replies byte-identical; three requests at
+once answered 200, 503, 503; the refusals as on CUDA. Memory: 3,828,402,944 bytes after the load and 9,471,914,240
+with the clip encoder, each the figure the server admits in advance (Metal rounds each buffer to 256 bytes, so its
+clip figure is 608 bytes above CUDA's). The same four requests on the RTX 5090 give replies of the same lengths whose
+16-bit samples differ by at most 2 (SNR 90.5 to 98.2 dB): both draw the same codes. All six response formats answer;
+the FLAC reply decodes to the PCM reply's bytes. Text normalization on Metal, with zyphra-textnorm 0.2.0 built as a dylib on the
+Mac and found in `lib/` beside the binary: the twelve sentences above, each normalized, gave the same reply bytes as
+its spoken form with `text_normalization` off and different bytes from the sentence as typed; without the library a
+request that leaves the field out is spoken as typed and `true` gets 400.
+
+**Kernel contract on Metal.** `zig/tests/contract/metal_zonos3*.zig` register all 40 Metal kernels, 41 registrations
+as on CUDA, each with a planted control. The tests are the CUDA ones with Metal's launches; their ranges use the Metal
+Shading Language specification's accuracy for precise math (exp, log, sin and cos 4 ulps, tanh 5, pow 16; division,
+sqrt and rsqrt correctly rounded) and codec.metal's own erf. The contract compiles the sources at run time; the
+`#pragma METAL fp contract(off)` in `z3_common.h` keeps that compile to the metallib's steps. Gate 5's records
+(`zig/src/core/contract/zonos3_records.zig`) take threadgroup bytes from Metal's reflection on the M5 and M1 and M2
+limits from `tf-kernel-contract --offline`; the three attentions reserve their thread counts in the source
+(`max_total_threads_per_threadgroup`), which leaves every check above unchanged. On the M5 Ultra:
+
+    tf-kernel-contract --only zonos3
+    SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems
+
+Gates 1 to 4 ran on the M5 only; M1 to M4 are covered by gate 5's records alone.
 
 ## The reference's bf16 paths
 
