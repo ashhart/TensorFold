@@ -208,8 +208,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         return null;
     };
     if (raised.window != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, raised.switch_name)});
-    if (o.slide) {
-        // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
+    if (o.slide) { // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
@@ -269,8 +268,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
             return null;
         },
     };
-    // unified memory: the checkpoint's cached pages leave the page cache before admission reads CUDA's free (#1857)
-    if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir);
+    if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir); // GB10: drop cached shards (#1857)
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -384,8 +382,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
-    h.kv_plan = counted.ledger;
-    // a ledger's plan placed the cache already, beside --parallel full-window requests
+    h.kv_plan = counted.ledger; // a ledger's plan placed the cache already, beside --parallel full-window requests
     const kept = if (host_cache) kv_pages.kept(F, loaded, paged, o, room, held, final_host_budget, true) else if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, 0, false);
     if (h.kv_plan) |*lp| lp.kept = kept;
     const cache = kept.copied;
