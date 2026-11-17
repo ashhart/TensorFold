@@ -24,7 +24,7 @@ test "chunks run `step` rows from where a pass starts, and a cut ends one" {
     try std.testing.expectEqual(@as(usize, 1000), end(0, 1000, step, &.{ 0, 1000 })); // cuts at the start or end cut nothing
 }
 
-test "message-start cuts partition the same rows in the same order, so a cut-invariant pass keeps its reply" {
+test "message-start cuts visit every row once in the same order" {
     const starts = [_]u32{ 128, 700, 1500, 3300, 4990 };
     const len = 5000;
     var cut_sum: u64 = 0;

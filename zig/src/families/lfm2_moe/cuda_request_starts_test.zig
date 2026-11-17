@@ -1,4 +1,4 @@
-//! LFM2.5-24B-A2B on CUDA: message starts keep a resumable state each, exact on resume, without a GPU.
+//! LFM2.5-24B-A2B message-start chunk and tap planning without a GPU.
 const std = @import("std");
 const be = @import("cuda_backend.zig");
 const lanes = @import("lanes");
