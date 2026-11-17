@@ -118,6 +118,20 @@ test "message starts: the chunk plan of a request is main's, and a raw completio
     // pinned from main f0a54bdf56: the starts must never move the prompt's cuts
     const chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, r.ids), 0, r.ids.len, srv.chunks.min_chunk);
     try t.expectEqualSlices(u32, &pinned_chunks, chunks);
+    const Gone = struct {
+        pub fn check(_: @This()) bool {
+            return false;
+        }
+    };
+    var actual_cx: errors.Cx = .{ .a = a };
+    const messages = (try json.parse(a, talk)).ok;
+    const actual = try @import("chat.zig").prepare(srv, &actual_cx, .{ .messages = messages, .fields = .null }, Gone{});
+    defer srv.release(actual.preparing, actual.request);
+    // Main's chat.prepare expression, frozen here: the comparison observes the actual prepared Request.chunks.
+    const system_len = prompt_mod.systemPrefixLen(srv, &actual_cx, messages, &.{}, r.ids, false, null);
+    const reference = try chunk_plan.withCut(a, try srv.chunks.starts(a, r.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, r.ids.len, srv.chunks.min_chunk);
+    try t.expectEqualSlices(u32, reference, actual.request.chunks);
+    try t.expectEqualSlices(u32, r.message_starts, actual.request.message_starts);
     var cx: errors.Cx = .{ .a = a };
     const raw = try prompt_mod.prepare(srv, &cx, .{ .prompt = .{ .text = "KUA KAB" }, .fields = .null }, false, null);
     try t.expectEqual(@as(usize, 0), raw.message_starts.len);
