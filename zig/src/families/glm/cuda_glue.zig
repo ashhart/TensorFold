@@ -33,6 +33,7 @@ pub const Kernels = struct {
     rank_sum: cuda.Function,
     hc_post: cuda.Function,
     combine: cuda.Function,
+    combine_tail: cuda.Function,
     slice_sum: cuda.Function,
     top1: cuda.Function,
     top1_sums: cuda.Function,
@@ -187,11 +188,11 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
 }
 
-/// glue.select: top_k by sigmoid + bias (lower id on ties), normed if `norm`, times `scale`, then the shared expert.
-pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool) !void {
+/// glue.select: top_k by sigmoid + bias (lower id on ties), normed, times `scale`, then shared; `flat`: [rows][top_k].
+pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool, flat: ?u64) !void {
     if (experts > 512 or top_k >= 32) return error.TopkTooWide;
     var a: cuda.Args = .{};
-    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)) }) |v| a.add(v);
+    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)), flat orelse @as(u64, 0) }) |v| a.add(v);
     try cuda_pdl.launch(set.glue.topk, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
 }
 
@@ -200,6 +201,13 @@ pub fn combine(set: Set, stream: cuda.Stream, y: u64, y_f32: bool, wts: u64, out
     var a: cuda.Args = .{};
     inline for (.{ y, @as(c_int, @intFromBool(y_f32)), wts, out, i64of(d), cint(slots) }) |v| a.add(v);
     try rows8Launch(set.glue.combine, stream, &a, rows, d, .{ y, out });
+}
+
+/// glue.combine with the last slot apart: y fp32 [rows][slots - 1][d], tail fp32 [rows][d]; combine's bytes.
+pub fn combineTail(set: Set, stream: cuda.Stream, y: u64, tail: u64, wts: u64, out: u64, rows: usize, d: usize, slots: usize) !void {
+    var a: cuda.Args = .{};
+    inline for (.{ y, tail, wts, out, i64of(d), cint(slots) }) |v| a.add(v);
+    try rows8Launch(set.glue.combine_tail, stream, &a, rows, d, .{ y, tail, out });
 }
 
 /// K blocks of the hyper-connection mixing dots (glue.HC_BLOCKS): fixed by the shape, like the router's slices.
