@@ -92,9 +92,9 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
-        var why: cfg.Problem = .{};
-        const c = cfg.parseWhy(a, text, null, &why) catch |e| {
-            if (why.len != 0) std.log.err("{s}: {s}", .{ path, why.text() });
+        var problem: cfg.Problem = .{};
+        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+            if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
             return e;
         };
         var local = c;
