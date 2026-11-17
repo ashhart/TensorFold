@@ -8,6 +8,7 @@ const relay = @import("tp_service.zig");
 const host_wait = @import("tp_host_wait.zig");
 const tp_seq = @import("tp_seq.zig");
 const tp_local = @import("tp_local.zig");
+const tp_agree = @import("tp_agree.zig");
 const D = 2560;
 const WIDE = 4 * D;
 const MAXR = 16;
@@ -62,15 +63,16 @@ const ACK_FLAG = CTRL_FLAG + 8; // served: rank 1's answer to a request's resume
 const SUBMIT_FLAG = ACK_FLAG + 16; // both hosts finished encoding through this job before either submits GPU waits
 pub const MARK_FLAG = FLAGS + 512; // states landed in MARK; ACK_FLAG + 8 remains the link probe
 pub const MARK_READY = MARK_FLAG + 8; // the receiver's MARK is free for that sequence
+const STEP_ACK = MARK_READY + 8; // rank 1's last step taken from CTRL_FLAG: rank 0 publishes the next only after it
 /// The receiving window's slot for layer i's prefill handoff (attention layers are i % 4 == 3).
 pub fn layerSlot(i: usize) usize {
     const att = i / 4; // attention layers before i (3, 7, ... below it)
     return PREFILL + (i - att) * DN_SLOT + att * ATT_SLOT;
 }
 test "control words are distinct and inside the flag page" {
-    var words: [LAYERS + 12]usize = undefined;
+    var words: [LAYERS + 13]usize = undefined;
     var n: usize = 0;
-    for ([_]usize{ FLAG, HELLO, TAIL_FLAG, BACK_FLAG, MTP_FLAG, REQ_FLAG, CTRL_FLAG, ACK_FLAG, ACK_FLAG + 8, SUBMIT_FLAG, MARK_FLAG, MARK_READY }) |w| {
+    for ([_]usize{ FLAG, HELLO, TAIL_FLAG, BACK_FLAG, MTP_FLAG, REQ_FLAG, CTRL_FLAG, ACK_FLAG, ACK_FLAG + 8, SUBMIT_FLAG, MARK_FLAG, MARK_READY, STEP_ACK }) |w| {
         words[n] = w;
         n += 1;
     }
@@ -126,7 +128,7 @@ pub const Tp2 = struct {
     ctrl: u64 = 0, // stop decisions so far, the same on both ranks
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
     pick_tmp: mtl.Buffer, // the MTP head's merged draft index
-    branches: mtl.Buffer, // decode's local MoE: a guard word, then both ranks' branch rows (tp_local.zig)
+    branches: mtl.Buffer, // decode on each Mac: a guard word, both ranks' branch rows, the peer's partial and picks (tp_local.zig)
     ids_pipe: mtl.Pipeline,
     seq: u64 = 0, // the last job: each prefill send on rank 0 matches a wait on rank 1
     seqs: tp_seq.Seqs = .{}, // decode messages so far, numbered the same on both Macs: flag values and slots
@@ -437,21 +439,9 @@ pub const Tp2 = struct {
         return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
     }
 
-    /// Rank 0 sends its stop decision and draft depth at each shared step; rank 1 waits for that decision.
-    pub fn agree(t: *Tp2, quit: bool, depth: u32) !struct { quit: bool, depth: u32 } {
-        if (t.failed.load(.acquire)) return error.TpLinkFailed;
-        t.ctrl += 1;
-        if (t.rank == 0) {
-            try t.rd.signal(t.peer, CTRL_FLAG, (t.ctrl << 6) | (@as(u64, depth & 31) << 1) | @intFromBool(quit));
-            return .{ .quit = quit, .depth = depth };
-        }
-        const t0 = platform.c.mach_absolute_time();
-        while (true) {
-            const v = @atomicLoad(u64, t.word64(CTRL_FLAG), .acquire);
-            if (v >> 6 >= t.ctrl) return .{ .quit = quit or (v >> 6 == t.ctrl and v & 1 != 0), .depth = @intCast((v >> 1) & 31) };
-            if (platform.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
-            std.atomic.spinLoopHint();
-        }
+    /// Rank 0 sends its stop decision and draft depth at each shared step; rank 1 waits for it and acknowledges it.
+    pub fn agree(t: *Tp2, quit: bool, depth: u32) !tp_agree.Decision {
+        return tp_agree.agree(t, CTRL_FLAG, STEP_ACK, quit, depth, 10 * std.time.ns_per_s);
     }
 
     /// The host waits until the window's word at `off` reaches `value`.
@@ -485,6 +475,7 @@ test {
     _ = @import("tp_deadline.zig");
     _ = tp_seq; // the decode messages' numbers and slots
     _ = tp_local;
+    _ = tp_agree;
 }
 
 test "host waits retain the wrapping prefill call counter" {

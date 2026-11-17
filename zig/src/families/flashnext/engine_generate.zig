@@ -162,7 +162,7 @@ pub const Handoff = struct { yielded: bool = false, cache: usize = 0 };
 pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_tokens: usize, eos: []const u32, depth: ?usize, watch: *think.Watch, out: Out, handoff: ?*Handoff) !Result {
     const r = e.r;
     const m = e.m;
-    r.tp_decode = r.tp != null; // both Macs enter here for the same request, so both merge locally
+    r.tp_decode = r.tp != null; // both Macs enter here for the same request, so both make every split stage here
     defer r.tp_decode = false;
     defer e.hostMode();
     defer if (r.tp) |tp| tp.finishStats();

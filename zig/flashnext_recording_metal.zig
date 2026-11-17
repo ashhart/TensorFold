@@ -27,6 +27,7 @@ pub const HandoffOp = struct {
     seq: u64 = 0,
     mode: DispatchType = .serial,
     pipeline: []const u8 = "",
+    text: []const u8 = "", // the pipeline's source, which tells patched copies of one kernel apart
     grid: Size = .{ .width = 0 },
     args: [20]Arg = @splat(.{}),
 };
@@ -169,7 +170,7 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(e: ComputeEncoder, grid: Size, _: Size) void {
-        recordHandoff(.{ .kind = .dispatch, .cb_id = e.cb_id, .mode = e.mode, .pipeline = pipe.name, .grid = grid, .args = args[0..20].* });
+        recordHandoff(.{ .kind = .dispatch, .cb_id = e.cb_id, .mode = e.mode, .pipeline = pipe.name, .text = pipe.text, .grid = grid, .args = args[0..20].* });
         if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
             rotary_calls += 1;
             return;

@@ -16,6 +16,7 @@ const Lane = fz.Lane;
 const Slot = fz.Slot;
 const Model = fz.Model;
 const finish = Model.finish;
+const tp_local = @import("tp_local.zig");
 
 pub fn mtpRun(m: *Model, nexts: []const u32, streams: Buf) !u32 {
     const r = m.r;
@@ -155,12 +156,19 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         const n = six.wq.b.length() * 4 / (3 * D);
         const tiles = n / 32;
         const half = (tiles + 1) / 2;
-        const t0: usize = if (tp.rank == 0) 0 else half;
-        const tn: usize = if (tp.rank == 0) half else tiles - half;
-        r.denseTiles(x, D, six, h.logits, t0, tn);
-        const lo = @min(t0 * 32, h.ids_n);
-        const hi = @min((t0 + tn) * 32, h.ids_n);
-        tp.argmax(&r.enc, h.logits, n, lo, hi - lo, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
+        var parts: [2][2]usize = undefined; // each rank's {first draft, drafts}; decode makes both halves here
+        for (0..2) |k| {
+            const t0: usize = if (k == 0) 0 else half;
+            const tn: usize = if (k == 0) half else tiles - half;
+            if (k == tp.rank or r.tp_decode) r.denseTiles(x, D, six, h.logits, t0, tn);
+            const lo = @min(t0 * 32, h.ids_n);
+            parts[k] = .{ lo, @min((t0 + tn) * 32, h.ids_n) - lo };
+        }
+        if (r.tp_decode) {
+            tp_local.argmax(tp, r.enc, h.logits, n, parts, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
+            return tp_local.ids(tp, r.enc, h.ids, out);
+        }
+        tp.argmax(&r.enc, h.logits, n, parts[tp.rank][0], parts[tp.rank][1], Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
         tp.mapIds(r.enc, h.ids, out);
         return;
     }

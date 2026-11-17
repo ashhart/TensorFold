@@ -262,28 +262,30 @@ pub const Model = struct {
             cur = 1 - cur;
             try m.hcProject(t.h[cur], L.ahc, "qa_hc_down@ahc", "qa_hc_up@ahc", t.inj_a);
             var plain = false; // speed-up mode's DeltaNet exchange made the stream update
-            if (L.linear and r.tp != null) { // This rank's key/value heads, followed by a partial exchange.
+            if (L.linear and r.tp != null) { // This rank's key/value heads, then a partial exchange; decode runs the peer's too.
                 const tp = r.tp.?;
-                const k0: usize = tp.rank;
                 if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
-                // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: this Mac's q, k, v and z heads, b and a whole, 8 K...
-                const cols = [_][2]usize{ .{ 32 * k0, 32 }, .{ 64 + 32 * k0, 32 }, .{ 128 + 96 * k0, 96 }, .{ 320 + 96 * k0, 96 }, .{ 512, 3 } };
-                const pj = try L.proj.recorded();
-                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, pj.wq, pj.sbt, t.mdims }, t.p, &cols, 8, null);
-                const a = m.state;
-                const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
-                const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
-                if (m.keptState()) |recs| {
-                    const li = i - i / 4;
-                    gdn_step.stepKept(r, r.gdn_kept.?, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a] }, recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 24 * tp.rank, 24);
-                } else try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
-                const pn = tp.partNext();
-                const part: Buf = .{ .b = pn.b, .off = pn.off };
-                const po = try L.out.recorded();
-                // One kernel at every width preserves drafted/plain equality.
-                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, po.wq, po.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 });
+                const ranks = [2]u32{ tp.rank, 1 - tp.rank };
+                for (ranks[0 .. @as(usize, 1) + @intFromBool(r.tp_decode)]) |k0| { // each rank's launches as that rank makes them
+                    // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: rank k0's q, k, v, z heads, b and a whole
+                    const cols = [_][2]usize{ .{ 32 * k0, 32 }, .{ 64 + 32 * k0, 32 }, .{ 128 + 96 * k0, 96 }, .{ 320 + 96 * k0, 96 }, .{ 512, 3 } };
+                    const pj = try L.proj.recorded();
+                    try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, pj.wq, pj.sbt, t.mdims }, t.p, &cols, 8, null);
+                    const a = m.state;
+                    const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
+                    const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
+                    if (m.keptState()) |recs| {
+                        const li = i - i / 4;
+                        gdn_step.stepKept(r, r.gdn_kept.?, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a] }, recs[1 - m.rec_slot].at(li * gdn_step.RECORD), recs[m.rec_slot].at(li * gdn_step.RECORD), r.ar, 24 * k0, 24);
+                    } else try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, k0);
+                    const pn = tp.partNext();
+                    const part: Buf = if (k0 == tp.rank) .{ .b = pn.b, .off = pn.off } else .{ .b = tp.branches, .off = tp_local.PARTIAL_AT };
+                    const po = try L.out.recorded();
+                    // One kernel at every width preserves drafted/plain equality.
+                    try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, po.wq, po.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 });
+                }
                 if (r.skip & TP_CLASS == 0) { // the partials' sum and the stream update in the exchange's launch
-                    tp.plain(&r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows);
+                    if (r.tp_decode) tp_local.plain(tp, r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows) else tp.plain(&r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows);
                     plain = true;
                 }
             } else if (L.linear) {
@@ -368,8 +370,11 @@ pub const Model = struct {
             const half = HEAD_TILES / 2;
             if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
             const hd = try m.head.recorded();
-            try split.laneTiles(r, "lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, hd.wq, hd.sbt, t.mdims }, t.logits, &.{.{ half * tp.rank, half }}, 1, null);
-            if (r.skip & TP_CLASS == 0) tp.argmax(&r.enc, t.logits, HEAD_TILES * 32, half * 32 * tp.rank, half * 32, t.picks, t.rows, rows);
+            const ranks = [2]u32{ tp.rank, 1 - tp.rank };
+            for (ranks[0 .. @as(usize, 1) + @intFromBool(r.tp_decode)]) |k| try split.laneTiles(r, "lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, hd.wq, hd.sbt, t.mdims }, t.logits, &.{.{ half * k, half }}, 1, null);
+            const parts = [2][2]usize{ .{ 0, half * 32 }, .{ half * 32, half * 32 } }; // each rank's {first column, columns}
+            if (r.skip & TP_CLASS != 0) return;
+            if (r.tp_decode) tp_local.argmax(tp, r.enc, t.logits, HEAD_TILES * 32, parts, t.picks, t.rows, rows) else tp.argmax(&r.enc, t.logits, HEAD_TILES * 32, parts[tp.rank][0], parts[tp.rank][1], t.picks, t.rows, rows);
             return;
         }
         try m.lane(t.mixed, D, m.head, "lane_qmm_bytes_grouped@head", t.logits);

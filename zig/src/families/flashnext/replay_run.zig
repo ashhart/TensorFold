@@ -124,7 +124,7 @@ pub const Run = struct {
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
-    tp_decode: bool = false, // TP decode: each Mac runs every row's experts and merges its own branches (tp_local.zig)
+    tp_decode: bool = false, // TP decode: each Mac makes both ranks' halves of every split stage, sending none (tp_local.zig)
     sel: ?Select = null, // long contexts: the indexer's pool, scores and selection
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
