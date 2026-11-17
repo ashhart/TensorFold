@@ -3,7 +3,6 @@
 #include "contract_controls.cu"
 #include "contract_js_controls.cuh"
 #include "contract_dense_controls.cuh"
-#include "contract_lfm3_controls.cuh"
 #include "contract_experts_bf16_controls.cuh"
 #include "contract_nemo_audio_controls.cuh"
 #include "contract_idol_controls.cuh"
@@ -18,3 +17,4 @@
 #include "contract_hy4_route_rows_controls.cuh"
 #include "contract_int4_controls.cuh"
 #include "contract_hy4_engram_fp8_controls.cuh"
+#include "contract_mhc_controls.cuh"
