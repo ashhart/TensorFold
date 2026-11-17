@@ -54,8 +54,7 @@ pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
 
-/// The cut points a cut-invariant CUDA pass honors: the one place to switch from `s.chunks` to
-/// D920's every-message-start list. No other family calls it, so no cut outside them changes.
+/// The named cut points the backend honors for this request.
 pub fn cutPoints(s: *const Stream) []const u32 {
     return s.chunks;
 }

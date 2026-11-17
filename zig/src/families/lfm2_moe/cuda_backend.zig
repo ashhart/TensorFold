@@ -272,7 +272,7 @@ pub const Lfm = struct {
         return k.at;
     }
 
-    /// Tap rows forward snapshots: only a registered hook can use them; a cache-off pass asks for none (H19).
+    /// Tap rows forward snapshots: only a registered hook can use them; a cache-off pass asks for none.
     pub fn tapRows(at: usize, c: *const Cut, hook: bool, rows: *[mdl.max_taps]usize) []const usize {
         if (!hook) return &.{};
         for (c.taps(), 0..) |p, j| rows[j] = p - at - 1;

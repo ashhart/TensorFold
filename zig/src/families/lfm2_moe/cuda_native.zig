@@ -15,7 +15,7 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
-/// Every row is cut-exact, so message starts are kept states by default without a switch.
+/// Cut-invariant prefill offers request-start snapshots within the cache admission and budget.
 pub const snap_cut_invariant = true;
 /// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
 pub const snap_lookahead: u32 = 0;

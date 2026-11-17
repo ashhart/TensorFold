@@ -259,8 +259,6 @@ pub const Cuda = struct {
         return s.reuse.at;
     }
 
-    // -- the vtable ---------------------------------------------------------------------------------------------
-
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self = of(ptr);
