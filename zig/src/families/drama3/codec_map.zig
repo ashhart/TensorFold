@@ -1,6 +1,6 @@
 //! The codec's tensors in native FP32 layouts, read from codec.pth; no FP16 decoder image is reused.
 const std = @import("std");
-const pth = @import("codec_pth.zig");
+const pth = @import("core").torch_pth;
 const A = std.mem.Allocator;
 
 const Reader = struct {

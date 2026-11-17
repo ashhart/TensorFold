@@ -4,6 +4,9 @@ const std = @import("std");
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
+/// torch.save archives and WAV files: Drama 3's codec and clips, through its `core` shim.
+pub const torch_pth = @import("core/torch_pth.zig");
+pub const wav = @import("core/wav.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
