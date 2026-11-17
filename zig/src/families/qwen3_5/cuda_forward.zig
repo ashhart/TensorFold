@@ -48,19 +48,22 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
     const mpos: u64 = if (e.features != 0) e.tables.ptr + mpos_at else 0;
     if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
-    var di: usize = 0;
-    var ai: c_int = 0;
+    var pending = g.first != 0;
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
     const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
     const tail_at: ?usize = if (prompt and ends) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
-    for (e.layers, 0..) |l, i| {
-        const tail = tail_at != null and i + 1 == e.layers.len;
+    for (e.steps, 0..) |st, si| {
+        const i = st.layer;
+        const l = e.layers[i];
+        const tail = tail_at != null and si + 1 == e.steps.len;
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
-        try e.norm(g.first + i != 0, l.input_norm, total);
+        pending = @import("loop_schedule.zig").enterMhc(st, pending);
+        try e.norm(@import("loop_schedule.zig").attentionMhc(st, pending), l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
+                const di = st.delta.?;
                 const layer: c_int = @intCast(di);
                 try e.projManyPrompt(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
@@ -70,9 +73,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
                 try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
-                di += 1;
             },
             .attention => |m| {
+                const ai: c_int = @intCast(st.attention.?);
                 const aw = g.attnWidth();
                 if (tail) {
                     try e.projManyPrompt(&.{ m.k, m.v }, e.x, &.{ e.kraw, e.vraw }, total, prompt);
@@ -110,10 +113,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 try launch(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
                 if (e.learning) |k| try k.gated(i, e.mix, total);
                 try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
-                ai += 1;
             },
         }
-        try e.norm(true, l.post_norm, total);
+        try e.norm(@import("loop_schedule.zig").ffnMhc(st, true), l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
         const x0 = e.x + t0 * g.hidden * 2;
@@ -140,6 +142,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
+        pending = @import("loop_schedule.zig").leaveMhc(st, true);
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };

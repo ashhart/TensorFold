@@ -80,6 +80,7 @@ test "Qwen paged reuse: a bf16 save and restore copy a page each into the copy's
     e.gpa = t.allocator;
     e.d = &d;
     e.g = undefined;
+    e.g.loop = null;
     e.g.hidden = 5120;
     e.g.k_heads = 16;
     e.g.v_heads = 48;

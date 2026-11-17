@@ -119,6 +119,7 @@ pub const Engine = struct {
     head: Proj,
     final_norm: u64,
     layers: []Layer,
+    steps: []@import("loop_schedule.zig").Step,
     // scratch, scratch_capacity rows each
     h: u64,
     x: u64,
@@ -184,15 +185,19 @@ pub const Engine = struct {
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize) !*Engine {
-        return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null);
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, loops: ?u32) !*Engine {
+        return initStageLoops(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null, loops);
     }
 
     /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
     pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span) !*Engine {
+        return initStageLoops(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, span, null);
+    }
+    fn initStageLoops(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span, loops: ?u32) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
-        const g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
+        var g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
+        if (loops) |n| g.loop = try (g.loop orelse return error.BadLoops).withLoops(n);
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -274,6 +279,9 @@ pub const Engine = struct {
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_rows_join = try e.mods[9].function("tf_q35_attn_rows8_join"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
         errdefer if (e.mo) |*m| m.unload();
+        const schedule = g.schedule();
+        e.steps = try gpa.dupe(@import("loop_schedule.zig").Step, schedule.slice());
+        errdefer gpa.free(e.steps);
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         if (g.exl3) {
@@ -338,6 +346,7 @@ pub const Engine = struct {
         hosted.release(e);
         if (e.boundary) |*b| b.free();
         e.gpa.free(e.layers);
+        e.gpa.free(e.steps);
         e.gpa.free(e.dir);
         e.affine.deinit();
         e.wide.deinit();
@@ -362,6 +371,7 @@ pub const Engine = struct {
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
+        if (e.g.loop != null and taps.len > 0) return error.SenseNovaDrafter;
         if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
         if (taps.len > e.taps.len) return error.TooManyTaps;
         for (taps) |t| if (t >= e.g.layers) return error.BadTap;
@@ -568,21 +578,7 @@ pub const Engine = struct {
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
 
-    /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
-            else => return error.InvalidGdnSlots,
-        };
-        const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
-        // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
-        const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
-        try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
-    }
+    pub const deltaScan = @import("cuda_delta_scan.zig").deltaScan;
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
     pub const body = @import("cuda_forward.zig").body;

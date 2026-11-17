@@ -40,6 +40,7 @@ pub const Layer = struct {
     post_norm: u64,
     mlp: Mlp,
     mixer: union(enum) { delta: Delta, attention: Attention },
+    mhc: ?@import("loop_weights.zig").Routers = null,
 };
 
 /// qwen35.cu's kernels, each tf_q35_ and its name.

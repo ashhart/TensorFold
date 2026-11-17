@@ -206,13 +206,14 @@ test "request starts: one family's switch leaves every other family without star
     var named = [_]usize{ 0, 0 }; // registry entry points naming Qwen's switch, GLM's
     inline for (registry) |F| if (@hasDecl(F, "request_starts_switch")) {
         const glm = std.mem.eql(u8, F.request_starts_switch, names[1]);
-        try std.testing.expect(std.mem.startsWith(u8, F.model_type, if (glm) "glm5_next" else "qwen3_5"));
+        try std.testing.expect(std.mem.startsWith(u8, F.model_type, if (glm) "glm5_next" else "qwen3_5") or
+            (!glm and std.mem.eql(u8, F.model_type, "sensenova_loop")));
         try std.testing.expect(glm or std.mem.eql(u8, F.request_starts_switch, names[0]));
         const id = profile.registered(F.request_starts_switch) orelse return error.UnreviewedSwitch;
         try std.testing.expect(profile.entry(id).applies(F.model_type, "cuda"));
         named[@intFromBool(glm)] += 1;
     };
-    try std.testing.expectEqual([_]usize{ 2, 1 }, named); // Qwen's dense and MoE entry points, GLM's one
+    try std.testing.expectEqual([_]usize{ 3, 1 }, named);
     for (0..names.len + 1) |on| { // on == names.len: every switch unset
         for (names, 0..) |n, i| try std.testing.expectEqual(@as(c_int, 0), if (i == on) sys.env.setenv(n, "1", 1) else sys.env.unsetenv(n));
         inline for (registry ++ .{ Other, Unnamed }) |F| {
