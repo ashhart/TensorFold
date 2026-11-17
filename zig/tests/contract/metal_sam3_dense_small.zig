@@ -40,6 +40,9 @@ const device_served = [_]c.Shape{
 };
 
 const compensated_served = device_served ++ [_]c.Shape{
+    .{ .rows = 65, .n = 1024, .k = 4736 },
+    .{ .rows = 64, .n = 1023, .k = 4735 },
+    .{ .rows = 63, .n = 1025, .k = 4736 },
     .{ .rows = 65, .n = 256, .k = 2304 },
     .{ .rows = 64, .n = 255, .k = 2303 },
     .{ .rows = 63, .n = 257, .k = 2305 },
@@ -238,6 +241,15 @@ const Probe = struct {
                     @memset(self.x[shape.k..][0..shape.k], 0);
                     self.x[shape.k] = 1 + 0x1p-20;
                 }
+                if (shape.rows > 2) {
+                    @memset(self.x[2 * shape.k ..][0..shape.k], 0);
+                    self.x[2 * shape.k] = 0x1p-79 + 0x1p-102;
+                    self.x[2 * shape.k + 1] = -0x1p-79;
+                    for (0..shape.n) |column| {
+                        self.weight[column * shape.k] = 0x1p-24;
+                        self.weight[column * shape.k + 1] = 0x1p-24;
+                    }
+                }
             }
             if (fill == .nonfinite and shape.n > 6) {
                 self.weight[4 * shape.k] = std.math.inf(f32);
@@ -355,6 +367,10 @@ const Probe = struct {
     pub fn intervals(self: *Probe, low: []f64, high: []f64) !void {
         @memset(low, -std.math.floatMax(f64));
         @memset(high, std.math.floatMax(f64));
+        if (self.half() and self.fill == .random and self.shape.k % 2 == 0 and self.shape.rows > 2) {
+            @memset(low[2 * self.shape.n ..][0..self.shape.n], 0x1p-126);
+            @memset(high[2 * self.shape.n ..][0..self.shape.n], 0x1p-126);
+        }
         if (self.fill != .random or (self.device() and self.shape.k % 2 == 0)) return;
         low[0] = if (self.shape.k > 1) 1 else 0x1p-49;
         high[0] = low[0];

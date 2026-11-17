@@ -294,7 +294,11 @@ pub fn build(b: *std.Build) void {
 const nativeServer = @import("zig/build/metal_server.zig").nativeServer;
 
 /// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.
-const metalTargets = metal_build.metalTargets;
+fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
+    const sam3 = @import("zig/build/sam3.zig").steps(b, target, optimize);
+    test_step.dependOn(sam3.tests);
+    metal_build.metalTargets(b, target, optimize, draft_ids, build_options, test_step);
+}
 
 /// The server and distribution use the same embedded-source Metal engine.
 const metalEngineModules = metal_build.metalEngineModules;

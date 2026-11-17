@@ -1,208 +1,234 @@
 const std = @import("std");
 const ops = @import("ops.zig");
-const memory = @import("memory.zig");
 const decoder = @import("decoder.zig");
 const embeddings = @import("prompt_encoder.zig");
+const memory = @import("memory.zig");
 const position = @import("position.zig");
 const prompts = @import("prompts.zig");
 const selection = @import("memory_selection.zig");
 const Layer = @import("layers.zig").Layer;
+
 pub const Result = decoder.Result;
 pub const Memory = memory.Memory;
 
-fn seedMask(r: *ops.Runtime, output: *Result, mask: prompts.Mask) !void {
-    const logits = try r.alloc(mask.values.len);
-    var present = false;
-    for (mask.values, logits.slice(f32, logits.count)) |probability, *value| {
-        present = present or probability > 0;
-        value.* = probability * 20 - 10;
+fn probabilitySeed(root: Layer, prediction: *Result, mask: prompts.Mask) !void {
+    const r = root.runtime;
+    const tensor = try r.alloc(mask.values.len);
+    var nonempty = false;
+    for (tensor.slice(f32, tensor.count), mask.values) |*logit, probability| {
+        logit.* = 20 * probability - 10;
+        nonempty = nonempty or probability > 0;
     }
-    output.input_masks = ops.feature(logits, mask.size.height, mask.size.width, 1);
-    const side = r.config.featureSide() * 4;
-    output.masks = try r.resize(output.input_masks.?, side, side, true);
-    output.scores[0] = if (present) 10 else -10;
-    output.ious[0] = 1;
-    if (!present) {
-        const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-        output.pointer = if (r.config.version == .sam31) try owner.linear("no_obj_ptr_linear", output.pointer) else try owner.parameter("no_obj_ptr");
-    }
+    prediction.input_masks = ops.feature(tensor, mask.size.height, mask.size.width, 1);
+    const side = 4 * r.config.featureSide();
+    prediction.masks = try r.resize(prediction.input_masks.?, side, side, true);
+    prediction.scores[0] = if (nonempty) 10 else -10;
+    prediction.ious[0] = 1;
+    if (!nonempty) prediction.pointer = if (r.config.version == .sam31)
+        try root.linear("no_obj_ptr_linear", prediction.pointer)
+    else
+        try root.parameter("no_obj_ptr");
 }
 
 pub fn seed(r: *ops.Runtime, features: [3]ops.Feature, prompt: prompts.Prompt, size: prompts.Size) !Result {
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
-    const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
+    const root = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
     const encoded = try embeddings.encode(r, prompt, size);
-    const initial = try owner.parameter(if (r.config.version == .sam31) "interactivity_no_mem_embed" else "no_mem_embed");
-    var result = try decoder.decode(r, features, try r.add(features[2].tensor, initial), .{
+    const key = if (r.config.version == .sam31) "interactivity_no_mem_embed" else "no_mem_embed";
+    const image = try r.add(features[2].tensor, try root.parameter(key));
+    var prediction = try decoder.decode(r, features, image, .{
         .sparse = encoded.sparse,
         .dense = encoded.dense,
-        .multimask = prompt.mask == null and prompt.points.len == 1 and prompt.boxes.len == 0,
+        .multimask = prompt.points.len == 1 and prompt.boxes.len == 0 and prompt.mask == null,
     });
-    if (prompt.mask) |mask| if (mask.format == .probabilities and prompt.points.len + prompt.boxes.len == 0) try seedMask(r, &result, mask);
-    var retained: [3]ops.Tensor = undefined;
-    r.trim(mark, result.retained(&retained));
-    return result;
-}
-
-fn pointerPosition(owner: Layer, relative: usize, horizon: usize, count: usize) !ops.Tensor {
-    const r = owner.runtime;
-    const name = try r.name("position.pointer.{s}.{d}.{d}.{d}", .{ owner.prefix, relative, horizon, count });
-    if (r.constant(name)) |cached| return cached;
-    const width = r.config.hidden;
-    const half = width / 2;
-    const embedding = try r.alloc(width);
-    for (0..half) |frequency| {
-        const normalized = @as(f32, @floatFromInt(relative)) / @as(f32, @floatFromInt(@max(1, horizon - 1)));
-        const exponent = @as(f32, @floatFromInt(frequency / 2 * 2)) / @as(f32, @floatFromInt(half));
-        const angle = normalized / std.math.pow(f32, 10000, exponent);
-        embedding.slice(f32, width)[frequency] = @sin(angle);
-        embedding.slice(f32, width)[half + frequency] = @cos(angle);
+    if (prompt.mask) |mask| {
+        if (mask.format == .probabilities and prompt.points.len == 0 and prompt.boxes.len == 0)
+            try probabilitySeed(root, &prediction, mask);
     }
-    const encoded = try owner.linear("obj_ptr_tpos_proj", embedding);
-    const repeated = try r.alloc(count);
-    if (encoded.count != r.config.memory_width or count % encoded.count != 0) return error.SamPointerPositionShape;
-    for (0..count / encoded.count) |token| @memcpy(repeated.slice(f32, count)[token * encoded.count ..][0..encoded.count], encoded.slice(f32, encoded.count));
-    return if (relative < r.config.pointer_frames) r.remember(name, repeated) else repeated;
+    var storage: [3]ops.Tensor = undefined;
+    r.trim(start, prediction.retained(&storage));
+    return prediction;
 }
 
-const Memories = struct {
-    values: ops.Tensor,
-    positions: ops.Tensor,
-    images: ops.Tensor,
-    spatial: usize,
-    cached: bool,
+fn temporalPointer(root: Layer, relative: usize, horizon: usize, count: usize) !ops.Tensor {
+    const r = root.runtime;
+    const key = try r.name("position.pointer.{s}.{d}.{d}.{d}", .{ root.prefix, relative, horizon, count });
+    if (r.constant(key)) |cached| return cached;
+    const half = r.config.hidden / 2;
+    const normalized = @as(f32, @floatFromInt(relative)) / @as(f32, @floatFromInt(@max(1, horizon - 1)));
+    const phases = try r.alloc(2 * half);
+    const values = phases.slice(f32, phases.count);
+    for (0..half) |band| {
+        const exponent = @as(f32, @floatFromInt(2 * (band / 2))) / @as(f32, @floatFromInt(half));
+        const phase = normalized / std.math.pow(f32, 10000, exponent);
+        values[band] = @sin(phase);
+        values[half + band] = @cos(phase);
+    }
+    const projected = try root.linear("obj_ptr_tpos_proj", phases);
+    if (projected.count != r.config.memory_width or count % projected.count != 0) return error.SamPointerPositionShape;
+    const output = try r.alloc(count);
+    const target = output.slice(f32, output.count);
+    for (0..count / projected.count) |row| {
+        @memcpy(target[row * projected.count ..][0..projected.count], projected.slice(f32, projected.count));
+    }
+    return if (relative < r.config.pointer_frames) r.remember(key, output) else output;
+}
+
+const Retrieval = struct {
+    memory: ops.Tensor,
+    position: ops.Tensor,
+    image: ops.Tensor,
+    spatial_rows: usize,
+    cache: bool,
     history: []const Memory,
     plan: selection.Plan,
 
-    fn gather(r: *ops.Runtime, owner: Layer, history: []const Memory, plan: selection.Plan, pointer_positions: []const ops.Tensor) !Memories {
-        const cached = r.config.version == .sam31 and r.precision == .mixed;
-        const total = plan.spatial.len + plan.pointers.len;
-        const values = try r.a.alloc(ops.Tensor, total);
-        const positions = try r.a.alloc(ops.Tensor, total);
-        const images = try r.a.alloc(ops.Tensor, plan.spatial.len + 1);
+    fn assemble(root: Layer, history: []const Memory, plan: selection.Plan, pointer_positions: []const ops.Tensor) !Retrieval {
+        const r = root.runtime;
+        const cache = r.config.version == .sam31 and r.precision == .mixed;
         const side = r.config.featureSide();
         const spatial_position = try position.spatial(r, side, side, r.config.memory_width);
-        const temporal = try owner.parameter("maskmem_tpos_enc");
-        var pointer_count: usize = 0;
-        for (plan.spatial.constSlice(), 0..) |entry, at| {
+        const temporal = try root.parameter("maskmem_tpos_enc");
+        var values: [29]ops.Tensor = undefined;
+        var positions: [29]ops.Tensor = undefined;
+        var images: [11]ops.Tensor = undefined;
+        const spatial_count = plan.spatial.len;
+        const count = spatial_count + plan.pointers.len;
+        for (plan.spatial.constSlice(), 0..) |entry, row| {
             const frame = history[entry.history];
-            values[at] = frame.encoded;
-            images[at] = frame.image;
-            positions[at] = try r.add(spatial_position, ops.view(temporal, entry.temporal * r.config.memory_width, r.config.memory_width));
+            values[row] = frame.encoded;
+            images[row] = frame.image;
+            const offset = ops.view(temporal, entry.temporal * r.config.memory_width, r.config.memory_width);
+            positions[row] = try r.add(spatial_position, offset);
         }
-        for (plan.pointers.constSlice(), pointer_positions, 0..) |entry, encoded, at| {
+        var pointer_rows: usize = 0;
+        for (plan.pointers.constSlice(), pointer_positions, 0..) |entry, phase, row| {
             const pointer = history[entry.history].pointer;
-            values[plan.spatial.len + at] = pointer;
-            positions[plan.spatial.len + at] = encoded;
-            pointer_count += pointer.count / r.config.memory_width;
+            values[spatial_count + row] = pointer;
+            positions[spatial_count + row] = phase;
+            pointer_rows += pointer.count / r.config.memory_width;
         }
-        const empty = try r.alloc(pointer_count * r.config.hidden);
-        @memset(empty.slice(f32, empty.count), 0);
-        images[plan.spatial.len] = empty;
+        const padding = try r.alloc(pointer_rows * r.config.hidden);
+        @memset(padding.slice(f32, padding.count), 0);
+        images[spatial_count] = padding;
         return .{
-            .values = try r.concat(if (cached) values[plan.spatial.len..] else values),
-            .positions = try r.concat(positions),
-            .images = if (r.config.version == .sam31 and !cached) try r.concat(images) else empty,
-            .spatial = plan.spatial.len * side * side,
-            .cached = cached,
+            .memory = try r.concat(values[if (cache) spatial_count else 0..count]),
+            .position = try r.concat(positions[0..count]),
+            .image = if (r.config.version == .sam31 and !cache) try r.concat(images[0 .. spatial_count + 1]) else padding,
+            .spatial_rows = spatial_count * side * side,
+            .cache = cache,
             .history = history,
             .plan = plan,
         };
     }
 
-    fn multiplexKeys(self: Memories, block: Layer, index: usize) ![2]ops.Tensor {
-        const r = block.runtime;
-        if (!self.cached) {
-            const key = try r.add(try block.linear("image_cross_attn_k_proj", self.images), try block.linear("cross_attn_k_proj", self.values));
-            return .{ try r.add(key, self.positions), try block.linear("cross_attn_v_proj", self.values) };
+    fn projected(self: Retrieval, layer: Layer, index: usize) ![2]ops.Tensor {
+        const r = layer.runtime;
+        if (self.cache) {
+            var keys: [11]ops.Tensor = undefined;
+            var values: [11]ops.Tensor = undefined;
+            const count = self.plan.spatial.len;
+            for (self.plan.spatial.constSlice(), 0..) |entry, row| {
+                const cached = self.history[entry.history].projected orelse return error.MissingSamMemoryProjection;
+                keys[row] = cached[index].key;
+                values[row] = cached[index].value;
+            }
+            const bias = try layer.parameter("image_cross_attn_k_proj.bias");
+            keys[count] = try r.add(try layer.linear("cross_attn_k_proj", self.memory), bias);
+            values[count] = try layer.linear("cross_attn_v_proj", self.memory);
+            return .{ try r.add(try r.concat(keys[0 .. count + 1]), self.position), try r.concat(values[0 .. count + 1]) };
         }
-        const keys = try r.a.alloc(ops.Tensor, self.plan.spatial.len + 1);
-        const values = try r.a.alloc(ops.Tensor, keys.len);
-        for (self.plan.spatial.constSlice(), 0..) |entry, at| {
-            const cache = self.history[entry.history].projected orelse return error.MissingSamMemoryProjection;
-            keys[at] = cache[index].key;
-            values[at] = cache[index].value;
-        }
-        keys[keys.len - 1] = try r.add(try block.linear("cross_attn_k_proj", self.values), try block.parameter("image_cross_attn_k_proj.bias"));
-        values[values.len - 1] = try block.linear("cross_attn_v_proj", self.values);
-        return .{ try r.add(try r.concat(keys), self.positions), try r.concat(values) };
+        const image_key = try layer.linear("image_cross_attn_k_proj", self.image);
+        const memory_key = try layer.linear("cross_attn_k_proj", self.memory);
+        const key = try r.add(try r.add(image_key, memory_key), self.position);
+        return .{ key, try layer.linear("cross_attn_v_proj", self.memory) };
     }
 };
 
-fn attend(layer: Layer, query: ops.Tensor, keys: ops.Tensor, values: ops.Tensor, spatial: usize) !ops.Tensor {
-    const r = layer.runtime;
+fn singleAttention(root: Layer, query: ops.Tensor, keys: ops.Tensor, values: ops.Tensor, spatial_rows: usize) !ops.Tensor {
+    const r = root.runtime;
     const width = r.config.hidden;
-    const q = try r.rope(try layer.linear("q_proj", query), 1, width, r.config.featureSide(), false, query.count / width);
-    const k = try r.rope(try layer.linear("k_proj", keys), 1, width, r.config.featureSide(), false, spatial);
-    const v = try layer.linear("v_proj", values);
+    const side = r.config.featureSide();
+    const q = try r.rope(try root.linear("q_proj", query), 1, width, side, false, query.count / width);
+    const k = try r.rope(try root.linear("k_proj", keys), 1, width, side, false, spatial_rows);
+    const v = try root.linear("v_proj", values);
     if (r.observer != null) {
-        try r.observe(try layer.named("q"), q, &.{ q.count / width, width });
-        try r.observe(try layer.named("k"), k, &.{ k.count / width, width });
-        try r.observe(try layer.named("v"), v, &.{ v.count / width, width });
+        for ([_][]const u8{ "q", "k", "v" }, [_]ops.Tensor{ q, k, v }) |label, tensor| {
+            try r.observe(try root.named(label), tensor, &.{ tensor.count / width, width });
+        }
     }
-    const attended = try r.attend(q, k, v, 1, width, null, false);
-    if (r.observer != null) try r.observe(try layer.named("attended"), attended, &.{ attended.count / width, width });
-    return layer.linear("out_proj", attended);
+    const context = try r.attend(q, k, v, 1, width, null, false);
+    if (r.observer != null) try r.observe(try root.named("attended"), context, &.{ context.count / width, width });
+    return root.linear("out_proj", context);
 }
 
-fn step(block: Layer, input: ops.Tensor, image: ops.Tensor, memories: Memories, index: usize) !ops.Tensor {
-    const r = block.runtime;
-    const side = r.config.featureSide();
+fn memoryLayer(root: Layer, input: ops.Tensor, image: ops.Tensor, retrieval: Retrieval, index: usize) !ops.Tensor {
+    const r = root.runtime;
     const width = r.config.hidden;
-    const norm = try block.norm("norm1", input, 1e-5);
-    var output: ops.Tensor = undefined;
+    const side = r.config.featureSide();
+    const norm1 = try root.norm("norm1", input, 1e-5);
     if (r.config.version == .sam3) {
-        output = try r.add(input, try attend(try block.child("self_attn"), norm, norm, norm, side * side));
-        const query = try block.norm("norm2", output, 1e-5);
-        output = try r.add(output, try attend(try block.child("cross_attn_image"), query, try r.add(memories.values, memories.positions), memories.values, memories.spatial));
-        const hidden = try block.feedForward(try block.norm("norm3", output, 1e-5), false);
-        return r.add(output, hidden);
+        const self_update = try singleAttention(try root.child("self_attn"), norm1, norm1, norm1, side * side);
+        const residual = try r.add(input, self_update);
+        const norm2 = try root.norm("norm2", residual, 1e-5);
+        const key = try r.add(retrieval.memory, retrieval.position);
+        const cross_update = try singleAttention(try root.child("cross_attn_image"), norm2, key, retrieval.memory, retrieval.spatial_rows);
+        const cross_residual = try r.add(residual, cross_update);
+        const norm3 = try root.norm("norm3", cross_residual, 1e-5);
+        return r.add(cross_residual, try root.feedForward(norm3, false));
     }
     const heads = r.config.tracker_heads;
-    const q = try r.rope(try block.linear("self_attn_q_proj", norm), heads, width, side, false, side * side);
-    const k = try r.rope(try block.linear("self_attn_k_proj", norm), heads, width, side, false, side * side);
-    const v = try block.linear("self_attn_v_proj", norm);
-    output = try r.add(input, try block.linear("self_attn_out_proj", try r.attend(q, k, v, heads, width, null, false)));
-    const query = try r.add(try block.linear("image_cross_attn_q_proj", image), try block.linear("cross_attn_q_proj", try block.norm("norm2", output, 1e-5)));
-    const key, const value = try memories.multiplexKeys(block, index);
-    const context = try r.attend(try r.rope(query, heads, width, side, false, side * side), try r.rope(key, heads, width, side, false, memories.spatial), value, heads, width, null, false);
-    output = try r.add(output, try block.linear("cross_attn_out_proj", context));
-    return r.add(output, try block.feedForward(try block.norm("norm3", output, 1e-5), true));
+    const q = try r.rope(try root.linear("self_attn_q_proj", norm1), heads, width, side, false, side * side);
+    const k = try r.rope(try root.linear("self_attn_k_proj", norm1), heads, width, side, false, side * side);
+    const v = try root.linear("self_attn_v_proj", norm1);
+    const self_update = try root.linear("self_attn_out_proj", try r.attend(q, k, v, heads, width, null, false));
+    const residual = try r.add(input, self_update);
+    const norm2 = try root.norm("norm2", residual, 1e-5);
+    const image_query = try root.linear("image_cross_attn_q_proj", image);
+    const memory_query = try root.linear("cross_attn_q_proj", norm2);
+    const query = try r.rope(try r.add(image_query, memory_query), heads, width, side, false, side * side);
+    const projected = try retrieval.projected(root, index);
+    const key = try r.rope(projected[0], heads, width, side, false, retrieval.spatial_rows);
+    const cross_update = try root.linear("cross_attn_out_proj", try r.attend(query, key, projected[1], heads, width, null, false));
+    const cross_residual = try r.add(residual, cross_update);
+    const norm3 = try root.norm("norm3", cross_residual, 1e-5);
+    return r.add(cross_residual, try root.feedForward(norm3, true));
 }
 
 fn observePlan(r: *ops.Runtime, history: []const Memory, plan: selection.Plan) !void {
     if (r.observer == null) return;
-    const mark = r.mark();
-    defer r.trim(mark, &.{});
-    const spatial = try r.alloc(plan.spatial.len * 2);
-    for (plan.spatial.constSlice(), 0..) |entry, at| {
-        spatial.slice(f32, spatial.count)[at * 2] = @floatFromInt(history[entry.history].index);
-        spatial.slice(f32, spatial.count)[at * 2 + 1] = @floatFromInt(entry.temporal);
+    const start = r.mark();
+    defer r.trim(start, &.{});
+    const lists = .{ plan.spatial.constSlice(), plan.pointers.constSlice() };
+    inline for (lists, .{ "tracker.spatial_plan", "tracker.pointer_plan" }) |entries, label| {
+        const tensor = try r.alloc(entries.len * 2);
+        const data = tensor.slice(f32, tensor.count);
+        for (entries, 0..) |entry, row| {
+            data[2 * row] = @floatFromInt(history[entry.history].index);
+            data[2 * row + 1] = @floatFromInt(if (@hasField(@TypeOf(entry), "temporal")) entry.temporal else entry.relative);
+        }
+        try r.observe(label, tensor, &.{ entries.len, 2 });
     }
-    try r.observe("tracker.spatial_plan", spatial, &.{ plan.spatial.len, 2 });
-    const pointers = try r.alloc(plan.pointers.len * 2);
-    for (plan.pointers.constSlice(), 0..) |entry, at| {
-        pointers.slice(f32, pointers.count)[at * 2] = @floatFromInt(history[entry.history].index);
-        pointers.slice(f32, pointers.count)[at * 2 + 1] = @floatFromInt(entry.relative);
-    }
-    try r.observe("tracker.pointer_plan", pointers, &.{ plan.pointers.len, 2 });
 }
 
 pub fn propagate(r: *ops.Runtime, features: [3]ops.Feature, history: []const Memory, index: usize, frames: usize, direction: selection.Direction, active: u16) !Result {
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
     const multiplex = r.config.version == .sam31;
     const plan = try selection.select(history, index, frames, direction, multiplex);
-    if (plan.pointers.len == 0 or plan.spatial.len == 0) return error.MissingConditioningFrame;
+    if (plan.spatial.len == 0 or plan.pointers.len == 0) return error.MissingConditioningFrame;
     try observePlan(r, history, plan);
-    const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-    const pointer_positions = try r.a.alloc(ops.Tensor, plan.pointers.len);
-    for (plan.pointers.constSlice(), pointer_positions) |entry, *encoded| encoded.* = try pointerPosition(owner, entry.relative, @min(frames, r.config.pointer_frames), history[entry.history].pointer.count);
+    const root = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
+    var phases: [19]ops.Tensor = undefined;
+    for (plan.pointers.constSlice(), 0..) |entry, row| {
+        phases[row] = try temporalPointer(root, entry.relative, @min(frames, r.config.pointer_frames), history[entry.history].pointer.count);
+    }
     const side = r.config.featureSide();
+    const shape = [_]usize{ 1, side, side, r.config.hidden };
     const spatial = try position.spatial(r, side, side, r.config.hidden);
     const memory_position = try position.spatial(r, side, side, r.config.memory_width);
-    try r.observe("tracker.position", spatial, &.{ 1, side, side, r.config.hidden });
+    try r.observe("tracker.position", spatial, &shape);
     try r.observe("tracker.memory_spatial_position", memory_position, &.{ 1, side, side, r.config.memory_width });
     if (!multiplex) {
         const keys = plan.spatial.len * side * side + plan.pointers.len * r.config.hidden / r.config.memory_width;
@@ -212,21 +238,21 @@ pub fn propagate(r: *ops.Runtime, features: [3]ops.Feature, history: []const Mem
     }
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
-    const memories = try Memories.gather(r, owner, history, plan, pointer_positions);
+    const retrieval = try Retrieval.assemble(root, history, plan, phases[0..plan.pointers.len]);
     var value = try r.add(features[2].tensor, try r.scale(spatial, 0.1));
-    try r.observe("tracker.input", value, &.{ 1, side, side, r.config.hidden });
-    try r.observe("tracker.memory", memories.values, &.{ memories.values.count / r.config.memory_width, r.config.memory_width });
-    try r.observe("tracker.memory_pos", memories.positions, &.{ memories.positions.count / r.config.memory_width, r.config.memory_width });
+    try r.observe("tracker.input", value, &shape);
+    try r.observe("tracker.memory", retrieval.memory, &.{ retrieval.memory.count / r.config.memory_width, r.config.memory_width });
+    try r.observe("tracker.memory_pos", retrieval.position, &.{ retrieval.position.count / r.config.memory_width, r.config.memory_width });
     const scratch = r.mark();
-    for (0..4) |layer_index| {
-        value = try step(try owner.indexed("transformer.encoder.layers", layer_index), value, features[2].tensor, memories, layer_index);
-        try r.observe(try r.name("tracker.layers.{d}.output", .{layer_index}), value, &.{ 1, side, side, r.config.hidden });
+    for (0..4) |layer| {
+        value = try memoryLayer(try root.indexed("transformer.encoder.layers", layer), value, features[2].tensor, retrieval, layer);
+        try r.observe(try r.name("tracker.layers.{d}.output", .{layer}), value, &shape);
         r.trim(scratch, &.{value});
     }
-    value = try owner.norm("transformer.encoder.norm", value, 1e-5);
-    try r.observe("tracker.output", value, &.{ 1, side, side, r.config.hidden });
+    value = try root.norm("transformer.encoder.norm", value, 1e-5);
+    try r.observe("tracker.output", value, &shape);
     try r.g.endBatch();
-    const output = try decoder.decode(r, features, value, .{ .multiplex = multiplex, .active = active });
-    r.trim(mark, &.{ output.masks.tensor, output.pointer });
-    return output;
+    const prediction = try decoder.decode(r, features, value, .{ .multiplex = multiplex, .active = active });
+    r.trim(start, &.{ prediction.masks.tensor, prediction.pointer });
+    return prediction;
 }

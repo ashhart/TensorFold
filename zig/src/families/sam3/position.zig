@@ -5,62 +5,70 @@ pub const Fourier = struct {
     matrix: ops.Tensor,
     width: usize,
 
-    pub fn init(r: *ops.Runtime, key: []const u8) !Fourier {
-        const matrix = try r.weight(key);
-        const width = r.config.hidden;
-        if (width % 2 != 0 or matrix.count != width) return error.SamFourierShape;
-        return .{ .matrix = matrix, .width = width };
+    pub fn init(runtime: *ops.Runtime, key: []const u8) !Fourier {
+        const geometry = try runtime.store.get(key);
+        const channels = runtime.config.hidden;
+        if (channels == 0 or channels % 2 != 0 or geometry.rank != 2 or
+            geometry.dim(0) != 2 or geometry.dim(1) != channels / 2) return error.SamFourierShape;
+        return .{ .matrix = try runtime.weight(key), .width = channels };
     }
 
-    pub fn write(self: Fourier, point: [2]f32, target: []f32) void {
-        std.debug.assert(target.len == self.width);
-        const count = self.width / 2;
-        const x = point[0] * 2 - 1;
-        const y = point[1] * 2 - 1;
-        for (0..count) |frequency| {
-            const angle = (2 * std.math.pi) * (x * self.matrix.get(frequency) + y * self.matrix.get(count + frequency));
-            target[frequency] = @sin(angle);
-            target[count + frequency] = @cos(angle);
+    pub fn write(self: Fourier, coordinate: [2]f32, row: []f32) void {
+        std.debug.assert(row.len == self.width);
+        const bands = self.width / 2;
+        const centred = [2]f32{ 2 * coordinate[0] - 1, 2 * coordinate[1] - 1 };
+        const sine = row[0..bands];
+        const cosine = row[bands..];
+        for (sine, cosine, 0..) |*s, *c, band| {
+            const projection = centred[0] * self.matrix.get(band) + centred[1] * self.matrix.get(bands + band);
+            const phase = (2 * std.math.pi) * projection;
+            s.* = @sin(phase);
+            c.* = @cos(phase);
         }
     }
 };
 
-pub fn grid(r: *ops.Runtime, key: []const u8) !ops.Tensor {
-    const cached_key = try r.name("position.grid.{s}", .{key});
-    if (r.constant(cached_key)) |cached| return cached;
-    const mapping = try Fourier.init(r, key);
-    const side = r.config.featureSide();
-    const result = try r.alloc(side * side * mapping.width);
-    const step: f32 = @floatFromInt(side);
-    for (0..side * side) |pixel| {
-        const xy = [2]f32{ (@as(f32, @floatFromInt(pixel % side)) + 0.5) / step, (@as(f32, @floatFromInt(pixel / side)) + 0.5) / step };
-        mapping.write(xy, result.slice(f32, result.count)[pixel * mapping.width ..][0..mapping.width]);
-    }
-    return r.remember(cached_key, result);
+pub fn grid(runtime: *ops.Runtime, matrix_key: []const u8) !ops.Tensor {
+    const key = try runtime.name("position.grid.{s}", .{matrix_key});
+    if (runtime.constant(key)) |value| return value;
+    const basis = try Fourier.init(runtime, matrix_key);
+    const side = runtime.config.featureSide();
+    const output = try runtime.alloc(side * side * basis.width);
+    const values = output.slice(f32, output.count);
+    const extent: f32 = @floatFromInt(side);
+    for (0..side) |y| for (0..side) |x| {
+        const coordinate = [2]f32{ (@as(f32, @floatFromInt(x)) + 0.5) / extent, (@as(f32, @floatFromInt(y)) + 0.5) / extent };
+        basis.write(coordinate, values[(y * side + x) * basis.width ..][0..basis.width]);
+    };
+    return runtime.remember(key, output);
 }
 
-pub fn spatial(r: *ops.Runtime, height: usize, width: usize, channels: usize) !ops.Tensor {
+fn spatialCoordinate(cell: usize, extent: usize) f32 {
+    const numerator: f32 = @floatFromInt(cell + 1);
+    const denominator = @as(f32, @floatFromInt(extent)) + 1e-6;
+    return numerator / denominator;
+}
+
+pub fn spatial(runtime: *ops.Runtime, height: usize, width: usize, channels: usize) !ops.Tensor {
     if (height < 2 or width < 2 or channels == 0 or channels % 4 != 0) return error.SamPositionShape;
-    const key = try r.name("position.spatial.{d}.{d}.{d}", .{ height, width, channels });
-    if (r.constant(key)) |cached| return cached;
-    const output = try r.alloc(height * width * channels);
-    const half = channels / 2;
-    for (0..height * width) |pixel| {
-        const coordinates = [2]f32{
-            spatialCoordinate(pixel / width, height),
-            spatialCoordinate(pixel % width, width),
-        };
-        for (0..channels) |channel| {
-            const exponent = @as(f32, @floatFromInt((channel % half) / 2 * 2)) / @as(f32, @floatFromInt(half));
-            const phase = coordinates[channel / half] * (2 * std.math.pi) / std.math.pow(f32, 10000, exponent);
-            output.slice(f32, output.count)[pixel * channels + channel] = if (channel % 2 == 0) @sin(phase) else @cos(phase);
+    const key = try runtime.name("position.spatial.{d}.{d}.{d}", .{ height, width, channels });
+    if (runtime.constant(key)) |value| return value;
+    const output = try runtime.alloc(height * width * channels);
+    const values = output.slice(f32, output.count);
+    const axis_width = channels / 2;
+    for (0..height) |y| for (0..width) |x| {
+        const row = values[(y * width + x) * channels ..][0..channels];
+        const axes = [2]f32{ spatialCoordinate(y, height), spatialCoordinate(x, width) };
+        for (axes, 0..) |coordinate, axis| {
+            for (0..axis_width / 2) |band| {
+                const exponent = @as(f32, @floatFromInt(2 * band)) / @as(f32, @floatFromInt(axis_width));
+                const phase = coordinate * (2 * std.math.pi) / std.math.pow(f32, 10000, exponent);
+                row[axis * axis_width + 2 * band] = @sin(phase);
+                row[axis * axis_width + 2 * band + 1] = @cos(phase);
+            }
         }
-    }
-    return r.remember(key, output);
-}
-
-fn spatialCoordinate(index: usize, extent: usize) f32 {
-    return @as(f32, @floatFromInt(index + 1)) / (@as(f32, @floatFromInt(extent)) + 1e-6);
+    };
+    return runtime.remember(key, output);
 }
 
 test "SAM spatial positions begin at the first cell and reach the normalized extent" {

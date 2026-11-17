@@ -8,149 +8,167 @@ const position = @import("position.zig");
 pub const Detection = struct { mask: ops.Feature, box: [4]f32, score: f32 };
 pub const Options = struct { threshold: f32 = 0.5, max_results: usize = 200 };
 
-const Scene = struct {
+fn attention(block: Layer, name: []const u8, query: ops.Tensor, key: ops.Tensor, value: ops.Tensor, bias: ?ops.Tensor) !ops.Tensor {
+    return block.runtime.mha(try block.named(name), query, key, value, 8, block.runtime.config.hidden, bias);
+}
+
+const Context = struct {
     image: ops.Tensor,
-    position: ops.Tensor,
+    grid: ops.Tensor,
     prompt: ops.Tensor,
 
-    fn encode(self: Scene, root: Layer) !ops.Tensor {
+    fn fuse(self: Context, root: Layer) !ops.Tensor {
         const r = root.runtime;
-        const mark = r.mark();
-        var image = self.image;
+        const start = r.mark();
+        var value = self.image;
         for (0..6) |index| {
-            const layer = try root.indexed("layers", index);
-            const normalized = try layer.norm("norm1", image, 1e-5);
-            const keys = try r.add(normalized, self.position);
-            image = try r.add(image, try attention(layer, "self_attn", keys, keys, normalized, null));
-            const query = try layer.norm("norm2", image, 1e-5);
-            image = try r.add(image, try attention(layer, "cross_attn_image", query, self.prompt, self.prompt, null));
-            image = try r.add(image, try layer.feedForward(try layer.norm("norm3", image, 1e-5), false));
-            r.trim(mark, &.{image});
+            const block = try root.indexed("layers", index);
+            const norm1 = try block.norm("norm1", value, 1e-5);
+            const spatial = try r.add(norm1, self.grid);
+            const local = try attention(block, "self_attn", spatial, spatial, norm1, null);
+            value = try r.add(value, local);
+            const norm2 = try block.norm("norm2", value, 1e-5);
+            const prompted = try attention(block, "cross_attn_image", norm2, self.prompt, self.prompt, null);
+            value = try r.add(value, prompted);
+            const norm3 = try block.norm("norm3", value, 1e-5);
+            value = try r.add(value, try block.feedForward(norm3, false));
+            r.trim(start, &.{value});
         }
-        return image;
+        return value;
     }
 };
 
-fn attention(layer: Layer, name: []const u8, q: ops.Tensor, k: ops.Tensor, v: ops.Tensor, bias: ?ops.Tensor) !ops.Tensor {
-    return layer.runtime.mha(try layer.named(name), q, k, v, 8, layer.runtime.config.hidden, bias);
-}
-
-const ObjectQueries = struct {
-    values: ops.Tensor,
+const Queries = struct {
+    tokens: ops.Tensor,
     boxes: ops.Tensor,
     count: usize,
 
-    fn init(root: Layer) !ObjectQueries {
+    fn initialize(root: Layer) !Queries {
         const r = root.runtime;
         const anchors = try root.parameter("reference_points.weight");
-        const learned = try root.parameter("query_embed.weight");
-        const count = anchors.count / 4;
-        if (anchors.count % 4 != 0 or count != 200 or learned.count != count * r.config.hidden) return error.SamConceptQueryShape;
-        return .{ .values = try r.concat(&.{ try root.parameter("presence_token.weight"), learned }), .boxes = try r.unary(anchors, 2), .count = count };
+        const symbols = try root.parameter("query_embed.weight");
+        if (anchors.count != 800 or symbols.count != 200 * r.config.hidden) return error.SamConceptQueryShape;
+        const presence = try root.parameter("presence_token.weight");
+        return .{ .tokens = try r.concat(&.{ presence, symbols }), .boxes = try r.unary(anchors, 2), .count = 200 };
     }
 
-    fn refine(self: *ObjectQueries, root: Layer, scene: Scene, memory: ops.Tensor) !void {
+    fn decode(self: *Queries, root: Layer, context: Context, memory: ops.Tensor) !void {
         const r = root.runtime;
         const width = r.config.hidden;
-        const mark = r.mark();
-        const empty = try r.alloc(width);
-        @memset(empty.slice(f32, width), 0);
+        const start = r.mark();
+        const presence_position = try r.alloc(width);
+        @memset(presence_position.slice(f32, width), 0);
         for (0..6) |index| {
-            const layer = try root.indexed("layers", index);
-            const locations = try root.mlp("ref_point_head", try geometry.boxEmbedding(r, self.boxes), 2);
-            const positional = try r.concat(&.{ empty, locations });
-            const keys = try r.add(self.values, positional);
-            var value = try layer.norm("norm2", try r.add(self.values, try attention(layer, "self_attn", keys, keys, self.values, null)), 1e-5);
-            value = try layer.norm("catext_norm", try r.add(value, try attention(layer, "ca_text", try r.add(value, positional), scene.prompt, scene.prompt, null)), 1e-5);
-            const spatial_keys = try r.add(memory, scene.position);
+            const block = try root.indexed("layers", index);
+            const fourier = try geometry.boxEmbedding(r, self.boxes);
+            const learned_position = try root.mlp("ref_point_head", fourier, 2);
+            const positions = try r.concat(&.{ presence_position, learned_position });
+            const positioned = try r.add(self.tokens, positions);
+            const local = try attention(block, "self_attn", positioned, positioned, self.tokens, null);
+            var value = try block.norm("norm2", try r.add(self.tokens, local), 1e-5);
+            const text_query = try r.add(value, positions);
+            const prompted = try attention(block, "ca_text", text_query, context.prompt, context.prompt, null);
+            value = try block.norm("catext_norm", try r.add(value, prompted), 1e-5);
+            const image_keys = try r.add(memory, context.grid);
             const bias = try geometry.boxBias(root, self.boxes);
-            value = try layer.norm("norm1", try r.add(value, try attention(layer, "cross_attn", try r.add(value, positional), spatial_keys, memory, bias)), 1e-5);
-            self.values = try layer.norm("norm3", try r.add(value, try layer.feedForward(value, false)), 1e-5);
-            const normalized = try root.norm("norm", ops.view(self.values, width, self.count * width), 1e-5);
-            self.boxes = try geometry.refine(r, self.boxes, try root.mlp("bbox_embed", normalized, 3));
-            r.trim(mark, &.{ empty, self.values, self.boxes });
+            const image_query = try r.add(value, positions);
+            const localized = try attention(block, "cross_attn", image_query, image_keys, memory, bias);
+            value = try block.norm("norm1", try r.add(value, localized), 1e-5);
+            self.tokens = try block.norm("norm3", try r.add(value, try block.feedForward(value, false)), 1e-5);
+            const objects = try root.norm("norm", ops.view(self.tokens, width, self.count * width), 1e-5);
+            self.boxes = try geometry.refine(r, self.boxes, try root.mlp("bbox_embed", objects, 3));
+            r.trim(start, &.{ presence_position, self.tokens, self.boxes });
         }
     }
 };
 
 const Candidate = struct {
-    query: usize,
+    index: usize,
     score: f32,
 
-    fn before(_: void, left: Candidate, right: Candidate) bool {
-        return left.score > right.score or (left.score == right.score and left.query < right.query);
+    fn higher(_: void, a: Candidate, b: Candidate) bool {
+        if (a.score == b.score) return a.index < b.index;
+        return a.score > b.score;
     }
 };
 
-fn rank(root: Layer, prompt: ops.Tensor, objects: ObjectQueries, normalized: ops.Tensor, options: Options) ![]Candidate {
+fn classify(root: Layer, prompt: ops.Tensor, queries: Queries, normalized: ops.Tensor, options: Options) ![]Candidate {
     const r = root.runtime;
     const width = r.config.hidden;
     const scorer = Layer{ .runtime = r, .prefix = "detector.dot_prod_scoring" };
-    const transformed = try scorer.norm("prompt_mlp.out_norm", try r.add(prompt, try scorer.mlp("prompt_mlp", prompt, 2)), 1e-5);
+    const prompt_update = try scorer.mlp("prompt_mlp", prompt, 2);
+    const prompt_hidden = try scorer.norm("prompt_mlp.out_norm", try r.add(prompt, prompt_update), 1e-5);
     const pool = try r.alloc(width);
+    const length = prompt.count / width;
     for (pool.slice(f32, width), 0..) |*value, channel| {
         var sum: f32 = 0;
-        for (0..prompt.count / width) |token| sum += transformed.get(token * width + channel);
-        value.* = sum / @as(f32, @floatFromInt(prompt.count / width));
+        for (0..length) |row| sum += prompt_hidden.get(row * width + channel);
+        value.* = sum / @as(f32, @floatFromInt(length));
     }
     const text = try scorer.linear("prompt_proj", pool);
-    const image = try scorer.linear("hs_proj", normalized);
-    const presence = try root.norm("presence_token_out_norm", ops.view(objects.values, 0, width), 1e-5);
-    const present = try root.mlp("presence_token_head", presence, 3);
-    const probability = 1 / (1 + @exp(-present.get(0)));
-    const candidates = try r.a.alloc(Candidate, objects.count);
-    var accepted: usize = 0;
-    for (0..objects.count) |query| {
+    const objects = try scorer.linear("hs_proj", normalized);
+    const presence = try root.norm("presence_token_out_norm", ops.view(queries.tokens, 0, width), 1e-5);
+    const logit = try root.mlp("presence_token_head", presence, 3);
+    const probability = 1 / (1 + @exp(-logit.get(0)));
+    const candidates = try r.a.alloc(Candidate, queries.count);
+    var count: usize = 0;
+    for (0..queries.count) |index| {
         var dot: f32 = 0;
-        for (0..width) |channel| dot += text.get(channel) * image.get(query * width + channel);
-        const score = probability / (1 + @exp(-std.math.clamp(dot / @sqrt(@as(f32, @floatFromInt(width))), -12, 12)));
+        for (0..width) |channel| dot += text.get(channel) * objects.get(index * width + channel);
+        const scaled = dot / @sqrt(@as(f32, @floatFromInt(width)));
+        const score = probability / (1 + @exp(-std.math.clamp(scaled, -12, 12)));
         if (score < options.threshold) continue;
-        candidates[accepted] = .{ .query = query, .score = score };
-        accepted += 1;
+        candidates[count] = .{ .index = index, .score = score };
+        count += 1;
     }
-    std.mem.sort(Candidate, candidates[0..accepted], {}, Candidate.before);
-    return candidates[0..@min(accepted, options.max_results)];
+    std.mem.sort(Candidate, candidates[0..count], {}, Candidate.higher);
+    return candidates[0..@min(count, options.max_results)];
 }
 
 pub fn detect(r: *ops.Runtime, features: [3]ops.Feature, text: ops.Tensor, options: Options) ![]Detection {
-    if (!std.math.isFinite(options.threshold) or options.threshold < 0 or options.threshold > 1 or options.max_results == 0 or options.max_results > 200)
-        return error.InvalidDetectionOptions;
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
-    const spatial = try position.spatial(r, features[2].height, features[2].width, r.config.hidden);
-    const scene = Scene{
-        .image = features[2].tensor,
-        .position = spatial,
-        .prompt = try r.concat(&.{ text, try geometry.classToken(r, features[2].tensor, spatial) }),
-    };
-    const encoder = Layer{ .runtime = r, .prefix = "detector.transformer.encoder" };
-    const decoder = Layer{ .runtime = r, .prefix = "detector.transformer.decoder" };
-    const memory = try scene.encode(encoder);
-    var objects = try ObjectQueries.init(decoder);
-    try objects.refine(decoder, scene, memory);
-    const normalized = try decoder.norm("norm", ops.view(objects.values, r.config.hidden, objects.count * r.config.hidden), 1e-5);
-    const selected = try rank(decoder, scene.prompt, objects, normalized, options);
-    const output = try r.a.alloc(Detection, selected.len);
-    if (selected.len == 0) {
-        r.trim(mark, &.{});
-        return output;
+    if (!std.math.isFinite(options.threshold) or options.threshold < 0 or options.threshold > 1 or
+        options.max_results < 1 or options.max_results > 200) return error.InvalidDetectionOptions;
+    if (text.count == 0 or text.count % r.config.hidden != 0) return error.SamConceptQueryShape;
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
+    const grid = try position.spatial(r, features[2].height, features[2].width, r.config.hidden);
+    const class_token = try geometry.classToken(r, features[2].tensor, grid);
+    const context = Context{ .image = features[2].tensor, .grid = grid, .prompt = try r.concat(&.{ text, class_token }) };
+    const root = Layer{ .runtime = r, .prefix = "detector.transformer" };
+    const encoder = try root.child("encoder");
+    const decoder = try root.child("decoder");
+    const memory = try context.fuse(encoder);
+    var queries = try Queries.initialize(decoder);
+    try queries.decode(decoder, context, memory);
+    const width = r.config.hidden;
+    const normalized = try decoder.norm("norm", ops.view(queries.tokens, width, queries.count * width), 1e-5);
+    const candidates = try classify(decoder, context.prompt, queries, normalized, options);
+    const results = try r.a.alloc(Detection, candidates.len);
+    if (results.len == 0) {
+        r.trim(start, &.{});
+        return results;
     }
-    const chosen = try r.alloc(selected.len * r.config.hidden);
-    for (selected, 0..) |candidate, index| for (0..r.config.hidden) |channel| {
-        chosen.slice(f32, chosen.count)[index * r.config.hidden + channel] = normalized.get(candidate.query * r.config.hidden + channel);
-    };
-    const pixels = try masks.pixels(r, features, memory, scene.prompt);
-    const logits = try masks.classify(r, pixels, chosen);
-    const retained = try r.a.alloc(ops.Tensor, selected.len);
-    for (selected, output, retained, 0..) |candidate, *result, *keep, index| {
-        const box = ops.view(objects.boxes, candidate.query * 4, 4);
-        const cx = box.get(0);
-        const cy = box.get(1);
-        const rx = box.get(2) * 0.5;
-        const ry = box.get(3) * 0.5;
-        keep.* = try r.columns(logits.tensor, pixels.height * pixels.width, selected.len, index, 1);
-        result.* = .{ .mask = ops.feature(keep.*, pixels.height, pixels.width, 1), .box = .{ cx - rx, cy - ry, cx + rx, cy + ry }, .score = candidate.score };
+    const selected = try r.alloc(results.len * width);
+    const data = selected.slice(f32, selected.count);
+    for (candidates, 0..) |candidate, row| {
+        for (data[row * width ..][0..width], 0..) |*value, channel| value.* = normalized.get(candidate.index * width + channel);
     }
-    r.trim(mark, retained);
-    return output;
+    const image = try masks.pixels(r, features, memory, context.prompt);
+    const logits = try masks.classify(r, image, selected);
+    const retained = try r.a.alloc(ops.Tensor, results.len);
+    for (candidates, results, retained, 0..) |candidate, *result, *keep, column| {
+        keep.* = try r.columns(logits.tensor, image.height * image.width, results.len, column, 1);
+        const offset = 4 * candidate.index;
+        const cx = queries.boxes.get(offset);
+        const cy = queries.boxes.get(offset + 1);
+        const rx = 0.5 * queries.boxes.get(offset + 2);
+        const ry = 0.5 * queries.boxes.get(offset + 3);
+        result.* = .{
+            .mask = ops.feature(keep.*, image.height, image.width, 1),
+            .box = .{ cx - rx, cy - ry, cx + rx, cy + ry },
+            .score = candidate.score,
+        };
+    }
+    r.trim(start, retained);
+    return results;
 }

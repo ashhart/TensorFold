@@ -1,4 +1,5 @@
 const std = @import("std");
+extern "c" fn erfc(f64) f64;
 const gpu = @import("tensor_metal");
 const ops = gpu.ops;
 const Tensor = gpu.Tensor;
@@ -7,6 +8,101 @@ const Runtime = @import("ops.zig");
 const Rope = Runtime.Rope;
 const Conv = Runtime.Conv;
 const flash = Runtime.flash;
+
+fn checkGeluTails(g: *gpu.Gpu) !void {
+    const values = [_]f32{ -8, -7, -6.5, -6, -5.5, -5.25, -5, -4.5, -4, -3, -2, -1, -0.5 };
+    const input = try g.alloc(values.len, .f32);
+    defer input.deinit();
+    @memcpy(input.slice(f32, values.len), &values);
+    const output = try g.allocDevice(values.len, .f32);
+    defer output.deinit();
+    try g.dispatch("im_sam_gelu", &.{ input, output }, @as(u32, @intCast(values.len)), Size.of(values.len, 1, 1), Size.of(256, 1, 1));
+    var maximum: f64 = 0;
+    for (values, 0..) |value, index| {
+        const x: f64 = value;
+        const reference = 0.5 * x * erfc(-x / @sqrt(@as(f64, 2)));
+        const error_ = @abs(reference - output.get(index));
+        const bound = 4 * std.math.floatEps(f32) * @abs(reference);
+        if (!std.math.isFinite(output.get(index)) or error_ > bound) {
+            std.debug.print("SAM GELU at {d}: got {e}, FP64 {e}, error {e}, bound {e}\n", .{ value, output.get(index), reference, error_, bound });
+            return error.SamGeluTailPrecision;
+        }
+        maximum = @max(maximum, error_);
+    }
+    std.debug.print("SAM GELU negative tails: {d} FP64 witnesses pass, maximum absolute error {e}\n", .{ values.len, maximum });
+}
+
+fn checkProjectionDomains(g: *gpu.Gpu) !void {
+    const x = try g.alloc(16, .f32);
+    defer x.deinit();
+    const bias = try g.alloc(16, .f32);
+    defer bias.deinit();
+    const domain = try g.alloc(7, .f32);
+    defer domain.deinit();
+    @memset(bias.slice(f32, bias.count), 0);
+    for ([_]gpu.DType{ .f16, .f32 }) |dtype| {
+        const weight = try g.alloc(16 * 16, dtype);
+        defer weight.deinit();
+        for (0..weight.count) |i| {
+            const value: f32 = if (i % 3 == 0) 0x1p-24 else 1;
+            if (dtype == .f16) weight.slice(f16, weight.count)[i] = @floatCast(value) else weight.slice(f32, weight.count)[i] = value;
+        }
+        for ([_]f32{ 0x1p-79, 0x1p-80, 0x1p-56, std.math.inf(f32) }, 0..) |value, index| {
+            @memset(x.slice(f32, x.count), value);
+            @memset(domain.slice(u32, domain.count), 0);
+            try g.dispatch(if (dtype == .f16) "sam_dense_half_domain" else "sam_dense_device_domain", &.{ x, weight, bias, domain }, [3]u32{ 1, 16, 16 }, Size.of(512, 1, 1), Size.of(128, 1, 1));
+            try g.dispatch("sam_dense_device_plan", &.{domain}, [3]u32{ 1, 16, 16 }, Size.of(1, 1, 1), Size.of(128, 1, 1));
+            const fallback = domain.slice(u32, domain.count)[0] != 0;
+            if (fallback != (index == 1 or index == 3)) {
+                std.debug.print("SAM {s} projection domain at {e}: fallback {}\n", .{ @tagName(dtype), value, fallback });
+                return error.SamProjectionDomain;
+            }
+        }
+        if (dtype == .f32) {
+            @memset(x.slice(f32, x.count), 0x1p-56);
+            weight.slice(f32, weight.count)[0] = 1 + 0x1p-20;
+            @memset(domain.slice(u32, domain.count), 0);
+            try g.dispatch("sam_dense_device_domain", &.{ x, weight, bias, domain }, [3]u32{ 1, 16, 16 }, Size.of(512, 1, 1), Size.of(128, 1, 1));
+            try g.dispatch("sam_dense_device_plan", &.{domain}, [3]u32{ 1, 16, 16 }, Size.of(1, 1, 1), Size.of(128, 1, 1));
+            if (domain.slice(u32, domain.count)[0] != 1) return error.SamProjectionDomain;
+        }
+    }
+    std.debug.print("SAM projection domains: exact half coefficients admit normal-product tails and retain fallbacks\n", .{});
+}
+
+fn checkExpansionTinyInput(g: *gpu.Gpu) !void {
+    const rows = 64;
+    const cols = 128;
+    const depth = 256;
+    const x = try g.alloc(rows * depth, .f32);
+    defer x.deinit();
+    const w = try g.alloc(cols * depth, .f32);
+    defer w.deinit();
+    const bias = try g.alloc(cols, .f32);
+    defer bias.deinit();
+    for (x.slice(f32, x.count), 0..) |*value, i| value.* = @sin(@as(f32, @floatFromInt(i % 997)) * 0.037);
+    for (w.slice(f32, w.count), 0..) |*value, i| value.* = @as(f16, @floatCast(@cos(@as(f32, @floatFromInt(i % 991)) * 0.017)));
+    for (bias.slice(f32, cols), 0..) |*value, i| value.* = @as(f32, @floatFromInt(i)) / 256;
+    x.slice(f32, x.count)[5 * depth + 17] = 0x1p-40;
+    try g.beginBatch();
+    errdefer if (g.batch != null) g.endBatch() catch {};
+    const actual = try @import("dense_expansion.zig").run(g, x, w, bias, rows, cols, depth, false);
+    defer actual.deinit();
+    try g.endBatch();
+    var worst: f64 = 0;
+    for (0..rows) |row| for (0..cols) |col| {
+        var expected: f64 = bias.get(col);
+        var magnitude: f64 = @abs(expected);
+        for (0..depth) |k| {
+            const term = @as(f64, x.get(row * depth + k)) * w.get(col * depth + k);
+            expected += term;
+            magnitude += @abs(term);
+        }
+        worst = @max(worst, @abs(expected - actual.get(row * cols + col)) / (8 * std.math.floatEps(f32) * magnitude));
+    };
+    std.debug.print("SAM exact expansion with one input below 2^-36: worst float64 oracle error {d:.3} of its 8-epsilon magnitude bound\n", .{worst});
+    if (!(worst <= 1)) return error.SamExpansionTinyInput;
+}
 
 pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
@@ -42,6 +138,9 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (replay) g.attention_two_pass = two_pass;
     if (replay) return @import("attention_replay.zig").run(init, &g, args[2..]);
     if (args.len == 2) return benchmark(&g);
+    try checkGeluTails(&g);
+    try checkProjectionDomains(&g);
+    try checkExpansionTinyInput(&g);
     try checkExactWeightProducts(&g);
     for ([_]usize{ 32, 256, 4736 }) |depth| {
         const x = try g.alloc(64 * depth, .f16);

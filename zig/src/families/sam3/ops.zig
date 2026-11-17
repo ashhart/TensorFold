@@ -188,6 +188,10 @@ pub const Runtime = struct {
         const weight_key = try self.name("{s}.weight", .{key});
         const source = try self.store.get(weight_key);
         const b = try self.weight(try self.name("{s}.bias", .{key}));
+        if (!activate and source.dtype == .f16 and std.mem.endsWith(u8, key, ".mlp.fc2")) {
+            const w = try self.weight(weight_key);
+            return self.own(try @import("dense_device.zig").run(self.g, x, w, b, x.count / width, b.count, width, .nk_compensated));
+        }
         if (!activate and source.dtype == .f16) {
             const half_weight = try self.own(try self.g.weight(source, .f16));
             return self.own(try @import("dense_device.zig").run(self.g, x, half_weight, b, x.count / width, b.count, width, .nk_half));

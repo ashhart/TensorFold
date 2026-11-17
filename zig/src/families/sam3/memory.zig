@@ -1,3 +1,4 @@
+const std = @import("std");
 const ops = @import("ops.zig");
 const decoder = @import("decoder.zig");
 const Layer = @import("layers.zig").Layer;
@@ -16,39 +17,33 @@ pub const Memory = struct {
 
     pub fn retained(self: Memory, destination: *[11]ops.Tensor) []const ops.Tensor {
         destination[0] = self.pointer;
-        var count: usize = 1;
-        if (self.spatial_live) {
-            destination[1] = self.encoded;
-            destination[2] = self.image;
-            count = 3;
-            if (self.projected) |cache| for (cache) |layer| {
-                destination[count] = layer.key;
-                destination[count + 1] = layer.value;
-                count += 2;
-            };
+        if (!self.spatial_live) return destination[0..1];
+        destination[1] = self.encoded;
+        destination[2] = self.image;
+        var length: usize = 3;
+        if (self.projected) |entries| {
+            for (entries) |entry| {
+                destination[length..][0..2].* = .{ entry.key, entry.value };
+                length += 2;
+            }
         }
-        return destination[0..count];
+        return destination[0..length];
     }
 
-    pub fn release(self: Memory, r: *ops.Runtime) void {
-        var tensors: [11]ops.Tensor = undefined;
-        for (self.retained(&tensors)) |tensor| r.release(tensor);
+    pub fn release(self: Memory, runtime: *ops.Runtime) void {
+        var storage: [11]ops.Tensor = undefined;
+        for (self.retained(&storage)) |tensor| runtime.release(tensor);
     }
 
-    pub fn expireSpatial(self: *Memory, r: *ops.Runtime) void {
-        if (!self.spatial_live) return;
-        var tensors: [11]ops.Tensor = undefined;
-        for (self.retained(&tensors)[1..]) |tensor| r.release(tensor);
-        self.projected = null;
-        self.spatial_live = false;
+    pub fn expireSpatial(self: *Memory, runtime: *ops.Runtime) void {
+        if (self.spatial_live) {
+            var storage: [11]ops.Tensor = undefined;
+            for (self.retained(&storage)[1..]) |tensor| runtime.release(tensor);
+            self.spatial_live = false;
+            self.projected = null;
+        }
     }
 };
-
-fn snapshot(r: *ops.Runtime, tensor: ops.Tensor) !ops.Tensor {
-    const output = try r.own(try r.g.allocDedicated(tensor.count, tensor.dtype));
-    try r.g.dispatch("im_sam_copy", &.{ tensor, output }, @as(u32, @intCast(tensor.count)), Size.of(tensor.count, 1, 1), Size.of(256, 1, 1));
-    return output;
-}
 
 pub const MaskParams = extern struct {
     pixels: u32,
@@ -60,40 +55,34 @@ pub const MaskParams = extern struct {
     bias: f32,
 };
 
-const Encoder = struct {
-    owner: Layer,
-    backbone: Layer,
+const Packing = struct {
     multiplex: bool,
     sparse: bool,
 
-    fn singleMask(self: Encoder, active: u16) !bool {
-        if (!self.multiplex or active != 1) return false;
-        const network = try self.backbone.child("mask_downsampler.encoder");
-        const weight = try network.parameter("0.weight");
-        // Keep the dense path for exceptional weights and unsafe FP32 product ranges.
-        return sparseWeights(weight.slice(f32, weight.count));
-    }
-
-    fn absence(self: Encoder, prediction: decoder.Result, active: u16) !ops.Tensor {
-        const r = self.owner.runtime;
-        const embedding = try self.owner.parameter("no_obj_embed_spatial");
-        const output = try r.alloc(r.config.memory_width);
-        @memset(output.slice(f32, output.count), 0);
-        for (0..r.config.bucket_size) |slot| {
-            if (active & (@as(u16, 1) << @intCast(slot)) != 0 and prediction.scores[slot] > 0) continue;
-            for (output.slice(f32, output.count), 0..) |*value, channel| value.* += embedding.get(slot * output.count + channel);
+    fn of(root: Layer, active: u16) !Packing {
+        const multiplex = root.runtime.config.version == .sam31;
+        var sparse = false;
+        if (multiplex and active == 1) {
+            const weights = try root.parameter("maskmem_backbone.mask_downsampler.encoder.0.weight");
+            sparse = sparseWeights(weights.slice(f32, weights.count));
         }
-        return output;
+        return .{ .multiplex = multiplex, .sparse = sparse };
     }
 
-    fn masks(self: Encoder, input: ops.Feature, active: u16, conditioning: u16, hard: bool) !ops.Feature {
-        const r = self.owner.runtime;
+    fn input(self: Packing, root: Layer, prediction: decoder.Result, active: u16, conditioning: u16, hard: bool) !ops.Feature {
+        const r = root.runtime;
+        var mask = prediction.input_masks orelse prediction.masks;
+        if (self.sparse) {
+            const column = try r.columns(mask.tensor, mask.height * mask.width, r.config.bucket_size, 0, 1);
+            mask = ops.feature(column, mask.height, mask.width, 1);
+        }
         const side = r.config.image_size;
-        const resized = try r.resize(input, side, side, true);
-        const channels: usize = if (self.multiplex and !self.sparse) r.config.bucket_size * 2 else 1;
+        if (prediction.input_masks != null) mask = try r.resize(mask, side, side, true);
+        mask = try r.resize(mask, side, side, true);
+        const channels = if (self.multiplex and !self.sparse) 2 * r.config.bucket_size else 1;
         const output = try r.device(side * side * channels);
         if (self.sparse and r.precision != .fp32) {
-            try r.g.dispatch("im_sam_mask_values", &.{ resized.tensor, output }, @as(u32, @intCast(side * side)), Size.of(output.count, 1, 1), Size.of(256, 1, 1));
+            try r.g.dispatch("im_sam_mask_values", &.{ mask.tensor, output }, @as(u32, @intCast(side * side)), Size.of(output.count, 1, 1), Size.of(256, 1, 1));
         } else {
             const parameters = MaskParams{
                 .pixels = @intCast(side * side),
@@ -104,108 +93,133 @@ const Encoder = struct {
                 .scale = if (self.multiplex) 2 else 20,
                 .bias = if (self.multiplex) -1 else -10,
             };
-            try r.g.dispatch("im_sam_memory_masks", &.{ resized.tensor, output }, parameters, Size.of(output.count, 1, 1), Size.of(256, 1, 1));
+            try r.g.dispatch("im_sam_memory_masks", &.{ mask.tensor, output }, parameters, Size.of(output.count, 1, 1), Size.of(256, 1, 1));
         }
-        const encoded = ops.feature(output, side, side, channels);
-        return r.resize(encoded, r.config.featureSide() * 16, r.config.featureSide() * 16, true);
+        const extent = 16 * r.config.featureSide();
+        return r.resize(ops.feature(output, side, side, channels), extent, extent, true);
     }
 
-    fn downsample(self: Encoder, input_mask: ops.Feature, conditioning: u16, keep: ops.Tensor, mark: usize) !ops.Feature {
-        const r = self.owner.runtime;
-        const network = try self.backbone.child("mask_downsampler.encoder");
-        var image = input_mask;
-        for (0..4) |stage| {
-            const convolution = try r.name("{d}", .{stage * 3});
-            if (stage == 0 and self.sparse) {
-                const side = image.height / 2;
+    fn downsample(self: Packing, root: Layer, mask: ops.Feature, conditioning: u16, absence: ops.Tensor, start: usize) !ops.Feature {
+        const r = root.runtime;
+        const network = try root.child("maskmem_backbone.mask_downsampler.encoder");
+        var value = mask;
+        for (0..4) |level| {
+            if (level != 0 or !self.sparse) {
+                value = try r.conv(try network.named(try r.name("{d}", .{3 * level})), value, 2, 1, false, false);
+            } else {
+                const weights = try network.parameter("0.weight");
                 const bias = try network.parameter("0.bias");
-                const output = try r.device(side * side * bias.count);
-                try r.g.dispatch("im_sam_mask_downsample", &.{ image.tensor, try network.parameter("0.weight"), bias, output }, @as(u32, @intFromBool(conditioning & 1 != 0)), Size.of(output.count, 1, 1), Size.of(256, 1, 1));
-                image = ops.feature(output, side, side, bias.count);
-            } else image = try r.conv(try network.named(convolution), image, 2, 1, false, false);
-            image.tensor = try r.gelu(try network.norm(try r.name("{d}", .{stage * 3 + 1}), image.tensor, 1e-6));
-            r.trim(mark, &.{ image.tensor, keep });
+                const extent = value.height / 2;
+                const tensor = try r.device(extent * extent * bias.count);
+                try r.g.dispatch("im_sam_mask_downsample", &.{ value.tensor, weights, bias, tensor }, @as(u32, @intFromBool(conditioning & 1 != 0)), Size.of(tensor.count, 1, 1), Size.of(256, 1, 1));
+                value = ops.feature(tensor, extent, extent, bias.count);
+            }
+            value.tensor = try network.norm(try r.name("{d}", .{3 * level + 1}), value.tensor, 1e-6);
+            value.tensor = try r.gelu(value.tensor);
+            r.trim(start, &.{ value.tensor, absence });
         }
-        return r.conv(try network.named("12"), image, 1, 0, false, false);
-    }
-
-    fn fuse(self: Encoder, image: ops.Tensor, mask: ops.Feature) !ops.Tensor {
-        const r = self.owner.runtime;
-        const side = r.config.featureSide();
-        const projected = try r.conv(try self.backbone.named("pix_feat_proj"), ops.feature(image, side, side, r.config.hidden), 1, 0, false, false);
-        var output = ops.feature(try r.add(mask.tensor, projected.tensor), side, side, projected.channels);
-        for (0..2) |stage| {
-            const block = try self.backbone.indexed("fuser.layers", stage);
-            const residual = output.tensor;
-            const spatial = try r.conv(try block.named("dwconv"), output, 1, 3, false, true);
-            const normalized = try block.norm("norm", spatial.tensor, 1e-6);
-            const expanded = try r.gelu(try block.linear("pwconv1", normalized));
-            const contracted = try block.linear("pwconv2", expanded);
-            output.tensor = try r.add(residual, try r.mul(contracted, try block.parameter("gamma")));
-        }
-        if (r.store.has(try self.backbone.named("out_proj.weight")))
-            output = try r.conv(try self.backbone.named("out_proj"), output, 1, 0, false, false);
-        return output.tensor;
-    }
-
-    fn projections(self: Encoder, image: ops.Tensor, encoded: ops.Tensor) !?[4]Projected {
-        if (!self.multiplex or self.owner.runtime.precision != .mixed) return null;
-        const r = self.owner.runtime;
-        var cache: [4]Projected = undefined;
-        for (&cache, 0..) |*entry, index| {
-            const mark = r.mark();
-            const block = try self.owner.indexed("transformer.encoder.layers", index);
-            const image_key = try block.linear("image_cross_attn_k_proj", image);
-            entry.key = try snapshot(r, try r.add(image_key, try block.linear("cross_attn_k_proj", encoded)));
-            entry.value = try snapshot(r, try block.linear("cross_attn_v_proj", encoded));
-            r.trim(mark, &.{ entry.key, entry.value });
-        }
-        return cache;
+        return r.conv(try network.named("12"), value, 1, 0, false, false);
     }
 };
 
+fn absentEmbedding(root: Layer, prediction: decoder.Result, active: u16) !ops.Tensor {
+    const r = root.runtime;
+    const symbols = try root.parameter("no_obj_embed_spatial");
+    const result = try r.alloc(r.config.memory_width);
+    const row = result.slice(f32, result.count);
+    @memset(row, 0);
+    for (0..r.config.bucket_size) |slot| {
+        const visible = active & (@as(u16, 1) << @intCast(slot)) != 0 and prediction.scores[slot] > 0;
+        if (!visible) for (row, 0..) |*value, channel| {
+            value.* += symbols.get(slot * row.len + channel);
+        };
+    }
+    return result;
+}
+
+fn fuseImage(root: Layer, mask: ops.Feature, image: ops.Tensor) !ops.Tensor {
+    const r = root.runtime;
+    const network = try root.child("maskmem_backbone");
+    const side = r.config.featureSide();
+    const pixels = ops.feature(image, side, side, r.config.hidden);
+    var fused = try r.conv(try network.named("pix_feat_proj"), pixels, 1, 0, false, false);
+    fused.tensor = try r.add(mask.tensor, fused.tensor);
+    for (0..2) |index| {
+        const block = try network.indexed("fuser.layers", index);
+        const spatial = try r.conv(try block.named("dwconv"), fused, 1, 3, false, true);
+        const normalized = try block.norm("norm", spatial.tensor, 1e-6);
+        const expansion = try r.gelu(try block.linear("pwconv1", normalized));
+        const update = try block.linear("pwconv2", expansion);
+        const weighted = try r.mul(update, try block.parameter("gamma"));
+        fused.tensor = try r.add(fused.tensor, weighted);
+    }
+    if (r.store.has(try network.named("out_proj.weight"))) {
+        fused = try r.conv(try network.named("out_proj"), fused, 1, 0, false, false);
+    }
+    return fused.tensor;
+}
+
+fn snapshot(runtime: *ops.Runtime, tensor: ops.Tensor) !ops.Tensor {
+    const copy = try runtime.own(try runtime.g.allocDedicated(tensor.count, tensor.dtype));
+    try runtime.g.dispatch("im_sam_copy", &.{ tensor, copy }, @as(u32, @intCast(tensor.count)), Size.of(tensor.count, 1, 1), Size.of(256, 1, 1));
+    return copy;
+}
+
+fn projectionCache(root: Layer, image: ops.Tensor, memory: ops.Tensor) !?[4]Projected {
+    const r = root.runtime;
+    if (r.config.version != .sam31 or r.precision != .mixed) return null;
+    var entries: [4]Projected = undefined;
+    for (0..entries.len) |index| {
+        const start = r.mark();
+        const layer = try root.indexed("transformer.encoder.layers", index);
+        const image_key = try layer.linear("image_cross_attn_k_proj", image);
+        const memory_key = try layer.linear("cross_attn_k_proj", memory);
+        const key = try snapshot(r, try r.add(image_key, memory_key));
+        const value = try snapshot(r, try layer.linear("cross_attn_v_proj", memory));
+        entries[index] = .{ .key = key, .value = value };
+        r.trim(start, &.{ key, value });
+    }
+    return entries;
+}
+
 pub fn encode(r: *ops.Runtime, image: ops.Tensor, prediction: decoder.Result, active: u16, conditioning: u16, from_points: bool, index: usize) !Memory {
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
-    const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-    var encoder = Encoder{ .owner = owner, .backbone = try owner.child("maskmem_backbone"), .multiplex = r.config.version == .sam31, .sparse = false };
-    encoder.sparse = try encoder.singleMask(active);
-    const absent = try encoder.absence(prediction, active);
-    var mask = prediction.input_masks orelse prediction.masks;
-    if (encoder.sparse) mask = ops.feature(try r.columns(mask.tensor, mask.height * mask.width, r.config.bucket_size, 0, 1), mask.height, mask.width, 1);
-    if (prediction.input_masks != null) mask = try r.resize(mask, r.config.image_size, r.config.image_size, true);
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
+    const root = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
+    const packing = try Packing.of(root, active);
+    const absent = try absentEmbedding(root, prediction, active);
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
-    const memory_mask = try encoder.masks(mask, active, conditioning, from_points);
-    try r.observe("tracker.memory_mask_input", memory_mask.tensor, &.{ 1, memory_mask.height, memory_mask.width, memory_mask.channels });
-    const down = try encoder.downsample(memory_mask, conditioning, absent, mark);
-    const encoded = try r.add(try encoder.fuse(image, down), absent);
+    const mask = try packing.input(root, prediction, active, conditioning, from_points);
+    try r.observe("tracker.memory_mask_input", mask.tensor, &.{ 1, mask.height, mask.width, mask.channels });
+    const reduced = try packing.downsample(root, mask, conditioning, absent, start);
+    const encoded = try r.add(try fuseImage(root, reduced, image), absent);
     const visible = if (prediction.scores[0] > 0) 2 / (1 + @exp(-prediction.scores[0])) - 1 else 0;
-    const memory = Memory{
+    const result = Memory{
         .index = index,
         .conditioning = conditioning != 0,
         .encoded = encoded,
         .image = try snapshot(r, image),
         .pointer = try snapshot(r, prediction.pointer),
         .score = visible * prediction.ious[0],
-        .projected = try encoder.projections(image, encoded),
+        .projected = try projectionCache(root, image, encoded),
     };
-    var retained: [11]ops.Tensor = undefined;
-    r.trim(mark, memory.retained(&retained));
+    var storage: [11]ops.Tensor = undefined;
+    r.trim(start, result.retained(&storage));
     try r.g.endBatch();
-    return memory;
+    return result;
 }
 
 fn sparseWeights(values: []const f32) bool {
     for (values) |value| {
-        const magnitude = @as(u32, @bitCast(value)) & 0x7fffffff;
-        if (magnitude != 0 and (magnitude < 0x2d800000 or magnitude > 0x51800000)) return false;
+        const magnitude = @abs(value);
+        if (magnitude == 0) continue;
+        if (!(magnitude >= 0x1p-36 and magnitude <= 0x1p36)) return false;
     }
     return true;
 }
 
 test "SAM sparse memory masks require bounded finite weights" {
-    const std = @import("std");
     try std.testing.expect(sparseWeights(&.{ 0, -0.0, 0x1p-36, -0x1p-36, 0x1p36, -0x1p36 }));
     for ([_]f32{ 0x1p-37, 0x1p37, 0x1p-149, std.math.floatMax(f32), std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |value| {
         try std.testing.expect(!sparseWeights(&.{ 0, value, 1 }));

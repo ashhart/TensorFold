@@ -164,8 +164,14 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     }
     const native_columns = try a.alloc(f64, cols);
     const torch_columns = try a.alloc(f64, cols);
+    const native_rows = try a.alloc(usize, cols);
+    const torch_rows = try a.alloc(usize, cols);
     @memset(native_columns, 0);
     @memset(torch_columns, 0);
+    @memset(native_rows, 0);
+    @memset(torch_rows, 0);
+    var native_error_sum: f64 = 0;
+    var torch_error_sum: f64 = 0;
     for (0..samples) |sample| {
         const row = std.math.cast(usize, std.mem.readInt(i64, indices.bytes[sample * 8 ..][0..8], .little)) orelse return error.ReferenceRowOutOfRange;
         if (row >= rows) return error.ReferenceRowOutOfRange;
@@ -174,8 +180,18 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
             const pytorch: f32 = @bitCast(std.mem.readInt(u32, truth.bytes[(row * cols + col) * 4 ..][0..4], .little));
             const native = actual.get(row * cols + col);
             if (!std.math.isFinite(reference) or !std.math.isFinite(pytorch) or !std.math.isFinite(native)) return error.NonFiniteProjectionReference;
-            native_columns[col] = @max(native_columns[col], @abs(reference - native));
-            torch_columns[col] = @max(torch_columns[col], @abs(reference - pytorch));
+            const native_error = @abs(reference - native);
+            const torch_error = @abs(reference - pytorch);
+            native_error_sum += native_error;
+            torch_error_sum += torch_error;
+            if (native_error > native_columns[col]) {
+                native_columns[col] = native_error;
+                native_rows[col] = row;
+            }
+            if (torch_error > torch_columns[col]) {
+                torch_columns[col] = torch_error;
+                torch_rows[col] = row;
+            }
         }
     }
     var worse: usize = 0;
@@ -208,9 +224,13 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
         .reference_rows = samples,
         .native_max_error = std.mem.max(f64, native_columns),
         .pytorch_max_error = std.mem.max(f64, torch_columns),
+        .native_mean_error = native_error_sum / @as(f64, @floatFromInt(oracle.numel())),
+        .pytorch_mean_error = torch_error_sum / @as(f64, @floatFromInt(oracle.numel())),
         .worse_columns = worse,
         .native_column_errors = native_columns,
         .pytorch_column_errors = torch_columns,
+        .native_column_worst_rows = native_rows,
+        .pytorch_column_worst_rows = torch_rows,
     }, .{ .whitespace = .indent_2 });
     const receipt = try std.Io.Dir.cwd().createFile(init.io, args[1], .{ .exclusive = true });
     defer receipt.close(init.io);
@@ -218,4 +238,5 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     try receipt.writeStreamingAll(init.io, "\n");
     std.debug.print("Projection {d}x{d}x{d}, {s}: replacement equal {}, PyTorch equal {}, five repeat runs; FP64 max native {e}, PyTorch {e}; {d}/{d} columns worse\n", .{ rows, cols, depth, backend_name, replacement_equal, reference_equal, std.mem.max(f64, native_columns), std.mem.max(f64, torch_columns), worse, cols });
     if (worse != 0) return error.ProjectionReferenceWorse;
+    if (native_error_sum > torch_error_sum) return error.ProjectionMeanReferenceWorse;
 }

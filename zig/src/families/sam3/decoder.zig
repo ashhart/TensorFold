@@ -35,188 +35,228 @@ const TokenTable = struct {
     masks: usize,
     width: usize,
 
-    fn token(self: TokenTable, values: ops.Tensor, offset: usize, slot: usize) ops.Tensor {
-        return ops.view(values, (offset + slot) * self.width, self.width);
-    }
-
-    fn mask(self: TokenTable, values: ops.Tensor, slot: usize, candidate: usize) ops.Tensor {
-        return self.token(values, self.slots * 2, slot * self.masks + candidate);
+    fn row(self: TokenTable, tensor: ops.Tensor, index: usize) ops.Tensor {
+        return ops.view(tensor, index * self.width, self.width);
     }
 };
-
-fn queries(layer: Layer, table: TokenTable, options: Options) !ops.Tensor {
-    const r = layer.runtime;
-    const cache = try r.name("decoder.queries.{s}.{d}", .{ layer.prefix, options.active });
-    if (r.constant(cache)) |cached| return cached;
-    var masks = try layer.parameter("mask_tokens.weight");
-    if (options.multiplex) {
-        const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-        const present = try owner.parameter("output_valid_embed");
-        const absent = try owner.parameter("output_invalid_embed");
-        const visibility = try r.alloc(masks.count);
-        for (0..table.slots) |slot| {
-            const chosen = if (options.active & (@as(u16, 1) << @intCast(slot)) == 0) absent else present;
-            for (0..table.masks) |candidate| for (0..table.width) |channel| {
-                visibility.slice(f32, visibility.count)[(slot * table.masks + candidate) * table.width + channel] = chosen.get(slot * table.width + channel);
-            };
-        }
-        masks = try r.add(masks, visibility);
-    }
-    const value = try r.concat(&.{ try layer.parameter("obj_score_token.weight"), try layer.parameter("iou_token.weight"), masks });
-    return if (options.active == 1) r.remember(cache, value) else value;
-}
-
-const Refinement = struct {
-    image: ops.Tensor,
-    queries: ops.Tensor,
-    query_position: ops.Tensor,
-    image_position: ops.Tensor,
-
-    fn attention(layer: Layer, name: []const u8, q: ops.Tensor, k: ops.Tensor, v: ops.Tensor) !ops.Tensor {
-        return layer.runtime.splitMha(try layer.named(name), q, k, v, 8);
-    }
-
-    fn step(self: *Refinement, layer: Layer, first: bool) !void {
-        const r = layer.runtime;
-        const positioned = if (first) self.queries else try r.add(self.queries, self.query_position);
-        const attended = try attention(layer, "self_attn", positioned, positioned, self.queries);
-        self.queries = try layer.norm("norm1", if (first) attended else try r.add(self.queries, attended), 1e-5);
-        const image_keys = try r.add(self.image, self.image_position);
-        const from_image = try attention(layer, "cross_attn_token_to_image", try r.add(self.queries, self.query_position), image_keys, self.image);
-        self.queries = try layer.norm("norm2", try r.add(self.queries, from_image), 1e-5);
-        const mlp = try layer.child("mlp");
-        const nonlinear = try r.unary(try mlp.linear("lin1", self.queries), 0);
-        self.queries = try layer.norm("norm3", try r.add(self.queries, try mlp.linear("lin2", nonlinear)), 1e-5);
-        const from_tokens = try attention(layer, "cross_attn_image_to_token", image_keys, try r.add(self.queries, self.query_position), self.queries);
-        self.image = try layer.norm("norm4", try r.add(self.image, from_tokens), 1e-5);
-    }
-
-    fn run(self: *Refinement, layer: Layer) !void {
-        const mark = layer.runtime.mark();
-        for (0..2) |index| {
-            try self.step(try layer.indexed("layers", index), index == 0);
-            layer.runtime.trim(mark, &.{ self.queries, self.image });
-        }
-        const r = layer.runtime;
-        const attended = try attention(layer, "final_attn_token_to_image", try r.add(self.queries, self.query_position), try r.add(self.image, self.image_position), self.image);
-        self.queries = try layer.norm("norm_final_attn", try r.add(self.queries, attended), 1e-5);
-        r.trim(mark, &.{ self.queries, self.image });
-    }
-};
-
-fn upsample(layer: Layer, image: ops.Tensor, skips: [3]ops.Feature) !ops.Feature {
-    const r = layer.runtime;
-    const side = r.config.featureSide();
-    var output = ops.feature(image, side, side, r.config.hidden);
-    for (0..2) |stage| {
-        output = try r.conv(try layer.named(if (stage == 0) "output_upscaling.0" else "output_upscaling.3"), output, 2, 0, true, false);
-        const skip = try r.conv(try layer.named(if (stage == 0) "conv_s1" else "conv_s0"), skips[1 - stage], 1, 0, false, false);
-        output.tensor = try r.add(output.tensor, skip.tensor);
-        if (stage == 0) output.tensor = try layer.norm("output_upscaling.1", output.tensor, 1e-6);
-        output.tensor = try r.gelu(output.tensor);
-    }
-    return output;
-}
 
 const Choice = struct { candidate: usize = 0, score: f32 = -10, iou: f32 = 0 };
 
 fn choose(table: TokenTable, quality: []const f32, scores: []const f32, multimask: bool) [16]Choice {
-    var selected: [16]Choice = @splat(.{});
-    for (selected[0..table.slots], 0..) |*choice, slot| {
-        choice.candidate = @intFromBool(multimask);
-        const count = if (table.slots > 1 or multimask) table.masks else 1;
-        for (choice.candidate + 1..count) |candidate| {
-            if (quality[slot * table.masks + candidate] > quality[slot * table.masks + choice.candidate]) choice.candidate = candidate;
+    var result: [16]Choice = @splat(.{});
+    const first: usize = @intFromBool(multimask);
+    const end = if (multimask or table.slots > 1) table.masks else 1;
+    for (0..table.slots) |slot| {
+        const row = quality[slot * table.masks ..][0..table.masks];
+        var winner = first;
+        for (first + 1..end) |candidate| {
+            if (row[candidate] > row[winner]) winner = candidate;
         }
-        choice.iou = quality[slot * table.masks + choice.candidate];
-        choice.score = scores[slot];
+        result[slot] = .{ .candidate = winner, .score = scores[slot], .iou = row[winner] };
     }
-    return selected;
+    return result;
+}
+
+fn enabled(options: Options, slot: usize) bool {
+    return !options.multiplex or options.active & (@as(u16, 1) << @intCast(slot)) != 0;
+}
+
+fn needsPixels(choices: []const Choice, options: Options) bool {
+    for (choices, 0..) |choice, slot| if (enabled(options, slot) and !(choice.score <= 0)) return true;
+    return false;
+}
+
+const Decoder = struct {
+    network: Layer,
+    owner: Layer,
+    prompts: Layer,
+    layout: TokenTable,
+    options: Options,
+
+    fn init(r: *ops.Runtime, requested: Options) !Decoder {
+        var options = requested;
+        options.multiplex = options.multiplex and r.config.version == .sam31;
+        const layout = TokenTable{
+            .slots = if (options.multiplex) r.config.bucket_size else 1,
+            .masks = if (options.multiplex) r.config.mask_tokens else 4,
+            .width = r.config.hidden,
+        };
+        const network = Layer{ .runtime = r, .prefix = r.config.decoderPrefix(!options.multiplex) };
+        const tensor = try r.store.get(try network.named("mask_tokens.weight"));
+        if (layout.slots == 0 or layout.slots > 16 or layout.masks == 0 or
+            !tensor.is(tensor.dtype, &.{ layout.slots * layout.masks, layout.width })) return error.SamDecoderShape;
+        return .{
+            .network = network,
+            .owner = .{ .runtime = r, .prefix = r.config.trackerPrefix() },
+            .prompts = .{ .runtime = r, .prefix = r.config.promptPrefix() },
+            .layout = layout,
+            .options = options,
+        };
+    }
+
+    fn learnedTokens(self: Decoder) !ops.Tensor {
+        const r = self.network.runtime;
+        const key = try r.name("decoder.queries.{s}.{d}", .{ self.network.prefix, self.options.active });
+        if (r.constant(key)) |value| return value;
+        var masks = try self.network.parameter("mask_tokens.weight");
+        if (self.options.multiplex) {
+            const present = try self.owner.parameter("output_valid_embed");
+            const absent = try self.owner.parameter("output_invalid_embed");
+            const offsets = try r.alloc(masks.count);
+            const values = offsets.slice(f32, offsets.count);
+            for (0..self.layout.slots) |slot| {
+                const symbol = if (enabled(self.options, slot)) present else absent;
+                for (0..self.layout.masks) |candidate| {
+                    const row = values[(slot * self.layout.masks + candidate) * self.layout.width ..][0..self.layout.width];
+                    for (row, 0..) |*value, channel| value.* = symbol.get(slot * self.layout.width + channel);
+                }
+            }
+            masks = try r.add(masks, offsets);
+        }
+        const tokens = try r.concat(&.{
+            try self.network.parameter("obj_score_token.weight"),
+            try self.network.parameter("iou_token.weight"),
+            masks,
+        });
+        return if (self.options.active == 1) r.remember(key, tokens) else tokens;
+    }
+
+    fn inputTokens(self: Decoder) !ops.Tensor {
+        const r = self.network.runtime;
+        const learned = try self.learnedTokens();
+        if (self.options.sparse) |points| return r.concat(&.{ learned, points });
+        if (self.options.multiplex) return learned;
+        const padding = try self.prompts.parameter("not_a_point_embed.weight");
+        return r.concat(&.{ learned, padding, padding });
+    }
+
+    fn imagePosition(self: Decoder) !ops.Tensor {
+        const key = if (self.options.multiplex)
+            try self.owner.named("image_pe_layer.positional_encoding_gaussian_matrix")
+        else
+            try self.prompts.named("pe_layer.positional_encoding_gaussian_matrix");
+        return position.grid(self.network.runtime, key);
+    }
+
+    fn upsample(self: Decoder, pixels: ops.Tensor, features: [3]ops.Feature) !ops.Feature {
+        const r = self.network.runtime;
+        const side = r.config.featureSide();
+        var value = ops.feature(pixels, side, side, self.layout.width);
+        const stages = [_]struct { convolution: []const u8, skip: []const u8, norm: ?[]const u8, level: usize }{
+            .{ .convolution = "output_upscaling.0", .skip = "conv_s1", .norm = "output_upscaling.1", .level = 1 },
+            .{ .convolution = "output_upscaling.3", .skip = "conv_s0", .norm = null, .level = 0 },
+        };
+        for (stages) |stage| {
+            value = try r.conv(try self.network.named(stage.convolution), value, 2, 0, true, false);
+            const skip = try r.conv(try self.network.named(stage.skip), features[stage.level], 1, 0, false, false);
+            value.tensor = try r.add(value.tensor, skip.tensor);
+            if (stage.norm) |norm| value.tensor = try self.network.norm(norm, value.tensor, 1e-6);
+            value.tensor = try r.gelu(value.tensor);
+        }
+        return value;
+    }
+
+    fn output(self: Decoder, tokens: ops.Tensor, image: ops.Tensor, features: [3]ops.Feature, choices: []const Choice) !Result {
+        const r = self.network.runtime;
+        const side = r.config.featureSide() * 4;
+        const empty = try r.alloc(side * side);
+        const zero = try r.alloc(self.layout.width);
+        @memset(empty.slice(f32, empty.count), -1024);
+        @memset(zero.slice(f32, zero.count), 0);
+        var masks: [16]ops.Tensor = @splat(empty);
+        var pointers: [16]ops.Tensor = @splat(zero);
+        var result = Result{ .masks = undefined, .pointer = undefined, .count = choices.len, .scores = @splat(-10), .ious = @splat(0) };
+        const pixels = if (needsPixels(choices, self.options)) try self.upsample(image, features) else null;
+        const pointer_head = if (r.config.version == .sam31 and !self.options.multiplex) "interactive_obj_ptr_proj" else "obj_ptr_proj";
+        for (choices, 0..) |choice, slot| {
+            result.scores[slot] = choice.score;
+            result.ious[slot] = choice.iou;
+            if (!enabled(self.options, slot)) continue;
+            const row = self.layout.row(tokens, 2 * self.layout.slots + slot * self.layout.masks + choice.candidate);
+            if (!(choice.score <= 0)) {
+                const classifier = try self.network.mlp(try r.name("output_hypernetworks_mlps.{d}", .{choice.candidate}), row, 3);
+                masks[slot] = try r.matmul(pixels.?.tensor, classifier, side * side, 1, pixels.?.channels);
+            }
+            pointers[slot] = try self.owner.mlp(pointer_head, row, 3);
+            if (choice.score <= 0) {
+                pointers[slot] = if (r.config.version == .sam31)
+                    try self.owner.linear("no_obj_ptr_linear", pointers[slot])
+                else
+                    try self.owner.parameter("no_obj_ptr");
+            }
+        }
+        const mask_tensor = if (choices.len == 1) masks[0] else try r.transpose(try r.concat(masks[0..choices.len]), choices.len, side * side);
+        result.masks = ops.feature(mask_tensor, side, side, choices.len);
+        result.pointer = try r.concat(pointers[0..choices.len]);
+        return result;
+    }
+};
+
+fn attention(layer: Layer, name: []const u8, query: ops.Tensor, key: ops.Tensor, value: ops.Tensor) !ops.Tensor {
+    return layer.runtime.splitMha(try layer.named(name), query, key, value, 8);
+}
+
+fn twoWay(root: Layer, tokens: ops.Tensor, pixels: ops.Tensor, grid: ops.Tensor) ![2]ops.Tensor {
+    const r = root.runtime;
+    const start = r.mark();
+    var q = tokens;
+    var image = pixels;
+    for (0..2) |index| {
+        const block = try root.indexed("layers", index);
+        const positioned = if (index == 0) q else try r.add(q, tokens);
+        const self_attended = try attention(block, "self_attn", positioned, positioned, q);
+        q = try block.norm("norm1", if (index == 0) self_attended else try r.add(q, self_attended), 1e-5);
+        const image_keys = try r.add(image, grid);
+        q = try block.norm("norm2", try r.add(q, try attention(block, "cross_attn_token_to_image", try r.add(q, tokens), image_keys, image)), 1e-5);
+        const mlp = try block.child("mlp");
+        const hidden = try r.unary(try mlp.linear("lin1", q), 0);
+        q = try block.norm("norm3", try r.add(q, try mlp.linear("lin2", hidden)), 1e-5);
+        const image_update = try attention(block, "cross_attn_image_to_token", image_keys, try r.add(q, tokens), q);
+        image = try block.norm("norm4", try r.add(image, image_update), 1e-5);
+        r.trim(start, &.{ q, image });
+    }
+    const final = try attention(root, "final_attn_token_to_image", try r.add(q, tokens), try r.add(image, grid), image);
+    q = try root.norm("norm_final_attn", try r.add(q, final), 1e-5);
+    r.trim(start, &.{ q, image });
+    return .{ q, image };
 }
 
 pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requested: Options) !Result {
-    const image_side = r.config.featureSide();
-    if (image.count != image_side * image_side * r.config.hidden) return error.SamDecoderShape;
-    for (features, 0..) |feature, i| {
-        const expected = image_side * (@as(usize, 4) >> @intCast(i));
-        if (feature.height != expected or feature.width != expected or feature.channels != r.config.hidden or
-            feature.tensor.count != expected * expected * feature.channels) return error.SamDecoderShape;
+    const side = r.config.featureSide();
+    const width = r.config.hidden;
+    if (image.count != side * side * width) return error.SamDecoderShape;
+    for (features, 0..) |feature, level| {
+        const extent = side * (@as(usize, 4) >> @intCast(level));
+        if (feature.height != extent or feature.width != extent or feature.channels != width or
+            feature.tensor.count != extent * extent * width) return error.SamDecoderShape;
     }
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
-    var options = requested;
-    options.multiplex = requested.multiplex and r.config.version == .sam31;
-    const layer = Layer{ .runtime = r, .prefix = r.config.decoderPrefix(!options.multiplex) };
-    const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-    const symbols = try r.store.get(try layer.named("mask_tokens.weight"));
-    const table = TokenTable{ .slots = if (options.multiplex) r.config.bucket_size else 1, .masks = if (options.multiplex) r.config.mask_tokens else 4, .width = r.config.hidden };
-    if (!symbols.is(symbols.dtype, &.{ table.slots * table.masks, table.width })) return error.SamDecoderShape;
-    var initial = try queries(layer, table, options);
-    if (options.sparse) |sparse| {
-        initial = try r.concat(&.{ initial, sparse });
-    } else if (!options.multiplex) {
-        const prompt = Layer{ .runtime = r, .prefix = r.config.promptPrefix() };
-        const padding = try prompt.parameter("not_a_point_embed.weight");
-        initial = try r.concat(&.{ initial, padding, padding });
-    }
-    const positional_key = if (options.multiplex) try owner.named("image_pe_layer.positional_encoding_gaussian_matrix") else try r.name("{s}.pe_layer.positional_encoding_gaussian_matrix", .{r.config.promptPrefix()});
-    const dense = options.dense orelse if (options.multiplex) null else try r.weight(try r.name("{s}.no_mask_embed.weight", .{r.config.promptPrefix()}));
-    const image_shape = [_]usize{ 1, features[2].height, features[2].width, r.config.hidden };
-    try r.observe("decoder.image", image, &image_shape);
-    if (options.dense == null and !options.multiplex) if (dense) |value| try r.observe("prompt.no_mask", value, &.{ 1, r.config.hidden });
-    var state = Refinement{ .image = if (dense) |value| try r.add(image, value) else image, .queries = initial, .query_position = initial, .image_position = try position.grid(r, positional_key) };
-    try r.observe("decoder.position", state.image_position, &image_shape);
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
+    const decoder = try Decoder.init(r, requested);
+    const tokens = try decoder.inputTokens();
+    const grid = try decoder.imagePosition();
+    const dense = decoder.options.dense orelse if (decoder.options.multiplex) null else try decoder.prompts.parameter("no_mask_embed.weight");
+    const shape = [_]usize{ 1, side, side, width };
+    try r.observe("decoder.image", image, &shape);
+    if (requested.dense == null and !decoder.options.multiplex) if (dense) |value| try r.observe("prompt.no_mask", value, &.{ 1, width });
+    try r.observe("decoder.position", grid, &shape);
+    const pixels = if (dense) |value| try r.add(image, value) else image;
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
-    try state.run(try layer.child("transformer"));
-    const quality_logits = try layer.mlp("iou_prediction_head", ops.view(state.queries, table.slots * table.width, table.slots * table.width), 3);
+    const refined = try twoWay(try decoder.network.child("transformer"), tokens, pixels, grid);
+    const count = decoder.layout.slots;
+    const quality_logits = try decoder.network.mlp("iou_prediction_head", ops.view(refined[0], count * width, count * width), 3);
     const quality = if (r.config.version == .sam3) try r.unary(quality_logits, 1) else quality_logits;
-    const scores = try layer.mlp("pred_obj_score_head", ops.view(state.queries, 0, table.slots * table.width), 3);
+    const confidence = try decoder.network.mlp("pred_obj_score_head", ops.view(refined[0], 0, count * width), 3);
     try r.g.endBatch();
-    if (quality.count != table.slots * table.masks or scores.count != table.slots) return error.SamDecoderShape;
-    try r.observe("decoder.quality", quality, &.{ table.slots, table.masks });
-    const selected = choose(table, quality.slice(f32, quality.count), scores.slice(f32, scores.count), options.multimask and !options.multiplex);
-    const side = r.config.featureSide() * 4;
-    const empty_mask = try r.alloc(side * side);
-    const empty_pointer = try r.alloc(table.width);
-    @memset(empty_mask.slice(f32, empty_mask.count), -1024);
-    @memset(empty_pointer.slice(f32, empty_pointer.count), 0);
-    var mask_rows: [16]ops.Tensor = @splat(empty_mask);
-    var pointer_rows: [16]ops.Tensor = @splat(empty_pointer);
-    var output = Result{ .masks = undefined, .pointer = undefined, .count = table.slots, .scores = @splat(-10), .ious = @splat(0) };
+    if (quality.count != count * decoder.layout.masks or confidence.count != count) return error.SamDecoderShape;
+    try r.observe("decoder.quality", quality, &.{ count, decoder.layout.masks });
+    const choices = choose(decoder.layout, quality.slice(f32, quality.count), confidence.slice(f32, confidence.count), requested.multimask and !decoder.options.multiplex);
     try r.g.beginBatch();
-    const pixels: ?ops.Feature = if (needsPixels(selected[0..table.slots], options)) try upsample(layer, state.image, features) else null;
-    for (selected[0..table.slots], 0..) |choice, slot| {
-        output.scores[slot] = choice.score;
-        output.ious[slot] = choice.iou;
-        if (options.multiplex and options.active & (@as(u16, 1) << @intCast(slot)) == 0) continue;
-        const mask_token = table.mask(state.queries, slot, choice.candidate);
-        if (!(choice.score <= 0)) {
-            const visible = pixels.?;
-            const head = try r.name("output_hypernetworks_mlps.{d}", .{choice.candidate});
-            const classifier = try layer.mlp(head, mask_token, 3);
-            mask_rows[slot] = try r.matmul(visible.tensor, classifier, side * side, 1, visible.channels);
-        }
-        var pointer = try owner.mlp(if (r.config.version == .sam31 and !options.multiplex) "interactive_obj_ptr_proj" else "obj_ptr_proj", mask_token, 3);
-        if (choice.score <= 0) {
-            pointer = if (r.config.version == .sam31) try owner.linear("no_obj_ptr_linear", pointer) else try owner.parameter("no_obj_ptr");
-            mask_rows[slot] = empty_mask;
-        }
-        pointer_rows[slot] = pointer;
-    }
-    output.masks = ops.feature(if (table.slots == 1) mask_rows[0] else try r.transpose(try r.concat(mask_rows[0..table.slots]), table.slots, side * side), side, side, table.slots);
-    output.pointer = try r.concat(pointer_rows[0..table.slots]);
+    const result = try decoder.output(refined[0], refined[1], features, choices[0..count]);
     try r.g.endBatch();
-    r.trim(mark, &.{ output.masks.tensor, output.pointer });
-    return output;
-}
-
-fn needsPixels(selected: []const Choice, options: Options) bool {
-    for (selected, 0..) |choice, slot| {
-        if (options.multiplex and options.active & (@as(u16, 1) << @intCast(slot)) == 0) continue;
-        if (!(choice.score <= 0)) return true;
-    }
-    return false;
+    r.trim(start, &.{ result.masks.tensor, result.pointer });
+    return result;
 }
 
 test "SAM absent masks skip pixels without hiding active NaN scores" {

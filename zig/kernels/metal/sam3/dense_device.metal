@@ -12,7 +12,8 @@ void sam_dense_half_domain(const device float* x, const device ushort* weight, c
         else {
             const float value = i < nx ? x[i] : bias[i - nx - nw];
             const uint bits = as_type<uint>(value) & 0x7fffffffu;
-            invalid |= uint(bits != 0 && (bits < 0x2d800000u || bits > 0x51800000u));
+            const uint minimum = i < nx ? 0x18000000u : 0x2d800000u;
+            invalid |= uint(bits != 0 && (bits < minimum || bits > 0x51800000u));
         }
     }
     if (invalid) atomic_fetch_or_explicit(domain, invalid, memory_order_relaxed);
@@ -68,8 +69,10 @@ void sam_dense_device_domain(const device float* x, const device float* weight, 
     for (ulong i = at; i < nx + nw + shape.columns; i += width) {
         const float value = i < nx ? x[i] : i < nx + nw ? weight[i - nx] : bias[i - nx - nw];
         const uint bits = as_type<uint>(value) & 0x7fffffffu;
-        // This domain keeps even exact product cancellation above the FP32 subnormal range.
-        invalid |= uint(bits != 0 && (bits < 0x2d800000u || bits > 0x51800000u));
+        const uint minimum = i < nx ? 0x18000000u : 0x2d800000u;
+        invalid |= uint(bits != 0 && (bits < minimum || bits > 0x51800000u));
+        if (i < nx) invalid |= uint(bits != 0 && bits < 0x2d800000u) << 1;
+        else if (i < nx + nw) invalid |= uint(value != float(half(value))) << 2;
     }
     if (invalid) atomic_fetch_or_explicit(domain, invalid, memory_order_relaxed);
 }
@@ -77,7 +80,10 @@ void sam_dense_device_domain(const device float* x, const device float* weight, 
 [[kernel, max_total_threads_per_threadgroup(128)]]
 void sam_dense_device_plan(device uint* domain, constant SamDenseShape& shape, uint at [[thread_position_in_grid]]) {
     if (at != 0) return;
-    const bool fallback = domain[0] != 0;
+    // At x >= 2^-79, exact half coefficients keep every product bit at or above 2^-126.
+    const uint flags = domain[0];
+    const bool fallback = (flags & 1u) != 0 || (flags & 6u) == 6u;
+    domain[0] = uint(fallback);
     domain[1] = fallback ? 0 : (shape.columns + sam_dense_device_columns - 1) / sam_dense_device_columns;
     domain[2] = (shape.rows + sam_dense_device_rows - 1) / sam_dense_device_rows;
     domain[3] = 1;

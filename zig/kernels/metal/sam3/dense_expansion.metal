@@ -11,7 +11,7 @@ void sam_dense_expansion_clear(device uint* domain, constant SamDenseShape& shap
 void sam_dense_expansion_pack(const device float* x, const device float* weight, device half* packed,
     device atomic_uint* domain, constant SamDenseShape& shape, uint at [[thread_position_in_grid]],
     uint width [[threads_per_grid]], device SamDenseResiduals* residuals [[buffer(5)]]) {
-    if (atomic_load_explicit(domain, memory_order_relaxed)) return;
+    if (atomic_load_explicit(domain, memory_order_relaxed) & 1u) return;
     const ulong nx = ulong(shape.rows) * shape.depth, nw = ulong(shape.columns) * shape.depth;
     uint invalid = 0, present = 0;
     for (ulong i = at; i < nx + nw; i += width) {

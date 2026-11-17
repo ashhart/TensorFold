@@ -1,25 +1,19 @@
 const std = @import("std");
 
-fn List(comptime T: type, comptime capacity: usize) type {
+fn Fixed(comptime T: type, comptime capacity: usize) type {
     return struct {
         items: [capacity]T = undefined,
         len: usize = 0,
 
-        fn appendAssumeCapacity(self: *@This(), item: T) void {
-            std.debug.assert(self.len < capacity);
-            self.items[self.len] = item;
-            self.len += 1;
-        }
-
-        fn insertAssumeCapacity(self: *@This(), at: usize, item: T) void {
-            std.debug.assert(at <= self.len and self.len < capacity);
-            std.mem.copyBackwards(T, self.items[at + 1 .. self.len + 1], self.items[at..self.len]);
-            self.items[at] = item;
+        fn push(self: *@This(), value: T) void {
+            std.debug.assert(self.len != capacity);
+            self.items[self.len] = value;
             self.len += 1;
         }
 
         pub fn get(self: @This(), at: usize) T {
-            return self.constSlice()[at];
+            std.debug.assert(at < self.len);
+            return self.items[at];
         }
 
         pub fn constSlice(self: *const @This()) []const T {
@@ -32,109 +26,130 @@ pub const Direction = enum { forward, reverse };
 pub const Spatial = struct { history: usize, temporal: usize };
 pub const Pointer = struct { history: usize, relative: usize };
 pub const Plan = struct {
-    spatial: List(Spatial, 10) = .{},
-    pointers: List(Pointer, 19) = .{},
+    spatial: Fixed(Spatial, 10) = .{},
+    pointers: Fixed(Pointer, 19) = .{},
 };
 
 pub fn distance(a: usize, b: usize) usize {
-    return @max(a, b) - @min(a, b);
+    return if (a >= b) a - b else b - a;
 }
 
-fn past(frame: usize, index: usize, direction: Direction) bool {
-    return if (direction == .forward) frame < index else frame > index;
+const Timeline = struct {
+    current: usize,
+    frames: usize,
+    direction: Direction,
+
+    fn age(self: Timeline, frame_index: usize) ?usize {
+        const earlier = switch (self.direction) {
+            .forward => frame_index < self.current,
+            .reverse => frame_index > self.current,
+        };
+        return if (earlier) distance(frame_index, self.current) else null;
+    }
+
+    fn frame(self: Timeline, age_: usize) ?usize {
+        return switch (self.direction) {
+            .forward => if (age_ <= self.current) self.current - age_ else null,
+            .reverse => if (age_ < self.frames - self.current) self.current + age_ else null,
+        };
+    }
+};
+
+fn anchors(history: anytype, current: usize) Fixed(usize, 4) {
+    var all: usize = 0;
+    for (history) |entry| all += @intFromBool(entry.conditioning);
+    var selected: Fixed(usize, 4) = .{};
+    if (all <= 4) {
+        for (history, 0..) |entry, row| if (entry.conditioning) selected.push(row);
+        return selected;
+    }
+    var sides: [2]?usize = @splat(null);
+    for (history, 0..) |entry, row| {
+        if (!entry.conditioning) continue;
+        const side: usize = @intFromBool(entry.index >= current);
+        const incumbent = sides[side];
+        if (incumbent == null or distance(entry.index, current) < distance(history[incumbent.?].index, current))
+            sides[side] = row;
+    }
+    for (sides) |row| if (row) |at| selected.push(at);
+    while (selected.len < 4) {
+        var next: ?usize = null;
+        for (history, 0..) |entry, row| {
+            if (!entry.conditioning or std.mem.indexOfScalar(usize, selected.constSlice(), row) != null) continue;
+            if (next == null or distance(entry.index, current) < distance(history[next.?].index, current)) next = row;
+        }
+        selected.push(next.?);
+    }
+    return selected;
 }
 
-fn previous(index: usize, frames: usize, direction: Direction, delta: usize) ?usize {
-    return switch (direction) {
-        .forward => if (delta <= index) index - delta else null,
-        .reverse => if (index < frames and delta < frames - index) index + delta else null,
-    };
+const Ranked = struct {
+    row: usize,
+    age: usize,
+
+    fn older(_: void, a: Ranked, b: Ranked) bool {
+        return a.age > b.age or (a.age == b.age and a.row < b.row);
+    }
+};
+
+fn confidentFrames(history: anytype, timeline: Timeline) Fixed(usize, 16) {
+    var pool: Fixed(Ranked, 15) = .{};
+    const capacity = @min(timeline.frames, 16) - 1;
+    for (history, 0..) |entry, row| {
+        if (entry.conditioning or !(entry.score > 0.01)) continue;
+        if (timeline.direction == .forward and entry.index == 0) continue;
+        const age = timeline.age(entry.index) orelse continue;
+        if (capacity == 0) break;
+        const candidate = Ranked{ .row = row, .age = age };
+        if (pool.len < capacity) {
+            pool.push(candidate);
+        } else if (Ranked.older({}, pool.items[0], candidate)) {
+            pool.items[0] = candidate;
+        }
+        std.mem.sort(Ranked, pool.items[0..pool.len], {}, Ranked.older);
+    }
+    var selected: Fixed(usize, 16) = .{};
+    for (pool.constSlice()) |entry| selected.push(history[entry.row].index);
+    if (timeline.frame(1)) |last| {
+        if (std.mem.indexOfScalar(usize, selected.constSlice(), last) == null) selected.push(last);
+    }
+    return selected;
 }
 
-fn find(history: anytype, index: usize, conditioning: []const usize) ?usize {
-    for (history, 0..) |item, at| if (item.index == index) {
-        return if (std.mem.indexOfScalar(usize, conditioning, at) == null) at else null;
-    };
+fn historyRow(history: anytype, frame: ?usize, excluded: []const usize) ?usize {
+    const wanted = frame orelse return null;
+    for (history, 0..) |entry, row| {
+        if (entry.index == wanted and std.mem.indexOfScalar(usize, excluded, row) == null) return row;
+    }
     return null;
-}
-
-fn conditioningFrames(history: anytype, index: usize) List(usize, 4) {
-    var out: List(usize, 4) = .{};
-    var count: usize = 0;
-    for (history) |item| count += @intFromBool(item.conditioning);
-    if (count <= 4) {
-        for (history, 0..) |item, i| if (item.conditioning) out.appendAssumeCapacity(i);
-        return out;
-    }
-    for ([_]bool{ true, false }) |before| {
-        var closest: ?usize = null;
-        for (history, 0..) |item, i| {
-            if (!item.conditioning or (item.index < index) != before) continue;
-            if (closest == null or distance(item.index, index) < distance(history[closest.?].index, index)) closest = i;
-        }
-        if (closest) |i| out.appendAssumeCapacity(i);
-    }
-    while (out.len < 4) {
-        var closest: ?usize = null;
-        for (history, 0..) |item, i| {
-            if (!item.conditioning or std.mem.indexOfScalar(usize, out.constSlice(), i) != null) continue;
-            if (closest == null or distance(item.index, index) < distance(history[closest.?].index, index)) closest = i;
-        }
-        out.appendAssumeCapacity(closest.?);
-    }
-    return out;
-}
-
-fn filtered(history: anytype, index: usize, frames: usize, direction: Direction) List(usize, 16) {
-    var nearest: List(usize, 15) = .{};
-    const maximum = @min(frames, 16) - 1;
-    for (history) |item| {
-        if (item.conditioning or !past(item.index, index, direction) or !(item.score > 0.01) or
-            (direction == .forward and item.index == 0)) continue;
-        var at: usize = 0;
-        while (at < nearest.len and distance(nearest.get(at), index) < distance(item.index, index)) : (at += 1) {}
-        if (at >= maximum) continue;
-        if (nearest.len == maximum) nearest.len -= 1;
-        nearest.insertAssumeCapacity(at, item.index);
-    }
-    var out: List(usize, 16) = .{};
-    var i = nearest.len;
-    while (i != 0) {
-        i -= 1;
-        out.appendAssumeCapacity(nearest.get(i));
-    }
-    if (previous(index, frames, direction, 1)) |last| {
-        if (std.mem.indexOfScalar(usize, out.constSlice(), last) == null) out.appendAssumeCapacity(last);
-    }
-    return out;
 }
 
 pub fn select(history: anytype, index: usize, frames: usize, direction: Direction, multiplex: bool) !Plan {
     if (frames == 0 or index >= frames) return error.FrameOutOfRange;
-    const conditioning = conditioningFrames(history, index);
+    const timeline = Timeline{ .current = index, .frames = frames, .direction = direction };
+    const conditioning = anchors(history, index);
     if (conditioning.len == 0) return error.MissingConditioningFrame;
     var out: Plan = .{};
-    const valid: List(usize, 16) = if (multiplex) .{} else filtered(history, index, frames, direction);
+    const valid: Fixed(usize, 16) = if (multiplex) .{} else confidentFrames(history, timeline);
     for (conditioning.constSlice()) |at| {
         const item = history[at];
         const delta = distance(item.index, index);
-        const temporal = if (multiplex and past(item.index, index, direction) and delta < 7) 6 - delta else 6;
-        if (item.spatial_live) out.spatial.appendAssumeCapacity(.{ .history = at, .temporal = temporal });
-        if (past(item.index, index, direction) or item.index == index)
-            out.pointers.appendAssumeCapacity(.{ .history = at, .relative = delta });
+        const temporal = if (multiplex and timeline.age(item.index) != null and delta < 7) 6 - delta else 6;
+        if (item.spatial_live) out.spatial.push(.{ .history = at, .temporal = temporal });
+        if (timeline.age(item.index) != null or item.index == index) out.pointers.push(.{ .history = at, .relative = delta });
     }
     var rank: usize = 6;
     while (rank != 0) : (rank -= 1) {
-        const frame = if (multiplex) previous(index, frames, direction, rank) else if (rank <= valid.len) valid.get(valid.len - rank) else null;
-        const at = find(history, frame orelse continue, conditioning.constSlice()) orelse continue;
-        if (history[at].spatial_live) out.spatial.appendAssumeCapacity(.{ .history = at, .temporal = rank - 1 });
+        const frame = if (multiplex) timeline.frame(rank) else if (rank <= valid.len) valid.get(valid.len - rank) else null;
+        const at = historyRow(history, frame, conditioning.constSlice()) orelse continue;
+        if (history[at].spatial_live) out.spatial.push(.{ .history = at, .temporal = rank - 1 });
     }
     const limit = @min(frames, 16);
     for (1..limit) |delta| {
         if (!multiplex and delta >= valid.len) break;
-        const frame = if (multiplex) previous(index, frames, direction, delta) else valid.get(valid.len - delta);
-        const at = find(history, frame orelse continue, conditioning.constSlice()) orelse continue;
-        out.pointers.appendAssumeCapacity(.{ .history = at, .relative = delta });
+        const frame = if (multiplex) timeline.frame(delta) else valid.get(valid.len - delta);
+        const at = historyRow(history, frame, conditioning.constSlice()) orelse continue;
+        out.pointers.push(.{ .history = at, .relative = delta });
     }
     return out;
 }
@@ -142,19 +157,19 @@ pub fn select(history: anytype, index: usize, frames: usize, direction: Directio
 pub const Retention = struct { keep: bool, spatial: bool };
 
 pub fn retention(history: anytype, at: usize, index: usize, frames: usize, multiplex: bool) Retention {
-    const item = history[at];
-    if (item.conditioning or item.index == index) return .{ .keep = true, .spatial = true };
-    const delta = distance(index, item.index);
-    if (multiplex) return .{ .keep = delta < 16, .spatial = delta < 6 };
-    if (!(item.score > 0.01)) return .{ .keep = false, .spatial = false };
-    var newer: usize = 0;
-    var latest_low: usize = 0;
-    for (history) |other| {
-        if (other.conditioning) continue;
-        if (distance(index, other.index) < delta and other.score > 0.01) newer += 1;
-        if (other.index == index and !(other.score > 0.01)) latest_low = 1;
+    const target = history[at];
+    if (target.conditioning or target.index == index) return .{ .keep = true, .spatial = true };
+    const age = distance(target.index, index);
+    if (multiplex) return .{ .keep = age < 16, .spatial = age < 6 };
+    if (!(target.score > 0.01) or frames == 0) return .{ .keep = false, .spatial = false };
+    var rank: usize = 0;
+    var reserve_latest = false;
+    for (history) |entry| {
+        if (entry.conditioning) continue;
+        if (entry.index == index and !(entry.score > 0.01)) reserve_latest = true;
+        rank += @intFromBool(entry.score > 0.01 and distance(entry.index, index) < age);
     }
-    return .{ .keep = newer < @min(frames, 16) - 1, .spatial = newer + latest_low < 6 };
+    return .{ .keep = rank + 1 < @min(frames, 16), .spatial = rank + @intFromBool(reserve_latest) < 6 };
 }
 
 const Sample = struct { index: usize, conditioning: bool = false, score: f32 = 1, spatial_live: bool = true };

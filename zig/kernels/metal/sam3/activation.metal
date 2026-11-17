@@ -204,7 +204,9 @@ inline float sam_gelu_fp32(float value) {
         return as_type<float>(sign | ((significand >> 1) + uint((significand & 3u) == 3u)));
     }
     const float absolute = as_type<float>(magnitude);
-    const float2 coordinate(absolute * 0.70710678118654752f, 0);
+    const float coordinate_high = absolute * 0.70710678118654752f;
+    float2 coordinate = sam_two_sum(coordinate_high, fma(absolute, 0.70710678118654752f, -coordinate_high));
+    sam_pair_add(coordinate, absolute * 1.2101617104478969e-8f);
     if (coordinate.x >= 6) return sign ? as_type<float>(0x80000000u) : value;
     const ushort piece = min(ushort(fma(coordinate.x, 32.0f, 0.5f)), ushort(192));
     float2 offset = sam_two_sum(coordinate.x, -float(piece) * 0.03125f);
@@ -224,10 +226,14 @@ inline float sam_gelu_fp32(float value) {
     sam_pair_add(result, sam_erfc_coefficients[piece][0].y);
     sam_pair_add(result, low_polynomial * offset.x);
     sam_pair_add(result, derivative * offset.y);
-    float2 complement = sam_two_sum(1.0f, -result.x);
-    sam_pair_add(complement, -result.y);
-    const float inner = sign ? -(complement.x + complement.y) : complement.x + complement.y;
-    return 0.5f * value * (1.0f + inner);
+    const float half_value = 0.5f * value;
+    const float correction_high = half_value * result.x;
+    float2 correction = sam_two_sum(correction_high, fma(half_value, result.x, -correction_high));
+    sam_pair_add(correction, half_value * result.y);
+    if (sign) return correction.x + correction.y;
+    float2 output = sam_two_sum(value, -correction.x);
+    sam_pair_add(output, -correction.y);
+    return output.x + output.y;
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]]

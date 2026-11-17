@@ -1,76 +1,88 @@
 const ops = @import("ops.zig");
 const Layer = @import("layers.zig").Layer;
 
-fn trace(r: *ops.Runtime, enabled: bool, name: []const u8, value: ops.Tensor, rows: usize) !void {
-    if (enabled) try r.observe(name, value, &.{ 1, rows, value.count / rows });
-}
+const Encoder = struct {
+    root: Layer,
+    width: usize,
+    rows: usize,
+    compensated: bool,
 
-fn mlpProjection(layer: Layer, suffix: []const u8, input: ops.Tensor, compensated: bool) !ops.Tensor {
-    if (!compensated) return layer.linear(suffix, input);
-    const r = layer.runtime;
-    const name = try layer.named(suffix);
-    const weights = try r.name("{s}.weight", .{name});
-    const matrix = try r.store.get(weights);
-    if (matrix.rank != 2 or matrix.dim(1) == 0 or input.count % matrix.dim(1) != 0) return error.SamProjectionShape;
-    return r.own(try @import("dense_small.zig").run(r.g, input, try r.weight(weights), try r.weight(try r.name("{s}.bias", .{name})), input.count / matrix.dim(1), matrix.dim(0), matrix.dim(1)));
-}
-
-fn block(layer: Layer, input: ops.Tensor, width: usize, detailed: bool, compensated: bool) !ops.Tensor {
-    const r = layer.runtime;
-    const rows = input.count / width;
-    const normalized = try layer.norm("ln_1", input, 1e-5);
-    try trace(r, detailed, "text.first.norm1", normalized, rows);
-    const attention = try layer.named("attn");
-    const q = try r.project(attention, normalized, width, 0);
-    const k = try r.project(attention, normalized, width, 1);
-    const v = try r.project(attention, normalized, width, 2);
-    const mixed = try r.attend(q, k, v, 16, width, null, true);
-    const projected = try layer.linear("attn.out_proj", mixed);
-    try trace(r, detailed, "text.first.projected", projected, rows);
-    const residual = try r.add(input, projected);
-    try trace(r, detailed, "text.first.residual", residual, rows);
-    const norm2 = try layer.norm("ln_2", residual, 1e-5);
-    try trace(r, detailed, "text.first.norm2", norm2, rows);
-    const expanded = try mlpProjection(layer, "mlp.c_fc", norm2, compensated);
-    try trace(r, detailed, "text.first.expanded", expanded, rows);
-    const activated = try r.gelu(expanded);
-    try trace(r, detailed, "text.first.gelu", activated, rows);
-    const contracted = try mlpProjection(layer, "mlp.c_proj", activated, compensated);
-    try trace(r, detailed, "text.first.contracted", contracted, rows);
-    return r.add(residual, contracted);
-}
-
-pub fn encode(r: *ops.Runtime, ids: []const u32) !ops.Tensor {
-    return encodeWithMlp(r, ids, false);
-}
-
-pub fn encodeWithMlp(r: *ops.Runtime, ids: []const u32, compensated: bool) !ops.Tensor {
-    if (ids.len == 0 or ids.len > 32) return error.SamTextLength;
-    const root = Layer{ .runtime = r, .prefix = "detector.backbone.language_backbone" };
-    const encoder = try root.child("encoder");
-    const words = try encoder.parameter("token_embedding.weight");
-    const positions = try encoder.parameter("positional_embedding");
-    const metadata = try r.store.get(try encoder.named("token_embedding.weight"));
-    if (metadata.rank != 2 or metadata.dim(1) != 1024 or positions.count < ids.len * metadata.dim(1)) return error.SamTextEmbeddingShape;
-    const width = metadata.dim(1);
-    const mark = r.mark();
-    errdefer r.trim(mark, &.{});
-    var value = try r.alloc(ids.len * width);
-    for (ids, 0..) |id, token| {
-        if (id >= metadata.dim(0)) return error.SamTokenOutOfRange;
-        for (0..width) |channel| value.slice(f32, value.count)[token * width + channel] = words.get(id * width + channel) + positions.get(token * width + channel);
+    fn trace(self: Encoder, suffix: []const u8, tensor: ops.Tensor, index: usize) !void {
+        if (index == 0) try self.root.runtime.observe(suffix, tensor, &.{ 1, self.rows, tensor.count / self.rows });
     }
-    try r.observe("text.input", value, &.{ 1, ids.len, width });
+
+    fn projection(self: Encoder, weights: Layer, name: []const u8, tensor: ops.Tensor) !ops.Tensor {
+        if (!self.compensated) return weights.linear(name, tensor);
+        const r = self.root.runtime;
+        const prefix = try weights.named(name);
+        const weight_key = try r.name("{s}.weight", .{prefix});
+        const shape = try r.store.get(weight_key);
+        if (shape.rank != 2 or shape.dim(1) == 0 or tensor.count % shape.dim(1) != 0) return error.SamProjectionShape;
+        const weight = try r.weight(weight_key);
+        const bias = try r.weight(try r.name("{s}.bias", .{prefix}));
+        return r.own(try @import("dense_small.zig").run(r.g, tensor, weight, bias, tensor.count / shape.dim(1), shape.dim(0), shape.dim(1)));
+    }
+
+    fn layer(self: Encoder, input: ops.Tensor, index: usize) !ops.Tensor {
+        const r = self.root.runtime;
+        const block = try self.root.indexed("transformer.resblocks", index);
+        const norm1 = try block.norm("ln_1", input, 1e-5);
+        try self.trace("text.first.norm1", norm1, index);
+        const attention_key = try block.named("attn");
+        var qkv: [3]ops.Tensor = undefined;
+        for (&qkv, 0..) |*tensor, part| tensor.* = try r.project(attention_key, norm1, self.width, @intCast(part));
+        const context = try r.attend(qkv[0], qkv[1], qkv[2], 16, self.width, null, true);
+        const projected = try block.linear("attn.out_proj", context);
+        try self.trace("text.first.projected", projected, index);
+        const residual = try r.add(input, projected);
+        try self.trace("text.first.residual", residual, index);
+        const norm2 = try block.norm("ln_2", residual, 1e-5);
+        try self.trace("text.first.norm2", norm2, index);
+        const expansion = try self.projection(block, "mlp.c_fc", norm2);
+        try self.trace("text.first.expanded", expansion, index);
+        const activation = try r.gelu(expansion);
+        try self.trace("text.first.gelu", activation, index);
+        const contraction = try self.projection(block, "mlp.c_proj", activation);
+        try self.trace("text.first.contracted", contraction, index);
+        return r.add(residual, contraction);
+    }
+};
+
+pub fn encode(runtime: *ops.Runtime, tokens: []const u32) !ops.Tensor {
+    return encodeWithMlp(runtime, tokens, false);
+}
+
+pub fn encodeWithMlp(r: *ops.Runtime, tokens: []const u32, compensated: bool) !ops.Tensor {
+    if (tokens.len < 1 or tokens.len > 32) return error.SamTextLength;
+    const root = Layer{ .runtime = r, .prefix = "detector.backbone.language_backbone" };
+    const weights = try root.child("encoder");
+    const vocabulary = try r.store.get(try weights.named("token_embedding.weight"));
+    const words = try weights.parameter("token_embedding.weight");
+    const positions = try weights.parameter("positional_embedding");
+    if (vocabulary.rank != 2 or vocabulary.dim(1) != 1024 or positions.count < tokens.len * vocabulary.dim(1)) return error.SamTextEmbeddingShape;
+    const tower = Encoder{ .root = weights, .width = vocabulary.dim(1), .rows = tokens.len, .compensated = compensated };
+    const start = r.mark();
+    errdefer r.trim(start, &.{});
+    var value = try r.alloc(tower.rows * tower.width);
+    const input = value.slice(f32, value.count);
+    for (tokens, 0..) |id, row| {
+        if (id >= vocabulary.dim(0)) return error.SamTokenOutOfRange;
+        for (input[row * tower.width ..][0..tower.width], 0..) |*entry, channel| {
+            entry.* = words.get(id * tower.width + channel) + positions.get(row * tower.width + channel);
+        }
+    }
+    try r.observe("text.input", value, &.{ 1, tower.rows, tower.width });
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     for (0..24) |index| {
-        value = try block(try encoder.indexed("transformer.resblocks", index), value, width, index == 0, compensated);
-        try r.observe(try r.name("text.layer.{d}", .{index}), value, &.{ 1, ids.len, width });
-        r.trim(mark, &.{value});
+        value = try tower.layer(value, index);
+        try r.observe(try r.name("text.layer.{d}", .{index}), value, &.{ 1, tower.rows, tower.width });
+        r.trim(start, &.{value});
     }
-    value = try root.linear("resizer", try encoder.norm("ln_final", value, 1e-5));
-    try r.observe("text.output", value, &.{ 1, ids.len, r.config.hidden });
+    const normalized = try weights.norm("ln_final", value, 1e-5);
+    value = try root.linear("resizer", normalized);
+    try r.observe("text.output", value, &.{ 1, tower.rows, r.config.hidden });
     try r.g.endBatch();
-    r.trim(mark, &.{value});
+    r.trim(start, &.{value});
     return value;
 }
