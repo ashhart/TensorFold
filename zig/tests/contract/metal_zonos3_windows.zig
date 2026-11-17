@@ -1,5 +1,4 @@
-//! ZONOS3's windowed sums on Metal under the contract: the codec's five, the encoder's resampler, the teacher's
-//! convolution (contract_zonos3_windows.zig's CUDA twin); the encoder's convolution is metal_zonos3_conv.zig's.
+//! ZONOS3's windowed sums on Metal: the codec's five, resampler, teacher's conv (contract_zonos3_windows.zig's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

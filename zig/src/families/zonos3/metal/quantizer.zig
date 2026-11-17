@@ -64,8 +64,7 @@ pub const Quantizer = struct {
     codes: u64, // i32 [frames][10]
     sc: layers.Scratch,
 
-    /// The quantizer on `g`, after everything else made on it so far; `dec`: the decoder's weights of the same
-    /// generator, which outlive this. Destroy it before anything made on `g` before it.
+    /// On `g` after all else made on it; `dec` (same generator) outlives this. Destroy before anything earlier on `g`.
     pub fn create(gpa: std.mem.Allocator, io: std.Io, g: *Gpu, generator: []const u8, dec: *const wts.Weights) !*Quantizer {
         const q = try gpa.create(Quantizer);
         errdefer gpa.destroy(q);

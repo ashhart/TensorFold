@@ -1,5 +1,4 @@
-//! The codec encoder's acoustic branch as published (generator.pt, fp32) in Metal buffers: resampler, conv front end,
-//! five stages; weight norms folded as cuda/encoder_weights.zig folds them.
+//! The codec encoder's acoustic branch (generator.pt, fp32) in Metal buffers; weight norms folded as on CUDA.
 const std = @import("std");
 const Gpu = @import("gpu.zig").Gpu;
 const pth = @import("core").torch_pth;

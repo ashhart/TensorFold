@@ -1,5 +1,4 @@
-//! The clip encoder's Metal launches: encoder.metal and teacher.metal by kernel, each with the threads of the launch of
-//! that name in cuda/encoder.zig, cuda/quantizer.zig and cuda/teacher.zig.
+//! The clip encoder's Metal launches (encoder.metal, teacher.metal), each with the threads of its cuda/ namesake.
 const Gpu = @import("gpu.zig").Gpu;
 
 fn i(x: usize) i32 {

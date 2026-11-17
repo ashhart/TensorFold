@@ -1,5 +1,4 @@
-// ours: ZONOS3 Mini's backbone on Metal: fp32 rows over bf16 weights, one fixed order a row for prompt and decode.
-// Each kernel follows zonos3.cu's kernel of the same name: the same threads, the same sums in the same order.
+// ours: ZONOS3 Mini's backbone on Metal, fp32 rows over bf16 weights: zonos3.cu's kernels, same threads and sum order.
 #include "z3_common.h"
 
 // Eight bf16 weights against eight fp32 inputs, in index order.
@@ -85,8 +84,7 @@ kernel void z3_attnres(device const float* bank [[buffer(0)]], device const bf16
   }
 }
 
-// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): bf16 W [N, K], K % 8 == 0, x staged in K * 4 bytes of threadgroup
-// memory (K <= 8192); picks move row r's W by picks[r] * pick_stride. A group of 8 simdgroups makes 8 outputs of a row.
+// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): bf16 W [N, K], K % 8 == 0, K <= 8192 (x in threadgroup memory).
 struct LinearArgs { int xs; int xrep; int K; int N; int ys; int has_bias; int has_picks; long pick_stride; };
 kernel void z3_linear(device const bf16* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]],
                       device const bf16* bias [[buffer(3)]], device const int* picks [[buffer(4)]],
@@ -99,6 +97,7 @@ kernel void z3_linear(device const bf16* W [[buffer(0)]], device const float* x 
   device const float* xr = x + (ulong)(r / a.xrep) * a.xs;
   for (int i = tid; i < a.K; i += nt) xs[i] = xr[i];
   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // 8 simdgroups make 8 outputs of row r; picks move its W by picks[r] * pick_stride.
   const int n = gid.x * 8 + sg;
   device const bf16* base = a.has_picks ? W + (ulong)picks[r] * (ulong)a.pick_stride : W;
   device const uint4* wr = (device const uint4*)(base + (ulong)min(n, a.N - 1) * a.K);
@@ -199,8 +198,7 @@ kernel void z3_gated_norm(device const float* o [[buffer(0)]], device const floa
   y[(ulong)t * 512 + h * 128 + i] = xv * inv * b2f(w[i]) * z3_silu(proj[(ulong)t * a.ps + a.z_off + h * 128 + i]);
 }
 
-// Attention inputs of a row at pos0 + row: q rms-normed, times |temp|, rotated in place; k and v to the caches.
-// 512 threads: simdgroup h is head h, its lane the head's dimension.
+// Attention inputs at pos0 + row: q rms-normed, times |temp|, rotated; k, v to the caches; simdgroup: head, lane: dim.
 struct AttnPrepArgs { int pos0; float theta; };
 kernel void z3_attn_prep(device float* q [[buffer(0)]], device const float* kv [[buffer(1)]],
                          device const bf16* temp [[buffer(2)]], device float* kc [[buffer(3)]],
@@ -228,8 +226,6 @@ kernel void z3_attn_prep(device float* q [[buffer(0)]], device const float* kv [
 }
 
 // Causal attention of (row, head) over cache rows 0 .. pos0 + row, gated; keys by index mod 256, a fixed fold.
-// The 33 partial sums of each thread are folded in two halves (threadgroup memory holds 17 a thread), each in
-// zonos3.cu's order: thread 0 to 255.
 struct AttentionArgs { int pos0; };
 [[max_total_threads_per_threadgroup(256)]] kernel void z3_attention(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]],
                          device const float* vc [[buffer(2)]], device const float* gate [[buffer(3)]],
@@ -264,6 +260,7 @@ struct AttentionArgs { int pos0; };
     s_[32] += e;
     for (int i = 0; i < 32; ++i) s_[i] = fma(e, v[i], s_[i]);
   }
+  // a thread's 33 sums folded in two halves (17 a thread fit), each in zonos3.cu's order: thread 0 to 255
   for (int half_ = 0; half_ < 2; ++half_) {
     const int first = half_ * 17, count = half_ == 0 ? 17 : 16;
     for (int i = 0; i < count; ++i) acc[tid][i] = s_[first + i];

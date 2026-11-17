@@ -1,7 +1,4 @@
-//! ZONOS3's Metal kernels under the contract: the family's sources compiled as its metallib is, a rig whose buffers
-//! are addressed as the family's device addresses are, the kernels' hooks, and fp32 functions as float64 ranges.
-//! The kernels are the CUDA family's, kernel for kernel, so each test is its CUDA twin (zig/tests/cuda/
-//! contract_zonos3_*.zig) with Metal's launch and Metal's function accuracy.
+//! ZONOS3's Metal contract kit: sources built as the metallib, a rig addressed as the family's, hooks, float64 ranges.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -32,8 +29,7 @@ pub fn source(a: std.mem.Allocator, file: File) ![]u8 {
     return std.mem.replaceOwned(u8, a, text, "#include \"z3_common.h\"", z.common);
 }
 
-/// The metallib's options at run time: safe math, precise fp32 functions, MLX's language version (z3_common.h's
-/// pragma turns contraction off, as the build's -ffp-contract=off does).
+/// The metallib's options at run time: safe math, precise fp32 functions, MLX's MSL version; contraction off by pragma.
 pub fn options() mtl.CompileOptions {
     var o = mtl.CompileOptions.mlx();
     o.math_functions = .precise;
@@ -77,8 +73,7 @@ pub const Libs = struct {
 const slot_shift = 40;
 const off_mask = (@as(u64, 1) << slot_shift) - 1;
 
-/// One call's guarded buffers (rig.zig's), each addressed as (its index + 1) << 40 plus a byte offset, as the family's
-/// gpu.zig addresses its buffers; every launch runs in a pass of its own and is waited for.
+/// One call's guarded buffers, at ((index + 1) << 40) + offset as in gpu.zig; each launch in its own pass, waited for.
 pub const Rig = struct {
     base: rig_.Rig,
     refs: std.ArrayList(rig_.Ref) = .empty,
@@ -156,8 +151,7 @@ pub const Rig = struct {
         return r.base.overlap();
     }
 
-    /// One dispatch as gpu.zig's goShared encodes it: buffers at 0.., `args` (an extern struct) at the next index,
-    /// `shared` bytes of threadgroup memory at index 0; committed and waited for.
+    /// One dispatch as gpu.zig's goShared encodes it: buffers 0.., then `args`, `shared` threadgroup bytes; waited for.
     pub fn go(r: *Rig, p: mtl.Pipeline, groups: [3]usize, threads: usize, bufs: []const u64, args: anytype, shared: usize) !void {
         const pass = r.base.begin();
         const e = pass.e;
@@ -355,9 +349,7 @@ pub fn tanh(a: Iv) Iv {
     return rising(tanh64, a, iv.tanh_ulps);
 }
 
-/// z3_log1p(u) for u >= 0: log(w) * (u / (w - 1)), w = 1 + u; u itself when w rounds to 1. The quotient corrects
-/// the rounding of w to first order, so the result is log1p(u) within log's ulps (twice, for the rounding of w that
-/// the correction leaves) and four fp32 roundings.
+/// z3_log1p(u), u >= 0: log(w) * (u / (w - 1)), w = 1 + u, or u if w rounds to 1; within 2 log ulps and 4 roundings.
 pub fn log1p(u: Iv) Iv {
     const f = struct {
         fn of(x: f64) f64 {

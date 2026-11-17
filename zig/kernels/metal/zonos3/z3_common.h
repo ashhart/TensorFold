@@ -1,7 +1,6 @@
 // ours: ZONOS3 Mini's Metal helpers: bf16 as ushort bits, the CUDA kernels' reduction orders, precise fp32 math.
 #pragma once
-// No contraction: the build passes -ffp-contract=off as well; this keeps a run-time compile (the kernel contract's)
-// to the same steps.
+// No contraction, as the build's -ffp-contract=off, so a run-time compile (the kernel contract's) takes the same steps.
 #pragma METAL fp contract(off)
 #include <metal_stdlib>
 using namespace metal;

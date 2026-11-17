@@ -1,6 +1,4 @@
-//! ZONOS3's attention on Metal under the contract: the backbone's, the codec's and the teacher's, and the two that
-//! rotate (contract_zonos3_attn.zig's CUDA twin). The Metal kernels fold each thread's partial sums through
-//! threadgroup memory in two halves, each value's terms in thread order, so their chains are CUDA's.
+//! ZONOS3's attention kernels on Metal under the contract (contract_zonos3_attn.zig's twin); their chains are CUDA's.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

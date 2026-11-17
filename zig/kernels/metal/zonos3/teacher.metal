@@ -34,9 +34,7 @@ kernel void zt_dwconv(device const float* x [[buffer(0)]], device const float* w
   out[t * a.C + c] = acc;
 }
 
-// Attention of (row l, head h) over all T rows: score(r) = (q . k_r + q . E[clamp(r - l, -64, 8) + 64]) / 8. The 128
-// threads' 65 partial sums are folded through threadgroup memory in two halves (33, then 32), each value's 128 terms
-// in thread order as on CUDA.
+// Attention of (row l, head h) over all T rows: score(r) = (q . k_r + q . E[clamp(r - l, -64, 8) + 64]) / 8.
 struct TAttnArgs { int D; int T; };
 [[max_total_threads_per_threadgroup(128)]] kernel void zt_attention(device const float* qkv [[buffer(0)]], device const float* E [[buffer(1)]],
                          device float* out [[buffer(2)]], constant TAttnArgs& a [[buffer(3)]],
@@ -76,6 +74,7 @@ struct TAttnArgs { int D; int T; };
     s_[64] += e;
     for (int i = 0; i < 64; ++i) s_[i] = fma(e, v[i], s_[i]);
   }
+  // a thread's 65 sums folded in two halves (33, then 32), each value's 128 terms in thread order as on CUDA
   for (int half_ = 0; half_ < 2; ++half_) {
     const int first = half_ * 33, count = half_ == 0 ? 33 : 32;
     for (int i = 0; i < count; ++i) acc[tid][i] = s_[first + i];

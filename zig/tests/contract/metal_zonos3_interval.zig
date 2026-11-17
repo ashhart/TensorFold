@@ -1,6 +1,4 @@
 //! Interval arithmetic for ZONOS3's Metal kernels: float64 at a kernel's rounding points, and the range fp32 allows.
-//! The functions' ulps are the Metal Shading Language specification's for precise math (its Table 8.1, the
-//! accuracy without fast math): the family compiles with -fmetal-math-fp32-functions=precise.
 const std = @import("std");
 const contract = @import("contract");
 
@@ -12,8 +10,7 @@ const sumIn = contract.rows.sumIn;
 pub const unit = 0x1p-24;
 /// One ulp at 1, the spread a function's n ulps scale.
 const ulp = 0x1p-23;
-/// precise::exp, exp2, log, sin and cos: at most 4 ulps; precise::tanh 5; precise::pow 16. Division, sqrt and rsqrt
-/// are correctly rounded.
+/// MSL Table 8.1 precise math (the family's): exp, exp2, log, sin, cos 4 ulps; tanh 5; pow 16; /, sqrt, rsqrt exact.
 pub const exp_ulps = 4;
 pub const log_ulps = 4;
 pub const trig_ulps = 4;
@@ -95,8 +92,7 @@ pub const Iv = struct {
         return .{ .m = if (a.m < v) v else a.m, .lo = @max(a.lo, v), .hi = @max(a.hi, v) };
     }
 
-    /// precise::cos (sin: false) or precise::sin (true) of an angle range: 1-Lipschitz, plus trig_ulps of 1, within
-    /// [-1, 1].
+    /// precise::cos (sin: false) or precise::sin (true) of an angle range: 1-Lipschitz plus trig_ulps, in [-1, 1].
     pub fn trig(a: Iv, sin: bool) Iv {
         const m = if (sin) @sin(a.m) else @cos(a.m);
         const d = @max(a.m - a.lo, a.hi - a.m) + trig_ulps * ulp;

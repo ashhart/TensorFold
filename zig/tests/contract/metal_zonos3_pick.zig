@@ -1,5 +1,4 @@
-//! ZONOS3's picking kernels on Metal under the contract: the MoE router and the quantizer's nearest code, by their own
-//! rules (contract_zonos3_pick.zig's CUDA twin).
+//! ZONOS3's MoE router and the quantizer's nearest code on Metal, by their own rules (contract_zonos3_pick.zig's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

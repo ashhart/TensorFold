@@ -194,7 +194,7 @@ pub const Engine = struct {
         }
     }
 
-fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe) !void {
+    fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe) !void {
         const g = e.g;
         const t = rows.len;
         const R = e.o.max_rows;

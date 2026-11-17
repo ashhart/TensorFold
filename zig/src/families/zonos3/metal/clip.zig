@@ -22,8 +22,7 @@ pub const Clip = struct {
     teacher: *teach.Teacher,
     quantizer: *quant.Quantizer,
 
-    /// On `g`, after everything else made on it so far; `root` is the release folder, `decoder` its decoder's weights.
-    /// Destroy it before anything made on `g` before it.
+    /// On `g` after all else made on it; `root`: the release, `decoder`: its weights. Destroy before older ones on `g`.
     pub fn create(gpa: std.mem.Allocator, io: std.Io, g: *Gpu, root: []const u8, generator: []const u8, decoder: *const dec.Weights) !*Clip {
         const c = try gpa.create(Clip);
         errdefer gpa.destroy(c);

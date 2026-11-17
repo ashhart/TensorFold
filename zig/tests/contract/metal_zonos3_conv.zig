@@ -1,5 +1,4 @@
-//! ZONOS3's encoder convolution on Metal under the contract: every layout the front end launches it at
-//! (contract_zonos3_conv.zig's CUDA twin), its taps' inputs staged in taps x Cin floats of threadgroup memory.
+//! ZONOS3's encoder convolution on Metal under the contract, every front-end layout (contract_zonos3_conv.zig's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

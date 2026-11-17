@@ -1,5 +1,4 @@
-//! ZONOS3's GDN layer on Metal under the contract: its inputs' norms and gates, the recurrence, and the gated norm
-//! after it (contract_zonos3_gdn.zig's CUDA twin).
+//! ZONOS3's GDN layer on Metal under the contract: norms, gates, recurrence, gated norm (contract_zonos3_gdn's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

@@ -61,8 +61,7 @@ pub const Teacher = struct {
     big: u64, // [rows][ffn]
     qkv: u64, // [rows][3 d]
 
-    /// The teacher on `g`, after everything else made on it so far; `dir` holds its model.safetensors. Destroy it
-    /// before anything made on `g` before it.
+    /// On `g` after all else made on it; `dir` holds model.safetensors. Destroy before anything earlier on `g`.
     pub fn create(gpa: std.mem.Allocator, io: std.Io, g: *Gpu, dir: []const u8) !*Teacher {
         const t = try gpa.create(Teacher);
         errdefer gpa.destroy(t);

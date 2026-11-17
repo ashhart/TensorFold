@@ -18,8 +18,7 @@ kernel void ze_resample_in(device const float* x [[buffer(0)]], device const flo
   out[m] = acc;
 }
 
-// out[t, o] = bias[o] + sum_j sum_c W[o][j][c] x[t * stride - pad + j * dilation, c], x zero outside [0, T); the taps'
-// inputs staged in K * Cin floats of threadgroup memory.
+// out[t, o] = bias[o] + sum_j sum_c W[o][j][c] x[t * stride - pad + j * dilation, c], x zero outside [0, T).
 struct ConvArgs { int Cin; int T; int K; int dilation; int stride; int pad; int Cout; };
 kernel void ze_conv(device const float* x [[buffer(0)]], device const float* W [[buffer(1)]],
                     device const float* bias [[buffer(2)]], device float* out [[buffer(3)]],
@@ -27,6 +26,7 @@ kernel void ze_conv(device const float* x [[buffer(0)]], device const float* W [
                     uint2 gid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
                     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   const long t = gid.x;
+  // the taps' inputs, staged in K * Cin floats of threadgroup memory
   const int n = a.K * a.Cin;
   for (int i = tid; i < n; i += 256) {
     const long p = t * a.stride - a.pad + (long)(i / a.Cin) * a.dilation;
@@ -77,8 +77,7 @@ kernel void ze_patch_down(device const float* in [[buffer(0)]], device float* ou
   if (i < a.C * a.h) out[t * a.C * a.h + i] = in[(t * a.h + i % a.h) * a.C + i / a.h];
 }
 
-// codes[row * 10 + col] = argmax_c e . C[c], C [4096][8]: ties to the lower, a NaN dot never wins, none finite: 0
-// (thread 0's first candidate, as on CUDA).
+// codes[row * 10 + col] = argmax_c e . C[c], C [4096][8]: ties to the lower, NaN never wins, none finite: 0 (as CUDA).
 struct NearestArgs { int col; };
 kernel void ze_nearest(device const float* e [[buffer(0)]], device const float* C [[buffer(1)]],
                        device int* codes [[buffer(2)]], constant NearestArgs& a [[buffer(3)]],

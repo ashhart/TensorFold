@@ -1,5 +1,4 @@
-//! ZONOS3's pointwise and moving kernels on Metal under the contract: no sums, each output a few fp32 steps from its
-//! inputs (contract_zonos3_point.zig's CUDA twin).
+//! ZONOS3's pointwise and moving kernels on Metal, a few fp32 steps an output (contract_zonos3_point.zig's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -286,12 +285,11 @@ pub const Point = struct {
 /// The kernels a control is planted for: every kind.
 pub const kinds = std.enums.values(Kind);
 
-/// z3_erf's distance from erf at z: below 0.5 the Taylor series (its tail under 1e-11) in about 20 fp32 steps of
-/// its value; above, Numerical Recipes' erfcc (erfc within 1.2e-7 of itself) through precise::exp (4 ulps) of an
-/// exponent whose roundings scale with z^2, about 20 steps of the fit, then 1 - erfc's own rounding.
+/// z3_erf's distance from erf at z: below 0.5 the Taylor series (its tail under 1e-11) in about 20 fp32 steps.
 fn erfError(z: f64) f64 {
     const az = @abs(z);
     if (az < 0.5) return 24 * ref.unit * @abs(erf64(z)) + 0x1p-149;
+    // erfcc (1.2e-7) through precise::exp (4 ulps) of an exponent rounding with z^2, ~20 fit steps, then 1 - erfc
     return (1 - erf64(az)) * (1.2e-7 + (4 * az * az + 48) * ref.unit) + ref.unit;
 }
 

@@ -1,4 +1,4 @@
-//! ZONOS3 Mini's weights as published (model.pth, bf16) in Metal buffers; the speaker and condition rows stay on the host.
+//! ZONOS3 Mini's weights as published (model.pth, bf16) in Metal buffers; speaker and condition rows stay on the host.
 const std = @import("std");
 const Gpu = @import("gpu.zig").Gpu;
 const pth = @import("core").torch_pth;

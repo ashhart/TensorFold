@@ -1,9 +1,7 @@
-// ours: ZONOS3's codec decoder on Metal in fp32; a row or sample depends on its position, never on a stream's chunks.
-// Each kernel follows zonos3_codec.cu's kernel of the same name: the same threads, the same sums in the same order.
+// ours: ZONOS3's codec decoder on Metal in fp32, zonos3_codec.cu's kernels; an output never depends on stream chunks.
 #include "z3_common.h"
 
-// erf in fp32: the Taylor series to x^15 below 0.5, else 1 - erfc by the Chebyshev fit of Numerical Recipes' erfcc
-// (fractional error under 1.2e-7); either side stays within about one ulp of the result.
+// erf in fp32: Taylor to x^15 below 0.5, else 1 - Numerical Recipes' erfcc (under 1.2e-7); about one ulp either way.
 inline float z3_erf(float x) {
   const float z = fabs(x);
   if (z < 0.5f) {
@@ -32,8 +30,7 @@ inline float z3_erf(float x) {
   return x < 0.0f ? erfc - 1.0f : 1.0f - erfc;
 }
 
-// y[r, n] = sum_k W[n, k] x[r, k] (+ bias[n]): fp32 W [N, K], a simdgroup an output, x staged in K * 4 bytes of
-// threadgroup memory (K <= 8192).
+// y[r, n] = sum_k W[n, k] x[r, k] (+ bias[n]): fp32 W [N, K], a simdgroup an output, K <= 8192 (x in threadgroup).
 struct ZLinearArgs { int xs; int K; int N; int ys; int has_bias; };
 kernel void zc_linear(device const float* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]],
                       device const float* bias [[buffer(3)]], constant ZLinearArgs& a [[buffer(4)]],
@@ -97,8 +94,6 @@ kernel void zc_attn_prep(device float* qkv [[buffer(0)]], device float* kc [[buf
 }
 
 // Causal local attention of (row, head) at p = pos0 + row over cache rows max(0, p - ctx + 1) .. p, in a fixed order.
-// The 65 partial sums of each thread are folded in two halves (threadgroup memory holds 33 a thread), each in
-// zonos3_codec.cu's order: thread 0 to 127.
 struct ZAttentionArgs { int D; int pos0; int ctx; };
 [[max_total_threads_per_threadgroup(128)]] kernel void zc_attention(device const float* qkv [[buffer(0)]], device const float* kc [[buffer(1)]],
                          device const float* vc [[buffer(2)]], device float* out [[buffer(3)]],
@@ -133,6 +128,7 @@ struct ZAttentionArgs { int D; int pos0; int ctx; };
     s_[64] += e;
     for (int i = 0; i < 64; ++i) s_[i] = fma(e, v[i], s_[i]);
   }
+  // a thread's 65 sums folded in two halves (33 a thread fit), each in zonos3_codec.cu's order: thread 0 to 127
   for (int half_ = 0; half_ < 2; ++half_) {
     const int first = half_ * 33, count = half_ == 0 ? 33 : 32;
     for (int i = 0; i < count; ++i) acc[tid][i] = s_[first + i];

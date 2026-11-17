@@ -1,9 +1,7 @@
-//! ZONOS3 Mini's Metal launches (zig/tests/contract/metal_zonos3*.zig): the backbone, the codec decoder, the codec
-//! encoder and its SSL teacher, as families/zonos3/metal/*_kernels.zig launch them. M1 and M2 limits from
-//! `tf-kernel-contract --offline` (the three attentions reserve their threads in the source); the dynamic bytes are the largest a served launch sets (a linear's K * 4, a
-//! convolution's taps * Cin * 4).
+//! ZONOS3 Mini's Metal launches (tests/contract/metal_zonos3*.zig), m1 and m2 from `tf-kernel-contract --offline`.
 const limits = @import("limits.zig");
 
+// tg_memory: the largest a served launch sets (linear K * 4, convolution taps * Cin * 4); attentions reserve threads.
 pub const records = [_]limits.MetalLaunch{
     .{ .name = "zonos3 backbone z3_embed", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "zonos3 backbone z3_rmsnorm", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },

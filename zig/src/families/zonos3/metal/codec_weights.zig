@@ -1,5 +1,4 @@
-//! The codec decoder's published fp32 weights (generator.pt, a head checkpoint) in Metal buffers; weight norms and code
-//! tables folded as cuda/codec_weights.zig folds them.
+//! The codec decoder's fp32 weights (generator.pt) in Metal buffers; weight norms and code tables folded as on CUDA.
 const std = @import("std");
 const Gpu = @import("gpu.zig").Gpu;
 const pth = @import("core").torch_pth;

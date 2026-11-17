@@ -4,8 +4,7 @@ const std = @import("std");
 const dir = "zig/kernels/metal/zonos3";
 const sources = [_][]const u8{ "backbone.metal", "codec.metal", "encoder.metal", "teacher.metal" };
 
-/// Each source compiled with `dir` on the include path (z3_common.h), safe math, precise fp32 functions and no
-/// contraction: a sum's fused steps are the ones the source writes, as `--fmad=false` keeps them on CUDA.
+/// Each source with `dir` on the include path, safe math, precise fp32 functions, no contraction (CUDA's --fmad=false).
 fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
     const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib", "-o" });
     const out = link.addOutputFileArg("zonos3.metallib");

@@ -1,6 +1,4 @@
-//! ZONOS3 Mini's Metal kernels under the contract: the two norms and the two linears here, the rest one file per group
-//! (metal_zonos3_*.zig), each registration followed by the control planted for it. The tests are the CUDA family's
-//! (zig/tests/cuda/contract_zonos3*.zig) with Metal's launches, as the kernels are CUDA's kernel for kernel.
+//! ZONOS3 Mini's Metal kernels under the contract, CUDA's tests with Metal launches: norms, linears here, rest grouped.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -122,8 +120,7 @@ pub const Norm = struct {
     }
 };
 
-/// z3_linear: a lane's chains of eight fused multiply-adds over every 32nd group of eight inputs, then the simdgroup's
-/// butterfly; zc_linear: a lane's chain over every 32nd input, then the butterfly.
+/// z3_linear: a lane's 8-fma chains over every 32nd group of 8 inputs; zc_linear: every 32nd input; then a butterfly.
 fn bf16Depth(s: c.Shape) usize {
     return 8 * ((s.k + 255) / 256) + 5;
 }
@@ -136,8 +133,7 @@ pub const Weights = enum { bf16, f32 };
 
 pub fn linearSpec(weights: Weights) c.Spec {
     return switch (weights) {
-        // the backbone's projections: a GDN layer's, the dense feed-forward's two, an expert's, the head's; the SSL
-        // teacher's feed-forward
+        // the backbone's projections (GDN, dense feed-forward, expert, head) and the SSL teacher's feed-forward
         .bf16 => .{ .name = "metal zonos3 z3_linear (fp32 rows, bf16 weights)", .accum = .f32, .depth = bf16Depth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &.{ .{ .rows = 1, .n = 2056, .k = 1024 }, .{ .rows = 64, .n = 1024, .k = 2048 }, .{ .rows = 2, .n = 3072, .k = 256 }, .{ .rows = 1, .n = 40980, .k = 1024 }, .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 16, .n = 4096, .k = 1024 } } },
         // the codec's: a stage's attention and feed-forward, the encoder's first projection, an iSTFT branch
         .f32 => .{ .name = "metal zonos3 zc_linear (fp32 rows and weights)", .accum = .f32, .depth = f32Depth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 32 } }, .served = &.{ .{ .rows = 16, .n = 2304, .k = 768 }, .{ .rows = 8, .n = 1280, .k = 5120 }, .{ .rows = 8, .n = 768, .k = 5888 }, .{ .rows = 8, .n = 2208, .k = 2210 } } },
@@ -285,8 +281,7 @@ pub const Suite = struct {
     }
 };
 
-/// Gate 5's text for a "zonos3 <file> <function>" launch: the file's library with z3_common.h inlined, the same text
-/// before the M5 (the family has no tensor-op kernels).
+/// Gate 5's text for "zonos3 <file> <function>": the file's library with z3_common.h inlined, the same before the M5.
 pub fn limitsText(a: std.mem.Allocator, name: []const u8) ![]u8 {
     var it = std.mem.tokenizeScalar(u8, name, ' ');
     _ = it.next();

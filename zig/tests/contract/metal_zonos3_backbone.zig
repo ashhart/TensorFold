@@ -1,5 +1,4 @@
-//! ZONOS3's summing backbone kernels on Metal under the contract: the embedding, AttnRes and the GDN's convolution
-//! (contract_zonos3_backbone.zig's CUDA twin), and the GDN layer's kernels (metal_zonos3_gdn.zig).
+//! ZONOS3's embedding, AttnRes and GDN convolution on Metal under the contract (contract_zonos3_backbone.zig's twin).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
