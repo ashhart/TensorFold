@@ -321,7 +321,7 @@ export function approvalsShouldStick(pendingCount: number): boolean {
  * Extracted so the semantics are testable directly.
  */
 export function ticketReviewThreadId(
-  ticket: Pick<Ticket, 'threadId'>,
+  ticket: { threadId?: Ticket['threadId'] },
   threads: ReadonlyArray<Pick<Thread, 'id'>>,
 ): string | null {
   if (!ticket.threadId) return null
