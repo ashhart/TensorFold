@@ -1,5 +1,8 @@
 {
   "Outline item opened.": "Entri kerangka percakapan telah dibuka.",
   "Quoted message opened.": "Pesan yang dikutip telah dibuka.",
-  "Search match opened.": "Hasil pencarian telah dibuka."
+  "Search match opened.": "Hasil pencarian telah dibuka.",
+  "Conversation unavailable": "Percakapan tidak tersedia",
+  "This conversation was archived or deleted, or it has not loaded yet.": "Percakapan ini telah diarsipkan atau dihapus, atau belum dimuat.",
+  "Back to Home": "Kembali ke Beranda"
 }
