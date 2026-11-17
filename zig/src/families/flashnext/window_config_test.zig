@@ -86,3 +86,36 @@ test "Flash Next context: every changed rotary path has a measured resource reco
         try t.expect(found);
     }
 }
+
+test "Flash Next context: one-plane aliases stay valid and two-part calls retain independent workspaces" {
+    const E = @import("engine.zig").Engine;
+    const P = @import("replay.zig").Prompt;
+    const M = @import("replay.zig").Model;
+    var first: P = undefined;
+    var second: P = undefined;
+    first.step = 8192;
+    var model: M = undefined;
+    model.pos = 0;
+    var e: E = undefined;
+    e.m = &model;
+    e.pr = &first;
+    e.pr2 = e.pr;
+    e.segments = false;
+    const one = e.chunkCall(16000);
+    try t.expectEqual(@as(usize, 1), one.parts);
+    const views = [2]*P{ e.pr, e.pr2 };
+    try t.expectEqual(&first, views[0]);
+    try t.expectEqual(&first, views[1]);
+    e.pr2 = &second;
+    e.segments = true;
+    try t.expectEqual(@as(usize, 2), e.chunkCall(16000).parts);
+    try t.expect(e.pr != e.pr2);
+    const s: w.Settings = .{ .ssd_experts = 8 << 30 };
+    try t.expect(!s.staggered() and !s.sibling(false));
+    try t.expect((w.Settings{}).sibling(false));
+    try t.expect(s.sibling(true));
+    try t.expectError(error.FsrNeedsSingleMetalDevice, s.validate(true));
+    try t.expect(!(w.Settings{ .ple_on_ssd = true }).sibling(false));
+    try t.expect(!(w.Settings{ .fsr_trace = "trace.jsonl" }).sibling(false));
+    try t.expect((w.Settings{}).sibling(true));
+}

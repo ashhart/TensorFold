@@ -63,19 +63,19 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     errdefer device.deinit();
     const existing = device.allocated();
     const base_extra = try std.math.add(u64, requested, existing);
-    const plain = try memory.budgetLive(weights, window.capacity, inventory, base_extra, existing);
+    const plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
     const cache = @import("rotary_cache.zig");
     const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
     const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
-    const startup = try memory.budgetLive(weights, window.capacity, inventory, extra, existing);
+    const startup = try memory.budgetLiveFor(weights, window.capacity, inventory, extra, existing, window.sibling(paired));
     const load_limit = memory.admitBudget(limit, startup, route.needs_build) catch |err| {
         if (err == error.FlashNextMemoryShortfall) {
             const need = startup.forPhase(route.needs_build);
             const gib: f64 = 1 << 30;
-            std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, both prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
+            std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, applicable prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
         }
         return err;
     };
@@ -91,7 +91,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.copy = true;
     e.copy_min = 3;
     e.copy_long = 6;
-    e.segments = window.ssd_experts == null and !window.ple_on_ssd and window.fsr_trace == null;
+    e.segments = window.staggered();
     e.mark_taps = true;
     e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
@@ -396,13 +396,16 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     e.pr = try arena.create(Prompt);
     e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
     const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
-    e.pr2 = try arena.create(Prompt);
-    e.pr2.* = try e.pr.sibling();
+    const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+    e.pr2 = e.pr;
+    if (r.window.sibling(tp_path != null)) {
+        e.pr2 = try arena.create(Prompt);
+        e.pr2.* = try e.pr.sibling();
+    }
     try e.rounds();
     e.tsel = try GSelect.init(r, 0);
     e.msel = try GSelect.init(r, 0);
     // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in...
-    const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
     if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
     if (tp_path) |path| r.tp = try fz.Tp2.init(arena, io, r.device, path);
     if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
