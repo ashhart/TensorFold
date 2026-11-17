@@ -23,6 +23,7 @@ const Host = struct {
     load_limit: u64 = 0,
     resident: ?mtl.resident.Resident = null,
     warm: mtl.keepalive.Target = undefined,
+    pair_warm: ?@import("src/native/flashnext_pair_warm.zig").PairWarm = null,
 };
 fn waiting(_: *anyopaque) bool {
     return false;
@@ -48,6 +49,7 @@ test "residency owner Flash Next: paired and single native inventories retain re
                 tp.one = tp_buffers[1].?;
                 tp.pick_tmp = tp_buffers[2].?;
                 tp.partial = tp_buffers[3].?;
+                tp.request_gate = .{};
                 run.tp = &tp;
             }
             var engine: Engine = undefined;
@@ -78,6 +80,20 @@ test "residency owner Flash Next: paired and single native inventories retain re
             try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
             try record.checkInitial();
             try record.check();
+            // only the single-request host serves pairs: the batch host refuses them before holding
+            try std.testing.expectEqual(paired and !shared, h.pair_warm != null);
+            try std.testing.expectEqual(@as(usize, if (paired and !shared) 1 else 0), record.side_queues);
+            if (h.pair_warm) |*w| {
+                try std.testing.expect(w.thread != null and w.target.flush == null);
+                try std.testing.expect(w.target.hold.?.ctx == @as(*anyopaque, &h.resident.?));
+                try std.testing.expect(w.target.sets.ptr == h.warm.sets.ptr);
+                w.stop();
+                tp.request_gate.begin();
+                try std.testing.expect(w.step());
+                tp.request_gate.end();
+                try std.testing.expect(!w.step());
+                try std.testing.expectEqual(@as(usize, 1), record.side_commits);
+            }
             mtl.keepalive.Target.tick(&h.warm);
             try std.testing.expect(record.copies > 0 and record.uses > 0);
             const lazy = try run.buffer(128);
@@ -100,6 +116,7 @@ test "residency owner Flash Next: paired and single native inventories retain re
         try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_adds);
         try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_removes);
         try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
+        try std.testing.expectEqual(record.side_queues, record.queue_releases);
     };
 }
 
@@ -135,6 +152,7 @@ test "Flash Next cleanup: failed open joins a follower holding borrowed residenc
         load_limit: u64 = 0,
         resident: ?mtl.resident.Resident = null,
         warm: mtl.keepalive.Target = undefined,
+        pair_warm: ?@import("src/native/flashnext_pair_warm.zig").PairWarm = null,
         follower: ?std.Thread = null,
         borrowed: std.atomic.Value(bool) = .init(false),
         used_live: *bool,
@@ -306,4 +324,5 @@ test "Flash Next cleanup: actual constructor prefix unwinds a later guard refusa
 
 test {
     _ = @import("src/families/flashnext/owned_test.zig");
+    _ = @import("residency_pair_warm_tests.zig");
 }

@@ -82,6 +82,8 @@ pub const Record = struct {
     queue_releases: usize = 0,
     uses: usize = 0,
     copies: usize = 0,
+    side_queues: usize = 0, // queues made by the device beside the engine's
+    side_commits: usize = 0,
     bad: usize = 0,
     set_commits: usize = 0,
     initial_missing: usize = 0,
@@ -147,6 +149,10 @@ pub const Device = struct {
         try d.record.allocations.append(d.record.gpa, p);
         return .{ .id = p };
     }
+    pub fn queue(d: Device) !Queue {
+        d.record.side_queues += 1;
+        return .{ .record = d.record, .side = true };
+    }
     pub fn maxWorkingSet(_: Device) usize {
         return 256 * ResidencySet.GiB;
     }
@@ -203,11 +209,12 @@ pub const ResidencySet = struct {
 
 pub const Queue = struct {
     record: *Record,
+    side: bool = false,
     pub fn deinit(q: Queue) void {
         q.record.queue_releases += 1;
     }
     pub fn commandBuffer(q: Queue) CommandBuffer {
-        return .{ .record = q.record };
+        return .{ .record = q.record, .side = q.side };
     }
     pub fn commandBufferUnretained(q: Queue) CommandBuffer {
         return q.commandBuffer();
@@ -225,6 +232,7 @@ pub const Queue = struct {
 pub const CommandBuffer = struct {
     record: *Record,
     id: objc.Id = undefined,
+    side: bool = false,
     pub fn useResidencySet(c: CommandBuffer, _: ResidencySet) void {
         c.record.uses += 1;
     }
@@ -236,6 +244,7 @@ pub const CommandBuffer = struct {
     }
     pub fn commit(c: CommandBuffer) void {
         c.record.commits += 1;
+        if (c.side) c.record.side_commits += 1;
     }
     pub fn wait(c: CommandBuffer) void {
         c.record.waits += 1;

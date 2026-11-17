@@ -3,13 +3,20 @@ const std = @import("std");
 
 pub const Gate = struct {
     mutex: std.atomic.Mutex = .unlocked,
+    active: std.atomic.Value(bool) = .init(false), // a request holds the gate, for readers that never take it
 
     pub fn begin(g: *Gate) void {
         while (!g.mutex.tryLock()) std.atomic.spinLoopHint();
+        g.active.store(true, .release);
     }
 
     pub fn end(g: *Gate) void {
+        g.active.store(false, .release);
         g.mutex.unlock();
+    }
+
+    pub fn held(g: *const Gate) bool {
+        return g.active.load(.acquire);
     }
 
     pub fn keepWarm(g: *Gate, warm: anytype) !bool {
@@ -127,6 +134,19 @@ test "a paired request prevents every idle flush and commit and idle ticks resum
     try std.testing.expectEqual(@as(u32, 1), p.flushes.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), p.commits.load(.acquire));
     try std.testing.expect(p.completed.load(.acquire));
+}
+
+test "the request gate reports a request active only between begin and end" {
+    var p: Probe = .{};
+    try std.testing.expect(!p.gate.held());
+    p.release.store(true, .release);
+    var target = p.warm();
+    try std.testing.expect(try p.gate.keepWarm(&target));
+    try std.testing.expect(!p.gate.held());
+    p.gate.begin();
+    try std.testing.expect(p.gate.held());
+    p.gate.end();
+    try std.testing.expect(!p.gate.held());
 }
 
 test "a failed idle probe releases the request gate and reports its GPU error" {

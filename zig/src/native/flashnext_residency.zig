@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const Resident = mtl.resident.Resident;
+const PairWarm = @import("flashnext_pair_warm.zig").PairWarm;
 
 fn initial(h: anytype, list: *std.ArrayList(mtl.Buffer)) !void {
     try list.appendSlice(h.gpa, h.eng.r.held.items);
@@ -31,10 +32,32 @@ pub fn hold(h: anytype) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
     try initial(h, &list);
+    if (h.eng.r.tp) |tp| h.pair_warm = PairWarm.init(h.eng.r.device, h.io, &tp.request_gate.active) catch |err| blk: {
+        std.log.warn("flash next: no residency probe during paired requests ({s})", .{@errorName(err)});
+        break :blk null;
+    };
+    errdefer dropPairWarm(h);
+    if (h.pair_warm) |*w| try list.append(h.gpa, w.target.scratch.?);
     try attach(h, h.io, list.items, "flash next");
+    if (h.resident == null) dropPairWarm(h);
+    if (h.pair_warm) |*w| {
+        w.track(h.warm);
+        w.start() catch |err| std.log.warn("flash next: no residency probe during paired requests ({s})", .{@errorName(err)});
+    }
+}
+
+fn dropPairWarm(h: anytype) void {
+    if (h.pair_warm) |*w| w.deinit();
+    h.pair_warm = null;
 }
 
 pub fn drop(h: anytype) void {
+    if (h.pair_warm) |*w| w.stop();
+    release(h);
+    dropPairWarm(h);
+}
+
+fn release(h: anytype) void {
     h.eng.r.follow = null;
     h.eng.r.warm_probe = null;
     h.eng.snap_pool.follow = null;
@@ -61,5 +84,5 @@ pub fn holdShared(h: anytype) !void {
 
 pub fn dropShared(h: anytype) void {
     for (h.back.sessions) |*session| session.setResident(null);
-    drop(h);
+    release(h);
 }

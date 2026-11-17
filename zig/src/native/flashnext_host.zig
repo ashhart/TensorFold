@@ -42,6 +42,7 @@ pub const Host = struct {
     shared_gdn_pipe: @FieldType(tf.flashnext_replay.Run, "gdn_pipe") = null,
     warm: mtl.keepalive.Target = undefined, // the engine's queue, for the server's idle ticker
     resident: ?Resident = null, // the engine's buffers, kept wired between requests
+    pair_warm: ?@import("flashnext_pair_warm.zig").PairWarm = null, // the set in use during paired requests
     info_: api.Info,
     load_limit: u64 = 0,
     mutex: std.Io.Mutex = .init,
