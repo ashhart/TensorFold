@@ -63,7 +63,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
 | 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
-| 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
+| 15. MTP | done [#1562]; yes C [#2485] (dense) | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
@@ -433,6 +433,23 @@ below; these are estimates for planning a port, not results.
     that same total between fixed and head components. Its row learning, granted-depth and shared-depth limits are
     off. The preserved shared step values are still checked on the host; the other proposed behavior retains its gates.
 
+    Dense Qwen CUDA MTP is tracked in [#2485]. The local candidate `ab19ad377` against main `a0e2665a4` was
+    measured with the Qwen3.8-27B NVFP4 checkpoint on an RTX 5090 Laptop (SM120). At one stream, 128-token decode
+    was 68.5–78.4 tok/s with MTP3 versus 34.2 tok/s without drafts; at two streams, aggregate decode was
+    122.6–151.9 versus 58.9–60.3 tok/s. Across greedy and seeded temperature-1 sampling, 120/120 cross-run token
+    hashes matched; resumed and fresh replies also matched in all four MTP-on/off and greedy/sampled cells, with
+    4,096 cached tokens observed on each resumed request. Cold first-token latency with cache off was slower with
+    MTP3: at 2,048 prompt tokens, 1.279 s versus a 1.213 s main A/B/A mean (+5.5%); at 8,000 tokens, 5.036 s
+    versus 4.864 s (+3.5%). The branch's target-only path matched main within noise. This misses the current
+    no-slower prompt gate for `--drafter`, so the change is not release-qualified until that regression is
+    addressed or the gate is explicitly revised. At parallel 2 and context 1,024, process GPU peak was 21,498
+    MiB with MTP versus 21,088 MiB target-only (+410 MiB); at context 8,192 it was 21,396 versus 21,168 MiB
+    (+228 MiB). Only this checkpoint and SM120 were measured; other dense families and devices remain unqualified.
+
+    Follow-up on 12 Nov 2026 after adding KV-only prompt absorption (same Qwen3.8-27B NVFP4 checkpoint and RTX 5090 Laptop, SM120): baseline worktree `3885dceb2bb60fe02e609066b75ec752baf51e38`, candidate `4f2436fc016adbc4ca79adab5fbcd0886a6149be`. Five fresh-server, cache-off greedy samples gave main/candidate-MTP median first-output latency of 1.2214/1.2498 s at 2,048 tokens (+2.33%) and 4.9839/5.0677 s at 8,192 (+1.68%); all token hashes matched. Candidate without drafts was +0.62% at 2K and −0.12% at 8K. MTP remains outside the strict no-slower prompt gate at both required lengths. The isolated K/V ring check was byte-identical for 1 and 128 rows; KV-only CUDA time was 0.081/0.770 ms versus 0.336/3.003 ms for full proposal. These checks do not qualify away the cold-prefill regression.
+
+    Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
+
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
     Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
@@ -762,6 +779,7 @@ below; these are estimates for planning a port, not results.
 [#2392]: https://github.com/ashhart/TensorFold/pull/2392
 [#2436]: https://github.com/ashhart/TensorFold/pull/2436
 [#2464]: https://github.com/ashhart/TensorFold/pull/2464
+[#2485]: https://github.com/ashhart/TensorFold/issues/2485
 [#2375]: https://github.com/ashhart/TensorFold/pull/2375
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634

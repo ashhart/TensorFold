@@ -10,13 +10,22 @@ const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_ty
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
-    if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
+    const qwen_mtp = std.mem.eql(u8, o.model_type, "qwen3_5") or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
+    if (o.mtp_drafts) |n| {
+        if (qwen_mtp) {
+            const max = @import("qwen35").native.max_mtp_drafts;
+            if (n > max) return std.fmt.comptimePrint("--mtp-drafts: Qwen CUDA drafts at most {d}", .{max});
+        } else if (n > nemotron.native.max_drafts) {
+            return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
+        }
+    }
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (std.mem.eql(u8, o.model_type, glm_model_type)) {
         if (o.mtp_drafts != null) return "--mtp-drafts: GLM-5.3-Flash's MTP head drafts at the lanes' depth; serve it without --mtp-drafts (--mtp-confidence stops its chains)";
         if (o.mtp_confidence != null and o.drafter != null) return "--mtp-confidence stops the MTP head's chains, and with --drafter DFlash2 drafts instead: serve without one of them";
     } else if (o.mtp_drafts != null or o.mtp_confidence != null) {
-        if (!std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
+        if (qwen_mtp and o.mtp_confidence != null) return "--mtp-confidence is not supported by the Qwen CUDA MTP head";
+        if (!qwen_mtp and !std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
             !std.mem.eql(u8, o.model_type, nemotron.omni.model_type))
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }

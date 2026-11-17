@@ -7,6 +7,7 @@ pub const modelopt = @import("cuda_modelopt.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const prefill = @import("cuda_prefill.zig");
 pub const cache = @import("cuda_cache.zig");
+pub const solo = @import("cuda_solo.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
 pub const native_moe = @import("cuda_native_moe.zig");
@@ -33,6 +34,9 @@ test {
     _ = native;
     _ = native_moe;
     _ = mtp;
+    _ = @import("cuda_mtp_draw.zig");
+    _ = @import("cuda_mtp_coupled_test.zig");
+    _ = @import("cuda_mtp_budget.zig");
     _ = @import("cuda_mtp_bf16.zig");
     _ = @import("cuda_mtp_batch.zig");
     _ = config;
@@ -40,6 +44,7 @@ test {
     _ = @import("draw.zig");
     _ = @import("cuda_draft_weights.zig");
     _ = @import("cuda_draft_config.zig");
+    _ = @import("cuda_drafter_open.zig");
     _ = draft;
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");

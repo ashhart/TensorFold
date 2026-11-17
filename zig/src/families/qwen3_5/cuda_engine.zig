@@ -14,6 +14,8 @@ const profile = @import("cuda_startup_profile.zig");
 const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
+const MtpPromptModule = @import("cuda_mtp_prompt.zig");
+pub const PromptTapMode = MtpPromptModule.Mode;
 pub const recurrent = @import("cuda_recurrent.zig");
 pub const stage_fwd = @import("cuda_stage_forward.zig");
 pub const Geometry = geometry.Geometry;
@@ -165,6 +167,7 @@ pub const Engine = struct {
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
     taps: [8]u32 = undefined,
     n_taps: usize = 0,
+    mtp_prompt: MtpPromptModule.State = .{},
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
     /// A pipeline stage's ring (null: one engine, or a stage warming up) and its boundary rows in host memory.
@@ -227,6 +230,7 @@ pub const Engine = struct {
         e.penalties = .{};
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
+        e.mtp_prompt = .{};
         e.features = 0;
         e.hop = null;
         e.boundary = null;
@@ -351,8 +355,13 @@ pub const Engine = struct {
 
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        return e.streamBytesWithTaps(cap, e.n_taps);
+    }
+
+    /// The same allocation plan for a tap count known before `setTaps` mutates the engine.
+    pub fn streamBytesWithTaps(e: *const Engine, cap: usize, taps: usize) usize {
         const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
+        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapRows() * taps * e.g.hidden * 2 + c.pendBytes(e.g);
     }
 
     /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
@@ -469,6 +478,7 @@ pub const Engine = struct {
         try e.admit(parts, ids, keep);
         try scratch_memory.requireCapacity(e.scratch_capacity, total);
         if (!keep.verifies() and e.int8.on and total > e.int8.capacity) return error.PromptInt8CapacityExceeded;
+        e.mtp_prompt.epoch +%= 1;
         const g = e.g;
         const record = keep.verifies();
         // the tables
@@ -513,7 +523,9 @@ pub const Engine = struct {
             Round.stageImageTables(st, im, p0, total);
         }
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
-        var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
+        const taps_active = e.n_taps > 0 and (record or e.mtp_prompt.mode != .none);
+        var shape = Shape.init(total, parts.len, record, taps_active, @intCast(Round.variant(slot_peak)));
+        if (!record and taps_active) shape.tap_from = e.mtp_prompt.tapFrom(parts[0].cache.len, total);
         if (record) for (parts) |p| {
             try recurrent.mark(p.cache, false);
             if (p.rows == 1 and p.undo) try recurrent.mark(p.cache, true);
@@ -578,6 +590,7 @@ pub const Engine = struct {
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
 
+    /// The same scan selected by body, exposed for host launch-contract fixtures.
     pub const deltaScan = @import("cuda_forward.zig").deltaScan;
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).

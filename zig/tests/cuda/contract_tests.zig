@@ -423,6 +423,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer q35_mod.unload();
     const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
     defer norm_shift.destroy();
+    const q35_taps = try @import("contract_qwen35_tap.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer q35_taps.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
@@ -590,8 +592,3 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     try g.runAll(a, kernels.items, 0x6b63, &t);
     return t;
 }
-
-/// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.
-pub const image = @import("contract_limits.zig").image;
-pub const live = @import("contract_limits.zig").live;
-pub const fatbins = @import("contract_limits.zig").fatbins;
