@@ -130,3 +130,8 @@ Results:
   100). Load 0.2 to 1.6 s; the condition, once an image, 0.07 s.
 - **Memory:** 1.84 GB peak process footprint (`/usr/bin/time -l`, the whole `tf-idol` run with its case), the
   denoiser's fp16 weights in shared Metal buffers.
+
+The shared synthetic case (release `idol-synthetic-case-2731c229`, `--synthetic-conditioning`), jayleaton's run of
+`tf-idol` at 9aaf5d318 on an M5 Ultra: exit 0, 100 of 100 branch-steps pass, worst row over the run 0.0932 against the
+SDK's 0.1009, `blocks 0` all 23 joint blocks pass, repeat identical bytes, final cosine 0.998918, 27.55 s for 50 guided
+steps.
