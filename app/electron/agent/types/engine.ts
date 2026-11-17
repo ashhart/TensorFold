@@ -49,6 +49,20 @@ export interface EngineStatus {
   contextTokens: number | null
   // Raw engine support, the effective preference, observed live mode and any release pause.
   cortheon?: { supported: boolean; enabled: boolean; active: boolean; disabledReason?: string }
+  // The control vector the operator chose: engine support, the file, the strength and whether it is live.
+  controlVector?: EngineControlVectorSnapshot
+}
+
+// What the operator chose for the local engine's control vector, and what the engine can do with it.
+export interface EngineControlVectorSnapshot {
+  // Whether the engine in use lists --glp among its serve flags.
+  supported: boolean
+  enabled: boolean
+  // The file the engine reads, or null when none has been chosen.
+  file: string | null
+  alpha: number
+  // Whether the running engine was given the vector.
+  active: boolean
 }
 
 export interface EngineInstalledModel {

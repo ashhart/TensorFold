@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face がダウンロードを保存する場所です。TensorFold 自身のモデルフォルダは「設定 → モデルフォルダ」で管理します。",
  "Engine knob: append per-request records to a file for diagnostics.": "エンジン設定：リクエストごとの記録を診断用にファイルへ追記します。",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1 にするとエンジンのターミナルでのライブ表示を隠します。提供されるモデルは変わりません。",
- "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。"
+ "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。",
+ "Control vector": "コントロールベクター",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "コントロールベクターは、ローカルモデルの返答のスタイルやトピックを誘導します。有効にするまでは無効のままです。エンジンは起動時に、読み込んだファイルとその SHA-256 を示し、返答が誘導されていることを伝えます。",
+ "Apply a control vector": "コントロールベクターを適用",
+ "Choose…": "選択…",
+ "Strength": "強度",
+ "File: {value0}": "ファイル：{value0}",
+ "In force in the loaded model.": "読み込まれたモデルで適用中です。",
+ "Strength scales the added direction. Large values can degrade replies.": "強度は加算する方向の倍率です。値が大きいと返答の品質が低下することがあります。",
+ "The strength must be above 0 and at most {value0}.": "強度は 0 より大きく、{value0} 以下にしてください。",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "このビルドの TensorFold エンジンはまだコントロールベクターに対応していないため、現在のエンジンでは渡せません。",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "コントロールベクターが有効な間、返答はファイルが表すスタイルやトピックの方向へ誘導されます。対応しているのは加算（add）方式のベクターのみで、エンジンは project 方式のベクターと検証できないファイルを拒否します。"
 }

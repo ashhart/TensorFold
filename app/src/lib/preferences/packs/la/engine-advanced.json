@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Ubi Hugging Face descriptiones reposcit. TensorFold calices modelloorum suorum in Optionibus → Calices modelloorum servat.",
  "Engine knob: append per-request records to a file for diagnostics.": "Clavis instrumenti: singula monumenta rogatorum in pugio pro diagnosci adiungere.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Pone 1 ut vivam textus monstrationem in terminali instrumenti celas; modellos qui ministratur nihil mutatur.",
- "Engine knob: mix a salt into request seeds.": "Clavis instrumenti: sal in semina rogationum miscere."
+ "Engine knob: mix a salt into request seeds.": "Clavis instrumenti: sal in semina rogationum miscere.",
+ "Control vector": "Vector rectum",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Vector rectum stilum vel argumentum responsorum exemplaris localis regit. Off est donec eum accendas. Cum motor incipit, tabulam quam oneravit et SHA-256 eius nominat, et responsa regi dicit.",
+ "Apply a control vector": "Adhibe vectorem rectum",
+ "Choose…": "Elige…",
+ "Strength": "Fortitudo",
+ "File: {value0}": "Tabula: {value0}",
+ "In force in the loaded model.": "Valet in exemplaro onerato.",
+ "Strength scales the added direction. Large values can degrade replies.": "Fortitudo directionem additam multiplicat. Valores magni responsa deteriorare possunt.",
+ "The strength must be above 0 and at most {value0}.": "Fortitudo maior quam 0 et non maior quam {value0} esse debet.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Hic motor TensorFold nondum vectorem rectum praebet, ideo motor praesens eum non accipiet.",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Cum vector recto valente, responsa ad stilum vel argumentum quod tabula codificat diriguntur. Soli vectores additivi (add) sustinentur; motor vectores project et tabulas quas validare non potest recusat."
 }

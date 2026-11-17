@@ -6,6 +6,7 @@ import { formatBytes, useEngine } from '../../lib/engine'
 import { Button, Input } from '../ui'
 import { Section, SettingsPane } from './shared'
 import { ENGINE_ENV_PRESETS, isDeniedEngineEnvKey, normalizeEngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import { ControlVectorSettings } from './ControlVectorSettings'
 import type { EngineEnvOverrides } from '../../lib/types'
 
 // Advanced engine environment: the variables a power user passes through to every
@@ -125,6 +126,7 @@ export function EngineAdvancedSettings() {
           <span>{tx('A load limit above the 70% default leaves less memory for everything else on this Mac. Raise it only when the engine reported that the model just barely did not fit.')}</span>
         </p>
       </Section>
+      <ControlVectorSettings />
     </SettingsPane>
   )
 }
