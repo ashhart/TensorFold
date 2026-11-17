@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on XPU: the target's and the DFlash2 drafter's RoPE tables come from core's exact helper, so they hold the reference's fp32 words; 15 of 32 and 18 of 64 values move by 1 ulp (#2000, part of #1852).
+
 - Tests: `zig build test-lane-explore-host` explores the lane host's schedules from a seed (arrivals, cancels at every stage, the backend's room for live lanes and memory pressure) around a fake target, so ordering bugs show up without hand-picked orders (#3233).
 
 - Qwen3.5 on CUDA: `qwen3_5` and `qwen3_5_moe` declare warm turns, so the server prefills a follow-up's prompt in the background and the next turn resumes past the previous reply, with replies unchanged (#2824). Thanks to @devopsfortunato.
