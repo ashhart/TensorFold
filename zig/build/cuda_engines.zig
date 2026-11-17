@@ -76,7 +76,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "lanes", .module = lanes },
             .{ .name = "nemotron", .module = nemotron },
             .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, core) },
-            .{ .name = "zonos3", .module = @import("zonos3.zig").module(b, target, optimize, cuda, core) },
+            .{ .name = "zonos3", .module = @import("zonos3.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
