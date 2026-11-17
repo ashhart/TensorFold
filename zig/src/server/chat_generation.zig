@@ -71,9 +71,23 @@ pub const Generation = struct {
     chunk_index: usize = 0,
     lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
+    recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+    }
+
+    /// Whether the route's own tool parser would find a call, or a refused envelope, in `text` taken as the answer.
+    fn callIn(g: *const Generation, text: []const u8) Allocator.Error!bool {
+        if (g.tools.len == 0) return false;
+        const parsed = try tool_parse.parse(g.a, try tool_lfm2.dsml(g.a, text, g.tools, true), g.tools, null);
+        return parsed.calls != null or parsed.rejected_envelopes > 0;
+    }
+
+    /// The model ended the reply itself, on its end token: not a stop string, the length or the loop guard.
+    fn endedOnEos(g: *const Generation, reason: []const u8, raw: []const u8, stopped: ?u32) bool {
+        const ids = g.collected.items;
+        return std.mem.eql(u8, reason, "stop") and stopped == null and g.stops.matched(raw) == null and ids.len > 0 and g.eos(ids[ids.len - 1]);
     }
 
     /// Close a tool call left open at the model end token, except when another stop condition ended the reply.
@@ -303,6 +317,10 @@ pub const Generation = struct {
             reasoning = h.reasoning;
         }
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
+        // the model ended its turn inside a think block that never closed: its reasoning is also its answer (#3687)
+        const recovered = g.recover and reasoning != null and reply_text.pyStrip(content).len == 0 and g.endedOnEos(reason, raw, stopped) and
+            (if (native) |n| n.open_think and n.calls == null else neverClosed(text, g.srv.markers, close_at)) and !try g.callIn(reasoning.?);
+        if (recovered) content = reasoning.?;
         if (g.sink) |sink| {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
@@ -362,6 +380,7 @@ pub const Generation = struct {
             if (stopped != null) try loop_field.put(a, "stopped", .{ .bool = true });
             try runtime.put(a, "loop", .{ .object = loop_field });
         }
+        if (recovered) try runtime.put(a, "reasoning_recovered", .{ .bool = true });
         const s = m.stats;
         const spec = try json.newObject(a);
         try spec.put(a, "rounds", try json.intValue(a, s.rounds));
@@ -394,9 +413,11 @@ pub const Generation = struct {
             .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions } else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
+            .reasoning_recovered = recovered,
         };
         if (std.mem.eql(u8, reason, "length") and reasons and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
+        if (recovered) log.line("{s}: the reply ended at its end token inside its think block, so its reasoning is also its content", .{g.reply_id});
         var cycle_text: [32]u8 = undefined;
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
         const done_ns = nowNs(g.srv.io);
@@ -426,4 +447,16 @@ fn answerTail(visible: []const u8, m: reply_text.Markers, close_at: ?reply_text.
         return visible[at + m.close.len ..];
     }
     return visible;
+}
+
+/// The think block never closed and the text opens no tool call, so only the reasoning can be the answer.
+fn neverClosed(text: []const u8, m: reply_text.Markers, close_at: ?reply_text.Close) bool {
+    const closed = switch (close_at orelse return false) {
+        .token => true,
+        .pending => false,
+        .spelled => reply_text.findTag(text, 0, m.close) != null,
+    };
+    if (closed) return false;
+    for (reply_text.openersOf(m).calls) |c| if (reply_text.findTag(text, 0, c[0]) != null) return false;
+    return true;
 }

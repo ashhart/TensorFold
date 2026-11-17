@@ -150,6 +150,7 @@ test {
     _ = @import("limit_pins_test.zig");
     _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("reasoning_recovered_test.zig");
     _ = @import("stream_scan_text.zig");
     _ = @import("stream_scan_bench.zig");
     _ = @import("stream_memory_wire_test.zig");
