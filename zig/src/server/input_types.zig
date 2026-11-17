@@ -35,6 +35,12 @@ pub fn decodes(vision: ?api.Vision) bool {
     return false;
 }
 
+/// At startup: the video decoder (none: video parts are a 400, never a 500) and the audio locator's token (audio.zig).
+pub fn start(srv: anytype) !void {
+    srv.video_decoder = decodes(srv.info.vision);
+    try @import("audio.zig").bindLocator(&srv.info, srv.text);
+}
+
 /// The media a request may carry: the template's vision and PDF, and the image and video inputs /v1/models publishes.
 pub fn media(srv: anytype) @import("messages.zig").Media {
     var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
