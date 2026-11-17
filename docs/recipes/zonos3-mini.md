@@ -59,9 +59,38 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
   The clip encoder's weights load on the first request that brings a clip.
 
-Refused or absent: clips in formats other than WAV, text normalization (text is spoken as typed), speaker and control
+Refused or absent: clips in formats other than WAV, speaker and control
 guidance, LACI, steering, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts,
 condition values (every condition row is its "unknown" bucket), the `full_mr` decoder, concurrency, Metal.
+
+## Text normalization
+
+The reference servers rewrite written text into its spoken form before the tokenizer sees it ("$5" becomes "five
+dollars") with Zyphra's [zyphra-textnorm](https://github.com/Zyphra/zyphra-textnorm), a Rust library with a C
+interface. The server loads that same library when a request first needs it (`server/zonos_textnorm.zig`), so the
+rewriting is the publisher's own code, not a port of it.
+
+- **`language`** names the grammar: one of the reference's 44 request codes (`en_us`, the default, `en_gb`, `fr_fr`,
+  `de`, `pt_br`, `ja`, `cmn`, ...), read whatever its case and with `-` for `_`. Another code is refused with the list.
+  It selects the grammar only; nothing else in the prompt depends on it.
+- **`text_normalization`** is `true` or `false`. Only `true` normalizes. Left out or `false`, the text is spoken as
+  typed, whether or not the library loads, so installing it changes no reply. `true` without the library is refused
+  with the line below.
+- Line breaks are collapsed either way, and start and pause markers pass through the grammar untouched, as in
+  `zonos3.tokenizer.textnorm`.
+
+The library is not built by `zig build`. Build release 0.2.0 (commit `170c571e`, the reference repository's
+`third_party/zyphra-textnorm` submodule; Rust 1.88 or later) as a shared library and name it in
+`TENSORFOLD_LIBZYPHRA_TEXTNORM`, or put it in `lib/` beside the installation:
+
+```
+cargo rustc --release --locked --lib -p zyphra-textnorm --features capi --crate-type cdylib
+```
+
+`server/zonos_textnorm_test.zig` checks the text step against every case of the reference's own tests
+(`model/tests/test_textnorm_wrapper.py`): with `true`, each text in each language it covers must equal the expected
+spoken form byte for byte, and left out or `false`, the text as typed with its line breaks collapsed. The cases that
+need the library skip where it does not load; run them with `TENSORFOLD_LIBZYPHRA_TEXTNORM` set.
 
 ## Precision
 
