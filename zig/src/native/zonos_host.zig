@@ -102,6 +102,8 @@ const Host = struct {
     rel: z3.release.Release,
     e: *z3.Engine,
     codec: *z3.Codec,
+    clip: ?*z3.clip.Clip = null, // the clip encoder, loaded by the first request that brings a clip
+    dir: []const u8,
     info_: api.Info,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
@@ -143,6 +145,13 @@ const Host = struct {
         if (r.pcm.len < @as(usize, r.max_frames) * sp.frame_length) return false;
         if (r.speaker.len != 0 and r.speaker.len != cfg.speaker_dim) return false;
         for (r.speaker) |x| if (!std.math.isFinite(x)) return false;
+        if (r.reference_audio.len != 0) {
+            // a clip becomes a reference prefix: a row a frame and nine more, ahead of the request's rows
+            const clip_frames = (r.reference_audio.len + z3.codec.frame_samples - 1) / z3.codec.frame_samples;
+            if (r.speaker.len != 0 or r.reference_audio.len < z3.clip.min_samples or clip_frames > z3.clip.max_frames) return false;
+            if (r.frames.len + clip_frames + C - 1 > sp.max_prompt_tokens) return false;
+            for (r.reference_audio) |x| if (!std.math.isFinite(x)) return false;
+        }
         if (!std.math.isFinite(r.temperature) or r.temperature < 0) return false;
         if (!std.math.isFinite(r.top_p) or r.top_p <= 0 or r.top_p > 1 or r.top_k == 0) return false;
         if (r.unconditioned.len != 0 or r.cfg_gamma != 1) return false;
@@ -228,7 +237,24 @@ const Host = struct {
     fn serve(h: *Host, job: Job, samples: *usize) !api.Reason {
         const r = job.request;
         const gpa = h.gpa;
-        const layout = try Layout.of(r.frames);
+        var rows = r.frames;
+        var cloned: [][W]i32 = &.{};
+        defer gpa.free(cloned);
+        if (r.reference_audio.len != 0) {
+            if (h.clip == null) {
+                h.clip = try z3.clip.Clip.create(gpa, h.io, &h.e.driver, h.e.stream, h.dir, h.rel.generator, h.codec.w);
+                std.log.info("zonos3: clip encoder loaded, {d} MiB of weights", .{h.clip.?.bytes() >> 20});
+            }
+            const codes = try h.clip.?.encode(gpa, r.reference_audio);
+            defer gpa.free(codes);
+            const prefix = try z3.prompt.referenceRows(gpa, codes);
+            defer gpa.free(prefix);
+            cloned = try gpa.alloc([W]i32, prefix.len + r.frames.len);
+            @memcpy(cloned[0..prefix.len], prefix);
+            @memcpy(cloned[prefix.len..], r.frames);
+            rows = cloned;
+        }
+        const layout = try Layout.of(rows);
         var replaced: [1 + cfg.conditions]z3.Replace = undefined;
         var n: usize = 0;
         if (r.speaker.len != 0) {
@@ -245,8 +271,8 @@ const Host = struct {
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
         try h.codec.reset();
-        var audio: Audio = .{ .h = h, .job = job, .prefill = r.frames[r.frames.len - layout.prefill ..] };
-        const made = try z3.generation.generateWatched(gpa, Guarded{ .h = h }, r.frames, @as([]const z3.Replace, replaced[0..n]), sampling, r.max_frames, &audio);
+        var audio: Audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
+        const made = try z3.generation.generateWatched(gpa, Guarded{ .h = h }, rows, @as([]const z3.Replace, replaced[0..n]), sampling, r.max_frames, &audio);
         defer gpa.free(made.rows);
         samples.* = audio.samples;
         return if (made.eos_frame != null) .stop else .length;
@@ -275,9 +301,11 @@ const Host = struct {
         const h = self(p);
         drain(h);
         h.e.ctx.makeCurrent() catch {};
+        if (h.clip) |c| c.destroy();
         h.codec.destroy();
         h.e.destroy();
         h.rel.deinit();
+        h.gpa.free(h.dir);
         h.gpa.destroy(h);
     }
 };
@@ -293,9 +321,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     errdefer e.destroy();
     const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
     errdefer codec.destroy();
+    const kept = try gpa.dupe(u8, dir);
+    errdefer gpa.free(kept);
     h.* = .{
         .gpa = gpa,
         .io = io,
+        .dir = kept,
         .rel = rel,
         .e = e,
         .codec = codec,

@@ -21,7 +21,12 @@ pub const State = struct {
     default: ?*const req.voices.Voice,
 };
 
-pub const Made = struct { prompt: []const u32, frames: []const [11]i32 };
+pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{} };
+
+const rate = 44100;
+/// A reference clip: at least half a second, and the first 60 s of it in whole frames of 2940 samples.
+const min_clip = rate / 2;
+const max_clip = req.reference_frames * 2940;
 
 /// The state for a ZONOS3 Mini release at `dir` (from the arena `a`), or null for any other checkpoint.
 pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8) !?*State {
@@ -57,9 +62,38 @@ fn referenceCodes(cx: *errors.Cx, value: json.Value) errors.Refused![]const [req
     return out;
 }
 
+/// `ref_audio` (a base64 WAV, or a data: URL of one) to mono 44.1 kHz as the release prepares a clip, cut to 60 s.
+fn referenceAudio(cx: *errors.Cx, value: json.Value) errors.Refused![]const f32 {
+    const text = value.str() orelse return cx.refuse(error_prefix ++ " ref_audio must be a base64 string holding a WAV file");
+    const payload = if (std.mem.startsWith(u8, text, "data:")) text[(std.mem.indexOfScalar(u8, text, ',') orelse return cx.refuse(error_prefix ++ " ref_audio is a data URL without a payload")) + 1 ..] else text;
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(payload) catch return cx.refuse(error_prefix ++ " ref_audio is not valid base64");
+    const bytes = try cx.a.alloc(u8, size);
+    decoder.decode(bytes, payload) catch return cx.refuse(error_prefix ++ " ref_audio is not valid base64");
+    const wav = @import("core").wav;
+    const clip = wav.parse(cx.a, bytes) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => cx.refuse(error_prefix ++ " ref_audio must be a WAV file: PCM of 8, 16, 24 or 32 bits, or 32-bit float"),
+    };
+    if (clip.rate < 8000 or clip.rate > 192000 or clip.rate % 50 != 0) return cx.refuse(error_prefix ++ " ref_audio's sample rate must be a multiple of 50 Hz from 8000 to 192000");
+    const audio = try wav.resample(cx.a, clip.samples, clip.rate, rate);
+    if (audio.len < min_clip) return cx.refuse(error_prefix ++ " ref_audio must be at least half a second long");
+    var peak: f32 = 0;
+    for (audio) |x| {
+        if (!std.math.isFinite(x)) return cx.refuse(error_prefix ++ " ref_audio holds samples that are not finite");
+        peak = @max(peak, @abs(x));
+    }
+    if (peak > 1) for (audio) |*x| {
+        x.* /= peak;
+    };
+    return audio[0..@min(audio.len, max_clip)];
+}
+
 /// The request's prompt: the voice's reference codes as a delayed prefix, the condition rows, the text, the silence.
-pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, voice: []const u8, own: ?json.Value) errors.Refused!Made {
-    const reference = if (own) |value| try referenceCodes(cx, value) else blk: {
+pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, voice: []const u8, own: ?json.Value, clip: ?json.Value) errors.Refused!Made {
+    if (own != null and clip != null) return cx.refuse(error_prefix ++ " send ref_audio or speaker_reference_codes, not both");
+    const audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
+    const reference: []const [req.config.codebooks]i32 = if (clip != null) &.{} else if (own) |value| try referenceCodes(cx, value) else blk: {
         const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice);
         const v = chosen orelse {
             if (st.voices.len == 0) return cx.refuse(error_prefix ++ " this release folder has no voices under gguf/voices");
@@ -75,13 +109,16 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this prompt"),
     };
-    const built = req.prompt.build(cx.a, ids, .{ .reference = reference }, st.silence, req.silence_frames) catch |e| return switch (e) {
+    const speaker: req.prompt.Speaker = if (clip != null) .none else .{ .reference = reference };
+    const built = req.prompt.build(cx.a, ids, speaker, st.silence, req.silence_frames) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(error_prefix ++ " the text has nothing to speak"),
     };
-    if (built.rows.len > sp.max_prompt_tokens)
-        return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ built.rows.len, sp.max_prompt_tokens });
-    return .{ .prompt = ids, .frames = built.rows };
+    // a clip's prefix is made by the engine: a row a frame and nine more
+    const rows = built.rows.len + if (audio.len > 0) (audio.len + 2939) / 2940 + req.config.codebooks - 1 else 0;
+    if (rows > sp.max_prompt_tokens)
+        return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows, sp.max_prompt_tokens });
+    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio };
 }
 
 pub fn listing(a: Allocator, st: *const State) !json.Value {
