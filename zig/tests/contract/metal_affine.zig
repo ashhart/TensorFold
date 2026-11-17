@@ -15,7 +15,7 @@ const mm = tf.affine_mm;
 const lane = tf.lane_projection;
 const identity = @import("affine_identity.zig");
 
-pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, lane, lane_reg };
+pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, lane, lane_reg, qk };
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's or simd_sums' planted fault.
 pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, identity: bool = false, control: bool = false, served: ?[]const c.Shape = null, inline_sums: bool = false };
@@ -93,6 +93,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .simd_half => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 32, .n = 6240, .k = 512 }, .{ .rows = 9, .n = 12288, .k = 256 } } },
         // the 27B's down and o (16 chunks, four column tiles), as a prompt chunk and an odd tail take them
         .simd_sums => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 16, .min = 9 }, .{ .size = 128, .step = 32, .min = 96 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 64, .n = 5120, .k = 1024 }, .{ .rows = 9, .n = 512, .k = 512 } } },
+        .qk => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = .bf16, .replaces = "tf_lane_reg on the same K split", .tiles = .{ .{ .size = 48 }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 256, .step = 64, .min = 64 } }, .served = v.served orelse &.{} },
         .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = laneBase(v), .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = v.served orelse &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
     };
 }
@@ -117,6 +118,7 @@ pub const Proj = struct {
     lane_p: ?lane.Projection = null,
     coop_p: ?lane.Projection = null,
     order: ?lane.RegOrder = null,
+    qk_p: ?lane.qk.Pipelines = null,
     f: ?Affine = null,
     x: rig_.Ref = undefined,
     w: rig_.Ref = undefined,
@@ -154,6 +156,10 @@ pub const Proj = struct {
             .lane_reg => if (v.bits == 4) {
                 p.order = try lane.RegOrder.init(device);
             },
+            .qk => {
+                p.order = try lane.RegOrder.init(device);
+                p.qk_p = lane.qk.Pipelines.init(a, device);
+            },
         }
         return p;
     }
@@ -166,6 +172,7 @@ pub const Proj = struct {
         if (p.mm_base_p) |pipes| for (pipes) |x| x.deinit();
         if (p.mm_p) |pipes| for (pipes) |x| x.deinit();
         if (p.order) |o| o.deinit();
+        if (p.qk_p) |*q| q.deinit();
         p.rig.deinit();
     }
 
@@ -187,9 +194,9 @@ pub const Proj = struct {
 
     /// The kernel's layout, or with `base` the layout of the kernel it replaces.
     fn layout(p: *const Proj, shape: c.Shape, base: bool) lane.Layout {
-        const reg = p.v.kind == .lane_reg and (!base or p.v.inline_sums);
+        const reg = (p.v.kind == .lane_reg or p.v.kind == .qk) and (!base or p.v.inline_sums);
         const coop = base and !reg;
-        return .{ .n = shape.n, .k = shape.k, .format = .{ .bits = p.v.bits, .group = p.v.group }, .sk = p.v.sk, .output = if (p.v.f32_out) .f32 else .bf16, .precompute_sums = p.v.kind == .lane_reg or p.v.coop, .cooperative = coop or (p.v.coop and !reg), .reg = reg, .inline_sums = reg and p.v.inline_sums and !base };
+        return .{ .n = shape.n, .k = shape.k, .format = .{ .bits = p.v.bits, .group = p.v.group }, .sk = p.v.sk, .output = if (p.v.f32_out) .f32 else .bf16, .precompute_sums = p.v.kind == .lane_reg or p.v.kind == .qk or p.v.coop, .cooperative = coop or (p.v.coop and !reg), .reg = reg, .inline_sums = reg and p.v.inline_sums and !base };
     }
 
     /// Whether the kernel takes this shape, as the engine's own validation says.
@@ -201,6 +208,7 @@ pub const Proj = struct {
             .simd_half => shape.n % 8 == 0 and shape.k % 64 == 0 and sq.chunks(shape.n, 0) == sq.half_chunks,
             .simd_sums => shape.n % 8 == 0 and shape.k % 64 == 0 and (try sq.callSumsAt(&p.sq_p.?, shape.n, shape.k, shape.rows)) != null,
             .affine_mm => shape.n % 64 == 0 and shape.k % 64 == 0,
+            .qk => shape.rows <= 2048 and shape.n % 32 == 0 and shape.k % 64 == 0,
             .lane, .lane_reg => shape.rows <= 16 and if (p.layout(shape, false).validate()) |_| true else |_| false,
         };
     }
@@ -237,9 +245,14 @@ pub const Proj = struct {
                     p.base = try p.rig.scratch(out_bytes);
                 }
             },
-            .lane, .lane_reg => {
+            .lane, .lane_reg, .qk => {
                 const l = p.layout(shape, false);
-                p.lane_p = try lane.Projection.init(p.a, p.rig.device, l);
+                p.lane_p = try lane.Projection.init(p.a, p.rig.device, if (p.v.kind == .qk) blk: {
+                    var wide = l;
+                    wide.rows = @max(lane.reg_rows, (shape.rows + 15) / 16 * 16);
+                    wide.row_blocks = true;
+                    break :blk wide;
+                } else l);
                 const pw = try p.a.alloc(u32, l.weightWords());
                 defer p.a.free(pw);
                 const psb = try p.a.alloc(u16, l.metadataElements());
@@ -247,7 +260,11 @@ pub const Proj = struct {
                 try lane.pack(l, words, f.scales, f.biases, pw, psb);
                 p.w = try p.rig.input(std.mem.sliceAsBytes(pw));
                 p.s = try p.rig.input(std.mem.sliceAsBytes(psb));
-                if (p.v.kind == .lane_reg) {
+                if (p.v.kind == .qk) {
+                    p.tiled = try p.rig.input(std.mem.sliceAsBytes(pw));
+                    try p.order.?.run(&.{.{ .w = ref(p.tiled), .n = shape.n, .k = shape.k }});
+                    p.base = try p.rig.scratch(out_bytes);
+                } else if (p.v.kind == .lane_reg) {
                     p.tiled = try p.rig.input(std.mem.sliceAsBytes(pw));
                     if (p.order) |o| try o.run(&.{.{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .n = shape.n, .k = shape.k }}) else {
                         const reg_words = p.rig.bytes(p.w, pw.len * 4);
@@ -306,6 +323,11 @@ pub const Proj = struct {
                 sqb.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off }, p.x.buf, p.x.off, p.out.buf, p.out.off);
             },
             .affine_mm => p.encodeAffine(e, p.mm_p.?, p.sums, p.out, p.v.control and !p.v.identity),
+            .qk => {
+                const rows: u32 = @intCast(shape.rows);
+                const sums = try p.lane_p.?.encodeOwnSums(e, ref(p.x), rows);
+                try p.qk_p.?.encode(e, shape.n, shape.k, @intCast(p.v.sk), ref(p.x), ref(p.w), ref(p.s), sums, ref(p.out), if (p.v.control and rows > 1) rows - 1 else rows);
+            },
             .lane, .lane_reg => try p.lane_p.?.encode(e, ref(p.x), ref(p.w), ref(p.s), ref(p.out), @intCast(shape.rows)),
         }
         try p.rig.finish(pass);
@@ -327,12 +349,14 @@ pub const Proj = struct {
     /// The replaced kernel's bytes on the same inputs: a frozen affine_mm, cooperative lane, or fp32 simd_qmm.
     pub fn replaced(p: *Proj) ![]const u8 {
         const affine_identity = p.v.kind == .affine_mm and p.v.identity;
-        if ((p.v.kind != .lane_reg or laneBase(p.v) == null) and p.v.kind != .simd_half and p.v.kind != .simd_sums and !affine_identity) return error.NotAReplacement;
+        if ((p.v.kind != .lane_reg or laneBase(p.v) == null) and p.v.kind != .simd_half and p.v.kind != .simd_sums and p.v.kind != .qk and !affine_identity) return error.NotAReplacement;
         const f = p.f.?;
         const len = f.outputs() * c.size(spec(p.v, p.name).out);
         @memset(p.rig.bytes(p.base, len), 0xff);
         const pass = p.rig.begin();
-        if (affine_identity) {
+        if (p.v.kind == .qk) {
+            try p.lane_p.?.encode(pass.e, ref(p.x), ref(p.tiled), ref(p.s), ref(p.base), @intCast(f.shape.rows));
+        } else if (affine_identity) {
             p.encodeAffine(pass.e, p.mm_base_p.?, p.base_sums, p.base, false);
         } else if (p.v.kind == .simd_half or p.v.kind == .simd_sums) {
             sq.encode(pass.e, try sq.call(&p.sq_p.?, f.shape.n, f.shape.k, f.shape.rows, false, false, 0), p.matrix(f.shape), p.x.buf, p.x.off, p.base.buf, p.base.off);

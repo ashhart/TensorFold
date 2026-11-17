@@ -210,6 +210,9 @@ pub fn main(init: std.process.Init) !u8 {
     var picks: @import("metal_tree_round_picks.zig").Suite = .{};
     defer picks.deinit(a);
     try picks.collect(a, device, queue, o.only, &kernels);
+    var q27_stack: @import("metal_q27_stack.zig").Suite = .{};
+    defer q27_stack.deinit(a);
+    try q27_stack.collect(a, device, queue, o.only, &kernels);
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
