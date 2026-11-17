@@ -302,5 +302,8 @@ pub const ComputeEncoder = struct {
     pub fn dispatchGroups(_: @This(), _: Size, _: Size) void {}
     pub fn dispatchIndirect(_: @This(), _: Buffer, _: usize, _: Size) void {}
     pub fn barrier(_: @This()) void {}
+    pub fn dispatchType(_: @This()) DispatchType {
+        return .serial;
+    }
     pub fn end(_: @This()) void {}
 };
