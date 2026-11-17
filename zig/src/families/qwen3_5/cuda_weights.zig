@@ -86,6 +86,7 @@ pub fn total(g: Geometry) usize {
     if (g.heads) t += if (mo) modelopt.packedBytes(g.vocab, g.hidden, g.kinds.head) else packedBytes(g.vocab, g.hidden, g.bits.head);
     if (g.heads) t += aligned(g.hidden * 2); // the final norm
     for (g.first..g.first + g.layers) |i| {
+        t += @import("loop_weights.zig").bytes(g, i);
         t += 2 * aligned(g.hidden * 2);
         if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
@@ -401,6 +402,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
             .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
+        if (@import("loop_weights.zig").active(g, i)) l.mhc = try @import("loop_weights.zig").load(e, ck, p);
         if (g.pocket > 0) try loadPocket(e, ck, p, i);
         if (g.linear[i]) {
             l.mixer = .{ .delta = .{
@@ -429,6 +431,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
 
 test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own width" {
     var g: Geometry = undefined;
+    g.loop = null;
     g = .{ .hidden = 2048, .intermediate = 6144, .layers = 2, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(false) };
     g.linear[0] = true;
     const uniform = total(g);
