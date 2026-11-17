@@ -39,6 +39,8 @@ pub const sources = 2 * layers + 1; // Full AttnRes bank: the embedding and two 
 pub const speaker_dim = 192;
 pub const conditions = 3; // loudness, fmax, speaking rate
 pub const max_buckets = 30;
+/// The condition rows in prompt order, as params.json's condition_names and a request name them.
+pub const condition_names = [conditions][]const u8{ "loudness", "fmax", "speaking_rate" };
 
 pub fn usesGdn(layer: usize) bool {
     return (layer + 1) % gdn_period != 0;
@@ -47,6 +49,15 @@ pub fn usesGdn(layer: usize) bool {
 pub const Config = struct {
     /// Buckets of each condition table; id == count is the table's unknown row.
     buckets: [conditions]u32,
+    /// Each table's bucket edges, rising: bucket i holds [edge i-1, edge i), one edge fewer than buckets.
+    edges: [conditions][max_buckets - 1]f64,
+
+    /// plan.resolve_condition_buckets: a raw value's bucket, the training loader's bisect_right over the edges.
+    pub fn bucketOf(c: *const Config, condition: usize, value: f64) u32 {
+        var n: u32 = 0;
+        for (c.edges[condition][0 .. c.buckets[condition] - 1]) |edge| n += @intFromBool(edge <= value);
+        return n;
+    }
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "params.json" });
@@ -96,6 +107,24 @@ pub const Config = struct {
             if (v != .integer or v.integer < 1 or v.integer > max_buckets) return refuse("condition_bucket_counts");
             c.buckets[i] = @intCast(v.integer);
         }
+        const names = m.get("condition_names") orelse return refuse("condition_names");
+        if (names != .array or names.array.items.len != conditions) return refuse("condition_names");
+        const all = m.get("condition_edges") orelse return refuse("condition_edges");
+        if (all != .object) return refuse("condition_edges");
+        for (names.array.items, condition_names, 0..) |v, name, i| {
+            if (v != .string or !std.mem.eql(u8, v.string, name)) return refuse("condition_names");
+            const edges = all.object.get(name) orelse return refuse("condition_edges");
+            if (edges != .array or edges.array.items.len != c.buckets[i] - 1) return refuse("condition_edges");
+            c.edges[i] = @splat(std.math.inf(f64));
+            for (edges.array.items, 0..) |e, j| {
+                c.edges[i][j] = switch (e) {
+                    .float => |f| f,
+                    .integer => |n| @floatFromInt(n),
+                    else => return refuse("condition_edges"),
+                };
+                if (!std.math.isFinite(c.edges[i][j]) or (j > 0 and c.edges[i][j] <= c.edges[i][j - 1])) return refuse("condition_edges");
+            }
+        }
         return c;
     }
 
@@ -128,4 +157,20 @@ test "layer kinds: one global attention layer in four" {
     for (0..layers) |l| gdn += @intFromBool(usesGdn(l));
     try std.testing.expectEqual(@as(usize, 9), gdn);
     try std.testing.expect(!usesGdn(3) and !usesGdn(7) and usesGdn(10));
+}
+
+test "conditions: a raw value's bucket is the count of edges at or below it" {
+    const t = std.testing;
+    var c: Config = .{ .buckets = .{ 10, 10, 30 }, .edges = @splat(@splat(std.math.inf(f64))) };
+    const loudness = [_]f64{ -29.778, -26.947, -25.047, -23.3, -21.743, -20.386, -19.186, -17.851, -15.967 };
+    @memcpy(c.edges[0][0..loudness.len], &loudness);
+    for (c.edges[2][0..29], 0..) |*e, i| e.* = @floatFromInt(i + 1);
+    // the reference resolves loudness -20 to bucket 6
+    try t.expectEqual(@as(u32, 6), c.bucketOf(0, -20.0));
+    try t.expectEqual(@as(u32, 0), c.bucketOf(0, -40.0));
+    try t.expectEqual(@as(u32, 9), c.bucketOf(0, 0.0));
+    // bisect_right: a value on an edge belongs to the bucket above it
+    try t.expectEqual(@as(u32, 4), c.bucketOf(0, -23.3));
+    try t.expectEqual(@as(u32, 29), c.bucketOf(2, 1000.0));
+    try t.expectEqual(@as(u32, 3), c.bucketOf(2, 3.5));
 }

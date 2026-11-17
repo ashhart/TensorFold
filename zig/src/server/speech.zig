@@ -32,13 +32,7 @@ pub const max_input_chars = 4096;
 /// The request fields served: the OpenAI ones (``speaker`` is ``voice``'s alias); ``stream*`` are checked apart.
 const served_fields = [_][]const u8{ "model", "input", "voice", "speaker", "response_format" };
 
-/// A voice as codes the caller encoded: frames of ten codec codes, a ZONOS3 reference prefix in place of `voice`.
-const zonos_codes = "speaker_reference_codes";
-/// A voice as a clip: a WAV file in base64, which a ZONOS3 engine encodes; other models refuse it.
-const zonos_clip = "ref_audio";
-/// ZONOS3's text normalization: the grammar's language (en_us when absent) and whether to run it.
-const zonos_language = "language";
-const zonos_normalize = "text_normalization";
+const zonos_fields = @import("zonos_speech.zig").fields;
 
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
 const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
@@ -74,7 +68,7 @@ pub const Format = enum {
     }
 };
 
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: ?f32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -121,12 +115,10 @@ fn checkFields(cx: *Cx, body: Value, inline_voices: bool, zonos: bool) errors.Re
             if (value == .null or (value == .string and std.mem.eql(u8, value.string, "audio"))) continue;
             if (value == .string and std.mem.eql(u8, value.string, "sse")) return cx.refuse("stream_format sse is not supported by this model");
             return cx.refuse("stream_format must be one of: audio, sse");
-        } else if (speech_sampling.isField(key) or (zonos and (std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)))) {
-            continue; // validated together before building the prompt
-        } else if (zonos and std.mem.eql(u8, key, zonos_language)) {
+        } else if (zonos and std.mem.eql(u8, key, zonos_fields.language)) {
             if (value != .string and value != .null) return cx.refuse("language must be a string");
-        } else if (zonos and std.mem.eql(u8, key, zonos_normalize)) {
-            if (value != .bool and value != .null) return cx.refuse("text_normalization must be a boolean");
+        } else if (speech_sampling.isField(key) or (zonos and listed(&zonos_fields.all, key))) {
+            continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
             if (value != .null) return cx.fail(.request, "{s} is not supported by this model", .{key});
         } else return cx.fail(.request, "unknown speech request field: {s}", .{key});
@@ -160,13 +152,10 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
-    const codes = raw.field(zonos_codes);
-    const clip = raw.field(zonos_clip);
     if (srv.zonos) |state| {
         const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
-        const normalize: ?bool = if (raw.get(zonos_normalize)) |v| (if (v == .bool) v.bool else null) else null;
-        const made = try zonos.plan(state, cx, srv.text, sp, input, voice, codes, clip, raw.strField(zonos_language), normalize);
-        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .sampling = sampling, .format = format, .stream = stream };
+        const made = try zonos.plan(state, cx, srv.text, sp, input, voice, raw);
+        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .conditions = made.conditions, .guidance = made.guidance, .sampling = sampling, .format = format, .stream = stream };
     }
     const refs = try voiceRefs(srv, cx, raw);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
@@ -260,9 +249,10 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .stream = plan.stream,
         .reference_rows = plan.reference_rows,
         .unconditioned = guided.rows,
-        .cfg_gamma = guided.gamma,
+        .cfg_gamma = plan.guidance orelse guided.gamma,
         .speaker = plan.speaker,
         .reference_audio = plan.reference_audio,
+        .conditions = plan.conditions,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();

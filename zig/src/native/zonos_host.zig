@@ -29,6 +29,11 @@ pub const weight_bytes: u64 = 2_531_483_136;
 /// The clip encoder's weights, state and workspaces: the acoustic encoder, the SSL teacher and the quantizers.
 pub const clip_bytes: u64 = 5_643_510_688;
 
+/// Device bytes a guided request's second stream takes, allocated by the first such request.
+pub fn twinBytes(o: z3.Options) u64 {
+    return z3.Engine.laneBytes(o);
+}
+
 /// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
 pub fn need(context: u32, frames: u32) u64 {
     return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
@@ -91,6 +96,10 @@ const Guarded = struct {
 
     pub fn lastLogits(g: Guarded, out: *[cfg.head_rows]f32) !void {
         try g.h.e.lastLogits(out);
+    }
+
+    pub fn swap(g: Guarded) void {
+        g.h.e.swap();
     }
 };
 
@@ -187,12 +196,16 @@ const Host = struct {
         }
         if (!std.math.isFinite(r.temperature) or r.temperature < 0) return false;
         if (!std.math.isFinite(r.top_p) or r.top_p <= 0 or r.top_p > 1 or r.top_k == 0) return false;
-        if (r.unconditioned.len != 0 or r.cfg_gamma != 1) return false;
+        // guidance: the host makes the twin itself, from a prompt that has a voice to drop
+        if (r.unconditioned.len != 0 or !std.math.isFinite(r.cfg_gamma) or r.cfg_gamma < 0) return false;
+        if (r.conditions.len != 0 and r.conditions.len != cfg.conditions) return false;
+        for (r.conditions, 0..) |bucket, i| if (bucket > h.e.c.buckets[i]) return false;
         for (r.frames) |row| {
             for (row[0..C]) |code| if (code < 0 or code >= cfg.audio_vocab) return false;
             if (row[C] < 0 or row[C] >= h.e.w.text_rows) return false;
         }
-        _ = Layout.of(r.frames) catch return false;
+        const layout = Layout.of(r.frames) catch return false;
+        if (r.cfg_gamma != 1 and layout.condition_row == 0 and r.reference_audio.len == 0) return false;
         return true;
     }
 
@@ -258,6 +271,10 @@ const Host = struct {
                     h.finish(job, .failed, 0, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free");
                     continue;
                 },
+                error.GuidanceNeedsMoreDeviceMemory => {
+                    h.finish(job, .failed, 0, "speaker guidance needs device memory for a second stream's state, and less than that is free");
+                    continue;
+                },
                 else => {
                     h.lock();
                     h.failed = true;
@@ -304,17 +321,27 @@ const Host = struct {
             h.e.w.speakerRow(r.speaker[0..cfg.speaker_dim], &replaced[n].vec);
             n += 1;
         }
-        // every condition unknown: the last row of its table
-        for (0..cfg.conditions) |c| {
+        // a condition the request leaves out is unknown: the last row of its table
+        var unknown: [cfg.conditions]z3.Replace = undefined;
+        for (0..cfg.conditions, &unknown) |c, *u| {
+            const bucket = if (r.conditions.len != 0) r.conditions[c] else h.e.c.buckets[c];
             replaced[n].row = layout.condition_row + c;
-            @memcpy(&replaced[n].vec, h.e.w.conditions[c][h.e.c.buckets[c] * cfg.dim ..][0..cfg.dim]);
+            @memcpy(&replaced[n].vec, h.e.w.conditions[c][bucket * cfg.dim ..][0..cfg.dim]);
             n += 1;
+            u.row = c;
+            @memcpy(&u.vec, h.e.w.conditions[c][h.e.c.buckets[c] * cfg.dim ..][0..cfg.dim]);
+        }
+        // speaker_cfg_twin: the prompt without its reference prefix or speaker row, every condition unknown
+        const twin: []const [W]i32 = if (r.cfg_gamma != 1) rows[layout.condition_row..] else &.{};
+        if (twin.len != 0 and h.e.other == null) {
+            if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, &h.e.ctx)) return error.GuidanceNeedsMoreDeviceMemory;
+            try h.e.twin();
         }
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
         try h.codec.reset();
         var audio: Audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
-        const made = try z3.generation.generateWatched(gpa, Guarded{ .h = h }, rows, @as([]const z3.Replace, replaced[0..n]), sampling, r.max_frames, &audio);
+        const made = try z3.generation.generateGuided(gpa, Guarded{ .h = h }, rows, @as([]const z3.Replace, replaced[0..n]), twin, @as([]const z3.Replace, &unknown), r.cfg_gamma, sampling, r.max_frames, &audio);
         defer gpa.free(made.rows);
         samples.* = audio.samples;
         return if (made.eos_frame != null) .stop else .length;
@@ -429,4 +456,10 @@ test "Layout: the condition rows sit before the text and the silence rows after 
     try t.expectEqual(p.condition_row, l.condition_row);
     try t.expectEqual(@as(usize, 3), l.prefill);
     try t.expectError(error.BadPromptLayout, Layout.of(p.rows[0..3]));
+}
+
+test "twinBytes: a guided request's second stream is the caches and recurrent state again, no weights" {
+    const t = std.testing;
+    try t.expectEqual(@as(u64, 10_913_792), twinBytes(.{ .max_ctx = 4096 }));
+    try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), twinBytes(.{ .max_ctx = 8192 }) - twinBytes(.{ .max_ctx = 4096 }));
 }

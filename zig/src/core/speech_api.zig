@@ -23,6 +23,8 @@ pub const SpeechRequest = struct {
     speaker: []const f32 = &.{},
     /// A reference clip to clone the voice from: mono samples at the family's rate; empty: none.
     reference_audio: []const f32 = &.{},
+    /// The family's condition rows by bucket, in prompt order; empty: every one unknown.
+    conditions: []const u32 = &.{},
 };
 
 pub const SpeechInfo = struct {

@@ -38,6 +38,9 @@ pub const Probe = struct {
     }
 };
 
+/// One stream's caches and position: what `run` reads and advances.
+pub const Lane = struct { kv: [cfg.layers][2]u64, conv: [cfg.layers]u64, gstate: [cfg.layers]u64, state: u64, position: usize = 0 };
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     o: Options,
@@ -56,6 +59,7 @@ pub const Engine = struct {
     gstate: [cfg.layers]u64, // GDN layers: fp32 [4][128][128]
     state: u64, // the conv and recurrent states in one block (zeroed per request)
     state_bytes: usize,
+    other: ?Lane, // a second stream's state (a guided request's twin), allocated when first asked for
     // scratch (R = max_rows)
     rows: u64, // i32 [R][11]
     bank: u64, // fp32 [sources][R][D]
@@ -90,6 +94,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.o = o;
         e.position = 0;
+        e.other = null;
         e.bufs = .empty;
         e.counted = null;
         e.c = try cfg.Config.load(gpa, io, model_dir);
@@ -150,28 +155,65 @@ pub const Engine = struct {
         return e.counted.?;
     }
 
-    fn allocState(e: *Engine) !void {
-        const R = e.o.max_rows;
+    /// Device bytes of a second lane's state under `o`.
+    pub fn laneBytes(o: Options) usize {
+        var e: Engine = undefined;
+        e.o = o;
+        e.counted = 0;
+        _ = e.allocLane() catch unreachable;
+        return e.counted.?;
+    }
+
+    /// The second lane, allocated by the first call; `reset` zeroes both.
+    pub fn twin(e: *Engine) !void {
+        if (e.other == null) e.other = try e.allocLane();
+    }
+
+    /// Exchanges the running lane with the second one.
+    pub fn swap(e: *Engine) void {
+        const mine: Lane = .{ .kv = e.kv, .conv = e.conv, .gstate = e.gstate, .state = e.state, .position = e.position };
+        const o = e.other.?;
+        e.kv = o.kv;
+        e.conv = o.conv;
+        e.gstate = o.gstate;
+        e.state = o.state;
+        e.position = o.position;
+        e.other = mine;
+    }
+
+    fn allocLane(e: *Engine) !Lane {
+        var l: Lane = undefined;
+        l.position = 0;
         const kvb = e.o.max_ctx * cfg.kv_width * 4;
         const conv_b = cfg.gdn_conv * 3 * 4;
         const gs_b = cfg.gdn_heads * cfg.gdn_dim * cfg.gdn_dim * 4;
         var n_gdn: usize = 0;
         for (0..cfg.layers) |li| n_gdn += @intFromBool(cfg.usesGdn(li));
         e.state_bytes = n_gdn * (conv_b + gs_b);
-        e.state = try e.alloc(e.state_bytes);
+        l.state = try e.alloc(e.state_bytes);
         var g: usize = 0;
         for (0..cfg.layers) |li| {
             if (cfg.usesGdn(li)) {
-                e.kv[li] = .{ 0, 0 };
-                e.conv[li] = e.state + g * (conv_b + gs_b);
-                e.gstate[li] = e.conv[li] + conv_b;
+                l.kv[li] = .{ 0, 0 };
+                l.conv[li] = l.state + g * (conv_b + gs_b);
+                l.gstate[li] = l.conv[li] + conv_b;
                 g += 1;
             } else {
-                e.kv[li] = .{ try e.alloc(kvb), try e.alloc(kvb) };
-                e.conv[li] = 0;
-                e.gstate[li] = 0;
+                l.kv[li] = .{ try e.alloc(kvb), try e.alloc(kvb) };
+                l.conv[li] = 0;
+                l.gstate[li] = 0;
             }
         }
+        return l;
+    }
+
+    fn allocState(e: *Engine) !void {
+        const R = e.o.max_rows;
+        const l = try e.allocLane();
+        e.kv = l.kv;
+        e.conv = l.conv;
+        e.gstate = l.gstate;
+        e.state = l.state;
         e.rows = try e.alloc(R * W * 4);
         e.bank = try e.alloc(cfg.sources * R * D * 4);
         e.mixed = try e.alloc(R * D * 4);
@@ -216,6 +258,12 @@ pub const Engine = struct {
         var b = e.buf(e.state);
         b.len = e.state_bytes;
         try b.fill8(0, e.stream.handle);
+        if (e.other) |*o| {
+            var ob = e.buf(o.state);
+            ob.len = e.state_bytes;
+            try ob.fill8(0, e.stream.handle);
+            o.position = 0;
+        }
         try e.stream.synchronize();
         e.position = 0;
     }
