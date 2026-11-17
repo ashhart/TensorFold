@@ -1,5 +1,5 @@
 #!/bin/bash
-# the branch's checks in order: kernel contract and its limits, the card tests one at a time on card 0, then zig build test
+# Checks: contracts/limits, individual card tests on card 0, then zig build test.
 export ZE_AFFINITY_MASK=0 LC_ALL=C
 R=$WORK; T=$R/tests; mkdir -p $T
 cd $TREE

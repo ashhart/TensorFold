@@ -118,7 +118,7 @@ pub const Topk = struct {
                 }
                 v.* = switch (r % 4) {
                     2 => 1.5, // one value everywhere: only the tie order picks the candidates
-                    3 => if (level == -16) (if (i % 2 == 1) -0.0 else 0.0) else -@abs(level), // zeros of both signs on top
+                    3 => if (level == -16) (if (i % 2 == 1) -0.0 else 0.0) else -@abs(level), // signed zeros
                     else => kit.round(.f16, level),
                 };
             }

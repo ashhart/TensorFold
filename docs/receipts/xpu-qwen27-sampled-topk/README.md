@@ -150,3 +150,7 @@ gives 15.875 at id 317`), and the merge whose flag reads the merged candidates i
 `compare.out`, `contract-run.out`,
 `limits.out`, `tests/`, `scripts/` (`bench_topk.py` the client, `run_pass.sh` and `driver.sh` the passes, `compare_topk.py`,
 `run-tests.sh`, `build_corp_code.sh`).
+
+The code corpus uses the top-level Python files from Ubuntu 26.04 python3.14 (3.14.4-1ubuntu0.2), concatenated in
+punctuation- and case-blind filename order, then cut to 1,500,000 bytes. Expected SHA-256:
+`31b2f903b4a2ea01728927e53436d924994c93cf3114c7b7f35e58d906961e30`. The historical corpus builder prints its digest.

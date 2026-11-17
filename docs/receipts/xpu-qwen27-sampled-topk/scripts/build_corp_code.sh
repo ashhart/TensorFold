@@ -1,7 +1,5 @@
 #!/bin/bash
-# Rebuilds inputs/corp_code.txt: the top-level *.py of the Ubuntu 26.04 python3.14 standard library (3.14.4-1ubuntu0.2),
-# concatenated without separator in the order of a punctuation- and case-blind sort of the file names, cut to 1,500,000
-# bytes. usage: build_corp_code.sh OUTFILE      expects sha256 31b2f903b4a2ea01728927e53436d924994c93cf3114c7b7f35e58d906961e30
+# Rebuild the historical corpus with build_corp_code.sh OUTFILE; source and expected hash are in the receipt.
 set -e
 python3 -I - "$1" <<"PY"
 import hashlib, os, re, sys

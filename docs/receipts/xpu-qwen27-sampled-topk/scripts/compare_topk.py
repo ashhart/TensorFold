@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""usage: compare_topk.py RUNS_DIR   exactness (token_sha256 per cell and stream) and speed (A-B-B-A pairs) of the sampled top-k."""
+"""Compare exact token hashes and A-B-B-A top-k rates; usage: compare_topk.py RUNS_DIR."""
 import glob, json, os, re, statistics as st, sys
 from collections import defaultdict
 
