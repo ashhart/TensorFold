@@ -136,6 +136,7 @@ pub const Spec = struct {
     loop_guard: bool = false,
     loop_stop: bool = false, // with loop_guard: finish where it fires instead of forcing the close
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
+    message_starts: []const u32 = &.{}, // where each templated message begins (api.Request.message_starts); not a cut
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
@@ -175,6 +176,7 @@ pub const Stream = struct {
     loop_period: ?u32 = null,
     long_loop: long_loop.Index = .{}, // the reasoning's runs, for passages repeated verbatim (long_loop.zig)
     chunks: []const u32,
+    message_starts: []const u32,
     history_len: u32,
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
@@ -272,6 +274,7 @@ pub const Stream = struct {
             .loop_guard = spec.loop_guard,
             .loop_stop = spec.loop_stop,
             .chunks = spec.chunks,
+            .message_starts = spec.message_starts,
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,

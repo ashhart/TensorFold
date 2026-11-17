@@ -30,6 +30,8 @@ pub const Ctx = struct {
     steps: u64 = 0,
     /// The stack where the render began; frames differ too much in size for a count of levels to bound it.
     base: usize = 0,
+    /// Where each request message's own output began (template.zig `renderMarked`); null: not recorded.
+    marks: ?*Marks = null,
 
     /// One more statement list or loop-filter test: a step of the render, taken only while the stack has room.
     fn enter(c: *Ctx) Error!void {
@@ -43,6 +45,24 @@ pub const Ctx = struct {
         if (c.vars.get(name)) |x| return x;
         if (std.meta.stringToEnum(v.Func, name)) |f| return .{ .func = f };
         return c.rt.undef("'{s}' is undefined", .{name});
+    }
+};
+
+/// A request's message objects, and the first top-level output byte of a loop iteration over or binding each one.
+pub const Marks = struct {
+    messages: []const *const v.Dict,
+    starts: []?usize,
+    root: *const v.Buffer,
+    bound: ?usize = null, // the message the current iteration set to a name or passed to a macro first
+
+    fn of(m: *const Marks, item: Value) ?usize {
+        if (item != .dict) return null;
+        return std.mem.indexOfScalar(*const v.Dict, m.messages, item.dict);
+    }
+
+    fn bind(c: *Ctx, x: Value) void {
+        const m = c.marks orelse return;
+        if (m.bound == null) m.bound = m.of(x);
     }
 };
 
@@ -138,7 +158,11 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
             const flow = try execIf(c, act, n);
             if (flow != .normal) return flow;
         },
-        .assign => |as| try assign(c, act, as.target, try eval(c, act, as.value)),
+        .assign => |as| {
+            const x = try eval(c, act, as.value);
+            Marks.bind(c, x);
+            try assign(c, act, as.target, x);
+        },
         .block_set => |b| {
             const inner = try enter(c, act, b.frame);
             var text = Value{ .str = try capture(c, inner, b.body) };
@@ -192,7 +216,18 @@ fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
         const body = try enter(c, act, f.body_frame);
         if (f.uses_loop) body.slots[f.loop_name.slot] = .{ .loop = loop };
         try assign(c, body, f.target, item);
-        switch (try exec(c, body, f.body)) {
+        const at = c.out.text.items.len;
+        const outer = if (c.marks) |m| m.bound else null;
+        if (c.marks) |m| m.bound = null;
+        const flow = try exec(c, body, f.body);
+        if (c.marks) |m| {
+            // a loop that writes nothing for its message (a scan for the last query) marks nothing
+            if (m.of(item) orelse m.bound) |k| if (m.starts[k] == null and c.out == m.root and c.out.text.items.len > at) {
+                m.starts[k] = at;
+            };
+            m.bound = outer;
+        }
+        switch (flow) {
             .brk => break,
             .cont => continue,
             .normal => completed = true,
@@ -240,6 +275,7 @@ pub fn call(c: *Ctx, callee: Value, pos: []const Value, kw: []const Kw) Error!Va
 
 /// Jinja2's Macro.__call__: positions first, keywords only for the rest, then defaults in the macro's frame.
 fn callMacro(c: *Ctx, m: *const v.Macro, pos: []const Value, kw: []const Kw) Error!Value {
+    for (pos) |x| Marks.bind(c, x);
     const node: *const ast.Macro = @ptrCast(@alignCast(m.node));
     const params = node.params;
     if (pos.len > params.len) return c.rt.fail("macro '{s}' takes not more than {d} argument(s)", .{ m.name, params.len });

@@ -60,6 +60,8 @@ pub const Request = struct {
     user_end: u32 = 0,
     /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
+    /// Where each message the chat template renders begins, sorted, past 0; empty for raw prompts (never a cut).
+    message_starts: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
     decode_spans: []const [2]u32 = &.{},
     /// Most reply tokens inside a think block before the engine writes ``think_close`` (0: no limit).
