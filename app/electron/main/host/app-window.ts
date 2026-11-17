@@ -30,8 +30,7 @@ interface MediaPermissionDetails {
   mediaType?: string
 }
 
-// The dev-server URL becomes the trusted renderer, so it is honoured only in an unpackaged build:
-// a packaged app always loads the page it shipped with, whatever its environment says.
+// The dev-server URL becomes the trusted renderer only in an unpackaged build; a packaged app loads its shipped page.
 export function devRendererUrl(packaged: boolean, env: NodeJS.ProcessEnv = process.env): string | null {
   if (packaged) return null
   return env.VITE_DEV_SERVER_URL?.trim() || null
