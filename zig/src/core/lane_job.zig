@@ -52,6 +52,7 @@ pub const Job = struct {
     memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
     memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
     memory_version: ?u64 = null, // the published memory version its routing saw, which its reply reports
+    why: pc.why.Why = .{}, // its lookup's reason; bypass until one runs
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {

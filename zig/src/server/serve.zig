@@ -243,6 +243,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .request_log_replies = if (env(s, "TENSORFOLD_REQUEST_LOG_REPLIES")) |v| std.mem.eql(u8, v, "1") else false,
         .journal = journal,
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
+        .cache_why = @import("sys").environment.value(bool, "TF_CACHE_WHY", env(s, "TF_CACHE_WHY"), false) catch return 1,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
