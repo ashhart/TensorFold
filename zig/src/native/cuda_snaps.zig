@@ -239,7 +239,7 @@ test "request starts: one family's switch turns only that family on; Qwen starts
     }
 }
 
-test "snap_cut_invariant: a chunk-invariant family keeps every message start by default" {
+test "request starts: snap_cut_invariant: a chunk-invariant family keeps every message start by default" {
     const Nemotron = struct { // unplanned: uses its pass size as the step
         pub const snap_cut_invariant = true;
         pub const prompt_rows: u32 = 2048;
@@ -265,7 +265,7 @@ test "snap_cut_invariant: a chunk-invariant family keeps every message start by 
     try std.testing.expect(passRules(WithGrid, 4096).chunk_starts);
 }
 
-test "snap_cut_invariant: a switch cannot opt an invariant family out, nor cache rules alter its starts" {
+test "request starts: snap_cut_invariant: a switch cannot opt an invariant family out, nor cache rules alter its starts" {
     const sys = @import("sys");
     const Invariant = struct {
         pub const snap_cut_invariant = true;

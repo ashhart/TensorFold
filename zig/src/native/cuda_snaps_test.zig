@@ -140,7 +140,7 @@ test "snap hooks: a family's spare, trim and reuses reach the prompt cache, and 
     try std.testing.expectEqual(@as(usize, 2), qwen); // the dense and MoE entry points
 }
 
-test "snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {
+test "request starts: snap_cut_invariant: message starts are on by default for invariant families, opt-in for the rest" {
     const snaps = @import("cuda_snaps.zig");
     // Nemotron/LFM-style: chunk-invariant, no switch; the step is prompt_rows or a declared snap_grid.
     const Nemotron = struct {
