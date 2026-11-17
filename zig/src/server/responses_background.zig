@@ -30,7 +30,7 @@ pub const Manager = struct {
     limits: Limits = .{},
 
     fn find(m: *Manager, id: []const u8) ?*Job {
-        for (m.jobs.items) |j| if (std.mem.eql(u8, j.id, id)) return j;
+        for (m.jobs.items) |j| if (!j.deleted and std.mem.eql(u8, j.id, id)) return j;
         return null;
     }
 
