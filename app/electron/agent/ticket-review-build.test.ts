@@ -53,6 +53,35 @@ check('a fresh justified waiver covers read-only work', [build, waiver, rebuild,
 check('a new builder is reported as the current builder', [build, approval, { ...rebuild, createdBy: 'Second builder' }], false, 'Second builder')
 check('a review cannot cover a build at the same timestamp', [build, approval, { ...rebuild, createdAt: 20 }], false)
 
+const reviewBlocker: TicketEvidence = {
+  id: 'review-blocker', kind: 'note', summary: 'Blocker: parser validation failed.',
+  createdBy: 'Reviewer', createdAt: 20, ref: 'thread:review-fixture',
+}
+const blockedBatch = [{ ...approval, ref: reviewBlocker.ref }, reviewBlocker]
+check('a reviewer blocker preserves the original builder identity', [build, ...blockedBatch], false)
+check('reviewer blocker batches are independent of insertion order', [build, ...[...blockedBatch].reverse()], false)
+check('a fresh approval resolves the reviewer blocker without a new build', [build, ...blockedBatch, {
+  ...approval, id: 'resolved', createdAt: 30,
+}], true)
+check('an unrelated note cannot inherit a review blocker batch', [build, ...blockedBatch.slice(0, 1), {
+  ...reviewBlocker, ref: 'thread:other-review',
+}], true)
+check('another actor cannot attach a review blocker batch', [build, blockedBatch[0], {
+  ...reviewBlocker, createdBy: 'Another actor',
+}], true)
+check('another timestamp cannot attach a review blocker batch', [build, blockedBatch[0], {
+  ...reviewBlocker, createdAt: 21,
+}], true)
+check('a blocker describing changed code is still a review finding', [build, blockedBatch[0], {
+  ...reviewBlocker, summary: 'Blocker: changed parser behavior fails validation.',
+}], false)
+check('an explicit empty blocker does not reject a review', [build, blockedBatch[0], {
+  ...reviewBlocker, summary: 'Blocker: none',
+}], true)
+check('a later builder run still invalidates approval without file events', [build, approval, {
+  ...build, id: 'builder-run', kind: 'note', summary: 'Builder worker finished the follow-up.', createdAt: 30,
+}], false)
+
 const reviewRun = worker('review', 20, 'Reviewer')
 const reviewOnly = ticket(reviewRun)
 assert.deepEqual(ticketReviewGateState(reviewOnly), { hasBuilderEvidence: false, builderEvidenceBy: null, hasReviewOrSkipAfterBuilder: false })

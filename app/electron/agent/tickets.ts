@@ -236,7 +236,7 @@ export interface TicketReviewGateState {
 
 export function ticketReviewGateState(ticket: Ticket): TicketReviewGateState {
   const evidence = meaningfulTicketEvidence(ticket)
-  const builder = newestBuilderEvidence(evidence)
+  const builder = newestBuilderEvidence(evidence, ticket)
   const review = newestReviewDecisionAfterBuilder(evidence, builder)
   return {
     hasBuilderEvidence: !!builder,
@@ -270,14 +270,17 @@ function newestReviewDecisionAfterBuilder(evidence: TicketEvidence[], builder: T
     || hasReviewerSignal(item) && isBlockingReviewEvidence(item),
   ))
   if (!decision || !(isReviewPassEvidence(decision) || canSkip && isReviewSkipEvidence(decision))) return null
+  const batch = reviewBatchKey(decision)
+  if (batch && evidence.some((item) => item.kind === 'note' && reviewBatchKey(item) === batch
+    && /^Blocker:/i.test(item.summary) && isBlockingReviewEvidence(item))) return null
   return builder && builder.createdAt < decision.createdAt && !sameEvidenceCreator(builder, decision) ? decision : null
 }
 
-function newestBuilderEvidence(evidence: TicketEvidence[]): TicketEvidence | null {
+function newestBuilderEvidence(evidence: TicketEvidence[], ticket: Ticket): TicketEvidence | null {
   const reviewBatches = new Set(evidence.filter((item) => item.kind === 'review')
     .map(reviewBatchKey).filter((key): key is string => key !== null))
   return newestEvidence(evidence.filter((item) => {
-    if (!isBuilderEvidence(item)) return false
+    if (!isBuilderEvidence(item, ticket)) return false
     const verification = item.kind === 'test' || item.kind === 'command'
     const batch = reviewBatchKey(item)
     return !verification || isCodeChangeEvidence(item) || batch === null || !reviewBatches.has(batch)
@@ -309,8 +312,11 @@ function hasUnresolvedExternalDestructiveApproval(ticket: Ticket): boolean {
   return !approvalAt || approvalAt < actionAt
 }
 
-function isBuilderEvidence(item: TicketEvidence): boolean {
-  return !isReviewEvidence(item) && !isReviewSkipEvidence(item)
+function isBuilderEvidence(item: TicketEvidence, ticket: Ticket): boolean {
+  if (isReviewEvidence(item) || isReviewSkipEvidence(item)) return false
+  if (item.kind === 'note' && /^Blocker:/i.test(item.summary)) return false
+  return item.kind !== 'note' || isCodeChangeEvidence(item) || /^Builder worker\b/i.test(item.summary)
+    || isExternalDestructiveActionEvidence(item, ticket)
 }
 
 function isReservationEvidence(item: TicketEvidence): boolean {

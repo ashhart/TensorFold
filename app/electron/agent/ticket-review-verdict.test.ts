@@ -27,6 +27,12 @@ function check(name: string, evidence: TicketEvidence[], allowed: boolean) {
 }
 
 check('an independent approval completes the gate', [finding, approved], true)
+check('an ordinary later note does not revoke approval', [finding, approved, {
+  ...finding, id: 'reminder', kind: 'note', summary: 'Follow up with the documentation team tomorrow.', createdAt: 30,
+}], true)
+check('a later note describing code changes still requires review', [finding, approved, {
+  ...finding, id: 'changed-note', kind: 'note', summary: 'Changed the parser implementation.', createdAt: 30,
+}, { ...finding, id: 'later-green', kind: 'test', summary: 'Parser tests passed.', createdAt: 31 }], false)
 check('a later blocking verdict supersedes approval', [finding, approved, blocked], false)
 check('another reviewer can reopen a ticket', [finding, approved, { ...blocked, createdBy: 'Second reviewer' }], false)
 check('a fresh approval resolves the blocking verdict', [finding, approved, blocked, { ...approved, id: 'fresh', createdAt: 40 }], true)
