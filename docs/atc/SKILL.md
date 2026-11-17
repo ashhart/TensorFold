@@ -19,6 +19,8 @@ Use numeric area references displayed by ATC, for example `atc check 42 1` or `a
 
 ## Before starting an issue
 
+Use ATC 0.9.7 or later. It discovers up to 2,500 open pull requests; older versions stop at 300 and cannot establish complete claim coverage in this repository. Check `atc --version` after updating your installation. At more than 2,500 PRs, or when a request times out, coverage remains incomplete and coordinating writes are refused. Board file comparisons have a separate limit, so a partial board is not a substitute for the issue-specific `check`.
+
 1. Run `atc doctor --json` if the repository or CLI setup is new, then `atc check <issue> [areaNumbers] --json`.
 2. Check `complete` before interpreting the result. If it is `false`, or `advice` is `incomplete`, stop dependent work, explain the fixed reason, and resolve the missing coverage.
 3. For `advice: "free"`, claim it within the human's authorization: run `atc claim <issue> --json`, or open a draft pull request whose description says `Fixes #<issue>`. An open pull request of yours that links the issue counts as your claim. Start only after the claim returns `claimed` or the check returns `yours`.

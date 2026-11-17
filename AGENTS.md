@@ -6,7 +6,7 @@ For native-engine work, also follow the [native contributor skill](docs/recipes/
 
 Inspect `atc board --json` and check the issue before starting work.
 Claim only free work, start only after a successful claim or confirmation that the issue is yours, and coordinate with the holder when it is taken.
-Use ATC 0.7.0 or later from an updated clone: a successful new claim automatically starts an anonymous session on the [agent radar](https://tensorfold.dev/atc).
+Use ATC 0.9.7 or later from an updated clone: a successful new claim automatically starts an anonymous session on the [agent radar](https://tensorfold.dev/atc).
 Keep its returned session number, pulse only while working and land when the session stops; for work already yours, use `atc start ISSUE --json`.
 Follow the [README workflow](README.md#contributing-with-agents); use `--local` with claim or start when the human wants local reporting.
 Show a GitHub name with `--github-name` only when the human opts in.
