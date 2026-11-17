@@ -257,10 +257,10 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
     const values_view = try vk.tensor.View.init(&vbuf, .bf16, 0, @intCast(v_bits.len));
     const stream_view = try vk.tensor.View.init(&stream_buf, .f32, 0, @intCast(stream_words));
     const head_stride_words: u64 = vk.Attention.tile_rows * ca.max_visible_keys;
-    var got: [2][]El = undefined;
+    var got: [2][]El = .{ &.{}, &.{} };
     defer a.free(got[0]);
     defer a.free(got[1]);
-    var probs: [2][]u32 = undefined;
+    var probs: [2][]u32 = .{ &[_]u32{}, &[_]u32{} };
     defer a.free(probs[0]);
     defer a.free(probs[1]);
     for ([_]vk.Attention.Path{ .single, .tiled }, 0..) |path, i| {
@@ -271,7 +271,8 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
         var out = try uploadWords(El, dev, cmds, staging, shell, timeout);
         defer out.deinit();
         const y_view = try vk.tensor.View.init(&out, kind, 0, @intCast(row_elems));
-        try vk.orExit(attn.attendOn(path, cmds, y_view, q_view, keys_view, values_view, if (i == 0) stream_view else null, keys - 1, 1, keys, timeout));
+        // attendPlan demands the stream past shared_stream_keys even for the tiled path, which never reads it; pass it unconditionally.
+        try vk.orExit(attn.attendOn(path, cmds, y_view, q_view, keys_view, values_view, stream_view, keys - 1, 1, keys, timeout));
         try fetch(cmds, staging, out, std.mem.sliceAsBytes(got[i]), timeout);
         if (i == 0) {
             probs[i] = try a.alloc(u32, stream_words);
