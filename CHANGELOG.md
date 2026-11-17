@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal before M5: a drafted window's rows run the decode attention in pairs over the keys below the window, so at a 32K prompt on an M3 Ultra drafted decode is 24% faster at one stream and 29% at eight with every reply unchanged; `TF_QWEN27_JOIN=0` keeps the unpaired pipelines (#3661).
+
 - App: opening an Approvals task whose conversation is archived, deleted or not loaded yet shows a clear "Conversation unavailable" view instead of a blank Thread window (#3393, fixes #3387). Thanks to @sx4im.
 
 - CLI: `tensorfold launch <agent>` starts Claude Code, Codex, OpenCode or Hermes against the local server, with the API base URL and key set only in the agent's environment; no agent config or home-folder files change (#3248, fixes #3199).
