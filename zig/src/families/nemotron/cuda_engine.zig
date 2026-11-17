@@ -261,38 +261,7 @@ pub const Engine = struct {
         head: struct { h: *Head, rows: usize, j: usize, vocab: @import("cuda_mtp.zig").Vocab },
     };
 
-    /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
-    pub fn record(e: *Engine, body: Body) !cuda.graph.Exec {
-        const t0 = std.Io.Clock.awake.now(e.io);
-        try cuda.graph.beginCapture(e.stream, .thread_local);
-        e.recordBody(body) catch |err| {
-            if (cuda.graph.endCapture(e.stream)) |g| {
-                var x = g;
-                x.deinit();
-            } else |_| {}
-            return err;
-        };
-        var g = try cuda.graph.endCapture(e.stream);
-        defer g.deinit();
-        const exec = try g.instantiate();
-        try exec.upload(e.stream);
-        try e.stream.synchronize();
-        e.stats.captures += 1;
-        e.stats.capture_ns += @intCast(std.Io.Clock.awake.now(e.io).toNanoseconds() - t0.toNanoseconds());
-        return exec;
-    }
-
-    fn recordBody(e: *Engine, body: Body) !void {
-        switch (body) {
-            .window => |w| {
-                const f = e.forward(null);
-                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot, .untaught = f.untaught }});
-                if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
-                try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
-            },
-            .head => |x| try x.h.level(x.rows, x.j, x.vocab),
-        }
-    }
+    pub const record = seq_graphs.record;
 
     /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
     pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
