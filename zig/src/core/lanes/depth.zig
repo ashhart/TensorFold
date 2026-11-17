@@ -563,6 +563,7 @@ test {
     _ = @import("shared_price_learning_test.zig");
     _ = @import("shared_price_8_test.zig");
     _ = @import("shared_price_modes_test.zig");
+    _ = @import("shared_hold_pass_test.zig");
 }
 
 test {
