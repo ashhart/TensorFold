@@ -145,7 +145,15 @@ The reference draws with PyTorch's generator, so sampled frames cannot match it;
 TensorFold's keyed sampler instead. With it, the standalone tool gave byte-identical WAV files for one seeded
 request run twice, and Whisper transcribed that 4.9 s reply with no errors. The figures in the rest of this section
 and in the serving table below were measured before the sampler moved to the keyed one (commit 39a2864ef, the
-family's own seeded generator) and have not been repeated since. Two indirect checks:
+family's own seeded generator) and have not been repeated since.
+
+The served build with the keyed sampler, one seeded request of 746,760 PCM bytes (373,380 samples, 8.5 s at
+44.1 kHz): sent again, sent streamed, and sent while two other requests
+arrived, it returned the same bytes each time. The server runs one lane and does not queue: the two requests that
+arrived while it spoke were refused with 503 `engine_busy` ("speech output capacity is full"), so there is no
+concurrent decoding to compare a solo reply with yet.
+
+Two indirect checks:
 
 - **Repeatability:** the served route returns the same bytes for the same seed, and a streamed reply's bytes equal
   the whole reply's.
