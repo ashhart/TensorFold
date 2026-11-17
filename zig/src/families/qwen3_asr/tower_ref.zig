@@ -1,4 +1,4 @@
-//! The audio tower in float64, stage by stage as the package's Qwen3ASRAudioEncoder runs it: the check's reference.
+//! The audio tower in float64, stage by stage: convs, positions, windowed layers, final norm, two projections.
 const std = @import("std");
 const cfg = @import("config.zig");
 const chunks = @import("chunks.zig");
