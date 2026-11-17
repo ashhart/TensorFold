@@ -206,6 +206,8 @@ function Card({
 }) {
   const tx = useAuthoredText()
   const deleteTicket = useStore((s) => s.deleteTicket)
+  const updateTicket = useStore((s) => s.updateTicket)
+  const bots = useStore((s) => s.settings?.agentPresets ?? [])
   const openThread = useStore((s) => s.openThread)
   const [now, setNow] = useState(() => Date.now())
   const running = t.runState === 'running'
@@ -243,6 +245,7 @@ function Card({
         {!running && t.status === 'review' && <span className="flex items-center gap-1 rounded bg-positive/12 px-1.5 py-0.5 text-positive"><Icon name="check" size={11} />{tx("Review")}</span>}
         {dependency.state === 'waiting' && <span title={tx("Waiting on {value0}", { value0: dependency.waitingOn.join(', ') })} className="rounded bg-warn/12 px-1.5 py-0.5 text-warn">{tx("Waiting on ")}{dependency.waitingOn.length}</span>}
         {dependency.state === 'blocked' && <span title={dependency.blockers.join(' ')} className="rounded bg-danger/10 px-1.5 py-0.5 text-danger">{tx("Dependency blocked")}</span>}
+        {!canWork && t.botId && (t.executionMode ?? 'solo') === 'solo' && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-accent">{bots.find((bot) => bot.id === t.botId)?.name ?? tx("Unavailable")}</span>}
         {assignedRoom && <span className="flex max-w-full items-center gap-1 rounded bg-accent-soft px-1.5 py-0.5 text-accent"><Icon name="layers" size={10} /><span className="truncate">{assignedRoom.name}</span></span>}
         <div className="flex-1" />
         {canWork && workPhase === 'build' && (() => {
@@ -272,6 +275,14 @@ function Card({
                 )}
               </Menu>
               </span>
+              {mode === 'solo' && <label className="flex items-center gap-1 text-ink-2" onClick={(event) => event.stopPropagation()}>
+                {tx("Saved bot")}
+                <select aria-label={tx("Saved bot")} value={t.botId ?? ''} onChange={(event) => { void updateTicket(t.id, { botId: event.target.value || null }) }} className="max-w-40 rounded-md border border-line bg-card px-1.5 py-0.5 text-ink">
+                  <option value="">{tx("Board model")}</option>
+                  {t.botId && !bots.some((bot) => bot.id === t.botId) && <option value={t.botId}>{tx("Unavailable")}</option>}
+                  {bots.filter((bot) => !bot.archivedAt || bot.id === t.botId).map((bot) => <option key={bot.id} value={bot.id} disabled={!!bot.archivedAt || !!bot.paused}>{bot.name}</option>)}
+                </select>
+              </label>}
               {mode === 'room' ? (
                 <span onClick={(e) => e.stopPropagation()}>
                   <Menu width={266} align="end" trigger={(open) => (
@@ -444,7 +455,9 @@ export function Board({ projectId }: { projectId: string }) {
       : mode === 'frontier'
         ? (frontierModelChoice(modelProviders, project) ?? buildModel)
         : buildModel
-    void workTicket(id, workOptionsFor(model, phase))
+    void workTicket(id, workOptionsFor(model, phase)).catch((error) => {
+      useStore.setState({ notice: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
+    })
   }
   const setTicketMode = (id: string, mode: TicketExecutionMode) => { void updateTicket(id, { executionMode: mode }) }
 
