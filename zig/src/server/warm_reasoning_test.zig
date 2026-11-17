@@ -80,7 +80,7 @@ test "warm turns: the guess carries the reply's reasoning unless the client's hi
     defer arena.deinit();
     const a = arena.allocator();
 
-    // a first turn: no assistant message yet, so the guess takes the reasoning the client was sent
+    // a first turn: no assistant message yet, so the guess keeps main's rendering without the reasoning
     const first = try late.exchange(srv, "/v1/chat/completions", "{\"model\":\"m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]" ++ tools);
     defer std.testing.allocator.free(first.body);
     try std.testing.expectEqual(@as(u16, 200), first.status);
@@ -88,7 +88,8 @@ test "warm turns: the guess carries the reply's reasoning unless the client's hi
     try std.testing.expectEqualStrings("Because.", message.get("reasoning_content").?.string);
     const w1 = try warmed(&backend);
     defer std.testing.allocator.free(w1);
-    try std.testing.expect(std.mem.indexOf(u8, w1, "[assistant]<r>Because.</r>Before.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w1, "[assistant]Before.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w1, "<r>Because.</r>") == null);
 
     // a client that sent reasoning back keeps getting it in the guess
     const echoing = "{\"model\":\"m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"go\"},{\"role\":\"assistant\",\"content\":\"Before.\",\"reasoning_content\":\"Earlier.\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"x\"}]" ++ tools;
@@ -111,12 +112,12 @@ test "warm turns: the guess carries the reply's reasoning unless the client's hi
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, w3, "[assistant]Before."));
 }
 
-test "warm turns: echoesReasoning reads the latest assistant message, and a conversation with none echoes" {
+test "warm turns: echoesReasoning reads the latest assistant message, and a conversation with none does not echo" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const echoes = @import("warm.zig").echoesReasoning;
-    try std.testing.expect(echoes((try json.parse(a, "[{\"role\":\"user\",\"content\":\"go\"}]")).ok));
+    try std.testing.expect(!echoes((try json.parse(a, "[{\"role\":\"user\",\"content\":\"go\"}]")).ok));
     try std.testing.expect(echoes((try json.parse(a, "[{\"role\":\"assistant\",\"content\":\"a\"},{\"role\":\"assistant\",\"content\":\"b\",\"reasoning_content\":\"\"},{\"role\":\"tool\",\"content\":\"x\"}]")).ok));
     try std.testing.expect(!echoes((try json.parse(a, "[{\"role\":\"assistant\",\"content\":\"a\",\"reasoning_content\":\"r\"},{\"role\":\"assistant\",\"content\":\"b\"},{\"role\":\"user\",\"content\":\"x\"}]")).ok));
     try std.testing.expect(!echoes(.null));
