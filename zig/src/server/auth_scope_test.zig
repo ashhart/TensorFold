@@ -64,11 +64,12 @@ const inference_routes = [_][]const u8{
 } ++ [_][]const u8{ "/apply-template", "/v1/apply-template", "/rerank", "/v1/rerank", "/v2/rerank", "/score", "/v1/score" };
 const read_routes = [_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard", "/v1/benchmark/manifest" };
 const private_routes = [_][]const u8{
-    "/v1/slide/learn",   "/v1/slide/graph",     "/v1/slide/fact/1",  "/v1/recall",           "/v1/imprint",
-    "/v1/imprint/load",  "/v1/imprint/resume",  "/v1/responses/id",  "/responses/id",        "/x/models",
-    "/x/completions",    "/x/chat/completions", "/x/systemone",      "/v1/completions/more", "/v1/../imprint/load",
-    "/v1/%63ompletions", "/V1/COMPLETIONS",     "/v1/completions#x", "http://h/v1/models",   "/future/private",
-    "/slide/unknown.js", "/v1/completions/..",  "/./v1/completions", "/v2/score",            "/v1/v2/rerank", "/v1/imprint/forget",
+    "/v1/slide/learn",    "/v1/slide/graph",     "/v1/slide/fact/1",  "/v1/recall",           "/v1/imprint",
+    "/v1/imprint/load",   "/v1/imprint/resume",  "/v1/responses/id",  "/responses/id",        "/x/models",
+    "/x/completions",     "/x/chat/completions", "/x/systemone",      "/v1/completions/more", "/v1/../imprint/load",
+    "/v1/%63ompletions",  "/V1/COMPLETIONS",     "/v1/completions#x", "http://h/v1/models",   "/future/private",
+    "/slide/unknown.js",  "/v1/completions/..",  "/./v1/completions", "/v2/score",            "/v1/v2/rerank",
+    "/v1/imprint/forget",
 };
 
 test "auth scopes: route grants are exact and every other method or resource is refused" {
