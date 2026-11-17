@@ -136,13 +136,15 @@ pub fn postOnly(e: *E, out: ?calls.Arg) !void {
 pub fn moe(e: *E, L: u32) !void {
     const n = e.n;
     const D: i64 = e.cfg.hidden;
+    if (e.o.format == .release_fp8) // the release's MXFP4 / FP8 experts; L.moe in fp32 for exchange_f32 (no r1)
+        return @import("release_moe.zig").body(e, L, n, try e.buf("w.out", .{}, .bf16, &.{ n, D }), "bias", try e.buf("L.moe", .{}, .f32, &.{ n, D }));
     const backbone = e.cfg.isBackbone(L);
     // the router folds kit rounding + grouping into its tail when no prune follows; with `r1` it folds the prune too
     const fold = !backbone or e.o.expert_topp == null or e.o.r1;
     const ex = e.cfg.expertsOf(L);
     const slots: i64 = ex.topk + 1;
     const Et: i64 = ex.count + 1;
-    const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
+    const I: i64 = (try @import("partition.zig").expertShare(e.cfg, e.o.rank, e.o.world)).len;
     const P = n * slots;
     const rows: i64 = if (backbone) e.o.expert_rows else e.o.dspark_rows;
     const sc: []const u8 = if (backbone) "s.ex" else "s.dx";
@@ -315,5 +317,6 @@ pub fn finish(e: *E) !void {
     const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     const logits = try e.buf("w.logits", .{}, .f32, &.{ e.n, V });
     try e.upstream("head", try e.buf("w.out", .{}, .bf16, &.{ e.n, D }), D, V, logits);
-    try e.glue("kit_logits", &.{logits});
+    // the EXL3 kit rounds logits to bf16; the release keeps the reference's FP32 logits (D§5.5)
+    if (e.o.format != .release_fp8) try e.glue("kit_logits", &.{logits});
 }

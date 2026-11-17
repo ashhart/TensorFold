@@ -6,6 +6,7 @@ const Pack = @import("pack.zig").Pack;
 const Info = @import("pack.zig").Info;
 const DType = @import("core").safetensors.DType;
 const Plan = @import("engram_tables.zig").Plan;
+const Span = @import("engram_tables.zig").Span;
 
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -49,8 +50,9 @@ pub const Manifest = struct {
     sources: []const Source = &.{},
     tables: []const Table = &.{},
 
-    /// The packer's manifest for `plans`, in ascending layer order; the shards in `tables_dir` must already be written.
-    pub fn build(a: Allocator, io: Io, tables_dir: []const u8, p: *const Pack, plans: []const Plan, seed: u64) !Manifest {
+    /// The packer's manifest for `plans` and their `spans` (ascending layers); the shards must already be written.
+    pub fn build(a: Allocator, io: Io, tables_dir: []const u8, p: *const Pack, plans: []const Plan, spans: []const Span, seed: u64) !Manifest {
+        if (spans.len != plans.len) return error.EngramManifestBad;
         const arena_p = try a.create(std.heap.ArenaAllocator);
         errdefer a.destroy(arena_p);
         arena_p.* = std.heap.ArenaAllocator.init(a);
@@ -62,7 +64,7 @@ pub const Manifest = struct {
         if (span > 0) m.samples = try ep.samples(al, span, 48, seed);
         var srcs: std.ArrayList(Source) = .empty;
         var tabs: std.ArrayList(Table) = .empty;
-        for (plans) |t| {
+        for (plans, spans) |t, sp| {
             for ([_]usize{ 0, 1 }) |k| {
                 const i: Info = if (k == 0) t.weight else t.scale;
                 var nb: [96]u8 = undefined;
@@ -77,15 +79,15 @@ pub const Manifest = struct {
                 });
             }
             var tnb: [64]u8 = undefined;
-            const tname = try ep.shardName(&tnb, t.layer);
+            const tname = try ep.shardName(&tnb, t.layer, sp);
             var spb: [512]u8 = undefined;
             const spath = try std.fmt.bufPrint(&spb, "{s}/{s}", .{ tables_dir, tname });
             try tabs.append(al, Table{
                 .layer = t.layer,
                 .file = try al.dupe(u8, tname),
-                .lo = 0,
-                .hi = t.rows,
-                .total = t.rows,
+                .lo = sp.lo,
+                .hi = sp.hi,
+                .total = sp.total,
                 .size = try fileLength(io, spath),
                 .sha = try fileSha256(io, spath),
             });
@@ -309,9 +311,10 @@ pub fn manifestFor(a: Allocator, io: Io, release_dir: []const u8, tables_dir: []
                 .length = i.nbytes,
             });
         }
+        const named = shardOf(n) orelse return error.EngramShardCorrupt;
         var tb: [64]u8 = undefined;
-        const tname = try ep.shardName(&tb, @intCast(h.layer));
-        if (!std.mem.eql(u8, n, tname)) return error.EngramShardCorrupt;
+        const tname = try ep.shardName(&tb, @intCast(h.layer), .{ .rank = named.rank, .world = named.world, .lo = h.lo, .hi = h.hi, .total = h.total });
+        if (named.layer != h.layer or !std.mem.eql(u8, n, tname)) return error.EngramShardCorrupt;
         try tabs.append(al, Table{
             .layer = @intCast(h.layer),
             .file = try al.dupe(u8, tname),
@@ -362,11 +365,15 @@ fn checkText(a: Allocator, io: Io, release_dir: []const u8, tables_dir: []const 
         if (h.layer != t.layer or h.lo != t.lo or h.hi != t.hi or h.total != t.total) return error.EngramShardCorrupt;
         const wi = pack.get(w.name).?;
         const si = pack.get(s.name).?;
-        for (m.samples) |x| {
+        // a shard's rows are the release table's: its total must be the tensor's row count, so global reads stay inside
+        if (wi.rank == 0 or h.total != wi.dims()[0]) return error.EngramShardCorrupt;
+        // the seeded global rows inside this shard, then its first and last rows (a shard need not start at row 0)
+        const ends = [_]u64{ h.lo, if (h.hi > h.lo) h.hi - 1 else h.lo };
+        for ([_][]const u64{ m.samples, if (h.hi > h.lo) &ends else &.{} }) |set| for (set) |x| {
             if (x < h.lo or x >= h.hi) continue;
-            if (x > (std.math.maxInt(u64) - er.header_bytes) / er.row_bytes) return error.EngramShardCorrupt;
+            if (x - h.lo > (std.math.maxInt(u64) - er.header_bytes) / er.row_bytes) return error.EngramShardCorrupt;
             var row: [er.row_bytes]u8 = undefined;
-            if (try f.readPositionalAll(io, &row, er.header_bytes + x * er.row_bytes) != er.row_bytes) return error.EngramShardCorrupt;
+            if (try f.readPositionalAll(io, &row, er.header_bytes + (x - h.lo) * er.row_bytes) != er.row_bytes) return error.EngramShardCorrupt;
             var wrow: [er.values]u8 = undefined;
             var srow: [8]u8 = undefined;
             try pack.read(io, wi, .{ .offset = x * er.values, .len = er.values }, &wrow);
@@ -374,7 +381,7 @@ fn checkText(a: Allocator, io: Io, release_dir: []const u8, tables_dir: []const 
             if (!std.mem.eql(u8, row[0..er.values], &wrow) or !std.mem.eql(u8, row[er.values..], &srow)) return error.EngramSampleMismatch;
             got.samples += 1;
             got.bytes += er.row_bytes;
-        }
+        };
         if (full) {
             const whole = try shaOf(f, io);
             if (!std.mem.eql(u8, &whole, &t.sha)) return error.EngramShardCorrupt;
@@ -382,6 +389,20 @@ fn checkText(a: Allocator, io: Io, release_dir: []const u8, tables_dir: []const 
         }
     }
     return got;
+}
+
+/// A shard file name's layer, rank and world (`engram-l<L>-r<R>of<W>.bin`); null when it is not one.
+pub fn shardOf(name: []const u8) ?struct { layer: u32, rank: u32, world: u32 } {
+    if (!std.mem.startsWith(u8, name, "engram-l") or !std.mem.endsWith(u8, name, ".bin")) return null;
+    const mid = name["engram-l".len .. name.len - ".bin".len];
+    const r = std.mem.indexOf(u8, mid, "-r") orelse return null;
+    const o = std.mem.lastIndexOf(u8, mid, "of") orelse return null;
+    if (o <= r + 2) return null;
+    const layer = std.fmt.parseInt(u32, mid[0..r], 10) catch return null;
+    const rank = std.fmt.parseInt(u32, mid[r + 2 .. o], 10) catch return null;
+    const world = std.fmt.parseInt(u32, mid[o + 2 ..], 10) catch return null;
+    if (world == 0 or rank >= world) return null;
+    return .{ .layer = layer, .rank = rank, .world = world };
 }
 
 /// One recorded source tensor against its release pack: file, dtype, shape, offset and length still match.

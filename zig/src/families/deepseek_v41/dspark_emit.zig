@@ -90,6 +90,7 @@ const Ds = struct {
         const w = "dspark.main_proj";
         const D: i64 = d.cfg().hidden;
         const K: i64 = @as(i64, @intCast(d.cfg().dspark_targets.items().len)) * D;
+        if (e.o.format == .release_fp8) return @import("release_dense.zig").upstream(e, w, x, K, D, y);
         const k2: i64 = try e.w.k2(w);
         const xh = try e.buf("L.{s}.xh", .{w}, .f16, &.{ e.n, K });
         try e.ext("tensorfold_exl3_linear_v4.rot_in", &.{ x, try e.weight("{s}.suh", .{w}, .f16, &.{K}), xh });

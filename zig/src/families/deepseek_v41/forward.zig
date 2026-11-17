@@ -130,7 +130,9 @@ pub const Forward = struct {
     calib_marks: std.ArrayList(u64) = .empty, // TF_DSV41_CALIB=measure: a follower's clock at each op_calib_mark
 
     pub fn init(gpa: std.mem.Allocator, cfg: *const Config, widths: *const block.Widths, opts: block.Options, runner: *run.Runner, comm: tp.collective.Collective) Forward {
-        return .{ .gpa = gpa, .cfg = cfg, .widths = widths, .opts = opts, .runner = runner, .comm = comm, .arena = std.heap.ArenaAllocator.init(gpa) };
+        var o = opts;
+        o.format = cfg.format; // the projection bodies follow the checkpoint's storage (EXL3 or the release's)
+        return .{ .gpa = gpa, .cfg = cfg, .widths = widths, .opts = o, .runner = runner, .comm = comm, .arena = std.heap.ArenaAllocator.init(gpa) };
     }
 
     pub fn upload(f: *Forward, destination: u64, bytes: []const u8) !void {

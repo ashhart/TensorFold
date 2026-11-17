@@ -15,8 +15,11 @@ pub const Gpu = struct {
     bufs: [8]?cuda.DeviceBuffer = @splat(null),
     /// nucleus statistics over every SM when the fatbin has them, unless TF_DSV41_SAMP_STATS=row (one CTA a row)
     split: bool,
+    /// top-k keys of every fp32 bit (topk_keys.cu's wide kernel), else of bf16-valued logits
+    wide: bool,
 
-    pub fn init(d: *const cuda.Driver, stream: cuda.Stream, kernels: *const dk.Kernels) !Gpu {
+    /// `wide`: the logits keep every fp32 bit (the release: Kernels.wideLogits), else bf16-valued (EXL3's kit).
+    pub fn init(d: *const cuda.Driver, stream: cuda.Stream, kernels: *const dk.Kernels, wide: bool) !Gpu {
         const fns = try dk.sampling.Functions.load(d);
         const row = try rowStats();
         const log = std.log.scoped(.dsv41);
@@ -25,7 +28,7 @@ pub const Gpu = struct {
         } else if (row) {
             log.info("sampling: nucleus statistics one CTA a row (TF_DSV41_SAMP_STATS=row)", .{});
         } else log.info("sampling: nucleus statistics split over every SM ({d} columns a CTA)", .{dk.sampling.Functions.chunk});
-        return .{ .d = d, .stream = stream, .kernels = kernels, .fns = fns, .split = fns.split != null and !row };
+        return .{ .d = d, .stream = stream, .kernels = kernels, .fns = fns, .split = fns.split != null and !row, .wide = wide };
     }
 
     /// TF_DSV41_SAMP_STATS: split (default) | row.
@@ -53,7 +56,7 @@ pub const Gpu = struct {
         const g = self_(p);
         const vals = try scratch(p, 5, 4 * n * k);
         const cols = try scratch(p, 6, 8 * n * k);
-        try g.kernels.others(g.stream).topKeys(lg, C, n, C, k, vals, cols);
+        try g.kernels.others(g.stream).topKeys(lg, C, n, C, k, vals, cols, g.wide);
         try g.fns.pack(g.stream, vals, cols, n, k, id0, out);
     }
 

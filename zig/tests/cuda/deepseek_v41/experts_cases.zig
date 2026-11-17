@@ -262,7 +262,7 @@ pub fn topkCases(gpu: Gpu, k: *const dsv41.Kernels, dir: []const u8) !void {
         const kk = try size(fx, try std.fmt.bufPrint(&name_buf, "k{d}", .{i}));
         const vals = try b.zeros(R * kk * 4, 0xee);
         const cols = try b.zeros(R * kk * 8, 0xee);
-        try o.topKeys(lg.ptr, C, R, C, kk, vals.ptr, cols.ptr);
+        try o.topKeys(lg.ptr, C, R, C, kk, vals.ptr, cols.ptr, false); // the EXL3 reference fixtures: bf16-valued logits
         try stream.synchronize();
         try same(gpu, fx, cols, try std.fmt.bufPrint(&name_buf, "cols{d}", .{i}), "topk_keys cols");
         try same(gpu, fx, vals, try std.fmt.bufPrint(&name_buf, "vals{d}", .{i}), "topk_keys vals");

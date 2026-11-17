@@ -9,6 +9,7 @@ pub const dense = @import("cuda").qlinear.block.dense;
 pub const kv_glue = @import("kernels_kv_glue.zig");
 pub const replay = @import("kernels_replay.zig");
 pub const ops = @import("kernels_ops.zig");
+pub const release = @import("kernels_release.zig");
 /// sampling.cu (its own module, loaded by the keyed sampler)
 pub const sampling = @import("sampling_kernels.zig");
 
@@ -61,6 +62,24 @@ const Lin2Blob = struct {
 };
 pub const lin2_image: []const u8 = &Lin2Blob.bytes;
 
+/// The release-format images (sm_121a only, zig/build/dsv41_units.zig `release`); empty when the build has none.
+pub const release_images = struct {
+    pub const proj: []const u8 = &Blob("dsv41_fatbin_dsv41_rel").bytes;
+    pub const glue: []const u8 = &Blob("dsv41_fatbin_dsv41_rel_glue").bytes;
+    pub const ex: []const u8 = &Blob("dsv41_fatbin_dsv41_rel_ex").bytes;
+};
+
+/// The release kernels' modules and functions, loaded beside the EXL3 set only for a release_fp8 checkpoint.
+pub const Release = struct {
+    mods: [3]cuda.Module,
+    f: release.Functions,
+    ex: release.ex.Functions,
+
+    pub fn unload(r: *Release) void {
+        for (&r.mods) |*m| m.unload();
+    }
+};
+
 fn env(name: [:0]const u8) ?[]const u8 {
     const v = std.c.getenv(name) orelse return null;
     return std.mem.span(v);
@@ -73,6 +92,7 @@ pub const Kernels = struct {
     dense: dense.Functions,
     ops: ops.Functions,
     sms: usize,
+    rel: ?Release = null,
 
     /// Loads every module and resolves every instance the launches can use.
     pub fn load(ctx: *const cuda.Context) !Kernels {
@@ -80,6 +100,7 @@ pub const Kernels = struct {
         if (!available) return error.BuiltWithoutKernels;
         const d = ctx.d;
         var k: Kernels = undefined;
+        k.rel = null;
         const list = [_][]const u8{ images.exl3_experts, images.x3ld, images.x3pf, images.x3gm, images.linear, images.x3seg, images.dense3, images.attn, images.topk, images.mhc, images.mhc_pf, images.router_gemv, images.pfdense_k8, images.pfdense_k10, images.pfdense_k12, images.pfdense_k16, images.engram_gate, images.l2pace, images.l2pf, images.x3gm_plan, images.topk_keys, images.pointwise, images.kvsplit, images.glue, images.x3gm3, images.pfglue, images.router_glue, images.kv_glue, images.x3ld_epi, images.topk_b };
         comptime std.debug.assert(list.len == @typeInfo(@FieldType(Kernels, "mods")).array.len);
         var loaded: usize = 0;
@@ -115,7 +136,40 @@ pub const Kernels = struct {
         if (mode.cluster) std.log.scoped(.dsv41).info("lin2: dense3's split-K launches of up to 32 rows reduce their partials in a cluster's shared memory (TF_DSV41_LIN2_CLUSTER)", .{});
     }
 
+    /// The release-format set on top of `load`'s: GB10's sm_121a block-scaled mma only, else a refusal by name.
+    pub fn loadRelease(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.rel != null) return;
+        if (try ctx.capability() != 121) return error.DeepSeekReleaseRequiresSm121;
+        if (release_images.proj.len == 0 or release_images.glue.len == 0 or release_images.ex.len == 0) return error.ReleaseKernelsNotBuilt;
+        var r: Release = undefined;
+        r.mods[0] = try cuda.Module.load(ctx.d, release_images.proj);
+        errdefer r.mods[0].unload();
+        r.mods[1] = try cuda.Module.load(ctx.d, release_images.glue);
+        errdefer r.mods[1].unload();
+        r.mods[2] = try cuda.Module.load(ctx.d, release_images.ex);
+        errdefer r.mods[2].unload();
+        r.f = try release.Functions.resolve(r.mods[0], r.mods[1]);
+        r.ex = try release.ex.Functions.resolve(r.mods[2]);
+        k.rel = r;
+    }
+
+    /// Whether logits keep every fp32 bit (a release checkpoint, its kernels loaded): top-k takes 48-bit keys.
+    pub fn wideLogits(k: *const Kernels) bool {
+        return k.rel != null;
+    }
+
+    /// The release experts' launches on one stream (after `loadRelease`).
+    pub fn releaseExOps(k: *const Kernels, s: cuda.Stream) release.ex.Ops {
+        return .{ .f = &k.rel.?.ex, .s = s };
+    }
+
+    /// The release launches on one stream (after `loadRelease`).
+    pub fn releaseOps(k: *const Kernels, s: cuda.Stream) release.Ops {
+        return .{ .f = &k.rel.?.f, .s = s };
+    }
+
     pub fn deinit(k: *Kernels) void {
+        if (k.rel) |*r| r.unload();
         if (k.dense.lin2) |*l| l.module.unload();
         for (&k.mods) |*m| m.unload();
     }
@@ -154,6 +208,8 @@ test {
     std.testing.refAllDecls(ops);
     std.testing.refAllDecls(ops.Ops);
     std.testing.refAllDecls(ops.Functions);
+    std.testing.refAllDecls(release);
+    std.testing.refAllDecls(release.Ops);
 }
 
 test {
@@ -162,6 +218,9 @@ test {
     _ = dense;
     _ = exl3;
     _ = kv_glue;
+    _ = release;
+    _ = @import("release_split.zig");
+    std.testing.refAllDecls(@import("kernels_replay_release.zig"));
     _ = @import("kernels_shapes.zig");
 }
 
@@ -212,4 +271,41 @@ test "DeepSeek refuses pre-cluster GPUs before loading any image" {
     const before = Fake.loads;
     try std.testing.expectError(error.NotReady, Kernels.load(&ctx));
     try std.testing.expectEqual(before, Fake.loads);
+}
+
+test "DeepSeek release kernels refuse every GPU but sm_121 before loading an image" {
+    const abi = cuda.abi;
+    const Fake = struct {
+        var sm: u32 = 0;
+        var loads: usize = 0;
+        fn attribute(out: *c_int, key: abi.DeviceAttribute, _: abi.Device) callconv(.c) abi.Result {
+            out.* = switch (key) {
+                .compute_capability_major => @intCast(sm / 10),
+                .compute_capability_minor => @intCast(sm % 10),
+                else => unreachable,
+            };
+            return abi.success;
+        }
+        fn load(_: *abi.Module, _: ?*const anyopaque) callconv(.c) abi.Result {
+            loads += 1;
+            return abi.error_not_ready;
+        }
+    };
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuModuleLoadData = Fake.load;
+    const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    var k: Kernels = undefined;
+    k.rel = null;
+    Fake.loads = 0;
+    for ([_]u32{ 90, 100, 110, 120 }) |sm| {
+        Fake.sm = sm;
+        try std.testing.expectError(error.DeepSeekReleaseRequiresSm121, k.loadRelease(&ctx));
+        try std.testing.expectEqual(@as(usize, 0), Fake.loads);
+    }
+    Fake.sm = 121;
+    const built = release_images.proj.len > 0 and release_images.glue.len > 0 and release_images.ex.len > 0;
+    try std.testing.expectError(if (built) error.NotReady else error.ReleaseKernelsNotBuilt, k.loadRelease(&ctx));
+    try std.testing.expectEqual(@intFromBool(built), Fake.loads);
+    try std.testing.expect(k.rel == null);
 }

@@ -100,3 +100,20 @@ test "world four: decode and padded prefill widths are local" {
     try admission.nativePrefill(&cfg, 4);
     try std.testing.expectError(error.UnsupportedPrefillHeads, admission.nativePrefill(&cfg, 8));
 }
+
+test "world four: the release format splits the experts on 64-column blocks, 576 a rank" {
+    var cfg: Config = .{};
+    for (0..4) |rank| try std.testing.expectEqual(@as(u32, 640 - 128 * @as(u32, @intFromBool(rank >= 2))), (try partition.expertShare(&cfg, rank, 4)).len);
+    cfg.format = .release_fp8;
+    var cursor: u32 = 0;
+    for (0..4) |rank| {
+        const p = try partition.expertShare(&cfg, rank, 4);
+        try std.testing.expectEqual(cursor, p.lo);
+        try std.testing.expectEqual(@as(u32, 576), p.len);
+        cursor += p.len;
+    }
+    try std.testing.expectEqual(cfg.expert_width, cursor);
+    try std.testing.expectEqual(@as(u32, 1152), (try partition.expertShare(&cfg, 1, 2)).len);
+    try std.testing.expectError(error.SplitNotOnBlocks, partition.shareOn(2304, 0, 0, 4));
+    try std.testing.expectEqualDeep(try partition.share(2304, 3, 4), try partition.shareOn(2304, 128, 3, 4));
+}

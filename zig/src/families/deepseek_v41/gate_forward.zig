@@ -17,18 +17,31 @@ const eh = @import("engram_host.zig");
 const Value = std.json.Value;
 
 /// The widths block.zig needs, from our loaded weights (each trellis's words) and the plan's expert layouts.
+const ReleaseForm = @import("release_dense.zig").Form;
+
 pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan) !block.Widths {
     var out: block.Widths = .{};
     var it = w.map.iterator();
     while (it.next()) |e| {
         const name = e.key_ptr.*;
+        // a release group's `<base>.w`: FP8 codes (u8) or BF16 values, both [rows][cols]; experts' are rank 3
+        if (std.mem.endsWith(u8, name, ".w") and e.value_ptr.rank == 2) {
+            const form: ReleaseForm = switch (e.value_ptr.kind) {
+                .u8 => .fp8,
+                .bf16 => .bf16,
+                else => return error.UnexpectedTensor,
+            };
+            try out.release.put(a, name[0 .. name.len - ".w".len], form);
+            continue;
+        }
         if (!std.mem.endsWith(u8, name, ".trellis") or e.value_ptr.rank != 3) continue;
         try out.dense.put(a, name[0 .. name.len - ".trellis".len], @intCast(e.value_ptr.shape[2] / 8));
     }
     for (p.layers) |*l| {
+        if (l.experts[0].form != .exl3) continue; // MXFP4 experts: no EXL3 widths (release_moe.zig)
         var r: [2][2]u32 = .{ .{ 99, 0 }, .{ 99, 0 } };
         for ([_]usize{ 0, 2, 1 }, [_]usize{ 0, 0, 1 }) |proj, slot| {
-            for (l.experts[proj].layout.words) |words| {
+            for (l.experts[proj].form.exl3.layout.words) |words| {
                 r[slot][0] = @min(r[slot][0], words / 8);
                 r[slot][1] = @max(r[slot][1], words / 8);
             }
@@ -39,7 +52,7 @@ pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan)
         try out.experts.put(a, l.index, r);
         // x3gm's widths present: the routed experts' gate (w1) and down (w2) K2s, the shared expert not among them
         var gm: [2]u32 = .{ 0, 0 };
-        for (0..2) |proj| for (l.experts[proj].layout.words) |words| {
+        for (0..2) |proj| for (l.experts[proj].form.exl3.layout.words) |words| {
             gm[proj] |= @as(u32, 1) << @intCast(words / 8);
         };
         try out.gm.put(a, l.index, gm);

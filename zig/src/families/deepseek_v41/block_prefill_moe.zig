@@ -50,12 +50,13 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
     const seg_rows = e.n;
     e.n = n;
     defer e.n = seg_rows;
+    if (e.o.format == .release_fp8) return @import("release_moe.zig").body(e, L, n, x, bias, part);
     const D: i64 = e.cfg.hidden;
     const ex = e.cfg.expertsOf(L);
     const topk: i64 = ex.topk;
     const slots: i64 = topk + 1;
     const Et: i64 = ex.count;
-    const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
+    const I: i64 = (try @import("partition.zig").expertShare(e.cfg, e.o.rank, e.o.world)).len;
     const P = n * topk;
     const pick = try e.buf("L.pick", .{}, .i32, &.{ n, slots });
     const wts = try e.buf("L.wts", .{}, .f32, &.{ n, slots });
