@@ -53,8 +53,6 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
-    /// Staged references for one stream's rounds; null (the default) records nothing.
-    stages: ?*@import("stage_planes.zig").Planes = null,
     tail: ?forward.Tail = null,
     accepted_chain: bool = false,
     /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
@@ -268,7 +266,7 @@ pub const Runner = struct {
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
-        if (r.stages != null) try stage_planes.admit(round.windows); // refused before the round touches any state
+        if (stage_planes.on) if (stage_planes.active != null) try stage_planes.admit(round.windows); // refused before the round touches any state
         for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
@@ -306,18 +304,19 @@ pub const Runner = struct {
             r.current_placed = .{};
         }
         if (r.capture_taps) r.taps.begin();
-        if (r.stages) |planes| planes.begin();
+        if (stage_planes.on) if (stage_planes.active) |planes| planes.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         var tail_facts = @import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null);
-        tail_facts.last_tapped = tail_facts.last_tapped or r.stages != null; // staged references read the last layer's rows
+        // staged references read the last layer's stream and its final norm, as a tap on it does
+        if (stage_planes.on) tail_facts.last_tapped = tail_facts.last_tapped or stage_planes.active != null;
         r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
         defer r.tail_from = null;
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
         const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) keysForward else null, .stage = if (r.stages) |p| .{ .planes = p, .glue = r.model.glue } else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -339,7 +338,7 @@ pub const Runner = struct {
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
-        if (r.stages) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
+        if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {

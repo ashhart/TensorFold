@@ -16,9 +16,9 @@ pub const Mixer = struct {
     tap: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, Ref, u32) anyerror!void = null,
     /// A pass that keeps no row and has no other reader of the last layer: that layer writes keys and values only.
     keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
-    /// Staged references (off unless asked for): the stream after each stage, the final norm and the head's rows.
-    stage: ?@import("stage_planes.zig").Hook = null,
 };
+/// Staged references (tf-qwen27-run only): the stream after each stage, the final norm and the head's rows.
+const stage_planes = @import("stage_planes.zig");
 
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
@@ -99,7 +99,7 @@ pub const Stages = struct {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
             lane.enc.barrier();
         }
-        if (s.hooks.stage) |stage| try stage.record(lane.enc, .embed, s.hidden, s.rows);
+        if (stage_planes.on) try stage_planes.record(s.model.glue, lane.enc, .embed, s.hidden, s.rows);
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;
@@ -116,7 +116,7 @@ pub const Stages = struct {
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
-            if (s.hooks.stage) |stage| try stage.record(e, .{ .block = index - 1 }, s.hidden, s.rows);
+            if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
     }
     /// The last layer of a pass whose other rows nothing reads: q, attention, o and the MLP have no reader.
@@ -173,7 +173,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, t.at(s.hidden, h), t.at(f.get(.output), h), wts.ref(layer.post_norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
-        if (s.hooks.stage) |stage| try stage.record(e, .{ .mixer = index }, s.hidden, s.rows);
+        if (stage_planes.on) try stage_planes.record(s.model.glue, e, .{ .mixer = index }, s.hidden, s.rows);
         if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, m.kernels.prompt)) {
             // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
@@ -265,10 +265,10 @@ pub const Stages = struct {
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
-        if (s.hooks.stage) |stage| {
+        if (stage_planes.on) {
             // the last block is the residual stream; final is the normed rows the head reads (f.input)
-            try stage.record(e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
-            try stage.record(e, .final, f.get(.input), s.rows);
+            try stage_planes.record(m.glue, e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
+            try stage_planes.record(m.glue, e, .final, f.get(.input), s.rows);
         }
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
@@ -279,10 +279,10 @@ pub const Stages = struct {
                 head_sums.ref.offset += @as(usize, s.rows - 1) * 4;
             }
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
-            if (s.hooks.stage) |stage| {
+            if (stage_planes.on) if (stage_planes.active != null) {
                 e.barrier();
-                try stage.record(e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
-            }
+                try stage_planes.record(m.glue, e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
+            };
         }
         e.barrier();
         if (s.reduce) |r| {
