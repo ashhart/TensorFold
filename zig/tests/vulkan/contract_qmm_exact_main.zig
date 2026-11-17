@@ -197,9 +197,9 @@ pub fn main(init: std.process.Init) !u8 {
             fail += 1;
             const at = first - first % units;
             std.debug.print("EXACT FAIL {s}: {d}/{d} elements differ, first at output[{d}]: ref bytes {x:0>4}{x:0>4} got {x:0>4}{x:0>4}", .{
-                name,       mismatches,
-                data_u16,   first / units,
-                ref_out[at + 1], ref_out[at],
+                name,                mismatches,
+                data_u16,            first / units,
+                ref_out[at + 1],     ref_out[at],
                 fixture.out[at + 1], fixture.out[at],
             });
             if (case.act_f32) {

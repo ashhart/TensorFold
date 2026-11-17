@@ -33,8 +33,7 @@ pub const shared_stream_keys: u64 = 7168;
 const sdpa_shared_bytes: u64 = 30720;
 /// Longest prefill chunk the tiled path takes (forward.zig max_prefill_rows) and the scratch its scores need.
 const tile_max_rows: u32 = 64;
-/// A 1-row decode over at least this many keys takes the tiled path too: the decode kernel runs 8 workgroups (one per head) and
-/// walks every key in one of them, so it leaves the GPU idle on long prefixes. Below it the single dispatch wins.
+/// Past this many keys a 1-row decode takes the tiled path: 8 workgroups idle the GPU on long prefixes.
 const decode_tile_keys: u64 = 512;
 
 // The compiled shader images Attention runs; every field is a real SPIR-V image of the named variant.
@@ -226,7 +225,7 @@ pub const Attention = struct {
         return a.attendOn(.auto, cmds, y, queries, cache_keys, cache_values, stream, prefix, rows, capacity, timeout_ns);
     }
 
-    /// Which dispatch attendOn runs: auto picks by the routing rule; the others force one path so a gate can compare them.
+    /// Which dispatch attendOn runs: auto routes, the others force a path so a gate can compare.
     pub const Path = enum { auto, single, tiled };
 
     pub fn attendOn(a: *Attention, path: Path, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, stream: ?View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
@@ -264,8 +263,7 @@ pub const Attention = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
     }
 
-    // Chunks of 2..tile_max_rows rows, and 1-row decodes over decode_tile_keys or more keys: scores, row softmax and P*V as three
-    // tiled dispatches over an f32 score scratch. Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
+    // Tiled scores, softmax and P*V over row chunks; keeps the decode kernel's accumulation order bit-for-bit.
     fn attendTiled(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, plan: AttendPlan, capacity: u64, timeout_ns: u64) Error!void {
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads),
@@ -293,7 +291,8 @@ pub const Attention = struct {
     }
 
     // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.
-    /// Public mirror of tile_max_rows for the contract gate: the tiled probs' head stride is tile_rows * max_visible_keys.
+
+    /// Public mirror of tile_max_rows: the tiled probs' head stride is tile_rows * max_visible_keys.
     pub const tile_rows: u64 = tile_max_rows;
     /// The tiled score scratch's size in f32 words, for the gate's full-scratch fetch.
     pub const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;

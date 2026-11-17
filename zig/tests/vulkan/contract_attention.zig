@@ -102,12 +102,10 @@ pub const tile_cases = [_]TileCase{
     .{ .name = "tile 64 rows poison second half", .rows = 64, .prefix = 0, .capacity = 80, .poison_from = 32 },
 };
 
-/// 1-row decodes at the routing threshold (decode_tile_keys = 512): the single dispatch and the tiled path must agree byte for byte.
-/// Dense around the boundary: 496 and 512 are 16-aligned controls; 508, 510, 511, 513, 514, 1025 are partial-tile cases.
+/// 1-row decodes at the 512 routing threshold: byte-identical outputs; 496 is the 16-aligned control.
 pub const route_keys = [_]u64{ 496, 508, 510, 511, 512, 513, 514, 1024, 1025, 2048 };
 
-/// Probes past the shared stream (7168): the single dispatch's probabilities become fetchable from the f32 stream buffer, so the
-/// gate byte-compares the two paths' probability arrays themselves, not just the outputs. 7200 is 16-aligned; 7201 and 7205 are partial.
+/// Probes past the shared stream (7168): byte-compare both paths' probability arrays.
 pub const probe_keys = [_]u64{ 7200, 7201, 7205 };
 
 /// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
