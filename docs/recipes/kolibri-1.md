@@ -92,15 +92,17 @@ default); both serve the release as published.
 
 Refused at load, by name, before any request is queued: a release of another architecture (the block drafter
 `josch15366/Kolibri-1-block-drafter` is not served on CUDA), a release for another target, a draft vocabulary or
-tensor shape that does not match the release's config, a stream opened before the drafter.
+tensor shape that does not match the release's config, a stream opened before the drafter, and a CUDA memory budget
+that leaves less than the drafter's weights, scratch and caches need (computed from its config before anything is
+allocated; about 0.44 GiB with one stream).
 
 GB10, greedy, 24 prompts of 256 tokens, A-B-B-A servers, the same replies in all four:
 
 | streams | copy drafts, tok/s | with `--drafter`, tok/s | tokens a round |
 | --- | ---: | ---: | ---: |
-| 1 | 52.6 | 67.4 (+28%) | 1.12 -> 1.92 |
-| 4 | 121.7 | 129.9 (+7%) | 1.12 -> 2.14 |
-| 8 | 159.6 | 155.9 (-2%) | 1.12 -> 2.13 |
+| 1 | 51.5 | 66.5 (+29%) | 1.08 -> 1.84 |
+| 4 | 120.4 | 127.8 (+6%) | 1.08 -> 2.05 |
+| 8 | 157.6 | 155.7 (-1%) | 1.08 -> 2.04 |
 
 At 8 streams the drafter is slower: the target verifies three times the rows, and the depth rule does not yet cut the
 drafts there.
