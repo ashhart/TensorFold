@@ -146,6 +146,17 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
     return upload(e, std.mem.sliceAsBytes(words));
 }
 
+fn dtBias(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, n: usize) !u64 {
+    var buf: [160]u8 = undefined;
+    const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}linear_attn.dt_bias", .{prefix}));
+    if (t.is(.bf16, &.{n})) return put(e, t);
+    if (!t.is(.f32, &.{n})) return error.UnexpectedTensor;
+    const converted = try e.gpa.alloc(u16, n);
+    defer e.gpa.free(converted);
+    try @import("loop_weights.zig").convertDtBias(t, converted);
+    return upload(e, std.mem.sliceAsBytes(converted));
+}
+
 pub fn tensor(into: anytype, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
     var buf: [160]u8 = undefined;
     return put(into, try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape_));
@@ -414,7 +425,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, taps_shape),
                 .norm = try tensor(e, ck, "{s}linear_attn.norm.weight", .{p}, .bf16, &.{geometry.dk}),
                 .a_log = try f32vec(e, ck, "{s}linear_attn.A_log", .{p}, g.v_heads),
-                .dt_bias = try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
+                .dt_bias = if (g.loop != null) try dtBias(e, ck, p, g.v_heads) else try tensor(e, ck, "{s}linear_attn.dt_bias", .{p}, .bf16, &.{g.v_heads}),
             } };
         } else {
             l.mixer = .{ .attention = .{
