@@ -4,9 +4,8 @@
 publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
 came from, and how each part was checked, so the checks can be rerun.
 
-Status: a work in progress on one branch, proposed in #3615. Every kernel launch has its limits record, but only four
-of the 40 kernels have numeric contract tests and none has a planted control of its own; the quality suite has not
-been run on this build.
+Status: a work in progress on one branch, proposed in #3615. All 40 kernels have their limits records, numeric
+contract tests and a planted control each; the quality suite has not been run on this build.
 
 ## Sources
 
@@ -264,12 +263,30 @@ of the four compilers. The audit also reports 18 stale records for launches of o
 (`exl3_experts tf_exl3_prompt_down` and `tf_exl3_prompt_gu`, `flashnext_mtp fn_row_topk`, `qwen35 tf_q35_gdn_slots_1`,
 `_2` and `_4`); this branch does not change those kernels, and the same audit was not run on the base to compare.
 
-**Numeric gates (1 to 4).** `zig/tests/cuda/contract_zonos3.zig` registers four kernels, the ones that sum:
-`z3_rmsnorm`, `zc_layernorm`, `z3_linear` and `zc_linear`, through the contract's row and dense input families with
-the bf16 inputs widened to the fp32 rows these kernels read. On an RTX 5090 (driver 615.71.09, images from nvcc
-13.0.88), `tf-cuda-test kernel-contract zonos3` ended with
+**Numeric gates (1 to 4).** `zig/tests/cuda/contract_zonos3.zig` and the `contract_zonos3_*.zig` files beside it
+register all 40 kernels, 41 registrations in all because `zc_add_scaled` is tested with and without its layer scale:
 
-    (filtered) SUMMARY 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems
+- the two norms and the two linears through the contract's row and dense input families, with the bf16 inputs
+  widened to the fp32 rows these kernels read;
+- the 15 pointwise and moving kernels (`contract_zonos3_point.zig`), which have no sums: each output is checked
+  against the range fp32 allows around its float64 value;
+- the router and the quantizer's nearest code (`contract_zonos3_pick.zig`), exact by their own stated rules;
+- the other 19 kernels (`_backbone`, `_gdn`, `_attn`, `_windows`, `_conv`), each against a float64 reference that
+  follows the kernel's own order of sums; 18 of them sum, and for those gate 4's inputs are built so fp32 sums are
+  exact in any order.
+
+Every registration has a planted control, 41 in all: the same kernel launched wrong in one stated way (a row, a
+value, a key or a block short, an input read one place late, a wrong epsilon), which gate 3 must turn red.
+
+Two kernels changed to pass gate 1: `zc_spec` clamped its log-magnitude with `fminf`, which drops a NaN, and now
+compares; `ze_nearest` wrote an out-of-range code for a row whose every dot is NaN and now writes code 0. Neither
+changes a finite input's result: every check in the table above was rerun after the change and gave the same
+frames, codes and audio figures.
+
+On an RTX 5090 (driver 615.71.09, images from nvcc 13.0.88, the runner built for sm_80, 86, 89, 120 and 121),
+`tf-cuda-test kernel-contract zonos3` ended with
+
+    (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6450 ms, limits 9 ms
 
 The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates) ended with
 
@@ -282,9 +299,6 @@ checks pass, and the three live failures are `flashnext_mtp fn_row_topk` and `ex
 
 The layer norm's test adds a term to its bound: the kernel scales in fp32 and then adds the bias, so the roundings
 before the bias are a fraction of the scaled value and not of the sum, which gate 4's rows make cancel.
-
-Not done: numeric tests for the other 36 kernels, and a planted control for any of them. The four tests above rely
-on the gates' shared controls only.
 
 ## The reference's bf16 paths
 
