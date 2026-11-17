@@ -256,6 +256,7 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
     const keys_view = try vk.tensor.View.init(&kbuf, .bf16, 0, @intCast(k_bits.len));
     const values_view = try vk.tensor.View.init(&vbuf, .bf16, 0, @intCast(v_bits.len));
     const stream_view = try vk.tensor.View.init(&stream_buf, .f32, 0, @intCast(stream_words));
+    const head_stride_words: u64 = vk.Attention.tile_rows * ca.max_visible_keys;
     var got: [2][]El = undefined;
     defer a.free(got[0]);
     defer a.free(got[1]);
@@ -276,9 +277,12 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
             probs[i] = try a.alloc(u32, stream_words);
             try fetch(cmds, staging, stream_buf, std.mem.sliceAsBytes(probs[i]), timeout);
         } else {
-            const view = try attn.probsScratch();
-            probs[i] = try a.alloc(u32, @intCast(view.elements));
-            try fetch(cmds, staging, attn.score_scratch, std.mem.sliceAsBytes(probs[i]), timeout);
+            // The tiled probs live in per-head strips at h * tile_rows * max_visible_keys; fetch each strip through the 1 MiB
+            // staging buffer separately instead of one oversized download that would corrupt the heap past staging.
+            probs[i] = try a.alloc(u32, @intCast(fx.heads * ca.max_visible_keys));
+            for (0..@intCast(fx.heads)) |h| {
+                try vk.orExit(vk.download(cmds, attn.score_scratch, @intCast(h * head_stride_words * 4), staging, std.mem.sliceAsBytes(probs[i][h * @as(usize, @intCast(ca.max_visible_keys)) .. (h + 1) * @as(usize, @intCast(ca.max_visible_keys))]), timeout));
+            }
         }
     }
     var pmis: usize = 0;
@@ -286,7 +290,7 @@ fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
     var pfirst_k: usize = 0;
     var pmag: f64 = 0;
     const nk: usize = @intCast(keys);
-    const head_stride: usize = @intCast(vk.Attention.tile_rows * ca.max_visible_keys);
+    const head_stride: usize = @intCast(ca.max_visible_keys);
     for (0..@intCast(fx.heads)) |h| {
         for (0..nk) |k| {
             const s = probs[0][h * nk + k];
