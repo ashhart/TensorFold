@@ -67,7 +67,9 @@ Limits, stated rather than hidden:
 1. A workspace with no repository is refused: bwrap mounts paths and cannot deny creating `.git` by
    name, so the sandbox requires metadata it can pin.
 2. The walk refuses at 32 directory levels or 50,000 directories rather than silently pinning a
-   subset. A workspace that exceeds either bound keeps commands refused.
+   subset, and it refuses when it cannot inspect a path (permission denied, I/O error) instead of
+   skipping a directory that could hold a repository. A workspace that trips any of these keeps
+   commands refused.
 3. Control entries a repository does not have yet (`config.worktree`, `hooks`, `info`) are mounted
    read-only from empty placeholders, which bwrap creates as empty files or directories inside
    `.git` on first use. A writable run therefore cannot add or edit them.
