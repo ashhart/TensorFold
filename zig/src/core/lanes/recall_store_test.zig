@@ -266,3 +266,42 @@ test "a disk-floor refusal writes no ids, then retries when space returns" {
     try std.testing.expectEqual(@as(u8, 0), s.admission.failures);
     try std.testing.expectEqual(@as(u64, 0), s.admission.reserved);
 }
+
+test "token ids: a reloaded Recall record must fit the target embedding before any draft" {
+    var d = try Dir.init();
+    defer d.deinit();
+    var prompt: [32]u32 = @splat(7);
+    prompt[31] = vocab - 1;
+    {
+        const s = try open(&d, identity(11, "recall-bound"), .{});
+        defer s.close();
+        s.readPrompt(&prompt, 0);
+    }
+    const s = try open(&d, identity(11, "recall-bound"), .{ .read_only = true });
+    defer s.close();
+    try std.testing.expect(s.shared.record.held() > 0);
+    try std.testing.expectEqual(vocab, s.shared.vocab);
+    var reader: @import("recall.zig").Reader = .{ .gpa = gpa, .shared = &s.shared };
+    defer reader.deinit();
+    try std.testing.expectError(error.TokenOutsideVocabulary, reader.checkVocabulary(vocab - 1));
+    try reader.checkVocabulary(vocab);
+}
+
+test "token ids: a reloaded Recall record with unused tokenizer ids stays usable" {
+    var d = try Dir.init();
+    defer d.deinit();
+    const prompt: [32]u32 = @splat(7);
+    {
+        const s = try open(&d, identity(12, "recall-subset"), .{});
+        defer s.close();
+        s.readPrompt(&prompt, 0);
+    }
+    const s = try open(&d, identity(12, "recall-subset"), .{ .read_only = true });
+    defer s.close();
+    try std.testing.expect(s.shared.record.held() > 0);
+    try std.testing.expectEqual(vocab, s.shared.vocab);
+    var reader: @import("recall.zig").Reader = .{ .gpa = gpa, .shared = &s.shared };
+    defer reader.deinit();
+    try reader.checkVocabulary(8);
+    try std.testing.expectError(error.TokenOutsideVocabulary, reader.checkVocabulary(7));
+}

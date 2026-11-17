@@ -10,6 +10,7 @@ pub const Shared = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     record: Record,
+    vocab: u32 = 0, // a disk store sets its tokenizer cap; zero is a trusted in-memory record
     rates: Rates = .{},
 
     pub fn lock(s: *Shared) void {
@@ -103,6 +104,19 @@ pub const Reader = struct {
     proposals: u64 = 0,
     proposed: u64 = 0,
     accepted: u64 = 0,
+
+    /// Admit a disk record once; a wider tokenizer may still contain only valid embedding ids.
+    pub fn checkVocabulary(x: *const Reader, rows: usize) error{TokenOutsideVocabulary}!void {
+        if (x.shared.vocab <= rows) return;
+        x.shared.lock();
+        defer x.shared.unlock();
+        const r = &x.shared.record;
+        var at = r.base();
+        while (at < r.end) : (at += 1) {
+            const id = r.id(at);
+            if (id != record.mark and id >= rows) return error.TokenOutsideVocabulary;
+        }
+    }
 
     pub fn deinit(x: *Reader) void {
         x.out.deinit(x.gpa);

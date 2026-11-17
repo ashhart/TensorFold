@@ -205,7 +205,6 @@ pub const Engine = struct {
     pub fn window(e: *Engine, wins: []const Win, out: []u32) !void {
         var rows: u32 = 0;
         var top: u32 = 0;
-        for (wins) |w| for (w.tokens) |t| if (t >= e.m.c.vocab) return error.TokenOutsideVocabulary;
         for (wins) |w| {
             if (w.slot >= e.slots.len) return error.WindowOutOfStep;
             const s = &e.slots[w.slot];
@@ -265,7 +264,6 @@ pub const Engine = struct {
     pub fn draft(e: *Engine, reqs: []const Draft) !void {
         if (!e.hasMtp()) return error.NoMtpHead;
         if (reqs.len == 0 or reqs.len > R) return error.DraftOutOfStep;
-        for (reqs) |q| for (q.follow) |t| if (t >= e.m.c.vocab) return error.TokenOutsideVocabulary;
         var rows: u32 = 0;
         var depth: u32 = 0;
         var ends: [R]u32 = undefined;

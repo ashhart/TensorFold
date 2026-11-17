@@ -100,7 +100,7 @@ pub const Store = struct {
         const cap_chunks: usize = @max(2, o.cap_bytes / chunk_bytes);
         s.* = .{
             .gpa = gpa,
-            .shared = .{ .io = io, .record = try recall.Record.init(gpa, bucketBits(cap_chunks)) },
+            .shared = .{ .io = io, .record = try recall.Record.init(gpa, bucketBits(cap_chunks)), .vocab = identity.vocab },
             .dir = dir,
             .name = name,
             .identity = identity,

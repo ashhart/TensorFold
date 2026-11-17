@@ -18,7 +18,8 @@ const Images = struct {
 pub fn begin(b: anytype, stream: *lanes.Stream, preferred: ?usize) !fill.State {
     const prompt = stream.prompt();
     if (prompt.len == 0) return error.EmptyPrompt;
-    if (!fz.Model.inVocab(prompt)) return error.TokenOutsideVocabulary; // before a slot is taken or a chunk runs
+    if (!fz.Model.inVocab(prompt) or !fz.Model.inVocab(stream.think_close)) return error.TokenOutsideVocabulary;
+    if (stream.recall) |reader| try reader.checkVocabulary(fz.VOCAB);
     if (b.by.contains(stream)) return error.PromptAlreadyStarted;
     const i = preferred orelse try b.slotFor(prompt.len, stream.max_new);
     if (b.sessions[i].used) return error.NoFreeSlot;

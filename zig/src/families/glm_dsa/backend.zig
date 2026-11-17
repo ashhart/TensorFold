@@ -92,7 +92,9 @@ pub const Backend = struct {
         if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
+        for (s.think_close) |t| if (t >= e.m.c.vocab) return error.TokenOutsideVocabulary;
         if (prompt.len + s.max_new + eng.max_depth + R + 1 > e.context) return error.ContextFull;
+        if (s.recall) |reader| try reader.checkVocabulary(e.m.c.vocab);
         const i = b.free() orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
         try fl.begin(e, i, prompt);
