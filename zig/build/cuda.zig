@@ -323,7 +323,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }
     @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), native);
     @import("cuda_sm_host.zig").steps(b, native_modules.api, step);
-    @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
+    @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron, mods.qwen35);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
     @import("locate_host.zig").cudaTests(b, mods.nemotron, step);

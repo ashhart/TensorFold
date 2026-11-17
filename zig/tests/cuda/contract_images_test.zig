@@ -1,9 +1,9 @@
 //! The live resolver with distinct inert image bytes and no CUDA calls.
 const std = @import("std");
-const live = @import("contract_tests.zig");
+const limits = @import("contract_limits.zig");
 
 fn resolve(name: []const u8) ![]const u8 {
-    return live.image(name);
+    return limits.image(name);
 }
 
 test "contract image: GLM top1 selects its own image" {
