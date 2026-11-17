@@ -20,6 +20,7 @@ const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const cancel_ids = @import("cancel_ids.zig");
+const ClientOut = @import("openai_client.zig").ClientOut;
 const prompt_list = @import("prompt_list.zig");
 const completion_prompt = @import("completion_prompt.zig");
 const Server = @import("server.zig").Server;
@@ -56,38 +57,6 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
-
-/// A chat reply written straight to the client.
-const ClientOut = struct {
-    startup_at: ?u64 = null,
-    conn: *Conn,
-    a: Allocator,
-
-    fn out(c: *ClientOut) Out {
-        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
-    }
-
-    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return sse.open(c.conn);
-    }
-
-    fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return if (payload) |p| sse.data(c.conn, c.a, p) else sse.done(c.conn);
-    }
-
-    fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        routes.sendValue(c.conn, c.a, status, payload);
-        if (status == 200 and c.conn.response_complete and !c.conn.broken) @import("startup_receipt.zig").complete(c.startup_at, payload);
-    }
-
-    fn keepalive(ctx: *anyopaque) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return sse.comment(c.conn);
-    }
-};
 
 /// Whether the client has gone, read between rounds (Python's socket_cancellation).
 pub const Gone = @import("stream_live.zig").Gone;
@@ -200,11 +169,16 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
+    // TENSORFOLD_REQUEST_JOURNAL: off, `observed` is `out` and the trace does nothing
+    var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out };
+    defer trace.finish();
+    const observed = trace.out();
+    if (trace.begin(raw, is_chat, gone.conn.key_label orelse "")) return trace.refuse(id);
     var p = plan(srv, &cx, is_chat, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
         const body = errorBody(a, &cx, field) catch return;
-        out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
+        observed.vt.reply(observed.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
     p.input.id = id;
@@ -214,9 +188,10 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
-    if (p.prompts.len > 0) return prompt_list.run(srv, a, out, gone, p, p.prompts, raw);
+    if (p.prompts.len > 0) return prompt_list.run(srv, a, observed, gone, p, p.prompts, raw);
+    if (srv.config.journal != null) p.input.trace = &trace;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+    var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
