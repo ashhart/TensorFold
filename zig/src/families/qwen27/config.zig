@@ -3,10 +3,16 @@ const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const rope_config = @import("rope_config");
+const fields = @import("config_fields");
+const eos_ids = @import("checkpoint_eos");
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
 pub const max_eos = 8;
+pub const Problem = fields.Problem;
+comptime {
+    std.debug.assert(eos_ids.qwen27_metal.max.? == max_eos);
+}
 
 pub const Config = struct {
     hidden: usize,
@@ -221,42 +227,18 @@ pub fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadConfig;
 }
 
-fn integer(v: std.json.Value, zero: bool) !usize {
-    if (v != .integer or v.integer < 0 or (!zero and v.integer == 0)) return error.BadConfig;
-    if (v.integer > std.math.maxInt(u32)) return error.BadConfig;
-    return @intCast(v.integer);
+/// A count, 0 allowed when `zero`, at most u32; the field layer names the field, the refusal stays BadConfig.
+fn integer(v: std.json.Value, zero: bool, at: fields.At, p: *Problem) !usize {
+    return fields.int(usize, v, .{ .min = @intFromBool(!zero), .max = std.math.maxInt(u32) }, at, p) catch error.BadConfig;
 }
 
-fn required(o: std.json.ObjectMap, key: []const u8) !usize {
-    return integer(o.get(key) orelse return error.BadConfig, false);
+fn required(r: fields.Reader, key: []const u8) !usize {
+    return integer(r.value(key) catch return error.BadConfig, false, r.at(key), r.problem);
 }
 
-fn number(v: std.json.Value) !f64 {
-    const n: f64 = switch (v) {
-        .integer => |x| @floatFromInt(x),
-        .float => |x| x,
-        else => return error.BadConfig,
-    };
-    return if (std.math.isFinite(n)) n else error.BadConfig;
-}
-
-fn optional(o: std.json.ObjectMap, key: []const u8, fallback: f64) !f64 {
-    const v = o.get(key) orelse return fallback;
-    return if (v == .null) fallback else number(v);
-}
-
-fn eos(c: *Config, v: std.json.Value) !void {
-    if (v == .null) return;
-    if (v == .array) {
-        for (v.array.items) |id| try eos(c, id);
-        return;
-    }
-    const id: u32 = @intCast(try integer(v, true));
-    if (id >= c.vocab) return error.BadEos;
-    if (c.isEos(id)) return;
-    if (c.eos_count == max_eos) return error.TooManyEos;
-    c.eos[c.eos_count] = id;
-    c.eos_count += 1;
+/// The number, or `fallback` when absent or null.
+fn optional(r: fields.Reader, key: []const u8, fallback: f64) !f64 {
+    return (r.optionalFloat(key, .absent) catch return error.BadConfig) orelse fallback;
 }
 
 fn shapeProducts(c: Config) !void {
@@ -273,57 +255,65 @@ fn shapeProducts(c: Config) !void {
 }
 
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
+    var p: Problem = .{};
+    return parseWhy(gpa, json, generation, &p);
+}
+
+/// `parse`, with `p` naming the field behind a BadConfig the field layer refused.
+pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, p: *Problem) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
+    const tower: fields.Reader = .{ .object = t, .source = if (root.get("text_config") == null) "config.json" else "config.json text_config", .problem = p };
     const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
     const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
     if (model != .string) return error.NotQwenDense;
     const routed = for (kinds_of, 0..) |k, i| {
         if (std.mem.eql(u8, model.string, k)) break i >= 2;
     } else return error.NotQwenDense;
-    const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
+    const experts = if (t.get("num_experts")) |v| try integer(v, true, tower.at("num_experts"), p) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
     if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
     try rules.check(t, .metal27);
-    const heads = try required(t, "num_attention_heads");
-    const hidden = try required(t, "hidden_size");
+    const heads = try required(tower, "num_attention_heads");
+    const hidden = try required(tower, "hidden_size");
     const head_dim = if (t.get("head_dim")) |v| blk: {
         if (v == .null or (v == .integer and v.integer == 0)) break :blk hidden / heads;
-        break :blk try integer(v, false);
+        break :blk try integer(v, false, tower.at("head_dim"), p);
     } else hidden / heads;
     const rope = rope_config.params(t) catch return error.BadConfig;
     // theta alone: a scaled rope (rope_scaling from the tower when it has the key, else the root) runs as plain rope
     if (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root)) return error.UnsupportedRopeScaling;
-    const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
+    const rp: ?fields.Reader = if (rope) |r| .{ .object = r, .source = "config.json rope_parameters", .problem = p } else null;
+    const factor = if (rp) |r| try optional(r, "partial_rotary_factor", try optional(tower, "partial_rotary_factor", 0.25)) else try optional(tower, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
         .hidden = hidden,
-        .intermediate = if (routed) try required(t, "shared_expert_intermediate_size") else try required(t, "intermediate_size"),
-        .layers = try required(t, "num_hidden_layers"),
-        .vocab = try required(t, "vocab_size"),
+        .intermediate = if (routed) try required(tower, "shared_expert_intermediate_size") else try required(tower, "intermediate_size"),
+        .layers = try required(tower, "num_hidden_layers"),
+        .vocab = try required(tower, "vocab_size"),
         .heads = heads,
-        .kv_heads = try required(t, "num_key_value_heads"),
+        .kv_heads = try required(tower, "num_key_value_heads"),
         .head_dim = head_dim,
-        .k_heads = try required(t, "linear_num_key_heads"),
-        .v_heads = try required(t, "linear_num_value_heads"),
-        .dk = try required(t, "linear_key_head_dim"),
-        .dv = try required(t, "linear_value_head_dim"),
-        .conv_kernel = try required(t, "linear_conv_kernel_dim"),
-        .eps = @floatCast(try optional(t, "rms_norm_eps", 1e-6)),
+        .k_heads = try required(tower, "linear_num_key_heads"),
+        .v_heads = try required(tower, "linear_num_value_heads"),
+        .dk = try required(tower, "linear_key_head_dim"),
+        .dv = try required(tower, "linear_value_head_dim"),
+        .conv_kernel = try required(tower, "linear_conv_kernel_dim"),
+        .eps = @floatCast(try optional(tower, "rms_norm_eps", 1e-6)),
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
-        .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
+        .rope_theta = if (rp) |r| try optional(r, "rope_theta", try optional(tower, "rope_theta", 10000000)) else try optional(tower, "rope_theta", 10000000),
     };
     if (routed) {
         c.experts = experts;
-        c.top_k = try required(t, "num_experts_per_tok");
-        c.moe_intermediate = try required(t, "moe_intermediate_size");
+        c.top_k = try required(tower, "num_experts_per_tok");
+        c.moe_intermediate = try required(tower, "moe_intermediate_size");
         // absent means true, as Qwen3.5-MoE's reference config and the CUDA family read it
-        c.renorm = if (t.get("norm_topk_prob")) |v| (if (v == .bool) v.bool else return error.BadConfig) else true;
+        c.renorm = (tower.optionalFlag("norm_topk_prob", .refused) catch return error.BadConfig) orelse true;
         if (c.experts > 256 or c.top_k >= c.experts or c.top_k > 15 or c.moe_intermediate != c.intermediate) return error.UnsupportedRouting;
     }
-    if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
+    if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false, tower.at("max_position_embeddings"), p);
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
         c.mrope_interleaved = v.bool;
@@ -332,18 +322,20 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     if (!std.math.isFinite(c.eps) or c.eps <= 0 or c.rope_theta <= 0 or c.rope_dims == 0 or c.rope_dims % 2 != 0) return error.BadConfig;
     if (rope) |r| if (r.get("mrope_section")) |v| {
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
+        for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true, .{ .source = "config.json rope_parameters", .key = "mrope_section" }, p);
     };
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..c.layers], t);
     for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
-    if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
-    if (generation) |text| {
-        const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-        defer gen.deinit();
-        if ((try object(gen.value)).get("eos_token_id")) |v| try eos(&c, v);
-    }
-    if (c.eos_count == 0) return error.MissingEos;
+    // generation_config.json is parsed before config.json's ids: only when both are bad does the refusal differ
+    const gen = if (generation) |text| try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) else null;
+    defer if (gen) |g| g.deinit();
+    const gen_doc: std.json.Value = if (gen) |g| .{ .object = try object(g.value) } else .null;
+    const ids = eos_ids.collect(&c.eos, eos_ids.qwen27_metal, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
+        error.BadEosValue => error.BadConfig,
+        else => e,
+    };
+    c.eos_count = ids.len;
     try shapeProducts(c);
     return c;
 }
