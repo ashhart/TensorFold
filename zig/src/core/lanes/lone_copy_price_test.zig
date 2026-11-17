@@ -521,3 +521,29 @@ test "lone copy price: a head stream's copy rounds are timed by their verify, wi
     const kept = e.lone_kept[0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
     try std.testing.expectEqual(@as(?f64, short_context[0] + short_context[1] * 16), kept.copy_ms.get(15));
 }
+
+/// A dense model's forwards: a row costs 11.6 ms past a 65 ms round, so a 15-row copy costs about three plain rounds.
+const dense = blk: {
+    var c: [16]cfgs.Cost = undefined;
+    for (&c, 1..) |*x, w| x.* = .{ .width = w, .ms = 65 + 11.6 * @as(f64, @floatFromInt(w)) };
+    break :blk c;
+};
+
+test "lone copy price: a request's first copy is priced at the landing rate the requests before it saw" {
+    var m = hip(false);
+    m.window_costs = &dense;
+    var asks = [_]Ask{
+        .{ .prompt = prompts[0], .quiet = 0, .max_new = 64, .times = .{ 65, 11.6 } },
+        .{ .prompt = prompts[1], .quiet = 0, .max_new = 64, .times = .{ 65, 11.6 } },
+    };
+    var got: [2]Request = @splat(.{});
+    try serve(m, &asks, &got);
+    for (&asks) |*ask| ask.drafts = false;
+    var plain: [2]Request = @splat(.{});
+    try serve(m, &asks, &plain);
+    for (got, plain) |r, p| try std.testing.expectEqualSlices(u32, p.tokens[0..p.len], r.tokens[0..r.len]);
+    // the first request's first copy meets the prior's landing rate: its expected rows stop paying for a full copy
+    try std.testing.expect(got[0].first.? < 15);
+    // the second starts at the rate the first's landed copies taught: its first copy is whole
+    try std.testing.expectEqual(@as(?usize, 15), got[1].first);
+}
