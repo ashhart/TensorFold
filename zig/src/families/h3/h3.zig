@@ -66,7 +66,7 @@ pub const Model = struct {
     lines: usize,
     rot: usize,
     blocks: []Block,
-    prompt: []const u16,
+    prompt: []u16,
     adaln: []const i32,
     times: []const i32,
     final_table: Ref,
@@ -134,20 +134,31 @@ pub const Model = struct {
 
     /// `checkpoint_dir`: the FastH3 transformer folder of `shards` files. `case`: tools/zig/h3_case.py's output.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, checkpoint_dir: []const u8, shards: usize, case: *Tensors, options: Options) !*Model {
+        return bind(gpa, try open(gpa, io, checkpoint_dir, shards), case, options);
+    }
+
+    /// The checkpoint's shards mapped and read ahead: the weights every `bind` reads in place.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, checkpoint_dir: []const u8, shards: usize) !Checkpoint {
         const device = try mtl.Device.init();
         if (!@import("source.zig").available(device)) return error.NeedsTensorUnits;
+        const ck = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
+        try ck.readAhead(gpa, io);
+        return ck;
+    }
+
+    /// A model over `checkpoint`'s weights for `case`'s rows: kernels, buffers and tables, host copies from `gpa`.
+    pub fn bind(gpa: std.mem.Allocator, checkpoint: Checkpoint, case: *Tensors, options: Options) !*Model {
+        const device = try mtl.Device.init();
         const self = try gpa.create(Model);
+        // zeroed first: a failure part-way leaves every field `release` touches at a null object
+        @memset(std.mem.asBytes(self), 0);
         self.gpa = gpa;
+        errdefer self.release();
         self.device = device;
         self.queue = try device.queue();
         self.case = case;
-        self.dense = false;
-        self.qkv = undefined;
-        self.profile = false;
-        self.spent = @splat(0);
-        self.checkpoint = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
+        self.checkpoint = checkpoint;
         const ck = &self.checkpoint;
-        try ck.readAhead(gpa, io);
         self.base = ck.entry("blocks.0.attn.qkv_proj.weight") != null;
         const prefix = if (self.base) "blocks" else "transformer_blocks";
         const to_q = ck.entry(if (self.base) "blocks.0.attn.qkv_proj.weight" else "transformer_blocks.0.attn.to_q.weight") orelse return error.MissingTensor;
@@ -234,6 +245,7 @@ pub const Model = struct {
         self.audio_velocity = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
 
         self.blocks = try gpa.alloc(Block, layers);
+        @memset(std.mem.sliceAsBytes(self.blocks), 0);
         for (self.blocks, 0..) |*b, i| {
             if (self.base) {
                 try self.baseBlock(b, i);
@@ -248,6 +260,27 @@ pub const Model = struct {
             b.tables = try self.held(try std.fmt.bufPrint(&name, "tables.{d}", .{i}), .bf16, 6 * self.lines * hidden);
         }
         return self;
+    }
+
+    /// A new prompt's text rows from `case`, on a binding whose rows, tags and canvas it shares.
+    pub fn retext(self: *Model, case: *const Tensors) !void {
+        const from = try case.at("text", .bf16, self.prompt.len);
+        @memcpy(std.mem.sliceAsBytes(self.prompt), case.map.bytes[from.offset..][0 .. self.prompt.len * 2]);
+    }
+
+    /// The binding's Metal objects and host copies; the checkpoint's shards stay mapped for the next `bind`.
+    pub fn release(self: *Model) void {
+        for (self.pipelines) |p| p.deinit();
+        for (self.blocks) |b| b.tables.buffer.deinit();
+        inline for (.{ "final_table", "final_norm", "w_video_in", "b_video_in", "w_video_out", "b_video_out", "cos", "sin", "slot", "sizes" }) |f| @field(self, f).buffer.deinit();
+        if (self.audio > 0) inline for (.{ "w_audio_in", "b_audio_in", "w_audio_out", "b_audio_out" }) |f| @field(self, f).buffer.deinit();
+        inline for (.{ "row_of", "all_tiles", "line", "time", "x", "y", "xn", "qr", "kr", "vr", "cr", "qkv", "wide", "act", "tq", "tk", "tv", "qp", "kp", "vp", "coarse", "tile_scores", "chosen", "condition_latents", "video_latents", "audio_latents", "normed", "video_velocity", "audio_velocity" }) |f| @field(self, f).deinit();
+        self.queue.deinit();
+        self.gpa.free(self.blocks);
+        self.gpa.free(self.prompt);
+        self.gpa.free(self.adaln);
+        self.gpa.free(self.times);
+        self.gpa.destroy(self);
     }
 
     /// Block `i` of the released MiniMax-H3 layout.
