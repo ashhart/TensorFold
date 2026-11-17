@@ -366,6 +366,9 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var penalties = @import("metal_penalties.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer penalties.deinit();
+    try penalties.collect(o.only);
     var q8_exact = @import("metal_lane_q8.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer q8_exact.deinit();
     if (tensor) try q8_exact.collect(o.only);
