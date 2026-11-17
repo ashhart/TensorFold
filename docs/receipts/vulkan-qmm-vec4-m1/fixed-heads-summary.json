@@ -1,0 +1,247 @@
+{
+ "change": "qmm_q4_vec4 (#1990) measured on the float32-fixed head",
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+  "mesa": "Honeykrisp, Omarchy Mesa build, library sha256 d75f4cbc",
+  "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
+  "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
+  "decision_rule": "median run-2 gain of at least 3 percent and every pair positive",
+  "old_build": "Source commit 46571f111b2f0e92963561702b7eaab41868f823 with local qmmVariant = .scalar; ELF SHA-256 4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31 (6087144 bytes)",
+  "new_build": "Source commit 46571f111b2f0e92963561702b7eaab41868f823 with committed vec4 selection; ELF SHA-256 1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a (6087520 bytes)",
+  "note": "The float32 fix sits above the vec4 commits, so an older #1544 build would not carry it. The old arm is the same head with the scalar kernel selected."
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T19:30:52+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31",
+     "bytes": 6087144
+    },
+    "new": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    }
+   },
+   "order": "old,new,new,old,old,new",
+   "pairs": 3,
+   "logits_sha256_all_processes": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c",
+   "run2_ms_median": {
+    "old": 15588,
+    "new": 10157
+   },
+   "run2_gain_median": 0.34840903258917116,
+   "run2_gain_range": [
+    0.34632530887784996,
+    0.35175297523319393
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 15336,
+     "run2_ms": 15588,
+     "peak_rss_bytes": 1214251008,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 10106,
+     "run2_ms": 10157,
+     "peak_rss_bytes": 1215561728,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 10255,
+     "run2_ms": 10264,
+     "peak_rss_bytes": 1214332928,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 15606,
+     "run2_ms": 15702,
+     "peak_rss_bytes": 1214431232,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 15738,
+     "run2_ms": 15545,
+     "peak_rss_bytes": 1215594496,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 9984,
+     "run2_ms": 10077,
+     "peak_rss_bytes": 1246920704,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    }
+   ]
+  },
+  {
+   "case": "document-256",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T19:39:53+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31",
+     "bytes": 6087144
+    },
+    "new": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    }
+   },
+   "order": "old,new,new,old,old,new",
+   "pairs": 3,
+   "logits_sha256_all_processes": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a",
+   "run2_ms_median": {
+    "old": 40352,
+    "new": 23796
+   },
+   "run2_gain_median": 0.410289452815226,
+   "run2_gain_range": [
+    0.4101222506013341,
+    0.41031867968478963
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 40217,
+     "run2_ms": 40354,
+     "peak_rss_bytes": 1215201280,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 23852,
+     "run2_ms": 23796,
+     "peak_rss_bytes": 1214218240,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 23972,
+     "run2_ms": 23788,
+     "peak_rss_bytes": 1214545920,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 40231,
+     "run2_ms": 40327,
+     "peak_rss_bytes": 1215545344,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 40383,
+     "run2_ms": 40352,
+     "peak_rss_bytes": 1243185152,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 23658,
+     "run2_ms": 23796,
+     "peak_rss_bytes": 1247002624,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    }
+   ]
+  },
+  {
+   "case": "document-1024",
+   "status": [
+    "PASS_WITH_NOT_VERIFIED"
+   ],
+   "start_utc": [
+    "2026-11-11T20:23:08+00:00",
+    "2026-11-11T20:35:25+00:00"
+   ],
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31",
+     "bytes": 6087144
+    },
+    "new": {
+     "sha256": "1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a",
+     "bytes": 6087520
+    }
+   },
+   "order": "pair 1 old,new; pair 2 new,old (two pairs, not three: the scalar arm takes about 250 s per process)",
+   "pairs": 2,
+   "logits_sha256_all_processes": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356",
+   "run2_ms_median": {
+    "old": 122959.5,
+    "new": 70124.5
+   },
+   "run2_gain_median": 0.4296944653090763,
+   "run2_gain_range": [
+    0.42951296616849927,
+    0.4298759644496533
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 123115,
+     "run2_ms": 123051,
+     "peak_rss_bytes": 1227128832,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 70313,
+     "run2_ms": 70199,
+     "peak_rss_bytes": 1227112448,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr0-new",
+     "arm": "new",
+     "run1_ms": 69977,
+     "run2_ms": 70050,
+     "peak_rss_bytes": 1259487232,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr1-old",
+     "arm": "old",
+     "run1_ms": 122909,
+     "run2_ms": 122868,
+     "peak_rss_bytes": 1228144640,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    }
+   ]
+  }
+ ]
+}
