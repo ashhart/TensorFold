@@ -234,8 +234,8 @@ The branch changes the speech route Drama 3 is served through and moves Drama's 
 core, so Drama 3 (`fishaudio/drama-3`) was run on that M5 Ultra from main `6d0a128b0` and from the branch: six
 `drama3-generate` runs (greedy, seeded, a reference clip encoded, a cloned voice, streamed PCM, frames) three times
 each, and four `/v1/audio/speech` requests (seeded whole, seeded streamed PCM, default, sampled) twice from each of
-two server starts. Every output is byte-identical between the two, and the speeds agree (the cloned run 73.2 to 73.6
-frames a second on main, 73.3 to 73.5 on the branch). Drama on CUDA was not run: the checkpoint does not fit the
+two server starts. Every output is byte-identical between the two, and the speeds agree (the cloned run 73.21 to 73.55
+frames a second on main, 73.31 to 73.49 on the branch). Drama on CUDA was not run: the checkpoint does not fit the
 5090.
 
 The family registers four kernel images, so `zig/tests/fixtures/gradient-serving.tsv` re-pins
