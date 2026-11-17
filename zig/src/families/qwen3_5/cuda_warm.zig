@@ -5,12 +5,12 @@ const E = @import("cuda_engine.zig");
 pub const profile = @import("cuda_startup_profile.zig");
 
 pub const Seen = struct {
-    keys: [E.most_verify + E.most_window]u32 = undefined,
+    keys: [E.most_verify + E.most_window]u64 = undefined,
     len: usize = 0,
     counts: [E.most_verify + E.most_window]u8 = @splat(0),
 
     pub fn contains(self: *const Seen, shape: E.Engine.Shape) bool {
-        return std.mem.indexOfScalar(u32, self.keys[0..self.len], shape.key()) != null;
+        return std.mem.indexOfScalar(u64, self.keys[0..self.len], shape.key()) != null;
     }
 
     pub fn passes(self: *const Seen, shape: E.Engine.Shape) u8 {

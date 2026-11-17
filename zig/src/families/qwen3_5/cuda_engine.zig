@@ -159,7 +159,7 @@ pub const Engine = struct {
     /// presence and frequency penalties the next forward takes from its kept rows' logits (staged by the caller).
     penalties: @import("cuda_penalties.zig").Rows = .{},
     /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
-    graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
+    graphs: std.AutoHashMapUnmanaged(u64, cuda.graph.Exec) = .empty,
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
     taps: [8]u32 = undefined,
     n_taps: usize = 0,
@@ -265,14 +265,12 @@ pub const Engine = struct {
         e.plan = try cuda.grouped.Router.resolve(e.mods[10]);
         e.moe = try cuda.moe.Fns.resolve(e.mods[13]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
-        try e.fns.attn_partial.allowDynamicShared(@import("cuda_forward.zig").attn_tiles); // bf16 tiles' two buffers
-        try e.fns.attn_rows.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
-        try e.fns.attn_partial_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
-        try e.fns.attn_rows_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
+        // bf16 tiles' two buffers
+        for ([_]cuda.Function{ e.fns.attn_partial, e.fns.attn_rows, e.fns.attn_rows_join, e.fns.attn_partial_whole, e.fns.attn_rows_whole }) |f| try f.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
         try e.int8.resolve(e.mods[18]);
-        e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
+        e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_rows_join = try e.mods[9].function("tf_q35_attn_rows8_join"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
         e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
         errdefer if (e.mo) |*m| m.unload();
         e.layers = try gpa.alloc(Layer, g.layers);
@@ -490,8 +488,7 @@ pub const Engine = struct {
         }
         // words 0 and 1 are reserved (each row's attention chunks follow its own keys: qwen35.cu's chunk_keys)
         const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..32]);
-        params[0] = 0;
-        params[1] = 0;
+        params[0..2].* = .{ 0, 0 };
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
@@ -514,6 +511,7 @@ pub const Engine = struct {
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
+        shape.join = shape.paged and caches.anyShares(parts);
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             shape.total = @intCast(total);

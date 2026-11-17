@@ -197,8 +197,31 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
     }
 }
 
+// A paged row's first page over [k0, k1) when it holds the span below its length (-1: it can't share it).
+template <class Tiles>
+__device__ __forceinline__ int first_page(const Seg& sg, int k0, int k1) {
+    if constexpr (!Tiles::paged_layout) return -1;
+    else return sg.pt == 0 || k1 <= k0 || k1 > sg.len ? -1 : reinterpret_cast<const int*>(sg.pt)[k0 / sg.ptok];
+}
+
+// Stream b's rows join a class of stream a's over [k0, k1): both hold the span below their length, in the same pages.
+template <class Tiles>
+__device__ __forceinline__ bool same_pages(const Seg* __restrict__ segs, int a, int b, int k0, int k1, int k1b) {
+    if constexpr (!Tiles::paged_layout) return false;
+    else {
+        if (b < 0 || k1 != k1b || k1 <= k0) return false;
+        const Seg &sa = segs[a], &sb = segs[b];
+        if (sa.pt == 0 || sb.pt == 0 || sa.kv != sb.kv || sa.ps != sb.ps || sa.ptok != sb.ptok) return false;
+        if (k1 > sa.len || k1 > sb.len) return false;
+        const int *pa = reinterpret_cast<const int*>(sa.pt), *pb = reinterpret_cast<const int*>(sb.pt);
+        for (int p = k0 / sa.ptok; p <= (k1 - 1) / sa.ptok; p++)
+            if (pa[p] != pb[p]) return false;
+        return true;
+    }
+}
+
 // RB rows a block (MT m16 tiles of query heads); a stream's rows of one chunk width read each key tile once.
-template <int MT, class Tiles>
+template <int MT, class Tiles, bool JOIN = false>  // JOIN: another stream's rows join over the same pages
 __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                                       const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                       const int* __restrict__ P, float scale, int total,
@@ -207,6 +230,8 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
     __shared__ __align__(16) __nv_bfloat16 pt[LINES][TK + 8];
     __shared__ float red[2][LINES], alpha[LINES];
     __shared__ int r_k0[32], r_k1[32], r_seg[32], r_ck[32];
+    __shared__ int r_p0[32];         // JOIN: a paged row's first page over its chunk
+    __shared__ unsigned r_mate[32];  // JOIN: row i's class when it leads
     __shared__ Ancestor r_anc[32];
     const int QH = geo.qh, KVH = geo.kvh, G = QH / KVH, RB = LINES / G;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, qd = lane & 3;
@@ -216,6 +241,7 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
     if (tid < RB) {
         const int m = m0 + tid;
         r_seg[tid] = -1;
+        if constexpr (JOIN) r_p0[tid] = -1;
         if (m < total && !past_rows(P, m) && segs[rowseg[m]].len >= GROUP_LEN) {
             const Seg sg = segs[rowseg[m]];
             const Ancestor anc = rowanc[m];
@@ -225,6 +251,20 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
             r_k0[tid] = c * ck;
             r_k1[tid] = min(c * ck + ck, keys);
             r_anc[tid] = anc;
+            if constexpr (JOIN) r_p0[tid] = first_page<Tiles>(sg, r_k0[tid], r_k1[tid]);
+        }
+    }
+    // JOIN: row tid's class when it leads (its stream's rows of its width, another's on the same pages)
+    if constexpr (JOIN) {
+        __syncwarp();
+        if (tid < RB && r_seg[tid] >= 0) {
+            unsigned mate = 0;
+            for (int j = tid; j < RB; j++)
+                if (r_seg[j] >= 0 && r_ck[j] == r_ck[tid] &&
+                    (r_seg[j] == r_seg[tid] ||
+                     (r_p0[j] >= 0 && r_p0[j] == r_p0[tid] && same_pages<Tiles>(segs, r_seg[tid], r_seg[j], r_k0[tid], r_k1[tid], r_k1[j]))))
+                    mate |= 1u << j;
+            r_mate[tid] = mate;
         }
     }
     __syncthreads();
@@ -259,7 +299,7 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
         unsigned cls = 0;
         int kend = 0;
         for (int j = lead; j < RB; j++)
-            if (r_seg[j] == r_seg[lead] && r_ck[j] == r_ck[lead]) {
+            if (JOIN ? !(done >> j & 1) && (r_mate[lead] >> j & 1) : r_seg[j] == r_seg[lead] && r_ck[j] == r_ck[lead]) {
                 cls |= 1u << j;
                 kend = max(kend, r_k1[j]);
             }

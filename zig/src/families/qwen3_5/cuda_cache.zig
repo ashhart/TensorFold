@@ -40,6 +40,17 @@ pub fn pendBytes(g: anytype) usize {
 pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
+/// Whether two of the forward's parts' paged caches start on one KV page (the shared store's prefix): the join kernels.
+pub fn anyShares(parts: anytype) bool {
+    for (parts, 0..) |p, i| if (firstPage(p.cache)) |f| for (parts[0..i]) |q| if (firstPage(q.cache)) |g| if (f == g) return true;
+    return false;
+}
+
+fn firstPage(c: *const Cache) ?u32 {
+    const p = c.paged orelse return null;
+    return if (p.ids.len > 0) p.ids[0] else null;
+}
+
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
 pub const Paged = struct {
     /// Where page 0 of the arena starts: the core pool's, or the cache's own buffer under TF_QWEN_KV_PAGE_TEST.
@@ -415,4 +426,16 @@ test "KV page dimensions: diagnostic admission includes its padded rows and devi
     for ([_]bool{ false, true }) |fp8| try std.testing.expectEqual(31 * g.kvBytes(1, fp8) + 8, try pageExtra(g, 65, 48, fp8));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(2147483647, 48));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(std.math.maxInt(usize), 48));
+}
+
+test "Qwen share faults: a forward joins only when two parts' paged caches start on one page" {
+    var ids = [_][2]u32{ .{ 4, 5 }, .{ 4, 9 }, .{ 7, 5 } };
+    var cs: [4]Cache = undefined;
+    for (cs[0..3], &ids) |*c, *i| c.paged = .{ .base = 0, .table = undefined, .ids = i, .tokens = 16, .own_ids = false };
+    cs[3].paged = null;
+    const P = struct { cache: *const Cache };
+    const all = [_]P{ .{ .cache = &cs[0] }, .{ .cache = &cs[1] }, .{ .cache = &cs[2] }, .{ .cache = &cs[3] } };
+    try std.testing.expect(anyShares(all[0..]) and anyShares(all[0..2]));
+    // a later page in common, no table, or the first page's holder alone in the forward: no join
+    try std.testing.expect(!anyShares(all[1..]) and !anyShares(all[0..1]) and !anyShares(&[_]P{ all[0], all[2], all[3] }));
 }
