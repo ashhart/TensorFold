@@ -397,7 +397,7 @@ pub fn run(gpu: check.Gpu, main_dir: ?[]const u8) !void {
     while (it.next()) |m| m.unload();
 }
 
-/// The weight-first qmmf decode rows behind the writer: K slices and their reduce, a cluster, and a one-group K.
+/// The weight-first qmmf decode rows behind the writer (BF16, FP4, MXFP8): K slices and their reduce, a cluster.
 fn qmmf(c: *Ctx) !void {
     const a = c.gpu.gpa;
     Qmmf.lane = try q.Lane.load(c.gpu.d, (try c.gpu.ctx.capability()) / 10);
@@ -405,22 +405,29 @@ fn qmmf(c: *Ctx) !void {
     var part = try cuda.DeviceBuffer.alloc(c.gpu.d, 8 << 20);
     defer part.free();
     Qmmf.part = part.ptr;
-    for ([_]struct { n: usize, k: usize, sk: u32, clusters: bool, what: []const u8 }{
-        .{ .n = 2560, .k = 6144, .sk = 4, .clusters = false, .what = "qmmf BF16 decode row, 4 K slices and their reduce" },
-        .{ .n = 2560, .k = 6144, .sk = 4, .clusters = true, .what = "qmmf BF16 decode row, a cluster of 4 slices" },
-        .{ .n = 2560, .k = 64, .sk = 1, .clusters = false, .what = "qmmf BF16 decode row, one K group (fewer than the prologue's stages)" },
+    for ([_]struct { mode: q.Mode, n: usize, k: usize, sk: u32, clusters: bool, what: []const u8 }{
+        .{ .mode = .bf16, .n = 2560, .k = 6144, .sk = 4, .clusters = false, .what = "qmmf BF16 decode row, 4 K slices and their reduce" },
+        .{ .mode = .bf16, .n = 2560, .k = 6144, .sk = 4, .clusters = true, .what = "qmmf BF16 decode row, a cluster of 4 slices" },
+        .{ .mode = .bf16, .n = 2560, .k = 64, .sk = 1, .clusters = false, .what = "qmmf BF16 decode row, one K group (fewer than the prologue's stages)" },
+        .{ .mode = .fp4, .n = 2560, .k = 6144, .sk = 4, .clusters = false, .what = "qmmf FP4 decode row, 4 K slices and their reduce" },
+        .{ .mode = .fp4, .n = 2560, .k = 6144, .sk = 4, .clusters = true, .what = "qmmf FP4 decode row, a cluster of 4 slices" },
+        .{ .mode = .mxfp8, .n = 2560, .k = 6144, .sk = 4, .clusters = false, .what = "qmmf MXFP8 decode row, 4 K slices and their reduce" },
+        .{ .mode = .mxfp8, .n = 2560, .k = 6144, .sk = 4, .clusters = true, .what = "qmmf MXFP8 decode row, a cluster of 4 slices" },
     }) |t| {
         const npad = (t.n + 127) / 128 * 128;
-        const host_w = try a.alloc(u16, t.n * t.k);
-        defer a.free(host_w);
-        var prng = std.Random.DefaultPrng.init(0x4218 + t.k);
-        for (host_w) |*v| v.* = bf16(prng.random());
-        const tiled = try a.alloc(u16, npad * t.k);
-        defer a.free(tiled);
-        q.packBf16(tiled, host_w, t.n, t.k);
-        var codes = try cuda.DeviceBuffer.fromHost(c.gpu.d, std.mem.sliceAsBytes(tiled));
+        var prng = std.Random.DefaultPrng.init(0x4218 + t.k + @backingInt(t.mode));
+        const codes_host = try packed_(a, t.mode, t.n, t.k, npad, prng.random());
+        defer a.free(codes_host);
+        var codes = try cuda.DeviceBuffer.fromHost(c.gpu.d, codes_host);
         defer codes.free();
-        Qmmf.w = try q.pinned(.{ .mode = .bf16, .codes = codes.ptr, .scales = 0, .n = @intCast(t.n), .k = @intCast(t.k), .npad = @intCast(npad), .scale = 1 }, t.sk);
+        // finite scales near 1: e4m3 0x30..0x3f (FP4, one a 16), e8m0 124..131 (MXFP8, one a 32)
+        const scales_host = try a.alloc(u8, if (t.mode == .fp4) npad * t.k / 16 else if (t.mode == .mxfp8) npad * t.k / 32 else 16);
+        defer a.free(scales_host);
+        for (scales_host) |*v| v.* = if (t.mode == .fp4) 0x30 + prng.random().uintLessThan(u8, 16) else 124 + prng.random().uintLessThan(u8, 8);
+        var scales = try cuda.DeviceBuffer.fromHost(c.gpu.d, scales_host);
+        defer scales.free();
+        const sp = if (t.mode == .bf16) 0 else scales.ptr;
+        Qmmf.w = try q.pinned(.{ .mode = t.mode, .codes = codes.ptr, .scales = sp, .n = @intCast(t.n), .k = @intCast(t.k), .npad = @intCast(npad), .scale = 1 }, t.sk);
         Qmmf.clusters = t.clusters;
         const input = try bytesOf(u16, a, t.k, 31 + t.k, bf16);
         defer a.free(input);
@@ -428,4 +435,23 @@ fn qmmf(c: *Ctx) !void {
         defer b.deinit();
         try case(c, t.what, "qmmf", Qmmf.lane.mod, &b, Qmmf.run);
     }
+}
+
+/// A packed weight's bytes: BF16 tiled from random values, FP4 and MXFP8 random finite codes (any layout is a weight).
+fn packed_(a: std.mem.Allocator, mode: q.Mode, n: usize, k: usize, npad: usize, r: std.Random) ![]u8 {
+    if (mode == .bf16) {
+        const host_w = try a.alloc(u16, n * k);
+        defer a.free(host_w);
+        for (host_w) |*v| v.* = bf16(r);
+        const tiled = try a.alloc(u16, npad * k);
+        defer a.free(tiled);
+        q.packBf16(tiled, host_w, n, k);
+        return a.dupe(u8, std.mem.sliceAsBytes(tiled));
+    }
+    const out = try a.alloc(u8, if (mode == .fp4) npad * k / 2 else npad * k);
+    r.bytes(out);
+    if (mode == .mxfp8) for (out) |*v| if (v.* & 0x7f == 0x7f) {
+        v.* ^= 1; // e4m3's NaN codes
+    };
+    return out;
 }
