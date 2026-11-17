@@ -303,10 +303,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     glm_checks.sampler(b, target, optimize, metal, lanes, sources);
 
-    @import("h3_host.zig").metalTools(b, target, optimize, metal, sources);
-    @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
-    @import("h3_image_prompt.zig").install(b, target, optimize, metal);
-    @import("h3_image_decoder.zig").tool(b, target, optimize, metal);
+    @import("h3_metal.zig").targets(b, target, optimize, metal, sources, test_step);
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     const row_check = b.addExecutable(.{ .name = "tf-row-check", .root_module = b.createModule(.{
