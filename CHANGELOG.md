@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8 Flash Next on Metal: with SSD residency on (`--ssd-experts`, `--ple-on-ssd`) the engine no longer allocates the second prompt workspace that only two-segment prompts use, 6.16 GiB less at the same window; replies are unchanged (#3690, #3667).
+
 - CUDA: dots.mocr's image tower weights load on CUDA as BF16 matrices for cuBLASLt, with fc1 and fc3 stacked into one gate|up projection and the patch weight zero-padded from 588 to 592 columns; every `vision_tower` tensor is consumed, a failed load drains its uploads before it frees a buffer, and no served path opens the tower yet (#2769, part of #1927). Thanks to @laudney.
 
 - Drama speech: an explicit `--max-frames` is now honored exactly or refused at open, so `--context` - 2 (once trimmed silently to `--context` - 3) is refused by name; an overlong prompt's 400 names the assembled-row limit, the request text's tokens as the prompt encodes them and the reference frames; and `GET /v1/models` lists a `speech` object with the loaded budgets. Admitted audio is unchanged (#2143). Thanks to @akol1.
@@ -51,7 +53,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the Nemotron 3.5 Lightning recipe gains a "Native HIP on a Strix Halo iGPU" section with its configuration, memory footprint, throughput, prefill and exactness checks, and the intro lists HIP beside Metal and CUDA (#3560). Thanks to @gilby.
 
 - Qwen3.5-2B on Metal: the engine declares `warm_turns` from its prompt cache, so a follow-up that re-renders earlier rows resumes the reply instead of prefilling the whole conversation again (#3662, from #3457). Thanks to @EugeneClaw.
-- Flash Next Metal omits the unused second prompt workspace and its admission charge under SSD residency (#3667). (ashhart)
 
 - DeepSeek V4.1 on CUDA: a prompt whose prefill segment is 18 to 32 rows no longer replies with repeated begin-of-sentence tokens, because the second streams buffer is now planned for 32 rows; replies at every other length are unchanged (#3366, #3388). Thanks to @sx4im for the fix, @laudney for the sweep test (#3529) and @BadAd84 for the trace and the GB10 pair receipts.
 
@@ -60,14 +61,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Nemotron on Metal: row projections over windows of 4 or more rows run 8 rows at a time, then 4, 2 and 1, so each weight code is unpacked once for up to eight rows; every row's sum keeps its order, bit-equal to one row alone (#3129).
 
 - Flash Next on Metal (M1 through M4): the scale index is now the default for 4-bit experts in groups of 32, and `TF_FLASHNEXT_SCALE_INDEX=0` turns it off. Prompt passes and grouped decode windows read each group's scale and bias through the index too, and the routed experts' stored scales and biases are released once indexed; every kernel gets the same values, so replies keep their tokens. On an M3 Ultra with the MLX 4-bit checkpoint, memory in use once loaded falls from 129.6 to 122.5 GiB, drafted decode on one stream is 2.0% to 4.2% faster (prose 138.6 to 142.0 tok/s, a copy-heavy edit 282.0 to 293.8), four streams are 2.6% faster (203.1 to 208.3 tok/s) and a cold prompt's first token arrives about 1% sooner; load takes about 0.7 s longer (#2805, part of #2751).
-
-
-
-
-
-
-
-
 
 - Kolibri-1: the tree-attention cache offsets are signed, so a server with default flags no longer panics with an integer overflow on its first request when a cache sits below the origin (#3561). Thanks to @jschmied.
 
