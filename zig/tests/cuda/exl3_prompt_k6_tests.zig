@@ -179,13 +179,15 @@ pub const Prompt = struct {
     b: Bufs,
     sc: ex.prompt.Scratch,
     p: cuda.grouped.Plan,
+    y: u64, // fp32 [rows][K][D]: the down kernels write each pair's slot row here
     pub fn init(c: *Ctx, l: ex.Layer, x: u64, pk: u64, rows: usize, per: usize) !Prompt {
         var b: Bufs = .{ .d = c.gpu.d, .gpa = c.gpu.gpa };
         errdefer b.deinit();
         const cap: usize = @min(rows, per);
         const sc = try ex.prompt.scratch(try b.alloc(try ex.prompt.bytes(l, cap, K)), l, cap, K);
         const p = try plan(&b, cap * K);
-        return .{ .c = c, .l = l, .x = x, .pk = pk, .rows = rows, .per = per, .b = b, .sc = sc, .p = p };
+        const y = try b.alloc(rows * K * D * 4);
+        return .{ .c = c, .l = l, .x = x, .pk = pk, .rows = rows, .per = per, .b = b, .sc = sc, .p = p, .y = y };
     }
     pub fn deinit(p: *Prompt) void {
         p.b.deinit();
@@ -194,8 +196,8 @@ pub const Prompt = struct {
         var at: usize = 0;
         while (at < p.rows) : (at += p.per) {
             const n: usize = @min(p.per, p.rows - at);
-            try p.c.exp.prompt.run(p.c.exp, p.c.router, p.c.s, p.l, p.x + at * D * 2, D, p.pk + at * K * 4, n, p.sc, p.p);
-            if (out) |o| try download(p.c, p.sc.y, o[at * K * D ..][0 .. n * K * D]);
+            try p.c.exp.prompt.run(p.c.exp, p.c.router, p.c.s, p.l, p.x + at * D * 2, D, p.pk + at * K * 4, n, p.sc, p.p, p.y + at * K * D * 4, null);
+            if (out) |o| try download(p.c, p.y + at * K * D * 4, o[at * K * D ..][0 .. n * K * D]);
         }
     }
     /// The gate/up (which 0) or down (1) launch of the last call again, as run() makes it.
@@ -206,10 +208,10 @@ pub const Prompt = struct {
         const items = cuda.grouped.maxItems(n * K, E, ex.prompt.tile);
         var a: cuda.Args = .{};
         if (which == 0) {
-            inline for (.{ p.sc.xg, p.sc.xu, p.l.gate, p.l.up, p.p.items, p.p.counts, p.p.members, p.l.svh_g, p.l.svh_u, p.l.suh_d, p.sc.xd, @as(i32, D), @as(i32, N), @as(i32, if (p.l.shared_input) K else 1), p.l.limit, p.l.act_mode }) |v| a.add(v);
+            inline for (.{ p.sc.xg, p.sc.xu, p.l.gate, p.l.up, p.p.items, p.p.counts, p.p.members, p.l.svh_g, p.l.svh_u, p.l.suh_d, p.sc.xd, @as(i32, D), @as(i32, N), @as(i32, if (p.l.shared_input) K else 1), p.l.limit, p.l.act_mode, @as(i32, -1) }) |v| a.add(v);
             try cuda.launch.launch(if (w.gu == 6) k.gateup_k6 else k.gateup, .{ .grid = .{ .x = N / 128, .y = @intCast(items), .z = 1 }, .block = .{ .x = 256 } }, p.c.s, &a);
         } else {
-            inline for (.{ p.sc.xd, p.l.down, p.p.items, p.p.counts, p.p.members, p.l.svh_d, p.sc.y, @as(i32, N), @as(i32, D), @as(i32, K) }) |v| a.add(v);
+            inline for (.{ p.sc.xd, p.l.down, p.p.items, p.p.counts, p.p.members, p.l.svh_d, p.y, @as(i32, N), @as(i32, D), @as(i32, -1) }) |v| a.add(v);
             try cuda.launch.launch(if (w.d == 6) k.down_k6 else k.down, .{ .grid = .{ .x = D / 256, .y = @intCast(items), .z = 1 }, .block = .{ .x = 256 } }, p.c.s, &a);
         }
     }
