@@ -3,7 +3,7 @@
 // create a namespace (nested containers), so it never claims confinement it did not observe.
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { runSandboxedCommand } from './sandbox'
@@ -87,6 +87,19 @@ if (process.platform !== 'linux') {
     assert.notEqual(repoint.code, 0, 'the worktree pointer stays read-only')
     assert.match(readFileSync(path.join(innerWorktree, '.git'), 'utf8'), /^gitdir: \.\.\/\.git\/worktrees\/inner/, 'the pointer was not rewritten')
 
+    // A directory the walk cannot inspect refuses before the command runs.
+    const unreadable = path.join(cwd, 'unreadable-dir')
+    mkdirSync(unreadable)
+    chmodSync(unreadable, 0o000)
+    try {
+      const refusedWalk = await runSandboxedCommand('printf should-not-run', { cwd, profile: 'build-test' })
+      assert.equal(refusedWalk.code, 126, 'an uninspectable directory refuses the command')
+      assert.match(refusedWalk.stderr, /cannot inspect .*unreadable-dir/)
+    } finally {
+      chmodSync(unreadable, 0o700)
+      rmSync(unreadable, { recursive: true, force: true })
+    }
+
     // A worktree inside the workspace whose shared directory resolves outside it is refused.
     const sharedWorktree = path.join(cwd, 'shared-worktree')
     const sharedGitdir = path.join(cwd, '.git', 'worktrees', 'shared')
@@ -128,7 +141,7 @@ if (process.platform !== 'linux') {
     assert.notEqual(cancelled.code, 0, 'cancelled command did not report success')
     assert.ok(Date.now() - started < 10_000, 'cancellation stops the sandboxed command promptly')
 
-    console.log('CONFORMANCE: passed (filesystem, git controls, placeholders, nested repositories, worktree pinning and refusal, shared-directory refusal, network and cancellation enforced)')
+    console.log('CONFORMANCE: passed (filesystem, git controls, placeholders, nested repositories, worktree pinning and refusal, shared-directory refusal, uninspectable-path refusal, network and cancellation enforced)')
   } finally {
     server.close()
     rmSync(root, { recursive: true, force: true })
