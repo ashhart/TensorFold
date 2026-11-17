@@ -377,3 +377,6 @@ pub const inkling2_tfq3 = @import("inkling2/tfq3_sources.zig").tfq3;
 
 /// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
 pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");
+
+/// Qwen27 flat activation shares the production specialization with its contract.
+pub const q27_mlp_xs = @embedFile("qwen27/mlp_xs.metal");
