@@ -40,6 +40,19 @@ These are one-run process-footprint measurements with the verified Flash Next ML
 
 This saving alone does not qualify a 32 GiB Mac: even a valid 1.5 GiB expert pool plans 26.19 GiB against a 22.4 GiB load ceiling. The plan includes a 2 GiB runtime reserve; it is distinct from physical footprint. The larger Mac also retains filesystem cache, so these measurements do not predict smaller-device SSD performance.
 
+## Smaller explicit contexts
+
+A smaller `--context` now sizes physical KV, indexer and score allocations, with the existing 32-row margin and four-row alignment. The physical floor is one unchanged 8192-row prompt chunk. Logical request limits remain separate from allocation padding and the trained rotary identity. Smaller contexts retain unscaled rotary; no-context allocation and past-trained rotary policy remain unchanged. A request outside its context is refused rather than truncated.
+
+At the same SSD8 setting on the M5 Ultra above, the physical allocation becomes 65,568 rows:
+
+| Physical context allocation | After load | 16K peak |
+| --- | --- | --- |
+| 262,144 rows, one workspace | 29.26 GiB | 29.84 GiB |
+| 65,568 rows, one workspace | 22.11 GiB | 22.69 GiB |
+
+The SSD8 startup plan is still 25.55 GiB and refuses a 22.4 GiB ceiling. A 4 GiB expert pool lowers that plan to about 21.55 GiB without changing stored bytes or routes. Admission and real peak footprint must both be checked for the selected workload. A budget imposed on a larger Mac is not a fit or speed qualification for a physical 32 GiB Mac.
+
 ## Bound read overhead
 
 The demand path deduplicates route IDs and reserves missing experts in logical order. Adjacent stored experts merge only when both the source bytes and their destination slots are contiguous. A request is at most 4 MiB. The reader queues at most nine requests through macOS asynchronous IO, drains every submitted request on errors, and checks each touched file's length before and after the batch. Queue pressure falls back to positional reads after submitted work drains. Cache bypass remains required.
