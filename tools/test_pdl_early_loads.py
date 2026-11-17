@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixtures for pdl_early_loads.py: early reads fail, reads after the wait and weight-first copies pass."""
+"""Fixtures for pdl_early_loads.py: early reads and waits a path can skip fail; later reads and weight copies pass."""
 import os
 import sys
 import unittest
@@ -50,6 +50,20 @@ class Scan(unittest.TestCase):
 
     def test_a_dependent_kernel_without_its_wait_fails(self):
         self.check(dump(121, "glm_mm16_16", COPY, "LDG.E R4, desc[UR4][R2.64]"), 1)
+
+    def test_predicated_wait_fails(self):
+        self.check(dump(121, "tf_glm_a", "@P0 ACQBULK", "LDG.E R4, desc[UR4][R2.64]"), 1)
+
+    def test_branch_past_the_wait_fails(self):
+        self.check(dump(121, "tf_glm_a", "@P0 BRA 0x30", "ACQBULK", "NOP", "LDG.E R4, desc[UR4][R2.64]"), 1)
+        self.check(dump(121, "glm_mm16_rows", COPY, "BRA.U !UP0, 0x30", "ACQBULK", "LDG.E R4, desc[UR4][R2.64]"), 1)
+
+    def test_indirect_branch_before_the_wait_fails(self):
+        self.check(dump(121, "tf_glm_a", "BRX R4 -0x20", "ACQBULK"), 1)
+
+    def test_branch_to_exit_or_within_the_prologue_passes(self):
+        self.check(dump(121, "tf_glm_a", "@P0 BRA 0x20", "ACQBULK", "EXIT"), 0)
+        self.check(dump(121, "glm_mm16_rows", COPY, "BRA.U UP0, 0x0", "ACQBULK", "LDG.E R4, desc[UR4][R2.64]"), 0)
 
     def test_pre_pdl_targets_skipped(self):
         self.check(dump(80, "tf_glm_a", "LDG.E R4, desc[UR4][R2.64]"), 0, 0)
