@@ -38,6 +38,7 @@ test {
 test {
     _ = @import("contract/qwen_served_records.zig");
     _ = @import("contract/delta_slots_records.zig");
+    _ = @import("contract/q27_stack_records.zig");
     _ = @import("contract/vit_records.zig");
     _ = @import("contract/simd_pairs_records.zig");
     _ = @import("contract/simd_half_records.zig");
@@ -69,4 +70,9 @@ test {
 
 test {
     _ = @import("contract/seed_test.zig");
+}
+
+pub const q27_stack_sums = @import("contract/q27_stack_sums.zig");
+test {
+    _ = q27_stack_sums;
 }
