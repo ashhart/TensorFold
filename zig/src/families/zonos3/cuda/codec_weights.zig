@@ -228,6 +228,70 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator
     return w;
 }
 
+/// What encoding adds to the decoder's tables: the semantic encoder, each quantizer's input projection and codes.
+pub const Quantizer = struct {
+    gpa: std.mem.Allocator,
+    bufs: std.ArrayList(cuda.DeviceBuffer),
+    bytes: usize,
+    sem_in_w: u64, // [width][latent_dim]
+    sem_in_b: u64,
+    sem: [sem_blocks]Block,
+    in_w: [1 + residuals]u64, // [codebook_dim][width] for the semantic quantizer, [codebook_dim][latent_dim] for the rest
+    in_b: [1 + residuals]u64,
+    codes: [1 + residuals]u64, // [4096][codebook_dim], each row at unit length
+
+    pub fn deinit(q: *Quantizer) void {
+        for (q.bufs.items) |*b| b.free();
+        q.bufs.deinit(q.gpa);
+    }
+};
+
+pub fn loadQuantizer(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator: []const u8) !*Quantizer {
+    var g = try pth.Archive.openNested(gpa, io, generator);
+    defer g.close();
+    const q = try gpa.create(Quantizer);
+    errdefer gpa.destroy(q);
+    q.* = undefined;
+    q.gpa = gpa;
+    q.bufs = .empty;
+    q.bytes = 0;
+    errdefer q.deinit();
+    // the loader's helpers write through a Weights' buffer list: lend it this one's
+    var shell: Weights = undefined;
+    shell.gpa = gpa;
+    shell.bufs = .empty;
+    shell.bytes = 0;
+    defer {
+        q.bufs = shell.bufs;
+        q.bytes = shell.bytes;
+    }
+    var l: Loader = .{ .gpa = gpa, .d = d, .w = &shell };
+    const first = try l.normed(&g, "generator/semantic_encoder.0.", width, latent_dim);
+    defer gpa.free(first);
+    q.sem_in_w = try l.device(first);
+    q.sem_in_b = try l.one(&g, "generator/semantic_encoder.0.bias", &.{width});
+    for (&q.sem, 1..) |*b, i| b.* = try l.block(&g, "generator/semantic_encoder.{d}.", i);
+    inline for (0..1 + residuals) |i| {
+        const p = if (i == 0) "generator/quantizer.semantic_quantizer.quantizers.0." else std.fmt.comptimePrint("generator/quantizer.quantizer.quantizers.{d}.", .{i - 1});
+        const in = if (i == 0) width else latent_dim;
+        const w = try l.normed(&g, p ++ "in_proj.", codebook_dim, in);
+        defer gpa.free(w);
+        q.in_w[i] = try l.device(w);
+        q.in_b[i] = try l.one(&g, p ++ "in_proj.bias", &.{codebook_dim});
+        const codes = try g.readF32(gpa, p ++ "codebook.weight", &.{ codebook_size, codebook_dim });
+        defer gpa.free(codes);
+        for (0..codebook_size) |c| {
+            const row = codes[c * codebook_dim ..][0..codebook_dim];
+            var ss: f64 = 0;
+            for (row) |x| ss += @as(f64, x) * x;
+            const scale: f32 = @floatCast(1.0 / @max(@sqrt(ss), 1e-12));
+            for (row) |*x| x.* *= scale;
+        }
+        q.codes[i] = try l.device(codes);
+    }
+    return q;
+}
+
 test "synthesis: a lone DC bin gives the window over n" {
     const t = std.testing;
     var win2: [8]f32 = undefined;

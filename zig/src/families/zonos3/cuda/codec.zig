@@ -167,14 +167,7 @@ pub const Codec = struct {
     }
 
     fn convnext(c: *Codec, b: wts.Block, hist: u64, x: u64, rows: usize) !void {
-        const k = &c.k;
-        const s = c.stream;
-        try k.dwconv(s, x, rows, b.dw_w, b.dw_b, hist, c.o_, W);
-        try k.layernorm(s, c.o_, b.ln_w, b.ln_b, c.n, W, 1e-6, rows);
-        try k.linear(s, b.pw1_w, b.pw1_b, c.n, W, W, wts.hidden, c.big, wts.hidden, rows);
-        try k.gelu(s, c.big, rows * wts.hidden);
-        try k.linear(s, b.pw2_w, b.pw2_b, c.big, wts.hidden, wts.hidden, W, c.o_, W, rows);
-        try k.addScaled(s, x, c.o_, 0, W, rows);
+        try stage_layer.convnext(&c.k, c.stream, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, b, hist, x, rows);
     }
 
     fn layer(c: *Codec, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
