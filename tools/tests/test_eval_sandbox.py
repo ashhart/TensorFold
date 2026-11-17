@@ -1,8 +1,11 @@
 """The model-code sandbox: wall timeout, memory, output limits, an empty environment and the OS sandbox's denials."""
 import json
+import plistlib
+import uuid
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -124,6 +127,55 @@ class Isolation(unittest.TestCase):
         result = self.box.run(f"import os\nprint(os.listdir({home!r}))\n")
         self.assertIn("PermissionError", result["stderr"])
 
+    @unittest.skipUnless(sys.platform == "darwin", "LaunchServices and launchd require macOS")
+    def test_renamed_open_and_launchctl_cannot_start_an_outside_job(self):
+        with tempfile.TemporaryDirectory() as outside:
+            outside = Path(os.path.realpath(outside))
+            marker = outside / "marker"
+            app = outside / "Probe.app"
+            executable = app / "Contents/MacOS/probe"
+            executable.parent.mkdir(parents=True)
+            executable.write_text(f"#!/bin/sh\n/usr/bin/touch '{marker}'\n")
+            executable.chmod(0o755)
+            (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleExecutable": "probe", "CFBundleIdentifier": "dev.tensorfold.sandbox-probe",
+                "CFBundlePackageType": "APPL", "CFBundleName": "Probe", "CFBundleVersion": "1", "LSUIElement": True,
+            }))
+            renamed = outside / "renamed-open"
+            shutil.copy2("/usr/bin/open", renamed)
+            baseline = subprocess.run([str(renamed), "-n", "-W", str(app)], capture_output=True, timeout=10, check=False)
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            self.assertTrue(marker.exists(), "the parent must launch the app before its sandbox refusal counts")
+            marker.unlink()
+            label = "dev.tensorfold.sandbox-probe-" + uuid.uuid4().hex
+            try:
+                baseline = subprocess.run(["/bin/launchctl", "submit", "-l", label, "--", "/usr/bin/touch", str(marker)],
+                                          capture_output=True, timeout=10, check=False)
+                self.assertEqual(baseline.returncode, 0, baseline.stderr)
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(marker.exists(), "the parent must launch the job before its sandbox refusal counts")
+                marker.unlink()
+            finally:
+                subprocess.run(["/bin/launchctl", "remove", label], capture_output=True, timeout=10, check=False)
+            programs = [
+                ("import shutil, subprocess\nshutil.copy2('/usr/bin/open', 'renamed-open')\n"
+                 f"subprocess.run(['./renamed-open', '-n', '-W', {str(app)!r}], timeout=10, check=True)\n"),
+                ("import subprocess\n"
+                 f"subprocess.run(['/bin/launchctl', 'submit', '-l', {label!r}, '--', "
+                 f"'/usr/bin/touch', {str(marker)!r}], timeout=10, check=True)\n"),
+            ]
+            try:
+                for code in programs:
+                    result = self.box.run(code)
+                    self.assertNotEqual(result["ended"], "timeout", result)
+                    self.assertTrue(result["error"], result)
+                    time.sleep(1)
+                    self.assertFalse(marker.exists(), result)
+            finally:
+                subprocess.run(["/bin/launchctl", "remove", label], capture_output=True, timeout=10, check=False)
+
 
 class Detection(unittest.TestCase):
     def test_no_sandbox_warns_then_refuses_unless_unsafe(self):
@@ -159,6 +211,15 @@ class Detection(unittest.TestCase):
         self.assertIn("(deny network*)", profile)
         self.assertIn("(deny file-write*)", profile)
         self.assertIn('(allow file-write* (subpath "/private/tmp/work dir")', profile)
+
+    def test_mac_profile_denies_app_and_job_escape_services(self):
+        profile = eval_sandbox.mac_profile("/private/tmp/work")
+        for command in ("/usr/bin/open", "/usr/bin/osascript", "/bin/launchctl", "/usr/bin/crontab", "/usr/bin/at"):
+            self.assertIn(f'(literal "{command}")', profile)
+        self.assertIn("(deny appleevent-send)", profile)
+        for prefix in ("com.apple.coreservices.", "com.apple.lsd.", "com.apple.runningboard", "com.apple.launchservices"):
+            self.assertIn(f'(global-name-prefix "{prefix}")', profile)
+        self.assertIn("Listeners|tmux-", profile)
 
     def test_cut_keeps_both_ends(self):
         self.assertEqual(eval_sandbox.cut("short", 10), "short")

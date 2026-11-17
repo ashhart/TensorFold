@@ -131,8 +131,8 @@ python3 tools/eval_hx_entu.py --model local-model --runs 3 --out hx.json
   `usage.completion_tokens_details.reasoning_tokens`.
 - The model's code runs as `python3 -I` in a new temporary directory with only `PATH` set, under a wall limit (30 s),
   CPU, file-size and memory limits. On macOS it runs inside `sandbox-exec` with no network, no writes outside that
-  directory and no reads in the home folder; macOS refuses address-space limits, so memory is held by watching the
-  program's resident size. On Linux it runs under `unshare -n`, which takes away the network only. Without either,
+  directory and no reads in the home folder. It also blocks launching apps and jobs through LaunchServices,
+  Apple Events and launchd. macOS refuses address-space limits, so memory is held by watching the program's resident size. On Linux it runs under `unshare -n`, which takes away the network only. Without either,
   the tool refuses to run unless you pass `--unsafe-no-sandbox`.
 - It prints each turn's verdict with its values against the references, the totals, and how many turns each run
   reached; a failed request ends that run. It exits 0 only when every run passes every turn.
