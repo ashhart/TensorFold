@@ -58,8 +58,7 @@ export interface ReadinessInput {
 const CONNECT_A_MODEL = 'Please go to Settings and connect a cloud or local model.'
 const LOCAL_SOURCES = ['ollama', 'lmstudio', 'omlx']
 
-// One definition of "plain local HTTP source", shared with the live model-list probe in
-// provider-ipc so the two cannot drift.
+// Single definition of a plain local HTTP source, shared with the provider-ipc probe so the two cannot drift.
 export function isLocalHttpSource(provider: Provider): boolean {
   return provider.kind === 'local' || (!!provider.source && LOCAL_SOURCES.includes(provider.source))
 }

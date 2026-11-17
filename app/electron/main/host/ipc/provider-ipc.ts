@@ -27,9 +27,7 @@ export function getManagedKokoroService(): KokoroService {
   return managedKokoro
 }
 
-// Opt-in live verification (issue 3539): a local server is Ready only when it actually answers
-// with models. Plain HTTP chat-completions locals only — the engine, CLI transports and cloud
-// providers keep their existing answers. `null` means the presence-based answer still holds.
+// Opt-in live check (3539): local HTTP chat-completions are Ready only with models; null keeps the presence answer.
 function isLiveCheckableLocalProvider(provider: Provider): boolean {
   return isLocalHttpSource(provider) && (provider.transport ?? 'chat-completions') === 'chat-completions'
 }
@@ -40,8 +38,7 @@ async function liveLocalReadiness(provider: Provider): Promise<Readiness | null>
   const apiKey = provider.apiKey?.trim() ?? ''
   const notReady: Readiness = { ready: false, reason: 'needs-endpoint', message: `${name} is not reachable or reports no models — start it or add a model in Settings → Models & Accounts.` }
   try {
-    // Ollama's key-less native probe is the cheapest path; a real key goes through the
-    // OpenAI-compatible call so it is not dropped. The account-bound key comes from above.
+    // Ollama's key-less probe is cheapest; a real key goes through the OpenAI-compatible call so it is not dropped.
     const models = provider.source === 'ollama' && !apiKey
       ? await fetchOllamaModels(baseUrl)
       : provider.source === 'lmstudio'
