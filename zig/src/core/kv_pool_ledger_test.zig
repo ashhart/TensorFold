@@ -23,7 +23,7 @@ fn counted(p: *kv.Pool, l: *Ledger) void {
             q.ledger = null;
         }
     };
-    l.* = .ofPages(.{ .ctx = p, .read = view.read, .detach = view.detach });
+    l.* = Ledger.ofPages(.{ .ctx = p, .read = view.read, .detach = view.detach }) catch unreachable; // one class
     p.ledger = .{ .ctx = l, .want = Ledger.wantOf };
 }
 
