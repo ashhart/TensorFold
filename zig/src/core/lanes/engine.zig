@@ -535,6 +535,7 @@ pub const Engine = struct {
     pub fn release(e: *Engine, s: *Stream) void {
         e.late.cancel(s);
         if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
+        @import("lone_copy.zig").keep(e, s);
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);
         e.backend.release(s);
