@@ -570,11 +570,12 @@ squares in bf16.
 
 CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
 GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
-128-wide absorb_q and expand_v, and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache,
-through `tf_glm_merge`; the split form with `tf_mla_merge_part`), each against float64 (eight controls, real launches
-each given one planted fault: the gate reading the next head's column, the plain rope one position late, the YaRN
-rope without its factor, absorb_q and expand_v reading the next head's weights, the chunks the next head's queries,
-the split chunks reading a rank's page z as chunk z, and the per-rank merge one chunk short).
+128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), and the
+chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache, through `tf_glm_merge`; the split form with
+`tf_mla_merge_part`), each against float64 (nine controls, real launches each given one planted fault: the gate
+reading the next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q
+forms and expand_v reading the next head's weights, the chunks the next head's queries, the split chunks reading a
+rank's page z as chunk z, and the per-rank merge one chunk short).
 
 ## CUDA records per nvcc release
 
