@@ -55,6 +55,11 @@ pub fn bucket(rows: usize) usize {
     return @as(usize, 1) << @intCast(@max(4, bits));
 }
 
+/// Plan rows for `rows` real rows: exact on explicit exact plans or RDNA3.5 lane verify rounds, else bucket(rows).
+pub fn planRows(o: Ops, exact: bool, rows: usize) usize {
+    return if (exact or (o.window and o.l.affine.caps.generation == .rdna3_5)) rows else bucket(rows);
+}
+
 /// max_items(pairs, experts, min(TILE, LANE_ROWS)): an item a used expert plus one a tile of pairs past its first.
 pub fn capacity(pairs: usize, experts: usize) usize {
     return @min(pairs, experts) + pairs / @min(TILE, LANE_ROWS);
@@ -81,7 +86,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
     const ex = r.experts;
     const slots = r.top_k + 1;
-    const size = if (r.exact) rows else bucket(rows);
+    const size = planRows(o, r.exact, rows);
     const pairs = rows * slots;
     const cap = capacity(size * slots, r.rows);
     const logits = try o.arena.of(f32, rows * r.rows);
@@ -143,7 +148,7 @@ pub const Parts = struct { y: u64, wts: u64, slots: usize };
 pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
     std.debug.assert(r.experts.shared == null);
     const slots = r.top_k + 1;
-    const size = if (r.exact) rows else bucket(rows);
+    const size = planRows(o, r.exact, rows);
     const cap = capacity(size * slots, r.rows);
     const logits = try o.arena.of(f32, rows * r.rows);
     const pick = try o.arena.of(i32, size * slots);
@@ -204,4 +209,21 @@ test "the routed products take the decode tile below 64 rows and in a lane round
     try std.testing.expectEqual(@as(usize, BLOCK_ROWS), tileFor(o, 2048));
     try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, BLOCK_FROM));
     try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, 2048));
+}
+
+test "planRows keeps RDNA3.5 lane rounds exact while leaving non-RDNA3.5 and non-window launches bucketed" {
+    const Caps = @import("caps.zig").Caps;
+    const Launcher = @import("launches.zig").Launcher;
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1201" }) |name| {
+        var l: Launcher = undefined;
+        l.affine.caps = Caps.of(name).?;
+        const prefill: Ops = .{ .l = &l, .bf16 = true, .stream = undefined, .arena = undefined, .window = false };
+        var window = prefill;
+        window.window = true;
+        try std.testing.expectEqual(@as(usize, 16), planRows(prefill, false, 3));
+        try std.testing.expectEqual(@as(usize, 3), planRows(prefill, true, 3));
+        const want: usize = if (l.affine.caps.generation == .rdna3_5) 3 else 16;
+        try std.testing.expectEqual(want, planRows(window, false, 3));
+        try std.testing.expectEqual(@as(usize, 3), planRows(window, true, 3));
+    }
 }
