@@ -5,7 +5,7 @@ publisher released, and serves it on `POST /v1/audio/speech`. This page records 
 came from, and how each part was checked, so the checks can be rerun.
 
 Status: a work in progress on one branch, proposed in #3615. The kernels are not registered with the kernel contract
-yet, and the quality suite has not been run on this build.
+yet, memory admission is not written, and the quality suite has not been run on this build.
 
 ## Sources
 
@@ -46,14 +46,18 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 - **Prompt and output** (`prompt.zig`, `speech.zig`, `release.zig`, `voices.zig`): the training layout
   `[reference prefix | speaker row] [condition rows] text [silence]`, the undelayed frames to decode, the decoder's
   -3 dB headroom and the soft limiter above -1 dBFS.
+- **Codec encoder** (`cuda/clip.zig` over `cuda/encoder.zig`, `cuda/teacher.zig`, `cuda/quantizer.zig`,
+  `features.zig`): a reference clip to its codes. The acoustic branch (the 44,100 to 44,160 Hz resampler, a
+  convolutional front end, five causal transformer stages down to 15 Hz), the SSL teacher (Wav2Vec2-BERT's first 16
+  conformer layers over log-mel features computed on the host), then the quantizer: the teacher's rows pooled onto
+  the frames give the semantic code, and nine residual codebooks take what its decoded prediction leaves. A clip
+  runs in the publisher's lanes: 20 s each, a later lane carrying 10 s of what came before.
 - **Served route** (`native/zonos_host.zig`, `server/zonos_speech.zig`): one request at a time; the release's 27
-  default voices by their reference codes; `speaker_reference_codes` for a caller's own voice; WAV or PCM, whole or
-  streamed in chunks of 1, 2, 4, 8 and then 15 frames.
-- **Codec encoder, in progress** (`cuda/encoder.zig`, `cuda/teacher.zig`, `features.zig`): the acoustic branch and
-  the SSL teacher each run and are checked on their own. The quantizer that joins them, lanes for clips past 20 s
-  and an upload field on the route are not written, so the server cannot yet clone from an audio file.
+  default voices by their reference codes; a caller's own voice as `ref_audio` (a WAV file in base64, encoded by the
+  engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
+  The clip encoder's weights load on the first request that brings a clip.
 
-Refused or absent: cloning from an uploaded clip, text normalization (text is spoken as typed), speaker and control
+Refused or absent: clips in formats other than WAV, text normalization (text is spoken as typed), speaker and control
 guidance, LACI, steering, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts,
 condition values (every condition row is its "unknown" bucket), the `full_mr` decoder, concurrency, Metal.
 
@@ -72,7 +76,7 @@ is what the port is compared with. The publisher's CUDA servers run parts in bf1
 ## How it was checked
 
 All figures below were measured on one RTX 5090 (driver 615.71, nvcc 13.3, Zig 0.17.0, `-Dsm=120`) at branch commit
-`141aefa97`, with every reference dump regenerated for that run.
+`39a2864ef`, with every reference dump regenerated for that run.
 
 ### The reference side
 
@@ -91,7 +95,13 @@ python ZONOS/tools/dump_golden.py codec-encoder --generator RELEASE/autoencoder/
     --audio RELEASE/gguf/voices/English/Cillian_en-Irish_M_1.wav -o D/enc_cillian
 python tools/zig/zonos3_reference.py encoder RELEASE/autoencoder/generator.pt D/enc_cillian/audio.npy D/enc_cillian_fp32
 python tools/zig/zonos3_reference.py teacher RELEASE/autoencoder/teacher D/enc_cillian/lane.0.ssl.features.npy D/teacher_cillian_fp32
+python tools/zig/zonos3_reference.py clip RELEASE/autoencoder/generator.pt RELEASE/autoencoder/teacher D/enc_cillian/audio.npy D/clip_cillian
+python tools/zig/zonos3_reference.py clip RELEASE/autoencoder/generator.pt RELEASE/autoencoder/teacher D/enc_cillian/audio.npy D/clip_cillian_47s --seconds 47.3
 ```
+
+The encoder's clip is the release's own `Cillian_en-Irish_M_1.wav` (9.67 s, one lane); the 47.3 s clip is that
+audio repeated, which takes four lanes. `clip` follows the publisher's lane layout; its production tool reports the
+same four pieces for the 47.3 s clip (300 frames, then 150, 150 and 110 after 150 of context each).
 
 The test request is "The quick brown fox jumps over the lazy dog, and then it rests by the river." in the release's
 Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her reference codes (a 209-row prompt).
@@ -115,6 +125,8 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | Teacher's features | `--features-check D/enc_cillian` | the reference's 999 feature rows of a 20 s lane | cosine 1.0000000; largest difference 2.4e-7 |
 | Encoder, acoustic branch | `--encoder-check D/enc_cillian_fp32 --generator G` | 101 captures of the fp32 run, 145 frames | every row's cosine 1.000000 |
 | SSL teacher | `--teacher-check D/teacher_cillian_fp32 --teacher RELEASE/autoencoder/teacher` | 18 captures of the fp32 run, 999 rows | worst row's cosine 0.9999252 |
+| Clip to codes, one lane | `--encode-check D/clip_cillian --checkpoint RELEASE` | the fp32 run's codes, 145 frames | 1,450 of 1,450 codes equal |
+| Clip to codes, four lanes | `--encode-check D/clip_cillian_47s --checkpoint RELEASE` | the fp32 run's codes, 710 frames | 7,100 of 7,100 codes equal |
 
 `G` is `RELEASE/autoencoder/generator.pt` and `H` the `keep2_plain` head checkpoint. A capture passes when its worst
 row's cosine against the reference is at least 0.9999. The backbone's "equal prompt rows" also covers the tokenizer:
@@ -130,6 +142,9 @@ The reference draws with PyTorch's generator, so sampled frames cannot match it.
 
 - **Repeatability:** the served route returns the same bytes for the same seed, and a streamed reply's bytes equal
   the whole reply's.
+- **Cloned voices:** two clips sent as `ref_audio` (the release's Cillian clip, and its Thaddeus clip as 48 kHz
+  stereo) each gave speech that Whisper transcribed with no errors. By the release's speaker encoder, each output's
+  cosine to its own source clip was 0.78 and 0.83, against 0.21 and 0.17 to the other clip.
 - **Transcription:** Whisper large-v3-turbo (resampled to 16 kHz) transcribed the greedy test sentence with no
   errors, from the port and from the reference alike, and a 62-word sampled passage with word error rates of 0.033
   and 0.016 in two voices; each error was the word "TensorFold".
@@ -143,12 +158,15 @@ The reference draws with PyTorch's generator, so sampled frames cannot match it.
 | A 19.4 s sampled reply, whole | 1.28 s (15 times real time) |
 | The same reply streamed | first response byte at 0.06 s, done at 1.29 s, bytes equal to the whole reply |
 | Device memory in use after it | 3.57 GiB (2.36 GiB of it weights) |
+| Device memory once a clip has been cloned | 8.82 GiB (the clip encoder adds 4.43 GiB of weights) |
+| The first request with a clip (9.7 s), which loads the encoder | 9.0 s |
+| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 1.07 s, 1.53 s |
 | A second request while one runs | 503 |
-| An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes` | 400 with the reason |
+| An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes`, a `ref_audio` that is no WAV or is under half a second | 400 with the reason |
 
 The standalone tool measured the parts: 22.0 s of sampled audio took 1.15 s to generate and 0.27 s to decode; the
-decoder alone turns 11.4 s of codes into audio in 0.13 s; the acoustic encoder takes 0.48 s for a 9.7 s clip and the
-teacher 0.26 s for a 20 s lane. There are no CUDA graphs and the sampler runs on the host; none of this is tuned.
+decoder alone turns 11.4 s of codes into audio in 0.13 s; a 9.7 s clip encodes in 0.75 s and a 47.3 s clip in 5.1 s
+(the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are no CUDA graphs and the sampler runs on the host; none of this is tuned.
 
 ### Repo checks
 
@@ -170,16 +188,29 @@ fp32. Measured with the reference alone, on the dumps above:
 | Encoder latent, 145 frames | worst row's cosine 0.966, mean 0.998 |
 | Teacher output, 999 rows | worst row's cosine 0.085, mean 0.984 |
 | Codes re-encoded from a release clip against the codes the release ships for it | 97% equal in the semantic codebook, 56% to 87% in the residual ones |
+| Codes of the 47.3 s clip, the fp32 run against the bf16 production run | 96% equal in the semantic codebook, 40% to 75% in the residual ones |
 
 The port computes in fp32 and matches the fp32 runs. Two consequences: its audio is closer to the publisher's CPU
-decode than the publisher's own CUDA server is, and a native encoder's codes will not be bit-equal to the
-publisher's. The encoder's gate should therefore be code agreement and cloned-voice quality, not identity.
+decode than the publisher's own CUDA server is, and the native encoder's codes are not the publisher's production
+codes. Residual quantization amplifies small differences, so the codes diverge while describing the same audio.
+Decoding the 9.67 s clip's three sets of codes with the reference decoder and comparing each with the clip:
+
+| Codes | Log-mel distance to the clip (L1) | Speaker cosine to the clip |
+| --- | --- | --- |
+| Shipped with the release | 0.574 | 0.946 |
+| The reference's bf16 run | 0.576 | 0.944 |
+| The fp32 run (what the port produces) | 0.620 | 0.947 |
+
+That is one clip: the fp32 codes keep the speaker as well and sit about 8% further in log-mel distance. Whether
+that gap is real across clips, and whether the backbone (trained on bf16-encoded references) clones as well from
+fp32 codes, needs a proper listening or scoring pass before the encoder's gate is agreed.
 
 ## Shared code this touches
 
 - `drama3/codec_pth.zig` moved to `core/torch_pth.zig` (its zip half to `core/torch_zip.zig`) and gained nested
   checkpoints and a raw reader; Drama 3's codec loads through the same code and its host tests pass.
-- `core/speech_api.zig`: `SpeechRequest.speaker`, an optional speaker vector.
+- `drama3/wav.zig` moved to `core/wav.zig`: both families read WAV files and resample with it.
+- `core/speech_api.zig`: `SpeechRequest.speaker`, an optional speaker vector, and `reference_audio`, an optional clip.
 - `server/`: voices load through `speech_voices.zig`; the speech route, the sampling parser, the voices listing,
   model detection and the tokenizer loader each gained a branch for a release folder, which has no `config.json`
   and is recognised by `lm/zonos3_mini/params.json`.
