@@ -15,19 +15,19 @@ const f = ev.f;
 const str = trail.str;
 const int = trail.int;
 
-/// A shared round's windows in one forward, each verified, committed and drafted alone; `ask` drafts their heads.
-pub fn run(e: *Engine, entries: []*Stream, comptime ask: anytype) !void {
-    return if (e.cfg.plain_guard) runPriced(e, entries, true, ask) else runPriced(e, entries, false, ask);
+/// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
+pub fn run(e: *Engine, entries: []*Stream) !void {
+    return if (e.cfg.plain_guard) runPriced(e, entries, true) else runPriced(e, entries, false);
 }
 
-fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptime ask: anytype) !void {
+fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool) !void {
     var sampled_before = false;
     if (independent) for (entries) |s| {
         sampled_before = sampled_before or s.sampling != null;
     };
     const measured = independent and e.rule.sharedPrice(entries.len, sampled_before) != null;
     if (!measured) e.clock.start();
-    try e.late.flush(e, ask);
+    try e.late.flush(e, Engine.askDrafts);
     // An unmeasured plain price retains the original clock boundary.
     if (measured) e.clock.start();
     const a = e.arena.allocator();
@@ -82,7 +82,7 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
             const s = plans[i].stream;
             r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(d) };
         }
-        try ask(e, requests);
+        try e.askDrafts(requests);
     } else {
         for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
     }

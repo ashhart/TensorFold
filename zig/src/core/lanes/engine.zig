@@ -255,10 +255,7 @@ pub const Engine = struct {
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
 
-    /// The shared round lives in its own file and takes the private draft call as an argument.
-    fn roundStreams(e: *Engine, entries: []*Stream) !void {
-        return @import("shared_round.zig").run(e, entries, Engine.askDrafts);
-    }
+    const roundStreams = @import("shared_round.zig").run;
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
     pub fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, rows_lp: []const LogRow, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
@@ -387,7 +384,7 @@ pub const Engine = struct {
         pub const askDrafts = Engine.askDrafts;
     } else struct {};
 
-    fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
+    pub fn askDrafts(e: *Engine, original: []const be.DraftRequest) !void {
         const requests = try @import("root_copy.zig").prepare(e, original);
         for (requests) |r| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(r.stream.id)), f("depth", int(r.depth)), f("position", int(r.position)), f("follow", .{ .u32s = r.follow }), f("rows", if (r.rows) |x| .{ .u32s = x } else .null) });
         // a lone stream's lanes: the head tree or chain + grafts with the most expected tokens a round time
