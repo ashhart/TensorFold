@@ -17,8 +17,7 @@ const bytes = @import("cuda_lanes_bytes.zig");
 const kvl = @import("cuda_kv_lanes.zig");
 const be = lanes.backend;
 const ring = 1024;
-/// Streams a round takes at most (a round with more live streams takes them in turns).
-const round_streams = 32;
+const round_streams = 32; // Streams a round takes at most (a round with more live streams takes them in turns).
 /// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
 pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
 pub const captured_head_entries = [_][]const u8{ "_rmsnorm", "_add_streams" };
