@@ -168,7 +168,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const acceptOffer = useCallback(() => { if (!session && offer && 'link' in offer) setPairingLink(offer.link); setOffer(null) }, [session, offer])
   const declineOffer = useCallback(() => setOffer(null), [])
 
-  // A paired phone shows no offer: a link that arrives while it is paired waits unseen and is dropped when the phone forgets its host.
+  // A paired phone shows no offer: a link arriving while paired waits unseen and is dropped on forget.
   return <Context.Provider value={{ session, host, ready, syncing, error, lastSynced, pairingLink, setPairingLink, offer: session ? null : offer, acceptOffer, declineOffer, pair, forget, refresh, client }}>{children}</Context.Provider>
 }
 
