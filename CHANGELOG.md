@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export.
+
 - DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) (#3567).
 
 - DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread (#3566).
