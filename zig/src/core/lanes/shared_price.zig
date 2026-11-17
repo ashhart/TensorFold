@@ -1,9 +1,9 @@
-//! Exact-count, exact-mode shared prices: a plain intercept and a drafted row excess.
+//! Exact-count, exact-mode shared prices: an independent plain option alongside the existing drafted curve.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const every: u64 = 64;
 pub const stale: u64 = 256;
-const Point = struct { residual: f64, rows: f64, at: u64 };
+const Point = struct { residual: f64, head: f64 = 0, at: u64 };
 const Bucket = struct {
     streams: usize,
     sampled: bool,
@@ -13,7 +13,7 @@ const Bucket = struct {
     plain: ?Point = null,
     draft: ?Point = null,
 };
-pub const Price = struct { plain: f64, fixed: f64, row: f64 };
+pub const Price = struct { plain: f64, fixed: f64, row: f64, head: f64 = 0 };
 
 pub const Prices = struct {
     buckets: std.ArrayList(Bucket) = .empty,
@@ -49,13 +49,17 @@ pub const Prices = struct {
 
     /// No drafting round moves the plain point; a count's first plain trial is a warm-up, each later one replaces it.
     pub fn observe(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, sampled: bool, plain: bool, calibration: bool) !void {
+        return p.observeHead(a, streams, rows, residual, 0, sampled, plain, calibration);
+    }
+
+    pub fn observeHead(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, head: f64, sampled: bool, plain: bool, calibration: bool) !void {
         const b = try p.get(a, streams, sampled);
         b.rounds +|= 1;
         if (calibration) b.last_probe = b.rounds;
         const trial = calibration and plain and rows == streams;
         if (trial) b.trials +|= 1;
         if (!std.math.isFinite(residual)) return;
-        const point: Point = .{ .residual = residual, .rows = @floatFromInt(rows), .at = b.rounds };
+        const point: Point = .{ .residual = residual, .head = head, .at = b.rounds };
         if (trial) {
             if (b.trials > 1) b.plain = point;
         } else if (plain and rows == streams) {
@@ -64,21 +68,18 @@ pub const Prices = struct {
     }
 
     /// Until a plain round is measured, leave the existing allocator and its draft ranking in charge.
-    pub fn price(p: *const Prices, streams: usize, sampled: bool, row: f64) ?Price {
+    pub fn price(p: *const Prices, streams: usize, sampled: bool, fixed: f64, head: f64, row: f64) ?Price {
         const b = p.buckets.items[p.find(streams, sampled) orelse return null];
         const plain = b.plain orelse return null;
-        var out: Price = .{ .plain = plain.residual, .fixed = plain.residual, .row = row };
-        if (b.draft) |draft| if (draft.rows > plain.rows) {
-            out.row = @max(0, (draft.residual - plain.residual) / (draft.rows - plain.rows));
-        };
-        return out;
+        const draft = b.draft;
+        return .{ .plain = plain.residual, .fixed = if (draft) |v| v.residual else fixed, .row = row, .head = if (draft) |v| v.head else head };
     }
 };
 
 fn blend(to: *?Point, v: Point) void {
     if (to.*) |*old| {
         old.residual += 0.2 * (v.residual - old.residual);
-        old.rows += 0.2 * (v.rows - old.rows);
+        old.head += 0.2 * (v.head - old.head);
         old.at = v.at;
     } else to.* = v;
 }

@@ -387,19 +387,19 @@ pub const Rule = struct {
         }
     }
 
-    /// Independent plain price and the row slope from a plain/drafted pair, at this exact count and mode.
+    /// A plain measurement changes only the zero-draft option, never the existing drafted curve.
     pub fn sharedPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
         if (streams < 2 or !r.plain_guard or r.confidence_floor != null) return null;
-        var price = r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled)) orelse return null;
-        // The independent plain point owns the intercept; row learning owns the signed, noise-tested slope.
-        if (r.k.learn_rows) price.row = r.row_cost.extraMs(streams, sampled);
+        const head = if (r.nearest(streams, sampled)) |o| o.head else 0;
+        var price = r.shared_price.price(streams, sampled, r.fixedMs(streams, sampled), head, r.row_cost.extraMs(streams, sampled)) orelse return null;
+        if (r.k.learn_rows) price.fixed = price.plain;
         return price;
     }
 
     /// Held drafts have already run; every verify option retains the round's same head fixed cost.
     pub fn verifyPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
         var price = r.sharedPrice(streams, sampled) orelse return null;
-        const head = if (r.nearest(streams, sampled)) |o| o.head else 0;
+        const head = price.head;
         price.plain += head;
         price.fixed += head;
         return price;
@@ -415,7 +415,7 @@ pub const Rule = struct {
     pub fn observeSharedPrice(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
             const residual = if (r.shared_costs.get(@intCast(rows))) |forward| ms - forward - head_ms else std.math.nan(f64);
-            try r.shared_price.observe(r.gpa, streams, rows, residual, sampled, plain, calibration);
+            try r.shared_price.observeHead(r.gpa, streams, rows, residual, head_ms, sampled, plain, calibration);
         }
     }
 
@@ -502,6 +502,7 @@ test {
     _ = @import("shared_warmup_test.zig");
     _ = @import("shared_head_price_test.zig");
     _ = @import("shared_price_learning_test.zig");
+    _ = @import("shared_price_8_test.zig");
 }
 
 test {
