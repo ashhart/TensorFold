@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal on M1 to M4: the 4-bit prompt matrix multiply reads each input row's group sums and half-precision operands from a prepass, bit-equal to the existing tiles; Qwen3.8-27B prompts run 3% to 4% faster on an M3 Ultra from 2K to 64K tokens, with decode level (#3215, toward #2089). Thanks to @jschmied.
+
 - GLM-5.3-Flash on Metal: routed experts stored in the official FP8 checkpoint's format (E4M3 codes, 128 x 128 f32 block scales) load as stored, and a combined checkpoint can point at whole FP8 shards, since a shard's tensors are read only where the index maps them. On an M5 Ultra, FP8 experts beside the 8-bit backbone decode prose at 60.8 tok/s against 55.7 with MLX 8-bit experts, with the same per-token loss (#3682).
 
 - Qwen3.8-27B on Metal before M5: a drafted window's rows run the decode attention in pairs over the keys below the window, so at a 32K prompt on an M3 Ultra drafted decode is 24% faster at one stream and 29% at eight with every reply unchanged; `TF_QWEN27_JOIN=0` keeps the unpaired pipelines (#3661).
