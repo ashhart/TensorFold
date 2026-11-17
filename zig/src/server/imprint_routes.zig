@@ -33,7 +33,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
     var cx: errors.Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
     var input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
-    input.cache_salt = @import("cache_salt.zig").ofRequest(srv, input.cache_salt, conn.key_digest); // as its turn keys it
+    input.cache_salt = @import("cache_salt.zig").ofRequest(srv, input.cache_salt, conn.key_digest); // match turn
     const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
     defer srv.release(p.preparing, p.request);
     const ask = make(srv, op, p.request) catch return conn.sendError(a, 500, "out of memory", null) catch {};
