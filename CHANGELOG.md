@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Super at TP=2 on CUDA: rank 1 gets one header a decode window and one exact-size message a layer, so it queues a window's layers with no host read between them (#2839).
+
 - Server: a `/v1/completions` request whose `prompt` is a list gets one choice a prompt, each the reply that prompt gets alone, streamed or not, with `usage` summed over all of them (#3194).
 
 - Fluid Subgraph Residency: the shared SSD expert code takes its stored-component count and MTP stage count as parameters, the groundwork for DeepSeek V4.1 experts on SSD; Flash Next reads, plans and traces byte for byte as before (#3683, step 1 of #3667).
