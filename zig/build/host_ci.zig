@@ -165,6 +165,7 @@ const linux_host = [_][]const u8{
     "test-flashnext-nonfinite-host",
     "test-flashnext-precise-host",
     "test-flashnext-prefill-pairs-host",
+    "test-flashnext-cancel-host",
     "test-flashnext-proposal-host",
     "test-flashnext-proposal-pack-host",
     "test-flashnext-rotary-bound-host",
