@@ -151,7 +151,8 @@ pub const Engine = struct {
         errdefer gpa.destroy(backend);
         backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
-        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
+        kb.tile_pad = o.settings.kda_pad; // its common width for glm_mm, else this rank's own rows to 16 bytes
+        kb.pad_to = if (kb.tile_pad) kb.padWidth(c.kda_heads, world) else kb.alignedWidth(share.kda.len());
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
@@ -177,6 +178,7 @@ pub const Engine = struct {
             head: u8,
             packs: *mm_mod.Packed,
             fn apply(t: @This(), w: *weights.Weights) !void {
+                try tile.padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
                 if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
             }
         };
