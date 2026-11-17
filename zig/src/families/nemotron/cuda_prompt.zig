@@ -21,13 +21,14 @@ const prompt_tail = @import("core").prompt_tail;
 const pin_sampled = engine.pin_sampled;
 const pin_prompt = engine.pin_prompt;
 
-/// The request's message starts. The lane host passes its stream as both the keep hook's context
-/// and the cancel check's pointer; a standalone prefill (bench, decode) passes neither, so it cuts
-/// at the engine's grid alone. Reading the stream here keeps the serving call site unchanged.
+/// The request's message starts, sent on every pass including a cache-off one: the lane host passes
+/// its stream as both the keep hook's context and the cancel check's pointer, so neither a cache
+/// budget nor a keep callback gates the cuts. A standalone prefill (bench, decode) has no stream and
+/// cuts at the engine's grid alone. `lanes.cutPoints` is the single switch point for D920's list.
 fn requestChunks(cancel: ?Cancel, keep: ?Keep) []const u32 {
     const ctx = if (keep) |k| k.ctx else if (cancel) |c| c.ptr else return &.{};
     const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
-    return s.chunks;
+    return lanes.cutPoints(s);
 }
 
 /// The end of the chunk starting at `at`: the grid `step`, a message start, a store mark, or the
