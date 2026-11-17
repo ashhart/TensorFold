@@ -23,6 +23,10 @@ pub fn adapter(c: @import("config.zig").Config) release.Adapter {
     return .{ .layers = @intCast(c.layers), .hidden = @intCast(c.hidden), .vocab = @intCast(c.vocab), .embed_scale = 1.0, .tied = false, .softcap = null, .head_bias = false };
 }
 
+fn gib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
+
 const Lane = struct { slot: u32, pos: u64 = 0, token: u32 = 0, rows: bool = false, held: [chain]u32 = undefined, held_len: u32 = 0 };
 
 pub const Drafter = struct {
@@ -43,8 +47,8 @@ pub const Drafter = struct {
     layers: []E.Layer,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
 
-    /// The release in `dir` over `kb`'s model: refused by name (logged) when it is not one this engine serves.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, kb: *be.Kolibri, k: *const kern.Kernels, dir: []const u8) !*Drafter {
+    /// The release in `dir` over `kb`'s model: refused by name (logged) if not served or past `left` device bytes.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, kb: *be.Kolibri, k: *const kern.Kernels, dir: []const u8, left: ?u64) !*Drafter {
         var folder = try std.Io.Dir.cwd().openDir(io, dir, .{});
         defer folder.close(io);
         var why: release.Why = .{};
@@ -58,6 +62,10 @@ pub const Drafter = struct {
             std.log.err("--drafter {s}: a {s} release; Kolibri-1 on CUDA serves eagle3 releases", .{ dir, @tagName(c.architecture) });
             return error.DrafterArchitectureNotServed;
         }
+        _ = admit(c, r.vocab.len, kb.m.slots, left) catch |e| {
+            std.log.err("--drafter {s}: needs {d:.2} GiB of device memory for {d} stream{s} and a timing slot; the budget leaves {d:.2} GiB", .{ dir, gib(need(c, r.vocab.len, kb.m.slots)), kb.m.slots, if (kb.m.slots == 1) "" else "s", gib(left.?) });
+            return e;
+        };
         const x = try gpa.create(Drafter);
         errdefer gpa.destroy(x);
         x.* = .{ .gpa = gpa, .io = io, .kb = kb, .act = undefined, .e = undefined, .vocab = try gpa.dupe(u32, r.vocab), .n_taps = c.taps.ids.len, .depth = c.serving.depth, .layers = &.{} };
@@ -67,11 +75,42 @@ pub const Drafter = struct {
         errdefer x.act.unload();
         errdefer x.freeWeights();
         const w = try x.upload(dir, c, r.names, k);
-        const s = c.drafter;
-        const dims: E.Dims = .{ .hidden = s.hidden, .heads = s.heads, .head_dim = s.head_dim, .ffn = s.ffn, .layers = s.layers, .taps = x.n_taps, .vocab = x.vocab.len, .window = s.window, .chain = chain, .eps = @floatCast(s.eps) };
         const ops: E.Ops = .{ .dense = &k.dense, .norms = &k.norms, .qk = &k.qk, .win = &k.win, .embed = &k.embed, .act = &x.act, .argmax = k.argmax_fn, .to_bf16 = k.to_bf16_fn };
-        x.e = try E.Eagle3.init(gpa, kb.d, kb.s, dims, w, ops);
+        x.e = try E.Eagle3.init(gpa, kb.d, kb.s, dimsOf(c, x.vocab.len), w, ops);
         return x;
+    }
+
+    /// The passes' shapes for release config `c` and a draft vocabulary of `vocab` rows.
+    fn dimsOf(c: *const release.Config, vocab: usize) E.Dims {
+        const s = c.drafter;
+        return .{ .hidden = s.hidden, .heads = s.heads, .head_dim = s.head_dim, .ffn = s.ffn, .layers = s.layers, .taps = c.taps.ids.len, .vocab = vocab, .window = s.window, .chain = chain, .eps = @floatCast(s.eps) };
+    }
+
+    /// Device bytes `upload` puts, from the shapes `core.drafter_layout` checked (projections bf16, norms fp32).
+    pub fn weightBytes(c: *const release.Config, vocab: usize) usize {
+        const s = c.drafter;
+        const d: usize = s.hidden;
+        const att = @as(usize, s.heads) * s.head_dim;
+        const t: usize = c.target.hidden;
+        const layer = [_]usize{ 3 * att * d * 2, d * att * 2, 2 * s.ffn * d * 2, d * s.ffn * 2, d * 4, d * 4 };
+        const rest = [_]usize{ vocab * 4, vocab * d * 2, d * c.taps.ids.len * t * 2, d * (t + d) * 2, d * 4, s.head_dim / 2 * 4 };
+        var sum: usize = 0;
+        for (layer) |b| sum += s.layers * @max(b, 256);
+        for (rest) |b| sum += @max(b, 256);
+        return sum;
+    }
+
+    /// Device bytes the drafter takes beside `slots` streams: weights, scratch, each slot's caches and a timing slot's.
+    pub fn need(c: *const release.Config, vocab: usize, slots: usize) usize {
+        const dm = dimsOf(c, vocab);
+        return weightBytes(c, vocab) + dm.scratchBytes() + (slots + 1) * dm.streamBytes();
+    }
+
+    /// `need` when `left` (null: unread) holds it, else DrafterPastMemory; from the config alone, nothing allocated.
+    pub fn admit(c: *const release.Config, vocab: usize, slots: usize, left: ?u64) !usize {
+        const bytes = need(c, vocab, slots);
+        if (left) |l| if (l < bytes) return error.DrafterPastMemory;
+        return bytes;
     }
 
     fn put(x: *Drafter, bytes: []const u8) !u64 {
@@ -304,4 +343,30 @@ test "the loaded Kolibri-1 is the adapter its published drafters were trained ag
     try std.testing.expectEqual(@as(u32, 50), a.layers);
     try std.testing.expectEqual(@as(u32, 2560), a.hidden);
     try std.testing.expectEqual(@as(u32, 128000), a.vocab);
+}
+
+test "the drafter's device bytes come from its config alone; one byte short refuses by name, nothing allocated" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const config = @import("config.zig");
+    var why: config.Why = .{};
+    const kc = try config.parse(arena.allocator(), config.pinned, &why);
+    // the published EAGLE-3 release's config.json (josch15366/Kolibri-1-EAGLE3-drafter), training counts left out
+    const text =
+        \\{"architecture": "kolibri1-eagle3-drafter", "target": "Aleph-Alpha/Kolibri-1",
+        \\ "drafter": {"hidden": 2560, "heads": 20, "head_dim": 128, "ffn": 4096, "eps": 1e-06, "theta": 10000.0,
+        \\  "layers": 1, "taps": 3}, "taps": [44, 47, 49], "draft_vocab": "draft_vocab.json", "draft_vocab_size": 32768}
+    ;
+    var rwhy: release.Why = .{};
+    const got = try published.parse(arena.allocator(), text, .{ .repo = target_repo, .adapter = adapter(kc) }, &rwhy);
+    const c = &got.config;
+    const v = 32768;
+    // per layer q|k|v, o, gate|up, down, 2 norms; ids, head rows, fuse, fc, out_norm, RoPE (each listed in weightBytes)
+    try std.testing.expectEqual(@as(usize, 348813568), Drafter.weightBytes(c, v));
+    const stream: usize = 2 * 2368 * 2560 * 2 + 2560 * 2; // a slot's keys, values and last output
+    const one = Drafter.need(c, v, 1);
+    try std.testing.expectEqual(348813568 + 70528256 + 2 * stream, one); // scratch 70528256: a pass of 256 rows
+    try std.testing.expectError(error.DrafterPastMemory, Drafter.admit(c, v, 1, one - 1));
+    try std.testing.expectEqual(one, try Drafter.admit(c, v, 1, one));
+    try std.testing.expectEqual(one + 7 * stream, try Drafter.admit(c, v, 8, null)); // linear caches: 8 at open
 }

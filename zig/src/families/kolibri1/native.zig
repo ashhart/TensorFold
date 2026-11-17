@@ -187,9 +187,9 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     if (bits != 4 and bits != 0) return error.DrafterBitsUnsupported; // the releases are bf16: default or 0 only
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.kb.lanes.count() != 0) return error.TapsAfterStreams;
-    const d = try eagle.Drafter.open(gpa, io, &own.kb, &own.k, dir);
+    const left = if (own.room) |r| r.read(r.ctx) else null; // the release's own bytes refuse before any is allocated
+    const d = try eagle.Drafter.open(gpa, io, &own.kb, &own.k, dir, left);
     errdefer d.deinit();
-    if (own.room) |r| if (r.read(r.ctx)) |left| if (left < 1 << 30) return error.DrafterPastMemory; // caches and scratch
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
 }
 
@@ -251,7 +251,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadDrafterRelease, error.AdapterMismatch => "--drafter: the folder is not a drafter release for Kolibri-1 (the log line names what is wrong)",
         error.DrafterArchitectureNotServed => "--drafter: Kolibri-1 on CUDA serves the EAGLE-3 release (josch15366/Kolibri-1-EAGLE3-drafter) only",
         error.DrafterBitsUnsupported => "--drafter-bits: Kolibri-1's drafter releases are bf16; serve without --drafter-bits",
-        error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves no room for the drafter's caches: lower --parallel or --context",
+        error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves too little for the drafter's weights, scratch and caches (the log line names the bytes): lower --parallel or --context",
         error.StructuresUnsupported => "structured output is not built for Kolibri-1 on CUDA yet",
         error.CapturedKernels => "Kolibri-1 runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Kolibri-1 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
