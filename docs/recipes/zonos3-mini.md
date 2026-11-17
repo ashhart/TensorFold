@@ -73,8 +73,20 @@ condition values (every condition row is its "unknown" bucket), the `full_mr` de
   sample.
 - All four kernel images build with the glue flags (`--fmad=false`, IEEE division and square root).
 
-The reference's oracle (`zonos3.reference`, `tools/dump_golden.py lm`) runs the backbone in fp32 on the CPU, which
-is what the port is compared with. The publisher's CUDA servers run parts in bf16; see "The reference's bf16 paths".
+### The arithmetic reference
+
+One reference, fixed for every part of the model: the publisher's PyTorch code (the pinned reference repo) run in
+fp32 on the CPU over the published weights, with no autocast. The backbone's oracle (`zonos3.reference`,
+`tools/dump_golden.py lm`) already runs that way; for the codec decoder, the encoder and the teacher,
+`tools/zig/zonos3_reference.py` runs the publisher's modules in fp32 where its servers would use bf16 autocast.
+
+The gates against it are exact: greedy frames equal frame for frame, a clip's codes equal code for code, streamed
+bytes equal whole ones. Cosines, SNR figures and voice scores on this page describe how close intermediate values
+are; none of them is a gate.
+
+What this choice costs: the publisher's CUDA servers run the codec and the teacher in bf16, so the codes this port
+encodes from a clip are not the codes the publisher's server encodes from it. "The reference's bf16 paths" measures
+the difference. The port has no bf16 path and none is planned as an option.
 
 ## How it was checked
 
@@ -298,9 +310,10 @@ Decoding the 9.67 s clip's three sets of codes with the reference decoder and co
 | The reference's bf16 run | 0.576 | 0.944 |
 | The fp32 run (what the port produces) | 0.620 | 0.947 |
 
-That is one clip: the fp32 codes keep the speaker as well and sit about 8% further in log-mel distance. Whether
-that gap is real across clips, and whether the backbone (trained on bf16-encoded references) clones as well from
-fp32 codes, needs a proper listening or scoring pass before the encoder's gate is agreed.
+That is one clip: the fp32 codes keep the speaker as well and sit about 8% further in log-mel distance. These
+scores are context, not a gate: the encoder's gate is code equality with the fp32 reference ("The arithmetic
+reference"). Not measured: whether that gap holds across clips, and whether the backbone, which was trained on
+bf16-encoded references, clones as well from fp32 codes.
 
 ## Shared code this touches
 
