@@ -87,7 +87,7 @@ fn listed(names: []const []const u8, key: []const u8) bool {
 }
 
 /// Refuses what this route would drop: unknown fields, set modifiers, non-strings, a bad ``stream``/``stream_format``.
-fn checkFields(cx: *Cx, body: Value, inline_voices: bool) errors.Refused!void {
+fn checkFields(cx: *Cx, body: Value, inline_voices: bool, zonos: bool) errors.Refused!void {
     for (body.object.keys(), body.object.values()) |key, value| {
         if (listed(&served_fields, key)) {
             if (value == .object and inline_voices and std.mem.eql(u8, key, "voice")) continue; // an attested voice object
@@ -98,7 +98,7 @@ fn checkFields(cx: *Cx, body: Value, inline_voices: bool) errors.Refused!void {
             if (value == .null or (value == .string and std.mem.eql(u8, value.string, "audio"))) continue;
             if (value == .string and std.mem.eql(u8, value.string, "sse")) return cx.refuse("stream_format sse is not supported by this model");
             return cx.refuse("stream_format must be one of: audio, sse");
-        } else if (speech_sampling.isField(key) or std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)) {
+        } else if (speech_sampling.isField(key) or (zonos and (std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)))) {
             continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
             if (value != .null) return cx.fail(.request, "{s} is not supported by this model", .{key});
@@ -117,7 +117,7 @@ fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("speech request body must be a JSON object");
-    try checkFields(cx, raw, srv.config.voice.inline_voices);
+    try checkFields(cx, raw, srv.config.voice.inline_voices, srv.zonos != null);
     const zonos = @import("zonos_speech.zig");
     const sampling = if (srv.zonos != null) try speech_sampling.parseFrom(cx, raw, .{ .temperature = zonos.temperature, .top_p = zonos.top_p, .top_k = zonos.top_k }, zonos.max_top_k) else try speech_sampling.parse(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
@@ -133,9 +133,6 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
     const codes = raw.field(zonos_codes);
     const clip = raw.field(zonos_clip);
-    if (srv.zonos == null) for ([_]struct { ?Value, []const u8 }{ .{ codes, zonos_codes }, .{ clip, zonos_clip } }) |f| {
-        if (f[0] != null) return cx.fail(.request, "{s} is not supported by this model", .{f[1]});
-    };
     if (srv.zonos) |state| {
         const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
         const made = try zonos.plan(state, cx, srv.text, sp, input, voice, codes, clip);
@@ -468,6 +465,20 @@ pub fn quantizeInPlace(pcm: []f32) error{NonFinite}![]u8 {
     return bytes[0 .. 2 * pcm.len];
 }
 
+test "fields: a ZONOS3 server takes a clip and reference codes, any other refuses both as before" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = (try json.parse(a, "{\"model\": \"m\", \"input\": \"hi\", \"ref_audio\": \"UklGRg==\", \"speaker_reference_codes\": [[1]]}")).ok;
+    var cx: Cx = .{ .a = a };
+    try checkFields(&cx, body, false, true);
+    try std.testing.expectError(error.Refused, checkFields(&cx, body, false, false));
+    try std.testing.expectEqualStrings("ref_audio is not supported by this model", cx.message);
+    const codes = (try json.parse(a, "{\"model\": \"m\", \"input\": \"hi\", \"speaker_reference_codes\": [[1]]}")).ok;
+    try std.testing.expectError(error.Refused, checkFields(&cx, codes, false, false));
+    try std.testing.expectEqualStrings("unknown speech request field: speaker_reference_codes", cx.message);
+}
+
 test "fields: unknown ones are refused even when null, modifiers when set" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -490,9 +501,9 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
         var cx: Cx = .{ .a = a };
         const body = (try json.parse(a, case[0])).ok;
         if (case[1].len == 0) {
-            try checkFields(&cx, body, false);
+            try checkFields(&cx, body, false, false);
         } else {
-            try std.testing.expectError(error.Refused, checkFields(&cx, body, false));
+            try std.testing.expectError(error.Refused, checkFields(&cx, body, false, false));
             try std.testing.expectEqualStrings(case[1], cx.message);
         }
     }
