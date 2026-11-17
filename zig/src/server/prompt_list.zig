@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const openai = @import("openai.zig");
+const warm = @import("warm.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -150,7 +151,7 @@ pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, plan:
         choices[i] = .{ .fan = &fan, .i = @intCast(i) };
         var p = plan;
         p.input.prompt = .{ .text = prompts[i] }; // the request as if it named this prompt alone
-        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = false, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = false, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .forgets = warm.forgets.load(.seq_cst) };
     }
     var pool: Pool = .{ .runs = runs[0..n], .fan = &fan, .gone = gone, .stream = plan.stream };
     var threads: [workers - 1]?std.Thread = @splat(null);
