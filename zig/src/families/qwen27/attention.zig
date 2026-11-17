@@ -33,7 +33,7 @@ pub const Limits = struct {
     /// Numeric shape; shared_prefix above selects the allocation's execution mode.
     geometry: planning.Geometry = .{},
 };
-pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v, pick };
+pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v, pick, mates };
 pub const BindingField = enum { meta, caches, keep_map };
 // Each layer owns immutable descriptors until its command buffer is terminal; arithmetic workspace is shared serially.
 pub const Binding = struct {
@@ -184,6 +184,7 @@ pub const Scratch = struct {
         @memcpy(s.get(.nodes).buffer.slice(i32, plan.nodes.len), plan.nodes);
         @memcpy(s.get(.paths).buffer.slice(i32, plan.paths.len), plan.paths);
         @memcpy(s.get(.positions).buffer.slice(i32, plan.positions.len), plan.positions);
+        if (plan.pairs > 0) @memcpy(s.get(.mates).buffer.slice(i32, plan.mates.len), plan.mates);
         s.uploaded = fingerprint(plan);
     }
     pub fn check(s: *const Scratch, plan: Plan) !void {
@@ -213,6 +214,7 @@ fn fingerprint(plan: Plan) [32]u8 {
     }
     hash.update(std.mem.asBytes(&plan.meta));
     inline for (.{ plan.tile_stream, plan.q_rows, plan.nodes, plan.paths, plan.positions }) |values| hash.update(std.mem.sliceAsBytes(values));
+    if (plan.pairs > 0) hash.update(std.mem.sliceAsBytes(plan.mates)); // unpaired plans keep their hash
     var digest: [32]u8 = undefined;
     hash.final(&digest);
     return digest;
@@ -258,6 +260,8 @@ pub const Attention = struct {
     io: [11]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
+    /// Q27_JOIN's pack_b, tail and merges (attention_join.pipelines), taken for a plan with pairs (Plan.pair)
+    join: ?[4]mtl.Pipeline = null,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
         var p: [32]mtl.Pipeline = undefined;
         var pn: usize = 0;
@@ -281,6 +285,7 @@ pub const Attention = struct {
     pub fn deinit(a: *Attention) void {
         for (a.prefix ++ a.io) |pipe| pipe.deinit();
         if (a.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
+        if (a.join) |pipes| for (pipes) |pipe| pipe.deinit();
     }
     /// Prompt kernel, pair and single merges, masked kernel, scan, pick; before M5 null below `prompt_threads`.
     pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[6]mtl.Pipeline {
@@ -493,10 +498,12 @@ pub const Attention = struct {
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
     fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool) !void {
         const g = plan.geometry;
+        const join = if (plan.pairs > 0) a.join else null;
         if (!plan.fused) {
-            e.setPipeline(a.io[1]);
+            e.setPipeline(if (join) |j| j[0] else a.io[1]);
             bind(e, .{ q, scratch.get(.qb) });
             e.setValue(args, 2);
+            if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 3);
             e.dispatchThreads(mtl.Size.of(g.dim, 16, g.kv_heads * plan.rows), mtl.Size.of(32, 4, 1));
         }
         e.barrier();
@@ -517,7 +524,7 @@ pub const Attention = struct {
             e.barrier();
         }
         if (!plan.fused) {
-            e.setPipeline(a.io[3]);
+            e.setPipeline(if (join) |j| j[1] else a.io[3]);
             bind(e, .{ scratch.get(.qb), binding.get(.caches) });
             e.setValue(scale, 2);
             e.setBuffer(binding.get(.meta).buffer, 0, 3);
@@ -525,13 +532,15 @@ pub const Attention = struct {
                 const r = scratch.get(field);
                 e.setBuffer(r.buffer, 0, i);
             }
+            if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 12);
             e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
-        e.setPipeline(a.io[if (split) 4 else 10]);
+        e.setPipeline(if (join) |j| j[if (split) 2 else 3] else a.io[if (split) 4 else 10]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
         if (split) e.setValue(g.heads, 11);
+        if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 12);
         e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
