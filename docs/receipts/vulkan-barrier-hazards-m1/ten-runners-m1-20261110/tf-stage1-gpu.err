@@ -1,0 +1,27 @@
+MILESTONE device-found elapsed_ms=4 name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 type=integrated api=1.4.362 driver="Honeykrisp" info="Mesa 26.3.0-devel (git-9323171c12)" subgroup=32 storage16=true int16=true max-storage-range=2147483647 max-buffer-size=137438953472 fence-timeout=60000ms
+MILESTONE cast-f32-bf16 elapsed_ms=61 elements=146 vectors=18 randoms=128 exact bits, tails unchanged
+MILESTONE cast-bf16-f32 elapsed_ms=61 elements=146 vectors=18 randoms=128 exact bits, tails unchanged
+MILESTONE copy-u32 elapsed_ms=62 elements=9 src_off=64 dst_off=128 exact bytes, guards and source unchanged
+MILESTONE copy-u16 elapsed_ms=63 elements=22 src_off=128 dst_off=256 exact bytes, guards and source unchanged
+MILESTONE gather-u32 elapsed_ms=64 rows=6 cols=10 tokens=4 rows exact incl repeat, out-of-range id gathers zeros, tails unchanged
+MILESTONE gather-bf16 elapsed_ms=64 rows=6 cols=10 tokens=4 rows exact incl repeat, out-of-range id gathers zeros, tails unchanged
+MILESTONE check-ids elapsed_ms=64 valid ids pass, boundary id refused before upload
+MILESTONE embedding elapsed_ms=65 case="6 tok 8 rows k64" tokens=6 rows=8 k=64 within bf16 bound, ids include a repeat, table and tails unchanged
+MILESTONE embedding elapsed_ms=66 case="3 tok 4 rows k128 repeats" tokens=3 rows=4 k=128 within bf16 bound, ids include a repeat, table and tails unchanged
+MILESTONE project elapsed_ms=69 case="m1 n8 k64" worst=0.7485 of bound at row 0 col 1, max_abs=2.522643655538559e-3, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=74 case="m2 n257 k128" worst=0.8880 of bound at row 0 col 131, max_abs=7.288329303264618e-3, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=77 case="m2 n256 k128 offsets" worst=0.9205 of bound at row 0 col 35, max_abs=1.5103191137313843e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=80 case="m3 n8 k64 cancel" worst=0.6477 of bound at row 0 col 4, max_abs=4.5108795166015625e-4, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=85 case="m1 n16 k2048" worst=0.2208 of bound at row 0 col 12, max_abs=1.1380931362509727e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=95 case="m2 n16 k6144 offsets" worst=0.0988 of bound at row 1 col 4, max_abs=2.9790184809826314e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=567 case="m32 n2048 k6144" worst=0.3003 of bound at row 16 col 745, max_abs=1.2159601086750627e-1, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=571 case="m4 n64 k128" worst=0.9146 of bound at row 2 col 47, max_abs=1.5507012605667114e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=575 case="m5 n300 k128 offsets" worst=0.9337 of bound at row 1 col 54, max_abs=7.781654596328735e-3, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=577 case="m7 n40 k256" worst=0.8347 of bound at row 4 col 17, max_abs=1.1798698455095291e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=582 case="m33 n258 k128" worst=0.9678 of bound at row 15 col 49, max_abs=1.5257224440574646e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=759 case="m1 n4096 k2048" worst=0.5086 of bound at row 0 col 59, max_abs=3.121222648769617e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=998 case="m1 n6144 k2048" worst=0.6793 of bound at row 0 col 264, max_abs=6.241181236691773e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=1241 case="m1 n2048 k6144 offsets" worst=0.1806 of bound at row 0 col 1390, max_abs=6.1923994187964126e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=1744 case="m32 n6144 k2048" worst=0.6619 of bound at row 31 col 2096, max_abs=6.245513679459691e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+MILESTONE project elapsed_ms=7144 case="m1 n140000 k2048 chunked on a 128 MiB range" worst=0.6710 of bound at row 0 col 61151, max_abs=6.2465062364935875e-2, tile=identical, repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused
+RESULT stage1 elapsed_ms=7151 on "Apple M1 (G13G B1)": passed=25 total=25

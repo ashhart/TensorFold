@@ -1,0 +1,12 @@
+MILESTONE device-found elapsed_ms=8 name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 api=1.4.362 storage16=true int16=true subgroups=63 shuffle-relative=true subgroup-size=32 fence-timeout=10000ms
+MILESTONE greedy elapsed_ms=37 gate="vocab-248320" count=248320 token=124160 reference=124160 repeats=3 identical inputs-guards-unchanged
+MILESTONE greedy elapsed_ms=60 gate="ties-across-chunks" count=248320 token=1 reference=1 repeats=3 identical inputs-guards-unchanged
+MILESTONE greedy elapsed_ms=72 gate="all-negative" count=248320 token=124160 reference=124160 repeats=3 identical inputs-guards-unchanged
+MILESTONE greedy elapsed_ms=86 gate="signed-zero-both-orders" count=248320 plus-first-token=5 minus-first-token=5 reference=lowest-index repeats=3 identical inputs-guards-unchanged
+error: greedy: non-finite bf16 logit at index 82773 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 124160 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 165546 of 248320; row refused
+MILESTONE greedy elapsed_ms=108 gate="nonfinite-refused" count=248320 nan-first-bad=82773 pinf-first-bad=124160 ninf-first-bad=165546 verdict=NonFinite decode-refuses inputs-guards-unchanged
+MILESTONE greedy elapsed_ms=119 gate="min-count-2" count=2 token=1 reference=1 repeats=3 identical inputs-guards-unchanged
+MILESTONE greedy elapsed_ms=119 gate="odd-count-refused" count=7 refused=Misaligned before-any-dispatch
+RESULT stage5 elapsed_ms=119 on "Apple M1 (G13G B1)": passed=7 total=7
