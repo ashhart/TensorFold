@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on CUDA: `qwen3_5` and `qwen3_5_moe` declare warm turns, so the server prefills a follow-up's prompt in the background and the next turn resumes past the previous reply, with replies unchanged (#2824). Thanks to @devopsfortunato.
+
 - Server: tool-call markup quoted in Markdown inline code spans and fenced code blocks stays prose, in whole replies and in streaming, instead of opening, hiding or running as a live tool call (#3588). Thanks to @gilby.
 
 - Lanes: shared draft pricing prices a chain-cut, unmeasured tail by the rule's rates instead of as a measured zero, and the cache's cut marker survives allocation errors (#2979). Thanks to @devopsfortunato.
