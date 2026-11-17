@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- H3 on Metal: `Model.load` reads every transformer shard ahead of its mappings and fails the load on a missing or short shard; `TF_LOAD_PREFETCH` sets the reader count and `0` turns read-ahead off (#2999). Thanks to @plotarmordev.
+
 - App: an idle task's disabled Planning only control opens the model picker on Local, so a planning provider no longer strands the user; the ordinary model button still opens All (#3357). Thanks to @garvrao80.
 
 - Studio: local benchmark receipts with the optional `hardware.form_factor` field are accepted, kept in saved history and exports, while unknown labels, raw product IDs and extra hardware keys are still rejected (#2693). Thanks to @garvrao80.
