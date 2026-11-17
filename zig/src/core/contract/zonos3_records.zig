@@ -1,0 +1,48 @@
+//! ZONOS3 Mini's Metal launches (zig/tests/contract/metal_zonos3*.zig): the backbone, the codec decoder, the codec
+//! encoder and its SSL teacher, as families/zonos3/metal/*_kernels.zig launch them. M1 and M2 limits from
+//! `tf-kernel-contract --offline` (the three attentions reserve their threads in the source); the dynamic bytes are the largest a served launch sets (a linear's K * 4, a
+//! convolution's taps * Cin * 4).
+const limits = @import("limits.zig");
+
+pub const records = [_]limits.MetalLaunch{
+    .{ .name = "zonos3 backbone z3_embed", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_rmsnorm", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_attnres", .threads = 256, .tg_memory = 384, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_linear", .threads = 256, .tg_memory = 0, .dynamic = 16384, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_conv_silu", .threads = 256, .tg_memory = 0, .m1 = 928, .m2 = 928 },
+    .{ .name = "zonos3 backbone z3_gdn_prep", .threads = 128, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_gdn", .threads = 128, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_gated_norm", .threads = 128, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_attn_prep", .threads = 512, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_attention", .threads = 256, .tg_memory = 17680, .reserved = 256, .m1 = 256, .m2 = 256 },
+    .{ .name = "zonos3 backbone z3_mul_silu", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_route", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_combine", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 backbone z3_softcap", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_linear", .threads = 256, .tg_memory = 0, .dynamic = 23552, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_layernorm", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_attn_prep", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_attention", .threads = 128, .tg_memory = 17296, .reserved = 128, .m1 = 128, .m2 = 128 },
+    .{ .name = "zonos3 codec zc_add_scaled", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_gelu", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_patch_up", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_dwconv", .threads = 256, .tg_memory = 0, .m1 = 928, .m2 = 928 },
+    .{ .name = "zonos3 codec zc_gather", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_latent", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_spec", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_ola", .threads = 256, .tg_memory = 0, .m1 = 928, .m2 = 928 },
+    .{ .name = "zonos3 codec zc_mix", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 codec zc_resample", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_resample_in", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_conv", .threads = 256, .tg_memory = 0, .dynamic = 4096, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_snake", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_add", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_sub", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_patch_down", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_nearest", .threads = 256, .tg_memory = 2048, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 encoder ze_sub_code", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 teacher zt_swish", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 teacher zt_glu", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 teacher zt_dwconv", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "zonos3 teacher zt_attention", .threads = 128, .tg_memory = 17584, .reserved = 128, .m1 = 128, .m2 = 128 },
+};

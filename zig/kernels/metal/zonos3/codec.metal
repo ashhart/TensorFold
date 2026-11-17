@@ -100,7 +100,7 @@ kernel void zc_attn_prep(device float* qkv [[buffer(0)]], device float* kc [[buf
 // The 65 partial sums of each thread are folded in two halves (threadgroup memory holds 33 a thread), each in
 // zonos3_codec.cu's order: thread 0 to 127.
 struct ZAttentionArgs { int D; int pos0; int ctx; };
-kernel void zc_attention(device const float* qkv [[buffer(0)]], device const float* kc [[buffer(1)]],
+[[max_total_threads_per_threadgroup(128)]] kernel void zc_attention(device const float* qkv [[buffer(0)]], device const float* kc [[buffer(1)]],
                          device const float* vc [[buffer(2)]], device float* out [[buffer(3)]],
                          constant ZAttentionArgs& a [[buffer(4)]], uint2 gid [[threadgroup_position_in_grid]],
                          uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],

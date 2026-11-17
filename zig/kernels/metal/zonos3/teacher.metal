@@ -38,7 +38,7 @@ kernel void zt_dwconv(device const float* x [[buffer(0)]], device const float* w
 // threads' 65 partial sums are folded through threadgroup memory in two halves (33, then 32), each value's 128 terms
 // in thread order as on CUDA.
 struct TAttnArgs { int D; int T; };
-kernel void zt_attention(device const float* qkv [[buffer(0)]], device const float* E [[buffer(1)]],
+[[max_total_threads_per_threadgroup(128)]] kernel void zt_attention(device const float* qkv [[buffer(0)]], device const float* E [[buffer(1)]],
                          device float* out [[buffer(2)]], constant TAttnArgs& a [[buffer(3)]],
                          uint2 gid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {

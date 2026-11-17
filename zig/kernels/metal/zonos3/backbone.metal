@@ -231,7 +231,7 @@ kernel void z3_attn_prep(device float* q [[buffer(0)]], device const float* kv [
 // The 33 partial sums of each thread are folded in two halves (threadgroup memory holds 17 a thread), each in
 // zonos3.cu's order: thread 0 to 255.
 struct AttentionArgs { int pos0; };
-kernel void z3_attention(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]],
+[[max_total_threads_per_threadgroup(256)]] kernel void z3_attention(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]],
                          device const float* vc [[buffer(2)]], device const float* gate [[buffer(3)]],
                          device float* out [[buffer(4)]], constant AttentionArgs& a [[buffer(5)]],
                          uint2 gid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
