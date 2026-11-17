@@ -43,6 +43,15 @@ fn delayed(codes: []const [C]i32, i: usize) [W]i32 {
     return r;
 }
 
+/// A reference clip's codes as a prompt's first rows: delayed a row a codebook, then their flushed tail (caller frees).
+pub fn referenceRows(gpa: std.mem.Allocator, codes: []const [C]i32) ![][W]i32 {
+    if (codes.len == 0) return error.EmptyReference;
+    for (codes) |row| for (row) |code| if (code < 0 or code >= cfg.codebook_size) return error.BadReferenceCode;
+    const rows = try gpa.alloc([W]i32, codes.len + C - 1);
+    for (rows, 0..) |*row, i| row.* = delayed(codes, i);
+    return rows;
+}
+
 /// `ids`: the text's SuperBPE ids. `silence`: the codec's silence frame, `silence_frames` of it prefilled (0: none).
 pub fn build(gpa: std.mem.Allocator, ids: []const u32, speaker: Speaker, silence: [C]i32, silence_frames: usize) !Prompt {
     if (ids.len == 0) return error.EmptyText;
@@ -56,10 +65,9 @@ pub fn build(gpa: std.mem.Allocator, ids: []const u32, speaker: Speaker, silence
             try rows.append(gpa, blank());
         },
         .reference => |codes| {
-            if (codes.len == 0) return error.EmptyReference;
-            for (codes) |row| for (row) |code| if (code < 0 or code >= cfg.codebook_size) return error.BadReferenceCode;
-            // the delayed codes and their flushed tail
-            for (0..codes.len + C - 1) |i| try rows.append(gpa, delayed(codes, i));
+            const prefix = try referenceRows(gpa, codes);
+            defer gpa.free(prefix);
+            try rows.appendSlice(gpa, prefix);
         },
     }
     const condition_row = rows.items.len;
