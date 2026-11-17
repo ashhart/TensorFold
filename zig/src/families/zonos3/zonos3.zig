@@ -16,6 +16,7 @@ pub const codec = @import("cuda/codec.zig");
 pub const codec_weights = @import("cuda/codec_weights.zig");
 pub const encoder = @import("cuda/encoder.zig");
 pub const teacher = @import("cuda/teacher.zig");
+pub const quantizer = @import("cuda/quantizer.zig");
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
@@ -35,4 +36,5 @@ test {
     _ = release;
     _ = voices;
     _ = codec_weights;
+    _ = quantizer;
 }

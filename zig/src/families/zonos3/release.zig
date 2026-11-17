@@ -5,6 +5,8 @@ const cfg = @import("config.zig");
 pub const lm_dir = "lm/zonos3_mini";
 /// The SuperBPE tokenizer params.json names, inside the language model's folder.
 pub const tokenizer_file = "tokenizer/superbpe8192.json";
+/// The codec encoder's SSL teacher, a folder with its model.safetensors.
+pub const teacher_dir = "autoencoder/teacher";
 /// The reference servers' default decoder: the pruned multi-resolution iSTFT head.
 pub const default_decoder = "keep2_plain";
 /// A decoder's registry: codec_registry.json, or codec_registry_<id>.json.
