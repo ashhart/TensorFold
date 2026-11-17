@@ -14,6 +14,13 @@ const note = pc.note;
 const sharedKey = pc.Store.sharedKey;
 
 pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
+    if (place(s, prompt, born, at, owner, starts, spans)) return true;
+    pc.why.refused(s, prompt, at); // a later prompt on this path says not_kept, not cold
+    return false;
+}
+
+/// The state at `at` kept, or the same one touched; false when nothing was kept.
+fn place(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
     s.collectExpired();
     const n = @as(usize, at) + s.rules.lookahead;
     if (at == 0 or n > prompt.len or s.hold) return false;

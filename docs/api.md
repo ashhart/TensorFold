@@ -424,6 +424,44 @@ its request_queue_time_seconds alias, for measured waits from request submission
 Both use the fixed request-time histogram edges and have no request labels. An unset flag keeps these families
 absent and skips the queue observation; existing request metrics remain available. This option does not change replies.
 
+## Prompt-cache reasons
+
+A native server whose engine keeps prompt states in its snapshot store gives each finished request one reason why its
+prompt resumed no further. Every Metal native host and the CUDA, HIP and XPU lane hosts that use that store do; the
+paged stores (`TF_KV_SHARE` on CUDA, HIP serve) and DeepSeek-V4.1's session store do not yet, and say nothing.
+
+| Reason | Meaning |
+| --- | --- |
+| `none` | Resumed as deep as any kept or remembered prompt shares, within 32 tokens (a re-rendered generation prompt) |
+| `cold` | Nothing kept shares the prompt |
+| `too_short` | The prompt is shorter than the shortest prompt the family keeps |
+| `bypass` | No lookup ran: a prompt-only, `prompt_logprobs` or untaught request, a prompt past the window, or a failed lookup |
+| `prompt_changed` | The prompt parts from a kept prompt at N, outside a reply the engine wrote: an edited history or system prompt |
+| `reply_changed` | It parts inside a reply the engine wrote: the template rendered the model's own earlier output differently |
+| `image_changed` | An image at N differs, or a kept state's images differ (another picture, or the same one re-sized) |
+| `frame_changed` | A kept state matches the tokens, but the family's image frame differs |
+| `rows_changed` | A kept state matches the tokens, but the decoded rows' arithmetic differs |
+| `ends_inside` | A kept state matches, but the prompt ends inside it: a state must leave at least one row to compute |
+| `off_grid` | A kept state matches, but not at one of this request's chunk starts |
+| `between_marks` | The prompt extends a kept prompt, but no state was kept between the resume point and N (the chunk grid) |
+| `evicted`, `shed`, `expired`, `cleared` | The deeper state was removed: for room, under memory pressure, by the backend or a peer, or on a weight change |
+| `not_kept` | The deeper state was never kept: memory pressure, the budget, promised room, or a failed save |
+| `restore_failed` | The deeper state was found, but its restore was refused |
+
+N is the longest prefix the prompt shares with a kept prompt, or with one of the last 64 states the store removed or
+refused to keep. The engine decides the reason after its store has chosen what to restore, reading the store and
+allocating nothing, so tokens and every reply byte are unchanged.
+
+- The done log line ends with ` cache=<reason>`, and past `none` with ` at=<N> lost=<tokens>`: positions only, never
+  token ids.
+- /metrics exports `tensorfold:prompt_cache_lookups_total{reason}` and `tensorfold:prompt_cache_lost_tokens_total{reason}`:
+  one series a reason, so the labels are bounded. Lost tokens are N less the tokens resumed.
+- With `TF_CACHE_WHY=1`, each reply's `tensorfold` block adds `prompt_cache`: `reason`, `shared` (N), `resumed`,
+  `lost`, and `message`, the rendered message holding N (absent when the template's message openers are unknown).
+  It is off by default because the store has no tenant scope: N and the reason are measured against every kept
+  prompt, including other clients' prompts, so a client could probe them token by token. Turn it on for a
+  single-user server.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains

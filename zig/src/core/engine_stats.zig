@@ -17,6 +17,8 @@ pub const Stats = struct {
     gpu_seconds: ?f64 = null,
     /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
     queued_seconds: f64 = 0,
+    /// Why the prompt resumed no further (#3686); null: the engine's store does not say.
+    prompt_cache: ?@import("prompt_cache_why.zig").Why = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };
