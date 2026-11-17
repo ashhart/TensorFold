@@ -235,6 +235,8 @@ test {
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
     _ = @import("message_starts_test.zig");
+    _ = @import("message_starts_proof_test.zig");
+    _ = @import("message_marks_test.zig");
     _ = @import("responses_store.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
