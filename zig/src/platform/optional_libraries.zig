@@ -6,8 +6,8 @@ const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
 const grammar_library = @import("grammar_library.zig");
 
-pub const Id = enum { cublaslt, cublas, rocblas, hipblaslt, miopen, aotriton, nccl, verbs, video, jpeg, webp, pdfium, grammar, rccl, mcdma_rpc, mcdma_fabric, mp3lame, opus, fdkaac };
-pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, HipblasltUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, PdfiumLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable, Mp3LibraryUnavailable, OpusLibraryUnavailable, AacLibraryUnavailable };
+pub const Id = enum { cublaslt, cublas, rocblas, hipblaslt, miopen, aotriton, nccl, verbs, video, jpeg, webp, pdfium, grammar, rccl, mcdma_rpc, mcdma_fabric, mp3lame, opus, fdkaac, textnorm };
+pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, HipblasltUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, PdfiumLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable, Mp3LibraryUnavailable, OpusLibraryUnavailable, AacLibraryUnavailable, TextNormLibraryUnavailable };
 pub const Spec = struct {
     id: Id,
     name: []const u8,
@@ -46,6 +46,7 @@ pub const all = [_]Spec{
     item(.mp3lame, "LAME", if (mac) &.{"libmp3lame.0.dylib"} else if (win) &.{"libmp3lame-0.dll"} else &.{"libmp3lame.so.0"}, "MP3 speech replies (response_format mp3)", "install LAME 3.100 (libmp3lame) and set TENSORFOLD_LIBMP3LAME to its file, or put it on the loader path", error.Mp3LibraryUnavailable, "TENSORFOLD_LIBMP3LAME", true),
     item(.opus, "libopus", if (mac) &.{"libopus.0.dylib"} else if (win) &.{"libopus-0.dll"} else &.{"libopus.so.0"}, "Opus speech replies (response_format opus)", "install libopus 1.x and set TENSORFOLD_LIBOPUS to its file, or put it on the loader path", error.OpusLibraryUnavailable, "TENSORFOLD_LIBOPUS", true),
     item(.fdkaac, "FDK AAC", if (mac) &.{"libfdk-aac.2.dylib"} else if (win) &.{"libfdk-aac-2.dll"} else &.{"libfdk-aac.so.2"}, "AAC speech replies (response_format aac)", "install FDK AAC 2.0 (libfdk-aac) and set TENSORFOLD_LIBFDKAAC to its file, or put it on the loader path", error.AacLibraryUnavailable, "TENSORFOLD_LIBFDKAAC", true),
+    item(.textnorm, "zyphra-textnorm", if (mac) &.{"libzyphra_textnorm.dylib"} else if (win) &.{"zyphra_textnorm.dll"} else &.{"libzyphra_textnorm.so"}, "ZONOS3 text normalization (text_normalization)", "build zyphra-textnorm 0.2.0 with its capi feature as a cdylib (docs/recipes/zonos3-mini.md) and set TENSORFOLD_LIBZYPHRA_TEXTNORM to its file, or put it in lib/ beside the TensorFold installation", error.TextNormLibraryUnavailable, "TENSORFOLD_LIBZYPHRA_TEXTNORM", true),
 };
 
 pub fn spec(id: Id) Spec {

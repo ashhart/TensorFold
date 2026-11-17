@@ -36,6 +36,9 @@ const served_fields = [_][]const u8{ "model", "input", "voice", "speaker", "resp
 const zonos_codes = "speaker_reference_codes";
 /// A voice as a clip: a WAV file in base64, which a ZONOS3 engine encodes; other models refuse it.
 const zonos_clip = "ref_audio";
+/// ZONOS3's text normalization: the grammar's language (en_us when absent) and whether to run it.
+const zonos_language = "language";
+const zonos_normalize = "text_normalization";
 
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
 const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
@@ -120,6 +123,10 @@ fn checkFields(cx: *Cx, body: Value, inline_voices: bool, zonos: bool) errors.Re
             return cx.refuse("stream_format must be one of: audio, sse");
         } else if (speech_sampling.isField(key) or (zonos and (std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)))) {
             continue; // validated together before building the prompt
+        } else if (zonos and std.mem.eql(u8, key, zonos_language)) {
+            if (value != .string and value != .null) return cx.refuse("language must be a string");
+        } else if (zonos and std.mem.eql(u8, key, zonos_normalize)) {
+            if (value != .bool and value != .null) return cx.refuse("text_normalization must be a boolean");
         } else if (listed(&modifier_fields, key)) {
             if (value != .null) return cx.fail(.request, "{s} is not supported by this model", .{key});
         } else return cx.fail(.request, "unknown speech request field: {s}", .{key});
@@ -157,7 +164,8 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const clip = raw.field(zonos_clip);
     if (srv.zonos) |state| {
         const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
-        const made = try zonos.plan(state, cx, srv.text, sp, input, voice, codes, clip);
+        const normalize: ?bool = if (raw.get(zonos_normalize)) |v| (if (v == .bool) v.bool else null) else null;
+        const made = try zonos.plan(state, cx, srv.text, sp, input, voice, codes, clip, raw.strField(zonos_language), normalize);
         return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .sampling = sampling, .format = format, .stream = stream };
     }
     const refs = try voiceRefs(srv, cx, raw);
