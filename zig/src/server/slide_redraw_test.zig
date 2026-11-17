@@ -269,9 +269,9 @@ test "slide redraw: refused rounds two through five continue rather than restart
 }
 
 test "slide redraw: routed mode keeps main continuation without fresh rows" {
-    if (@import("core").profile.lookup("TF_SLIDE_ROUTED") == null and
-        @import("core").profile.lookup("TF_SLIDE_EDIT") == null and
-        @import("core").profile.lookup("TF_SLIDE_PROBE") == null) return error.SkipZigTest;
+    if (!@import("sys").environment.isSet("TF_SLIDE_ROUTED") and
+        !@import("sys").environment.isSet("TF_SLIDE_EDIT") and
+        !@import("sys").environment.isSet("TF_SLIDE_PROBE")) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const c = try capture(arena.allocator(), true, false, false, false, false);
