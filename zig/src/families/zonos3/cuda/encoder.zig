@@ -10,6 +10,7 @@ const Buf = cuda.DeviceBuffer;
 pub const frame_samples = 2940; // 44.1 kHz samples a code frame
 pub const internal_frame = 2944; // 44.16 kHz samples a code frame
 pub const lane_frames = 300; // a lane is at most 20 s; a longer clip continues in lanes with 10 s of left context
+pub const clip_frames = 900; // a reference clip is at most 60 s
 pub const latent_dim = 1024;
 const head_rows = 16; // 240 Hz rows a code frame
 
@@ -36,8 +37,9 @@ pub const Encoder = struct {
     fns: [names.len]cuda.Function,
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
-    audio: u64, // the lane's 44.1 kHz samples
+    audio: u64, // the clip's 44.1 kHz samples
     wave: u64, // its 44.16 kHz samples, whole frames
+    frames: usize = 0, // the loaded clip's frames
     p: u64, // front-end rows, three buffers a block's steps rotate through
     q: u64,
     r: u64,
@@ -69,8 +71,9 @@ pub const Encoder = struct {
         const samples = lane_frames * internal_frame;
         const rows = lane_frames * head_rows;
         const front = samples * wts.blocks[0].channels * 4;
-        e.audio = try e.alloc(lane_frames * frame_samples * 4);
-        e.wave = try e.alloc(samples * 4);
+        e.frames = 0;
+        e.audio = try e.alloc(clip_frames * frame_samples * 4);
+        e.wave = try e.alloc(clip_frames * internal_frame * 4);
         e.p = try e.alloc(front);
         e.q = try e.alloc(front);
         e.r = try e.alloc(front);
@@ -168,15 +171,13 @@ pub const Encoder = struct {
         try e.go(.patch_down, (c * h + 255) / 256, rows, 0, &a);
     }
 
-    /// A lane's audio (44.1 kHz, at most 20 s, from the lane's start) to `latent`; the frames it covers.
-    pub fn acoustic(e: *Encoder, audio: []const f32, probe: ?Probe) !usize {
+    /// A clip (44.1 kHz, at most 60 s) resampled whole to 44.16 kHz, zero to the end of its last frame; its frames.
+    pub fn load(e: *Encoder, audio: []const f32, probe: ?Probe) !usize {
         const frames = (audio.len + frame_samples - 1) / frame_samples;
-        if (frames == 0 or frames > lane_frames) return error.BadLane;
+        if (frames == 0 or frames > clip_frames) return error.BadClip;
         const s = e.stream;
-        const k = &e.k;
         const w = e.w;
-        var t = frames * internal_frame;
-        // 44.16 kHz, zero to the end of the last frame
+        const t = frames * internal_frame;
         try e.buf(e.audio).uploadAsync(0, std.mem.sliceAsBytes(audio), s.handle);
         var wave = e.buf(e.wave);
         wave.len = t * 4;
@@ -192,11 +193,22 @@ pub const Encoder = struct {
             try e.go(.resample_in, (count + 255) / 256, 1, 0, &a);
         }
         if (probe) |p| try p.f(p.ctx, "internal_audio", e.wave, t, 1);
+        e.frames = frames;
+        return frames;
+    }
+
+    /// A lane of the loaded clip, `frames` frames from frame `first` (at most 20 s), to `latent`.
+    pub fn acoustic(e: *Encoder, first: usize, frames: usize, probe: ?Probe) !void {
+        if (frames == 0 or frames > lane_frames or first + frames > e.frames) return error.BadLane;
+        const s = e.stream;
+        const k = &e.k;
+        const w = e.w;
+        var t = frames * internal_frame;
         // the front end: x holds the block's rows, y and z are scratch
         var x = e.p;
         var y = e.q;
         var z = e.r;
-        try e.conv(e.wave, 1, t, w.first, 7, 1, 1, 6, x, wts.blocks[0].channels);
+        try e.conv(e.wave + first * internal_frame * 4, 1, t, w.first, 7, 1, 1, 6, x, wts.blocks[0].channels);
         if (probe) |p| try p.f(p.ctx, "lane.0.enc.in", x, t, wts.blocks[0].channels);
         for (w.blocks, wts.blocks, 0..) |b, shape, bi| {
             const c = shape.channels;
@@ -234,6 +246,5 @@ pub const Encoder = struct {
         }
         try e.buf(e.latent).copyFrom(0, x, frames * latent_dim * 4, s.handle);
         if (probe) |p| try p.f(p.ctx, "lane.0.acoustic", e.latent, frames, latent_dim);
-        return frames;
     }
 };

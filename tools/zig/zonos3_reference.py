@@ -11,6 +11,7 @@ the commands. Every subcommand writes float32 / int32 .npy files under OUT, name
     encoder  GENERATOR AUDIO.npy OUT   the codec encoder's acoustic branch in fp32 on one lane of 44.1 kHz audio
     teacher  TEACHER_DIR FEATS.npy OUT the SSL teacher in fp32 on one lane's feature rows
     quantize GENERATOR ACOUSTIC.npy SSL.npy OUT  the quantizer in fp32 on those two runs' rows: the lane's codes
+    clip     GENERATOR TEACHER_DIR AUDIO.npy OUT [--seconds S]  a whole clip's codes in fp32, lane by lane
 
 The backbone's per-layer dump and the encoder's bf16 production dump come from the publisher's tool unchanged:
     tools/dump_golden.py lm LM_DIR --input-ids OUT/input_ids.npy --dtype f32 --mode full -o DIR
@@ -236,6 +237,65 @@ def quantize(args):
     print(f"{frames} frames, {len(taps)} captures -> {out}")
 
 
+def clip(args):
+    """A whole clip encoded in fp32 with the publisher's lanes (20 s, 10 s of left context): audio.npy and codes.npy."""
+    from torch.nn import functional as F
+
+    from zonos3.codec.hybrid10_dual_encoding.model import MossCodec
+    from zonos3.codec.resample_exact import resample_exact
+    from zonos3.codec.s1dac.losses import SemanticTeacher, average_ssl_frames
+    from zonos3.codec.s1dac.same_data.npy_ogg_dataset import Wav2Vec2BertFeaturePreprocessor
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    state = torch.load(args.generator, map_location="cpu", mmap=True, weights_only=True)
+    cfg = state["config"]["model"]
+    model = MossCodec(cfg)
+    model.load_state_dict(state["generator"], strict=True, assign=True)
+    model.eval().requires_grad_(False).float().cuda()
+    teacher = SemanticTeacher(args.teacher, layer=16, dtype=torch.float32).cuda().eval()
+    audio = np.load(args.audio).astype(np.float32).reshape(-1)
+    if args.seconds:
+        count = int(args.seconds * 44100)
+        audio = np.tile(audio, (count + audio.size - 1) // audio.size)[:count].copy()
+    audio = audio[: 900 * 2940]
+    np.save(out / "audio.npy", audio)
+    wave = torch.from_numpy(audio)[None, None]
+    frames = (wave.shape[-1] + 2939) // 2940
+    internal = resample_exact(wave, model.to_internal.cpu())
+    internal = F.pad(internal, (0, frames * 2944 - internal.shape[-1]))
+    external = F.pad(wave, (0, frames * 2940 - wave.shape[-1]))
+    features = Wav2Vec2BertFeaturePreprocessor(44100)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    codes = np.zeros((frames, 10), dtype=np.int32)
+    start = 0
+    with torch.inference_mode():
+        while start < frames:
+            # the first lane starts the clip; a later one carries 150 frames of what came before
+            context = 0 if start == 0 else 150
+            end = min(frames, start + 300 - context)
+            first, n = start - context, end - (start - context)
+            latent = model.encoder(internal[..., first * 2944 : end * 2944].cuda())
+            lane = F.pad(external[0, :, first * 2940 : end * 2940], (0, (300 - n) * 2940))
+            info = {}
+            features(lane, info)
+            feats = info["w2v_bert_input_features"][None].cuda()
+            ssl = teacher(feats, torch.ones(1, feats.shape[1], dtype=torch.bool, device="cuda"))
+            pooled = average_ssl_frames(ssl, 300, cfg["dual_encoding"]["window_ratio"])[..., :n]
+            q1, c1, _, _, _ = model.quantizer.semantic_quantizer(model.semantic_encoder(pooled))
+            residual = latent - model.semantic_head(q1)
+            lane_codes = [c1[0, 0]]
+            for quantizer in model.quantizer.quantizer.quantizers:
+                z_q, _, _, indices, _ = quantizer(residual)
+                residual = residual - z_q
+                lane_codes.append(indices[0])
+            codes[start:end] = torch.stack(lane_codes, 1)[context:].cpu().numpy()
+            start = end
+    np.save(out / "codes.npy", codes)
+    print(f"{frames} frames -> {out}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -271,6 +331,13 @@ def main():
     p.add_argument("ssl")
     p.add_argument("out")
     p.set_defaults(run=quantize)
+    p = commands.add_parser("clip")
+    p.add_argument("generator")
+    p.add_argument("teacher")
+    p.add_argument("audio")
+    p.add_argument("out")
+    p.add_argument("--seconds", type=float, help="repeat the audio to this length")
+    p.set_defaults(run=clip)
     args = parser.parse_args()
     args.run(args)
 
