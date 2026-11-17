@@ -11,6 +11,7 @@ pub const solo = @import("cuda_solo.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const cuda_pdl = @import("cuda_pdl.zig");
 pub const native = @import("cuda_native.zig");
+pub const native_loop = @import("cuda_native_loop.zig");
 pub const native_moe = @import("cuda_native_moe.zig");
 pub const mtp = @import("cuda_mtp.zig");
 pub const mtp_check = @import("cuda_mtp_check.zig");
