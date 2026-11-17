@@ -1,6 +1,6 @@
 // Run: node electron/agent/linux-sandbox.test.ts
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary, planLinuxMounts } from './linux-sandbox'
@@ -71,6 +71,15 @@ try {
   assert.ok(bind(worktreeArgv, '--ro-bind', path.join(innerWorktree, '.git')), 'the worktree pointer is read-only')
   assert.ok(bind(worktreeArgv, '--bind', innerGitdir), 'the worktree gitdir stays writable for refs and objects')
   ok('a nested worktree is pinned through its gitdir and its pointer is frozen')
+
+  // A directory the walk cannot inspect refuses instead of hiding a possible repository.
+  const unreadable = path.join(cwd, 'unreadable-dir')
+  mkdirSync(unreadable)
+  chmodSync(unreadable, 0o000)
+  assert.throws(() => linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false }), /cannot inspect .*unreadable-dir/)
+  chmodSync(unreadable, 0o700)
+  rmSync(unreadable, { recursive: true, force: true })
+  ok('a directory the walk cannot inspect is refused')
 
   // A worktree inside the workspace whose shared directory resolves outside it is refused.
   const sharedWorktree = path.join(cwd, 'shared-worktree')

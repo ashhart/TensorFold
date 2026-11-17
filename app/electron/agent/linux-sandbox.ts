@@ -84,10 +84,20 @@ const NESTED_DIRECTORY_LIMIT = 50_000
 
 const insideWorkspace = (cwd: string, target: string) => target === cwd || target.startsWith(`${cwd}${path.sep}`)
 
+/** Missing is safe to skip; any other inspection failure refuses, because it could hide a repository. */
+const isMissing = (error: unknown) => {
+  const code = (error as NodeJS.ErrnoException)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+function refuseInspection(target: string, error: unknown): never {
+  throw new LinuxSandboxError(`The sandbox cannot inspect ${target}: ${(error as Error)?.message ?? String(error)}`)
+}
+
 /** Real path under the workspace, or null when the entry does not exist. */
 function workspacePath(cwd: string, target: string): string | null {
   let resolved: string
-  try { resolved = realpathSync(target) } catch { return null }
+  try { resolved = realpathSync(target) } catch (error) { if (isMissing(error)) return null; refuseInspection(target, error) }
   if (!insideWorkspace(cwd, resolved)) throw new LinuxSandboxError(`The sandbox will not mount git metadata outside the workspace: ${target}`)
   return resolved
 }
@@ -160,24 +170,34 @@ function nestedGitPaths(cwd: string): string[] {
   const walk = (dir: string, depth: number): void => {
     if (depth > NESTED_DEPTH_LIMIT) throw new LinuxSandboxError(`The sandbox will not walk below ${NESTED_DEPTH_LIMIT} directory levels to find nested repositories.`)
     let entries: Dirent[]
-    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch (error) {
+      if (isMissing(error)) return
+      refuseInspection(dir, error)
+    }
     for (const entry of entries) {
       if (entry.name === '.git') continue
       const candidate = path.join(dir, entry.name)
       let child: string | null = null
       if (entry.isDirectory()) child = candidate
       else if (entry.isSymbolicLink()) {
+        let resolved: string
+        let kind: 'file' | 'dir'
         try {
-          const resolved = realpathSync(candidate)
-          if (insideWorkspace(cwd, resolved) && statSync(resolved).isDirectory()) child = resolved
-        } catch { child = null }
+          resolved = realpathSync(candidate)
+          kind = statSync(resolved).isDirectory() ? 'dir' : 'file'
+        } catch (error) {
+          if (isMissing(error)) continue
+          refuseInspection(candidate, error)
+        }
+        if (kind === 'dir' && insideWorkspace(cwd, resolved)) child = resolved
       }
       if (!child) continue
       if (++directories > NESTED_DIRECTORY_LIMIT) throw new LinuxSandboxError(`The sandbox will not walk more than ${NESTED_DIRECTORY_LIMIT} workspace directories to find nested repositories.`)
       const real = realpathSync(child)
       if (seen.has(real)) continue
       seen.add(real)
-      if (existsSync(path.join(real, '.git'))) found.push(path.join(real, '.git'))
+      const nested = path.join(real, '.git')
+      try { lstatSync(nested); found.push(nested) } catch (error) { if (!isMissing(error)) refuseInspection(nested, error) }
       walk(real, depth + 1)
     }
   }
@@ -190,14 +210,20 @@ export function gitMetadataArgs(cwd: string): string[] {
   const args: string[] = []
   const rootGit = path.join(cwd, '.git')
   let rootKind: 'dir' | 'file' | null = null
-  try { rootKind = lstatSync(rootGit).isDirectory() ? 'dir' : 'file' } catch { rootKind = null }
+  try { rootKind = lstatSync(rootGit).isDirectory() ? 'dir' : 'file' } catch (error) {
+    if (!isMissing(error)) refuseInspection(rootGit, error)
+    rootKind = null
+  }
   // A workspace without a repository keeps commands refused: bwrap cannot deny creating .git by name.
   if (!rootKind) throw new LinuxSandboxError('The sandbox needs a git workspace; commands stay refused here.')
   if (rootKind === 'file') pinWorktree(cwd, rootGit, args)
   else pinGitDirectory(cwd, rootGit, args)
   for (const nested of nestedGitPaths(cwd)) {
     let kind: 'dir' | 'file'
-    try { kind = lstatSync(nested).isDirectory() ? 'dir' : 'file' } catch { continue }
+    try { kind = lstatSync(nested).isDirectory() ? 'dir' : 'file' } catch (error) {
+      if (isMissing(error)) continue
+      refuseInspection(nested, error)
+    }
     if (kind === 'file') pinWorktree(cwd, nested, args)
     else pinGitDirectory(cwd, nested, args)
   }
