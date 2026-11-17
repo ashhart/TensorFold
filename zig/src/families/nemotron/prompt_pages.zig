@@ -20,7 +20,7 @@ pub const Pass = struct {
         b.pending = null;
         var p: Pass = .{ .on = true };
         errdefer p.adopt.deinit(b.gpa);
-        const got = try pr.begin(s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), &p.adopt);
+        const got = try pr.begin(.of(s.prompt()), s.history_len, s.shared_prefixes, @ptrCast(s), &p.adopt);
         p.from = got.from;
         p.marks = got.marks;
         return p;
@@ -62,7 +62,7 @@ pub const Pass = struct {
         defer b.gpa.free(mine);
         const path = try b.gpa.alloc(u32, n);
         defer b.gpa.free(path);
-        const shared = b.prompts.?.keep(s.prompt(), @intCast(at), @ptrCast(s), mine, path);
+        const shared = b.prompts.?.keep(.of(s.prompt()), @intCast(at), @ptrCast(s), mine, path);
         if (shared == n) p.kept += 1;
         if (std.mem.eql(u32, mine[0..shared], path[0..shared])) return;
         try b.drain(); // the chunk in flight writes the lane's pages: none goes back while it may
