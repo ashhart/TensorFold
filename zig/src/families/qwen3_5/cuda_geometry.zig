@@ -84,6 +84,8 @@ pub const Geometry = struct {
     rope: cuda_rope.Rope = .plain,
     linear: [max_layers]bool,
     loop: ?@import("loop_config.zig").Config = null,
+    loop_deltas: usize = 0,
+    loop_attentions: usize = 0,
     bits: Widths = .{},
     kinds: Kinds = .{},
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
@@ -141,7 +143,7 @@ pub const Geometry = struct {
 
     /// Delta executions in the schedule.
     pub fn deltas(g: Geometry) usize {
-        return g.schedule().deltas;
+        return if (g.loop != null) g.loop_deltas else g.physicalDeltas();
     }
 
     pub fn physicalDeltas(g: Geometry) usize {
@@ -156,6 +158,15 @@ pub const Geometry = struct {
 
     pub fn schedule(g: Geometry) @import("loop_schedule.zig").Schedule {
         return @import("loop_schedule.zig").build(g.linear[g.first..][0..g.layers], g.loop) catch unreachable;
+    }
+
+    pub fn withLoops(g: Geometry, loops: usize) !Geometry {
+        var out = g;
+        out.loop = try (g.loop orelse return error.BadLoops).withLoops(loops);
+        const s = try @import("loop_schedule.zig").build(out.linear[0..out.layers], out.loop);
+        out.loop_deltas = s.deltas;
+        out.loop_attentions = s.attentions;
+        return out;
     }
 
     /// The whole model's geometry, of which this may be a stage.
@@ -182,7 +193,7 @@ pub const Geometry = struct {
     }
 
     pub fn attentions(g: Geometry) usize {
-        return g.schedule().attentions;
+        return if (g.loop != null) g.loop_attentions else g.physicalAttentions();
     }
 
     /// Bytes of one linear layer's recurrence (fp32) and convolution tail (bf16).
@@ -394,9 +405,12 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         if (t.get("mtp_num_hidden_layers")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMtp;
         if (g.pocket != 0) return error.UnsupportedLearningFormat;
         g.loop = try @import("loop_config.zig").parse(root, g.layers);
+        if (g.loop.?.mhc) |m| if (m.iterations != 20 or m.fixed_identity or m.pre_scale != 1) return error.UnsupportedSenseNovaMhc;
         if (g.tied) return error.UnsupportedQwenConfig;
         const plan = try @import("loop_schedule.zig").build(g.linear[0..g.layers], g.loop);
         if (plan.attentions == 0) return error.UnsupportedQwenGeometry;
+        g.loop_deltas = plan.deltas;
+        g.loop_attentions = plan.attentions;
     }
     if (modelopt or bf16) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;

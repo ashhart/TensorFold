@@ -118,6 +118,7 @@ pub const Engine = struct {
     kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
     head: Proj,
     final_norm: u64,
+    mhc: @import("cuda_mhc.zig").Runtime,
     layers: []Layer,
     steps: []@import("loop_schedule.zig").Step,
     // scratch, scratch_capacity rows each
@@ -186,18 +187,15 @@ pub const Engine = struct {
     const tables_len = Round.bytes;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, loops: ?u32) !*Engine {
-        return initStageLoops(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null, loops);
+        return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null, loops);
     }
 
     /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
-    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span) !*Engine {
-        return initStageLoops(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, span, null);
-    }
-    fn initStageLoops(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span, loops: ?u32) !*Engine {
+    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span, loops: ?u32) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
         var g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
-        if (loops) |n| g.loop = try (g.loop orelse return error.BadLoops).withLoops(n);
+        if (loops) |n| g = try g.withLoops(n);
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -213,6 +211,7 @@ pub const Engine = struct {
         e.kit = null;
         e.d = d;
         e.g = g;
+        e.mhc = .{};
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
         e.verify_rows = most_verify;
         e.kv8 = kv8;
@@ -252,6 +251,10 @@ pub const Engine = struct {
             e.mods[i] = try cuda.Module.load(d, img);
             loaded += 1;
         }
+        if (g.loop) |c| if (c.mhc != null) {
+            e.mhc = try @import("cuda_mhc.zig").Runtime.load(d);
+        };
+        errdefer e.mhc.deinit();
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
@@ -352,6 +355,7 @@ pub const Engine = struct {
         e.wide.deinit();
         e.int8.deinit();
         if (e.mo) |*m| m.unload();
+        e.mhc.deinit();
         for (&e.mods) |*m| m.unload();
         e.stream.deinit();
         e.gpa.destroy(e);

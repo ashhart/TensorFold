@@ -1,6 +1,8 @@
 //! The landed CUDA forward with optional learner taps and pocket contributions.
 const E = @import("cuda_engine.zig");
 const cuda = @import("cuda");
+const mhc = @import("cuda_mhc.zig");
+const schedule = @import("loop_schedule.zig");
 const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
@@ -39,7 +41,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
-    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows); // a stage's head over the ring's rows
+    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows, true); // a stage's head over the ring's rows
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
     if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
@@ -51,15 +53,21 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var pending = g.first != 0;
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
     const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
-    const tail_at: ?usize = if (prompt and ends) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
+    const tail_at: ?usize = if (prompt and ends and !e.steps[e.steps.len - 1].inside) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
     for (e.steps, 0..) |st, si| {
         const i = st.layer;
         const l = e.layers[i];
         const tail = tail_at != null and si + 1 == e.steps.len;
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
-        pending = @import("loop_schedule.zig").enterMhc(st, pending);
-        try e.norm(@import("loop_schedule.zig").attentionMhc(st, pending), l.input_norm, total);
+        const d = schedule.decide(st, pending);
+        @import("std").debug.assert(!st.inside or !tail);
+        if (d.enter) try mhc.enter(e, pending, total, t_params);
+        if (d.route) {
+            const router = l.mhc orelse return error.MissingSenseNovaRouter;
+            try mhc.route(e, router.attn_weight, router.attn_bias, total, t_params);
+        }
+        try e.norm(d.first_add, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -115,7 +123,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
             },
         }
-        try e.norm(@import("loop_schedule.zig").ffnMhc(st, true), l.post_norm, total);
+        if (d.merge) try mhc.merge(e, total, t_params);
+        if (d.route) {
+            const router = l.mhc orelse return error.MissingSenseNovaRouter;
+            try mhc.route(e, router.ffn_weight, router.ffn_bias, total, t_params);
+        }
+        try e.norm(d.second_add, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
         const x0 = e.x + t0 * g.hidden * 2;
@@ -142,13 +155,15 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
-        pending = @import("loop_schedule.zig").leaveMhc(st, true);
+        if (d.merge) try mhc.merge(e, total, t_params);
+        if (d.leave) try mhc.leave(e, total, t_params);
+        pending = d.pending;
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
-    if (shape.part == .whole) try finish(e, total, heads, shape.hidden, shape.rows);
+    if (shape.part == .whole) try finish(e, total, heads, shape.hidden, shape.rows, pending);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
@@ -167,10 +182,10 @@ fn shared(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, t
 }
 
 /// Layer inputs are already kept: hidden reads need no final norm or head, and a readout piece's rows no head.
-pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) !void {
+pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool, pending: bool) !void {
     if (hidden) return;
     const g = e.g;
-    try e.norm(true, e.final_norm, total);
+    try e.norm(pending, e.final_norm, total);
     if (rows) return;
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows
