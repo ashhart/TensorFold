@@ -340,8 +340,7 @@ pub const Unique = struct { ids: Ref, members: Ref, count: Ref };
 /// The member lists' length in glm_rows.metal (GLM_MAXR): a window's most rows.
 pub const max_members = 16;
 
-/// byIds's GLU and down for the slots, glu and dense for the shared expert's rows: a launch each step, the same bits.
-/// With `u` and 2+ rows, each step runs by unique expert: an expert's weights read once for every row that picked it.
+/// byIds's GLU and down, glu and dense for the shared expert, a launch a step; with `u` at 2+ rows, by unique expert.
 pub fn moe(
     p: *const Pipes,
     e: mtl.ComputeEncoder,
