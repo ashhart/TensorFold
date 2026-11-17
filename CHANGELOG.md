@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: creating a Kanban ticket shows it once, even when its update event arrives before the create reply (#3363, fixes #3338). Thanks to @sx4im.
+
 - CLI: `tensorfold rm REPO[@REVISION]` removes a checkpoint `pull` cached, or one of its snapshots with the refs that name it and the blobs no other snapshot links to. It lists what goes and the bytes freed, then asks; `--yes` skips the question and `--dry-run` only lists. It refuses paths and repos the cache does not hold, and never deletes outside the repo's cache folder or through a link. It coordinates with TensorFold pulls, rechecks the plan after confirmation, and refuses snapshots a running server holds (#3525).
 
 - Qwen3.8 Flash Next on Metal: with SSD residency on (`--ssd-experts`, `--ple-on-ssd`) the engine no longer allocates the second prompt workspace that only two-segment prompts use, 6.16 GiB less at the same window; replies are unchanged (#3690, #3667).
