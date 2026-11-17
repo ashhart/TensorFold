@@ -447,6 +447,10 @@ sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit
 and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans over many blocks
 (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
 rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.
+Full GLM-5.3's indexer values run on the same kernels (`contract_glm_full.zig`): `tf_glm_scores` at pools of 1 with
+64 roped query dims against float64 (allowing the roped queries' bf16 rounding), `tf_glm_index_scores` bit-equal to
+it, `tf_glm_dsa_tokens` at pools of 1, and `tf_glm_index_write`'s LayerNormed keys roped on 64 dims, with four
+controls: queries or keys left unroped, keys read as pools of 4, and token lists one position late.
 CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
 marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
 their slots from host pages or the layer's row cache, the token lists' slots, the marks cleared, the dense rows through
