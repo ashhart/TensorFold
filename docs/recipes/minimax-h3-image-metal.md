@@ -29,6 +29,30 @@ zig-out/bin/tf-h3-image-decoder MODEL_DIR out/case.latent.f32 128 128 out/case.p
 3. `tf-h3-image-decoder` decodes the latent. Its rows and columns are the canvas over 16. It resizes the picture back
    to the requested size when that differs from the canvas.
 
+### Resident: one process, every picture warm
+
+`tf-h3-image-server` loads the prompt encoder, the transformer's weights and the decoder once, then makes one picture
+per stdin line, writing the same files as the three tools above:
+
+```sh
+zig build tf-h3-image-server -Dcpu=apple_m1 -Doptimize=ReleaseFast
+printf '2048x2048 42 out/a prompt.txt\n2048x2048 7 out/b prompt.txt\n' |
+  zig-out/bin/tf-h3-image-server TEXT_ENCODER_DIR MODEL_DIR
+```
+
+A request line is `WIDTHxHEIGHT SEED OUT_PREFIX prompt.txt`. This server accepts text-to-image requests only, not
+reference images or editing cases. The transformer's kernels and buffers depend on the picture's layout (canvas,
+rows and text tags), so a request with the last one's layout keeps them and only replaces the prompt's text rows
+(`Model.retext`); another layout releases them and binds anew over the same mapped weights. `Binding.fits` compares
+the canvas, row count, reference count and tags; it assumes there are no reference rows, so those determine all
+rotary positions. Supporting edits would also require checking reference geometry and refreshing reference
+conditioning, not just comparing row counts.
+Each request prints one line of stage seconds: prompt, case, transformer (`reused` or `bound`), 6 steps, decoder, total.
+A bad request prints its error and the server reads the next line.
+If the weights cannot be held resident or the idle ticker cannot start, it exits instead of serving unwarmed.
+
+`zig build test-h3-image-server` runs the resident gates on a synthetic checkpoint.
+
 ## What runs here, and what the case brings
 
 Made natively, from the request and the model folder:
