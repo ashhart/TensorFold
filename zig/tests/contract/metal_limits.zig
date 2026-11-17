@@ -32,6 +32,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     if (@import("metal_dsv41_limits.zig").tensorOnly(d.name))
@@ -41,6 +42,11 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
+    if (std.mem.startsWith(u8, d.name, "q27 stack ")) {
+        if (!assemble) return undefined;
+        const body = try @import("metal_q27_limits.zig").source(a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = if (d.offline) body else "" };
+    }
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
