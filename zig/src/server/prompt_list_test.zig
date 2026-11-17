@@ -250,11 +250,11 @@ test "n and max_tokens apply to each prompt as they do to that prompt alone" {
     defer arena.deinit();
     const a = arena.allocator();
     var echo: Echo = .{};
-    for ([_][]const u8{ list, "\"ab\"" }) |prompt| { // n above 1 is refused for a list as for one prompt
+    { // a list with n above 1 is refused before any is submitted (one prompt with n above 1 is choices now)
         var got: Capture = .{ .a = a };
-        try complete(a, &echo, prompt, two ++ ",\"n\":2", &got);
+        try complete(a, &echo, list, two ++ ",\"n\":2", &got);
         try t.expectEqual(@as(?u16, 400), got.status);
-        try t.expect(std.mem.indexOf(u8, got.whole, "n must be 1") != null);
+        try t.expect(std.mem.indexOf(u8, got.whole, "n above 1 cannot be served with a list of prompts") != null);
     }
     try t.expectEqual(@as(usize, 0), echo.calls.load(.monotonic));
     const one = ",\"n\":1,\"max_tokens\":1";
