@@ -65,7 +65,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, ids_path: []const u8) !void {
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
     const e = try prompt.Engine.init(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir);
     defer e.deinit();
-    const h = try mtp.Head.init(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir);
+    const h = try mtp.Head.init(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir, e.widths);
     defer h.deinit();
     const ops: mtp.Ops(flash.Tri) = .{ .e = e, .tri = tri, .h = h };
     const ids = try gpu.gpa.alloc(u32, @min(base.items.len, 64));
