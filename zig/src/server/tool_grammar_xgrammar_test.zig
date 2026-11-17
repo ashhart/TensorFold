@@ -142,3 +142,82 @@ test "auto tools through xgrammar: non-strict now takes any object, strict looku
     };
     try std.testing.expectEqual(@as(usize, 0), wrong);
 }
+
+/// One object of `count` optional string properties: xgrammar's compile time grows faster than the square of `count`.
+fn optionalObject(a: std.mem.Allocator, count: usize) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "{\"type\":\"object\",\"properties\":{");
+    for (0..count) |i| try text.print(a, "{s}\"p{d}\":{{\"type\":\"string\"}}", .{ if (i > 0) "," else "", i });
+    try text.appendSlice(a, "}}");
+    return text.items;
+}
+
+fn now() i64 {
+    return std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+}
+
+const Schema = struct {
+    l: Lib,
+    text: []const u8,
+    started: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
+    g: ?*anyopaque = null,
+    err: [512]u8 = @splat(0),
+    ms: i64 = 0,
+
+    fn compile(s: *Schema) void {
+        s.started.store(true, .release);
+        const began = now();
+        s.g = s.l.f.compile(s.l.h, @backingInt(lanes.grammar.Kind.json_schema), s.text.ptr, s.text.len, &s.err, s.err.len);
+        s.ms = now() - began;
+        s.done.store(true, .release);
+    }
+};
+
+test "grammar compile through xgrammar: 8,000 optional properties are refused at the time limit, others compile meanwhile" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const l = try Lib.open(a);
+    defer l.f.close(l.h);
+    const json_schema = @backingInt(lanes.grammar.Kind.json_schema);
+    var large: Schema = .{ .l = l, .text = try optionalObject(a, 8000) };
+    try std.testing.expectEqual(@as(usize, 206_922), large.text.len);
+    const thread = try std.Thread.spawn(.{}, Schema.compile, .{&large});
+    const small_ok, const small_ms = blk: {
+        while (!large.started.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+        std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+        const small = "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}},\"required\":[\"x\"]}";
+        var err: [512]u8 = @splat(0);
+        const began = now();
+        const g = l.f.compile(l.h, json_schema, small.ptr, small.len, &err, err.len);
+        defer if (g) |done| l.f.free(done);
+        break :blk .{ g != null, now() - began };
+    };
+    const meanwhile = !large.done.load(.acquire);
+    thread.join();
+    if (large.g) |g| l.f.free(g);
+    try std.testing.expect(small_ok and meanwhile and small_ms < 1000);
+    try std.testing.expect(large.g == null and large.ms < 3000);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.sliceTo(&large.err, 0), "2000 ms time limit") != null);
+    // xgrammar cannot stop it: it runs on in its slot, and asking again joins it instead of compiling it twice
+    const compiling = l.f.compiling orelse return error.MissingSymbol;
+    try std.testing.expectEqual(@as(c_int, 1), compiling(l.h));
+    var err: [512]u8 = @splat(0);
+    const again = now();
+    try std.testing.expect(l.f.compile(l.h, json_schema, large.text.ptr, large.text.len, &err, err.len) == null);
+    try std.testing.expect(now() - again < 500 and std.mem.indexOf(u8, std.mem.sliceTo(&err, 0), "time limit") != null);
+    try std.testing.expectEqual(@as(c_int, 1), compiling(l.h));
+    const waited = now();
+    while (compiling(l.h) != 0) {
+        if (now() - waited > 600_000) return error.CompileNeverReturned;
+        try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    }
+    // once it returns its slot is free, and xgrammar's cache serves the grammar it finished
+    const cached = now();
+    const g = l.f.compile(l.h, json_schema, large.text.ptr, large.text.len, &err, err.len) orelse return error.Grammar;
+    defer l.f.free(g);
+    try std.testing.expect(now() - cached < 1000);
+    try std.testing.expect(try l.admits(g, "{}"));
+}
