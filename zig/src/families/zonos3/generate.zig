@@ -5,7 +5,7 @@ const core = @import("core");
 const encoder_checks = @import("check_encoder.zig");
 const laci_checks = @import("check_laci.zig");
 
-// The parts this build's family has (the Metal family is the backbone and the decoder so far).
+// The parts this build's family has.
 const has_codec = @hasDecl(z3, "Codec");
 const has_encoder = @hasDecl(z3, "clip");
 const on_metal = @hasDecl(z3, "gpu");

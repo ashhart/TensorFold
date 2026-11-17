@@ -1,8 +1,71 @@
 //! zonos3-generate's checks of the codec encoder against the reference's dumps: the acoustic branch, the SSL features.
 const std = @import("std");
 const z3 = @import("zonos3");
-const cuda = @import("cuda");
 const gen = @import("generate.zig");
+
+const on_metal = @hasDecl(z3, "gpu");
+const cuda = if (on_metal) void else @import("cuda");
+
+/// A device of its own for a part checked alone, and the parts made on it.
+const Dev = if (on_metal) struct {
+    g: *z3.gpu.Gpu,
+
+    fn open(gpa: std.mem.Allocator) !Dev {
+        return .{ .g = try z3.gpu.Gpu.openFamily(gpa) };
+    }
+    fn close(d: *Dev) void {
+        d.g.close();
+    }
+    fn sync(d: *Dev) !void {
+        try d.g.flush();
+    }
+    fn encoder(d: *Dev, gpa: std.mem.Allocator, io: std.Io, generator: []const u8) !*z3.encoder.Encoder {
+        return z3.encoder.Encoder.create(gpa, io, d.g, generator);
+    }
+    fn teacher(d: *Dev, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*z3.teacher.Teacher {
+        return z3.teacher.Teacher.create(gpa, io, d.g, dir);
+    }
+    fn decoder(d: *Dev, gpa: std.mem.Allocator, io: std.Io, generator: []const u8, head: []const u8, which: z3.codec.Decoder) !*z3.codec_weights.Weights {
+        return z3.codec_weights.load(gpa, io, d.g, generator, head, which);
+    }
+    fn clip(d: *Dev, gpa: std.mem.Allocator, io: std.Io, root: []const u8, generator: []const u8, dec: *const z3.codec_weights.Weights) !*z3.clip.Clip {
+        return z3.clip.Clip.create(gpa, io, d.g, root, generator, dec);
+    }
+} else struct {
+    driver: cuda.Driver,
+    ctx: cuda.Context,
+    stream: cuda.Stream,
+
+    fn open(_: std.mem.Allocator) !Dev {
+        var d: Dev = undefined;
+        d.driver = try cuda.Driver.open();
+        errdefer d.driver.close();
+        d.ctx = try cuda.Context.init(&d.driver, 0);
+        errdefer d.ctx.deinit();
+        d.stream = try cuda.Stream.init(&d.driver, true);
+        return d;
+    }
+    fn close(d: *Dev) void {
+        d.stream.deinit();
+        d.ctx.deinit();
+        d.driver.close();
+    }
+    fn sync(d: *Dev) !void {
+        try d.stream.synchronize();
+    }
+    fn encoder(d: *Dev, gpa: std.mem.Allocator, io: std.Io, generator: []const u8) !*z3.encoder.Encoder {
+        return z3.encoder.Encoder.create(gpa, io, &d.driver, d.stream, generator);
+    }
+    fn teacher(d: *Dev, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*z3.teacher.Teacher {
+        return z3.teacher.Teacher.create(gpa, io, &d.driver, d.stream, dir);
+    }
+    fn decoder(d: *Dev, gpa: std.mem.Allocator, io: std.Io, generator: []const u8, head: []const u8, which: z3.codec.Decoder) !*z3.codec_weights.Weights {
+        return z3.codec_weights.load(gpa, io, &d.driver, generator, head, which);
+    }
+    fn clip(d: *Dev, gpa: std.mem.Allocator, io: std.Io, root: []const u8, generator: []const u8, dec: *const z3.codec_weights.Weights) !*z3.clip.Clip {
+        return z3.clip.Clip.create(gpa, io, &d.driver, d.stream, root, generator, dec);
+    }
+};
 
 const Check = gen.Check;
 const nowNs = gen.nowNs;
@@ -15,14 +78,10 @@ pub fn acoustic(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: 
     defer gpa.free(f.bytes);
     const audio = try f.arr.floats(gpa);
     defer gpa.free(audio);
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
+    var dev = try Dev.open(gpa);
+    defer dev.close();
     const t_load = nowNs(io);
-    const enc = try z3.encoder.Encoder.create(gpa, io, &driver, stream, generator);
+    const enc = try dev.encoder(gpa, io, generator);
     defer enc.destroy();
     const Enc = struct {
         fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
@@ -38,7 +97,7 @@ pub fn acoustic(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: 
     const t0 = nowNs(io);
     const frames = try enc.load(lane, null);
     try enc.acoustic(0, frames, null);
-    try stream.synchronize();
+    try dev.sync();
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
     const pass = c.fails == 0 and c.n > 0 and c.missing == 0;
     std.debug.print("RESULT zonos3 encoder {s} probes={d} low={d} missing={d} worst_row_cos={d:.6} frames={d} encode_s={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, frames, seconds });
@@ -94,13 +153,9 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, teacher_dir:
     defer gpa.free(f.bytes);
     const feats = try f.arr.floats(gpa);
     defer gpa.free(feats);
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
-    const t = try z3.teacher.Teacher.create(gpa, io, &driver, stream, teacher_dir);
+    var dev = try Dev.open(gpa);
+    defer dev.close();
+    const t = try dev.teacher(gpa, io, teacher_dir);
     defer t.destroy();
     const Get = struct {
         fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
@@ -112,7 +167,7 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, teacher_dir:
     _ = try t.run(feats, .{ .ctx = &c, .f = Check.probe });
     const t0 = nowNs(io);
     _ = try t.run(feats, null);
-    try stream.synchronize();
+    try dev.sync();
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
     const pass = c.fails == 0 and c.n > 0 and c.missing == 0;
     std.debug.print("RESULT zonos3 teacher {s} probes={d} low={d} missing={d} worst_row_cos={d:.7} seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, seconds });
@@ -136,19 +191,15 @@ pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, root: []const
 
     var rel = try z3.release.open(gpa, io, root, null);
     defer rel.deinit();
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
-    const dec = try z3.codec_weights.load(gpa, io, &driver, rel.generator, rel.head, .keep2_plain);
+    var dev = try Dev.open(gpa);
+    defer dev.close();
+    const dec = try dev.decoder(gpa, io, rel.generator, rel.head, .keep2_plain);
     defer {
         dec.deinit();
         gpa.destroy(dec);
     }
     const t_load = nowNs(io);
-    const clip = try z3.clip.Clip.create(gpa, io, &driver, stream, root, rel.generator, dec);
+    const clip = try dev.clip(gpa, io, root, rel.generator, dec);
     defer clip.destroy();
     const load_s = @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9;
     _ = try clip.encode(gpa, audio);

@@ -2,7 +2,7 @@
 const std = @import("std");
 
 const dir = "zig/kernels/metal/zonos3";
-const sources = [_][]const u8{ "backbone.metal", "codec.metal" };
+const sources = [_][]const u8{ "backbone.metal", "codec.metal", "encoder.metal", "teacher.metal" };
 
 /// Each source compiled with `dir` on the include path (z3_common.h), safe math, precise fp32 functions and no
 /// contraction: a sum's fused steps are the ones the source writes, as `--fmad=false` keeps them on CUDA.

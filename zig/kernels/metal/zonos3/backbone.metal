@@ -85,15 +85,15 @@ kernel void z3_attnres(device const float* bank [[buffer(0)]], device const bf16
   }
 }
 
-// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): bf16 W [N, K], K % 8 == 0, K <= 2048; picks move row r's W
-// by picks[r] * pick_stride. A group of 8 simdgroups makes 8 outputs of one row.
+// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): bf16 W [N, K], K % 8 == 0, x staged in K * 4 bytes of threadgroup
+// memory (K <= 8192); picks move row r's W by picks[r] * pick_stride. A group of 8 simdgroups makes 8 outputs of a row.
 struct LinearArgs { int xs; int xrep; int K; int N; int ys; int has_bias; int has_picks; long pick_stride; };
 kernel void z3_linear(device const bf16* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]],
                       device const bf16* bias [[buffer(3)]], device const int* picks [[buffer(4)]],
-                      constant LinearArgs& a [[buffer(5)]], uint2 gid [[threadgroup_position_in_grid]],
-                      uint tid [[thread_index_in_threadgroup]], uint nsg [[simdgroups_per_threadgroup]],
-                      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float xs[2048];
+                      constant LinearArgs& a [[buffer(5)]], threadgroup float* xs [[threadgroup(0)]],
+                      uint2 gid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                      uint nsg [[simdgroups_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                      uint sg [[simdgroup_index_in_threadgroup]]) {
   const uint nt = nsg * 32;
   const int r = gid.y;
   device const float* xr = x + (ulong)(r / a.xrep) * a.xs;

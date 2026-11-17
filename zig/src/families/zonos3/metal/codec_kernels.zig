@@ -10,14 +10,14 @@ fn l(x: usize) i64 {
     return @intCast(x);
 }
 
-/// The kernel's threadgroup copy of an input row holds this many values.
-pub const max_k = 5120;
+/// The longest input row the kernel's threadgroup copy holds (32 KB of threadgroup memory).
+pub const max_k = 8192;
 
 /// y [rows, n] = x [rows, kdim] W^T (+ bias when not 0), all fp32.
 pub fn linear(g: *Gpu, w: u64, bias: u64, x: u64, xs: usize, kdim: usize, n: usize, y: u64, ys: usize, rows: usize) void {
     const A = extern struct { xs: i32, K: i32, N: i32, ys: i32, has_bias: i32 };
     std.debug.assert(kdim <= max_k);
-    g.go(.zc_linear, .{ (n + 7) / 8, rows, 1 }, 256, &.{ w, x, y, if (bias != 0) bias else w }, A{ .xs = i(xs), .K = i(kdim), .N = i(n), .ys = i(ys), .has_bias = @intFromBool(bias != 0) });
+    g.goShared(.zc_linear, .{ (n + 7) / 8, rows, 1 }, 256, &.{ w, x, y, if (bias != 0) bias else w }, A{ .xs = i(xs), .K = i(kdim), .N = i(n), .ys = i(ys), .has_bias = @intFromBool(bias != 0) }, kdim * 4);
 }
 
 pub fn layernorm(g: *Gpu, x: u64, w: u64, b: u64, y: u64, d: usize, eps: f32, rows: usize) void {

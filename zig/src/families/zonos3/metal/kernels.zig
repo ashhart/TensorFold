@@ -25,15 +25,15 @@ pub fn attnres(g: *Gpu, bank: u64, n_src: usize, cap: usize, query: u64, out: u6
 
 pub const Linear = struct { bias: u64 = 0, picks: u64 = 0, pick_stride: usize = 0, xrep: usize = 1 };
 
-/// The kernel's threadgroup copy of an input row holds this many values.
-pub const max_k = 2048;
+/// The longest input row the kernel's threadgroup copy holds (32 KB of threadgroup memory).
+pub const max_k = 8192;
 
 /// y [rows, n] = x [rows / xrep, kdim] W^T: bf16 weights, fp32 rows xs / ys elements apart.
 pub fn linear(g: *Gpu, w: u64, x: u64, xs: usize, kdim: usize, n: usize, y: u64, ys: usize, rows: usize, o: Linear) void {
     const A = extern struct { xs: i32, xrep: i32, K: i32, N: i32, ys: i32, has_bias: i32, has_picks: i32, pad: i32 = 0, pick_stride: i64 };
     std.debug.assert(kdim % 8 == 0 and kdim <= max_k);
     const a: A = .{ .xs = i(xs), .xrep = i(o.xrep), .K = i(kdim), .N = i(n), .ys = i(ys), .has_bias = @intFromBool(o.bias != 0), .has_picks = @intFromBool(o.picks != 0), .pick_stride = @intCast(o.pick_stride) };
-    g.go(.z3_linear, .{ (n + 7) / 8, rows, 1 }, 256, &.{ w, x, y, if (o.bias != 0) o.bias else w, if (o.picks != 0) o.picks else x }, a);
+    g.goShared(.z3_linear, .{ (n + 7) / 8, rows, 1 }, 256, &.{ w, x, y, if (o.bias != 0) o.bias else w, if (o.picks != 0) o.picks else x }, a, kdim * 4);
 }
 
 pub fn convSilu(g: *Gpu, proj: u64, ps: usize, t: usize, w: u64, state: u64, out: u64, c: usize) void {

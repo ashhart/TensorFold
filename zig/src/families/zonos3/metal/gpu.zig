@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 
-/// Every pipeline of zonos3.metallib, by its kernel name: the backbone's, then the codec's.
+/// Every pipeline of zonos3.metallib, by its kernel name: the backbone's, the codec's, the encoder's, the teacher's.
 pub const P = enum {
     z3_embed,
     z3_rmsnorm,
@@ -32,6 +32,18 @@ pub const P = enum {
     zc_ola,
     zc_mix,
     zc_resample,
+    ze_resample_in,
+    ze_conv,
+    ze_snake,
+    ze_add,
+    ze_sub,
+    ze_patch_down,
+    ze_nearest,
+    ze_sub_code,
+    zt_swish,
+    zt_glu,
+    zt_dwconv,
+    zt_attention,
 };
 
 const n_pipes = @typeInfo(P).@"enum".field_names.len;
@@ -71,6 +83,11 @@ pub const Gpu = struct {
         errdefer g.bufs.deinit(gpa);
         try g.bufs.append(gpa, undefined);
         return g;
+    }
+
+    /// The device with this family's metallib.
+    pub fn openFamily(gpa: std.mem.Allocator) !*Gpu {
+        return open(gpa, @import("zonos3_metallib").bytes);
     }
 
     pub fn close(g: *Gpu) void {
@@ -147,7 +164,13 @@ pub const Gpu = struct {
 
     /// One dispatch: buffers bound at 0.., then `args` (an extern struct) at the next index.
     pub fn go(g: *Gpu, p: P, groups: [3]usize, threads: usize, bufs: []const u64, args: anytype) void {
+        g.goShared(p, groups, threads, bufs, args, 0);
+    }
+
+    /// One dispatch with `shared` bytes of threadgroup memory at threadgroup index 0.
+    pub fn goShared(g: *Gpu, p: P, groups: [3]usize, threads: usize, bufs: []const u64, args: anytype, shared: usize) void {
         const e = g.encoder();
+        if (shared > 0) e.setThreadgroupMemory(std.mem.alignForward(usize, shared, 16), 0);
         e.setPipeline(g.pipes[@backingInt(p)]);
         for (bufs, 0..) |a, i| {
             const r = g.ref(a);

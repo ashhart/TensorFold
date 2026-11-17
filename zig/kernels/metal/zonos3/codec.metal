@@ -32,13 +32,14 @@ inline float z3_erf(float x) {
   return x < 0.0f ? erfc - 1.0f : 1.0f - erfc;
 }
 
-// y[r, n] = sum_k W[n, k] x[r, k] (+ bias[n]): fp32 W [N, K], K <= 5120, a simdgroup an output.
+// y[r, n] = sum_k W[n, k] x[r, k] (+ bias[n]): fp32 W [N, K], a simdgroup an output, x staged in K * 4 bytes of
+// threadgroup memory (K <= 8192).
 struct ZLinearArgs { int xs; int K; int N; int ys; int has_bias; };
 kernel void zc_linear(device const float* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]],
                       device const float* bias [[buffer(3)]], constant ZLinearArgs& a [[buffer(4)]],
-                      uint2 gid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
-                      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float xs[5120];
+                      threadgroup float* xs [[threadgroup(0)]], uint2 gid [[threadgroup_position_in_grid]],
+                      uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                      uint sg [[simdgroup_index_in_threadgroup]]) {
   const int r = gid.y;
   device const float* xr = x + (ulong)r * a.xs;
   for (int i = tid; i < a.K; i += 256) xs[i] = xr[i];

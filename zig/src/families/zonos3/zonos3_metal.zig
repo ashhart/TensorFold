@@ -15,6 +15,10 @@ pub const weights = @import("metal/weights.zig");
 pub const engine = @import("metal/engine.zig");
 pub const codec = @import("metal/codec.zig");
 pub const codec_weights = @import("metal/codec_weights.zig");
+pub const encoder = @import("metal/encoder.zig");
+pub const teacher = @import("metal/teacher.zig");
+pub const quantizer = @import("metal/quantizer.zig");
+pub const clip = @import("metal/clip.zig");
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
@@ -35,4 +39,5 @@ test {
     _ = voices;
     _ = kernels;
     _ = codec_weights;
+    _ = quantizer;
 }
