@@ -108,7 +108,7 @@ const Rig = struct {
     core: lanes.Engine,
     host: LaneHost,
 
-    fn start(r: *Rig, pages: *Pages) !void {
+    fn start(r: *Rig, pages: *Pages, lanes_n: u32) !void {
         const gpa = std.testing.allocator;
         r.cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
         errdefer r.cfg.deinit(gpa);
@@ -118,7 +118,7 @@ const Rig = struct {
         r.core = lanes.Engine.init(gpa, &r.cfg, r.target.backend(), r.clock.clock());
         errdefer r.core.deinit();
         const admit: api.Admit = .{ .ctx = pages, .fits = Pages.fits, .need = Pages.need };
-        r.host = LaneHost.init(gpa, std.testing.io, &r.core, .{ .lanes = 3, .admit = admit });
+        r.host = LaneHost.init(gpa, std.testing.io, &r.core, .{ .lanes = lanes_n, .admit = admit });
         try r.host.countPool(&pages.pool);
         try r.host.start();
     }
@@ -135,13 +135,13 @@ const run_long = 100000; // a reply that runs until it is cancelled
 const small: [8]u32 = .{ 3, 1, 4, 1, 5, 9, 2, 6 }; // 2 pages, any class
 const nine: [36]u32 = @splat(7); // 9 pages: more than a class of 8 holds
 
-/// Test 3 on `classes` classes of 16 pages: a running stream, then a request of 9 pages; its end, or null.
-fn pastClass(classes: u32, box: *Box) !struct { ?Reason, usize } {
+/// Test 3 on `classes` classes of 16 pages, `n` lanes: a running stream, then a request of 9 pages; its end, or null.
+fn pastClass(classes: u32, n: u32, box: *Box) !struct { ?Reason, usize } {
     var pages: Pages = .{ .pool = try kv.Pool.initClasses(std.testing.allocator, 16, 4, classes) };
     defer pages.deinit();
     Pages.prompts = .{ &small, &nine, &small, &small, &small, &small, &small, &small };
     var rig: Rig = undefined;
-    try rig.start(&pages);
+    try rig.start(&pages, n);
     defer rig.stop();
     const e = rig.host.engine();
     var a: Box = .{};
@@ -159,14 +159,22 @@ fn pastClass(classes: u32, box: *Box) !struct { ?Reason, usize } {
 
 test "kv classes 3: a request past a whole class is refused at once by name, while another stream runs" {
     var b: Box = .{};
-    const end, const held = try pastClass(2, &b);
+    const end, const held = try pastClass(2, 3, &b);
     try equal(@as(?Reason, .failed), end); // not left queued for room no release can give
     try expect(std.mem.indexOf(u8, b.message, "KV owner class") != null); // the refusal names the class
     try equal(@as(usize, 0), b.state()[0]);
     try equal(@as(usize, 2), held); // nothing promised or taken for it before the refusal
     var one: Box = .{};
-    const end1, _ = try pastClass(1, &one); // one class of 16: the same request runs, as on #2415
+    const end1, _ = try pastClass(1, 3, &one); // one class of 16: the same request runs, as on #2415
     try equal(@as(?Reason, .length), end1);
+}
+
+test "kv classes 3: refused at once with every lane busy, not when the running stream ends" {
+    var b: Box = .{};
+    const end, const held = try pastClass(2, 1, &b); // one lane, held by the long stream until it is cancelled
+    try equal(@as(?Reason, .failed), end);
+    try expect(std.mem.indexOf(u8, b.message, "KV owner class") != null);
+    try equal(@as(usize, 2), held);
 }
 
 test "kv classes 5: a head waiting on class 0 lets a later request for class 1 go first, then runs" {
@@ -177,7 +185,7 @@ test "kv classes 5: a head waiting on class 0 lets a later request for class 1 g
     const three: [12]u32 = .{101} ++ @as([11]u32, @splat(7)); // class 1, 3 pages
     Pages.prompts = .{ &six, &four, &three, &small, &small, &small, &small, &small };
     var rig: Rig = undefined;
-    try rig.start(&pages);
+    try rig.start(&pages, 3);
     defer rig.stop();
     const e = rig.host.engine();
     var a: Box = .{};

@@ -31,8 +31,9 @@ pub const Ledger = struct {
     pool: ?Counted = null, // a paged family's pool: its pages promised or held count here, its own test defers here
 
     /// A ledger whose whole budget is `c`'s pages: a paged family's alone admits exactly what its pool did.
-    pub fn ofPages(c: Counted) Ledger {
+    pub fn ofPages(c: Counted) error{NoClassHook}!Ledger {
         const n = c.read(c.ctx);
+        if (n.classes > 1 and c.class == null) return error.NoClassHook; // whole-pool counts are no class's
         return .{ .total = n.total * n.unit, .pool = c };
     }
 

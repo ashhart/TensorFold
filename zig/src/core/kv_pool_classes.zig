@@ -58,6 +58,8 @@ pub fn reserve(p: *Pool, l: *kv.Lease, n: usize, in: ?u32) error{ LaneMemory, Ba
     const held = l.promised > 0 or l.ids.items.len > 0;
     const c = if (held) was else in orelse roomiest(p);
     if (c >= p.classes or (held and in != null and in.? != was)) return error.BadClass;
+    p.enter(); // one change: the notice comes after the promise or the owner's rollback
+    defer p.leave();
     l.owner = c;
     p.promise(l, n) catch |e| {
         l.owner = was;
