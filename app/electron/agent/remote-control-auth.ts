@@ -92,7 +92,7 @@ export function securityRoleAllows(required: SecurityRole): boolean {
   return SECURITY_ROLE_RANK[currentSecurityRoleFromEnv(process.env)] >= SECURITY_ROLE_RANK[required]
 }
 
-/** Resolving a tool approval is the owner's call: a paired device is told it cannot, and its snapshot hides approvals. */
+/** Resolving a tool approval is the owner's call: a paired device is told it cannot; its snapshot hides approvals. */
 export function remoteMutationNeedsOwnerToken(pathname: string): boolean {
   return /^\/v1\/approvals\/[^/]+$/.test(pathname)
 }
