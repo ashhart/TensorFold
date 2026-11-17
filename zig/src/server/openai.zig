@@ -21,15 +21,18 @@ const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const cancel_ids = @import("cancel_ids.zig");
 const prompt_list = @import("prompt_list.zig");
+const completion_prompt = @import("completion_prompt.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
+
 /// Where a chat reply goes: the client's socket, or a Responses or Messages translation of it.
 pub const Out = struct {
     ctx: *anyopaque,
     vt: *const VTable,
+
     pub const VTable = struct {
         /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
         open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
@@ -41,6 +44,7 @@ pub const Out = struct {
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
+
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
@@ -143,7 +147,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
     const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
-    if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try legacyPrompt(srv, cx, body.get("prompt"));
+    if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");
     const max = if (first != null and first.?.truthy()) first else body.get("max_completion_tokens");
@@ -184,49 +188,6 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         .named = replyModel(srv, body),
         .prompts = prompts,
     };
-}
-
-/// A completion's prompt as the model reads it: token ids as given, anything else as text.
-fn legacyPrompt(srv: *Server, cx: *Cx, prompt: ?Value) errors.Refused!chat.Prompt {
-    const p = prompt orelse return .{ .text = "" };
-    if (p == .array and p.array.len > 0 and allInts(p.array)) {
-        const vocab = srv.text.vocabSize();
-        const out = try cx.a.alloc(u32, p.array.len);
-        for (p.array, out) |t, *slot| slot.* = try promptId(cx, vocab, t);
-        return .{ .ids = out };
-    }
-    return .{ .text = try promptText(srv, cx, p) };
-}
-
-/// A prompt token id, refused unless it is an integer inside the vocabulary.
-fn promptId(cx: *Cx, vocab: u32, t: Value) errors.Refused!u32 {
-    const n = if (t == .int) t.int64() else null;
-    if (n == null or n.? < 0 or n.? >= vocab) return cx.fail(.request, "prompt token ids must be integers in the valid range 0 to {d}", .{@as(i64, vocab) - 1});
-    return @intCast(n.?);
-}
-
-fn allInts(items: []const Value) bool {
-    for (items) |t| if (t != .int and t != .bool) return false;
-    return true;
-}
-
-fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
-    switch (p) {
-        .string => |s| return s,
-        .null => return "",
-        .array => |items| {
-            if (allInts(items)) {
-                const vocab = srv.text.vocabSize();
-                const toks = try cx.a.alloc(u32, items.len);
-                for (items, toks) |t, *slot| slot.* = try promptId(cx, vocab, t);
-                return srv.text.decode(cx.a, toks) catch return error.OutOfMemory;
-            }
-            var parts: std.ArrayList([]const u8) = .empty;
-            for (items) |item| try parts.append(cx.a, try promptText(srv, cx, item));
-            return std.mem.join(cx.a, "\n", parts.items);
-        },
-        else => return tool_specs.pyStr(cx.a, p),
-    }
 }
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
