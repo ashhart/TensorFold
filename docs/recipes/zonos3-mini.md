@@ -59,9 +59,9 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
   The clip encoder's weights load on the first request that brings a clip.
 
-Refused or absent: clips in formats other than WAV, speaker and control
-guidance, LACI, steering, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts,
-condition values (every condition row is its "unknown" bucket), the `full_mr` decoder, concurrency, Metal.
+Refused or absent: clips in formats other than WAV, steering controls and their guidance (`controls_cfg_scale`),
+LACI, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts, the `full_mr` decoder,
+concurrency, Metal.
 
 ## Text normalization
 
@@ -91,6 +91,35 @@ cargo rustc --release --locked --lib -p zyphra-textnorm --features capi --crate-
 (`model/tests/test_textnorm_wrapper.py`): with `true`, each text in each language it covers must equal the expected
 spoken form byte for byte, and left out or `false`, the text as typed with its line breaks collapsed. The cases that
 need the library skip where it does not load; run them with `TENSORFOLD_LIBZYPHRA_TEXTNORM` set.
+
+## Condition values and speaker guidance
+
+Both are the reference's (`zonos3.tts.plan`, `zonos3.speaker_cfg`), under its field names.
+
+- **`condition_values`** and **`condition_buckets`** set the three condition rows: `loudness` (LUFS), `fmax` (Hz)
+  and `speaking_rate` (UTF-8 bytes of text a second), as an object by name or a list in that order. A raw value goes
+  to its bucket through the edges in `params.json` (the count of edges at or below it); a bucket id is taken as
+  given, from 0 to the table's count, the count itself meaning unknown. A bucket wins over a value for the same row,
+  and a row the request leaves out is unknown, as every row was before.
+- **`speaker_cfg_scale`** is speaker guidance: 1 (the default) is off, larger follows the voice harder, 0 is the
+  prompt without its voice. The host runs a twin beside the request: the same prompt without its reference prefix
+  (or speaker row) and with every condition unknown, on a second set of caches, fed the same generated rows. Each
+  frame is sampled from `unconditional + scale * (conditional - unconditional)`, mixed in fp32 on the host before
+  the sampler, as the reference does. There is no new kernel: each branch is the single-stream pass already
+  checked.
+- **Memory:** the second set of caches and recurrent state is 10,913,792 bytes at the default context, allocated by
+  the first guided request after asking the pool for that room, and kept.
+- **Speed:** a guided request runs the backbone twice a frame.
+
+`controls_cfg_scale`, the guidance on steering controls, needs the steering bundle, which is not served.
+
+Checked on the RTX 5090, served, with the Savannah voice sent as `speaker_reference_codes` at temperature 0: the
+replies to the four requests above have the reference audio's sample counts and match it at 64.8 dB (unguided, the
+earlier baseline), 64.9 dB (condition values), 61.9 dB (guidance 1.5) and 63.6 dB (guidance 2 with buckets) signal
+to noise, the reference decoding on the CPU. Sampled: a guided request repeats byte for byte and streams the same
+bytes, also with a cloned clip; scale 1 gives the unguided bytes; `condition_values` give the bytes of the buckets
+they resolve to, and all-unknown buckets the bytes of a request that names none. One 13-word sentence in the
+`rupert` voice lasted 6.53 s at `speaking_rate` 8, 4.40 s with none and 2.47 s at 25.
 
 ## Precision
 
@@ -132,6 +161,10 @@ package installed, and `LM=RELEASE/lm/zonos3_mini`:
 python tools/zig/zonos3_reference.py requests RELEASE D/requests
 python tools/zig/zonos3_reference.py rows LM D/requests/greedy_embedding.json D/gen_greedy_embedding --device cpu
 python tools/zig/zonos3_reference.py rows LM D/requests/greedy_reference.json D/gen_greedy_reference --device cpu
+python tools/zig/zonos3_reference.py rows LM D/requests/conditions.json D/gen_conditions --device cpu
+python tools/zig/zonos3_reference.py rows LM D/requests/guided_reference.json D/gen_guided_reference --device cpu
+python tools/zig/zonos3_reference.py rows LM D/requests/guided_embedding.json D/gen_guided_embedding --device cpu
+python tools/zig/zonos3_reference.py rows LM D/requests/guided_conditions.json D/gen_guided_conditions --device cpu
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_embedding/input_ids.npy --dtype f32 --mode full -o D/lm_embedding
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_reference/input_ids.npy --dtype f32 --mode full -o D/lm_reference
 python tools/zig/zonos3_reference.py codec RELEASE/gguf/voices/English/Savannah_en-American_F_1.codes.npy D/codec_savannah
@@ -162,6 +195,10 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | Backbone, reference prompt | `--model LM --check D/lm_reference --max-rows 256` | 109 captures, 209 rows | every row's cosine 1.0000000; worst relative difference 3.7e-6 |
 | Greedy frames, embedding voice | `--model LM --frames-check D/gen_greedy_embedding --max-rows N` | the reference's 78 frames | 78 of 78 identical at N = 1, 7, 64 and 256 |
 | Greedy frames, reference voice | `--model LM --frames-check D/gen_greedy_reference --max-rows N` | the reference's 80 frames | 80 of 80 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, condition values (loudness -20, speaking rate 18) | `--model LM --frames-check D/gen_conditions --max-rows N` | the reference's 68 frames | 68 of 68 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, speaker guidance 1.5, reference voice | `--model LM --frames-check D/gen_guided_reference --max-rows N` | the reference's 77 frames | 77 of 77 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, speaker guidance 1.5, embedding voice | `--model LM --frames-check D/gen_guided_embedding --max-rows N` | the reference's 81 frames | 81 of 81 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, speaker guidance 2 with condition buckets 3, unknown, 25 | `--model LM --frames-check D/gen_guided_conditions --max-rows N` | the reference's 62 frames | 62 of 62 identical at N = 1, 7, 64 and 256 |
 | Codec decoder | `--codec-check D/codec_savannah --generator G --head H` | 13 captures and the audio of 171 frames, CPU fp32 | cosine 1.0000000; audio SNR 115.9 dB |
 | Codec in chunks | the same run | frames fed 1, 3, 7, 15, ... at a time, the settled samples taken after each | bit-identical to one pass |
 | Text to audio, embedding voice | `--checkpoint RELEASE --text "..." --voice-embedding E --temperature 0 --reference D/gen_greedy_embedding` | the reference's prompt rows, frames and CPU audio | rows equal, 78 of 78 frames, 205,800 of 205,800 samples, audio SNR 111.7 dB |

@@ -24,7 +24,8 @@ const usage =
     \\--check runs DUMP_DIR/input_ids.npy (prompt rows [n, 11]) with DUMP_DIR/input_ids.cond.json through the backbone
     \\and compares every sublayer with the reference's .npy captures (tools/dump_golden.py lm of Zyphra/ZONOS3-Mini).
     \\--frames-check generates greedily (temperature 0, the other sampling defaults) after GEN_DIR's prompt and compares
-    \\the frames with GEN_DIR/rows.npy, the reference's generation of the same request.
+    \\the frames with GEN_DIR/rows.npy, the reference's generation of the same request. A guided request's dump also
+    \\holds twin_ids.npy and twin_ids.cond.json (the prompt without its voice, and the scale): both branches are run.
     \\--codec-check decodes DUMP_DIR/codes.npy ([frames, 10]) with the codec decoder and compares its captures and
     \\audio with the reference's (dump_codec.py); --generator is autoencoder/generator.pt, --head a decoder checkpoint.
     \\--text speaks the text as typed (line breaks collapsed, no number or date expansion) in the voice of a 192-d
@@ -113,7 +114,12 @@ pub const Check = struct {
 
 /// The dump's prompt: rows and the rows a speaker or condition vector replaces.
 fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, rows: *[][W]i32, replaced: *std.ArrayList(z3.Replace)) !void {
-    const ids_path = try std.fs.path.join(gpa, &.{ dir, "input_ids.npy" });
+    _ = try loadBranch(gpa, io, e, dir, "input_ids", rows, replaced);
+}
+
+/// A branch of the dump (`input_ids`, or the guidance twin `twin_ids`); the twin's sidecar holds the guidance scale.
+fn loadBranch(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, comptime stem: []const u8, rows: *[][W]i32, replaced: *std.ArrayList(z3.Replace)) !f32 {
+    const ids_path = try std.fs.path.join(gpa, &.{ dir, stem ++ ".npy" });
     defer gpa.free(ids_path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, ids_path, gpa, .limited(1 << 28));
     defer gpa.free(bytes);
@@ -124,7 +130,7 @@ fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
     rows.* = try gpa.alloc([W]i32, arr.shape[0]);
     for (rows.*, 0..) |*r, i| r.* = flat[i * W ..][0..W].*;
 
-    const cond_path = try std.fs.path.join(gpa, &.{ dir, "input_ids.cond.json" });
+    const cond_path = try std.fs.path.join(gpa, &.{ dir, stem ++ ".cond.json" });
     defer gpa.free(cond_path);
     const text = try std.Io.Dir.cwd().readFileAlloc(io, cond_path, gpa, .limited(1 << 22));
     defer gpa.free(text);
@@ -153,6 +159,11 @@ fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
         @memcpy(&r.vec, e.w.conditions[i][bucket * D ..][0..D]);
         try replaced.append(gpa, r);
     }
+    return if (o.get("cfg_scale")) |scale| switch (scale) {
+        .float => |f| @floatCast(f),
+        .integer => |n| @floatFromInt(n),
+        else => error.BadGuidanceScale,
+    } else 1;
 }
 
 pub fn nowNs(io: std.Io) i128 {
@@ -168,8 +179,21 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
     if (arr.rank != 2 or arr.shape[1] != W) return error.BadReferenceRows;
     const want = try arr.ints(gpa);
     defer gpa.free(want);
+    // a guided request's dump brings its twin: the prompt without the voice, run on the second lane
+    var twin: [][W]i32 = &.{};
+    defer gpa.free(twin);
+    var twin_replaced: std.ArrayList(z3.Replace) = .empty;
+    defer twin_replaced.deinit(gpa);
+    var scale: f32 = 1;
+    const twin_path = try std.fs.path.join(gpa, &.{ dir, "twin_ids.npy" });
+    defer gpa.free(twin_path);
+    if (std.Io.Dir.cwd().access(io, twin_path, .{})) |_| {
+        scale = try loadBranch(gpa, io, e, dir, "twin_ids", &twin, &twin_replaced);
+        try e.twin();
+        try e.reset();
+    } else |_| {}
     const t0 = nowNs(io);
-    const r = try z3.generation.generate(gpa, e, prompt, replaced, .{ .temperature = 0 }, max_frames);
+    const r = try z3.generation.generateGuided(gpa, e, prompt, replaced, twin, twin_replaced.items, scale, .{ .temperature = 0 }, max_frames, null);
     defer gpa.free(r.rows);
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
     const n = @min(r.rows.len, arr.shape[0]);
@@ -177,7 +201,7 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
     while (same < n and std.mem.eql(i32, &r.rows[same], want[same * W ..][0..W])) same += 1;
     const pass = same == arr.shape[0] and r.rows.len == arr.shape[0];
     if (!pass and same < n) std.debug.print("first difference at frame {d}: mine {any} reference {any}\n", .{ same, r.rows[same], want[same * W ..][0..W] });
-    std.debug.print("RESULT zonos3 frames {s} identical={d} mine={d} reference={d} eos_frame={?d} prompt_rows={d} seconds={d:.3} frames_per_s={d:.1}\n", .{ if (pass) "PASS" else "FAIL", same, r.rows.len, arr.shape[0], r.eos_frame, prompt.len, seconds, @as(f64, @floatFromInt(r.rows.len)) / seconds });
+    std.debug.print("RESULT zonos3 frames {s} identical={d} mine={d} reference={d} eos_frame={?d} prompt_rows={d} twin_rows={d} guidance={d} seconds={d:.3} frames_per_s={d:.1}\n", .{ if (pass) "PASS" else "FAIL", same, r.rows.len, arr.shape[0], r.eos_frame, prompt.len, twin.len, scale, seconds, @as(f64, @floatFromInt(r.rows.len)) / seconds });
     return if (pass) 0 else 1;
 }
 
