@@ -229,7 +229,7 @@ const Sent = struct {
 /// The cache key a chat request reached the engine with (testing-allocator owned), and its reply's status.
 fn keyOf(k: *Keys, body: []const u8, per_key: bool, digest: ?[32]u8) !struct { key: []u32, status: u16, salted: bool } {
     var text: Text = .{};
-    var secret = @import("ids.zig").Key.of("one server's salt key"); // Server.init takes it: every call's server keys alike
+    var secret = @import("ids.zig").Key.of("one server's salt key"); // a stable server key on each call
     var srv = try server.Server.init(gpa, io, k.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .cache_salt_per_key = per_key, .tool_id_key = &secret }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -328,4 +328,113 @@ test "the routes: an engine keyed by tokens alone refuses a salt, a malformed sa
     };
     const t = try @import("responses_translate.zig").translate(&cx, body, NoHistory{});
     try std.testing.expectEqualStrings("tenant-a", t.chat.strField("cache_salt").?);
+}
+
+/// A cache-capable engine that reports real key matches and keeps every request's cache-hit count.
+const RouteCache = struct {
+    mutex: std.Io.Mutex = .init,
+    keys: std.ArrayList([]u32) = .empty,
+    hits: std.ArrayList(u32) = .empty,
+    const owned = std.heap.page_allocator;
+
+    fn deinit(k: *@This()) void {
+        for (k.keys.items) |key| owned.free(key);
+        k.keys.deinit(owned);
+        k.hits.deinit(owned);
+    }
+    fn engine(k: *@This()) api.Engine {
+        return .{ .ctx = k, .vtable = &.{ .info = info, .submit = submit, .cancel = Keys.cancel, .status = Keys.status, .memory = Keys.memory } };
+    }
+    fn info(k: *anyopaque) api.Info {
+        return .{ .context_window = 4096, .prompt_cache = true, .cache_salt = true, .vision = .{ .ctx = k, .prepare = prepare, .image_token = '#', .image_tokens = 64, .max_images = 4 }, .ocr = .{ .prompt = "Read the page.", .parse = parse } };
+    }
+    fn prepare(_: *anyopaque, a: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+        return .{ .pixels = try a.alloc(f32, 0), .gh = 1, .gw = 1, .tokens = 1, .hash = 7, .frame = .{ .width = 100, .height = 50 } };
+    }
+    fn parse(a: std.mem.Allocator, src: []const u8, _: api.Size, _: api.Size) anyerror![]api.ocr.OcrBlock {
+        const out = try a.alloc(api.ocr.OcrBlock, 1);
+        out[0] = .{ .content = src, .quad = .{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } }, .kind = .text };
+        return out;
+    }
+    fn submit(ctx: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const k: *@This() = @ptrCast(@alignCast(ctx));
+        const hit = blk: {
+            k.mutex.lockUncancelable(io);
+            defer k.mutex.unlock(io);
+            var n: u32 = 0;
+            for (k.keys.items) |key| if (std.mem.eql(u32, key, r.cacheKey())) {
+                n = @intCast(r.prompt.len);
+                break;
+            };
+            if (n == 0) {
+                const key = owned.dupe(u32, r.cacheKey()) catch return error.Busy;
+                k.keys.append(owned, key) catch {
+                    owned.free(key);
+                    return error.Busy;
+                };
+            }
+            k.hits.append(owned, n) catch return error.Busy;
+            break :blk n;
+        };
+        sink.event(sink.ctx, id, &.{ .prefilled = hit });
+        sink.event(sink.ctx, id, &.{ .tokens = &.{'x'} });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+};
+
+fn isolated(k: *const RouteCache, from: usize, count: usize, resumed: bool) !void {
+    try std.testing.expectEqual(from + count, k.hits.items.len);
+    for (k.hits.items[from..]) |hit| try std.testing.expectEqual(resumed, hit > 0);
+}
+
+test "cache salt isolation: two keys list completions never resume each other, with whole and streamed replies" {
+    for ([_]bool{ false, true }) |streaming| {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var cache: RouteCache = .{};
+        defer cache.deinit();
+        const srv = try server.Server.init(gpa, io, cache.engine(), @import("ocr/harness_test.zig").text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .cache_salt_per_key = true }, null);
+        defer srv.deinit();
+        const raw = (try json.parse(a, if (streaming)
+            "{\"model\":\"m\",\"prompt\":[\"first prompt\",\"second prompt\"],\"max_tokens\":1,\"stream\":true}"
+        else
+            "{\"model\":\"m\",\"prompt\":[\"first prompt\",\"second prompt\"],\"max_tokens\":1}")).ok;
+        for ([_]u8{ 1, 1, 2, 2, 1 }, [_]bool{ false, true, false, true, true }) |key, resumed| {
+            const from = cache.hits.items.len;
+            var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .key_digest = @as([32]u8, @splat(key)) };
+            var sent: Sent = .{};
+            openai.run(srv, a, sent.out(), .{ .conn = &conn }, false, raw);
+            if (!streaming) try std.testing.expectEqual(@as(u16, 200), sent.status);
+            try isolated(&cache, from, 2, resumed);
+        }
+    }
+}
+
+test "cache salt isolation: two keys OCR pages never resume each other and each key resumes its own page" {
+    const harness = @import("ocr/harness_test.zig");
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cache: RouteCache = .{};
+    defer cache.deinit();
+    const srv = try server.Server.init(gpa, io, cache.engine(), harness.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .cache_salt_per_key = true }, null);
+    defer srv.deinit();
+    const png = try harness.png(a, 4, 3);
+    const url = try @import("pdf.zig").makeDataUrl(a, "image/png", png);
+    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"document\":{{\"type\":\"image_url\",\"image_url\":\"{s}\"}}}}", .{url});
+    var first: ?[]const u8 = null;
+    for ([_]u8{ 1, 1, 2, 2, 1 }, [_]bool{ false, true, false, true, true }) |key, resumed| {
+        const from = cache.hits.items.len;
+        var wire: harness.Wire = .{ .a = a };
+        const conn = try harness.request(a, &wire, "/v1/ocr", "application/json", body);
+        conn.key_digest = @as([32]u8, @splat(key));
+        @import("ocr/route.zig").post(srv, conn, a);
+        try std.testing.expectEqual(@as(u16, 200), wire.status());
+        try isolated(&cache, from, 1, resumed);
+        const reply = try wire.parsed();
+        const markdown = reply.get("pages").?.array[0].strField("markdown").?;
+        try std.testing.expect(std.mem.indexOf(u8, markdown, "x") != null);
+        if (first) |expected| try std.testing.expectEqualStrings(expected, markdown) else first = markdown;
+    }
 }

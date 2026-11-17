@@ -96,7 +96,7 @@ fn parse(a: Allocator, src: []const u8, original: api.Size, frame: api.Size) any
 }
 
 /// Bytes as tokens; every prompt renders "a#b", one image placeholder ('#', an added token) between two words.
-fn text() model_text.Text {
+pub fn text() model_text.Text {
     return .{ .ctx = undefined, .vtable = &.{ .encode = TestText.encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .added = added } };
 }
 fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
