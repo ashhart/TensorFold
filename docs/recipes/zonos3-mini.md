@@ -224,7 +224,12 @@ workflow runs them (`-Dfixed-cpu`, its test timeouts) and all passed:
   (`test-drama-host test-cuda-host`).
 
 They ran under umask 022: with 0002 one unrelated test (`serve --config`, which refuses a group-writable file)
-fails. The macOS and Metal jobs were not run, and neither was any quality suite.
+fails.
+
+On macOS (an M5 Ultra) the default build and `zig build native` succeed, and `zig build test` fails one test, GLM's
+`a failed compile releases every pipeline built before it` (expected 52, found 64), which fails the same way on main
+`9489c3817` there. The family has no Metal path; the Metal contract jobs were not run, and neither was any quality
+suite.
 
 The family registers four kernel images, so `zig/tests/fixtures/gradient-serving.tsv` re-pins
 `zig/src/cuda/kernels.zig`, as earlier image registrations did.
