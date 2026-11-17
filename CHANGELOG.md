@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 EXL3 on Metal: the indexer row scorer runs on 32-row threadgroups with all four simdgroups live, 1024 rows x 32k keys in 2.64 ms instead of 2.98 ms on an M5 Ultra, with bit-identical scores (#3736).
 - DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention (#3382),
   per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
   Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.
