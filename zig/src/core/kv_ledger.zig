@@ -1,5 +1,6 @@
 //! A byte budget that admitted requests promise from: leases' bytes, and a paged pool's pages as a sub-count.
 const std = @import("std");
+pub const classes = @import("kv_classes.zig"); // the pages a request needs a class (#2444 C1)
 
 /// The bytes one holder (an admitted job) has promised past its standing stream, if it is `bound` to one.
 pub const Lease = struct { bytes: u64 = 0, bound: bool = false };
@@ -8,13 +9,17 @@ pub const Lease = struct { bytes: u64 = 0, bound: bool = false };
 pub const Standing = struct { each: u64 = 0, streams: u32 = 0 };
 
 /// A paged pool's counts in pages, and the bytes a page counts for (kv_pool.Pool's, read through `Counted`).
-pub const Pages = struct { total: usize, available: usize, reclaimable: usize, unit: u64 };
+pub const Pages = struct { total: usize, available: usize, reclaimable: usize, unit: u64, classes: u32 = 1 };
+
+/// One owner class as the ledger reads it (kv_classes.zig): the ids it holds and those free and not promised.
+pub const Class = struct { cap: usize, available: usize };
 
 /// A pool the ledger counts: its counts, and its way back to its own pages (kv_pool stays a module of its own).
 pub const Counted = struct {
     ctx: *anyopaque,
     read: *const fn (ctx: *const anyopaque) Pages,
     detach: *const fn (ctx: *anyopaque) void,
+    class: ?*const fn (ctx: *const anyopaque, c: u32) Class = null, // null: one class, the pool itself
 };
 
 /// What streams' caches may take at once; the caller serializes every call (the lane host's lock, then the pool's).
@@ -31,7 +36,7 @@ pub const Ledger = struct {
         return .{ .total = n.total * n.unit, .pool = c };
     }
 
-    fn pages(l: *const Ledger) Pages {
+    pub fn pages(l: *const Ledger) Pages {
         const c = l.pool orelse return .{ .total = 0, .available = 0, .reclaimable = 0, .unit = 1 };
         return c.read(c.ctx);
     }
@@ -65,10 +70,10 @@ pub const Ledger = struct {
         return c.available +| @as(usize, @intCast((short + c.unit - 1) / c.unit));
     }
 
-    /// `want` for the pool's gate (kv_pool.Gate), `ctx` the ledger.
-    pub fn wantOf(ctx: *const anyopaque, n: usize) usize {
+    /// `want` for the pool's gate (kv_pool.Gate), `ctx` the ledger: the whole pool's (null) or class `c`'s.
+    pub fn wantOf(ctx: *const anyopaque, c: ?u32, n: usize) usize {
         const l: *const Ledger = @ptrCast(@alignCast(ctx));
-        return l.want(n);
+        return if (c) |x| classes.wantIn(l, x, n) else l.want(n);
     }
 
     /// The pool counts on its own pages again and leaves this ledger.
