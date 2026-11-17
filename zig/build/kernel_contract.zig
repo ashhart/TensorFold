@@ -304,6 +304,8 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     runner.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = h3 orelse b.addWriteFiles().add("h3.fatbin", "") });
     const names = [2][]const u8{ "h3_image_decoder", "h3_image_prompt" };
     for (names, h3_image) |n, file| runner.root_module.addAnonymousImport(b.fmt("fatbin_{s}", .{n}), .{ .root_source_file = file orelse b.addWriteFiles().add(b.fmt("{s}.fatbin", .{n}), "") });
+    const runner_install = b.addInstallArtifact(runner, .{});
+    b.step("install-cuda-contract-runner", "Install the CUDA contract runner without executing it").dependOn(&runner_install.step);
     const install = b.step("kernel-contract-fatbins", "Install all CUDA contract images (fatbin/)");
     if (controls) |file| install.dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     if (h3) |file| install.dependOn(&b.addInstallFile(file, "fatbin/h3.fatbin").step);
