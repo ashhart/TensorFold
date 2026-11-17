@@ -211,12 +211,17 @@ test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) =
 }
 
 test "dsv41 metal serve: (c2) a thinking turn keeps its state before <think>; the next turn resumes there == fresh" {
+    for ([_]bool{ false, true }) |steps| try thinkingTurn(steps);
+}
+
+/// (c2) with whole prompts, or in steps (`steps`): the same kept state and replies.
+fn thinkingTurn(steps: bool) !void {
     const c = fs.config();
     const body = try untagged(300, 7);
     defer gpa.free(body);
     const p = try std.mem.concat(gpa, u32, &.{ body, &.{ c.assistant, c.think_open } });
     defer gpa.free(p);
-    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30, .steps = steps });
     const s = try Served.open(gpa, io, m.model(), ".", null);
     defer Served.close(s);
     const e = s.engine();
@@ -239,13 +244,18 @@ test "dsv41 metal serve: (c2) a thinking turn keeps its state before <think>; th
     try reference(&asks, &want);
     defer freeAll(&want);
     const bad = same(&want, &.{ first[0], got[0] });
-    say(bad == 0 and resumed == p.len - 1, "(c2) a thinking follow-up resumed {d} rows (its turn before <think>: {d}); split prefill and follow-up vs fresh: {d} of 2 replies differ", .{ resumed, p.len - 1, bad });
+    say(bad == 0 and resumed == p.len - 1, "(c2) {s}: a thinking follow-up resumed {d} rows (its turn before <think>: {d}); split prefill and follow-up vs fresh: {d} of 2 replies differ", .{ if (steps) "in steps" else "whole prompts", resumed, p.len - 1, bad });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(m.t.stats.hits > hits0);
     try testing.expectEqual(@as(u32, @intCast(p.len - 1)), resumed);
 }
 
 test "dsv41 metal serve: (c3) a fresh conversation resumes after the last one's system part == fresh" {
+    for ([_]bool{ false, true }) |steps| try systemPart(steps);
+}
+
+/// (c3) with whole prompts, or in steps (`steps`): the same kept state and replies.
+fn systemPart(steps: bool) !void {
     const c = fs.config();
     const system = try untagged(300, 9);
     defer gpa.free(system);
@@ -259,7 +269,7 @@ test "dsv41 metal serve: (c3) a fresh conversation resumes after the last one's 
         k.* = .{ .prompt = p.*, .max = 24 };
     }
     defer for (prompts) |p| gpa.free(p);
-    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30, .steps = steps });
     const s = try Served.open(gpa, io, m.model(), ".", null);
     defer Served.close(s);
     var drafted: u64 = 0;
@@ -271,7 +281,7 @@ test "dsv41 metal serve: (c3) a fresh conversation resumes after the last one's 
     try reference(&asks, &want);
     defer freeAll(&want);
     const bad = same(&want, &got);
-    say(bad == 0 and resumed[1] == system.len, "(c3) a new conversation resumed {d} rows (the system part: {d}); vs fresh: {d} of 2 replies differ", .{ resumed[1], system.len, bad });
+    say(bad == 0 and resumed[1] == system.len, "(c3) {s}: a new conversation resumed {d} rows (the system part: {d}); vs fresh: {d} of 2 replies differ", .{ if (steps) "in steps" else "whole prompts", resumed[1], system.len, bad });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expectEqual([2]u32{ 0, @intCast(system.len) }, resumed);
 }
@@ -548,7 +558,8 @@ test "dsv41 metal serve: (h) a short request during a long prompt: first in step
 }
 
 test "dsv41 metal serve: (i) in steps, a request cancelled mid-prompt keeps nothing and the next requests == serial" {
-    const long = try ids(1100, 32);
+    // no user or think tag, so no state short of the prompt is kept (Target.keepPoints)
+    const long = try untagged(1100, 32);
     defer gpa.free(long);
     const p0 = try ids(120, 33);
     defer gpa.free(p0);
