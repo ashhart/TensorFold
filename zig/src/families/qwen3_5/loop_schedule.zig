@@ -52,22 +52,52 @@ pub fn build(linear: []const bool, loop: ?config.Config) error{ ScheduleTooLarge
     return s;
 }
 
-pub fn enterMhc(step: Step, pending: bool) bool {
-    _ = step;
-    return pending;
-}
+pub const Decision = struct {
+    enter: bool,
+    route: bool,
+    first_add: bool,
+    second_add: bool,
+    merge: bool,
+    leave: bool,
+    pending: bool,
 
-pub fn leaveMhc(step: Step, pending: bool) bool {
-    _ = step;
-    return pending;
-}
+    pub fn actions(d: Decision) Actions {
+        var out: Actions = .{};
+        if (d.enter) out.add(.enter);
+        if (d.route) out.add(.route);
+        out.add(if (d.first_add) .norm_add else .norm_plain);
+        out.add(.mixer);
+        if (d.merge) out.add(.merge);
+        if (d.route) out.add(.route);
+        out.add(if (d.second_add) .norm_add else .norm_plain);
+        out.add(.mlp);
+        if (d.merge) out.add(.merge);
+        if (d.leave) out.add(.leave);
+        return out;
+    }
+};
 
-pub fn attentionMhc(step: Step, pending: bool) bool {
-    _ = step;
-    return pending;
-}
+pub const Action = enum { enter, route, norm_add, norm_plain, mixer, merge, mlp, leave };
+pub const Actions = struct {
+    items: [10]Action = undefined,
+    len: usize = 0,
+    fn add(a: *Actions, item: Action) void {
+        a.items[a.len] = item;
+        a.len += 1;
+    }
+    pub fn slice(a: *const Actions) []const Action {
+        return a.items[0..a.len];
+    }
+};
 
-pub fn ffnMhc(step: Step, pending: bool) bool {
-    _ = step;
-    return pending;
+pub fn decide(step: Step, pending: bool) Decision {
+    return .{
+        .enter = step.enter,
+        .route = step.inside,
+        .first_add = !step.inside and pending,
+        .second_add = !step.inside,
+        .merge = step.inside,
+        .leave = step.leave,
+        .pending = !step.inside,
+    };
 }
