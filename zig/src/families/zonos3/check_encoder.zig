@@ -33,9 +33,11 @@ pub fn acoustic(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: 
     var c: Check = .{ .gpa = gpa, .io = io, .ctx = enc, .get = Enc.get, .dir = dir, .prefix = true, .floor = 0.99 };
     std.debug.print("zonos3 encoder check: {d} samples, {d} MiB of weights, loaded in {d:.1} s\n", .{ audio.len, enc.w.bytes >> 20, @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9 });
     const lane = audio[0..@min(audio.len, z3.encoder.lane_frames * z3.encoder.frame_samples)];
-    _ = try enc.acoustic(lane, .{ .ctx = &c, .f = Check.probe });
+    const probe: z3.encoder.Probe = .{ .ctx = &c, .f = Check.probe };
+    try enc.acoustic(0, try enc.load(lane, probe), probe);
     const t0 = nowNs(io);
-    const frames = try enc.acoustic(lane, null);
+    const frames = try enc.load(lane, null);
+    try enc.acoustic(0, frames, null);
     try stream.synchronize();
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
     const pass = c.fails == 0 and c.n > 0 and c.missing == 0;
@@ -117,18 +119,14 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, teacher_dir:
     return if (pass) 0 else 1;
 }
 
-/// A clip's first lane end to end (acoustic branch, features, teacher, pooling, quantizer) against the fp32 codes.
-pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, audio_path: []const u8, root: []const u8) !u8 {
-    var rel = try z3.release.open(gpa, io, root, null);
-    defer rel.deinit();
-    const teacher_dir = try std.fs.path.join(gpa, &.{ root, z3.release.teacher_dir });
-    defer gpa.free(teacher_dir);
+/// A whole clip encoded natively (lanes of 20 s with 10 s of left context) against the reference's fp32 codes.
+pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, root: []const u8) !u8 {
+    const audio_path = try std.fs.path.join(gpa, &.{ dir, "audio.npy" });
+    defer gpa.free(audio_path);
     const f = try readNpy(gpa, io, audio_path);
     defer gpa.free(f.bytes);
-    const all = try f.arr.floats(gpa);
-    defer gpa.free(all);
-    const lane_samples = z3.encoder.lane_frames * z3.encoder.frame_samples;
-    const audio = all[0..@min(all.len, lane_samples)];
+    const audio = try f.arr.floats(gpa);
+    defer gpa.free(audio);
     const want_path = try std.fs.path.join(gpa, &.{ dir, "codes.npy" });
     defer gpa.free(want_path);
     const w = try readNpy(gpa, io, want_path);
@@ -136,63 +134,39 @@ pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, audio_path: [
     const want = try w.arr.ints(gpa);
     defer gpa.free(want);
 
+    var rel = try z3.release.open(gpa, io, root, null);
+    defer rel.deinit();
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
-    const enc = try z3.encoder.Encoder.create(gpa, io, &driver, stream, rel.generator);
-    defer enc.destroy();
-    const teach = try z3.teacher.Teacher.create(gpa, io, &driver, stream, teacher_dir);
-    defer teach.destroy();
     const dec = try z3.codec_weights.load(gpa, io, &driver, rel.generator, rel.head);
     defer {
         dec.deinit();
         gpa.destroy(dec);
     }
-    const quant = try z3.quantizer.Quantizer.create(gpa, io, &driver, stream, rel.generator, dec);
-    defer quant.destroy();
-    const Get = struct {
-        fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
-            try @as(*z3.quantizer.Quantizer, @ptrCast(@alignCast(c))).download(ptr, out);
-        }
-    };
-    var c: Check = .{ .gpa = gpa, .io = io, .ctx = quant, .get = Get.get, .dir = dir };
-
+    const t_load = nowNs(io);
+    const clip = try z3.clip.Clip.create(gpa, io, &driver, stream, root, rel.generator, dec);
+    defer clip.destroy();
+    const load_s = @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9;
+    _ = try clip.encode(gpa, audio);
     const t0 = nowNs(io);
-    const frames = try enc.acoustic(audio, null);
-    // the teacher hears the lane padded to its 20 s
-    const padded = try gpa.alloc(f32, lane_samples);
-    defer gpa.free(padded);
-    @memset(padded, 0);
-    @memcpy(padded[0..audio.len], audio);
-    const low = try z3.features.resample(gpa, padded);
-    defer gpa.free(low);
-    const feats = try z3.features.rows(gpa, low);
-    defer gpa.free(feats);
-    const rows = feats.len / z3.teacher.feature_width;
-    const ssl_ptr = try teach.run(feats, null);
-    const ssl = try gpa.alloc(f32, rows * z3.teacher.d);
-    defer gpa.free(ssl);
-    try teach.download(ssl_ptr, std.mem.sliceAsBytes(ssl));
-    const pooled = try z3.quantizer.pool(gpa, ssl, frames);
-    defer gpa.free(pooled);
-    const codes = try gpa.alloc([z3.quantizer.codebooks]i32, frames);
+    const codes = try clip.encode(gpa, audio);
     defer gpa.free(codes);
-    try quant.run(enc.latent, pooled, codes, null);
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
-    try quant.run(enc.latent, pooled, codes, .{ .ctx = &c, .f = Check.probe });
 
-    const n = @min(frames, w.arr.shape[0]);
-    var same: [z3.quantizer.codebooks]usize = @splat(0);
-    for (codes[0..n], 0..) |row, r| for (row, 0..) |code, cb| {
-        same[cb] += @intFromBool(code == want[r * z3.quantizer.codebooks + cb]);
+    const cb = z3.quantizer.codebooks;
+    const n = @min(codes.len, w.arr.shape[0]);
+    var same: [cb]usize = @splat(0);
+    for (codes[0..n], 0..) |row, r| for (row, 0..) |code, j| {
+        same[j] += @intFromBool(code == want[r * cb + j]);
     };
     var total: usize = 0;
     for (same) |v| total += v;
-    const pass = c.fails == 0 and c.missing == 0 and frames == w.arr.shape[0] and same[0] == n;
+    const pass = codes.len == w.arr.shape[0] and total == n * cb;
     std.debug.print("codes equal to the fp32 reference's, per codebook of {d} frames: {any}\n", .{ n, same });
-    std.debug.print("RESULT zonos3 encode {s} frames={d} reference_frames={d} probes={d} low={d} worst_row_cos={d:.6} codes_equal={d}/{d} semantic_equal={d}/{d} seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", frames, w.arr.shape[0], c.n, c.fails, c.worst, total, n * z3.quantizer.codebooks, same[0], n, seconds });
+    std.debug.print("RESULT zonos3 encode {s} frames={d} reference_frames={d} codes_equal={d}/{d} semantic_equal={d}/{d} audio_s={d:.2} encode_s={d:.3} load_s={d:.1} weights_mib={d}\n", .{ if (pass) "PASS" else "FAIL", codes.len, w.arr.shape[0], total, n * cb, same[0], n, @as(f64, @floatFromInt(audio.len)) / 44100.0, seconds, load_s, clip.bytes() >> 20 });
     return if (pass) 0 else 1;
 }
