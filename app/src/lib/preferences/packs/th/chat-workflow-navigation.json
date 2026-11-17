@@ -1,5 +1,8 @@
 {
   "Outline item opened.": "เปิดรายการในโครงร่างแล้ว",
   "Quoted message opened.": "เปิดข้อความที่อ้างอิงแล้ว",
-  "Search match opened.": "เปิดผลการค้นหาแล้ว"
+  "Search match opened.": "เปิดผลการค้นหาแล้ว",
+  "Conversation unavailable": "การสนทนาใช้ไม่ได้",
+  "This conversation was archived or deleted, or it has not loaded yet.": "การสนทนานี้ถูกเก็บถาวรหรือลบไปแล้ว หรือยังไม่ได้โหลด",
+  "Back to Home": "กลับไปหน้าหลัก"
 }
