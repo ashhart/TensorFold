@@ -777,6 +777,18 @@ backend mask hook. A missing library or grammar compilation error is also refuse
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
 
+A native grammar request waits at most 2,000 ms for its compile. This holds for every format, including JSON objects
+and schemas, regexes, choices, EBNF and the structural tags of tool calls. Past that the request gets HTTP 400 naming
+the limit, for example `response_format: the grammar cannot be enforced: grammar compilation exceeds the 2000 ms time
+limit`. Each model compiles at most 4 grammars at once, outside any lock other requests take, so one slow schema does
+not hold up other requests' grammars. A request that finds all 4 busy waits for one within the same 2,000 ms, then
+gets HTTP 400 naming both limits. Identical requests share one compile. A grammar compiled before is served from the
+cache with the same bytes. The last 8 that finished in time need no compile slot, and the rest come from xgrammar's
+own 256 MiB cache. xgrammar cannot stop a compile once it has started, so an abandoned one runs on in the background
+and keeps its slot until it returns. The grammar it finishes goes into xgrammar's cache, and the same request sent
+after that is served. An invalid grammar is refused with xgrammar's reason, as before. These limits are separate from
+`grammar_budget`, which bounds the tokens a constrained reply needs to complete.
+
 ### Strict tools under `tool_choice: "auto"`
 
 With tools offered and `tool_choice` omitted or `"auto"`, a tool marked `"strict": true` inside `function` is held
