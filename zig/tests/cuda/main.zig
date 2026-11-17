@@ -340,6 +340,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "tree-accept")) return @import("tree_accept.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return @import("chunk_costs.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (try request_starts.dispatch(gpu, cmd, rest)) return;
+    if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "prompt-segments")) return prompt_cuts.segments(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "cached-plans-tp2")) return @import("shared_plans.zig").tp2(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "shared-fork")) return shared_fork.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
