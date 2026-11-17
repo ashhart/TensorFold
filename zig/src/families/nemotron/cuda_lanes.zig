@@ -335,7 +335,7 @@ pub const Cuda = struct {
 
     pub fn servedPrefill(e: anytype, head: ?*Head, s: *lanes.Stream, from: usize, keep: ?engine.Keep) !u32 {
         const ids = s.prompt();
-        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
+        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep, lanes.cutPoints(s)) catch |err| {
             if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
             return err;
         };

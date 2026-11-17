@@ -272,6 +272,12 @@ pub const Lfm = struct {
         return k.at;
     }
 
+    /// Tap rows forward snapshots: only a registered hook can use them; a cache-off pass asks for none (H19).
+    pub fn tapRows(at: usize, c: *const Cut, hook: bool, rows: *[mdl.max_taps]usize) []const usize {
+        if (!hook) return &.{};
+        for (c.taps(), 0..) |p, j| rows[j] = p - at - 1;
+        return rows[0..c.n];
+    }
     /// One chunk from `l.fill` (cold or resumed) to the next line, mark or named start; true at the last row's logits.
     fn chunk(x: *Lfm, s: *Stream, l: *Lane) !bool {
         const p = s.prompt();
@@ -281,8 +287,8 @@ pub const Lfm = struct {
         const c = cut(at, p.len, s.reuse.marks, points);
         const done = c.end == p.len;
         var rows: [mdl.max_taps]usize = undefined;
-        for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
-        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = rows[0..c.n] }}, true, c.end - at - 1, @intFromBool(done));
+        const taps = tapRows(at, &c, s.reuse.hook != null, &rows);
+        try fwd.forward(x.m, x.k, try x.fenced(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..c.end], .taps = taps }}, true, c.end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(c.end), .monotonic);
         l.fill = if (done) null else c.end;
