@@ -55,6 +55,11 @@ pub fn scratch(e: anytype, rows: usize, mode: Mode) !usize {
     const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden);
     inline for (.{ "h", "x", "r" }) |name| @field(e, name) = try t.alloc(rows * g.hidden * 2);
     e.xs = try t.alloc(rows * (@max(g.intermediate, wide) / 64) * 4);
+    if (g.loop) |c| if (c.mhc != null) {
+        e.mhc.streams = try t.alloc(rows * 2 * g.hidden * 2);
+        e.mhc.post = try t.alloc(rows * 2 * 4);
+        e.mhc.mix = try t.alloc(rows * 4 * 4);
+    };
     // a layer's mixer, then its MLP, pass only h, x, xs and r (outside it): their rows share one start
     const shared = t.mark();
     inline for (.{ "y", "mix", "z", "v" }) |name| @field(e, name) = try t.alloc(rows * wide * 2);
@@ -124,6 +129,7 @@ test "scratch startup capacity refuses rows beyond its reserved ceiling" {
 pub fn ensureScratch(e: anytype, rows: usize) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidScratchRows;
     if (rows <= e.scratch_capacity) return;
+    if (e.g.loop != null and e.scratch_capacity != 0) return error.ScratchCapacityExceeded;
     const capacity = growthCapacity(e.scratch_capacity, rows, mainGrowthCeiling(e.scratch_rows, e.verify_rows));
     var measured = e.*;
     const bytes = try scratch(&measured, capacity, .measure);

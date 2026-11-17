@@ -47,17 +47,10 @@ pub fn loaded(g: geometry.Geometry, name: []const u8) bool {
     return false;
 }
 
-pub fn checkDtBias(tensor_value: @import("core").checkpoint.Tensor, heads: usize) !void {
-    if (tensor_value.is(.f32, &.{heads})) return error.SenseNovaFp32DtBias;
-    if (!tensor_value.is(.bf16, &.{heads})) return error.UnexpectedTensor;
-}
-
-pub fn preflight(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, g: geometry.Geometry) !void {
-    var ck = try @import("core").Checkpoint.openModelPrefix(gpa, io, dir, "model.language_model.layers.");
-    defer ck.close();
-    var buf: [128]u8 = undefined;
-    for (0..g.layers) |i| if (g.linear[i]) {
-        const name = try std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.linear_attn.dt_bias", .{i});
-        try checkDtBias(try ck.get(name), g.v_heads);
-    };
+pub fn convertDtBias(t: @import("core").checkpoint.Tensor, out: []u16) !void {
+    if (!t.is(.f32, &.{out.len})) return error.UnexpectedTensor;
+    for (out, 0..) |*v, i| {
+        const word = std.mem.readInt(u32, t.bytes[i * 4 ..][0..4], .little);
+        v.* = @import("core").bf16_round.bits(@bitCast(word));
+    }
 }

@@ -63,3 +63,60 @@ test "loop config rejects malformed values" {
         try t.expectError(error.BadLoopConfig, config.parse(doc.value.object, 32));
     }
 }
+
+test "mHC decisions follow every checkpoint step and plain identity" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
+    defer parsed.deinit();
+    const c = try config.parse(parsed.value.object, 32);
+    var linear: [32]bool = @splat(true);
+    for (0..32) |i| if (i % 4 == 3) {
+        linear[i] = false;
+    };
+    const s = try schedule.build(&linear, c);
+    var pending = false;
+    for (s.slice()) |st| {
+        const d = schedule.decide(st, pending);
+        try t.expectEqual(st.enter, d.enter);
+        try t.expectEqual(st.inside, d.route);
+        try t.expectEqual(if (st.inside) false else pending, d.first_add);
+        try t.expectEqual(!st.inside, d.second_add);
+        try t.expectEqual(st.inside, d.merge);
+        try t.expectEqual(st.leave, d.leave);
+        const got = d.actions();
+        var expected: [10]schedule.Action = undefined;
+        var n: usize = 0;
+        if (st.enter) {
+            expected[n] = .enter;
+            n += 1;
+        }
+        if (st.inside) {
+            for ([_]schedule.Action{ .route, .norm_plain, .mixer, .merge, .route, .norm_plain, .mlp, .merge }) |item| {
+                expected[n] = item;
+                n += 1;
+            }
+        } else {
+            for ([_]schedule.Action{ if (pending) .norm_add else .norm_plain, .mixer, .norm_add, .mlp }) |item| {
+                expected[n] = item;
+                n += 1;
+            }
+        }
+        if (st.leave) {
+            expected[n] = .leave;
+            n += 1;
+        }
+        try t.expectEqualSlices(schedule.Action, expected[0..n], got.slice());
+        pending = d.pending;
+        try t.expectEqual(!st.inside, pending);
+    }
+    const plain = try schedule.build(&linear, null);
+    pending = false;
+    for (plain.slice(), 0..) |st, i| {
+        const d = schedule.decide(st, pending);
+        try t.expectEqual(i != 0, d.first_add);
+        try t.expect(d.second_add and !d.route and !d.enter and !d.leave and !d.merge);
+        const got = d.actions();
+        const expected = [_]schedule.Action{ if (i == 0) .norm_plain else .norm_add, .mixer, .norm_add, .mlp };
+        try t.expectEqualSlices(schedule.Action, &expected, got.slice());
+        pending = d.pending;
+    }
+}

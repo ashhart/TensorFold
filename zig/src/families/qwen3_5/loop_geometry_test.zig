@@ -43,8 +43,7 @@ test "SenseNova loop: geometry counts executions and keeps physical weights" {
     try t.expectEqual(@as(usize, 1 + 14 * 2 * 4), layout.count());
     try t.expectEqual(@as(u64, g.stateBytes() + 14 * 2 * 4 * 64 * 512), layout.total());
     for (1..5) |loops| {
-        var overridden = g;
-        overridden.loop = try g.loop.?.withLoops(loops);
+        const overridden = try g.withLoops(loops);
         try t.expectEqual(6 + 18 * loops, overridden.deltas());
         try t.expectEqual(2 + 6 * loops, overridden.attentions());
     }
@@ -68,15 +67,6 @@ test "SenseNova loop: Qwen identity state and KV sizes stay physical" {
     try t.expectEqual(@as(usize, 8 * 2 * 4 * 128 * 512), g.kvBytes(128, false));
     const s = g.schedule();
     for (s.slice(), 0..) |step, i| try t.expectEqual(i, step.layer);
-}
-
-test "SenseNova loop: FP32 dt bias is refused rather than rounded" {
-    const tensor: @import("core").checkpoint.Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 32, 0, 0, 0, 0 }, .bytes = &.{} };
-    try t.expectError(error.SenseNovaFp32DtBias, loop_weights.checkDtBias(tensor, 32));
-    var bf16 = tensor;
-    bf16.dtype = .bf16;
-    try loop_weights.checkDtBias(bf16, 32);
-    try t.expectError(error.UnexpectedTensor, loop_weights.checkDtBias(bf16, 16));
 }
 
 test "SenseNova loop: in-tree 2B and 27B identity geometry keeps existing state sizes" {
@@ -159,22 +149,6 @@ test "SenseNova loop: MoE and MTP configurations are refused" {
     try t.expectError(error.SenseNovaPocket, geometry.parse(t.allocator, pocket));
 }
 
-test "SenseNova loop: checkpoint preflight rejects FP32 delta bias" {
-    const header =
-        \\{"model.language_model.layers.0.linear_attn.dt_bias":{"dtype":"F32","shape":[32],"data_offsets":[0,128]}}
-    ;
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    defer t.allocator.free(dir);
-    var bytes: [8 + header.len + 128]u8 = @splat(0);
-    std.mem.writeInt(u64, bytes[0..8], header.len, .little);
-    @memcpy(bytes[8..][0..header.len], header);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = &bytes });
-    const g: geometry.Geometry = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 2, .k_heads = 16, .v_heads = 32, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 32, .linear = @splat(true) };
-    try t.expectError(error.SenseNovaFp32DtBias, loop_weights.preflight(t.allocator, t.io, dir, g));
-}
-
 test "SenseNova loop: checkpoint YaRN settings pass CUDA geometry" {
     const original = try config("sensenova_loop", settings);
     defer t.allocator.free(original);
@@ -191,4 +165,58 @@ test "SenseNova loop: a direct tap request is refused" {
     var e: @import("cuda_engine.zig").Engine = undefined;
     e.g.loop = .{ .start = 1, .end = 2, .count = 2, .mhc = null };
     try t.expectError(error.SenseNovaDrafter, e.setTaps(&.{1}));
+}
+
+test "SenseNova loop: F32 delta bias converts to BF16 with ties to even" {
+    const bits = [_]u32{ 0x3f808000, 0x3f818000, 0xbf808000, 0x3f807fff, 0x3f808001 };
+    const tensor: @import("core").checkpoint.Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 5, 0, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(&bits) };
+    var output: [5]u16 = undefined;
+    try loop_weights.convertDtBias(tensor, &output);
+    try t.expectEqualSlices(u16, &.{ 0x3f80, 0x3f82, 0xbf80, 0x3f80, 0x3f81 }, &output);
+    var wrong = tensor;
+    wrong.dtype = .f16;
+    try t.expectError(error.UnexpectedTensor, loop_weights.convertDtBias(wrong, &output));
+    wrong = tensor;
+    wrong.shape[0] = 4;
+    try t.expectError(error.UnexpectedTensor, loop_weights.convertDtBias(wrong, &output));
+}
+
+test "SenseNova loop: mHC scratch is persistent and counted by capacity" {
+    const bytes = try config("sensenova_loop", settings);
+    defer t.allocator.free(bytes);
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.g = try geometry.parse(t.allocator, bytes);
+    e.mhc = .{};
+    e.scratch_buf = .{ .d = undefined, .ptr = 0x200000, .len = 1 << 30 };
+    const rows = 17;
+    const with_mhc = try e.scratch(rows, .allocate);
+    const streams = e.mhc.streams;
+    const post = e.mhc.post;
+    const mix = e.mhc.mix;
+    try t.expect(post >= streams + rows * 2 * e.g.hidden * 2);
+    try t.expect(mix >= post + rows * 2 * 4);
+    try t.expect(e.scratch_buf.?.ptr + with_mhc >= mix + rows * 4 * 4);
+    e.g.loop = null;
+    const without = try e.scratch(rows, .measure);
+    const round_up = @import("cuda_scratch.zig").aligned;
+    try t.expectEqual(round_up(rows * 2 * e.g.hidden * 2) + round_up(rows * 2 * 4) + round_up(rows * 4 * 4), with_mhc - without);
+}
+
+test {
+    _ = @import("cuda_mhc_test.zig");
+}
+
+test "SenseNova loop: unsupported mHC settings are refused" {
+    const original = try config("sensenova_loop", settings);
+    defer t.allocator.free(original);
+    const replacements = [_][2][]const u8{
+        .{ "\"iterations\":20", "\"iterations\":19" },
+        .{ "\"fixed_identity\":false", "\"fixed_identity\":true" },
+        .{ "\"iterations\":20", "\"iterations\":20,\"pre_scale\":2" },
+    };
+    for (replacements) |pair| {
+        const changed = try std.mem.replaceOwned(u8, t.allocator, original, pair[0], pair[1]);
+        defer t.allocator.free(changed);
+        try t.expectError(error.UnsupportedSenseNovaMhc, geometry.parse(t.allocator, changed));
+    }
 }
