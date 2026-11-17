@@ -70,6 +70,11 @@ pub const cuda_132 = [_]registry.Override{
     .{ .name = "df_block_qkv", .usage = .{ .{ .regs = 32, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 32, .static = 8, .bound = 0 }, .{ .regs = 32, .static = 8, .bound = 0 } } },
     .{ .name = "df_ctx_kv", .usage = .{ .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 30, .static = 8, .bound = 0 }, .{ .regs = 28, .static = 8, .bound = 0 }, .{ .regs = 28, .static = 8, .bound = 0 } } },
     .{ .name = "df_top16_merge", .usage = .{ .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 23, .static = 8416, .bound = 256 }, .{ .regs = 28, .static = 8416, .bound = 256 }, .{ .regs = 28, .static = 8416, .bound = 256 } } },
+    // qmmf's 16-row cluster tiles, as GLM's decode launches them
+    .{ .name = "qmmf FP4 16-row tile, cluster of 8", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
+    .{ .name = "qmmf FP4 fp32 out 16-row tile, cluster of 8", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
+    .{ .name = "qmmf MXFP8 16-row tile, cluster of 8", .usage = .{ .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 } } },
+    .{ .name = "qmmf MXFP8 fp32 out 16-row tile, cluster of 8", .usage = .{ .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 69, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 } } },
 };
 
 /// nvcc 13.3's usage where it differs from 13.0's.
