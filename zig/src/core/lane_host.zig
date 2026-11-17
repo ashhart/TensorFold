@@ -107,11 +107,10 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        var share: fill.Share = .withDecode(info_.decode_share); // flag first; the env beats a default, uncapped
-        var decode_cap = info_.decode_share != null;
-        if (info_.decode_share == null) if (info_.default_decode_share) |default| if (share.p >= 1) { // the env unset: the default arms
-            share.p = fill.Share.fromDecode(default).p;
-            decode_cap = true;
+        // --decode-share: the flag wins; the env beats a default and never arms the cap; the budget survives.
+        var share: fill.Share = .withDecode(info_.decode_share); var decode_cap = info_.decode_share != null;
+        if (info_.decode_share == null) if (info_.default_decode_share) |default| if (share.p >= 1 and !share.env_share) {
+            share.p = fill.Share.fromDecode(default).p; share.defaulted = true; decode_cap = true; // the default arms past Share.default_arm_rows only
         };
         return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = share, .decode_cap = decode_cap, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
