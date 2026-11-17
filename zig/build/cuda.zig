@@ -72,6 +72,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
         if (image.*) |file| fatbin_step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
     }
+    // check-pdl-loads: no global read above a dependent launch's wait (tools/pdl_early_loads.py)
+    if (nvcc) |tool| {
+        const check = b.addSystemCommand(&.{ "python3", "tools/pdl_early_loads.py", b.pathJoin(&.{ std.fs.path.dirname(tool) orelse ".", "cuobjdump" }) });
+        for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf")) check.addFileArg(file);
+        b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images and qmmf (needs -Dnvcc)").dependOn(&check.step);
+    }
     // MiniMax H3's kernel image: its library and the contract's runner take it
     const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
         const run = b.addSystemCommand(&.{ tool, "--version" });
