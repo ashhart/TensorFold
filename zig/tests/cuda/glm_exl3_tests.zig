@@ -253,7 +253,8 @@ pub fn run_(gpu: Gpu) !void {
     for ([_][3]u16{ .{ 8, 8, 8 }, .{ 6, 6, 8 }, .{ 4, 6, 8 } }) |halves| for ([_]bool{ true, false }) |one| {
         const s = try weights(&r, one, halves);
         std.debug.print("glm-exl3: {s} experts, {s}\n", .{ s.name(), if (one) "one rotation" else "a rotation an expert" });
-        try largeBytes(&r, &k, &ek, s);
+        // widths the prompt kernels do not take run the compact path both ways: nothing to compare
+        if (cuda.exl3_experts.prompt.eligible(glm.exl3.layer(s.experts(), E, D, N, limit))) try largeBytes(&r, &k, &ek, s);
         for ([_]usize{ 1, 3, 8 }) |rows| { // decode windows
             const x = try r.bfs(rows * D, 1.0);
             const pk = try picks(&r, rows);
@@ -283,7 +284,8 @@ pub fn run_(gpu: Gpu) !void {
             }
         }
     };
-    for ([_][3]u16{ .{ 8, 8, 8 }, .{ 6, 6, 8 } }) |halves| { // a NaN in one row's input: that row's routed slots NaN, every other row finite
+    // a NaN in one row's input: that row's routed slots NaN, every other row finite
+    for ([_][3]u16{ .{ 8, 8, 8 }, .{ 6, 6, 8 } }) |halves| {
         const s = try weights(&r, true, halves);
         const rows = 4;
         const x = try r.bfs(rows * D, 1.0);
