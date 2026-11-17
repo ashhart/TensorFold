@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """quality_suite.py URL OUT: TensorFold Web's quality suite against one served model, scored as its Bench scores it."""
-# The 228 items, their reply lengths and the strict scoring come from web/tensorfold_web/quality.py. Each item runs
-# once, greedy, with thinking off when the model's `thinking_switch` says the off request works. Standard library only.
+# Each suite item runs once, greedy, with thinking off when the server advertises that switch.
 from __future__ import annotations
 
 import argparse
