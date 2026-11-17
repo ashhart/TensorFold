@@ -33,7 +33,7 @@ pub fn plan(weights: u64, capacity: usize) !Plan {
 }
 
 pub fn planFor(weights: u64, capacity: usize, second_prompt: bool) !Plan {
-    if (capacity < window.trained or capacity > window.maximum or capacity % 4 != 0) return error.ContextTooLong;
+    if (capacity < prompt.PMAX or capacity > window.maximum or capacity % 4 != 0) return error.ContextTooLong;
     const cap: u64 = capacity;
     const planes: u64 = 1 + @as(u64, @intFromBool(second_prompt));
     const so = 48 * 128 * 128 * 4;
@@ -263,5 +263,20 @@ test "Flash Next memory: the unused prompt plane is omitted at the same capacity
     const a = try budgetLiveFor(0, trained, inventory, 0, 0, false);
     const b = try budgetLive(0, trained, inventory, 0, 0);
     try std.testing.expectEqual((try twin.total()) - (try one.total()), b.steady - a.steady);
+    try std.testing.expectEqual(a.building, b.building);
+}
+
+test "Flash Next memory: smaller capacities and one prompt plane charge their actual selectors and scratch" {
+    const small = try planFor(0, 65568, false);
+    const twin = try planFor(0, 65568, true);
+    const full = try planFor(0, trained, true);
+    try std.testing.expectEqual(prompt.bytes(), small.prompts);
+    try std.testing.expectEqual(prompt.bytes(), twin.prompts - small.prompts);
+    try std.testing.expect(small.selectors < twin.selectors and twin.selectors < full.selectors);
+    try std.testing.expect(small.attention < full.attention);
+    const inventory: weights_plan.Inventory = .{ .raw = GiB };
+    const a = try budgetLiveFor(0, 65568, inventory, 0, 0, false);
+    const b = try budgetLiveFor(0, 65568, inventory, 0, 0, true);
+    try std.testing.expectEqual((try twin.total()) - (try small.total()), b.steady - a.steady);
     try std.testing.expectEqual(a.building, b.building);
 }
