@@ -272,12 +272,12 @@ pub const Lfm = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
+    /// One chunk from `l.fill` to the next grid line, mark or message start; true at the last row's logits.
     fn chunk(x: *Lfm, s: *Stream, l: *Lane) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        const c = cut(at, p.len, s.reuse.marks);
+        const c = cut(at, p.len, s.reuse.marks, s.chunks);
         const done = c.end == p.len;
         var rows: [mdl.max_taps]usize = undefined;
         for (c.taps(), 0..) |t, j| rows[j] = t - at - 1;
@@ -290,38 +290,46 @@ pub const Lfm = struct {
             x.tapped = .{ .stream = s, .cut = c };
             defer x.tapped = null;
             for (c.taps()) |t| hk.at(hk.ptr, s, @intCast(t));
-            if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(c.end)) != null) hk.at(hk.ptr, s, @intCast(c.end));
+            if (isCut(@intCast(c.end), s.reuse.marks) or isCut(@intCast(c.end), s.chunks)) hk.at(hk.ptr, s, @intCast(c.end));
         }
         return done;
     }
 
-    /// A chunk's end (the grid line, the prompt's end or a mark) and the marks inside it, tapped in order.
-    const Cut = struct {
+    /// A chunk's end (the grid line, the prompt's end or a cut point) and the cut points inside it, tapped in order.
+    pub const Cut = struct {
         end: usize,
         at: [mdl.max_taps]usize = undefined,
         n: usize = 0,
-        fn taps(c: *const Cut) []const usize {
+        pub fn taps(c: *const Cut) []const usize {
             return c.at[0..c.n];
         }
     };
 
-    /// The chunk from `at`: up to max_taps marks inside it are tapped, the next one ends it.
-    fn cut(at: usize, len: usize, marks: []const u32) Cut {
+    /// Whether a chunk end is a kept mark or message start, and owes the hook a state.
+    fn isCut(at: u32, points: []const u32) bool {
+        return std.mem.indexOfScalar(u32, points, at) != null;
+    }
+
+    /// The chunk from `at`: marks and message starts bound it; up to max_taps inside are tapped, the next ends it.
+    pub fn cut(at: usize, len: usize, marks: []const u32, chunks: []const u32) Cut {
         var c: Cut = .{ .end = @min(len, (at / prompt_rows + 1) * prompt_rows) };
         var from = at;
-        while (true) { // the marks inside in order, the first max_taps tapped
+        while (true) { // the cut points inside in order, the first max_taps tapped
             var next: ?usize = null;
             for (marks) |mk| if (mk > from and mk < c.end and (next == null or mk < next.?)) {
                 next = mk;
             };
-            const mk = next orelse break;
+            for (chunks) |ck| if (ck > from and ck < c.end and (next == null or ck < next.?)) {
+                next = ck;
+            };
+            const point = next orelse break;
             if (c.n == mdl.max_taps) {
-                c.end = mk;
+                c.end = point;
                 break;
             }
-            c.at[c.n] = mk;
+            c.at[c.n] = point;
             c.n += 1;
-            from = mk;
+            from = point;
         }
         return c;
     }
@@ -479,18 +487,21 @@ test "a request holds its prompt, its reply and one verify window in whole pages
     try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
 }
 
-test "a chunk taps the marks inside it, up to four, and ends at the next one, the grid line or the prompt's end" {
-    const cases = [_]struct { at: usize, len: usize, marks: []const u32, end: usize, taps: []const usize }{
-        .{ .at = 0, .len = 3000, .marks = &.{}, .end = prompt_rows, .taps = &.{} },
-        .{ .at = 0, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{700} },
-        .{ .at = 0, .len = 3000, .marks = &.{ 900, 300, 2900 }, .end = prompt_rows, .taps = &.{ 300, 900 } },
-        .{ .at = 0, .len = 3000, .marks = &.{ 5, 4, 3, 2, 1 }, .end = 5, .taps = &.{ 1, 2, 3, 4 } },
-        .{ .at = 9216, .len = 10144, .marks = &.{ 10050, 10140 }, .end = 10144, .taps = &.{ 10050, 10140 } },
-        .{ .at = 2048, .len = 2500, .marks = &.{ 2100, 2500 }, .end = 2500, .taps = &.{2100} },
-        .{ .at = 700, .len = 3000, .marks = &.{700}, .end = prompt_rows, .taps = &.{} },
+test "a chunk taps marks and message starts, up to four, then ends at the next, the grid line or the prompt's end" {
+    const cases = [_]struct { at: usize, len: usize, marks: []const u32, chunks: []const u32, end: usize, taps: []const usize }{
+        .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{}, .end = prompt_rows, .taps = &.{} },
+        .{ .at = 0, .len = 3000, .marks = &.{700}, .chunks = &.{}, .end = prompt_rows, .taps = &.{700} },
+        .{ .at = 0, .len = 3000, .marks = &.{ 900, 300, 2900 }, .chunks = &.{}, .end = prompt_rows, .taps = &.{ 300, 900 } },
+        .{ .at = 0, .len = 3000, .marks = &.{ 5, 4, 3, 2, 1 }, .chunks = &.{}, .end = 5, .taps = &.{ 1, 2, 3, 4 } },
+        .{ .at = 9216, .len = 10144, .marks = &.{ 10050, 10140 }, .chunks = &.{}, .end = 10144, .taps = &.{ 10050, 10140 } },
+        .{ .at = 2048, .len = 2500, .marks = &.{ 2100, 2500 }, .chunks = &.{}, .end = 2500, .taps = &.{2100} },
+        .{ .at = 700, .len = 3000, .marks = &.{700}, .chunks = &.{}, .end = prompt_rows, .taps = &.{} },
+        .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{700}, .end = prompt_rows, .taps = &.{700} },
+        .{ .at = 0, .len = 3000, .marks = &.{300}, .chunks = &.{900}, .end = prompt_rows, .taps = &.{ 300, 900 } },
+        .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{ 300, 700, 900, 1000, 1023 }, .end = 1023, .taps = &.{ 300, 700, 900, 1000 } },
     };
     for (cases) |k| {
-        const c = Lfm.cut(k.at, k.len, k.marks);
+        const c = Lfm.cut(k.at, k.len, k.marks, k.chunks);
         try std.testing.expectEqual(k.end, c.end);
         try std.testing.expectEqualSlices(usize, k.taps, c.taps());
     }
