@@ -1,7 +1,6 @@
 // Run: jiti electron/agent/loop-delegate-child-gate.test.ts
-// An Explore, Oracle or delegate_task child runs unattended and reads untrusted files, so it
-// obeys the parent's rules: it runs only the tools it was offered, and a child web_fetch only
-// reaches hosts the user typed.
+
+// Explore, Oracle, delegate_task run unattended: only offered tools run, web_fetch reaches typed hosts.
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,6 +10,8 @@ import type { Provider, Thread } from './types'
 
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
+
+const names = (schemas: ReturnType<typeof delegateChildToolSchemas>) => schemas.map((t) => t.function!.name).sort()
 
 function sseResponse(parts: string[]): Response {
   const body = new ReadableStream({
@@ -111,12 +112,18 @@ try {
 }
 
 {
-  const names = (schemas: ReturnType<typeof delegateChildToolSchemas>) => schemas.map((t) => t.function!.name).sort()
-  const defaults = names(delegateChildToolSchemas())
   assert.deepEqual(names(delegateChildToolSchemas(['web_fetch', 'read_file'], new Set(['read_file', 'web_fetch']))), ['read_file', 'web_fetch'])
   assert.deepEqual(names(delegateChildToolSchemas(['web_fetch', 'read_file'], new Set(['read_file']))), ['read_file'])
-  assert.deepEqual(names(delegateChildToolSchemas(['web_fetch'], new Set(['read_file']))), defaults)
+  assert.deepEqual(names(delegateChildToolSchemas(['web_fetch'], new Set(['read_file']))), [])
   ok('a delegate_task child never gets a tool its parent run was not offered')
+}
+
+{
+  const onlyRead = new Set(['read_file'])
+  assert.deepEqual(names(delegateChildToolSchemas(undefined, onlyRead)), ['read_file'], 'no unoffered Explore tools by default')
+  assert.deepEqual(names(delegateChildToolSchemas(['web_fetch'], onlyRead)), [], 'no fallback to web_fetch or unoffered tools')
+  assert.deepEqual(names(delegateChildToolSchemas(undefined, new Set())), [], 'an empty parent tool set grants no tools')
+  ok('a parent without web_fetch gives no default child web_fetch or unoffered Explore tools')
 }
 
 console.log(`\n${passed} passed`)
