@@ -1,0 +1,4 @@
+# tools/first.py 8090 prompts/p8192.json 16 REPS, a fresh serve each (--context 65536 --parallel 4 --prompt-cache-gib 0)
+head 60e673799f (dependent, default)   REPS 60  {'b15475d6': 60}
+main 077998f7d9                        REPS 30  {'b15475d6': 30}
+earlier 79c9ffe97f (const __restrict__ inputs, dependent) REPS 30  {'b15475d6': 24, 'ca814dc1': 3, '51a38b88': 2, '95fe4f96': 1}
