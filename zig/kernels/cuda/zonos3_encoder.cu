@@ -69,3 +69,47 @@ extern "C" __global__ void ze_patch_down(const float* __restrict__ in, float* __
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < C * h) out[t * C * h + i] = in[(t * h + i % h) * C + i / h];
 }
+
+// x -= y over n values.
+extern "C" __global__ void ze_sub(float* __restrict__ x, const float* __restrict__ y, long long n) {
+  const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) x[i] -= y[i];
+}
+
+// A row's nearest code by cosine: codes[row * 10 + col] = argmax_c e . C[c], C [4096][8] unit rows, ties to the lower.
+extern "C" __global__ void __launch_bounds__(256) ze_nearest(const float* __restrict__ e, const float* __restrict__ C,
+                                                             int* __restrict__ codes, int col) {
+  __shared__ float best[256];
+  __shared__ int which[256];
+  const float* x = e + (size_t)blockIdx.x * 8;
+  float bv = -INFINITY;
+  int bi = 0x7FFFFFFF;
+  for (int c = threadIdx.x; c < 4096; c += blockDim.x) {
+    const float* row = C + (size_t)c * 8;
+    float d = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) d = fmaf(x[i], row[i], d);
+    if (d > bv) {
+      bv = d;
+      bi = c;
+    }
+  }
+  best[threadIdx.x] = bv;
+  which[threadIdx.x] = bi;
+  __syncthreads();
+  if (threadIdx.x != 0) return;
+  for (int t = 1; t < 256; ++t)
+    if (best[t] > bv || (best[t] == bv && which[t] < bi)) {
+      bv = best[t];
+      bi = which[t];
+    }
+  codes[blockIdx.x * 10 + col] = bi;
+}
+
+// residual[r] -= table[codes[r][col]] over D values a row.
+extern "C" __global__ void ze_sub_code(float* __restrict__ residual, const float* __restrict__ table,
+                                       const int* __restrict__ codes, int col, int D) {
+  const size_t r = blockIdx.y;
+  const int d = blockIdx.x * blockDim.x + threadIdx.x;
+  if (d < D) residual[r * D + d] -= table[(size_t)codes[r * 10 + col] * D + d];
+}
