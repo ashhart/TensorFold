@@ -91,9 +91,10 @@ pub const Shape = struct {
         return s.latentBytes() + s.pkBytes();
     }
 
-    /// A page's bytes: every cache's part (13,056 a row on GLM-5.3-Flash).
+    /// A page's bytes: every cache's part, padded to whole latent rows (page_rows a page) and whole token bytes.
     pub fn pageBytes(s: Shape) u64 {
-        return s.caches * s.cacheBytes();
+        const unit = s.row * 2 / std.math.gcd(s.row * 2, page_rows) * page_rows;
+        return (s.caches * s.cacheBytes() + unit - 1) / unit * unit;
     }
 
     /// TF_GLM_KV_HOST: every cache's pooled keys on a device page of their own.
@@ -152,10 +153,12 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
     const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
+    const row = c.latentRow(); // kv_a: the latent, then its roped key columns
+    const qh = c.nope + c.rope; // a q head
     return .{
-        .{ kw, c.hidden },                   .{ n, c.kda_dim },                    .{ c.hidden, n },
-        .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
-        .{ c.i_heads * c.i_dim, c.q_lora },  .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
+        .{ kw, c.hidden },                  .{ n, c.kda_dim },                    .{ c.hidden, n },
+        .{ c.q_lora + row, c.hidden },      .{ s.mla.len() * qh, c.q_lora },      .{ c.i_dim + c.i_heads, c.hidden },
+        .{ c.i_heads * c.i_dim, c.q_lora }, .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
         .{ c.hidden, 2 * c.hidden }, // the MTP head's eh_proj
         if (c.exl3) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
         if (c.exl3) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
@@ -270,9 +273,12 @@ pub const Buffers = struct {
         const pairs = rows * slots;
         const count: usize = c.experts;
         const lw: usize = c.kv_lora;
+        const row: usize = c.latentRow(); // the latent, then its roped key columns
+        const qh: usize = c.nope + c.rope; // a q head
         const part_rows = if (prefill) @min(rows, dsa_block.prompt_att_rows) else seg;
         const nch = latent.chunksFor(@min(capacity, dense_reach) + seg);
-        const partial_rows = @max(nch * part_rows, latent.chunksFor(sparse.width) * seg); // dense calls, or one sparse
+        const width: usize = c.keyWidth(); // a token list (sparse.Geometry.width)
+        const partial_rows = @max(nch * part_rows, latent.chunksFor(width) * seg); // dense calls, or one sparse
         const np_max = capacity / c.kpool;
         const sel = selectLs(rows, prefill, seg, np_max);
         var mm: usize = 4;
@@ -291,10 +297,10 @@ pub const Buffers = struct {
             if (own_proj) rows * kw * 2 else 4, rows * n * 2, rows * n * 2, // kproj, ka, kg
             rows * n * 2, rows * n * 4, rows * n * 2, rows * n * 4, // saves out, k, v, g
             rows * LL * 4,                    rows * n * 4,               rows * n * 2, // saves b, wide q, y
-            rows * (c.q_lora + lw) * 2,       rows * c.q_lora * 2,        rows * (c.q_lora / 64) * 4,
-            rows * lw * 2,                    rows * (lw / 64) * 4,       rows * HL * c.nope * 2,
+            rows * (c.q_lora + row) * 2,      rows * c.q_lora * 2,        rows * (c.q_lora / 64) * 4,
+            rows * row * 2,                   rows * (lw / 64) * 4,       rows * HL * qh * 2,
             rows * (c.i_dim + c.i_heads) * 2, rows * c.i_dim * 4,         glue.router_ks * rows * @max(count, c.i_dim) * 4,
-            rows * HL * lw * 2,               rows * HL * lw * 2,         rows * HL * c.v_dim * 2,
+            rows * HL * row * 2,              rows * HL * lw * 2,         rows * HL * c.v_dim * 2,
             rows * c.i_heads * c.i_dim * 2,   partial_rows * HL * lw * 4, partial_rows * HL * 4,
             partial_rows * HL * 4,
             4, // dummy
@@ -303,7 +309,7 @@ pub const Buffers = struct {
             rows * sparse.select_list * 4,
             (if (prefill) rows + s.world else rows) * (c.i_topk / c.kpool) * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
-            rows * sparse.width * 4,
+            rows * width * 4,
             rows * 4,
             mm,
             4, // a prompt block's position

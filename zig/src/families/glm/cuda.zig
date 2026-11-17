@@ -50,6 +50,7 @@ test {
     _ = @import("cuda_formats_csf0_test.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("cuda_kv8_test.zig");
+    _ = @import("cuda_latent_test.zig");
     _ = kv8_ref;
     _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");

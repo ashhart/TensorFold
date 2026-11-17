@@ -250,7 +250,8 @@ const Loader = struct {
         const q_norm = try L.put("layers.{d}.dsa.q_norm", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.kv_a_layernorm.weight", .{i}), .bf16);
         const kv_norm = try L.put("layers.{d}.dsa.kv_norm", .{i});
-        const q_b = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * qk, h.hi * qk } }}, wants, "layers.{d}.dsa.q_b");
+        const qh = qk + c.rope; // a q head's rows: its latent-path dims, then its roped ones
+        const q_b = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.q_b_proj", .rows = .{ h.lo * qh, h.hi * qh } }}, wants, "layers.{d}.dsa.q_b");
         const kv_b = try L.get("layers.{d}.self_attn.kv_b_proj.weight", .{i});
         const per = qk + c.v_dim; // a head's kv_b rows: its keys, then its values
         const total = c.mla_heads * per;
@@ -283,6 +284,7 @@ const Loader = struct {
             .qk = qk,
             .dv = c.v_dim,
             .lw = c.kv_lora,
+            .rope = c.rope,
             .q_lora = c.q_lora,
             .dims = c.hidden,
             .eps = c.eps,
