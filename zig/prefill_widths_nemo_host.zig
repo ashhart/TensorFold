@@ -12,7 +12,7 @@ const Engine = struct {
     pos: usize = 0,
     fail: bool = false,
     cancel: bool = false,
-    pub fn prefillFrom(e: *@This(), ids: []const u32, _: usize, _: anytype, _: anytype, _: anytype, _: anytype) !u32 {
+    pub fn prefillFrom(e: *@This(), ids: []const u32, _: usize, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype) !u32 {
         if (e.fail) return error.PlantedForward;
         if (e.cancel) return error.Cancelled;
         try e.stream.synchronize(); // cuda_prompt.prefillFrom downloads the first token, then waits.
