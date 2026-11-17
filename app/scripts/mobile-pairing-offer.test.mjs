@@ -42,8 +42,7 @@ function loader(mocks) {
 const nodes = tree => tree == null || typeof tree !== 'object' ? [] : Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)]
 const words = tree => typeof tree === 'string' ? [tree] : tree == null || typeof tree !== 'object' ? [] : Array.isArray(tree) ? tree.flatMap(words) : words(tree.props?.children)
 
-// The production session provider and pairing screen on a phone with no network, Keychain or native module.
-// `stored` is the saved device session, `initialUrl` the link that launched the app.
+// Production provider and pairing screen, offline, no native modules; `stored` = session, `initialUrl` = launch link.
 function phone({ stored = null, initialUrl = null } = {}) {
   const provider = hooks(); const form = hooks(); let value; let tree; let urlListener
   const requests = []
@@ -123,7 +122,7 @@ function phone({ stored = null, initialUrl = null } = {}) {
   assert.equal(p.value.offer, null, 'A link the user never accepted must not return after the phone forgets its host')
 }
 {
-  // A paired phone takes no pairing link from outside, at launch or later, and none is waiting once it forgets its host.
+  // A paired phone takes no outside pairing link, at launch or later, and none waits after forget.
   const p = phone({ stored: JSON.stringify(saved), initialUrl: deepLink }); await p.settle()
   assert.equal(p.value.session.token, saved.token); assert.equal(p.value.offer, null); assert.equal(p.value.pairingLink, '')
   p.open(deepLink); await p.settle()
@@ -146,7 +145,7 @@ function phone({ stored = null, initialUrl = null } = {}) {
   }
 }
 {
-  // Links that are not pairing links ask nothing: a route inside the app, a link with no code, and text that is no URL.
+  // Links that are not pairing links ask nothing: an in-app route, a link with no code, or plain text.
   for (const url of ['tensorfold-mobile://host', 'tensorfold-mobile://pair?link=fictional-code', `tensorfold-mobile://pair?link=${encodeURIComponent(outsideHost)}`, outsideHost, 'not a link']) {
     const p = phone(); await p.settle()
     p.open(url); await p.settle()
