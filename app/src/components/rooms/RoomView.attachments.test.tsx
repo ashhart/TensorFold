@@ -54,6 +54,40 @@ function start(node: any) { return all(node, (entry) => entry.type === 'button' 
 async function settle() { for (let i = 0; i < 12; i++) await Promise.resolve(); await new Promise<void>((resolve) => setImmediate(resolve)) }
 render()
 let node = render()
+
+// The health tile counts completed tickets so a finished room matches the final gate (issue #3517).
+const ticketRow = (index: number, status: string) => ({ id: `t${index}`, projectId: 'p', roomId: 'A', title: `Task ${index}`, body: '', type: 'task', status, priority: 'medium', effort: 'small', tags: [], parentId: null, assignee: null, threadId: null, runState: null, order: index, createdAt: 1, updatedAt: 1 })
+const taskStat = (input: any) => all(input, (entry) => entry.props?.label === 'Tasks')[0]
+const finalGate = (input: any) => all(input, (entry) => Array.isArray(entry.props?.tickets) && Array.isArray(entry.props?.leftToWork))[0]
+const ticketQueue = (input: any) => all(input, (entry) => typeof entry.props?.total === 'number' && entry.props?.ticketJobsByTicket instanceof Map)[0]
+const ticketsIn = (completed: number, remaining: number) => [
+  ...Array.from({ length: completed }, (_, index) => ticketRow(index + 1, 'completed')),
+  ...Array.from({ length: remaining }, (_, index) => ticketRow(completed + index + 1, 'ready')),
+]
+store.rightPanelHidden = false
+store.tickets = ticketsIn(8, 0)
+node = render()
+assert.equal(taskStat(node).props.value, '8/8', 'a finished room shows every ticket completed')
+assert.equal(taskStat(node).props.accent, false, 'a finished room is not flagged')
+store.tickets = ticketsIn(5, 3)
+node = render()
+assert.equal(taskStat(node).props.value, '5/8', 'a partial room counts only completed tickets')
+assert.equal(taskStat(node).props.accent, true, 'a partial room stays flagged')
+assert.equal(finalGate(node).props.tickets.length, 8)
+assert.equal(finalGate(node).props.leftToWork.length, 3, 'the final gate still sees the remaining tickets')
+assert.equal(ticketQueue(node).props.total, 8)
+assert.equal(ticketQueue(node).props.tickets.length, 3, 'the ticket queue still lists the remaining tickets')
+store.tickets = ticketsIn(0, 8)
+node = render()
+assert.equal(taskStat(node).props.value, '0/8', 'an untouched room shows no completed tickets')
+assert.equal(taskStat(node).props.accent, true)
+store.tickets = []
+node = render()
+assert.equal(taskStat(node).props.value, '0/0', 'a room without tickets counts nothing out of nothing')
+console.log('room health tasks tile counts completed tickets out of the room total')
+store.rightPanelHidden = true
+node = render()
+
 const broken = new File(['bad'], 'unreadable.txt', { type: 'text/plain' })
 Object.defineProperty(broken, 'slice', { value: () => { throw new Error('selected file is unreadable') } })
 fileInput(node).props.onChange({ target: { files: [new File(['first'], 'first.txt', { type: 'text/plain' }), broken, new File(['third'], 'third.txt', { type: 'text/plain' })], value: '' } })
