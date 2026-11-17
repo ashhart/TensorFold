@@ -163,8 +163,11 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (own.ranks) |r| try load_cache.finishAfter(.{ r, std.math.maxInt(u64) }, ranks.Session.room) else load_cache.finish();
     // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM
     own.engine.ngram.warm();
+    const all_on_pages = page_tokens > 0 and @import("cuda_kv_lanes.zig").pagedOnly();
     return .{
         .layout = own.kv.layout,
+        .all_on_pages = all_on_pages,
+        .engine_paged = all_on_pages,
         .vision = own.vision,
         .backend = own.backend(),
         .facts = own.facts(),

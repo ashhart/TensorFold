@@ -99,6 +99,10 @@ pub fn Namespace(comptime Tri: type) type {
             follow: ?*const fn (*anyopaque) anyerror!void = null,
             /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
             layout: ?@import("core").kv_pool.Layout = null,
+            /// All streams take their caches from the page pool.
+            all_on_pages: bool = false,
+            /// The first stream's attention cache is included in the page plan.
+            engine_paged: bool = false,
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
