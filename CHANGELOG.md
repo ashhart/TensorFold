@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Vision (MLX server): an image's visual-token budget is its own `--vision-image-tokens`, no longer a share split over the request's images: a shared, count-dependent budget resized every image already in the conversation whenever one more arrived, which changed the words its rows hash to in the prompt cache and made each later turn re-prefill from the conversation's first image (in a real multi-image session, turns after each new image waited 60-130 s at a ~100,000-token prompt); each image also keeps its resolution as newer ones arrive. The native server's shared split and the video split are unchanged.
 - Docs: the GLM-5.3-Flash CUDA recipe's Verified copy drafts section lists, for one checkpoint at TP=2 with `--parallel 4`, the loads that `TF_GLM_COPIES=1` sped up and the ones it slowed, and says the default stays off (#3335). Thanks to @Bizuayeu.
 - Tests: the Qwen 3.8 27B Metal residency fixtures compile again on macOS after the DFlash2 target became a value (#3572).
 - Tests: the kernel contract's Llama `gemm_untransposed` control edits the `TF_GEMM_NAX_KERNEL` instance line again, so its planted fault fails as it should (#3157, thanks @gilby, who found and fixed it first).

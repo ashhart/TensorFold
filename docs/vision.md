@@ -116,9 +116,12 @@ reach the limit. Once that history exceeds it, even a text-only follow-up is ref
 the images. Remove older image content from the submitted history, start a new conversation, or restart
 the server with a larger count limit. The server does not discard images automatically.
 
-A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
-that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
+Each image is sized within `--vision-image-tokens` (4,096 by default) on its own, not a share split over the
+request's images: eight images get up to 4,096 tokens each, and an image keeps its size as later turns add more,
+which also keeps its prompt-cache words stable — a budget shared across the request's images resized every earlier
+image whenever one more arrived, breaking prefix reuse past the first image on each later turn. On CUDA Qwen
+checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises that per-image budget, up to
+65,536. The tower
 encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
 that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
 counts against the context window.
@@ -133,8 +136,9 @@ Decoded images are bounded to 8,192 pixels per dimension, 16 million pixels per 
 EXIF orientation is applied and transparency is composited onto white; animated and multipage inputs are refused.
 Up to 16 requests decode and process images at once; more wait up to a minute, and past 128 waiting the server answers 503 so the client retries.
 The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`.
-The model processor bounds the total expanded image tokens to 4,096, with a smaller budget for `detail: low`.
-That budget is shared across the images; a higher count can reduce the detail available for each image.
+The model processor bounds each image's expanded tokens to 4,096, with a smaller budget for `detail: low`.
+An image's budget is its own, not shared across the request's images, so its size and its cache words stay
+the same as more images join the conversation.
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
@@ -240,8 +244,8 @@ holds the warning's words.
 With `--vision`, the 27B loads its checkpoint's image tower (the `vision_tower.*` tensors of
 `TensorFold/Qwen3.8-27B-MLX-4bit`, kept in bf16) beside the language model. Without the flag nothing of the tower
 loads. An image is prepared as transformers' Qwen2-VL processor prepares it: decoded as above, sized by `smart_resize`
-to multiples of 32 pixels between the processor's 65,536 pixels and the image's share of `--vision-image-tokens`
-(split evenly over the request's images, 1,024 pixels a token, at most 16,777,216 pixels), resized with Pillow's
+to multiples of 32 pixels between the processor's 65,536 pixels and `--vision-image-tokens`
+(per image, 1,024 pixels a token, at most 16,777,216 pixels), resized with Pillow's
 bicubic, and cut into 16-pixel patches. The tower runs once an image as its request's prompt pass starts, on the GPU
 in bf16 with fp32 sums. Its 2 x 2 merged rows replace the `<|image_pad|>` placeholders' embeddings. The text's
 attention layers turn each image row by its row and column (M-RoPE), and the rows after an image carry the shift those

@@ -199,8 +199,11 @@ pub fn expandWith(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx:
     if (ps.len == 0) return null;
     if (n_images > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, n_images }));
     if (v.video) |o| if (n_videos > o.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{o.max_videos}));
-    const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
-    if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
+    // Each image's cap is its own, never a share of the request's images: a shared, count-dependent
+    // budget resizes every image again whenever one more arrives, and the prompt cache keys an image's
+    // rows by its grid, so a resized history image invalidates every kept state past it and a
+    // multi-turn conversation re-prefills from its first image on each later turn.
+    const budget: u32 = v.image_tokens;
     const prepared = try cx.a.alloc(api.PreparedImage, n_images);
     const frames = try cx.a.alloc(?api.Size, n_images);
     const clips = try cx.a.alloc(api.PreparedVideo, n_videos);
@@ -397,6 +400,46 @@ test "a wrapped image: the server writes the wrapper around each image's rows, i
 
 fn noLibrary(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
     return error.NoJpegLibrary;
+}
+
+fn budgetedPrepare(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    _ = ctx;
+    const natural: u32 = @intCast(bytes.len - 3); // the test image's own size: one token a byte, capped by the budget it is given
+    const tokens = @min(natural, max_tokens);
+    return .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 2 * tokens, .tokens = tokens, .content_size = .{ 16, 16 }, .hash = bytes[3] };
+}
+
+test "one image's tokens and cache words do not depend on the request's other images" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    // 40 tokens of its own against a 64-token budget: alone it fits; shared across three images it would not
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = budgetedPrepare, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    const one = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const three = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+        \\  {"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFbbb"}},
+        \\  {"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFccc"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const alone = (try expand(v, null, MarkText.text(), &cx, one, &[_]u32{ 1, 9, 2 }, 0)).?;
+    const beside = (try expand(v, null, MarkText.text(), &cx, three, &[_]u32{ 1, 9, 9, 9, 2 }, 0)).?;
+    // the first image keeps its own 40 tokens and grid beside the other two, so a kept state from
+    // the one-image request still resumes the three-image request's prompt past its rows
+    try std.testing.expectEqual(alone.images[0].tokens, beside.images[0].tokens);
+    try std.testing.expectEqual(alone.images[0].gh, beside.images[0].gh);
+    try std.testing.expectEqual(alone.images[0].gw, beside.images[0].gw);
+    try std.testing.expectEqual(alone.images[0].hash, beside.images[0].hash);
+    try std.testing.expectEqualSlices(u32, alone.cache_key[1 .. 1 + alone.images[0].tokens], beside.cache_key[1 .. 1 + beside.images[0].tokens]);
 }
 
 fn libraryWords(err: anyerror) ?[]const u8 {
