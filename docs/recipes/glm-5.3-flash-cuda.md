@@ -6,6 +6,7 @@ The native CUDA build serves GLM-5.3-Flash at tensor parallel over hosts: from N
 NVIDIA's FP4-Local checkpoint as stored and from XSFP4, which keeps FP4-Local's tensors outside the routed experts.
 Jammed XSFP4, in [1.2.3](../../CHANGELOG.md#123) ([#2041](https://github.com/ashhart/TensorFold/pull/2041)), holds those experts at block 32 in the `csf0_v1` form and loads the same way.
 Jammed XSFP4 NZ5, in [1.2.10](../../CHANGELOG.md#1210) ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
+A ModelOpt checkpoint may also leave the dense MLPs of layers 0 to 2 as bf16 ([#3680](https://github.com/ashhart/TensorFold/pull/3680)): they are read as stored, as an EXL3 checkpoint's are.
 Rank 0 serves HTTP and the other ranks follow its steps, with MTP drafts, concurrent streams and kept prompt states.
 The [Python 0.6.6 recipe](glm-5.3-flash.md) belongs to the frozen engine; the native server takes the same `--tp`, `--rank`
 and `--master` flags.
