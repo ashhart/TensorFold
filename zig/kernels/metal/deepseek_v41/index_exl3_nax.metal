@@ -111,7 +111,7 @@ kernel void dsv41_index_scores_nax(device const ushort *qp [[buffer(0)]], device
   }
 }
 
-// This is that kernel's own body with the tile's row extent cut to sixteen -- the MMA's M granularity.
+// This is that kernel's own body at the MMA's M granularity: a simdgroup is 16 rows by 32 keys, a threadgroup 32 by 64.
 kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device const ushort *wp [[buffer(1)]],
                                    device const ushort *kp [[buffer(2)]], device float *scores [[buffer(3)]],
                                    constant Dsv41Index &p [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
@@ -120,12 +120,12 @@ kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device
   const device bfloat* W = reinterpret_cast<const device bfloat*>(wp);
   const device bfloat* K = reinterpret_cast<const device bfloat*>(kp);
   threadgroup bfloat tile[64 * INAX_PAD];
-  const int t0 = int(p.tile_start) + int(tg.x) * 64, r0 = int(tg.y) * 16;
-  const int rows = min(16, int(p.rows) - r0);
+  const int t0 = int(p.tile_start) + int(tg.x) * 64, r0 = int(tg.y) * 32;
+  const int rows = min(32, int(p.rows) - r0);
   const uint t = sg * 32u + lane;
   if (p.keys == 0 or p.ratio == 0) return;
   if (t0 >= int((p.position + uint(r0) + uint(rows)) / p.ratio)) {
-    for (uint i = t; i < 16u * 64u; i += 128u) {
+    for (uint i = t; i < 32u * 64u; i += 128u) {
       const int r = int(i) / 64, k = t0 + int(i) % 64;
       if (r < rows && k < int(p.keys))
         *(dsv41_score_slot(scores, p, r0 + r, p.tile_start / p.tile_width) + (k - int(p.tile_start))) = -INFINITY;
@@ -138,10 +138,9 @@ kernel void dsv41_index_scores_row(device const ushort *qp [[buffer(0)]], device
     *(threadgroup uint4*)(tile + rr * INAX_PAD + cc) = *(const device uint4*)(K + size_t(k) * INAX_D + cc);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (int(sg) >= 2) return;  // sixteen rows by sixty-four keys is two 16x32 column blocks
+  const int tm = 16 * int(sg / 2), tn = 32 * int(sg % 2);
+  if (tm >= rows) return; // a short tail's second row block holds no live row
   const short2 home = frag_home(ushort(lane));
-  const int tn = 32 * int(sg);
-  const int tm = 0;
   const device bfloat* qr[2];
   const device bfloat* wr[2];
   TF_UNROLL
