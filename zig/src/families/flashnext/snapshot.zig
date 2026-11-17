@@ -232,6 +232,7 @@ pub fn blank(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
 
 /// The live state becomes `st`'s: the next prompt chunk starts at its position (generateFrom with from = st.at).
 pub fn restore(e: *Engine, st: *const State) !void {
+    if (st.at > e.m.cap or st.bytes != bytes(st.at)) return error.SnapshotSize;
     if (st.layout != layoutOf(e)) return error.SnapshotLayout; // the store drops it and the pass starts at 0
     const m = e.m;
     const pool = mtl.objc.Pool.push();
@@ -258,4 +259,20 @@ test "a new buffer pads a state an eighth, in 32 MiB steps, but never past the b
     try std.testing.expectEqual(@as(usize, 704 << 20), p.size(600 << 20));
     try std.testing.expectEqual(@as(usize, 1 << 30), p.size(1000 << 20));
     try std.testing.expectEqual(capacity(1100 << 20), p.size(1100 << 20));
+}
+
+test "Flash Next context: packed snapshot rows are cap-independent while live head offsets follow each cap" {
+    const at = 4096;
+    const key: fz.Buf = .{ .b = undefined, .off = 64 };
+    const val: fz.Buf = .{ .b = undefined, .off = 128 };
+    const raw: fz.Buf = .{ .b = undefined, .off = 256 };
+    var a: [5]Part = undefined;
+    var b: [5]Part = undefined;
+    try std.testing.expectEqual(@as(usize, 5), rows(key, val, raw, 8192, at, &a));
+    try std.testing.expectEqual(@as(usize, 5), rows(key, val, raw, 65568, at, &b));
+    for (a, b) |x, y| try std.testing.expectEqual(x.len, y.len);
+    try std.testing.expectEqual(key.off + 8192 * KEY_ROW, a[1].live.off);
+    try std.testing.expectEqual(key.off + 65568 * KEY_ROW, b[1].live.off);
+    try std.testing.expectEqual(val.off + 8192 * KEY_ROW, a[3].live.off);
+    try std.testing.expectEqual(val.off + 65568 * KEY_ROW, b[3].live.off);
 }
