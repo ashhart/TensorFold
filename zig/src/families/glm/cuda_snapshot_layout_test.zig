@@ -154,3 +154,14 @@ test "cache shape: on pages each cache's part is a 576-wide row's latent then it
     }
     try t.expectEqual(kv + 78 * s.cacheBytes(), st.mtp_caches.lc);
 }
+
+test "cache shape: index keys stay in GLM-5.3-Flash's ring of index_ring rows, a rebase keeping whole pools" {
+    var d = Fake.driver();
+    var layers: [2]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    var st = try fixture(&d, &w, &layers);
+    defer st.deinit();
+    try t.expectEqual(@as(usize, state.index_ring), state.shapeOf(&w).keys);
+    try t.expectEqual(@as(usize, state.index_ring), st.ring_rows);
+    try t.expectEqual(@as(usize, 4), st.pool);
+}
