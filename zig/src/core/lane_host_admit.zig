@@ -77,7 +77,8 @@ fn choose(h: *LaneHost) ?usize {
 fn fits(h: *const LaneHost, job: *const Job) bool {
     if (ledger.priced(h)) return ledger.fits(h, job);
     const a = h.info_.admit.?;
-    return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
+    if (ledger.never(h, job) != null) return true; // past a whole class: it goes on, to its refusal by name
+    return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens) and ledger.fitsClasses(h, job);
 }
 
 /// Whether to admit several at once: prompts batch (beside chunked fills up to many_rows), two wait, two lanes free.

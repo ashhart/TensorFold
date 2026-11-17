@@ -195,8 +195,7 @@ pub const Pages = struct {
     /// Whether a request's pages fit now and a paged sequence is free for it.
     pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
         const n = need(p.layout, prompt, max_tokens);
-        // past a class, `open` refuses it by name: the lane host drops it, not waits for room that never comes
-        for (p.used) |u| if (!u) return p.pool.fitsAny(n) or (p.pool.classes > 1 and n > p.pool.classCap());
+        for (p.used) |u| if (!u) return p.pool.fitsAny(n); // past a class: the lane host refuses it (kvNeed)
         return false;
     }
 
@@ -212,7 +211,7 @@ pub const Pages = struct {
 
     /// `open` with the prompt cache's `adopted` pages (held for this call) first: their rows stay as the cache kept.
     pub fn openWith(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32) ![]const u32 {
-        return p.openOwned(slot, prompt, max_tokens, adopted, p.pool.roomiest());
+        return p.openOwned(slot, prompt, max_tokens, adopted, null);
     }
 
     /// `open` on owner class `owner` (the harness pins it; serving takes the roomiest).
@@ -220,17 +219,19 @@ pub const Pages = struct {
         return p.openOwned(slot, prompt, max_tokens, &.{}, owner);
     }
 
-    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: u32) ![]const u32 {
+    /// `owner` null: the reservation chooses it, once (the adopted pages' class, else the roomiest; kv_pool.reserve).
+    fn openOwned(p: *Pages, slot: u32, prompt: usize, max_tokens: usize, adopted: []const u32, owner: ?u32) ![]const u32 {
         var held = adopted.len > 0;
         errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
         const n = need(p.layout, prompt, max_tokens);
         if (n > tableLen(p.e.capacity) or adopted.len > n) return error.PromptTooLong;
         if (p.pool.classes > 1 and n > p.pool.classCap()) return error.ClassTooSmall; // not LaneMemory: never requeued
-        if (owner >= p.pool.classes) return error.BadStep;
+        const in = owner orelse if (adopted.len > 0) adopted[0] % p.pool.classes else null; // a resume keeps its class
+        if (in) |c| if (c >= p.pool.classes) return error.BadStep;
+        for (adopted) |id| if (id % p.pool.classes != in.?) return error.ResidueMismatch; // one class a lease
         const l = &p.leases[slot];
-        l.owner = owner; // every id it takes is of this class
-        try p.pool.promise(l, n - adopted.len);
+        p.pool.reserve(l, n - adopted.len, in) catch |e| return if (e == error.BadClass) error.BadStep else e;
         errdefer p.pool.finish(l);
         if (adopted.len > 0) {
             held = false;
