@@ -34,7 +34,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Audio {
         } else if (std.mem.eql(u8, id, "data")) {
             data = body;
         }
-        at += 8 + len + (len & 1);
+        at += 8 + @as(usize, len) + (len & 1);
     }
     const d = data orelse return error.BadWav;
     if (channels == 0 or rate == 0) return error.BadWav;
@@ -162,4 +162,22 @@ test "resampling keeps torchaudio's output length and a constant signal's level"
     defer gpa.free(y);
     try std.testing.expectEqual(@as(usize, 4410), y.len);
     for (y[200 .. y.len - 200]) |v| try std.testing.expectApproxEqAbs(@as(f32, 0.25), v, 2e-3);
+}
+
+test "voice WAV: a huge trailing chunk cannot overflow the RIFF advance" {
+    var bytes: [44]u8 = undefined;
+    header(&bytes, 44100, 0);
+    @memcpy(bytes[36..40], "JUNK");
+    std.mem.writeInt(u32, bytes[40..44], 0xFFFFFFF8, .little);
+    try std.testing.expectError(error.BadWav, parse(std.testing.allocator, &bytes));
+}
+
+test "voice WAV: a truncated maximal data chunk is bounded by the available bytes" {
+    var bytes: [46]u8 = @splat(0);
+    header(bytes[0..44], 44100, 1);
+    std.mem.writeInt(u32, bytes[40..44], 0xFFFFFFFF, .little);
+    const audio = try parse(std.testing.allocator, &bytes);
+    defer audio.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), audio.samples.len);
+    try std.testing.expectEqual(@as(f32, 0), audio.samples[0]);
 }
