@@ -316,7 +316,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flint on Metal: `--drafter` takes the published `incoai/Flint-DFlash2` draft model, through the DFlash2 runtime the 27B uses; every reply equals drafts off, and greedy decode on an M5 Ultra goes from 174.6 to 233.0 tok/s at one stream and 221.4 to 289.7 at two (#3511).
 
-- Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prices a Qwen3.8-27B-class start from the charge `serve` itself makes (weights, every stream's KV and state, the prompt scratch) and says whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context. `info` also no longer reads its `model_type` from a parse it had freed (#3268, for #2761).
+- Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prices a Qwen3.8-27B-class start from the charge `serve` itself makes (weights, every stream's KV and state, the prompt scratch) and says whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context. `info` also no longer reads its `model_type` from a parse it had freed (#3268, for #2761). Thanks to @cshintov.
 
 - Docs: `docs/api.md` documents the Ollama-compatible routes (`/api/tags`, `/api/ps`, `/api/version`, `/api/show`, `/api/chat`, `/api/generate`, `/api/embed`): what each takes and refuses, the NDJSON replies, and how each differs from its OpenAI-style route (#3496).
 
