@@ -11,6 +11,7 @@ const ps = @import("prompt_scratch.zig");
 
 const Ref = ctx_.Ref;
 const g = pipelines.glue;
+const mv_mma = pipelines.mv_mma;
 const cl = @import("calls.zig");
 const cp = pipelines.compress;
 const attn = pipelines.attn;
@@ -56,9 +57,18 @@ pub const Px = struct {
         return .{ .buf = x.tables.of(if (x.c.compressRatio(layer) > 0) .compressed else .window) };
     }
 
-    /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's).
+    /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's) or tensor units.
     fn proj(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32) !void {
         try mma.encode(&x.p.mma, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16 });
+    }
+
+    /// A bf16-weight prompt matvec: MMA tiles at >= 16 rows and K >= 32 (bit-equal to glue.mv), else glue.mv.
+    fn mv(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: Ref, out: Ref, rows: u32, k: u32, n: u32, f32_out: bool) !void {
+        if (rows == 0) return;
+        if (rows >= 16 and k >= 32) {
+            return mv_mma.encode(&x.p.mv_mma, e, cv(mv_mma.Ref, in), cv(mv_mma.Ref, w), cv(mv_mma.Ref, out), .{ .k = k, .n = n, .rows = rows, .out = if (f32_out) .f32 else .bf16 });
+        }
+        return g.mv(&x.p.glue, e, in, w, out, rows, k, n, f32_out);
     }
 };
 
@@ -88,7 +98,9 @@ fn attnInput(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, io: I
     const mix = [3]Ref{ x.at(s.mix_a[0], from, 16), x.at(s.mix_a[1], from, 16), x.at(s.mix_a[2], from, 64) };
     cl.hcmix(x.p, e, x.at(io.x, from, 8 * H), w.hc_attn, mix, n, hc(c));
     cl.hcpre(x.p, e, x.at(io.x, from, 8 * H), x.at(io.pre, from, 16), x.at(s.h, from, 2 * H), n, H);
+    e.barrier();
     g.rmsnorm(&x.p.glue, e, x.at(s.h, from, 2 * H), w.attn_norm, x.at(s.hn, from, 2 * H), n, H, c.eps);
+    e.barrier();
 }
 
 /// hc pre, attention, hc post, hc pre, MoE, hc post for rows [o, b); window keys for [k, b).
@@ -106,13 +118,17 @@ pub fn encode(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, io: 
     const n = x.b - o;
     if (n == 0) return;
     cl.hcpost(x.p, e, x.at(s.aout, o, 2 * H), x.at(io.x, o, 8 * H), x.at(s.mix_a[1], o, 16), x.at(s.mix_a[2], o, 64), x.at(s.x1, o, 8 * H), n, H);
+    e.barrier();
     const mix = [3]Ref{ x.at(io.pre_out, o, 16), x.at(s.mix_f[1], o, 16), x.at(s.mix_f[2], o, 64) };
     cl.hcmix(x.p, e, x.at(s.x1, o, 8 * H), w.hc_ffn, mix, n, hc(c));
     cl.hcpre(x.p, e, x.at(s.x1, o, 8 * H), x.at(s.mix_a[0], o, 16), x.at(s.h2, o, 2 * H), n, H);
+    e.barrier();
     g.rmsnorm(gp, e, x.at(s.h2, o, 2 * H), w.ffn_norm, x.at(s.hn2, o, 2 * H), n, H, c.eps);
+    e.barrier();
     try cut(x, .ffn_in);
     try moe(x, e, w, o);
     cl.hcpost(x.p, e, x.at(s.mout, o, 2 * H), x.at(s.x1, o, 8 * H), x.at(s.mix_f[1], o, 16), x.at(s.mix_f[2], o, 64), x.at(io.x_out, o, 8 * H), n, H);
+    e.barrier();
 }
 
 /// The KV source's publish for every chunk row: its attention input and compressor (pool rows and index keys).
@@ -125,6 +141,7 @@ pub fn publish(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, io:
 
 /// q for rows [o, b), window keys for [k, b) through the linear window, compressor, indexer, attention, output.
 fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows: Rows) !void {
+    if (x.stop == .none) return attentionFast(x, e, w, rows);
     const c = x.c;
     const s = x.s;
     const gp = &x.p.glue;
@@ -143,27 +160,168 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     const nw = kv.windowSlots(c);
     const g0 = k -| back;
     if (k > g0) g.scatter(gp, e, plus(whole(region.window), @as(usize, g0 % nw) * D * 2), s.lin, s.metaAt(s.rec.iota + back + g0 - x.a), k - g0, D * 2, 1);
+    e.barrier();
     try x.proj(e, x.at(s.hq, k, 2 * H), w.wkv, x.at(s.kv, k, 2 * D), nk);
+    e.barrier();
     g.rmsnorm(gp, e, x.at(s.kv, k, 2 * D), w.kv_norm, x.at(s.kvn, k, 2 * D), nk, D, c.eps);
+    e.barrier();
     try g.rope(gp, e, x.at(s.kvn, k, 2 * D), x.at(s.kvr, k, 2 * D), x.rec(pos, k), table, nk, 1, D, @intCast(x.tables.positions));
+    e.barrier();
     const lin = plus(s.lin, @as(usize, back) * D * 2);
     try cl.actqRows(x.p, e, x.at(s.kvr, k, 2 * D), x.at(lin, k, 2 * D), nk, D);
+    e.barrier();
     // the last window slots' worth of keys into both mirror slots of the ring
     const m = @min(nk, nw);
     g.scatter(gp, e, x.at(lin, x.b - m, 2 * D), whole(region.window), x.s.metaAt(s.rec.wdest + 2 * (x.b - m - x.a)), 2 * m, D * 2, 2);
     const ratio = c.compressRatio(l);
-    if (ratio > 0 and c.isKvSource(l) and rows.compress) try compress(x, e, w, ratio, k);
+    if (ratio > 0 and c.isKvSource(l) and rows.compress) {
+        try compress(x, e, w, ratio, k);
+    } else e.barrier();
     try cut(x, .kv);
     if (no == 0) return;
     // q: wq_a, q_norm, wq_b and RoPE on each head's last 64 dims
     try x.proj(e, x.at(s.hq, o, 2 * H), w.wq_a, x.at(s.qa, o, 2 * c.q_lora), no);
+    e.barrier();
     try cl.normq(x.p, e, x.at(s.qa, o, 2 * c.q_lora), w.q_norm, x.at(s.qr, o, 2 * c.q_lora), x.at(s.qrq, o, 2 * c.q_lora), no, c.q_lora, c.eps);
+    e.barrier();
     const QH = c.heads * D;
     try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.wq_b, x.at(s.q, o, 2 * QH), no);
+    e.barrier();
     try g.rope(gp, e, x.at(s.q, o, 2 * QH), x.at(s.qrope, o, 2 * QH), x.rec(pos, o), table, no, c.heads, D, @intCast(x.tables.positions));
+    e.barrier();
     try cut(x, .q);
     if (ratio > 0 and c.isIndexSource(l)) try indexer(x, e, w, ratio, o);
+    try attnCoreAndOut(x, e, w, ratio, o);
+}
+
+/// Fast overlapped attention path (`x.stop == .none`): merges KV, compressor, Q, and ix_proj into 6-7 barrier waves.
+fn attentionFast(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows: Rows) !void {
+    const c = x.c;
+    const s = x.s;
+    const gp = &x.p.glue;
+    const l = w.layer;
+    const D = c.head_dim;
+    const H = c.hidden;
+    const k = rows.k;
+    const o = rows.o;
+    const nk = x.b - k;
+    const no = x.b - o;
+    const table = x.table(l);
+    const pos = x.s.rec.pos;
+    const region = &x.slot.regions[l];
+    const nw = kv.windowSlots(c);
+    const g0 = k -| back;
+    const ratio = c.compressRatio(l);
+    const do_comp = ratio > 0 and c.isKvSource(l) and rows.compress;
+    const do_ix = no > 0 and ratio > 0 and c.isIndexSource(l);
+    const QH = c.heads * D;
+    const IX = c.index_heads * c.index_dim;
+    const IXD = c.index_dim;
+    const lin = plus(s.lin, @as(usize, back) * D * 2);
+    const cpos = if (do_comp) x.byRatio(s.rec.cpos, ratio, k) else undefined;
+    const dest = if (do_comp) x.byRatio(s.rec.dest, ratio, k) else undefined;
+
+    // Wave 1: actq(hn -> hq), pre-window scatter, comp inputs, ix_wp
+    try cl.actqRows(x.p, e, x.at(s.hn, k, 2 * H), x.at(s.hq, k, 2 * H), nk, H);
+    if (k > g0) g.scatter(gp, e, plus(whole(region.window), @as(usize, g0 % nw) * D * 2), s.lin, s.metaAt(s.rec.iota + back + g0 - x.a), k - g0, D * 2, 1);
+    if (do_comp) {
+        if (ratio == 1) {
+            try x.mv(e, x.at(s.hn, k, 2 * H), w.comp_wkv.?, x.at(s.lat, k, 2 * D), nk, H, D, false);
+        } else {
+            try x.mv(e, x.at(s.hn, k, 2 * H), w.comp_wkv.?, x.at(s.cf, k, 4 * D), nk, H, D, true);
+            try x.mv(e, x.at(s.hn, k, 2 * H), w.comp_wgate.?, x.at(s.cg, k, 4 * D), nk, H, D, true);
+        }
+    }
+    if (do_ix) try x.mv(e, x.at(s.hn, o, 2 * H), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), no, H, c.index_heads, false);
+    e.barrier();
+
+    // Wave 2: wkv, wq_a, comp pool2 (ratio>1) or comp_norm (ratio==1)
+    try x.proj(e, x.at(s.hq, k, 2 * H), w.wkv, x.at(s.kv, k, 2 * D), nk);
+    if (no > 0) try x.proj(e, x.at(s.hq, o, 2 * H), w.wq_a, x.at(s.qa, o, 2 * c.q_lora), no);
+    if (do_comp) {
+        if (ratio == 1) {
+            g.rmsnorm(gp, e, x.at(s.lat, k, 2 * D), w.comp_norm.?, x.at(s.latn, k, 2 * D), nk, D, c.eps);
+        } else {
+            cp.pool2(&x.p.compress, e, x.at(s.cf, k, 4 * D), x.at(s.cg, k, 4 * D), whole(region.carry.?), x.rec(pos, k), x.at(s.lat, k, 2 * D), nk, D);
+        }
+    }
+    e.barrier();
+
+    // Wave 3: kv_norm, q_norm, comp_norm (ratio>1) or ix_wk + rope(latr) (ratio==1)
+    g.rmsnorm(gp, e, x.at(s.kv, k, 2 * D), w.kv_norm, x.at(s.kvn, k, 2 * D), nk, D, c.eps);
+    if (no > 0) try cl.normq(x.p, e, x.at(s.qa, o, 2 * c.q_lora), w.q_norm, x.at(s.qr, o, 2 * c.q_lora), x.at(s.qrq, o, 2 * c.q_lora), no, c.q_lora, c.eps);
+    if (do_comp) {
+        if (ratio == 1) {
+            try x.mv(e, x.at(s.latn, k, 2 * D), w.ix_wk.?, x.at(s.ik, k, 2 * IXD), nk, D, IXD, false);
+            try g.rope(gp, e, x.at(s.latn, k, 2 * D), x.at(s.latr, k, 2 * D), cpos, table, nk, 1, D, @intCast(x.tables.positions));
+        } else {
+            g.rmsnorm(gp, e, x.at(s.lat, k, 2 * D), w.comp_norm.?, x.at(s.latn, k, 2 * D), nk, D, c.eps);
+        }
+    }
+    e.barrier();
+
+    // Wave 4: rope(kvr), wq_b, ix_wq_b, comp stage
+    try g.rope(gp, e, x.at(s.kvn, k, 2 * D), x.at(s.kvr, k, 2 * D), x.rec(pos, k), table, nk, 1, D, @intCast(x.tables.positions));
+    if (no > 0) try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.wq_b, x.at(s.q, o, 2 * QH), no);
+    if (do_ix) try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), no);
+    if (do_comp) {
+        if (ratio == 1) {
+            g.rmsnorm(gp, e, x.at(s.ik, k, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, k, 2 * IXD), nk, IXD, c.eps);
+            cp.fp4rt(&x.p.compress, e, x.at(s.latr, k, 2 * D), whole(region.pool.?), dest, nk, D);
+        } else {
+            try x.mv(e, x.at(s.latn, k, 2 * D), w.ix_wk.?, x.at(s.ik, k, 2 * IXD), nk, D, IXD, false);
+            try g.rope(gp, e, x.at(s.latn, k, 2 * D), x.at(s.latr, k, 2 * D), cpos, table, nk, 1, D, @intCast(x.tables.positions));
+        }
+    }
+    e.barrier();
+
+    // Wave 5: actq(lin), rope(qrope), rope(ixqr), comp stage
+    try cl.actqRows(x.p, e, x.at(s.kvr, k, 2 * D), x.at(lin, k, 2 * D), nk, D);
+    if (no > 0) try g.rope(gp, e, x.at(s.q, o, 2 * QH), x.at(s.qrope, o, 2 * QH), x.rec(pos, o), table, no, c.heads, D, @intCast(x.tables.positions));
+    if (do_ix) try g.rope(gp, e, x.at(s.ixq, o, 2 * IX), x.at(s.ixqr, o, 2 * IX), x.rec(pos, o), table, no, c.index_heads, IXD, @intCast(x.tables.positions));
+    if (do_comp) {
+        if (ratio == 1) {
+            try g.rope(gp, e, x.at(s.ikn, k, 2 * IXD), x.at(s.ikr, k, 2 * IXD), cpos, table, nk, 1, IXD, @intCast(x.tables.positions));
+        } else {
+            g.rmsnorm(gp, e, x.at(s.ik, k, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, k, 2 * IXD), nk, IXD, c.eps);
+            cp.fp4rt(&x.p.compress, e, x.at(s.latr, k, 2 * D), whole(region.pool.?), dest, nk, D);
+        }
+    }
+    e.barrier();
+
+    // Wave 6: scatter(window), fp4pack(ixq), comp stage
+    const m = @min(nk, nw);
+    g.scatter(gp, e, x.at(lin, x.b - m, 2 * D), whole(region.window), x.s.metaAt(s.rec.wdest + 2 * (x.b - m - x.a)), 2 * m, D * 2, 2);
+    if (do_ix) cp.fp4pack(&x.p.compress, e, x.at(s.ixqr, o, 2 * IX), x.at(s.ixqc, o, IX / 2), x.at(s.ixqs, o, IX / 32), no, .{ .blocks = IX / 32, .in_stride = IX, .code_row = IX / 2, .scale_row = IX / 32 });
+    if (do_comp) {
+        if (ratio == 1) {
+            const keys = whole(region.keys.?);
+            cp.fp4pack(&x.p.compress, e, x.at(s.ikr, k, 2 * IXD), keys, keys, nk, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
+        } else {
+            try g.rope(gp, e, x.at(s.ikn, k, 2 * IXD), x.at(s.ikr, k, 2 * IXD), cpos, table, nk, 1, IXD, @intCast(x.tables.positions));
+        }
+    }
+    e.barrier();
+
+    if (do_comp and ratio > 1) {
+        const keys = whole(region.keys.?);
+        cp.fp4pack(&x.p.compress, e, x.at(s.ikr, k, 2 * IXD), keys, keys, nk, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
+        e.barrier();
+    }
+    if (no == 0) return;
+    if (do_ix) try indexerSelect(x, e, w, ratio, o);
+    try attnCoreAndOut(x, e, w, ratio, o);
+}
+
+fn attnCoreAndOut(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: u32, o: u32) !void {
+    const c = x.c;
+    const s = x.s;
+    const l = w.layer;
+    const D = c.head_dim;
+    const no = x.b - o;
+    const QH = c.heads * D;
     const src = x.slot.source(c, l);
+    const region = &x.slot.regions[l];
     const b: attn.Bind = .{
         .q = cv(attn.Ref, x.at(s.qrope, o, 2 * QH)),
         .w = cv(attn.Ref, s.lin),
@@ -171,10 +329,11 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
         .i = cv(attn.Ref, x.at(s.sel, o, 4 * attn.max_selected)),
         .m = cv(attn.Ref, s.metaAt((if (ratio > 0) s.rec.comp else s.rec.swa) + 8 * (o - x.a))),
         .sk = cv(attn.Ref, w.sink),
-        .cs = cv(attn.Ref, table),
+        .cs = cv(attn.Ref, x.table(l)),
         .o = cv(attn.Ref, x.at(s.o, o, 2 * QH)),
     };
     try attn.encodePrompt(&x.p.attn, e, b, .{ .rows = no, .heads = c.heads, .out = .bf16 });
+    e.barrier();
     try cut(x, .core);
     try output(x, e, w, o);
 }
@@ -191,25 +350,33 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     const hn = x.at(s.hn, from, 2 * H);
     const lat = x.at(s.lat, from, 2 * D);
     if (ratio == 1) {
-        try g.mv(gp, e, hn, w.comp_wkv.?, lat, n, H, D, false);
+        try x.mv(e, hn, w.comp_wkv.?, lat, n, H, D, false);
+        e.barrier();
     } else {
-        try g.mv(gp, e, hn, w.comp_wkv.?, x.at(s.cf, from, 4 * D), n, H, D, true);
-        try g.mv(gp, e, hn, w.comp_wgate.?, x.at(s.cg, from, 4 * D), n, H, D, true);
+        try x.mv(e, hn, w.comp_wkv.?, x.at(s.cf, from, 4 * D), n, H, D, true);
+        try x.mv(e, hn, w.comp_wgate.?, x.at(s.cg, from, 4 * D), n, H, D, true);
+        e.barrier();
         cp.pool2(&x.p.compress, e, x.at(s.cf, from, 4 * D), x.at(s.cg, from, 4 * D), whole(region.carry.?), x.rec(s.rec.pos, from), lat, n, D);
+        e.barrier();
     }
     const latn = x.at(s.latn, from, 2 * D);
     g.rmsnorm(gp, e, lat, w.comp_norm.?, latn, n, D, c.eps);
+    e.barrier();
     const cpos = x.byRatio(s.rec.cpos, ratio, from);
     const dest = x.byRatio(s.rec.dest, ratio, from);
     const table = x.table(w.layer);
     const IXD = c.index_dim;
-    try g.mv(gp, e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
-    g.rmsnorm(gp, e, x.at(s.ik, from, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, from, 2 * IXD), n, IXD, c.eps);
-    try g.rope(gp, e, x.at(s.ikn, from, 2 * IXD), x.at(s.ikr, from, 2 * IXD), cpos, table, n, 1, IXD, @intCast(x.tables.positions));
-    const keys = whole(region.keys.?);
-    cp.fp4pack(&x.p.compress, e, x.at(s.ikr, from, 2 * IXD), keys, keys, n, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
+    try x.mv(e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
     try g.rope(gp, e, latn, x.at(s.latr, from, 2 * D), cpos, table, n, 1, D, @intCast(x.tables.positions));
+    e.barrier();
+    g.rmsnorm(gp, e, x.at(s.ik, from, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, from, 2 * IXD), n, IXD, c.eps);
+    const keys = whole(region.keys.?);
     cp.fp4rt(&x.p.compress, e, x.at(s.latr, from, 2 * D), whole(region.pool.?), dest, n, D);
+    e.barrier();
+    try g.rope(gp, e, x.at(s.ikn, from, 2 * IXD), x.at(s.ikr, from, 2 * IXD), cpos, table, n, 1, IXD, @intCast(x.tables.positions));
+    e.barrier();
+    cp.fp4pack(&x.p.compress, e, x.at(s.ikr, from, 2 * IXD), keys, keys, n, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
+    e.barrier();
 }
 
 /// The selection of rows [o, b): FP4 queries and weights, then scores, candidates and the top-512 a few rows at a time.
@@ -220,12 +387,22 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
     const n = x.b - o;
     const IX = c.index_heads * c.index_dim;
     try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), n);
+    try x.mv(e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
+    e.barrier();
     try g.rope(gp, e, x.at(s.ixq, o, 2 * IX), x.at(s.ixqr, o, 2 * IX), x.rec(s.rec.pos, o), x.table(w.layer), n, c.index_heads, c.index_dim, @intCast(x.tables.positions));
+    e.barrier();
     cp.fp4pack(&x.p.compress, e, x.at(s.ixqr, o, 2 * IX), x.at(s.ixqc, o, IX / 2), x.at(s.ixqs, o, IX / 32), n, .{ .blocks = IX / 32, .in_stride = IX, .code_row = IX / 2, .scale_row = IX / 32 });
-    try g.mv(gp, e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
+    e.barrier();
+    try cut(x, .ix_proj);
+    try indexerSelect(x, e, w, ratio, o);
+}
+
+fn indexerSelect(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: u32, o: u32) !void {
+    const c = x.c;
+    const s = x.s;
+    const IX = c.index_heads * c.index_dim;
     const src = x.slot.source(c, w.layer).?;
     const masked = c.usesCandidates(w.layer);
-    try cut(x, .ix_proj);
     var t = o;
     while (t < x.b) : (t += s.ix_rows) {
         const rows = @min(s.ix_rows, x.b - t);
@@ -241,9 +418,11 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
                 .ratio = ratio,
                 .mask_stride = if (masked) s.blocks else 0,
             });
+            e.barrier();
             if (c.isCandidateSource(w.layer)) cand.encode(x.p.cand, e, s.scores, vis, s.bscore, cmask, rows, keys, s.blocks, c.candidate_blocks);
         }
         if (x.stop != .ix_score) g.topk512(x.p.topk512, e, s.scores, vis, x.at(s.sel, t, 4 * attn.max_selected), rows, @max(keys, 1));
+        e.barrier();
     }
     try cut(x, .ix_score);
     try cut(x, .ix_select);
@@ -258,12 +437,16 @@ fn output(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) 
     const kg = c.heads / G * c.head_dim;
     const ol = c.o_lora;
     try cl.actq(x.p, e, x.at(s.o, o, 2 * c.heads * c.head_dim), s.oq, .{ .k = kg, .nb = R, .na = G, .sa = kg, .sb = c.heads * c.head_dim, .ta = R * kg, .tb = kg });
+    e.barrier();
     for (0..G) |gi| {
         const wg: weights.Fp8 = .{ .w = plus(w.wo_a.w, gi * ol * kg), .s = plus(w.wo_a.s, gi * ol / 32 * (kg / 32)), .k = kg, .n = ol };
         try x.proj(e, plus(s.oq, gi * R * kg * 2), wg, plus(s.oa, gi * R * ol * 2), R);
     }
+    e.barrier();
     try cl.actq(x.p, e, s.oa, s.ob, .{ .k = ol, .nb = R, .na = G, .sa = R * ol, .sb = ol, .ta = ol, .tb = G * ol });
+    e.barrier();
     try x.proj(e, s.ob, w.wo_b, x.at(s.aout, o, 2 * c.hidden), R);
+    e.barrier();
     try cut(x, .out);
 }
 
@@ -271,25 +454,63 @@ fn output(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) 
 fn moe(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) !void {
     const c = x.c;
     const s = x.s;
-    const gp = &x.p.glue;
     const R = x.b - o;
     const H = c.hidden;
     const W = c.expert_width;
     const K = c.topk;
     const hn2 = x.at(s.hn2, o, 2 * H);
-    try g.mv(gp, e, hn2, w.gate_w, x.at(s.logits, o, 4 * c.experts), R, H, c.experts, true);
+    if (x.stop == .none and !x.expert_loop) {
+        try x.mv(e, hn2, w.gate_w, x.at(s.logits, o, 4 * c.experts), R, H, c.experts, true);
+        try cl.actqRows(x.p, e, hn2, x.at(s.hq2, o, 2 * H), R, H);
+        e.barrier();
+        g.route(x.p.route, e, .{ .logits = x.at(s.logits, o, 4 * c.experts), .bias = w.gate_b, .bias_vl = w.gate_bvl orelse w.gate_b, .image = x.at(s.image, o, 1), .picks = x.at(s.picks, o, 4 * K), .weights = x.at(s.wts, o, 4 * K) }, R, K, c.routed_scale);
+        try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[0], x.at(s.sg, o, 2 * W), R);
+        try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[2], x.at(s.su, o, 2 * W), R);
+        e.barrier();
+        ex.use(e, w.backing());
+        const table: ex.Ref = .{ .buf = w.table };
+        const call: xm.Call = .{ .rows = R, .k = H, .n = W, .experts = c.experts };
+        try xm.check(call);
+        const route: ex.Route = .{ .ids = cv(ex.Ref, x.at(s.picks, o, 4 * K)), .weights = cv(ex.Ref, x.at(s.wts, o, 4 * K)), .slots = cv(ex.Ref, s.plan[0]), .nslots = cv(ex.Ref, s.plan[1]), .pairs = cv(ex.Ref, s.plan[2]), .where = cv(ex.Ref, s.plan[3]) };
+        const dcall: ex.Call = .{ .rows = R, .k = H, .n = W, .experts = c.experts };
+        ex.plan(&x.p.experts, e, route, dcall);
+        const xp = &x.p.xmma;
+        xm.quant(xp, e, cv(xm.Ref, hn2), cv(xm.Ref, s.xcodes), cv(xm.Ref, s.xscales), call);
+        cl.swiglu(x.p, e, x.at(s.sg, o, 2 * W), x.at(s.su, o, 2 * W), x.at(s.sact, o, 2 * W), x.at(s.sactq, o, 2 * W), R * W, c.swiglu_limit);
+        e.barrier();
+        xm.tiles(xp, e, route, cv(xm.Ref, s.xtiles));
+        e.barrier();
+        xm.up(xp, e, cv(xm.Ref, s.xcodes), cv(xm.Ref, s.xscales), table, route, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.act), call);
+        try x.proj(e, x.at(s.sactq, o, 2 * W), w.shared[1], x.at(s.sout, o, 2 * H), R);
+        e.barrier();
+        xm.down(xp, e, cv(xm.Ref, s.act), cv(xm.Ref, s.xdq), table, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.eout), call);
+        e.barrier();
+        ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, o, 4 * H)), true, dcall);
+        e.barrier();
+        cl.join(x.p, e, x.at(s.yr, o, 4 * H), x.at(s.sout, o, 2 * H), x.at(s.mout, o, 2 * H), R * H);
+        e.barrier();
+        return;
+    }
+    try x.mv(e, hn2, w.gate_w, x.at(s.logits, o, 4 * c.experts), R, H, c.experts, true);
+    e.barrier();
     g.route(x.p.route, e, .{ .logits = x.at(s.logits, o, 4 * c.experts), .bias = w.gate_b, .bias_vl = w.gate_bvl orelse w.gate_b, .image = x.at(s.image, o, 1), .picks = x.at(s.picks, o, 4 * K), .weights = x.at(s.wts, o, 4 * K) }, R, K, c.routed_scale);
+    e.barrier();
     try cut(x, .route);
     ex.use(e, w.backing());
     const table: ex.Ref = .{ .buf = w.table };
     if (x.expert_loop) try expertsLoop(x, e, o, table) else try expertsMma(x, e, o, table);
     try cut(x, .experts);
     try cl.actqRows(x.p, e, hn2, x.at(s.hq2, o, 2 * H), R, H);
+    e.barrier();
     try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[0], x.at(s.sg, o, 2 * W), R);
     try x.proj(e, x.at(s.hq2, o, 2 * H), w.shared[2], x.at(s.su, o, 2 * W), R);
+    e.barrier();
     cl.swiglu(x.p, e, x.at(s.sg, o, 2 * W), x.at(s.su, o, 2 * W), x.at(s.sact, o, 2 * W), x.at(s.sactq, o, 2 * W), R * W, c.swiglu_limit);
+    e.barrier();
     try x.proj(e, x.at(s.sactq, o, 2 * W), w.shared[1], x.at(s.sout, o, 2 * H), R);
+    e.barrier();
     cl.join(x.p, e, x.at(s.yr, o, 4 * H), x.at(s.sout, o, 2 * H), x.at(s.mout, o, 2 * H), R * H);
+    e.barrier();
     try cut(x, .shared);
 }
 
@@ -306,9 +527,13 @@ fn expertsLoop(x: *const Px, e: mtl.ComputeEncoder, o: u32, table: ex.Ref) !void
         try ex.check(call);
         const route: ex.Route = .{ .ids = cv(ex.Ref, x.at(s.picks, t, 4 * K)), .weights = cv(ex.Ref, x.at(s.wts, t, 4 * K)), .slots = cv(ex.Ref, s.plan[0]), .nslots = cv(ex.Ref, s.plan[1]), .pairs = cv(ex.Ref, s.plan[2]), .where = cv(ex.Ref, s.plan[3]) };
         ex.plan(&x.p.experts, e, route, call);
+        e.barrier();
         ex.up(&x.p.experts, e, cv(ex.Ref, x.at(s.hn2, t, 2 * H)), table, route, cv(ex.Ref, s.act), call);
+        e.barrier();
         ex.down(&x.p.experts, e, cv(ex.Ref, s.act), table, route, cv(ex.Ref, s.eout), call);
+        e.barrier();
         ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, t, 4 * H)), true, call);
+        e.barrier();
     }
 }
 
@@ -325,12 +550,17 @@ fn expertsMma(x: *const Px, e: mtl.ComputeEncoder, o: u32, table: ex.Ref) !void 
     const dcall: ex.Call = .{ .rows = R, .k = H, .n = c.expert_width, .experts = c.experts };
     ex.plan(&x.p.experts, e, route, dcall);
     const xp = &x.p.xmma;
-    xm.tiles(xp, e, route, cv(xm.Ref, s.xtiles));
     xm.quant(xp, e, cv(xm.Ref, x.at(s.hn2, o, 2 * H)), cv(xm.Ref, s.xcodes), cv(xm.Ref, s.xscales), call);
+    e.barrier();
+    xm.tiles(xp, e, route, cv(xm.Ref, s.xtiles));
+    e.barrier();
     try cut(x, .xe_plan);
     xm.up(xp, e, cv(xm.Ref, s.xcodes), cv(xm.Ref, s.xscales), table, route, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.act), call);
+    e.barrier();
     try cut(x, .xe_up);
     xm.down(xp, e, cv(xm.Ref, s.act), cv(xm.Ref, s.xdq), table, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.eout), call);
+    e.barrier();
     try cut(x, .xe_down);
     ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, o, 4 * H)), true, dcall);
+    e.barrier();
 }

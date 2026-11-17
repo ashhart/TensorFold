@@ -23,6 +23,8 @@ pub const fold = @embedFile("fold.metal");
 pub const compress = @embedFile("compress.metal");
 /// DeepSeek-V4.1 router, indexer, compressor and head matvecs: lane chains over K, one butterfly, any row count.
 pub const mv = @embedFile("mv.metal");
+/// DeepSeek-V4.1 prompt matvecs on simdgroup MMA: bit-identical to mv.metal.
+pub const mv_mma = @embedFile("mv_mma.metal");
 /// DeepSeek-V4.1 candidate blocks: block maxima, the newest block pinned, an exact top-2048 as a byte mask.
 pub const cand = @embedFile("cand.metal");
 /// DeepSeek V4.1's indexer scores: FP4 query and key dots in one stated order, causal and block masks.

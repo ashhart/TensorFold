@@ -213,7 +213,7 @@ fn runTo(r: *Rig, a: u32, rows: u32, stop: Stage) !u64 {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = r.queue.commandBuffer();
-    const e = cb.compute(.serial);
+    const e = cb.compute(.concurrent);
     const x = r.px(a, a + rows, stop);
     const io: pl.Io = .{ .x = .{ .buf = r.io[0] }, .pre = .{ .buf = r.io[2] }, .x_out = .{ .buf = r.io[1] }, .pre_out = .{ .buf = r.io[3] } };
     pl.encode(&x, e, &r.w, io, .{ .k = a, .o = a, .compress = r.class.compresses() }) catch |err| if (err != error.Stopped) return err;

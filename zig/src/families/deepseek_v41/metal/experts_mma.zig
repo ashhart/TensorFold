@@ -140,6 +140,7 @@ pub fn down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, dq: Ref, table
         bind(e, &.{ act, dq, ds });
         e.setValue([2]u32{ c.n, pairs }, 3);
         e.dispatchThreads(mtl.Size.of(c.n / 4, pairs, 1), mtl.Size.of(32, 1, 1));
+        e.barrier();
         e.setPipeline(xu[3]);
         bind(e, &.{ act, table, tile_table, out });
         e.setValue(args, 4);
