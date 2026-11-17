@@ -520,7 +520,7 @@ pub const LaneHost = struct {
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
-            @import("lane_host_backlog.zig").step(h); // slow readers' holds and stalls, before the activity: its wait is idle
+            @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
             var activity = @import("lane_activity.zig").Activity.enter(h.activity);
             defer activity.end();
             ends.takeCancels(h);
