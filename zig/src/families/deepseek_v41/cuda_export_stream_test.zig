@@ -47,6 +47,7 @@ fn streamCase(upto: u64, index: ex.IndexFormat) !void {
         progress.mark(i);
     };
     try std.testing.expect(!progress.whole.load(.acquire));
+    for (b.parts, 0..) |p, i| try std.testing.expectEqual((p.spec.kind == .comp or p.spec.kind == .ixk) and i % 2 == 0, progress.isReady(i));
     try cx.complete(b, state);
     try std.testing.expect(progress.whole.load(.acquire));
     for (whole.exp.sources, b.exp.sources) |a, c| for (a.parts, c.parts) |x, y| try std.testing.expectEqualSlices(u8, x, y);
