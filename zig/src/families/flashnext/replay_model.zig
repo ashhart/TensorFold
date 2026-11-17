@@ -9,6 +9,7 @@ const lane_w = fz.lane_w;
 const rows_load = fz.rows_load;
 const variants = fz.variants;
 const gx_mod = @import("gx.zig");
+const tp_local = @import("tp_local.zig");
 const gdn_step = fz.gdn_step;
 const vis_prompt = fz.vis_prompt;
 const D = fz.D;
@@ -112,7 +113,7 @@ pub const Model = struct {
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
         // Merge expert rows from both ranks.
-        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(&m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows);
+        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS != 0) {} else if (m.r.tp_decode) tp_local.merge(tp, m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows) else tp.combine(&m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows);
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -354,7 +355,7 @@ pub const Model = struct {
             if (by_expert) r.gx.?.encode(r, t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             if (r.fsr) |stream| try stream.after(r);
             r.tp_layer = false;
-            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
+            if (r.tp) |tp| if (r.skip & TP_CLASS == 0) if (r.tp_decode) tp_local.branch(tp, r.enc, t.ydown, t.wts, t.lg, rows) else tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
             if (r.lg_probe) |pb| r.copyKept(t.lg, pb.at(i * MAXR * 513 * 4), rows * 513, 0, 0, 0, 1, 0);
             pending = .grouped;

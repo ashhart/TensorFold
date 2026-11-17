@@ -59,3 +59,7 @@ test {
 test {
     _ = @import("flashnext_fsr_tests.zig");
 }
+
+test {
+    _ = @import("src/families/flashnext/tp_local_test.zig");
+}

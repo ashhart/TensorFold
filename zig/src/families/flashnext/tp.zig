@@ -7,6 +7,7 @@ const Handoff = @import("tp_handoff.zig").Handoff;
 const relay = @import("tp_service.zig");
 const host_wait = @import("tp_host_wait.zig");
 const tp_seq = @import("tp_seq.zig");
+const tp_local = @import("tp_local.zig");
 const D = 2560;
 const WIDE = 4 * D;
 const MAXR = 16;
@@ -125,6 +126,7 @@ pub const Tp2 = struct {
     ctrl: u64 = 0, // stop decisions so far, the same on both ranks
     one: mtl.Buffer, // a rows word holding 1, for posts that carry no rows
     pick_tmp: mtl.Buffer, // the MTP head's merged draft index
+    branches: mtl.Buffer, // decode's local MoE: a guard word, then both ranks' branch rows (tp_local.zig)
     ids_pipe: mtl.Pipeline,
     seq: u64 = 0, // the last job: each prefill send on rank 0 matches a wait on rank 1
     seqs: tp_seq.Seqs = .{}, // decode messages so far, numbered the same on both Macs: flag values and slots
@@ -145,7 +147,7 @@ pub const Tp2 = struct {
     stats_state: stats_module.State = .{},
     /// Metal aliases the endpoint window; count it once beside staging, tiny buffers and the host queue.
     pub fn startupBytes() usize {
-        return WINDOW + (32 << 20) + PART + 48 + @sizeOf(Tp2) + JOBS * @sizeOf(Job);
+        return WINDOW + (32 << 20) + PART + 48 + tp_local.BYTES + @sizeOf(Tp2) + JOBS * @sizeOf(Job);
     }
     /// Connect to the peer named in the settings file and start the host's service thread.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, settings_path: []const u8) !*Tp2 {
@@ -181,6 +183,7 @@ pub const Tp2 = struct {
             .plain_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_plain", false)),
             .one = try owned.keep(gpa, try device.buffer(16, opts)),
             .pick_tmp = try owned.keep(gpa, try device.buffer(16, opts)),
+            .branches = try owned.keep(gpa, try device.buffer(tp_local.BYTES, opts)),
             .ids_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_ids", false)),
             .jobs = try gpa.alloc(Job, JOBS),
         };
@@ -189,6 +192,7 @@ pub const Tp2 = struct {
         errdefer t.handoff.deinit();
         t.owned = owned;
         t.one.slice(i32, 1)[0] = 1;
+        tp_local.arm(t.branches);
         t.trace = platform.c.getenv("TF_TP_TRACE") != null;
         t.local = platform.c.getenv("TF_TP_LOCAL") != null;
         t.stats = platform.c.getenv("TF_TP_STATS") != null;
@@ -480,6 +484,7 @@ pub const Tp2 = struct {
 test {
     _ = @import("tp_deadline.zig");
     _ = tp_seq; // the decode messages' numbers and slots
+    _ = tp_local;
 }
 
 test "host waits retain the wrapping prefill call counter" {

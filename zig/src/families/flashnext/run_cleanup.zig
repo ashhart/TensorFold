@@ -26,7 +26,7 @@ pub fn drop(r: anytype) void {
         r.held.items.len -= 1;
         if (r.follow) |f| f.leave(f.ctx, b);
         if (r.tp) |t| if (b.id == t.wbuf.id or b.id == t.one.id or b.id == t.pick_tmp.id or
-            b.id == t.partial.id or b.id == t.handoff.ready.id) continue;
+            b.id == t.partial.id or b.id == t.branches.id or b.id == t.handoff.ready.id) continue;
         b.deinit();
     }
     if (r.rows_cleanup) |f| f.call(f.ctx);

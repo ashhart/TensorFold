@@ -41,7 +41,7 @@ test "residency owner Flash Next: paired and single native inventories retain re
             }
             _ = try run.buffer(64);
             var tp: fz.Tp2 = undefined;
-            var tp_buffers: [4]?mtl.Buffer = @splat(null);
+            var tp_buffers: [5]?mtl.Buffer = @splat(null);
             defer for (tp_buffers) |maybe| if (maybe) |buffer| buffer.deinit();
             if (paired) {
                 for (&tp_buffers) |*buffer| buffer.* = try record.device().buffer(64, 0);
@@ -49,6 +49,7 @@ test "residency owner Flash Next: paired and single native inventories retain re
                 tp.one = tp_buffers[1].?;
                 tp.pick_tmp = tp_buffers[2].?;
                 tp.partial = tp_buffers[3].?;
+                tp.branches = tp_buffers[4].?;
                 tp.request_gate = .{};
                 run.tp = &tp;
             }

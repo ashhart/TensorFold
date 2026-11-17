@@ -136,3 +136,127 @@ test "pair plain handoff preserves serial and concurrent encoder boundaries" {
 test "pair send handoff preserves serial and concurrent encoder boundaries" {
     try shape(.send);
 }
+
+const tp_local = @import("src/families/flashnext/tp_local.zig");
+const tp_seq = @import("src/families/flashnext/tp_seq.zig");
+const D = 2560;
+const Bufs = struct { y: Ref, wts: Ref, lg: Ref, h: Ref, inj: Ref, out: Ref, ssp: Ref, rows: Ref };
+
+fn pair(tp: *Tp2, rank: u32, jobs: *[1024]Job) !void {
+    tp.* = undefined;
+    tp.rank = rank;
+    tp.seq = epoch - 1;
+    tp.seqs = .{};
+    tp.queued = .init(tp.seq);
+    tp.failed = .init(false);
+    tp.stop = .init(false);
+    tp.jobs = jobs;
+    tp.wbuf = try (mtl.Device{}).buffer(64, mtl.ResourceOptions.shared);
+    tp.branches = try (mtl.Device{}).buffer(tp_local.BYTES, mtl.ResourceOptions.shared);
+    tp_local.arm(tp.branches);
+    tp.branch_pipe = .{ .name = "tp_branch" };
+    tp.merge_pipe = .{ .name = "tp_merge" };
+    tp.handoff = try Handoff.init(.{}, &tp.failed, &tp.stop, rank);
+}
+
+/// The MoE stage's dispatches for one layer, exchanged (exchange then combine) or local, in recorded order.
+fn moe(tp: *Tp2, mode: mtl.DispatchType, bufs: Bufs, rows: usize, local: bool) ![]const mtl.HandoffOp {
+    mtl.resetHandoffs();
+    mtl.record_handoffs = true;
+    defer mtl.record_handoffs = false;
+    var enc = (mtl.CommandBuffer{ .id = cb_id }).compute(mode);
+    if (local) {
+        tp_local.branch(tp, enc, bufs.y, bufs.wts, bufs.lg, rows);
+        tp_local.merge(tp, enc, bufs.h, bufs.inj, bufs.out, bufs.ssp, bufs.rows, rows);
+    } else {
+        tp.exchange(enc, bufs.y, bufs.wts, bufs.lg, rows);
+        tp.combine(&enc, bufs.h, bufs.inj, bufs.out, bufs.ssp, bufs.rows, rows);
+    }
+    return try mtl.allocator.dupe(mtl.HandoffOp, mtl.handoff_ops[0..mtl.handoff_op_count]);
+}
+
+fn word(op: mtl.HandoffOp, at: usize, comptime T: type) T {
+    return std.mem.bytesToValue(T, op.args[at].bytes[0..@sizeOf(T)]);
+}
+
+test "pair decode MoE: local branches and merge reuse the exchange's arguments with no job, seam or event" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    mtl.allocator = arena.allocator();
+    var bufs: Bufs = undefined;
+    inline for (@typeInfo(Bufs).@"struct".field_names) |name| @field(bufs, name) = .{ .b = try (mtl.Device{}).buffer(16, mtl.ResourceOptions.shared) };
+    var jobs: [1024]Job = undefined;
+    for ([_]mtl.DispatchType{ .serial, .concurrent }) |mode| for (1..17) |rows| {
+        var exchanged: [2][]const mtl.HandoffOp = undefined;
+        var ready: [2]usize = undefined;
+        for (0..2) |k| {
+            var tp: Tp2 = undefined;
+            try pair(&tp, @intCast(k), &jobs);
+            defer tp.handoff.deinit();
+            exchanged[k] = try moe(&tp, mode, bufs, rows, false);
+            ready[k] = tp.handoff.ready.id;
+        }
+        for (0..2) |k| {
+            var tp: Tp2 = undefined;
+            try pair(&tp, @intCast(k), &jobs);
+            defer tp.handoff.deinit();
+            const ops = try moe(&tp, mode, bufs, rows, true);
+            try testing.expectEqual(epoch - 1, tp.seq);
+            try testing.expectEqual(epoch - 1, tp.queued.load(.acquire));
+            try testing.expectEqual(tp_seq.Seqs{}, tp.seqs);
+            try testing.expect(ops[0].kind == .compute);
+            const ranges: usize = if (rows > 1) 2 else 1;
+            try testing.expectEqual(1 + ranges + 1, ops.len);
+            for (ops[1..]) |op| try testing.expect(op.kind == .dispatch and op.args[if (std.mem.eql(u8, op.pipeline, "tp_merge")) 0 else 5].id == tp.branches.id);
+            const merge = ops[ops.len - 1];
+            try testing.expectEqualStrings("tp_merge", merge.pipeline);
+            const reference = for (exchanged[k]) |op| {
+                if (op.kind == .dispatch and std.mem.eql(u8, op.pipeline, "tp_merge")) break op;
+            } else return error.NoExchangedMerge;
+            try testing.expectEqual(ready[k], reference.args[0].id); // the exchanged merge reads peer rows only once published
+            try testing.expectEqual(tp_local.PASS, word(merge, 1, u64));
+            try testing.expectEqual(reference.grid, merge.grid);
+            for ([_]usize{ 2, 3, 4, 7, 8, 9 }) |at| try testing.expectEqual(reference.args[at], merge.args[at]);
+            const split = word(merge, 7, [4]u32);
+            for (ops[1 .. ops.len - 1], 0..) |b, j| {
+                try testing.expectEqualStrings("tp_branch", b.pipeline);
+                const owner: u32 = if (rows > 1) @intCast(j) else 0;
+                const theirs = for (exchanged[owner]) |op| {
+                    if (op.kind == .dispatch and std.mem.eql(u8, op.pipeline, "tp_branch")) break op;
+                } else return error.NoExchangedBranch;
+                try testing.expectEqual(theirs.grid, b.grid);
+                for ([_]usize{ 0, 1, 2, 4 }) |at| try testing.expectEqual(theirs.args[at], b.args[at]);
+                try testing.expectEqual(tp_local.PASS, word(b, 6, u64));
+                const own = word(b, 4, [2]u32);
+                try testing.expectEqual(tp_seq.ownRows(owner, rows), [2]usize{ own[0], own[1] });
+                try testing.expectEqual(tp.branches.id, b.args[3].id);
+                for (own[0]..own[1]) |r| { // tp_merge's index for row r lands on the byte tp_branch wrote for it
+                    const is_mine = r >= split[0] and r < split[1];
+                    try testing.expectEqual(owner == k, is_mine);
+                    const read = if (is_mine) merge.args[5].off + (r - split[0]) * D * 2 else merge.args[6].off + (r - split[2]) * D * 2;
+                    try testing.expectEqual(b.args[3].off + (r - own[0]) * D * 2, read);
+                    try testing.expectEqual(tp.branches.id, merge.args[if (is_mine) 5 else 6].id);
+                }
+            }
+        }
+    };
+}
+
+test "pair decode MoE: the local guard word is the pair's own, and no published or cancelled epoch matches it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    mtl.allocator = arena.allocator();
+    mtl.resetHandoffs();
+    var jobs: [1024]Job = undefined;
+    var tp: Tp2 = undefined;
+    try pair(&tp, 0, &jobs);
+    defer tp.handoff.deinit();
+    try testing.expectEqual(std.math.maxInt(u64), tp_local.PASS);
+    try testing.expectEqual(tp_local.PASS, tp.branches.slice(u64, 1)[0]);
+    try testing.expect(tp.branches.id != tp.handoff.ready.id and tp.branches.id != tp.wbuf.id);
+    try testing.expect(tp.handoff.publish(epoch));
+    try testing.expectEqual(epoch, tp.handoff.ready.slice(u64, 1)[0]);
+    tp.handoff.cancel();
+    try testing.expectEqual(std.math.maxInt(u64), tp.handoff.landed.value());
+    try testing.expect(tp.handoff.ready.slice(u64, 1)[0] != tp_local.PASS);
+}

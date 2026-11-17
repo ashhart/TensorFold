@@ -84,6 +84,7 @@ const Pair = struct {
     one: Fake.Object,
     pick_tmp: Fake.Object,
     partial: Fake.Object,
+    branches: Fake.Object,
     handoff: struct { ready: Fake.Object },
     record: *Record,
     stopped: bool = false,
@@ -95,6 +96,7 @@ const Pair = struct {
         std.debug.assert(p.stopped and p.record.waits > 0);
         Fake.objc.release(p.pick_tmp.id);
         Fake.objc.release(p.partial.id);
+        Fake.objc.release(p.branches.id);
         Fake.objc.release(p.handoff.ready.id);
         Fake.objc.release(p.one.id);
         Fake.objc.release(p.wbuf.id);
@@ -117,11 +119,11 @@ test "Flash Next cleanup: the pair owns borrowed aliases until all queue work is
         files: std.ArrayList(c_int) = .empty,
     };
     var record: Record = .{};
-    var tokens: [6]Token = @splat(.{ .record = &record });
-    var pair: Pair = .{ .wbuf = .{ .id = &tokens[0] }, .one = .{ .id = &tokens[1] }, .pick_tmp = .{ .id = &tokens[2] }, .partial = .{ .id = &tokens[4] }, .handoff = .{ .ready = .{ .id = &tokens[5] } }, .record = &record };
+    var tokens: [7]Token = @splat(.{ .record = &record });
+    var pair: Pair = .{ .wbuf = .{ .id = &tokens[0] }, .one = .{ .id = &tokens[1] }, .pick_tmp = .{ .id = &tokens[2] }, .partial = .{ .id = &tokens[4] }, .branches = .{ .id = &tokens[6] }, .handoff = .{ .ready = .{ .id = &tokens[5] } }, .record = &record };
     var run: Run = .{ .tp = &pair, .queue = .{ .record = &record } };
     defer run.held.deinit(testing.allocator);
-    try run.held.appendSlice(testing.allocator, &.{ pair.wbuf, pair.one, pair.pick_tmp, pair.partial, pair.handoff.ready, .{ .id = &tokens[3] } });
+    try run.held.appendSlice(testing.allocator, &.{ pair.wbuf, pair.one, pair.pick_tmp, pair.partial, pair.branches, pair.handoff.ready, .{ .id = &tokens[3] } });
     @import("run_cleanup.zig").drop(&run);
     for (tokens) |t| try testing.expectEqual(@as(u32, 1), t.released);
     try testing.expect(pair.stopped and pair.closed and !record.early_release);

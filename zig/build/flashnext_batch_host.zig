@@ -41,7 +41,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const standard = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{ "Flash Next standard frame:", "the standard frame:" } }));
     b.step("test-flashnext-standard-frame-host", "Standard image positions, decode windows and session growth without shaders").dependOn(&standard.step);
     all.dependOn(&standard.step);
-    const tests_ = b.addTest(.{ .root_module = root, .filters = &.{"batch widths:"} });
+    const tests_ = b.addTest(.{ .root_module = root, .filters = &.{ "batch widths:", "pair decode:" } });
     const run = b.addRunArtifact(tests_);
     run.has_side_effects = true;
     const step = b.step("test-flashnext-batch-host", "Actual shared lane verification at checkpoint widths, without Metal execution");

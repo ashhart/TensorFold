@@ -124,6 +124,7 @@ pub const Run = struct {
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
+    tp_decode: bool = false, // TP decode: each Mac runs every row's experts and merges its own branches (tp_local.zig)
     sel: ?Select = null, // long contexts: the indexer's pool, scores and selection
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
@@ -434,7 +435,7 @@ pub const Run = struct {
             if (!r.serial) r.enc.barrier();
             return;
         }
-        const rows_own = if (r.tp != null and r.tp_layer) r.tp.?.ownRows(r.rows) else [2]usize{ 0, r.rows };
+        const rows_own = if (r.tp != null and r.tp_layer and !r.tp_decode) r.tp.?.ownRows(r.rows) else [2]usize{ 0, r.rows };
         if (rows_own[1] == rows_own[0]) return; // TP: a one-row window's experts are rank 0's
         const own = [4]u32{ @intCast(rows_own[0]), @intCast(rows_own[1]), 0, 0 };
         const pairs = (rows_own[1] - rows_own[0]) * 11;

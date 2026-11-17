@@ -52,8 +52,8 @@ pub fn bytes(kind: Kind, rank: u32, rows: usize) usize {
 const D = 2560;
 const Ev = struct { op: enum { write, post, poll }, kind: Kind, msg: Msg };
 
-/// One Mac's GPU-side steps in a decode round, in replay.zig windowEncode's order under speed-up mode.
-fn round(evs: *std.ArrayList(Ev), a: std.mem.Allocator, s: *Seqs, rank: u32, rows: usize) !void {
+/// One Mac's GPU-side steps in a round, in windowEncode's order; `local` merges MoE without exchanges (decode).
+fn round(evs: *std.ArrayList(Ev), a: std.mem.Allocator, s: *Seqs, rank: u32, rows: usize, local: bool) !void {
     const own = ownRows(rank, rows);
     const peer_rows = rows - (own[1] - own[0]);
     for (1..rows) |_| { // the MTP head's drafts: one argmax swap each
@@ -70,12 +70,15 @@ fn round(evs: *std.ArrayList(Ev), a: std.mem.Allocator, s: *Seqs, rank: u32, row
             const m = s.reduce();
             try evs.appendSlice(a, &.{ .{ .op = .write, .kind = .reduce, .msg = m }, .{ .op = .post, .kind = .reduce, .msg = m }, .{ .op = .poll, .kind = .reduce, .msg = m } });
         }
+        if (local) continue;
         const e = s.exchange();
         if (own[1] > own[0]) try evs.append(a, .{ .op = .write, .kind = .exchange, .msg = e });
         pending = e;
     }
-    try evs.append(a, .{ .op = .post, .kind = .exchange, .msg = pending.? });
-    if (peer_rows > 0) try evs.append(a, .{ .op = .poll, .kind = .exchange, .msg = pending.? });
+    if (pending) |e| {
+        try evs.append(a, .{ .op = .post, .kind = .exchange, .msg = e });
+        if (peer_rows > 0) try evs.append(a, .{ .op = .poll, .kind = .exchange, .msg = e });
+    }
     const m = s.pick();
     try evs.appendSlice(a, &.{ .{ .op = .write, .kind = .pick, .msg = m }, .{ .op = .post, .kind = .pick, .msg = m }, .{ .op = .poll, .kind = .pick, .msg = m } });
 }
@@ -97,12 +100,12 @@ fn answered(macs: [2][]const Ev, p: usize, flag: u32, w: usize) bool {
 
 test "a decode slot is written again only after the peer answered its last message, at every window width" {
     const a = std.testing.allocator;
-    for ([_][]const usize{ &.{ 1, 1, 1 }, &.{ 4, 4, 4 }, &.{ 1, 3, 1, 8, 1 }, &.{ 2, 1, 16, 1, 5 } }) |widths| {
+    for ([_][]const usize{ &.{ 1, 1, 1 }, &.{ 4, 4, 4 }, &.{ 1, 3, 1, 8, 1 }, &.{ 2, 1, 16, 1, 5 } }) |widths| for (0..4) |mode| {
         var macs: [2]std.ArrayList(Ev) = .{ .empty, .empty };
         defer for (&macs) |*m| m.deinit(a);
-        for (0..2) |rank| {
+        for (0..2) |rank| { // exchanged, local, and both orders of alternating windows (prompt windows, then decode)
             var s: Seqs = .{};
-            for (widths) |rows| try round(&macs[rank], a, &s, @intCast(rank), rows);
+            for (widths, 0..) |rows, w| try round(&macs[rank], a, &s, @intCast(rank), rows, if (mode < 2) mode == 1 else (w + mode) % 2 == 0);
         }
         const both = [2][]const Ev{ macs[0].items, macs[1].items };
         for (0..2) |p| {
@@ -110,13 +113,32 @@ test "a decode slot is written again only after the peer answered its last messa
             for (both[p], 0..) |ev, w| if (ev.op == .write) {
                 const slot = &last[@backingInt(ev.kind)][ev.msg.slot];
                 if (slot.*) |before| if (!answered(both, p, before, w)) {
-                    std.debug.print("rank {d} rewrites {s} slot {d} (message {d}) before the peer answered message {d}; widths {any}\n", .{ p, @tagName(ev.kind), ev.msg.slot, ev.msg.flag, before, widths });
+                    std.debug.print("rank {d} rewrites {s} slot {d} (message {d}) before the peer answered message {d}; widths {any} mode {d}\n", .{ p, @tagName(ev.kind), ev.msg.slot, ev.msg.flag, before, widths, mode });
                     return error.SlotRewrittenUnanswered;
                 };
                 slot.* = ev.msg.flag;
             };
         }
-    }
+    };
+}
+
+test "a decode round with local MoE posts only reduces and picks, numbered alike on both Macs and rising by one" {
+    const a = std.testing.allocator;
+    var macs: [2]std.ArrayList(Ev) = .{ .empty, .empty };
+    defer for (&macs) |*m| m.deinit(a);
+    var s: [2]Seqs = .{ .{}, .{} };
+    for (0..2) |rank| for ([_]usize{ 1, 5, 16, 2 }) |rows| try round(&macs[rank], a, &s[rank], @intCast(rank), rows, true);
+    try std.testing.expectEqual(s[0], s[1]);
+    try std.testing.expectEqual(@as(u32, 4 * 37 + 0 + 4 + 15 + 1), s[0].x);
+    try std.testing.expectEqual(@as(u32, 4 * 36), s[0].r);
+    var posts: [2]std.ArrayList(Msg) = .{ .empty, .empty };
+    defer for (&posts) |*p| p.deinit(a);
+    for (0..2) |rank| for (macs[rank].items) |ev| if (ev.op == .post) {
+        try std.testing.expect(ev.kind != .exchange);
+        try posts[rank].append(a, ev.msg);
+    };
+    try std.testing.expectEqualSlices(Msg, posts[0].items, posts[1].items);
+    for (posts[0].items, 1..) |m, x| try std.testing.expectEqual(@as(u32, @intCast(x)), m.flag);
 }
 
 test "a message's bytes follow its own window: both ranks' branches cover it once, partials and picks every row" {

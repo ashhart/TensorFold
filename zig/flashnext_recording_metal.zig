@@ -18,6 +18,8 @@ pub var draws: usize = 0;
 pub var rotary_calls: usize = 0;
 pub var fsr_fence_updates: usize = 0;
 pub var fsr_fence_waits: usize = 0;
+/// A dispatch's bound buffer (id, offset) or its first bytes set by value, by argument index.
+pub const Arg = struct { id: usize = 0, off: usize = 0, bytes: [16]u8 = @splat(0) };
 pub const HandoffOp = struct {
     kind: enum { compute, end, signal, wait, dispatch },
     cb_id: usize = 0,
@@ -25,9 +27,11 @@ pub const HandoffOp = struct {
     seq: u64 = 0,
     mode: DispatchType = .serial,
     pipeline: []const u8 = "",
+    grid: Size = .{ .width = 0 },
+    args: [20]Arg = @splat(.{}),
 };
 pub var record_handoffs: bool = false;
-pub var handoff_ops: [1024]HandoffOp = undefined;
+pub var handoff_ops: [4096]HandoffOp = undefined;
 pub var handoff_op_count: usize = 0;
 const SharedState = struct {
     value: std.atomic.Value(u64) = .init(0),
@@ -125,6 +129,11 @@ pub const Pipeline = struct {
 pub const Bound = struct { b: Buffer, off: usize };
 var pipe: Pipeline = .{};
 var bound: [32]Bound = undefined;
+var args: [32]Arg = @splat(.{});
+fn argBytes(at: usize, bytes: []const u8) void {
+    args[at] = .{};
+    @memcpy(args[at].bytes[0..@min(bytes.len, 16)], bytes[0..@min(bytes.len, 16)]);
+}
 pub const ComputeEncoder = struct {
     id: usize = 0,
     cb_id: usize = 0,
@@ -140,9 +149,14 @@ pub const ComputeEncoder = struct {
     }
     pub fn setBuffer(_: ComputeEncoder, b: Buffer, off: usize, at: usize) void {
         bound[at] = .{ .b = b, .off = off };
+        args[at] = .{ .id = b.id, .off = off };
     }
-    pub fn setValue(_: ComputeEncoder, _: anytype, _: usize) void {}
-    pub fn setBytes(_: ComputeEncoder, _: []const u8, _: usize) void {}
+    pub fn setValue(_: ComputeEncoder, v: anytype, at: usize) void {
+        argBytes(at, std.mem.asBytes(&v));
+    }
+    pub fn setBytes(_: ComputeEncoder, bytes: []const u8, at: usize) void {
+        argBytes(at, bytes);
+    }
     fn value(text: []const u8, name: []const u8) usize {
         const at = (std.mem.indexOf(u8, text, name) orelse unreachable) + name.len;
         const stop = at + (std.mem.indexOfScalar(u8, text[at..], ';') orelse unreachable);
@@ -155,7 +169,7 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(e: ComputeEncoder, grid: Size, _: Size) void {
-        recordHandoff(.{ .kind = .dispatch, .cb_id = e.cb_id, .mode = e.mode, .pipeline = pipe.name });
+        recordHandoff(.{ .kind = .dispatch, .cb_id = e.cb_id, .mode = e.mode, .pipeline = pipe.name, .grid = grid, .args = args[0..20].* });
         if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
             rotary_calls += 1;
             return;
