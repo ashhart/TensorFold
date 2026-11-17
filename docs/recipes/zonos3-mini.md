@@ -5,8 +5,8 @@ publisher released, and serves it on `POST /v1/audio/speech`. This page records 
 came from, and how each part was checked, so the checks can be rerun.
 
 Status: a work in progress on one branch, proposed in #3615. Every kernel launch has its limits record, but only four
-of the 40 kernels have numeric contract tests and none has a planted control of its own; memory admission is not
-written, and the quality suite has not been run on this build.
+of the 40 kernels have numeric contract tests and none has a planted control of its own; the quality suite has not
+been run on this build.
 
 ## Sources
 
@@ -211,6 +211,27 @@ browser by an automated test.
 `zig build test-kernel-contract` passes with the family's records joined.
 
 Not run: `zig build test`, `test-golden`, and any quality suite.
+
+### Memory admission
+
+The host works out what a load takes before it allocates anything and asks the pool every CUDA family reads
+(`native/cuda_family_memory.zig`: the card's free memory less the reserve, and `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`).
+
+- **The load:** the pinned release's weights as the device holds them (2,531,483,136 bytes: the backbone's bf16 and
+  the `keep2_plain` decoder's fp32), plus the backbone's and the decoder's state and workspaces, which their own
+  allocation code counts without allocating (`Engine.stateBytes`, `Codec.stateBytes`). At the default
+  `--context 4096` and 2,000 frames that is 3,828,406,528 bytes (3.57 GiB), and the server's log shows the same
+  number admitted and held after the load. A load that holds more than it was admitted for is an error.
+- **The clip encoder** loads with the first request that brings a clip and takes 5,643,510,688 bytes (5.26 GiB) of
+  weights, state and workspaces, all of fixed size; the log again shows that number admitted and held.
+
+Checked on the served build with `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`: at 3 the server refuses to start ("ZONOS3 Mini
+needs 3.57 GiB of device memory at --context 4096; 3.00 GiB is free for it after the reserve"); at 5 it starts, a
+cloning request is refused (HTTP 500, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less
+than that is free"), and the same seeded request before and after that refusal returns the same bytes. The two
+weight sizes are constants for this release and are not derived from the files; another checkpoint would need its
+own. These counts are the engine's buffers: `nvidia-smi` showed the process at 4,264 MiB after the load, the CUDA
+context and kernel images included.
 
 ### Kernel contract
 
