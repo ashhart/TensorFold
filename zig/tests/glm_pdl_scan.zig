@@ -113,6 +113,17 @@ pub fn scan(a: std.mem.Allocator, src: []const u8, problems: *std.ArrayList(Prob
     }
 }
 
+/// A weight-first prologue between `from` and `to`: its weight loads before grid_wait(), its input loads only after.
+fn prologue(src: []const u8, from: []const u8, to: []const u8, weights: []const u8, inputs: []const u8) bool {
+    const a = std.mem.indexOf(u8, src, from) orelse return false;
+    const b = std.mem.indexOfPos(u8, src, a, to) orelse return false;
+    const seg = src[a..b];
+    const w = std.mem.indexOf(u8, seg, "grid_wait();") orelse return false;
+    const before = seg[0..w];
+    return std.mem.indexOf(u8, before, weights) != null and std.mem.indexOf(u8, before, inputs) == null and
+        std.mem.indexOf(u8, seg[w..], inputs) != null;
+}
+
 fn problemsIn(src: []const u8) !usize {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -134,6 +145,13 @@ test "GLM kernels: every body opens with the dependency wait" {
     }
     try std.testing.expect(kernels >= 100);
     try std.testing.expectEqual(@as(usize, 0), problems.items.len);
+}
+
+test "weight-first prologues: weights before the wait, the kernel before's outputs only after it" {
+    try std.testing.expect(prologue(@embedFile("glm_mm.cu"), "grid_launch();", "for (int it", "loadW(", "loadX("));
+    try std.testing.expect(prologue(@embedFile("qmmf_body.cuh"), "#ifdef TF_QMMF_WFIRST", "#else", "load(s, g0 + s, 2)", "load(s, g0 + s, 1)"));
+    try std.testing.expect(!prologue("grid_launch(); loadX(0); grid_wait(); loadW(0); for (int it", "grid_launch();", "for (int it", "loadW(", "loadX("));
+    try std.testing.expect(!prologue("grid_launch(); loadW(0); loadX(0); grid_wait(); loadX(1); for (int it", "grid_launch();", "for (int it", "loadW(", "loadX("));
 }
 
 test "GLM kernels: late, conditional and missing waits fail; a macro body and a writer pass" {

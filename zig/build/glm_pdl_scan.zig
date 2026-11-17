@@ -24,6 +24,7 @@ pub fn add(b: *std.Build) void {
         names.appendSlice(b.allocator, name) catch @panic("OOM");
         names.append(b.allocator, '\n') catch @panic("OOM");
     }
+    _ = files.addCopyFile(b.path("zig/kernels/cuda/qmmf_body.cuh"), "qmmf_body.cuh"); // qmmf's weight-first prologue
     _ = files.add("files.txt", names.items);
     const root = files.addCopyFile(b.path("zig/tests/glm_pdl_scan.zig"), "main.zig");
     const test_ = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = root, .target = b.graph.host, .optimize = .debug }) });
