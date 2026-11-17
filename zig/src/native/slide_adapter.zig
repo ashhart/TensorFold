@@ -67,7 +67,7 @@ pub fn Adapter(comptime slide: type) type {
                 if (r.completed) |done| done.* = false;
                 inline for (.{ "train", "think", "held", "near", "keep", "asked", "unasked", "kept", "retire", "forget" }) |f|
                     if (@field(request, f).len > 0) return error.BadAudit;
-                inline for (.{ "undo", "more", "reroute", "drop", "save", "unretire", "unforget" }) |f|
+                inline for (.{ "undo", "more", "refresh_wordings", "reroute", "drop", "save", "unretire", "unforget" }) |f|
                     if (@field(request, f)) return error.BadAudit;
                 if (!r.probe_only) a.audit = try Audit.init(&a.learner);
                 a.audit_request = r;

@@ -60,7 +60,7 @@ test "slide redraw: first and later draws inherit the request's rendered recall 
     retries[0].seen = &.{};
     var retry = plan;
     retry.wordings = retries;
-    const next = try draw.next(srv, &cx, retry, 1, 0, fixture.Stays{});
+    const next = try draw.next(srv, &cx, retry, 1, fixture.Stays{});
     try t.expect(!held.contaminated(next.full, reserved_ids));
     try t.expect(next.probes.ptr == plan.probes.ptr);
 }
