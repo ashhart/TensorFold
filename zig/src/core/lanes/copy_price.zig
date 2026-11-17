@@ -32,6 +32,7 @@ pub fn plain(r: *Rule, who: Who) !?f64 {
 pub fn observeCopy(r: *Rule, rows: i64, ms: f64, initializing: bool, who: Who) !void {
     if (rows <= 0 or initializing) return;
     try r.blend(try copies(r, who), rows, ms);
+    who.state.*.?.copy_rounds += 1;
 }
 
 /// A round the head's timing keeps out of the stream's own times (no plain_guard): plain's price reads it.
