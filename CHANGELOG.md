@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- On Macs, DeepSeek V4.1's vision tower (epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge) has its own Metal kernels under the kernel contract, each with a planted control; nothing serves through them until #1722 (#1721, part of #1676).
 - DeepSeek V4.1 on CUDA: a request whose prompt and reply don't fit the free KV pool now waits in the queue until a running request ends instead of running unreserved (one that can never fit fails at once with a reason), and at TP=2 the ranks agree on each new KV page and roll back together before any device table changes; replies are unchanged (#1682). Thanks to @jayleaton.
 
 - Metal on M1 to M4: the 4-bit prompt matrix multiply reads each input row's group sums and half-precision operands from a prepass, bit-equal to the existing tiles; Qwen3.8-27B prompts run 3% to 4% faster on an M3 Ultra from 2K to 64K tokens, with decode level (#3215, toward #2089). Thanks to @jschmied.
@@ -230,7 +231,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   same way; its departures are listed in the recipe beside float32's (#2074). Thanks to @BobClawblaw.
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 
-- On Macs, DeepSeek V4.1's vision tower (epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge) has its own Metal kernels under the kernel contract, each with a planted control; nothing serves through them until #1722 (#1721, part of #1676).
 
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
