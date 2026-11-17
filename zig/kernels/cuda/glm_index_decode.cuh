@@ -193,7 +193,7 @@ struct Merge {
 
 // tf_glm_dsel_scan, grid (cdiv(the last row's NP, SPAN), R): a span's pools above (gt) and at (eq) the row's floor.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
-    tf_glm_dsel_scan(const float* __restrict__ S, int64_t np, const int* __restrict__ pos, int K, int target,
+    tf_glm_dsel_scan(const float* S, int64_t np, const int* pos, int K, int target,
                      uint32_t* __restrict__ bits, int64_t words) {
   glm_pdl::enter();
   using namespace glm_dsel;
@@ -258,8 +258,8 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
 
 // tf_glm_dsel_merge, a CTA a row: scores [R][np] into out [R][K] int64 ascending; PATH null or [R] int32, each path.
 extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
-    tf_glm_dsel_merge(const float* __restrict__ S, int64_t* __restrict__ OUT, int64_t np, const int* __restrict__ pos,
-                      int K, const uint32_t* __restrict__ bits, int64_t words, int* __restrict__ PATH) {
+    tf_glm_dsel_merge(const float* S, int64_t* __restrict__ OUT, int64_t np, const int* pos,
+                      int K, const uint32_t* bits, int64_t words, int* __restrict__ PATH) {
   glm_pdl::enter();
   using namespace glm_dsel;
   __shared__ Merge sm;

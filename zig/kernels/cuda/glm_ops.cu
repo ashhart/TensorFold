@@ -7,9 +7,9 @@
 constexpr long long PAGE = 512;  // rows a KV page holds
 
 // sparse.select_tokens' assembly, a block a row: K pools' 4 tokens, then the tail; on pages each token's row in them.
-extern "C" __global__ void tf_glm_dsa_tokens(const long long* __restrict__ pools, const int* __restrict__ pos, int K,
+extern "C" __global__ void tf_glm_dsa_tokens(const long long* pools, const int* pos, int K,
                                              int* __restrict__ tokens, int* __restrict__ counts,
-                                             const int* __restrict__ pt, long long page_rows) {
+                                             const int* pt, long long page_rows) {
     glm_pdl::enter();
     const int r = blockIdx.x;
     const long long q = static_cast<long long>(*pos) + r;
@@ -80,8 +80,8 @@ extern "C" __global__ void tf_glm_kvh_mark(const int* __restrict__ tokens, const
 }
 
 // copy: slot s gets row list[s] (row_vec 16-byte words a row), one warp a row.
-extern "C" __global__ void tf_glm_kvh_copy(const uint4* __restrict__ lc, const int* __restrict__ list,
-                                           const int* __restrict__ n, uint4* __restrict__ slots, int row_vec, int cap) {
+extern "C" __global__ void tf_glm_kvh_copy(const uint4* lc, const int* list,
+                                           const int* n, uint4* __restrict__ slots, int row_vec, int cap) {
     glm_pdl::enter();
     const long long s = static_cast<long long>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
     if (s >= min(*n, cap)) return;
@@ -101,15 +101,15 @@ extern "C" __global__ void tf_glm_kvh_remap(int* tokens, const int* __restrict__
 }
 
 // reset: the rows this call marked are unseen again.
-extern "C" __global__ void tf_glm_kvh_reset(const int* __restrict__ list, const int* __restrict__ n, int* slot_of, int cap) {
+extern "C" __global__ void tf_glm_kvh_reset(const int* list, const int* n, int* slot_of, int cap) {
     glm_pdl::enter();
     const long long s = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (s < min(*n, cap)) slot_of[list[s]] = -1;
 }
 
 // rows: a sequence's rows 0 .. *pos + rows (at most max_rows) into slots in position order, through its page table.
-extern "C" __global__ void tf_glm_kvh_rows(const uint4* __restrict__ lc, const int* __restrict__ pt, long long page_rows,
-                                           const int* __restrict__ pos, int rows, uint4* __restrict__ slots, int row_vec,
+extern "C" __global__ void tf_glm_kvh_rows(const uint4* lc, const int* pt, long long page_rows,
+                                           const int* pos, int rows, uint4* __restrict__ slots, int row_vec,
                                            int max_rows) {
     glm_pdl::enter();
     const long long s = static_cast<long long>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
@@ -119,9 +119,9 @@ extern "C" __global__ void tf_glm_kvh_rows(const uint4* __restrict__ lc, const i
 }
 
 // prev_mark: prev_of[row] = its slot in the layer's row cache, except rows this call writes (rejected drafts' rows).
-extern "C" __global__ void tf_glm_kvh_prev_mark(const int* __restrict__ prev_rows, const int* __restrict__ prev_n,
-                                                int* prev_of, const int* __restrict__ pt, long long page_rows,
-                                                const int* __restrict__ pos, int rows) {
+extern "C" __global__ void tf_glm_kvh_prev_mark(const int* prev_rows, const int* prev_n,
+                                                int* prev_of, const int* pt, long long page_rows,
+                                                const int* pos, int rows) {
     glm_pdl::enter();
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= *prev_n) return;
@@ -134,10 +134,10 @@ extern "C" __global__ void tf_glm_kvh_prev_mark(const int* __restrict__ prev_row
 }
 
 // copy_cached: as copy, from the layer's cache where the row is there, else from host memory.
-extern "C" __global__ void tf_glm_kvh_copy_cached(const uint4* __restrict__ lc, const int* __restrict__ list,
-                                                  const int* __restrict__ n, uint4* __restrict__ slots, int row_vec,
-                                                  int cap, const int* __restrict__ prev_of,
-                                                  const uint4* __restrict__ cache) {
+extern "C" __global__ void tf_glm_kvh_copy_cached(const uint4* lc, const int* list,
+                                                  const int* n, uint4* __restrict__ slots, int row_vec,
+                                                  int cap, const int* prev_of,
+                                                  const uint4* cache) {
     glm_pdl::enter();
     const long long s = static_cast<long long>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
     if (s >= min(*n, cap)) return;
@@ -148,8 +148,8 @@ extern "C" __global__ void tf_glm_kvh_copy_cached(const uint4* __restrict__ lc, 
 }
 
 // keep: the call's gathered rows become the layer's cache (the first cache_rows of them), one warp a row.
-extern "C" __global__ void tf_glm_kvh_keep(const uint4* __restrict__ slots, const int* __restrict__ list,
-                                           const int* __restrict__ n, uint4* __restrict__ cache, int* prev_rows,
+extern "C" __global__ void tf_glm_kvh_keep(const uint4* slots, const int* list,
+                                           const int* n, uint4* __restrict__ cache, int* prev_rows,
                                            int* prev_n, int row_vec, int cache_rows) {
     glm_pdl::enter();
     const long long s = static_cast<long long>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
@@ -161,8 +161,8 @@ extern "C" __global__ void tf_glm_kvh_keep(const uint4* __restrict__ slots, cons
 }
 
 // unmark: the previous call's rows (old_rows, old_n) and this call's (list, n) are unseen again.
-extern "C" __global__ void tf_glm_kvh_unmark(const int* __restrict__ old_rows, const int* __restrict__ old_n,
-                                             int* prev_of, const int* __restrict__ list, const int* __restrict__ n,
+extern "C" __global__ void tf_glm_kvh_unmark(const int* old_rows, const int* old_n,
+                                             int* prev_of, const int* list, const int* n,
                                              int* slot_of, int cap) {
     glm_pdl::enter();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
