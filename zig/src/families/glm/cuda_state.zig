@@ -71,9 +71,10 @@ pub const Shape = struct {
     row: usize, // kv_lora + qk_rope: 512 on GLM-5.3-Flash
     i_dim: usize,
     pool: usize, // rows a pooled key sums: 4 on GLM-5.3-Flash
+    keys: usize, // index key and gate rows a cache holds: a ring of index_ring, or maxInt for a whole sequence's
 
     pub fn of(c: anytype, caches: usize) Shape {
-        return .{ .caches = caches, .row = c.latentRow(), .i_dim = c.i_dim, .pool = c.kpool };
+        return .{ .caches = caches, .row = c.latentRow(), .i_dim = c.i_dim, .pool = c.kpool, .keys = index_ring };
     }
 
     /// One cache's latent rows on a page, and their pooled keys.
@@ -132,7 +133,7 @@ fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize
     const n = s.kda.len() * c.kda_dim;
     const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
     const pk_rows = capacity / c.kpool + 2;
-    const ring_rows = @min(capacity, index_ring);
+    const ring_rows = @min(capacity, shapeOf(w).keys);
     const rows: usize = @intFromBool(table == null); // on pages a cache's rows are the pool's
     var sizes: std.ArrayList(usize) = .empty;
     errdefer sizes.deinit(gpa);
@@ -272,7 +273,7 @@ pub const Buffers = struct {
         const part_rows = if (prefill) @min(rows, dsa_block.prompt_att_rows) else seg;
         const nch = latent.chunksFor(@min(capacity, dense_reach) + seg);
         const partial_rows = @max(nch * part_rows, latent.chunksFor(sparse.width) * seg); // dense calls, or one sparse
-        const np_max = capacity / sparse.pool;
+        const np_max = capacity / c.kpool;
         const sel = selectLs(rows, prefill, seg, np_max);
         var mm: usize = 4;
         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
@@ -300,7 +301,7 @@ pub const Buffers = struct {
             @min(seg, sparse.select_rows) * np_max * 4,
             sel.bytes, // ls: the list rows, and on a decode's buffers its select's bit words
             rows * sparse.select_list * 4,
-            (if (prefill) rows + s.world else rows) * sparse.topk_pools * 8, // pools; a split's equal blocks end at most world - 1 rows past them
+            (if (prefill) rows + s.world else rows) * (c.i_topk / c.kpool) * 8, // pools; a split's equal blocks end at most world - 1 rows past them
             4,
             rows * sparse.width * 4,
             rows * 4,
@@ -423,7 +424,8 @@ pub const State = struct {
     rec_layer: usize,
     proj_layer: usize,
     proj_row: usize,
-    ring_rows: usize, // index rows each ring holds: min(capacity, index_ring)
+    ring_rows: usize, // index rows each ring holds: min(capacity, Shape.keys)
+    pool: usize, // rows a pooled key sums: a rebase keeps whole pools
     ring_row: usize, // bytes of one index row
     rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
     base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
@@ -476,8 +478,8 @@ pub const State = struct {
         for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ls = if (kv8) p[8 + 4 * j] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
         const rings = try gpa.alloc(u64, 2 * (nd + 1));
         for (0..nd + 1) |j| rings[2 * j ..][0..2].* = .{ p[9 + 4 * j], p[10 + 4 * j] };
-        const ring_rows = @min(capacity, index_ring);
-        var st: State = .{ .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ls = if (kv8) p[8 + 4 * nd] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .prompt_hidden = p[13 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
+        const ring_rows = @min(capacity, shapeOf(w).keys);
+        var st: State = .{ .pool = c.kpool, .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ls = if (kv8) p[8 + 4 * nd] + capacity * c.latentRow() else 0, .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .prompt_hidden = p[13 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
         if (paged) |q| {
             st.table = p[14 + 4 * nd];
             st.capacity = 0; // no rows until a stream's pages are mapped
@@ -553,7 +555,7 @@ pub const State = struct {
         const at = if (mtp) st.mtp_len else st.pos;
         const old = if (mtp) st.mtp_base else st.base;
         const floor = if (mtp) at -| window_rows else at;
-        const nb = floor / sparse.pool * sparse.pool;
+        const nb = floor / st.pool * st.pool;
         const keep = (at - nb) * st.ring_row;
         const d = st.arena.buf.d;
         const first: usize = if (mtp) st.caches.len else 0;

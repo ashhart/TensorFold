@@ -278,7 +278,7 @@ const Loader = struct {
             .wk = wk,
             .wv = wv,
             .o = o,
-            .index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim },
+            .index = .{ .kw = kw, .gate = gate, .ln_w = ln_w, .ln_b = ln_b, .ape = ape, .qb = qb, .heads = c.i_heads, .d = c.i_dim, .geom = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool } },
             .heads = h.len(),
             .qk = qk,
             .dv = c.v_dim,

@@ -72,7 +72,7 @@ static int fails = 0;
 static uint32_t bits(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 static float bf(__nv_bfloat16 v) { return __bfloat162float(v); }
 
-struct Case { int64_t pos, rows, np; int loop, heads; bool paged; };
+struct Case { int64_t pos, rows, np; int loop, heads; bool paged; int pool = 4, rope = 0; };
 
 // tf_glm_scores' result for one (row, pool), the model of the mma: a chain of double sums per k16 step, then its rules
 static float model_score(const std::vector<__nv_bfloat16>& q, const std::vector<__nv_bfloat16>& w, int64_t w_stride,
@@ -103,34 +103,48 @@ static float model_score(const std::vector<__nv_bfloat16>& q, const std::vector<
 
 static void scores_case(std::mt19937_64& g, const Case& c) {
   const int D = 128, W = 40;  // head weights in a row of W columns
-  const int64_t visible = (c.pos + c.rows) / 4;
+  const int64_t visible = (c.pos + c.rows) / c.pool, pp = 512 / c.pool;  // pp: a page's pools
   const int64_t nb = (std::min(c.np, std::max<int64_t>(512, visible)) + 63) / 64;
   std::normal_distribution<float> nd(0.0f, 1.0f);
   std::vector<__nv_bfloat16> q(c.rows * c.heads * D), w(c.rows * W);
   for (auto& x : q) x = __float2bfloat16_rn(nd(g));
   for (auto& x : w) x = __float2bfloat16_rn(nd(g));
-  const int64_t pool_rows = (c.pos + c.rows) / 4 + 1;
+  const int64_t pool_rows = (c.pos + c.rows) / c.pool + 1;
   std::vector<__nv_bfloat16> keys(std::max<int64_t>(c.np, pool_rows + 200) * D);
   for (auto& x : keys) x = __float2bfloat16_rn(nd(g) * 2);
-  // pages of 128 pools, shuffled, when paged: the table maps a logical page to its place
-  const int64_t npages = (keys.size() / D + 127) / 128, page_elems = 128 * D;
+  // pages of pp pools, shuffled, when paged: the table maps a logical page to its place
+  const int64_t npages = (keys.size() / D + pp - 1) / pp, page_elems = pp * D;
   std::vector<int> pt(npages), order(npages);
   for (int i = 0; i < npages; i++) order[i] = i;
   std::shuffle(order.begin(), order.end(), g);
   std::vector<__nv_bfloat16> store(npages * page_elems);
   for (int64_t p = 0; p < (int64_t)(keys.size() / D); p++) {
-    pt[p / 128] = order[p / 128];
-    std::memcpy(&store[(int64_t)order[p / 128] * page_elems + (p % 128) * D], &keys[p * D], D * 2);
+    pt[p / pp] = order[p / pp];
+    std::memcpy(&store[(int64_t)order[p / pp] * page_elems + (p % pp) * D], &keys[p * D], D * 2);
   }
   const __nv_bfloat16* pk = c.paged ? store.data() : keys.data();
   const float scale = 0.0883883461f, wscale = 0.176776692f;
   const int pos = (int)c.pos;
+  // rope: the model turns q's pairs below c.rope itself (row r at pos + r), the kernel its fragments
+  std::vector<float> inv(64);
+  for (int i = 0; i < 64; i++) inv[i] = (float)std::pow(8.0e6, -2.0 * i / 64);
+  std::vector<__nv_bfloat16> qm = q;
+  for (int64_t r = 0; r < c.rows; r++)
+    for (int h = 0; h < c.heads; h++)
+      for (int i = 0; i < c.rope / 2; i++) {
+        __nv_bfloat16* x = &qm[(r * c.heads + h) * D + 2 * i];
+        const float x0 = bf(x[0]), x1 = bf(x[1]);
+        float sn, cs;
+        sincosf((float)(c.pos + r) * inv[i], &sn, &cs);
+        x[0] = __float2bfloat16_rn(std::fma(x0, cs, -(x1 * sn)));
+        x[1] = __float2bfloat16_rn(std::fma(x1, cs, x0 * sn));
+      }
   std::vector<float> out(c.rows * c.np);
   std::vector<uint32_t> raw(out.size(), 0x7FC0DEAD);
   std::memcpy(out.data(), raw.data(), out.size() * 4);
   run_grid((c.rows + 7) / 8, (nb + c.loop - 1) / c.loop, 256, [&] {
     tf_glm_index_scores(q.data(), w.data(), W, pk, out.data(), &pos, c.rows, c.np, nb, scale, wscale, c.heads, c.loop,
-                        c.paged ? pt.data() : nullptr, c.paged ? page_elems * 2 : 0);
+                        c.paged ? pt.data() : nullptr, c.paged ? page_elems * 2 : 0, c.pool, c.rope, inv.data());
   });
   int64_t bad = 0, unread = 0;
   for (int64_t r = 0; r < c.rows; r++)
@@ -140,12 +154,12 @@ static void scores_case(std::mt19937_64& g, const Case& c) {
         unread += have != 0x7FC0DEAD;  // never written
         continue;
       }
-      const int64_t npool = (c.pos + r + 1) / 4;
-      const float want = p < npool ? model_score(q, w, W, &keys[p * D], r, c.heads, scale, wscale) : -INFINITY;
+      const int64_t npool = (c.pos + r + 1) / c.pool;
+      const float want = p < npool ? model_score(qm, w, W, &keys[p * D], r, c.heads, scale, wscale) : -INFINITY;
       bad += have != bits(want);
     }
-  printf("scores pos %lld rows %lld np %lld loop %d heads %d %s: %lld differ, %lld untouched columns written\n",
-         (long long)c.pos, (long long)c.rows, (long long)c.np, c.loop, c.heads, c.paged ? "paged" : "plain",
+  printf("scores pos %lld rows %lld np %lld loop %d heads %d pool %d rope %d %s: %lld differ, %lld untouched columns written\n",
+         (long long)c.pos, (long long)c.rows, (long long)c.np, c.loop, c.heads, c.pool, c.rope, c.paged ? "paged" : "plain",
          (long long)bad, (long long)unread);
   fails += bad != 0 || unread != 0;
 }
@@ -188,34 +202,43 @@ int main() {
   std::mt19937_64 g(0x101);
   for (const Case& c : {Case{0, 1, 1024, 2, 32, false}, Case{1000, 19, 1024, 4, 32, false}, Case{3000, 24, 1024, 16, 32, true},
                         Case{3900, 17, 1000, 3, 32, false}, Case{5000, 9, 2048, 5, 20, true},
-                        Case{6000, 24, 2048, 8, 32, false}, Case{12000, 8, 4096, 3, 32, true}})
+                        Case{6000, 24, 2048, 8, 32, false}, Case{12000, 8, 4096, 3, 32, true},
+                        // full GLM-5.3's: every key scored (pools of 1, 512 a page), queries roped on 64 dims
+                        Case{3000, 9, 4096, 4, 32, true, 1, 64}, Case{2100, 17, 2560, 3, 32, false, 1, 64},
+                        Case{5000, 8, 8192, 16, 32, true, 1, 0}})
     scores_case(g, c);
 
-  const int K = 512, rows = 2;
+  const int rows = 2;
   int paths[3] = {0, 0, 0};
-  for (int np : {1024, 4097, 12289, 32769, 70001})
+  // GLM-5.3-Flash's 512 of pools of 4 at every bucket, then full GLM-5.3's 2,048 of single keys
+  struct Pick { int np, pool, K; };
+  std::vector<Pick> picks;
+  for (int np : {1024, 4097, 12289, 32769, 70001}) picks.push_back({np, 4, 512});
+  for (int np : {4097, 12289}) picks.push_back({np, 1, 2048});
+  for (const Pick& pk : picks)
     for (int mode = 0; mode < 3; mode++)
       for (Kind kind : {normal, ties, equal, zeros, skewed, decoy}) {
+        const int np = pk.np, pool = pk.pool, K = pk.K;
         // the first row's position: few visible pools (limit K), about half, or nearly all
-        const int pos = mode == 0 ? 300 : mode == 1 ? 2 * np : 4 * np - rows - 5;
+        const int pos = mode == 0 ? 300 : mode == 1 ? pool * np / 2 : pool * np - rows - 5;
         std::vector<float> s((size_t)rows * np + 4);
         float* base = s.data() + (np % 4 ? 1 : 0);  // an unaligned row now and then: the scalar loads
         std::vector<int> limit(rows);
         for (int r = 0; r < rows; r++) {
-          limit[r] = (int)std::min<int64_t>(np, std::max<int64_t>((pos + r + 1) / 4, K));
+          limit[r] = (int)std::min<int64_t>(np, std::max<int64_t>((pos + r + 1) / pool, K));
           fill(g, base + (size_t)r * np, np, limit[r], kind);
         }
         std::vector<int64_t> out((size_t)rows * K, -7);
         std::vector<int> path(rows, -1);
         run_grid(rows, 1, glm_index::T, [&] {
-          tf_glm_index_pools(base, out.data(), np, &pos, K, tile_cap(np), tile_target(np), path.data());
+          tf_glm_index_pools(base, out.data(), np, &pos, K, tile_cap(np), tile_target(np), path.data(), pool);
         });
         for (int r = 0; r < rows; r++) {
           paths[path[r]]++;
           const auto want = reference(base + (size_t)r * np, limit[r], K);
           if (!std::equal(want.begin(), want.end(), out.begin() + (size_t)r * K)) {
             fails++;
-            printf("pools np %d mode %d kind %d row %d (path %d) differs\n", np, mode, (int)kind, r, path[r]);
+            printf("pools np %d pool %d mode %d kind %d row %d (path %d) differs\n", np, pool, mode, (int)kind, r, path[r]);
           }
         }
       }
@@ -225,26 +248,30 @@ int main() {
   // glm_index_decode.cuh: a decode window's rows marked on many CTAs, then merged, against the same plain top-K
   int dpaths[4] = {0, 0, 0, 0};
   const int drows = 3;
-  for (int np : {4097, 12289, 70001})
+  std::vector<Pick> dpicks;
+  for (int np : {4097, 12289, 70001}) dpicks.push_back({np, 4, 512});
+  dpicks.push_back({12289, 1, 2048});
+  for (const Pick& pk : dpicks)
     for (int mode = 0; mode < 3; mode++)
       for (Kind kind : {normal, ties, equal, zeros, skewed, decoy}) {
-        const int pos = mode == 0 ? 300 : mode == 1 ? 2 * np : 4 * np - drows - 5;
+        const int np = pk.np, pool = pk.pool, K = pk.K;
+        const int pos = mode == 0 ? 300 : mode == 1 ? pool * np / 2 : pool * np - drows - 5;
         std::vector<float> s((size_t)drows * np + 4);
         float* base = s.data() + (np % 4 ? 1 : 0);
         std::vector<int> limit(drows);
         for (int r = 0; r < drows; r++) {
-          limit[r] = (int)std::min<int64_t>(np, std::max<int64_t>((pos + r + 1) / 4, K));
+          limit[r] = (int)std::min<int64_t>(np, std::max<int64_t>((pos + r + 1) / pool, K));
           fill(g, base + (size_t)r * np, np, limit[r], kind);
         }
         const int64_t words = (np + 31) / 32;
         std::vector<uint32_t> bitw((size_t)drows * 2 * words, 0xA5A5A5A5u);  // words a scan does not write stay unread
-        const int last = (int)std::min<int64_t>(np, std::max<int64_t>((pos + drows) / 4, K));
+        const int last = (int)std::min<int64_t>(np, std::max<int64_t>((pos + drows) / pool, K));
         const unsigned ctas = last <= glm_dsel::CAP ? 0 : (unsigned)((last + glm_dsel::SPAN - 1) / glm_dsel::SPAN);
         if (ctas > 0)
-          run_grid(ctas, drows, glm_dsel::T1, [&] { tf_glm_dsel_scan(base, np, &pos, K, 2048, bitw.data(), words); });
+          run_grid(ctas, drows, glm_dsel::T1, [&] { tf_glm_dsel_scan(base, np, &pos, K, 2048, bitw.data(), words, pool); });
         std::vector<int64_t> out((size_t)drows * K, -7);
         std::vector<int> path(drows, -1);
-        run_grid(drows, 1, glm_dsel::T2, [&] { tf_glm_dsel_merge(base, out.data(), np, &pos, K, bitw.data(), words, path.data()); });
+        run_grid(drows, 1, glm_dsel::T2, [&] { tf_glm_dsel_merge(base, out.data(), np, &pos, K, bitw.data(), words, path.data(), pool); });
         for (int r = 0; r < drows; r++) {
           if (path[r] < 0 || path[r] > 3) {
             fails++;
@@ -255,7 +282,7 @@ int main() {
           const auto want = reference(base + (size_t)r * np, limit[r], K);
           if (!std::equal(want.begin(), want.end(), out.begin() + (size_t)r * K)) {
             fails++;
-            printf("dsel np %d mode %d kind %d row %d (path %d) differs\n", np, mode, (int)kind, r, path[r]);
+            printf("dsel np %d pool %d mode %d kind %d row %d (path %d) differs\n", np, pool, mode, (int)kind, r, path[r]);
           }
         }
       }
