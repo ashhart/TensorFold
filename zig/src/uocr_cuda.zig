@@ -9,6 +9,8 @@ pub const vision = @import("families/uocr/cuda_vision.zig");
 pub const decoder = @import("families/uocr/cuda_decoder.zig");
 pub const gemm = @import("families/uocr/cuda_gemm.zig");
 pub const serve = @import("families/uocr/cuda_serve.zig");
+pub const guard = @import("families/uocr/guard.zig");
+pub const gate = @import("families/uocr/gate.zig");
 
 test {
     _ = config;
@@ -17,5 +19,6 @@ test {
     _ = kernels;
     _ = decoder;
     _ = gemm;
-    _ = @import("families/uocr/guard.zig");
+    _ = guard;
+    _ = gate;
 }
