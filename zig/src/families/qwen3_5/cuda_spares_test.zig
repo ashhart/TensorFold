@@ -90,6 +90,7 @@ const Mock = struct {
 /// Three linear layers then attention, twice: the 27B's pattern at a test's size.
 fn testGeometry() geometry.Geometry {
     var g: geometry.Geometry = undefined;
+    g.loop = null;
     g.hidden = 256;
     g.k_heads = 2;
     g.v_heads = 4;
