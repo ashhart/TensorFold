@@ -216,6 +216,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
     // scores: this simdgroup's 128 dims of the block's 32 keys
     frag<float> lo_s = frag<float>(0), hi_s = frag<float>(0);
 #ifndef TF_SIMD_FRAGS
+    frag<bfloat> kf0[8], kf1[8];
     TF_UNROLL
     for (short t = 0; t < 8; t++) {
       const uint d = uint(d0) + 16u * uint(t) + uint(home.x);
@@ -223,7 +224,9 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
       const bfloat4 b = dsv41_dense4_off(keyrow[short(home.y + 8)], keyoff[short(home.y + 8)], dense, d);
       const bfloat4 c = dsv41_dense4_off(keyrow[short(16 + home.y)], keyoff[short(16 + home.y)], dense, d);
       const bfloat4 e = dsv41_dense4_off(keyrow[short(24 + home.y)], keyoff[short(24 + home.y)], dense, d);
-      mma_16x32<false, true>(lo_s, hi_s, qf[t], frag<bfloat>(a, b), frag<bfloat>(c, e));
+      kf0[t] = frag<bfloat>(a, b);
+      kf1[t] = frag<bfloat>(c, e);
+      mma_16x32<false, true>(lo_s, hi_s, qf[t], kf0[t], kf1[t]);
     }
 #else
     TF_UNROLL
@@ -291,13 +294,9 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
       for (short c = 0; c < 4; c++) {
         const uint d = uint(d0) + 32u * uint(c) + uint(home.x);
 #ifndef TF_SIMD_FRAGS
-        // The dense pass already rounded every key this window reads.
-        const bfloat4 a = dsv41_dense4_off(keyrow[16 * kb + home.y], keyoff[16 * kb + home.y], dense, d);
-        const bfloat4 b = dsv41_dense4_off(keyrow[16 * kb + short(home.y + 8)], keyoff[16 * kb + short(home.y + 8)], dense, d);
-        frag<bfloat> v0(a, b);
-        const bfloat4 a2 = dsv41_dense4_off(keyrow[16 * kb + home.y], keyoff[16 * kb + home.y], dense, d + 16);
-        const bfloat4 b2 = dsv41_dense4_off(keyrow[16 * kb + short(home.y + 8)], keyoff[16 * kb + short(home.y + 8)], dense, d + 16);
-        frag<bfloat> v1(a2, b2);
+        // A value fragment is a key fragment already in registers: the same dense rows and dims.
+        const frag<bfloat> v0 = kb == 0 ? kf0[2 * c] : kf1[2 * c];
+        const frag<bfloat> v1 = kb == 0 ? kf0[2 * c + 1] : kf1[2 * c + 1];
 #else
         frag<bfloat> v0, v1;
         TF_UNROLL
