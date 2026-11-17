@@ -544,7 +544,6 @@ pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
 }
-
 /// The HIP compiler as the build found it, the device bitcode it links, and whether gfx1100 relaxes branches earlier.
 pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool = false };
 
