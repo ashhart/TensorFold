@@ -170,11 +170,7 @@ template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0> // RPS columns
   }
 }
 
-// glm_moe_rows by unique expert, for windows of 2+ rows: z below ucount[0] is the route's z-th picked expert (uids), and
-// simdgroup m its m-th pick (umem, GLM_MAXR a list; -1 past them); z = slots is the shared expert, simdgroup m row m.
-// One threadgroup's simdgroups read the same expert's RPS columns together, so an expert's weights come from memory
-// once for every row that picked it instead of once a pick. Each pick's sums are glm_moe_rows's (the same call), so
-// its bits are too. Grid ((n + RPS - 1) / RPS, slots + 1), threadgroup 32 x rows.
+// glm_moe_rows by unique expert (uids, umem, ucount): a simdgroup a pick, z = slots the shared; glm_moe_rows's sums.
 #define GLM_MAXR 16
 template <int BITS, int SBITS, bool GLU, int RPS = 4>
 [[max_total_threads_per_threadgroup(32 * GLM_MAXR)]]

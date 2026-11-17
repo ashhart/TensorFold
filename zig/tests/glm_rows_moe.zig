@@ -102,8 +102,7 @@ pub fn check(g: *const rc.Gpu) !usize {
     return pairs;
 }
 
-/// wide.moe by unique expert (the route's ids, members and count, as moe_route writes them) == wide.moe by pick, bit for
-/// bit: every act, acts, ye and ys value, at 2, 4 and 16 rows of 8 distinct picks from 16 experts, routed at 8, 4 and 2 bits.
+/// wide.moe by unique expert == by pick, bit for bit: 2, 4 and 16 rows of 8 distinct picks of 16 experts, q8, q4, q2.
 pub fn checkUnique(g: *const rc.Gpu) !usize {
     const n = 256;
     const k = 512;
