@@ -1,10 +1,36 @@
 //! zonos3-generate: ZONOS3 Mini's backbone on one CUDA GPU against the PyTorch reference's dumps.
 const std = @import("std");
 const z3 = @import("zonos3");
-const cuda = @import("cuda");
 const core = @import("core");
 const encoder_checks = @import("check_encoder.zig");
 const laci_checks = @import("check_laci.zig");
+
+// The parts this build's family has (the Metal family is the backbone and the decoder so far).
+const has_codec = @hasDecl(z3, "Codec");
+const has_encoder = @hasDecl(z3, "clip");
+const on_metal = @hasDecl(z3, "gpu");
+const cuda = if (on_metal) void else @import("cuda");
+
+/// A CUDA device of its own, for a part checked alone.
+const CudaDevice = struct {
+    driver: cuda.Driver,
+    ctx: cuda.Context,
+    stream: cuda.Stream,
+
+    fn open(d: *CudaDevice) !void {
+        d.driver = try cuda.Driver.open();
+        errdefer d.driver.close();
+        d.ctx = try cuda.Context.init(&d.driver, 0);
+        errdefer d.ctx.deinit();
+        d.stream = try cuda.Stream.init(&d.driver, true);
+    }
+
+    fn close(d: *CudaDevice) void {
+        d.stream.deinit();
+        d.ctx.deinit();
+        d.driver.close();
+    }
+};
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -237,15 +263,13 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
     defer gpa.free(codes);
     for (codes, 0..) |*r, j| r.* = flat[j * 10 ..][0..10].*;
 
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
+    var dev: if (on_metal) void else CudaDevice = undefined;
+    if (comptime !on_metal) try dev.open();
+    defer if (comptime !on_metal) dev.close();
     const t_load = nowNs(io);
     const decoder = z3.codec.Decoder.of(decoder_id) orelse return error.NoSuchDecoder;
-    const codec = try z3.Codec.create(gpa, io, &driver, stream, generator, head, .{ .max_frames = codes.len, .pass_frames = codes.len, .decoder = decoder });
+    const o: z3.codec.Options = .{ .max_frames = codes.len, .pass_frames = codes.len, .decoder = decoder };
+    const codec = if (comptime on_metal) try z3.Codec.open(gpa, io, generator, head, o) else try z3.Codec.create(gpa, io, &dev.driver, dev.stream, generator, head, o);
     defer codec.destroy();
     const Dec = struct {
         fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
@@ -331,7 +355,8 @@ fn speak(gpa: std.mem.Allocator, io: std.Io, a: Speak) !u8 {
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .max_ctx = @min(z3.config.max_seqlen, a.max_frames + 2048) });
     defer e.destroy();
     const decoder = z3.codec.Decoder.of(rel.decoder) orelse return error.NoSuchDecoder;
-    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = a.max_frames + 64, .decoder = decoder });
+    const co: z3.codec.Options = .{ .max_frames = a.max_frames + 64, .decoder = decoder };
+    const codec = if (comptime on_metal) try z3.Codec.create(gpa, io, e.g, rel.generator, rel.head, co) else try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, co);
     defer codec.destroy();
     const load_s = @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9;
 
@@ -429,6 +454,11 @@ fn speak(gpa: std.mem.Allocator, io: std.Io, a: Speak) !u8 {
     return if (std.mem.eql(u8, verdict, "FAIL")) 1 else 0;
 }
 
+fn unsupported(part: []const u8) u8 {
+    std.debug.print("zonos3-generate: this build has no {s}\n", .{part});
+    return 2;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = std.heap.c_allocator;
@@ -472,31 +502,35 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (laci_replay) |trace| return if (i == argv.len and expected.len > 0) laci_checks.replay(gpa, io, trace, expected, registry) else 2;
     if (steer_check) |dir| return if (i == argv.len and steer_bundle.len > 0) @import("check_steering.zig").run(gpa, io, dir, steer_bundle) else 2;
-    if (encode_check) |dir| return if (i == argv.len and sp.checkpoint.len > 0) encoder_checks.encode(gpa, io, dir, sp.checkpoint) else 2;
-    if (teacher_check) |dir| return if (i == argv.len and teacher_dir.len > 0) encoder_checks.teacher(gpa, io, dir, teacher_dir) else 2;
-    if (features_check) |dir| return if (i == argv.len) encoder_checks.features(gpa, io, dir) else 2;
-    if (encoder_check) |dir| {
+    if (!has_encoder and (encode_check != null or teacher_check != null or features_check != null or encoder_check != null)) return unsupported("the clip encoder");
+    if (!has_codec and (codec_check != null or sp.checkpoint.len > 0)) return unsupported("the codec decoder");
+    if (comptime has_encoder) {
+        if (encode_check) |dir| return if (i == argv.len and sp.checkpoint.len > 0) encoder_checks.encode(gpa, io, dir, sp.checkpoint) else 2;
+        if (teacher_check) |dir| return if (i == argv.len and teacher_dir.len > 0) encoder_checks.teacher(gpa, io, dir, teacher_dir) else 2;
+        if (features_check) |dir| return if (i == argv.len) encoder_checks.features(gpa, io, dir) else 2;
+    }
+    if (comptime has_encoder) if (encoder_check) |dir| {
         if (i != argv.len or generator.len == 0) {
             std.debug.print("{s}", .{usage});
             return 2;
         }
         return encoder_checks.acoustic(gpa, io, dir, generator);
-    }
-    if (codec_check) |dir| {
+    };
+    if (comptime has_codec) if (codec_check) |dir| {
         if (i != argv.len or generator.len == 0 or head.len == 0) {
             std.debug.print("{s}", .{usage});
             return 2;
         }
         return codecCheck(gpa, io, dir, generator, head, sp.decoder orelse z3.release.default_decoder);
-    }
-    if (sp.checkpoint.len > 0) {
+    };
+    if (comptime has_codec) if (sp.checkpoint.len > 0) {
         if (i != argv.len or sp.text.len == 0 or (sp.embedding != null and sp.codes != null)) {
             std.debug.print("{s}", .{usage});
             return 2;
         }
         sp.max_frames = max_frames;
         return speak(gpa, io, sp);
-    }
+    };
     if (aligner_check) |clip| return if (i == argv.len and aligner_dir.len > 0) @import("check_aligner.zig").run(gpa, io, clip, aligner_dir) else 2;
     if (speaker_check) |clip| return if (i == argv.len and speaker_encoder.len > 0) @import("check_speaker.zig").run(gpa, io, clip, speaker_encoder) else 2;
     if (edit_check) |edits| {
