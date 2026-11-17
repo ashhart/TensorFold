@@ -7,6 +7,7 @@ pub fn shed(s: *pc.Store, mark: u64) bool {
     var went = false;
     if (s.held > mark) if (s.victimBut(null, &.{}, 0)) |i| {
         s.entries.items[i].removed_as = .shed;
+        s.entries.items[i].gone = .shed;
         s.remove(i);
         s.counts.evicted += 1;
         went = true;

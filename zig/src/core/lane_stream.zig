@@ -136,6 +136,7 @@ fn kept(h: *LaneHost, job: *Job) lanes.stream.Reuse {
     const store = h.cache.?;
     const l = @import("lane_cache_queue.zig").lookup(h, job) catch return .{};
     job.entry = l.entry;
+    job.why = l.why;
     job.kept0 = store.counts.kept;
     job.marks = l.marks;
     return .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
