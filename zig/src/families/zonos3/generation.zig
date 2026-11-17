@@ -41,7 +41,7 @@ pub fn generateWatched(gpa: std.mem.Allocator, engine: anytype, prompt: []const 
     while (true) {
         try engine.lastLogits(@ptrCast(logits));
         const generated = rows.items.len;
-        var row = sampler.sample(logits, codes.items, generated, cfg.eoa_id, sampling);
+        var row = try sampler.sample(gpa, logits, codes.items, generated, cfg.eoa_id, sampling);
         coldStart(&row, generated, has_audio_prefix);
         try codes.append(gpa, row);
         var full: [W]i32 = undefined;
