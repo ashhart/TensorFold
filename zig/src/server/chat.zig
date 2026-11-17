@@ -198,6 +198,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .rewind_len = @intCast(rendered.rewind_len),
         .user_end = @intCast(rendered.user_end),
         .shared_prefixes = shared.items,
+        .message_starts = rendered.message_starts,
         // a cut before the conversation's own text: fresh sessions resume their whole harness
         .chunks = try srv.chunks.request(a, rendered.ids, system_len),
         // from the tokens alone, for every request: cached states are keyed by tokens

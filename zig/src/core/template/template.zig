@@ -190,6 +190,15 @@ pub fn renderProvenance(gpa: Allocator, t: *const Compiled, messages: std.json.V
 
 /// Checkpoint-owned globals are template data; request context overrides them and retains its provenance.
 pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag) Error!Str {
+    return renderWith(gpa, t, messages, tools, context, template_globals, add_generation_prompt, diag, null);
+}
+
+/// `renderProvenanceGlobals`, and with `starts` the byte where each message's own output starts (sorted, caller-owned).
+pub fn renderMarked(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag, starts: ?*[]usize) Error!Str {
+    return renderWith(gpa, t, messages, tools, context, template_globals, add_generation_prompt, diag, starts);
+}
+
+fn renderWith(gpa: Allocator, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, diag: ?*Diag, starts: ?*[]usize) Error!Str {
     // not on `gpa`: an arena there, such as a server request's, would keep the freed scratch until it is reset
     var capped: Capped = .{ .child = t.arena.child_allocator, .left = t.limits.bytes };
     var arena = std.heap.ArenaAllocator.init(capped.allocator());
@@ -198,7 +207,8 @@ pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std
     var out: v.Buffer = .{};
     var vars: v.Map = .empty;
     var c = eval.Ctx{ .rt = .{ .a = a }, .vars = &vars, .out = &out, .limits = t.limits };
-    run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt) catch |err| {
+    var marked: std.ArrayList(usize) = .empty;
+    run(&c, &vars, t, messages, tools, context, template_globals, add_generation_prompt, if (starts != null) &marked else null) catch |err| {
         if (err == error.OutOfMemory and capped.spent) return report(gpa, diag, "the chat template needs more than {d} MiB to render this request", .{t.limits.bytes >> 20});
         if (err == error.OutOfMemory) return error.OutOfMemory;
         if (diag) |d| d.raised = c.rt.raised;
@@ -206,10 +216,12 @@ pub fn renderProvenanceGlobals(gpa: Allocator, t: *const Compiled, messages: std
     };
     const text = try gpa.dupe(u8, out.text.items);
     errdefer gpa.free(text);
+    if (starts) |s| s.* = try gpa.dupe(usize, marked.items);
+    errdefer if (starts) |s| gpa.free(s.*);
     return .{ .s = text, .spans = try gpa.dupe(Span, out.spans.items) };
 }
 
-fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool) v.Error!void {
+fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value, tools: std.json.Value, context: std.json.Value, template_globals: std.json.Value, add_generation_prompt: bool, marked: ?*std.ArrayList(usize)) v.Error!void {
     const a = c.rt.a;
     if (template_globals == .object) {
         var it = template_globals.object.iterator();
@@ -227,7 +239,19 @@ fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value,
             try vars.put(a, key, try pyjson.fromJson(&c.rt, e.value_ptr.*));
         }
     }
+    var marks: eval.Marks = undefined;
+    if (marked != null) {
+        const items = try access.iterate(&c.rt, vars.get("messages").?);
+        var dicts: std.ArrayList(*const v.Dict) = .empty;
+        for (items) |item| if (item == .dict) try dicts.append(a, item.dict);
+        marks = .{ .messages = dicts.items, .starts = try a.alloc(?usize, dicts.items.len), .root = c.out };
+        @memset(marks.starts, null);
+        c.marks = &marks;
+    }
     try eval.root(c, t.tree);
+    const out = marked orelse return;
+    for (marks.starts) |at| if (at) |x| try out.append(a, x);
+    std.mem.sort(usize, out.items, {}, std.sort.asc(usize));
 }
 
 /// One-shot compile and render, the call the engine's chat prompts make.
