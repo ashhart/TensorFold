@@ -19,8 +19,7 @@ pub const snap_drop = reuse.drop;
 pub const snap_slots = reuse.slots; // the snapshot slots it makes come out of the cache's budget
 pub const snap_place = reuse.place; // device or host states, as the native host finds the cache fits on the card
 pub const kept_states = reuse; // their shape, a blank one and copies out and in, for the disk (--learn-conversations)
-/// A row's bits are the same wherever a prompt pass cuts (cuda_prompt_cuts.zig), so cuda_snaps requests
-/// message starts by default and the lane host keeps a state at every one of them.
+/// Cut-invariant prefill requests message starts by default (cuda_prompt_cuts.zig).
 pub const snap_cut_invariant = true;
 const core = @import("core");
 

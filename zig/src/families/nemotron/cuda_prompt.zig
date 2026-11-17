@@ -21,19 +21,14 @@ const prompt_tail = @import("core").prompt_tail;
 const pin_sampled = engine.pin_sampled;
 const pin_prompt = engine.pin_prompt;
 
-/// The request's message starts, sent on every pass including a cache-off one: the lane host passes
-/// its stream as both the keep hook's context and the cancel check's pointer, so neither a cache
-/// budget nor a keep callback gates the cuts. A standalone prefill (bench, decode) has no stream and
-/// cuts at the engine's grid alone. `lanes.cutPoints` is the single switch point for D920's list.
+/// Message starts come from the typed prefill argument, cache-off included; lanes.cutPoints is the D920 switch.
 fn requestChunks(cancel: ?Cancel, keep: ?Keep) []const u32 {
     const ctx = if (keep) |k| k.ctx else if (cancel) |c| c.ptr else return &.{};
     const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
     return lanes.cutPoints(s);
 }
 
-/// The end of the chunk starting at `at`: the grid `step`, a message start, a store mark, or the
-/// prompt's end, whichever comes first. A state is kept at every boundary, so a next turn resumes
-/// there. Nemotron is cut-invariant (cuda_prompt_cuts.zig): a new boundary changes no row's bits.
+/// End at the nearest grid step, request start, store mark or prompt end.
 pub fn chunkEnd(at: usize, len: usize, step: usize, chunks: []const u32, store_marks: []const u32) usize {
     var end = cuts.end(at, len, step, chunks);
     end = cuts.end(at, end, end - at, store_marks); // step `end - at`: only a nearer mark can shorten it
@@ -61,8 +56,7 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
     } else if (e.pos != from) return error.BadReuse;
     const waited = e.heat_gate.waited_s;
     const chunks = requestChunks(cancel, keep);
-    // The segmented fast path runs a prompt with no request cuts; when the request names message
-    // starts, serialChunks cuts there (the same cut-invariant kernels, so the rows keep their bits).
+    // Named request cuts use serialChunks; segmented prefill retains its no-cuts path.
     if (from == 0 and keep == null and chunks.len == 0 and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
         try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
     } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
