@@ -28,6 +28,16 @@ pub fn bf(v: f64) f64 {
     return c.fromBf16(c.toBf16(@floatCast(v)));
 }
 
+/// The bf16 values on either side of a finite bf16 `v` (zero's are the smallest subnormals).
+fn bfSides(v: f64) [2]f64 {
+    const h = c.toBf16(@floatCast(v));
+    const sign = h & 0x8000;
+    const mag = h & 0x7fff;
+    const away = sign | (mag + 1);
+    const toward = if (mag == 0) (sign ^ 0x8000) | 1 else sign | (mag - 1);
+    return .{ c.fromBf16(away), c.fromBf16(toward) };
+}
+
 fn none(_: c.Shape) usize {
     return 0;
 }
@@ -91,6 +101,7 @@ pub const Glue = struct {
     pos: u32 = 0,
     mscale: f32 = 1, // prep: the factor the cosines and sines carry (YaRN's at Bimo's geometry)
     cf: []f32 = &.{}, // bias_round: the fp32 sums
+    flip: []f64 = &.{}, // prep: each output's widest move when its cos or sin lands on a neighbouring bf16
     r: ?rows_in.Rows = null,
     x: []u16 = &.{}, // the residual's first contents (add, add_norm), gu (silu), q|k|v (prep), the logits (argmax)
     y: []u16 = &.{}, // the added rows (add, add_norm)
@@ -119,6 +130,8 @@ pub const Glue = struct {
         p.inv = &.{};
         p.a.free(p.cf);
         p.cf = &.{};
+        p.a.free(p.flip);
+        p.flip = &.{};
         p.rig.reset();
     }
 
@@ -406,6 +419,9 @@ pub const Glue = struct {
         const kc = (p.pos + s.rows) * kvw;
         @memset(want[qn .. qn + 2 * kc], 0);
         @memset(mag[qn .. qn + 2 * kc], 0);
+        p.a.free(p.flip);
+        p.flip = try p.a.alloc(f64, want.len);
+        @memset(p.flip, 0);
         for (0..s.rows) |r| {
             const position: f32 = @floatFromInt(p.pos + r);
             for (0..geo.heads + geo.kv_heads) |unit| {
@@ -425,6 +441,10 @@ pub const Glue = struct {
                     const other = if (d < DH / 2) -xv(p.x, src + d + DH / 2) else xv(p.x, src + d - DH / 2);
                     want[dst + d] = bf(bf(x * cs) + bf(other * sn));
                     mag[dst + d] = @abs(x * cs) + @abs(other * sn);
+                    // precise::cos and sin are not correctly rounded: either may round to the bf16 beside cs or sn
+                    for ([_]f64{cs} ++ bfSides(cs)) |c2| for ([_]f64{sn} ++ bfSides(sn)) |s2| {
+                        p.flip[dst + d] = @max(p.flip[dst + d], @abs(bf(bf(x * c2) + bf(other * s2)) - want[dst + d]));
+                    };
                 }
             }
             for (0..geo.kv_heads) |head| for (0..DH) |d| {
@@ -435,10 +455,10 @@ pub const Glue = struct {
         }
     }
 
-    /// The rotation's allowance: a bf16 ulp of each term (its rounding, its cos or sin), then the output's rounding.
+    /// The rotation's allowance: a bf16 ulp of each term and of the output, plus a cos or sin a bf16 step off.
     pub fn bounds(p: *Glue, want: []const f64, mag: []const f64, allow: []f64) !void {
         if (p.which != .prep) return;
-        for (allow, want, mag) |*l, w, m| l.* = 0x1p-7 * m + 0x1p-8 * @abs(w) + 0x1p-133;
+        for (allow, want, mag, p.flip) |*l, w, m, f| l.* = 0x1p-7 * m + 0x1p-8 * @abs(w) + f + 0x1p-133;
     }
 
     pub fn simulate(p: *Glue, acc: c.Accum, order: g.Order, out: []f64) !void {
