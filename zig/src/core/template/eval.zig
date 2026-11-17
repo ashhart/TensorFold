@@ -48,23 +48,7 @@ pub const Ctx = struct {
     }
 };
 
-/// A request's message objects, and the first top-level output byte of a loop iteration over or binding each one.
-pub const Marks = struct {
-    messages: []const *const v.Dict,
-    starts: []?usize,
-    root: *const v.Buffer,
-    bound: ?usize = null, // the message the current iteration set to a name or passed to a macro first
-
-    fn of(m: *const Marks, item: Value) ?usize {
-        if (item != .dict) return null;
-        return std.mem.indexOfScalar(*const v.Dict, m.messages, item.dict);
-    }
-
-    fn bind(c: *Ctx, x: Value) void {
-        const m = c.marks orelse return;
-        if (m.bound == null) m.bound = m.of(x);
-    }
-};
+pub const Marks = @import("marks.zig").Marks;
 
 const acc_min = 4096;
 
@@ -77,6 +61,12 @@ fn accumulator(s: v.Str) ?*v.Buffer {
 }
 
 fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
+    const s = try joinText(c, l, r);
+    if (c.marks) |m| try m.joined(l, r, s);
+    return s;
+}
+
+fn joinText(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
     const owned = accumulator(l);
     if (l.s.len < acc_min and owned == null) {
@@ -151,7 +141,7 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
     for (body) |st| switch (st) {
         .output => |pieces| for (pieces) |pc| switch (pc) {
             .text => |t| try c.out.literal(c.rt.a, t),
-            .expr => |e| try c.out.append(c.rt.a, try v.asStr(&c.rt, try eval(c, act, e))),
+            .expr => |e| try emit(c, try v.asStr(&c.rt, try eval(c, act, e))),
         },
         .for_ => |f| try execFor(c, act, f),
         .if_ => |n| {
@@ -160,7 +150,7 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
         },
         .assign => |as| {
             const x = try eval(c, act, as.value);
-            Marks.bind(c, x);
+            if (c.marks) |m| m.bind(c.out, x);
             try assign(c, act, as.target, x);
         },
         .block_set => |b| {
@@ -174,11 +164,17 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
             mv.* = .{ .node = m, .closure = act, .name = m.name.id };
             (try slotOf(c, act, m.name.frame, m.name.slot)).* = .{ .macro = mv };
         },
-        .scoped => |sc| try c.out.append(c.rt.a, try capture(c, try enter(c, act, sc.frame), sc.body)),
+        .scoped => |sc| try emit(c, try capture(c, try enter(c, act, sc.frame), sc.body)),
         .break_ => return .brk,
         .continue_ => return .cont,
     };
     return .normal;
+}
+
+fn emit(c: *Ctx, s: v.Str) Error!void {
+    const base = c.out.text.items.len;
+    try c.out.append(c.rt.a, s);
+    if (c.marks) |m| try m.carry(c.out, s, base);
 }
 
 fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!v.Str {
@@ -187,6 +183,7 @@ fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!v.Str {
     c.out = &buf;
     defer c.out = saved;
     _ = try exec(c, act, body);
+    if (c.marks) |m| try m.close(&buf, buf.str());
     return buf.str();
 }
 
@@ -217,16 +214,10 @@ fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
         if (f.uses_loop) body.slots[f.loop_name.slot] = .{ .loop = loop };
         try assign(c, body, f.target, item);
         const at = c.out.text.items.len;
-        const outer = if (c.marks) |m| m.bound else null;
-        if (c.marks) |m| m.bound = null;
+        var saved: Marks.Saved = undefined;
+        if (c.marks) |m| saved = m.begin(c.out);
         const flow = try exec(c, body, f.body);
-        if (c.marks) |m| {
-            // a loop that writes nothing for its message (a scan for the last query) marks nothing
-            if (m.of(item) orelse m.bound) |k| if (m.starts[k] == null and c.out == m.root and c.out.text.items.len > at) {
-                m.starts[k] = at;
-            };
-            m.bound = outer;
-        }
+        if (c.marks) |m| try m.end(saved, c.out, at, item);
         switch (flow) {
             .brk => break,
             .cont => continue,
@@ -275,7 +266,10 @@ pub fn call(c: *Ctx, callee: Value, pos: []const Value, kw: []const Kw) Error!Va
 
 /// Jinja2's Macro.__call__: positions first, keywords only for the rest, then defaults in the macro's frame.
 fn callMacro(c: *Ctx, m: *const v.Macro, pos: []const Value, kw: []const Kw) Error!Value {
-    for (pos) |x| Marks.bind(c, x);
+    if (c.marks) |mk| {
+        for (pos) |x| mk.bind(c.out, x);
+        for (kw) |k| mk.bind(c.out, k.value); // keyword arguments bind as positional ones do
+    }
     const node: *const ast.Macro = @ptrCast(@alignCast(m.node));
     const params = node.params;
     if (pos.len > params.len) return c.rt.fail("macro '{s}' takes not more than {d} argument(s)", .{ m.name, params.len });

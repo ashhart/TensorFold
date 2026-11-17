@@ -241,11 +241,7 @@ fn run(c: *eval.Ctx, vars: *v.Map, t: *const Compiled, messages: std.json.Value,
     }
     var marks: eval.Marks = undefined;
     if (marked != null) {
-        const items = try access.iterate(&c.rt, vars.get("messages").?);
-        var dicts: std.ArrayList(*const v.Dict) = .empty;
-        for (items) |item| if (item == .dict) try dicts.append(a, item.dict);
-        marks = .{ .messages = dicts.items, .starts = try a.alloc(?usize, dicts.items.len), .root = c.out };
-        @memset(marks.starts, null);
+        marks = try eval.Marks.init(a, try access.iterate(&c.rt, vars.get("messages").?), c.out);
         c.marks = &marks;
     }
     try eval.root(c, t.tree);
