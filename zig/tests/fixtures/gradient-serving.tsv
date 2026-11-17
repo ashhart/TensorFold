@@ -28,7 +28,7 @@ zig/kernels/cuda/glm_glue_norm.cuh	a3664d9833c17ff4718b7342c529ddd7fa958cbc51a8f
 zig/kernels/cuda/glm_glue_router.cuh	99911df38e6ad2826491b3fa5efd47aea5e54eebb7cd83eed586ba0dd9305658	raw
 zig/kernels/cuda/glm_glue_rows.cuh	8d22166c33ce75fb2dfe5383694a8503044613420d7a06e90e6d1a0b88c197b2	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_kda.cu	aef9f980f8a928f2b6c439c7e1eda499fba12c32a7605e39062bef83952a83d2	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
-zig/kernels/cuda/glm_ops.cu	9f2db86233e87e1fe8b4ee36b432ba48db3533fd422dce5be5c76c4603dc5567	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_ops.cu	bf90d5eeb62c145d8a140db90e057fa53d3c1f6b77f739d14122a0e04a216b51	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); dependent-launch inputs without __restrict__ (no non-coherent load above the wait)
 zig/kernels/cuda/glm_quant.cu	e04ee0760ddd215244117bbf113f625ce2e9da3eef04345eb0741e1cd2c876ea	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_triton.cuh	8eee12f24bbf283a08a29f9396e3db5588b48fce85abe74de7f85adc12fa94f4	raw
 zig/kernels/cuda/common/glue_math.cuh	b7234684fc786b3700473358632bf10f0b2d2240e5957eefddb13254dae5d746	raw
