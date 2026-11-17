@@ -17,6 +17,8 @@ const usage =
     \\GLM_PROFILE=D,D (after the replies: a knock-out profile of a round at each depth, GLM_PROFILE_REPS times; GLM_PROFILE_ROWS=N: N rows at depth 0),
     \\GLM_LOGITS=PREFIX (write each prompt's last-row logits, bf16, to PREFIX.NAME.bf16 at its first depth's first run),
     \\GLM_LOGITS_VS=PREFIX (compare them with such a file: the largest difference against the bf16 step at the top logit),
+    \\GLM_PROMPT_NLL=ROWS (each prompt's per-token loss through the prompt path, ROWS a chunk; GLM_PROMPT_NLL_OUT=PREFIX writes
+    \\PREFIX.NAME.f32; GLM_PROMPT_NLL_ONLY stops before the replies),
     \\GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
     \\GLM_MARGINS=PREFIX (each emitted token's top-two logit margin, f32, to PREFIX.NAME.margins), GLM_MARGINS_VS=PREFIX
     \\(at the first token that differs from GLM_VS's reply, both runs' margins there),
@@ -149,6 +151,26 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s} forced: {d} of {d} picks equal the reference's", .{ p.object.get("name").?.string, r.same, want.len });
         if (r.first) |i| std.debug.print(", first differs at {d}\n", .{i}) else std.debug.print("\n", .{});
     };
+    if (platform.c.getenv("GLM_PROMPT_NLL")) |v| { // each prompt's per-token loss through the prompt path, ROWS a chunk
+        const rows = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        for (doc.object.get("prompts").?.array.items) |p| {
+            const name = p.object.get("name").?.string;
+            const ids = try ints(arena, p.object.get("ids").?);
+            const out = try arena.alloc(f32, ids.len - 1);
+            try e.promptNll(ids, rows, out);
+            var s: f64 = 0;
+            for (out) |o| s += o;
+            std.debug.print("{s} prompt nll: mean {d:.6} over {d} tokens ({d}-row chunks)\n", .{ name, s / @as(f64, @floatFromInt(out.len)), out.len, rows });
+            if (platform.c.getenv("GLM_PROMPT_NLL_OUT")) |pre| {
+                const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.f32", .{ std.mem.span(pre), name }, 0);
+                const f = platform.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = platform.c.fclose(f);
+                const bytes = std.mem.sliceAsBytes(out);
+                if (platform.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.WriteFailed;
+            }
+        }
+        if (platform.c.getenv("GLM_PROMPT_NLL_ONLY") != null) return;
+    }
     var failures: usize = 0;
     const vs: ?std.json.Value = if (platform.c.getenv("GLM_VS")) |path| blk: {
         const f = try mtl.MappedFile.open(path);
