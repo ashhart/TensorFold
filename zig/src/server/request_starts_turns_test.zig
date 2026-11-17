@@ -187,7 +187,7 @@ fn replay(f: *Fake, store: *pc.Store, r: *const api.Request, marks: []const u32)
     try t.expectEqual(fresh(r.prompt), f.sum);
 }
 
-test "turn starts: a cut-invariant family defaults on and a six-turn edit resumes at the edited message" {
+test "turn starts: a six-turn edit resumes at the edited message in the fake engine" {
     const step: u32 = 2048;
     const minimum: u32 = 1;
     // Model invariant-family metadata here; native contract tests check its actual declaration.
@@ -250,7 +250,7 @@ test "turn starts: a cut-invariant family defaults on and a six-turn edit resume
     const prepared = try chat.prepare(srv, &cx, input, Never{});
     defer srv.release(prepared.preparing, prepared.request);
     const r = prepared.request;
-    // On main there are no message starts at all: chunks is empty and the edit re-reads from an older endpoint.
+    // Require message starts for the explicitly configured fake engine.
     try t.expect(r.chunks.len > 0);
     const first_diff: u32 = @intCast(std.mem.indexOfDiff(u32, unedited, r.prompt).?);
     var edit_start: u32 = 0;
@@ -261,10 +261,10 @@ test "turn starts: a cut-invariant family defaults on and a six-turn edit resume
 
     const plan = try store.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
     try t.expectEqual(edit_start, plan.from);
-    // A fresh pass cuts at the very starts a resume reuses (#2824's warm-pass case).
+    // An empty store plans the cold prompt without restoring a state.
     const fresh_plan = try baseline.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
     try t.expectEqual(@as(u32, 0), fresh_plan.from);
     // The request retains starts even when the store marks only history and rewind points.
     try t.expect(std.mem.indexOfScalar(u32, r.chunks, plan.from) != null);
-    try replay(&f, &store, &r, plan.marks); // resumed tokens == fresh(r.prompt), greedy and seeded alike
+    try replay(&f, &store, &r, plan.marks); // the fake state equals direct token-sum evaluation
 }
