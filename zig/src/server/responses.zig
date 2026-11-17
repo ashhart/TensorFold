@@ -119,7 +119,7 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     var out: Wire = .{ .reply = &reply };
     cancel_ids.alias = base.get("id").?.string; // the cancel route takes the response's id too
     defer cancel_ids.alias = null;
-    openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true, false);
+    openai.runLogged(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true, false, .{ .route = "responses", .client_id = base.get("id").?.string });
     if (out.opened or conn.broken) return .{ .streamed = reply.final };
     const status = out.status orelse return .{ .streamed = null };
     if (status != 200) return .{ .refused = .{ .status = status, .payload = out.payload } };

@@ -6,6 +6,7 @@ const posix = platform.posix;
 const Io = std.Io;
 const wire = @import("wire.zig");
 const Reply = wire.Reply;
+const request_log_norm = @import("request_log_norm.zig");
 
 const context_tokens = "1024";
 
@@ -511,11 +512,15 @@ pub fn main(init: std.process.Init) !void {
                 // a checkout with autocrlf gives the frozen log CRLF endings, the server writes LF: both compare as LF
                 const want = try std.mem.replaceOwned(u8, init.arena.allocator(), Io.Dir.cwd().readFileAlloc(io, golden_log, init.arena.allocator(), .limited(1 << 28)) catch "", "\r\n", "\n");
                 const got = try std.mem.replaceOwned(u8, init.arena.allocator(), Io.Dir.cwd().readFileAlloc(io, s.log_path.?, init.arena.allocator(), .limited(1 << 28)) catch "", "\r\n", "\n");
+                // reply lines and the random request id are not part of the frozen comparison
+                const want_requests = request_log_norm.requestOnly(init.arena.allocator(), want) catch want;
+                const got_requests = request_log_norm.requestOnly(init.arena.allocator(), got) catch got;
+                const same = std.mem.eql(u8, want_requests, got_requests);
                 try outcomes.append(init.arena.allocator(), .{
                     .group = "lifecycle",
                     .name = "request-log",
-                    .verdict = if (std.mem.eql(u8, want, got)) .equal else .differ,
-                    .why = if (std.mem.eql(u8, want, got)) &.{} else try logDiff(init.arena.allocator(), want, got),
+                    .verdict = if (same) .equal else .differ,
+                    .why = if (same) &.{} else try logDiff(init.arena.allocator(), want_requests, got_requests),
                 });
             } else if (std.mem.eql(u8, kind, "rewrite_key")) {
                 var file = try Io.Dir.cwd().createFile(io, s.key_path.?, .{});

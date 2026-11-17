@@ -88,6 +88,11 @@ pub const Reply = struct {
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
     reasoning_recovered: bool = false, // ended at its end token in an unclosed think block: content repeats it
+    // Reply-log timings (request_log.zig). Never serialized to the client.
+    queued_seconds: ?f64 = null, // seconds the job waited for admission
+    ttft_seconds: ?f64 = null, // seconds from receipt to the first token
+    decode_tps: f64 = 0, // decoded tokens per second
+    total_seconds: f64 = 0, // seconds from receipt to the last token
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };

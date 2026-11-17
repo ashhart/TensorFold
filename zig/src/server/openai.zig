@@ -14,6 +14,8 @@ const token_stream = @import("token_stream.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const request_log = @import("request_log.zig");
+const reply_log = @import("reply_log.zig");
+pub const ReplyLog = reply_log.ReplyLog;
 const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
@@ -43,6 +45,14 @@ pub const Out = struct {
         /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
+};
+
+/// What a route records in the request and reply logs: its name and the id its client sees.
+pub const RouteInfo = struct {
+    /// Logged as the reply line's ``route`` (chat, completions, messages, responses, ollama-chat, ollama-generate).
+    route: []const u8,
+    /// The id the client sees; null: use runLogged's generated chatcmpl-/cmpl- id.
+    client_id: ?[]const u8 = null,
 };
 
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
@@ -138,7 +148,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
-    if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.appendRequest(cx.a, path, body, cx.log_id);
     var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
@@ -192,16 +202,33 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
-    runNamed(srv, a, out, gone, is_chat, raw, null, true, false);
+    runLogged(srv, a, out, gone, is_chat, raw, null, true, false, .{ .route = if (is_chat) "chat" else "completions" });
 }
 
 /// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
 pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool) void {
+    runLogged(srv, a, out, gone, is_chat, raw, format, client_thinking, skip_request_log, .{ .route = if (is_chat) "chat" else "completions" });
+}
+
+/// ``runNamed`` with the route's client id recorded on both the request and the reply line.
+pub fn runLogged(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool, info: RouteInfo) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
-    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
+    const client_id = info.client_id orelse id;
+    const background = if (raw.strField("priority")) |p| std.mem.eql(u8, p, "background") else false;
+    var log_state: ReplyLog = .{
+        .a = a,
+        .srv = srv,
+        .enabled = !background,
+        .id = client_id,
+        .route = info.route,
+        .model = replyModel(srv, raw),
+    };
+    defer log_state.write();
+    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log, .log_id = client_id, .log_route = info.route };
     var p = plan(srv, &cx, is_chat, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
+        log_state.refused(&cx);
         logRefused(id, cx.message);
         const body = errorBody(a, &cx, field) catch return;
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
@@ -214,9 +241,9 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
-    if (p.prompts.len > 0) return prompt_list.run(srv, a, out, gone, p, p.prompts, raw);
+    if (p.prompts.len > 0) return prompt_list.run(srv, a, out, gone, p, p.prompts, raw, &log_state);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .log = &log_state };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -240,6 +267,7 @@ pub const Run = struct {
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
     call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
+    log: *ReplyLog, // reply line, written after the reply handler returns
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -307,14 +335,16 @@ pub const Run = struct {
     fn fail(r: *Run, cx: *const Cx, field: []const u8) void {
         const a = r.a;
         const kind_ok = cx.kind != .other and cx.kind != .server;
+        const status: u16 = if (kind_ok) cx.status() else 500;
+        r.log.fail(status, cx.message);
         const body = errorBody(a, cx, field) catch return;
-        r.out.vt.reply(r.out.ctx, if (kind_ok) cx.status() else 500, wrapError(a, body) catch return);
+        r.out.vt.reply(r.out.ctx, status, wrapError(a, body) catch return);
     }
 
     /// An unsent reply: request 400, unavailable 503, failure 500, nothing when the client left.
     fn unsent(r: *Run, cx: *Cx, e: chat.Failure, field: []const u8) void {
         switch (e) {
-            error.Cancelled => {},
+            error.Cancelled => r.log.cancelled(),
             error.OutOfMemory => r.fail(&.{ .a = r.a, .kind = .server, .message = "out of memory" }, field),
             error.Failed => r.fail(&.{ .a = r.a, .kind = .server, .message = "the reply failed" }, field),
             error.Refused => {
@@ -331,6 +361,7 @@ pub const Run = struct {
         // a context-window refusal: the head opens with no prompt behind it, so it carries no count
         r.out.vt.open(r.out.ctx, 0) catch return;
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
+        r.log.refused(cx);
         logRefused(r.id, cx.message);
         const body = errorBody(a, cx, field) catch return;
         r.emit(wrapError(a, body) catch return) catch return;
@@ -346,6 +377,7 @@ pub const Run = struct {
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
         r.out.vt.reply(r.out.ctx, 200, .{ .object = o });
+        r.log.done(&reply, calls);
         r.warmNext(&reply, calls);
     }
 
@@ -462,6 +494,7 @@ pub const Run = struct {
 
     /// A server error after the stream opened: its error event, then [DONE].
     fn streamFailed(r: *Run, message: []const u8) void {
+        r.log.fail(500, message);
         log.line("stream error: {s}", .{message});
         const err = json.newObject(r.a) catch return;
         err.put(r.a, "message", .{ .string = message }) catch return;
@@ -502,8 +535,9 @@ pub const Run = struct {
                 return r.unsent(&cx, e, field);
             }
             switch (e) {
-                error.Cancelled => return,
+                error.Cancelled => { r.log.cancelled(); return; },
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {
+                    r.log.refused(&cx);
                     logRefused(r.id, cx.message);
                     const body = errorBody(a, &cx, field) catch return;
                     r.emit(wrapError(a, body) catch return) catch return;
@@ -553,6 +587,7 @@ pub const Run = struct {
         }
         if (reply.loop_stop) |period| r.emit(wrapError(a, @import("loop_stop.zig").errorBody(a, period) catch return) catch return) catch return;
         r.out.vt.event(r.out.ctx, null) catch {};
+        r.log.done(&reply, calls);
         r.warmNext(&reply, calls);
     }
 };

@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const openai = @import("openai.zig");
+const ids = @import("ids.zig");
 const embeddings = @import("embeddings.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
@@ -211,9 +212,9 @@ const Wire = struct {
             if (value.get("tensorfold")) |t| if (t == .object) {
                 if (t.get("prefill_seconds")) |v| try o.put(w.a, "prompt_eval_duration", try duration(w.a, v));
                 if (t.get("seconds")) |v| try o.put(w.a, "eval_duration", try duration(w.a, v));
-                if (t.get("token_ids")) |ids| if (ids == .array) {
-                    try o.put(w.a, "eval_count", try json.intValue(w.a, ids.array.len));
-                    try o.put(w.a, "token_ids", ids);
+                if (t.get("token_ids")) |id_value| if (id_value == .array) {
+                    try o.put(w.a, "eval_count", try json.intValue(w.a, id_value.array.len));
+                    try o.put(w.a, "token_ids", id_value);
                 };
             };
             if (value.get("usage")) |u| if (u == .object) {
@@ -268,8 +269,10 @@ fn serve(srv: *Server, conn: *Conn, a: Allocator, is_generate: bool) void {
         const err = openai.errorBody(a, &cx, "messages") catch return;
         return routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
     };
-    // A refusal must keep its status: plan before the 200 head goes out.
-    var pre: Cx = .{ .a = a };
+    // Plan before the 200 head so refusals keep their status: this plan writes the request line, runLogged the reply.
+    const route: []const u8 = if (is_generate) "ollama-generate" else "ollama-chat";
+    const log_id = ids.make(a, "chatcmpl-", 32) catch return;
+    var pre: Cx = .{ .a = a, .log_id = log_id, .log_route = route };
     _ = openai.plan(srv, &pre, true, translated, null, true) catch {
         const err = openai.errorBody(a, &pre, "messages") catch return;
         return routes.sendValue(conn, a, pre.status(), openai.wrapError(a, err) catch return);
@@ -287,7 +290,7 @@ fn serve(srv: *Server, conn: *Conn, a: Allocator, is_generate: bool) void {
     conn.addHeader("Content-Type", "application/x-ndjson") catch return;
     conn.addHeader("Connection", "close") catch return;
     conn.finish("") catch return;
-    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, translated, null, true, true);
+    openai.runLogged(srv, a, wire.out(), .{ .conn = conn }, true, translated, null, true, true, .{ .route = route, .client_id = log_id });
 }
 
 pub fn embed(srv: *Server, conn: *Conn, a: Allocator) void {

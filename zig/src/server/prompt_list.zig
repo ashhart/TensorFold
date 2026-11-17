@@ -134,7 +134,7 @@ const Choice = struct {
 };
 
 /// Each of `prompts` as the route's own whole reply or stream, on up to `workers` threads, then one answer.
-pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, plan: openai.Plan, prompts: []const []const u8, raw: Value) void {
+pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, plan: openai.Plan, prompts: []const []const u8, raw: Value, log: *openai.ReplyLog) void {
     const n: usize = prompts.len;
     var slots: [max_prompts]Slot = undefined;
     for (slots[0..n]) |*s| s.* = .{ .arena = .init(srv.gpa) };
@@ -147,7 +147,7 @@ pub fn run(srv: *Server, a: Allocator, out: openai.Out, gone: openai.Gone, plan:
         choices[i] = .{ .fan = &fan, .i = @intCast(i) };
         var p = plan;
         p.input.prompt = .{ .text = prompts[i] }; // the request as if it named this prompt alone
-        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = false, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+        runs[i] = .{ .srv = srv, .a = slots[i].arena.allocator(), .out = choices[i].out(), .is_chat = false, .plan = p, .id = plan.input.id, .created = created, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .log = log };
     }
     var pool: Pool = .{ .runs = runs[0..n], .fan = &fan, .gone = gone, .stream = plan.stream };
     var threads: [workers - 1]?std.Thread = @splat(null);

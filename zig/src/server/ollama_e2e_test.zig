@@ -454,10 +454,21 @@ test "ollama HTTP: one request writes one request-log line" {
     defer h.deinit();
     try t.expect(statusIs(try h.ask(a, "/api/chat", null, chat_body), 200));
     const text = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(1 << 16));
+    // one request line plus its reply line: only the request line is counted here
     var count: usize = 0;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| if (line.len > 0) {
-        count += 1;
+        const parsed = json.parse(a, line) catch return error.BadLogLine;
+        if (parsed != .ok) return error.BadLogLine;
+        var is_reply = false;
+        if (parsed.ok == .object) if (parsed.ok.get("kind")) |k| {
+            if (k == .string and std.mem.eql(u8, k.string, "reply")) is_reply = true;
+        };
+        if (!is_reply) count += 1;
     };
     try t.expectEqual(@as(usize, 1), count);
+}
+
+test {
+    _ = @import("request_log_e2e_test.zig");
 }

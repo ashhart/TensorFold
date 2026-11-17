@@ -132,7 +132,7 @@ Changing the count does not change the other limits: 10 MiB encoded per image an
 Decoded images are bounded to 8,192 pixels per dimension, 16 million pixels per image and 32 million total.
 EXIF orientation is applied and transparency is composited onto white; animated and multipage inputs are refused.
 Up to 16 requests decode and process images at once; more wait up to a minute, and past 128 waiting the server answers 503 so the client retries.
-The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`.
+The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`, and reply lines follow the same rule: image URLs and inline file data in a reply (including structured tool arguments) are redacted the same way.
 The model processor bounds the total expanded image tokens to 4,096, with a smaller budget for `detail: low`.
 That budget is shared across the images; a higher count can reduce the detail available for each image.
 Those expanded tokens count toward prompt usage and the context window before model execution.

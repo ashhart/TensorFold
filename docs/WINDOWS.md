@@ -48,6 +48,7 @@ floor) with Zig 0.17.0 from the portable zip, on main at 9d6f1d78c (2026-11-04):
   symlink tests, which skip only on `PermissionDenied`; three more symlink tests, in `core/learned_part_test.zig`,
   skip on Windows whatever the privilege (an `os.tag == .windows` guard) and are among the 13 skip events the
   one-by-one run did not name.
+- The reply-line log tests (`request_log_e2e_test.zig`) drive the CPU fake engine over a loopback socket and only read a plain file; they add no mode-bit or symlink checks, so they are not in that Windows skip set.
 - Unzip the Zig download with Windows' own `tar.exe` (`C:\Windows\System32\tar.exe -xf zig-x86_64-windows-0.17.0.zip`,
   37 s); PowerShell's `Expand-Archive` took 258 s, and Git for Windows' GNU `tar`, when its `usr\bin` is first on
   `PATH`, does not read zips.

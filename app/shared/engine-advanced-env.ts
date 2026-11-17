@@ -183,7 +183,7 @@ export const ENGINE_ENV_PRESETS: Array<{ key: string; desc: string }> = [
   { key: 'FLASHNEXT_LOAD_LIMIT_GB', desc: 'GB cap for loading Flash Next models, replacing the 70% of RAM limit. Also raises the app-side memory check.' },
   { key: 'HF_HUB_OFFLINE', desc: 'Set 1 to keep the engine off the network; model downloads need the connection back on.' },
   { key: 'HF_HOME', desc: 'Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.' },
-  { key: 'TENSORFOLD_REQUEST_LOG', desc: 'Engine knob: append per-request records to a file for diagnostics.' },
+  { key: 'TENSORFOLD_REQUEST_LOG', desc: 'Engine knob: append per-request and per-reply records to a file for diagnostics.' },
   { key: 'TENSORFOLD_NO_LIVE', desc: 'Set 1 to hide the engine live text display in its terminal; the served model is unchanged.' },
   { key: 'TENSORFOLD_SEED_SALT', desc: 'Engine knob: mix a salt into request seeds.' },
 ]

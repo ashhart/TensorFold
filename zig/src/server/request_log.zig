@@ -1,4 +1,4 @@
-//! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images redacted, for replays.
+// TENSORFOLD_REQUEST_LOG: one JSON line per request body (images redacted) and per reply, keyed by client id.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
@@ -39,10 +39,9 @@ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
     }
 }
 
-/// Appends ``body`` to ``path`` unless it is background work (batch jobs are not client traffic).
-pub fn append(a: Allocator, path: []const u8, body: Value) void {
-    if (body.strField("priority")) |p| if (std.mem.eql(u8, p, "background")) return;
-    const line = json.stringify(a, redact(a, body) catch return, .{}) catch return;
+/// Appends one JSON value as a single line, under the file rules below.
+fn appendLine(a: Allocator, path: []const u8, value: Value) void {
+    const line = json.stringify(a, redact(a, value) catch return, .{}) catch return;
     const pathz = a.dupeSentinel(u8, path, 0) catch return;
     const fd = platform.c.open(pathz, .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return warnOnce(path, "it cannot be opened, or it is a symbolic link");
@@ -50,6 +49,81 @@ pub fn append(a: Allocator, path: []const u8, body: Value) void {
     if (!private(fd)) return warnOnce(path, "it is not a regular file only its owner can read");
     const framed = std.mem.concat(a, u8, &.{ line, "\n" }) catch return;
     _ = platform.c.write(fd, framed.ptr, framed.len);
+}
+
+/// Appends ``body`` unless it is background work (batch jobs are not client traffic).
+pub fn append(a: Allocator, path: []const u8, body: Value) void {
+    if (body.strField("priority")) |p| if (std.mem.eql(u8, p, "background")) return;
+    appendLine(a, path, body);
+}
+
+/// The request body plus the id its client sees, paired with that reply's ``appendReply`` line.
+pub fn appendRequest(a: Allocator, path: []const u8, body: Value, id: ?[]const u8) void {
+    if (body.strField("priority")) |p| if (std.mem.eql(u8, p, "background")) return;
+    var value = body;
+    if (id) |client_id| {
+        if (body == .object) {
+            const with_id = json.copyObject(a, body.object) catch return;
+            with_id.put(a, "id", .{ .string = client_id }) catch return;
+            value = .{ .object = with_id };
+        }
+    }
+    appendLine(a, path, value);
+}
+
+/// One finished reply, written after the last byte reaches the client. Only reply lines carry ``kind``.
+pub const Reply = struct {
+    id: []const u8,
+    route: []const u8,
+    model: []const u8 = "",
+    status: i64 = 0, // 0: the client left before a reply was sent
+    text: ?[]const u8 = null,
+    reasoning: ?[]const u8 = null,
+    tool_calls: ?[]Value = null,
+    finish_reason: ?[]const u8 = null,
+    err: ?[]const u8 = null,
+    has_usage: bool = false, // a refusal or cancellation has no generation to count
+    prompt_tokens: usize = 0,
+    cached_tokens: usize = 0,
+    completion_tokens: usize = 0,
+    queued: ?f64 = null, // seconds waiting for admission
+    ttft: ?f64 = null, // seconds from receipt to first token
+    decode_tps: ?f64 = null, // decoded tokens per second
+    total: ?f64 = null, // seconds from receipt to last token
+};
+
+fn putSeconds(a: Allocator, o: *json.Object, key: []const u8, value: ?f64) Allocator.Error!void {
+    try o.put(a, key, if (value) |v| .{ .float = v } else .null);
+}
+
+/// Writes one reply line under the same privacy rules as a request line.
+pub fn appendReply(a: Allocator, path: []const u8, r: Reply) void {
+    const o = json.newObject(a) catch return;
+    o.put(a, "kind", .{ .string = "reply" }) catch return;
+    o.put(a, "id", .{ .string = r.id }) catch return;
+    o.put(a, "route", .{ .string = r.route }) catch return;
+    o.put(a, "model", .{ .string = r.model }) catch return;
+    o.put(a, "status", json.intValue(a, r.status) catch return) catch return;
+    o.put(a, "text", if (r.text) |t| .{ .string = t } else .null) catch return;
+    o.put(a, "reasoning", if (r.reasoning) |t| .{ .string = t } else .null) catch return;
+    const calls_value: Value = if (r.tool_calls) |calls| .{ .array = calls } else .null;
+    o.put(a, "tool_calls", calls_value) catch return;
+    o.put(a, "finish_reason", if (r.finish_reason) |f| .{ .string = f } else .null) catch return;
+    o.put(a, "error", if (r.err) |e| .{ .string = e } else .null) catch return;
+    const usage = json.newObject(a) catch return;
+    if (r.has_usage) {
+        usage.put(a, "prompt_tokens", json.intValue(a, r.prompt_tokens) catch return) catch return;
+        usage.put(a, "cached_tokens", json.intValue(a, r.cached_tokens) catch return) catch return;
+        usage.put(a, "completion_tokens", json.intValue(a, r.completion_tokens) catch return) catch return;
+    }
+    o.put(a, "usage", .{ .object = usage }) catch return;
+    const timings = json.newObject(a) catch return;
+    putSeconds(a, timings, "queued", r.queued) catch return;
+    putSeconds(a, timings, "ttft", r.ttft) catch return;
+    putSeconds(a, timings, "decode_tps", r.decode_tps) catch return;
+    putSeconds(a, timings, "total", r.total) catch return;
+    o.put(a, "timings", .{ .object = timings }) catch return;
+    appendLine(a, path, .{ .object = o });
 }
 
 /// A regular file no one but its owner can read or write: a name in a shared directory can be someone else's file.
