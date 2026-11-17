@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a `/v1/completions` request whose `prompt` is a list gets one choice a prompt, each the reply that prompt gets alone, streamed or not, with `usage` summed over all of them (#3194).
+
 - Fluid Subgraph Residency: the shared SSD expert code takes its stored-component count and MTP stage count as parameters, the groundwork for DeepSeek V4.1 experts on SSD; Flash Next reads, plans and traces byte for byte as before (#3683, step 1 of #3667).
 
 - App: Readiness and Command Centre check a local provider such as Ollama or LM Studio against its live model list at its configured address, so a stopped server or one with no models no longer shows as Ready (#3605, fixes #3539). Thanks to @devopsfortunato.
