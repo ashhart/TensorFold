@@ -179,7 +179,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const here = if (device.tensorUnits()) try std.mem.replaceOwned(u8, a, body, "#include \"../nax.h\"", sources.nax) else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
-    if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
+    if (std.mem.startsWith(u8, d.name, "flashnext penalties ")) {
+        if (!assemble) return undefined;
+        text = tf.metal_penalties.source;
+    } else if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
         const fsr = try tf.flashnext_fsr_contract.source(a, fun);
         const pre = if (fsr.fragments) try preM5(a, "", fsr.text) else fsr.text;
