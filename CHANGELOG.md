@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: Readiness and Command Centre check a local provider such as Ollama or LM Studio against its live model list at its configured address, so a stopped server or one with no models no longer shows as Ready (#3605, fixes #3539). Thanks to @devopsfortunato.
+
 - App: new ticket worker chats appear in the sidebar as soon as they are created, for solo and Room workers, instead of after a restart (#3461). Thanks to @AIFlowML.
 
 - App: selecting Supervisor or applying the Supervised build preset is accepted instead of failing with `collaborationMode has an invalid value` (#3472). Thanks to @AIFlowML.
