@@ -65,7 +65,11 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
-    if (limits) |l| if (e.cfg.granted_depth) try payReserved(e, l.who, probs, heads, sampled, out);
+    if (limits) |l| {
+        if (e.cfg.granted_depth) {
+            try payReserved(e, l.who, probs, heads, sampled, out);
+        } else if (e.rule.k.hold_costs.len > 0) try payPass(e, l.who, probs, heads, sampled, out);
+    }
 }
 
 // Copy lookups may advance a proposer's backoff; the reservation loop, not this depth cap, asks it once.
@@ -107,6 +111,22 @@ fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: 
         w.granted = kept;
         var gain: f64 = 0;
         for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
+        w.gain = gain;
+    }
+    if (e.cfg.plain_guard)
+        try e.rule.payHoldsFor(who, sampled, out, probs.len)
+    else
+        try e.rule.payHolds(who, sampled, out);
+}
+
+/// A drafter's timed hold pass under a legacy cap: each head's reserved depth is the hold the rule prices.
+fn payPass(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: []const usize, sampled: bool, out: []i64) !void {
+    for (who, heads, out) |*w, i, d| {
+        if (d <= 0) continue;
+        const kept: usize = @intCast(@min(d, @as(i64, @intCast(probs[i].len))));
+        w.granted = @intCast(kept); // its rows and expected tokens this round, not its last verified grant
+        var gain: f64 = 0;
+        for (probs[i][0..kept]) |chance| gain += chance;
         w.gain = gain;
     }
     if (e.cfg.plain_guard)
