@@ -1,4 +1,4 @@
-//! Qwen3-ASR's tower kernels under the contract (qwen3-asr-contract): vit.cu's conv taps and flatten, attention at 64.
+//! Qwen3-ASR's conv taps, flatten and attention at 64, in kernel-contract: `kernel-contract tf_vit_conv qwen3-asr`.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -201,18 +201,3 @@ pub const Set = struct {
         set.gpa.destroy(set);
     }
 };
-
-/// The Qwen3-ASR tower kernels' gates 1-4 and their controls alone.
-pub fn run(gpu: check.Gpu) !void {
-    const a = gpu.gpa;
-    var s = try cuda.Stream.init(gpu.d, false);
-    defer s.deinit();
-    var list: std.ArrayList(g.Kernel) = .empty;
-    defer list.deinit(a);
-    const set = try Set.init(gpu, s, a, &list);
-    defer set.deinit();
-    var t: g.Tally = .{};
-    try g.runAll(a, list.items, 0x71776e33, &t);
-    std.debug.print("SUMMARY qwen3-asr: {d} kernels, {d} pass gates 1-4, {d} fail; {d} controls: {d} red as planted, {d} missed\n", .{ t.kernels, t.passed, t.failed, t.controls, t.caught, t.missed });
-    try check.expect(t.problems() == 0, "qwen3-asr-contract: {d} gate failures, {d} controls missed", .{ t.failed, t.missed });
-}
