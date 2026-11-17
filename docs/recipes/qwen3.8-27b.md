@@ -223,7 +223,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
-`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+`--no-drafts` disables all drafts on either backend. On CUDA, `--drafter` can name DFlash2 or a compatible
+checkpoint with MTP weights; use `--no-drafts` to disable all drafts.
 The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
 loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
@@ -276,6 +277,16 @@ tensorfold pull nvidia/Qwen3.8-27B-NVFP4
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
+
+This ModelOpt checkpoint also includes a dense BF16 MTP head. Passing the target itself to `--drafter` selects it;
+TensorFold packs those projections as affine-4 while loading. `--mtp-drafts N` sets the MTP chain depth (default 3).
+Standalone affine-4 MTP checkpoints are supported only for routed MoE targets; dense targets require indexed BF16 MTP
+tensors from the target checkpoint. `--mtp-drafts 0` disables the target MTP head while leaving a separately named DFlash2 drafter eligible;
+`--no-drafts` disables all drafting. Serial and batched chains keep token feedback on the GPU; concurrent batches use
+the same dense or routed MLP dispatch as the serial path. Serial chains are the default; set `TF_MTP_TREES=1` to
+opt in to sampled tree mode. In that mode, rank 0 is the exact full-vocabulary
+target-coupled sample. Runner-up branches are selected from the `lp_top` log-probability candidates, so their Gumbel
+ordering is a proposal heuristic rather than an exhaustive full-vocabulary ranking.
 
 Prompts take bf16 rows on a prompt GEMM that reads the stored bytes: each FP8 byte and each NVFP4 code times its
 block scale is exact in bf16, summed in fp32 over the inputs, the tensor scale last. `--prefill-fp8` restores the FP8

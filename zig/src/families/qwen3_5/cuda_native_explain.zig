@@ -29,6 +29,12 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
     return switch (err) {
         error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+        error.MtpDoesNotFit => "the MTP drafter's resident weights, conversion staging, scratch, and calibration context exceed the remaining CUDA budget; free device memory or lower --context",
+        error.MtpMemorySizeOverflow => "the MTP drafter's CUDA allocation estimate overflowed; this checkpoint geometry cannot be admitted safely",
+        error.UnsupportedMtpGeometry => "the MTP drafter's geometry is outside the CUDA kernel's supported allocation and index limits",
+        error.UnsupportedDrafterFormat => "the drafter directory has neither a DFlash2 configuration nor a compatible MTP head",
+        error.UnsupportedMtpWeightFormat => "this MTP format is unsupported for the target; dense MTP must be indexed BF16, while standalone affine-4 is routed-only",
+        error.MtpBudgetUnavailable => "cannot determine the remaining CUDA memory before loading the MTP drafter; refusing the allocation",
         error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
         error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
         error.QwenServedWithoutVision => "image inputs need the server started with --vision",

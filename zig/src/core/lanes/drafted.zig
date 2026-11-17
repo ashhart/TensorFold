@@ -139,8 +139,8 @@ pub const Drafted = struct {
     }
 
     /// Device bytes an admitted stream takes: the target's own and the drafter's for the same stream.
-    pub fn streamBytes(x: *const Drafted, target: usize) usize {
-        return target + x.drafter.facts().stream_bytes;
+    pub fn streamBytes(x: *const Drafted, target: usize) !usize {
+        return std.math.add(usize, target, x.drafter.facts().stream_bytes) catch error.StreamSizeOverflow;
     }
 
     fn clearProposals(ptr: *anyopaque, s: *Stream) void {

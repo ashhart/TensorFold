@@ -334,7 +334,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return @import("contract_limits.zig").fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-modelopt-contract")) return @import("contract_flashnext_modelopt.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu, rest);

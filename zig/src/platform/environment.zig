@@ -72,7 +72,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
-    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; opt in to sampled MTP tree drafting)" },
     .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
     .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q27_POCKET_OFF", .scope = .cuda, .kind = .path, .forms = "all, or a list of layer:neuron pairs without control characters (default off)" },
