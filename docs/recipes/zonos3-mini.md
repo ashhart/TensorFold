@@ -4,7 +4,7 @@
 publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
 came from, and how each part was checked, so the checks can be rerun.
 
-Status: one branch, proposed in #3615 and not yet opened as a pull request. All 40 kernels have their limits
+Status: one branch, proposed in #3615 and open as draft pull request #3720. All 40 kernels have their limits
 records, numeric contract tests and a planted control each; the quality suite has not been run on this build.
 
 ## Sources
