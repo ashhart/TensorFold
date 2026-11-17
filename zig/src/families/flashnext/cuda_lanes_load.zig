@@ -90,7 +90,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     _ = try own.engine.reserve(@max(@min(o.context, own.engine.chunk), if (o.slide) @as(usize, @import("cuda_train.zig").pack_rows) else 0));
     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and -0.4)
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
-        own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
+        own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir, e.widths);
         const drafts = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);
         own.depth = @max(1, @min(mtp.max_chain, drafts));
         const greedy = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS_GREEDY", mtp.default_depth_greedy);
