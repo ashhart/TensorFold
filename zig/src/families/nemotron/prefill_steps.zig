@@ -24,7 +24,7 @@ pub fn absorbed(at: usize, rows: usize, n: usize) usize {
 /// One chunk from `at` at today's cut (`flight.rows`), submitted on `b`; the row after it.
 pub fn chunk(b: anytype, ops: anytype, s: *Stream, at: usize, next: *usize) !usize {
     const rows = flight.rows(s, at, ops.cap(), ops.decision(s), next);
-    if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+    try flight.checkpoint(s);
     try ops.grow(s, at + rows);
     try flight.submit(b, s, ops.body(s, at, rows));
     const end = at + rows;
