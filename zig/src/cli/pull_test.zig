@@ -550,13 +550,10 @@ test "pull refuses cache mutation while rm holds the cache directory" {
     defer arena.deinit();
     const a = arena.allocator();
     const io = std.testing.io;
-    var fake = FakeHub.open() catch return error.SkipZigTest;
-    fake.start();
-    defer fake.stopServer();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
-    const env = try testEnv(a, try fake.endpoint(a));
+    const env = try testEnv(a, "http://127.0.0.1:1");
     const lease = try @import("sys").folder_lock.hold(a, root, true);
     defer lease.release();
     var out: std.Io.Writer.Allocating = .init(a);

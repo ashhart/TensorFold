@@ -34,6 +34,13 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     }
     const endpoint = envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
     const root = try hub.cacheDir(a, env, override);
+    const w = std.Io.Dir.cwd();
+    try w.createDirPath(io, root);
+    const mutation = @import("sys").folder_lock.hold(a, root, true) catch |e| {
+        try err_out.print("tensorfold pull: cache {s} is busy or cannot be locked ({t}); retry after other pulls or removals finish\n", .{ root, e });
+        return 1;
+    };
+    defer mutation.release();
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
 
@@ -83,13 +90,6 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const blobs_dir = try std.fs.path.join(a, &.{ repo_dir, "blobs" });
     const snapshot_dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", sha });
     const refs_dir = try std.fs.path.join(a, &.{ repo_dir, "refs" });
-    const w = std.Io.Dir.cwd();
-    try w.createDirPath(io, root);
-    const mutation = @import("sys").folder_lock.hold(a, root, true) catch |e| {
-        try err_out.print("tensorfold pull: cache {s} is busy or cannot be locked ({t}); retry after other pulls or removals finish\n", .{ root, e });
-        return 1;
-    };
-    defer mutation.release();
     for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
 
     var big: std.ArrayList(Big) = .empty;
