@@ -37,8 +37,10 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   attention layers, Full AttnRes residuals, a dense feed-forward in layer 0 and a 64-expert top-2 latent mixture of
   experts in the rest, one linear head for 10 codebooks of 4,098 logits a frame.
 - **Sampler and generation** (`sampler.zig`, `generation.zig`, on the host): the release's masks, repetition
-  penalty, temperature, top-k, top-p and min-p, its end-of-audio countdown and cold-start padding. Draws come from a
-  counter-based generator keyed by the request's seed, the frame and the codebook.
+  penalty, its end-of-audio countdown and cold-start padding, on fp32 logits. Each codebook's code is then drawn
+  by TensorFold's keyed sampler (`core/lanes/sampling.zig`: temperature, top-k, top-p and min-p in float64) among
+  the ids left unmasked, at position `frame * 10 + codebook` under the request's seed. Temperature 0 is its greedy
+  rule: the first maximum, ties to the lower id.
 - **Codec decoder** (`cuda/codec.zig`, `zonos3_codec.cu`): the `keep2_plain` decoder, the reference servers'
   default: code tables, the semantic head, five causal transformer stages from 15 Hz to 240 Hz, the ConvNeXt head,
   two centered iSTFTs, the FIR mixer and the 44,160 to 44,100 Hz resampler. It keeps its state between calls and
@@ -138,7 +140,11 @@ I have not yet found whether a reduction order or the padded rows explain it.
 
 ### Sampled speech
 
-The reference draws with PyTorch's generator, so sampled frames cannot match it. Two indirect checks:
+The reference draws with PyTorch's generator, so sampled frames cannot match it; a seeded draw is defined by
+TensorFold's keyed sampler instead. With it, the standalone tool gave byte-identical WAV files for one seeded
+request run twice, and Whisper transcribed that 4.9 s reply with no errors. The figures in the rest of this section
+and in the serving table below were measured before the sampler moved to the keyed one (commit 39a2864ef, the
+family's own seeded generator) and have not been repeated since. Two indirect checks:
 
 - **Repeatability:** the served route returns the same bytes for the same seed, and a streamed reply's bytes equal
   the whole reply's.
