@@ -17,7 +17,6 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) 
         if (asked.drafter) return error.SenseNovaDrafter;
         if (asked.slide) return error.SenseNovaLearning;
         if (asked.kv8 or asked.prompt_int8) return error.SenseNovaPrecision;
-        try @import("loop_weights.zig").preflight(gpa, io, dir, g);
         return false;
     }
     const head = present(gpa, io, dir);
@@ -64,10 +63,10 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.SenseNovaDrafter => "--drafter: SenseNova Loop supports plain decoding only",
         error.SenseNovaLearning => "SenseNova Loop does not support learning or training",
         error.SenseNovaRanks => "SenseNova Loop does not support pipeline stages or tensor-parallel ranks",
+        error.UnsupportedSenseNovaMhc => "SenseNova mHC requires 20 iterations, pre_scale 1 and fixed_identity false",
         error.SenseNovaPocket => "SenseNova Loop CUDA does not support learned pocket shards",
         error.SenseNovaMoe => "SenseNova Loop CUDA does not support MoE checkpoints",
         error.SenseNovaMtp => "SenseNova Loop CUDA does not support MTP layers",
-        error.SenseNovaFp32DtBias => "SenseNova Loop has FP32 dt_bias weights, but the Qwen CUDA path requires BF16; an FP32-compatible gate path is required",
         error.SenseNovaPrecision => "SenseNova Loop requires BF16 prompts and KV caches",
         error.BadLoops => "--loops: SenseNova Loop accepts a count from 1 to 4",
         error.BadLoopConfig => "invalid SenseNova Loop or mHC configuration",
