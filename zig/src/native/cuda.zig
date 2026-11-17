@@ -463,7 +463,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .startup = h.startup,
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
-        .decode_share = o.decode_share, // #3397's cure rides the flag or TENSORFOLD_PREFILL_SHARE; no engine default: the measured short-prompt cost must stay at zero
+        .decode_share = o.decode_share,
+        .default_decode_share = 0.25, // #3397: shares long fills only (past Share.default_arm_rows); short prompts keep main's cells
         .prompt_cache_capacity = cache_capacity,
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
         .logprobs = served.backend.vtable.first_row != null,
