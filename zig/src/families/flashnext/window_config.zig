@@ -9,6 +9,12 @@ pub const Settings = struct {
     ssd_experts: ?u64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    pub fn staggered(s: Settings) bool {
+        return s.ssd_experts == null and !s.ple_on_ssd and s.fsr_trace == null;
+    }
+    pub fn sibling(s: Settings, paired: bool) bool {
+        return s.staggered() or paired;
+    }
     pub fn validate(s: Settings, paired: bool) !void {
         if (paired and (s.ssd_experts != null or s.ple_on_ssd or s.fsr_trace != null)) return error.FsrNeedsSingleMetalDevice;
         if (s.capacity < trained or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
