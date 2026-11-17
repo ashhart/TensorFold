@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
+
 - Qwen3.8-27B on XPU: the target's and the DFlash2 drafter's RoPE tables come from core's exact helper, so they hold the reference's fp32 words; 15 of 32 and 18 of 64 values move by 1 ulp (#2000, part of #1852).
 
 - Tests: `zig build test-lane-explore-host` explores the lane host's schedules from a seed (arrivals, cancels at every stage, the backend's room for live lanes and memory pressure) around a fake target, so ordering bugs show up without hand-picked orders (#3233).
