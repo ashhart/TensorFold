@@ -1,4 +1,4 @@
-//! The int4 launches (fn_int4.cu): declarations for every kept instantiation, their compiler usage pending.
+//! The int4 launches (fn_int4.cu): every kept instantiation; nvcc 13.3's usage in pending_133.zig, 13.0 pending.
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
