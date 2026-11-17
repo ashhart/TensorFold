@@ -274,7 +274,8 @@ fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.
         const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
         const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
         const dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
-        if (idx.takesDecode(c.rows, np, (np + 63) / 64, dk, 0)) dscored += 1; // the latent table's default ps is 0
+        const nb = (sp.scoreColumns(c.pos, c.rows, np) + 63) / 64; // selectTokens' blocks
+        if (idx.takesDecode(c.rows, np, nb, dk, 0)) dscored += 1; // the latent table's default ps is 0
         var sa = try scratch(gpu, &bufs, c.rows, np);
         var sb = try scratch(gpu, &bufs, c.rows, np);
         sb.ls = try zeros(gpu, &bufs, sp.bitsBytes(c.rows, np));
