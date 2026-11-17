@@ -36,66 +36,106 @@ pub fn guide(conditional: *[cfg.head_rows]f32, unconditional: *const [cfg.head_r
 
 /// As generateWatched, each frame sampled from its logits mixed with those of `twin` on the engine's second lane.
 pub fn generateGuided(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32, replaced: anytype, twin: []const [W]i32, twin_replaced: anytype, scale: f32, sampling: sampler.Sampling, max_frames: usize, watch: anytype) !Result {
-    if (prompt.len == 0 or max_frames == 0) return error.NoRows;
-    const logits = try gpa.create([C][cfg.audio_vocab]f32);
-    defer gpa.destroy(logits);
-    const guided = twin.len != 0;
-    const unconditional: ?*[cfg.head_rows]f32 = if (guided) try gpa.create([cfg.head_rows]f32) else null;
-    defer if (unconditional) |u| gpa.destroy(u);
-    var rows: std.ArrayList([W]i32) = .empty;
-    errdefer rows.deinit(gpa);
-    var codes: std.ArrayList([C]i32) = .empty;
-    defer codes.deinit(gpa);
-    var has_audio_prefix = false;
-    for (prompt[prompt.len - 1][0..C]) |code| has_audio_prefix = has_audio_prefix or code != cfg.audio_pad_id;
-    try engine.run(prompt, replaced, null);
-    try engine.lastLogits(@ptrCast(logits));
-    if (unconditional) |u| {
-        engine.swap();
-        defer engine.swap();
-        try engine.run(twin, twin_replaced, null);
-        try engine.lastLogits(u);
-    }
-    var eos_frame: ?usize = null;
-    var countdown: usize = 0;
+    var run = try Run.begin(gpa, engine, prompt, replaced, twin, twin_replaced, scale, sampling, max_frames);
+    defer run.deinit();
     while (true) {
-        if (unconditional) |u| guide(@ptrCast(logits), u, scale);
-        const generated = rows.items.len;
-        var row = try sampler.sample(gpa, logits, codes.items, generated, cfg.eoa_id, sampling);
-        coldStart(&row, generated, has_audio_prefix);
-        try codes.append(gpa, row);
+        const finished = try run.sample();
+        if (@TypeOf(watch) != @TypeOf(null)) try watch.row(run.rows.items, run.eos_frame, finished);
+        if (finished) break;
+        try run.advance(engine);
+    }
+    return run.result();
+}
+
+/// A request in progress, a frame a turn; the caller puts the request's lane in use around `sample` and `advance`.
+pub const Run = struct {
+    gpa: std.mem.Allocator,
+    logits: *[C][cfg.audio_vocab]f32,
+    /// The twin's logits of a guided request: the prompt without its voice, on the lane engine.swap() exchanges.
+    unconditional: ?*[cfg.head_rows]f32,
+    scale: f32,
+    sampling: sampler.Sampling,
+    max_frames: usize,
+    has_audio_prefix: bool,
+    rows: std.ArrayList([W]i32) = .empty,
+    codes: std.ArrayList([C]i32) = .empty,
+    eos_frame: ?usize = null,
+    countdown: usize = 0,
+
+    /// Runs the prompt (and the twin's, when it has rows) and holds the first frame's logits.
+    pub fn begin(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32, replaced: anytype, twin: []const [W]i32, twin_replaced: anytype, scale: f32, sampling: sampler.Sampling, max_frames: usize) !Run {
+        if (prompt.len == 0 or max_frames == 0) return error.NoRows;
+        const logits = try gpa.create([C][cfg.audio_vocab]f32);
+        errdefer gpa.destroy(logits);
+        const unconditional: ?*[cfg.head_rows]f32 = if (twin.len != 0) try gpa.create([cfg.head_rows]f32) else null;
+        errdefer if (unconditional) |u| gpa.destroy(u);
+        var has_audio_prefix = false;
+        for (prompt[prompt.len - 1][0..C]) |code| has_audio_prefix = has_audio_prefix or code != cfg.audio_pad_id;
+        try engine.run(prompt, replaced, null);
+        try engine.lastLogits(@ptrCast(logits));
+        if (unconditional) |u| {
+            engine.swap();
+            defer engine.swap();
+            try engine.run(twin, twin_replaced, null);
+            try engine.lastLogits(u);
+        }
+        return .{ .gpa = gpa, .logits = logits, .unconditional = unconditional, .scale = scale, .sampling = sampling, .max_frames = max_frames, .has_audio_prefix = has_audio_prefix };
+    }
+
+    pub fn deinit(r: *Run) void {
+        r.rows.deinit(r.gpa);
+        r.codes.deinit(r.gpa);
+        if (r.unconditional) |u| r.gpa.destroy(u);
+        r.gpa.destroy(r.logits);
+    }
+
+    /// The next row, appended to `rows`; true when it is the request's last.
+    pub fn sample(r: *Run) !bool {
+        if (r.unconditional) |u| guide(@ptrCast(r.logits), u, r.scale);
+        const generated = r.rows.items.len;
+        var row = try sampler.sample(r.gpa, r.logits, r.codes.items, generated, cfg.eoa_id, r.sampling);
+        coldStart(&row, generated, r.has_audio_prefix);
+        try r.codes.append(r.gpa, row);
         var full: [W]i32 = undefined;
         full[0..C].* = row;
         full[C] = cfg.text_vocab;
-        try rows.append(gpa, full);
-        var finished = rows.items.len >= max_frames;
-        if (eos_frame == null) {
+        try r.rows.append(r.gpa, full);
+        var finished = r.rows.items.len >= r.max_frames;
+        if (r.eos_frame == null) {
             var last: ?usize = null;
             for (row, 0..) |code, cb| if (code == cfg.eoa_id) {
                 last = cb;
             };
             if (last) |cb| {
-                eos_frame = generated -| cb;
-                countdown = C + 1;
+                r.eos_frame = generated -| cb;
+                r.countdown = C + 1;
             }
         }
-        if (countdown > 0) {
-            countdown -= 1;
-            if (countdown == 0) finished = true;
+        if (r.countdown > 0) {
+            r.countdown -= 1;
+            if (r.countdown == 0) finished = true;
         }
-        if (@TypeOf(watch) != @TypeOf(null)) try watch.row(rows.items, eos_frame, finished);
-        if (finished) break;
-        try engine.run(rows.items[generated..], &.{}, null);
-        try engine.lastLogits(@ptrCast(logits));
-        if (unconditional) |u| {
+        return finished;
+    }
+
+    /// Runs the row `sample` appended, on the request's lane and its twin's, for the next frame's logits.
+    pub fn advance(r: *Run, engine: anytype) !void {
+        const last = r.rows.items[r.rows.items.len - 1 ..];
+        try engine.run(last, &.{}, null);
+        try engine.lastLogits(@ptrCast(r.logits));
+        if (r.unconditional) |u| {
             engine.swap();
             defer engine.swap();
-            try engine.run(rows.items[generated..], &.{}, null);
+            try engine.run(last, &.{}, null);
             try engine.lastLogits(u);
         }
     }
-    return .{ .rows = try rows.toOwnedSlice(gpa), .eos_frame = eos_frame };
-}
+
+    /// The generated rows (caller frees) and the end-of-audio frame; the run is spent.
+    pub fn result(r: *Run) !Result {
+        return .{ .rows = try r.rows.toOwnedSlice(r.gpa), .eos_frame = r.eos_frame };
+    }
+};
 
 test "generation: an end-of-audio code in codebook 0 ends the request eleven rows later" {
     const t = std.testing;
@@ -163,4 +203,45 @@ test "generation: a guided request runs each row on both lanes and samples the m
     const un: [cfg.head_rows]f32 = @splat(0.5);
     guide(&mixed, &un, 1.5);
     try t.expectEqual(@as(f32, 0.5 + 1.5 * 1.5), mixed[0]);
+}
+
+test "generation: two requests taking turns on one engine each draw what they draw alone" {
+    const t = std.testing;
+    // an engine whose logits depend on the lane in use and on how many rows that lane has run
+    const Fake = struct {
+        lane: usize = 0,
+        rows: [2]usize = .{ 0, 0 },
+        pub fn run(f: *@This(), rows: []const [W]i32, _: anytype, _: anytype) !void {
+            f.rows[f.lane] += rows.len;
+        }
+        pub fn swap(_: *@This()) void {}
+        pub fn lastLogits(f: *@This(), out: *[cfg.head_rows]f32) !void {
+            @memset(out, 0);
+            for (0..C) |cb| out[cb * cfg.audio_vocab + 100 + 10 * f.lane + (f.rows[f.lane] + cb) % 7] = 3;
+        }
+    };
+    const sampling: sampler.Sampling = .{ .temperature = 0, .repetition_penalty = 1 };
+    var prompt = [_][W]i32{ @splat(cfg.audio_pad_id), @splat(cfg.audio_pad_id), @splat(cfg.audio_pad_id) };
+    for (&prompt, 2..) |*row, text| row[C] = @intCast(text);
+    var alone: [2][][W]i32 = undefined;
+    for (&alone, 0..) |*rows, lane| {
+        var fake: Fake = .{ .lane = lane };
+        rows.* = (try generate(t.allocator, &fake, prompt[0 .. 2 + lane], @as([]const u8, &.{}), sampling, 5 + lane)).rows;
+    }
+    defer for (alone) |rows| t.allocator.free(rows);
+    var fake: Fake = .{};
+    var runs: [2]Run = undefined;
+    for (&runs, 0..) |*r, lane| {
+        fake.lane = lane;
+        r.* = try Run.begin(t.allocator, &fake, prompt[0 .. 2 + lane], @as([]const u8, &.{}), &.{}, @as([]const u8, &.{}), 1, sampling, 5 + lane);
+    }
+    defer for (&runs) |*r| r.deinit();
+    var done = [2]bool{ false, false };
+    while (!done[0] or !done[1]) for (&runs, 0..) |*r, lane| {
+        if (done[lane]) continue;
+        fake.lane = lane;
+        done[lane] = try r.sample();
+        if (!done[lane]) try r.advance(&fake);
+    };
+    for (runs, alone) |r, rows| try t.expectEqualSlices([W]i32, rows, r.rows.items);
 }

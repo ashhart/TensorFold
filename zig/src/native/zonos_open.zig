@@ -35,8 +35,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "ZONOS3 Mini is served without guidance: serve without --cfg";
         return null;
     }
-    if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and o.lanes != 1)) {
-        problem.* = "ZONOS3 Mini serves one request at a time on one CUDA device: use --parallel 1, without tensor parallelism";
+    const parallel: u32 = if (o.lanes_fixed) o.lanes else 1;
+    if (o.tp != 1 or o.rank != 0 or parallel == 0 or parallel > zonos_host.max_parallel) {
+        problem.* = "ZONOS3 Mini serves on one CUDA device, without tensor parallelism, 1 to 16 requests at once: use --parallel 1 through 16";
         return null;
     }
     if (o.silence.enabled()) {
@@ -69,7 +70,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     Room.io = io;
     var refusal: zonos_host.Refusal = .{};
     const admit: zonos_host.Admit = .{ .ptr = &Room.gpa, .room = Room.room };
-    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .admit = admit, .refusal = &refusal }) catch |e| {
+    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .parallel = parallel, .admit = admit, .refusal = &refusal }) catch |e| {
         if (e == error.InsufficientDeviceMemory) {
             const text = "ZONOS3 Mini needs {d:.2} GiB of device memory at --context {d}; {d:.2} GiB is free for it after the reserve";
             problem.* = try std.fmt.allocPrint(a, text, .{ memory.toGib(refusal.need), window, memory.toGib(refusal.room) });

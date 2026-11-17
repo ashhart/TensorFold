@@ -14,6 +14,7 @@ pub const Options = struct {
     context: u32 = 4096,
     device: u32 = 0,
     max_frames: ?u32 = null,
+    parallel: u32 = 1, // requests at once, taking turns a frame at a time
     admit: ?Admit = null, // null: nothing is asked, as the tool and tests load
     refusal: ?*Refusal = null,
 };
@@ -38,6 +39,14 @@ pub fn twinBytes(o: z3.Options) u64 {
 pub fn need(context: u32, frames: u32) u64 {
     return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
 }
+
+/// Device bytes each request at once past the first adds: a backbone lane and a decoder lane.
+pub fn laneBytes(context: u32, frames: u32) u64 {
+    return z3.Engine.laneBytes(.{ .max_ctx = context }) + z3.Codec.laneBytes(.{ .max_frames = frames });
+}
+
+/// Requests at once a server may ask for.
+pub const max_parallel = 16;
 
 const Door = struct {
     o: Options,
@@ -82,15 +91,24 @@ pub const Layout = struct {
 
 const Job = struct { id: api.Id, request: *const api.SpeechRequest, sink: api.Sink };
 
-/// The backbone under generation, stopped between rows when the request is cancelled or the host closes.
+/// A request's place among those running: its lanes on the backbone and the decoder, and its generation so far.
+const Slot = struct {
+    index: usize, // its backbone lane and its decoder lane
+    twin: ?usize = null, // the backbone lane of its guidance twin, made by its first guided request
+    job: ?Job = null,
+    cancelled: bool = false,
+    started: bool = false,
+    run: z3.generation.Run = undefined,
+    audio: Audio = undefined,
+    cloned: [][W]i32 = &.{}, // a clip's reference prefix and the request's rows
+};
+
+/// The backbone as one slot's generation sees it: its lane, and its twin's between swaps.
 const Guarded = struct {
     h: *Host,
+    slot: *Slot,
 
     pub fn run(g: Guarded, rows: []const [W]i32, replaced: []const z3.Replace, probe: ?z3.Probe) !void {
-        g.h.lock();
-        const stop = g.h.cancelled or g.h.closing;
-        g.h.unlock();
-        if (stop) return error.Cancelled;
         try g.h.e.run(rows, replaced, probe);
     }
 
@@ -99,7 +117,7 @@ const Guarded = struct {
     }
 
     pub fn swap(g: Guarded) void {
-        g.h.e.swap();
+        g.h.e.use(if (g.h.e.active == g.slot.index) g.slot.twin.? else g.slot.index);
     }
 };
 
@@ -150,8 +168,7 @@ const Host = struct {
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
     worker: ?std.Thread = null,
-    job: ?Job = null,
-    cancelled: bool = false,
+    slots: []Slot,
     closing: bool = false,
     failed: bool = false,
 
@@ -215,10 +232,13 @@ const Host = struct {
         h.lock();
         defer h.unlock();
         if (h.closing or h.failed) return error.Closed;
-        if (h.job != null) return error.Busy;
+        const slot = for (h.slots) |*s| {
+            if (s.job == null) break s;
+        } else return error.Busy;
         r.result.* = .{};
-        h.job = .{ .id = id, .request = r, .sink = sink };
-        h.cancelled = false;
+        slot.job = .{ .id = id, .request = r, .sink = sink };
+        slot.cancelled = false;
+        slot.started = false;
         h.wake.signal(h.io);
     }
 
@@ -226,8 +246,8 @@ const Host = struct {
         const h = self(p);
         h.lock();
         defer h.unlock();
-        if (h.job) |j| if (j.id == id) {
-            h.cancelled = true;
+        for (h.slots) |*s| if (s.job) |j| if (j.id == id) {
+            s.cancelled = true;
         };
     }
 
@@ -236,7 +256,7 @@ const Host = struct {
         h.lock();
         defer h.unlock();
         out.* = .{};
-        if (h.job != null) out.running = 1;
+        for (h.slots) |s| out.running += @intFromBool(s.job != null);
     }
 
     fn memory(_: *anyopaque, reset_peak: bool) ?api.Memory {
@@ -244,11 +264,14 @@ const Host = struct {
         return .{ .active = u.device, .pinned = u.host, .peak = u.peak };
     }
 
+    /// The worker: every request in progress takes a turn, a frame each, until none is left.
     fn run(h: *Host) void {
         const current = if (h.e.ctx.makeCurrent()) |_| true else |_| false;
         while (true) {
             h.lock();
-            const job = h.job orelse {
+            var waiting = false;
+            for (h.slots) |s| waiting = waiting or s.job != null;
+            if (!waiting) {
                 if (h.closing) {
                     h.unlock();
                     return;
@@ -256,45 +279,58 @@ const Host = struct {
                 h.wake.waitUncancelable(h.io, &h.mutex);
                 h.unlock();
                 continue;
-            };
-            const dead = h.failed or !current;
-            h.unlock();
-            if (dead) {
-                h.finish(job, .failed, 0, "speech engine closed after execution failure");
-                continue;
             }
-            var samples: usize = 0;
-            const reason = h.serve(job, &samples) catch |err| switch (err) {
-                error.Cancelled => api.Reason.cancelled,
-                // refused before anything ran on the device: the engine is as it was
-                error.ClipEncoderNeedsMoreDeviceMemory => {
-                    h.finish(job, .failed, 0, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free");
-                    continue;
-                },
-                error.GuidanceNeedsMoreDeviceMemory => {
-                    h.finish(job, .failed, 0, "speaker guidance needs device memory for a second stream's state, and less than that is free");
-                    continue;
-                },
-                else => {
-                    h.lock();
-                    h.failed = true;
-                    h.unlock();
-                    h.e.stream.synchronize() catch {};
-                    h.finish(job, .failed, 0, @errorName(err));
-                    continue;
-                },
-            };
-            h.finish(job, reason, samples, "");
+            h.unlock();
+            for (h.slots) |*slot| h.turn(slot, current);
         }
     }
 
-    /// One request: its prompt rows, then frames to the end of audio or the budget, their audio into its buffer.
-    fn serve(h: *Host, job: Job, samples: *usize) !api.Reason {
+    /// One slot's turn: a new request's prompt, or one more frame of a running one; its end goes to its sink.
+    fn turn(h: *Host, slot: *Slot, current: bool) void {
+        h.lock();
+        const job = slot.job orelse return h.unlock();
+        const dead = h.failed or !current;
+        const stop = slot.cancelled or h.closing;
+        h.unlock();
+        if (dead) return h.finish(slot, job, .failed, "speech engine closed after execution failure");
+        if (stop) return h.finish(slot, job, .cancelled, "");
+        h.e.use(slot.index);
+        h.codec.use(slot.index);
+        const reason = h.step(slot, job) catch |err| switch (err) {
+            // refused before anything ran on the device: the engine is as it was
+            error.ClipEncoderNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free"),
+            error.GuidanceNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "speaker guidance needs device memory for a second stream's state, and less than that is free"),
+            else => {
+                h.lock();
+                h.failed = true;
+                h.unlock();
+                h.e.stream.synchronize() catch {};
+                return h.finish(slot, job, .failed, @errorName(err));
+            },
+        } orelse return;
+        h.finish(slot, job, reason, "");
+    }
+
+    /// The request's prompt rows on its first turn, then a frame a turn; its reason once its last frame is spoken.
+    fn step(h: *Host, slot: *Slot, job: Job) !?api.Reason {
+        if (!slot.started) {
+            try h.start(slot, job);
+            return null;
+        }
+        const finished = try slot.run.sample();
+        try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
+        if (!finished) {
+            try slot.run.advance(Guarded{ .h = h, .slot = slot });
+            return null;
+        }
+        return if (slot.run.eos_frame != null) .stop else .length;
+    }
+
+    /// A request's first turn: its clip encoded, its lanes zeroed, its prompt rows (and its twin's) run.
+    fn start(h: *Host, slot: *Slot, job: Job) !void {
         const r = job.request;
         const gpa = h.gpa;
         var rows = r.frames;
-        var cloned: [][W]i32 = &.{};
-        defer gpa.free(cloned);
         if (r.reference_audio.len != 0) {
             if (h.clip == null) {
                 if (h.admit) |a| if (clip_bytes > try a.room(a.ptr, &h.e.ctx)) return error.ClipEncoderNeedsMoreDeviceMemory;
@@ -308,10 +344,10 @@ const Host = struct {
             defer gpa.free(codes);
             const prefix = try z3.prompt.referenceRows(gpa, codes);
             defer gpa.free(prefix);
-            cloned = try gpa.alloc([W]i32, prefix.len + r.frames.len);
-            @memcpy(cloned[0..prefix.len], prefix);
-            @memcpy(cloned[prefix.len..], r.frames);
-            rows = cloned;
+            slot.cloned = try gpa.alloc([W]i32, prefix.len + r.frames.len);
+            @memcpy(slot.cloned[0..prefix.len], prefix);
+            @memcpy(slot.cloned[prefix.len..], r.frames);
+            rows = slot.cloned;
         }
         const layout = try Layout.of(rows);
         var replaced: [1 + cfg.conditions]z3.Replace = undefined;
@@ -333,25 +369,32 @@ const Host = struct {
         }
         // speaker_cfg_twin: the prompt without its reference prefix or speaker row, every condition unknown
         const twin: []const [W]i32 = if (r.cfg_gamma != 1) rows[layout.condition_row..] else &.{};
-        if (twin.len != 0 and h.e.other == null) {
-            if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, &h.e.ctx)) return error.GuidanceNeedsMoreDeviceMemory;
-            try h.e.twin();
+        if (twin.len != 0) {
+            if (slot.twin == null) {
+                if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, &h.e.ctx)) return error.GuidanceNeedsMoreDeviceMemory;
+                slot.twin = try h.e.addLane();
+            }
+            h.e.use(slot.twin.?);
+            try h.e.reset();
+            h.e.use(slot.index);
         }
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
         try h.codec.reset();
-        var audio: Audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
-        const made = try z3.generation.generateGuided(gpa, Guarded{ .h = h }, rows, @as([]const z3.Replace, replaced[0..n]), twin, @as([]const z3.Replace, &unknown), r.cfg_gamma, sampling, r.max_frames, &audio);
-        defer gpa.free(made.rows);
-        samples.* = audio.samples;
-        return if (made.eos_frame != null) .stop else .length;
+        slot.audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
+        slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, @as([]const z3.Replace, &unknown), r.cfg_gamma, sampling, r.max_frames);
+        slot.started = true;
     }
 
-    fn finish(h: *Host, job: Job, reason: api.Reason, samples: usize, message: []const u8) void {
+    fn finish(h: *Host, slot: *Slot, job: Job, reason: api.Reason, message: []const u8) void {
+        if (slot.started) slot.run.deinit();
+        h.gpa.free(slot.cloned);
         h.lock();
-        if (reason == .stop or reason == .length) job.request.result.samples = samples;
+        if (reason == .stop or reason == .length) job.request.result.samples = slot.audio.samples;
         job.request.result.reason = reason;
-        h.job = null;
+        slot.cloned = &.{};
+        slot.started = false;
+        slot.job = null;
         h.unlock();
         job.sink.event(job.sink.ctx, job.id, &.{ .finished = .{ .reason = reason, .message = message } });
     }
@@ -375,6 +418,7 @@ const Host = struct {
         h.e.destroy();
         h.rel.deinit();
         h.gpa.free(h.dir);
+        h.gpa.free(h.slots);
         h.gpa.destroy(h);
     }
 };
@@ -386,12 +430,20 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     errdefer gpa.destroy(h);
     var rel = try z3.release.open(gpa, io, dir, null);
     errdefer rel.deinit();
-    var door: Door = .{ .o = o, .need = need(o.context, b.frames) };
+    if (o.parallel == 0 or o.parallel > max_parallel) return error.BadZonosParallel;
+    var door: Door = .{ .o = o, .need = need(o.context, b.frames) + (o.parallel - 1) * laneBytes(o.context, b.frames) };
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check } });
     errdefer e.destroy();
     const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
     errdefer codec.destroy();
+    for (1..o.parallel) |_| {
+        _ = try e.addLane();
+        _ = try codec.addLane();
+    }
     if (cuda.usage(false).device > door.need) return error.LoadOverItsAdmission;
+    const slots = try gpa.alloc(Slot, o.parallel);
+    errdefer gpa.free(slots);
+    for (slots, 0..) |*slot, i| slot.* = .{ .index = i };
     const kept = try gpa.dupe(u8, dir);
     errdefer gpa.free(kept);
     h.* = .{
@@ -401,11 +453,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         .rel = rel,
         .e = e,
         .codec = codec,
+        .slots = slots,
         .admit = o.admit,
         .info_ = .{
             .name = "ZONOS3 Mini",
             .text_generation = false,
-            .lanes = 1,
+            .lanes = o.parallel,
             .context_window = o.context,
             .plain_only = true,
             .prompt_cache = false,
@@ -414,7 +467,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     const held = cuda.usage(false).device;
-    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, held, door.need });
+    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} at once, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, o.parallel, held, door.need });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 
@@ -456,6 +509,13 @@ test "Layout: the condition rows sit before the text and the silence rows after 
     try t.expectEqual(p.condition_row, l.condition_row);
     try t.expectEqual(@as(usize, 3), l.prefill);
     try t.expectError(error.BadPromptLayout, Layout.of(p.rows[0..3]));
+}
+
+test "laneBytes: each request at once past the first adds a backbone lane and a decoder lane, no weights" {
+    const t = std.testing;
+    try t.expectEqual(@as(u64, 1_236_862_976), laneBytes(4096, 2000));
+    try t.expectEqual(@as(u64, 10_913_792), laneBytes(4096, 2000) - z3.Codec.laneBytes(.{ .max_frames = 2000 }));
+    try t.expect(laneBytes(4096, 1000) < laneBytes(4096, 2000));
 }
 
 test "twinBytes: a guided request's second stream is the caches and recurrent state again, no weights" {

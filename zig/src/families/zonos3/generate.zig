@@ -190,7 +190,9 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
     if (std.Io.Dir.cwd().access(io, twin_path, .{})) |_| {
         scale = try loadBranch(gpa, io, e, dir, "twin_ids", &twin, &twin_replaced);
         try e.twin();
+        e.swap();
         try e.reset();
+        e.swap();
     } else |_| {}
     const t0 = nowNs(io);
     const r = try z3.generation.generateGuided(gpa, e, prompt, replaced, twin, twin_replaced.items, scale, .{ .temperature = 0 }, max_frames, null);
