@@ -115,6 +115,14 @@ inline void dsv41_frag_put(thread const frag<float> &f, device ushort *p, int ld
   for (short e = 0; e < 8; e++) q[(e >> 2) * 8 * ld + TF_COL(e)] = dsv41_round(f[e]);
 }
 
+#ifndef TF_SIMD_FRAGS
+// frag_get from device memory in two 8-byte loads: (c + home.x) * 2 and ld * 2 must be multiples of 8.
+inline void dsv41_frag_get4(thread frag<bfloat> &f, const device bfloat *p, int ld, int c, short2 home) {
+  const device bfloat *q = p + home.y * ld + (c + home.x);
+  f = frag<bfloat>(*(const device bfloat4 *)q, *(const device bfloat4 *)(q + 8 * ld));
+}
+#endif
+
 
 // Dense KV: each visible key decoded once per layer, so attention reads bf16 instead of unpacking per row.
 struct DenseKv { uint rows, width, stride, first_row, source; };
@@ -165,6 +173,12 @@ inline bfloat4 dsv41_dense4_off(int enc, uint off, device const ushort *dense, u
   return *(const device bfloat4 *)(dense + ulong(off) + d);
 }
 
+// The tensor path's form of it: a missing key's offset is all ones, so no slot code stays in registers a fragment.
+inline bfloat4 dsv41_dense4_at(uint off, device const ushort *dense, uint d) {
+  if (off == ~0u) return bfloat4(float4(0.0f));
+  return *(const device bfloat4 *)(dense + ulong(off) + d);
+}
+
 inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, uint d) {
   if (enc < 0) return bfloat(0);
   return as_type<bfloat>(dense[ulong(off) + d]);
@@ -191,8 +205,10 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   // this simdgroup's 128 dims of its 16 heads' queries
   const device bfloat *qb = reinterpret_cast<device const bfloat *>(q + ulong(row) * p.q_stride + ulong(h0) * RANK + uint(d0));
   frag<bfloat> qf[8];
+#ifdef TF_SIMD_FRAGS
   TF_UNROLL
   for (short t = 0; t < 8; t++) frag_get(qf[t], qb, RANK, 0, 16 * t, home);
+#endif
   frag<float> acc[4][2];
   float m[2], l[2];
   TF_UNROLL
@@ -210,20 +226,22 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
     if (s == 0 && lane < uint(BLOCK)) {
       const int enc = j0 + lane < j_end ? dsv41_slot_at(p, row, query, columns, j0 + lane, indices) : -1;
       keyrow[lane] = enc;
-      keyoff[lane] = enc < 0 ? 0u : uint(dsv41_dense_row(enc, p) * p.width);
+      keyoff[lane] = enc < 0 ? ~0u : uint(dsv41_dense_row(enc, p) * p.width);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // scores: this simdgroup's 128 dims of the block's 32 keys
     frag<float> lo_s = frag<float>(0), hi_s = frag<float>(0);
 #ifndef TF_SIMD_FRAGS
-    frag<bfloat> kf0[8], kf1[8];
+    frag<bfloat> kf0[8], kf1[8]; // the query fragments reload each block: its 32 registers stay free for the scan
+    TF_UNROLL
+    for (short t = 0; t < 8; t++) dsv41_frag_get4(qf[t], qb, RANK, 16 * t, home);
     TF_UNROLL
     for (short t = 0; t < 8; t++) {
       const uint d = uint(d0) + 16u * uint(t) + uint(home.x);
-      const bfloat4 a = dsv41_dense4_off(keyrow[home.y], keyoff[home.y], dense, d);
-      const bfloat4 b = dsv41_dense4_off(keyrow[short(home.y + 8)], keyoff[short(home.y + 8)], dense, d);
-      const bfloat4 c = dsv41_dense4_off(keyrow[short(16 + home.y)], keyoff[short(16 + home.y)], dense, d);
-      const bfloat4 e = dsv41_dense4_off(keyrow[short(24 + home.y)], keyoff[short(24 + home.y)], dense, d);
+      const bfloat4 a = dsv41_dense4_at(keyoff[home.y], dense, d);
+      const bfloat4 b = dsv41_dense4_at(keyoff[short(home.y + 8)], dense, d);
+      const bfloat4 c = dsv41_dense4_at(keyoff[short(16 + home.y)], dense, d);
+      const bfloat4 e = dsv41_dense4_at(keyoff[short(24 + home.y)], dense, d);
       kf0[t] = frag<bfloat>(a, b);
       kf1[t] = frag<bfloat>(c, e);
       mma_16x32<false, true>(lo_s, hi_s, qf[t], kf0[t], kf1[t]);
@@ -329,6 +347,14 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   }
   // The source adds sink mass to the completed online denominator before the division; every store is dsv41_round.
   device ushort *obase = out + ulong(row) * p.q_stride + ulong(h0) * RANK + uint(d0);
+  float denom[2], inv[2];
+  TF_UNROLL
+  for (short h = 0; h < 2; h++) {
+    denom[h] = l[h] + fast::exp(sink[ulong(h0) + uint(home.y) + 8u * uint(h)] - m[h]);
+    inv[h] = 1.0f / denom[h];
+  }
+  // The quotient as the reciprocal product plus one fma-corrected residual: the division's rounded value, within range.
+  uint worst = 0u; // the largest (|acc| bits - 2^-60's), unsigned: a zero, a huge, an Inf or a NaN lands above the span
   TF_UNROLL
   for (short c = 0; c < 4; c++) {
     TF_UNROLL
@@ -337,8 +363,25 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
         const short h = e >> 2;
-        const float denom = l[h] + fast::exp(sink[ulong(h0) + uint(home.y) + 8u * uint(h)] - m[h]);
-        o[e] = denom == 0.0f ? 0.0f : o[e] / denom;
+        const float x = o[e], q0 = x * inv[h];
+        worst = max(worst, (as_type<uint>(x) & 0x7fffffffu) - 0x21800000u);
+        o[e] = fma(fma(-q0, denom[h], x), inv[h], q0);
+      }
+      dsv41_frag_put(o, obase, RANK, 0, 32 * c + 16 * j, home);
+    }
+  }
+  const bool ranged = worst < 0x3c000000u && denom[0] >= 0x1p-10f && denom[0] <= 0x1p20f && denom[1] >= 0x1p-10f && denom[1] <= 0x1p20f;
+  if (simd_all(ranged)) return;
+  // Outside the range the plain division rewrites every store.
+  TF_UNROLL
+  for (short c = 0; c < 4; c++) {
+    TF_UNROLL
+    for (short j = 0; j < 2; j++) {
+      frag<float> o = acc[c][j];
+      TF_UNROLL
+      for (short e = 0; e < 8; e++) {
+        const short h = e >> 2;
+        o[e] = denom[h] == 0.0f ? 0.0f : o[e] / denom[h];
       }
       dsv41_frag_put(o, obase, RANK, 0, 32 * c + 16 * j, home);
     }
