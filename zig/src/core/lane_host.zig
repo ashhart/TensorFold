@@ -107,8 +107,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        // --decode-share: the flag wins; the env beats a default and never opts into the cap; the budget survives.
-        var share: fill.Share = .withDecode(info_.decode_share);
+        var share: fill.Share = .withDecode(info_.decode_share); // flag first; the env beats a default, uncapped
         var decode_cap = info_.decode_share != null;
         if (info_.decode_share == null) if (info_.default_decode_share) |default| if (share.p >= 1) { // the env unset: the default arms
             share.p = fill.Share.fromDecode(default).p;
