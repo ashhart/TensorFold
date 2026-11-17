@@ -127,6 +127,13 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.lanes.fits(prompt, max_tokens);
 }
 
+/// The pages a request needs a class (#2444 C1): all from one owner class, which its reservation chooses.
+pub fn kvNeed(p: *anyopaque, prompt: u32, max_tokens: u32) @import("engine_api").kv_ledger.classes.Need {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const pages = own.e.pages orelse return .{ .one = .{ .n = 0 } };
+    return .{ .one = .{ .n = pages_mod.need(pages.layout, prompt, max_tokens) } };
+}
+
 /// The page pool the load ledger watches: rank 0's, the one that takes and gives pages for every rank.
 pub fn kvPool(p: *anyopaque) ?kv.Source {
     const own: *Owned = @ptrCast(@alignCast(p));

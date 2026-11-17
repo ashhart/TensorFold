@@ -1,6 +1,7 @@
 //! The lane host's KV ledger: a job promises its caches' bytes as it leaves the queue and returns them as it ends.
 const std = @import("std");
 const kv = @import("kv_ledger.zig");
+const classes = kv.classes;
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
@@ -29,7 +30,12 @@ pub fn count(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
                 .available = p.available(),
                 .reclaimable = p.reclaimable(),
                 .unit = p.unit(),
+                .classes = if (@hasField(P, "classes")) p.classes else 1,
             };
+        }
+        fn class(ctx: *const anyopaque, c: u32) kv.Class {
+            const p: *const P = @ptrCast(@alignCast(ctx));
+            return .{ .cap = p.classCap(), .available = p.availableIn(c) };
         }
         fn detach(ctx: *anyopaque) void {
             const p: *P = @ptrCast(@alignCast(ctx));
@@ -37,7 +43,8 @@ pub fn count(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
             p.host = null;
         }
     };
-    h.kv = .ofPages(.{ .ctx = pool, .read = view.read, .detach = view.detach });
+    const by: ?*const fn (*const anyopaque, u32) kv.Class = if (@hasField(P, "classes") and pool.classes > 1) view.class else null;
+    h.kv = .ofPages(.{ .ctx = pool, .read = view.read, .detach = view.detach, .class = by });
     pool.ledger = .{ .ctx = &h.kv.?, .want = kv.Ledger.wantOf };
     pool.host = h;
 }
@@ -87,9 +94,25 @@ pub fn outstanding(h: *const LaneHost) bool {
     return !h.kv.?.idle();
 }
 
-/// Whether `job` alone exceeds the whole budget: with nothing else promised it would wait forever.
-pub fn never(h: *const LaneHost, job: *const Job) bool {
-    return priced(h) and !outstanding(h) and !fits(h, job);
+/// Why `job` would wait forever: past the whole budget alone, or past a whole owner class even while others run.
+pub fn never(h: *const LaneHost, job: *const Job) ?[]const u8 {
+    if (priced(h) and !outstanding(h) and !fits(h, job)) return too_big;
+    const d = need(h, job) orelse return null;
+    return if (classes.neverNeed(&h.kv.?, d) != null) too_big_class else null;
+}
+
+/// The pages `job` needs a class (Admit.need), when the family names them and its pool counts here (else null).
+pub fn need(h: *const LaneHost, job: *const Job) ?classes.Need {
+    const a = h.info_.admit orelse return null;
+    const f = a.need orelse return null;
+    if (h.kv == null or h.kv.?.pool == null) return null;
+    return f(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
+}
+
+/// Whether `job`'s pages fit now in each class it takes from (true without Admit.need); the caller holds the lock.
+pub fn fitsClasses(h: *const LaneHost, job: *const Job) bool {
+    const d = need(h, job) orelse return true;
+    return classes.fitsNeed(&h.kv.?, d);
 }
 
 /// At stop every job has ended: bytes still promised mean a lease that never came back.
@@ -99,4 +122,5 @@ pub fn checkIdle(h: *const LaneHost) void {
     if (l.bound > 0) std.log.warn("kv ledger: {d} standing streams still held at stop", .{l.bound}); // never the lease itself
 }
 
+pub const too_big_class = "this request's pages exceed one whole KV owner class (TF_GLM_KV_SPLIT): lower max_tokens or --context";
 pub const too_big = "this request's caches exceed the whole KV budget with nothing else running: lower max_tokens or --context";

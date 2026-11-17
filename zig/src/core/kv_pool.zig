@@ -210,10 +210,10 @@ pub const Table = struct {
 pub const Reclaim = @import("kv_reclaim.zig").Reclaim;
 pub const Reclaims = @import("kv_reclaim.zig").Chain;
 
-/// The lane host's ledger (core/kv_ledger.zig) that admits this pool's promises: the available pages `n` more need.
+/// The lane host's ledger (kv_ledger.zig): the available pages (the pool's, or class c's) at which `n` more fit.
 pub const Gate = struct {
     ctx: *const anyopaque,
-    want: *const fn (ctx: *const anyopaque, n: usize) usize,
+    want: *const fn (ctx: *const anyopaque, class: ?u32, n: usize) usize,
 };
 
 /// Called after each outermost change to the pool's counts, on the thread that made it.
@@ -302,6 +302,7 @@ pub const Pool = struct {
     pub const availableIn = owners.availableIn;
     pub const roomiest = owners.roomiest;
     pub const fitsAny = owners.fitsAny;
+    pub const reserve = owners.reserve;
 
     /// Pages the store alone holds whose readers are done: evicting its idle leaves frees them now.
     pub fn reclaimable(p: *const Pool) usize {
@@ -310,13 +311,13 @@ pub const Pool = struct {
 
     /// Whether `need` pages could be promised now, the store's idle pages counted.
     pub fn fits(p: *const Pool, need: usize) bool {
-        return p.available() + p.reclaimable() >= p.want(need);
+        return p.available() + p.reclaimable() >= p.want(null, need);
     }
 
-    /// The available pages at which `n` more fit: the ledger's answer, or `n` on the pool's own pages.
-    fn want(p: *const Pool, n: usize) usize {
+    /// The available pages (the pool's, or class c's) at which `n` more fit: the ledger's answer, or `n` on its own.
+    fn want(p: *const Pool, c: ?u32, n: usize) usize {
         const g = p.ledger orelse return n;
-        return g.want(g.ctx, n);
+        return g.want(g.ctx, c, n);
     }
 
     /// A page's bytes as a ledger counts them: one at least, so a pool of empty pages still counts its pages.
@@ -386,8 +387,7 @@ pub const Pool = struct {
         p.enter();
         defer p.leave();
         p.reclaimFor(n);
-        if (p.available() < p.want(n)) return error.LaneMemory;
-        if (p.classes > 1 and p.availableIn(l.owner) < n) return error.LaneMemory; // its class lacks them
+        if (p.availableIn(l.owner) < p.want(l.owner, n)) return error.LaneMemory; // its class's test, bytes inside it
         p.promised += n; // a sub-count of the ledger's: it passed the ledger's test above, never a second one
         p.cpromised[l.owner] += n;
         l.promised += n;
@@ -398,9 +398,8 @@ pub const Pool = struct {
         p.enter();
         defer p.leave();
         p.reclaimFor(out.len);
-        if (p.available() < p.want(out.len)) return false;
         const c = p.roomiest(); // above one class: all from one, as a lease's
-        if (p.classes > 1 and p.availableIn(c) < out.len) return false;
+        if (p.availableIn(c) < p.want(c, out.len)) return false;
         for (out) |*id| {
             id.* = owners.pop(p, c);
             p.ownership(id.*, 1, 0);
@@ -423,8 +422,8 @@ pub const Pool = struct {
     fn reclaimFor(p: *Pool, n: usize) void {
         const chain = p.reclaims; // a store that leaves while asked does not shift the walk
         for (chain.hooks()) |r| {
-            if (p.available() >= p.want(n)) return;
-            _ = r.call(r.ctx, p.want(n));
+            if (p.available() >= p.want(null, n)) return;
+            _ = r.call(r.ctx, p.want(null, n));
         }
     }
 

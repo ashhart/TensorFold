@@ -52,6 +52,19 @@ pub fn fitsAny(p: *const Pool, need: usize) bool {
     return p.fits(need) and (p.classes == 1 or availableIn(p, roomiest(p)) >= need);
 }
 
+/// `l`'s owner chosen once, then `n` promised: its held class, else `in` (a resume's), else the roomiest.
+pub fn reserve(p: *Pool, l: *kv.Lease, n: usize, in: ?u32) error{ LaneMemory, BadClass }!void {
+    const was = l.owner;
+    const held = l.promised > 0 or l.ids.items.len > 0;
+    const c = if (held) was else in orelse roomiest(p);
+    if (c >= p.classes or (held and in != null and in.? != was)) return error.BadClass;
+    l.owner = c;
+    p.promise(l, n) catch |e| {
+        l.owner = was;
+        return e;
+    };
+}
+
 /// A free id back on its class's stack.
 pub fn push(p: *Pool, id: u32) void {
     const c = id % p.classes;

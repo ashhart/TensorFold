@@ -377,11 +377,11 @@ pub const LaneHost = struct {
             h.unlock();
             return .none;
         };
-        if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
+        if (ledger.never(h, h.queued.items[at])) |why| { // past the budget alone or a class: no release makes it fit
             const job = h.queued.orderedRemove(at);
             h.load.failures[@backingInt(load.Failure.prompt_too_large)] += 1;
             h.unlock();
-            h.finish(job, .failed, ledger.too_big);
+            h.finish(job, .failed, why);
             return .failed;
         }
         if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
