@@ -26,7 +26,8 @@ fn counted(p: *kv.Pool, l: *Ledger) void {
             q.ledger = null;
         }
     };
-    l.* = .ofPages(.{ .ctx = p, .read = view.read, .detach = view.detach, .class = if (p.classes > 1) view.class else null });
+    const by: ?*const fn (*const anyopaque, u32) lg.Class = if (p.classes > 1) view.class else null;
+    l.* = Ledger.ofPages(.{ .ctx = p, .read = view.read, .detach = view.detach, .class = by }) catch unreachable;
     p.ledger = .{ .ctx = l, .want = Ledger.wantOf };
 }
 
@@ -266,4 +267,44 @@ test "kv classes 6: one class counted in a ledger hands out #2415's pages, count
     try walk(&out);
     try equal(@as(usize, 150001), out.items.len);
     try equal(@as(u64, 0xf005c622d55ebd68), std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(out.items))); // af17f6c8fc
+}
+
+test "kv classes: a failed reservation notifies once, with the owner already restored" {
+    var p: kv.Pool = undefined;
+    var l: Ledger = undefined;
+    var hold: [2]kv.Lease = .{ .{}, .{} };
+    try twoClasses(&p, &l, &hold, 3, 5);
+    defer p.deinit();
+    defer for (&hold) |*x| p.finish(x);
+    var x: kv.Lease = .{};
+    const Seen = struct {
+        x: *const kv.Lease,
+        owners: [4]u32 = @splat(9),
+        n: usize = 0,
+        fn call(ctx: *anyopaque, _: *const kv.Pool) void {
+            const s: *@This() = @ptrCast(@alignCast(ctx));
+            s.owners[s.n] = s.x.owner;
+            s.n += 1;
+        }
+    };
+    var seen: Seen = .{ .x = &x };
+    p.notify = .{ .ctx = &seen, .call = Seen.call };
+    defer p.notify = null;
+    try std.testing.expectError(error.LaneMemory, p.reserve(&x, 6, 1));
+    try equal(@as(usize, 1), seen.n);
+    try equal(@as(u32, 0), seen.owners[0]); // the owner it had, never the class it failed in
+}
+
+test "kv classes: two classes without the class hook are refused at load, a class the pool lacks never fits" {
+    var p: kv.Pool = undefined;
+    var l: Ledger = undefined;
+    var hold: [2]kv.Lease = .{ .{}, .{} };
+    try twoClasses(&p, &l, &hold, 8, 8);
+    defer p.deinit();
+    var c = l.pool.?;
+    c.class = null; // whole-pool counts would pass one(9) on two classes of 8
+    try std.testing.expectError(error.NoClassHook, Ledger.ofPages(c));
+    const in2: Need = .{ .one = .{ .n = 1, .in = 2 } }; // a resume's class past the pool's two
+    try expect(!classes.fitsNeed(&l, in2));
+    try equal(@as(?u32, 2), classes.neverNeed(&l, in2));
 }
