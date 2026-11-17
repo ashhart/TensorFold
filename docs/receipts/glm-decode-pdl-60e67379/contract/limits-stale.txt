@@ -1,6 +1,6 @@
 # kernel-contract-limits on five-SM fatbins (sm_80,86,89,120,121), nvcc 13.3 (V13.3.73); a problem is a record that differs from the measured usage (stale)
 main 3f1290ffe7: FAIL kernel-contract-limits: 834 problems
-branch (1240c1908f): FAIL kernel-contract-limits: 832 problems
+branch (with its qmmf cluster tile record commit): FAIL kernel-contract-limits: 832 problems
 stale on the branch only:
 stale on main only:
 sm_120|df_sumn
