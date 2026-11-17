@@ -1,4 +1,4 @@
-//! codec.pth read without Python: the zip's stored members and a pickle VM limited to weights_only's allow-list.
+//! torch.save checkpoints read without Python: stored zip members and a pickle VM limited to weights_only's allow-list.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -36,7 +36,10 @@ pub const Tensor = struct {
     stride: []const u64,
 };
 
-const Member = struct { local: u64, size: u64, crc: u32 };
+const zip = @import("torch_zip.zig");
+const Member = zip.Member;
+const readMember = zip.readMember;
+const readDirectory = zip.readDirectory;
 
 pub const Archive = struct {
     arena: std.heap.ArenaAllocator,
@@ -48,6 +51,15 @@ pub const Archive = struct {
     prefix: []const u8,
 
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8) !Archive {
+        return openAs(gpa, io, path, false);
+    }
+
+    /// A root dict nesting state dicts beside plain values: tensors are named by their keys joined with '/'.
+    pub fn openNested(gpa: Allocator, io: std.Io, path: []const u8) !Archive {
+        return openAs(gpa, io, path, true);
+    }
+
+    fn openAs(gpa: Allocator, io: std.Io, path: []const u8, nested: bool) !Archive {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
@@ -74,7 +86,7 @@ pub const Archive = struct {
         if (pm.size > 64 << 20) return error.BadArchive;
         const pickle = try a.alloc(u8, @intCast(pm.size));
         try readMember(io, file, pm, pickle);
-        const tensors = try unpickle(a, pickle);
+        const tensors = try unpickle(a, pickle, nested);
         return .{ .arena = arena, .io = io, .file = file, .members = members, .tensors = tensors, .prefix = prefix };
     }
 
@@ -89,6 +101,36 @@ pub const Archive = struct {
             std.log.err("codec.pth has no tensor {s}", .{name});
             return error.MissingTensor;
         };
+    }
+
+    /// name's elements as stored (row-major bytes, caller frees): dtype and shape as given, the member CRC-checked.
+    pub fn readRaw(self: *const Archive, gpa: Allocator, name: []const u8, dtype: DType, shape: []const u64) ![]u8 {
+        const t = try self.tensor(name);
+        if (t.dtype != dtype) return error.UnexpectedDType;
+        if (!std.mem.eql(u64, t.shape, shape)) {
+            std.log.err("tensor {s} has shape {any}, expected {any}", .{ name, t.shape, shape });
+            return error.ShapeMismatch;
+        }
+        var numel: u64 = 1;
+        var i = t.shape.len;
+        while (i > 0) {
+            i -= 1;
+            if (t.shape[i] != 1 and t.stride[i] != numel) return error.NonContiguousTensor;
+            numel *= t.shape[i];
+        }
+        if (t.offset > t.storage_numel or numel > t.storage_numel - t.offset) return error.BadArchive;
+        const width = elementBytes(dtype);
+        const key = try std.fmt.allocPrint(gpa, "{s}data/{s}", .{ self.prefix, t.storage });
+        defer gpa.free(key);
+        const m = self.members.get(key) orelse return error.MissingStorage;
+        if (m.size != std.math.mul(u64, t.storage_numel, width) catch return error.BadArchive) return error.BadArchive;
+        const all = try gpa.alloc(u8, @intCast(m.size));
+        errdefer gpa.free(all);
+        try readMember(self.io, self.file, m, all);
+        if (t.offset == 0 and numel == t.storage_numel) return all;
+        const out = try gpa.dupe(u8, all[@intCast(t.offset * width)..][0..@intCast(numel * width)]);
+        gpa.free(all);
+        return out;
     }
 
     /// name's float32 elements row-major (caller frees), its shape and its storage member's CRC-32 checked.
@@ -124,108 +166,6 @@ pub const Archive = struct {
     }
 };
 
-fn readU16(b: []const u8, at: usize) u16 {
-    return std.mem.readInt(u16, b[at..][0..2], .little);
-}
-
-fn readU32(b: []const u8, at: usize) u32 {
-    return std.mem.readInt(u32, b[at..][0..4], .little);
-}
-
-fn readU64(b: []const u8, at: usize) u64 {
-    return std.mem.readInt(u64, b[at..][0..8], .little);
-}
-
-/// A stored member's bytes into `out` (exactly its size), CRC-checked.
-fn readMember(io: std.Io, file: std.Io.File, m: Member, out: []u8) !void {
-    if (out.len != m.size) return error.BadArchive;
-    var head: [30]u8 = undefined;
-    if (try file.readPositionalAll(io, &head, m.local) != head.len) return error.ShortRead;
-    if (readU32(&head, 0) != 0x04034b50) return error.BadArchive;
-    const data: u64 = m.local + @as(u64, head.len) + @as(u64, readU16(&head, 26)) + @as(u64, readU16(&head, 28));
-    if (try file.readPositionalAll(io, out, data) != out.len) return error.ShortRead;
-    if (std.hash.Crc32.hash(out) != m.crc) return error.ChecksumMismatch;
-}
-
-/// The central directory: every member stored (method 0), zip64 records honoured.
-fn readDirectory(a: Allocator, io: std.Io, file: std.Io.File) !std.StringHashMapUnmanaged(Member) {
-    const size = try file.length(io);
-    if (size < 22) return error.BadArchive;
-    const tail_len: usize = @intCast(@min(size, 22 + 0xFFFF));
-    const tail = try a.alloc(u8, tail_len);
-    if (try file.readPositionalAll(io, tail, size - @as(u64, tail_len)) != tail_len) return error.ShortRead;
-    var at: usize = tail_len - 22;
-    while (readU32(tail, at) != 0x06054b50) {
-        if (at == 0) return error.BadArchive;
-        at -= 1;
-    }
-    var count: u64 = readU16(tail, at + 10);
-    var cd_size: u64 = readU32(tail, at + 12);
-    var cd_off: u64 = readU32(tail, at + 16);
-    if (count == 0xFFFF or cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF) {
-        if (at < 20 or readU32(tail, at - 20) != 0x07064b50) return error.BadArchive;
-        var rec: [56]u8 = undefined;
-        if (try file.readPositionalAll(io, &rec, readU64(tail, at - 20 + 8)) != rec.len) return error.ShortRead;
-        if (readU32(&rec, 0) != 0x06064b50) return error.BadArchive;
-        count = readU64(&rec, 32);
-        cd_size = readU64(&rec, 40);
-        cd_off = readU64(&rec, 48);
-    }
-    if (cd_size > 64 << 20 or cd_off > size or cd_size > size - cd_off) return error.BadArchive;
-    const cd = try a.alloc(u8, @intCast(cd_size));
-    if (try file.readPositionalAll(io, cd, cd_off) != cd.len) return error.ShortRead;
-    var members: std.StringHashMapUnmanaged(Member) = .empty;
-    var p: usize = 0;
-    var n: u64 = 0;
-    while (n < count) : (n += 1) {
-        if (cd.len - p < 46 or readU32(cd, p) != 0x02014b50) return error.BadArchive;
-        const method = readU16(cd, p + 10);
-        const crc = readU32(cd, p + 16);
-        var csize: u64 = readU32(cd, p + 20);
-        var usize_: u64 = readU32(cd, p + 24);
-        const nlen: usize = readU16(cd, p + 28);
-        const xlen: usize = readU16(cd, p + 30);
-        const clen: usize = readU16(cd, p + 32);
-        var local: u64 = readU32(cd, p + 42);
-        if (cd.len - p - 46 < nlen + xlen + clen) return error.BadArchive;
-        const name = cd[p + 46 ..][0..nlen];
-        var x = p + 46 + nlen;
-        const xend = x + xlen;
-        while (xend - x >= 4) {
-            const id = readU16(cd, x);
-            const len: usize = readU16(cd, x + 2);
-            if (xend - x - 4 < len) return error.BadArchive;
-            if (id == 0x0001) {
-                var f = x + 4;
-                const fend = f + len;
-                if (usize_ == 0xFFFFFFFF) {
-                    if (fend - f < 8) return error.BadArchive;
-                    usize_ = readU64(cd, f);
-                    f += 8;
-                }
-                if (csize == 0xFFFFFFFF) {
-                    if (fend - f < 8) return error.BadArchive;
-                    csize = readU64(cd, f);
-                    f += 8;
-                }
-                if (local == 0xFFFFFFFF) {
-                    if (fend - f < 8) return error.BadArchive;
-                    local = readU64(cd, f);
-                }
-            }
-            x += 4 + len;
-        }
-        if (method != 0 or csize != usize_) {
-            std.log.err("codec.pth member {s} is compressed; torch.save stores members", .{name});
-            return error.CompressedMember;
-        }
-        if (local > size or usize_ > size - local) return error.BadArchive;
-        try members.put(a, name, .{ .local = local, .size = usize_, .crc = crc });
-        p += 46 + nlen + xlen + clen;
-    }
-    return members;
-}
-
 const GlobalRef = union(enum) { ordered_dict, rebuild_tensor_v2, storage_type: DType };
 
 const Storage = struct { dtype: DType, key: []const u8, numel: u64 };
@@ -244,7 +184,9 @@ const Value = union(enum) {
     none,
     boolean: bool,
     int: i64,
+    float: f64,
     str: []const u8,
+    list: *std.ArrayList(Value),
     tuple: []const Value,
     dict: *Dict,
     global: GlobalRef,
@@ -376,8 +318,26 @@ fn reduce(a: Allocator, f: Value, args: Value) !Value {
     }
 }
 
+/// A nested root's tensors into `out` under `prefix`; plain values (numbers, strings, lists) are not weights.
+fn collect(a: Allocator, out: *std.StringHashMapUnmanaged(Tensor), prefix: []const u8, d: *const Dict, depth: usize) !void {
+    if (depth > 8) return error.BadPickle;
+    for (d.keys.items, d.values.items) |k, v| {
+        if (k != .str) continue;
+        const name = if (prefix.len == 0) k.str else try std.mem.concat(a, u8, &.{ prefix, "/", k.str });
+        switch (v) {
+            .tensor => |t| {
+                const gop = try out.getOrPut(a, name);
+                if (gop.found_existing) return error.BadPickle;
+                gop.value_ptr.* = t.*;
+            },
+            .dict => |sub| try collect(a, out, name, sub, depth + 1),
+            else => {},
+        }
+    }
+}
+
 /// The state dict's tensors by name. Unknown opcodes and globals are refused, never run.
-fn unpickle(a: Allocator, data: []const u8) !std.StringHashMapUnmanaged(Tensor) {
+fn unpickle(a: Allocator, data: []const u8, nested: bool) !std.StringHashMapUnmanaged(Tensor) {
     var stack: std.ArrayList(Value) = .empty;
     var marks: std.ArrayList(usize) = .empty;
     var memo: std.AutoHashMapUnmanaged(u32, Value) = .empty;
@@ -430,6 +390,23 @@ fn unpickle(a: Allocator, data: []const u8) !std.StringHashMapUnmanaged(Tensor) 
                 try stack.append(a, .{ .int = v });
             },
             'N' => try stack.append(a, .none),
+            'G' => try stack.append(a, .{ .float = @bitCast(std.mem.readInt(u64, (try r.bytes(8))[0..8], .big)) }), // BINFLOAT
+            ']' => { // EMPTY_LIST
+                const l = try a.create(std.ArrayList(Value));
+                l.* = .empty;
+                try stack.append(a, .{ .list = l });
+            },
+            'a' => { // APPEND
+                const v = try pop(&stack);
+                if (stack.items.len == 0 or stack.items[stack.items.len - 1] != .list) return error.BadPickle;
+                try stack.items[stack.items.len - 1].list.append(a, v);
+            },
+            'e' => { // APPENDS
+                const at = marks.pop() orelse return error.BadPickle;
+                if (at == 0 or at > stack.items.len or stack.items[at - 1] != .list) return error.BadPickle;
+                try stack.items[at - 1].list.appendSlice(a, stack.items[at..]);
+                stack.shrinkRetainingCapacity(at);
+            },
             0x88 => try stack.append(a, .{ .boolean = true }), // NEWTRUE
             0x89 => try stack.append(a, .{ .boolean = false }), // NEWFALSE
             'q', 'r' => { // BINPUT, LONG_BINPUT
@@ -478,6 +455,10 @@ fn unpickle(a: Allocator, data: []const u8) !std.StringHashMapUnmanaged(Tensor) 
                     else => return error.BadPickle,
                 };
                 var out: std.StringHashMapUnmanaged(Tensor) = .empty;
+                if (nested) {
+                    try collect(a, &out, "", root, 0);
+                    return out;
+                }
                 for (root.keys.items, root.values.items) |k, v| {
                     if (k != .str or v != .tensor) return error.BadPickle;
                     const gop = try out.getOrPut(a, k.str);
@@ -524,7 +505,7 @@ test "the state-dict VM reads torch.save's tensor records and their views" {
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const tensors = try unpickle(arena.allocator(), &fixture);
+    const tensors = try unpickle(arena.allocator(), &fixture, false);
     try std.testing.expectEqual(@as(u32, 3), tensors.count());
     const w = tensors.get("a.weight").?;
     try std.testing.expectEqual(DType.f32, w.dtype);
@@ -549,7 +530,7 @@ test "the state-dict VM refuses globals outside the allow-list" {
     const evil = "\x80\x02cos\nsystem\n.";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expectError(error.ForbiddenGlobal, unpickle(arena.allocator(), evil));
+    try std.testing.expectError(error.ForbiddenGlobal, unpickle(arena.allocator(), evil, false));
 }
 
 /// A float32 storage of 2^62 + 1 elements (an 8-byte LONG1 count): `numel * 4` wraps to the 4 bytes its member holds.
