@@ -111,7 +111,6 @@ pub const Cuda = struct {
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
         return .{ .bits = self.bits_dev + slot * words * 4, .words = words };
     }
-
     /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const self = of(ptr);
