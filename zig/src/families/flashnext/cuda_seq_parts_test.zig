@@ -124,3 +124,15 @@ test "carveout.open refuses tp 2 before it touches the context" {
     var ctx: cuda.Context = undefined;
     try std.testing.expectError(error.FlashNextCarveoutUnsupported, carve_mod.open(std.testing.allocator, &ctx, 2));
 }
+
+test "the open path opens the carveout before the glue, the engine or any weight loads" {
+    const source = @embedFile("cuda_lanes_load.zig");
+    const entry = std.mem.indexOf(u8, source, "pub fn open(") orelse return error.TestUnexpectedResult;
+    const opened = std.mem.indexOfPos(u8, source, entry, "carve.open(gpa, ctx, o.tp)") orelse return error.TestUnexpectedResult;
+    const later = [_][]const u8{ "Glue.load(", "F.comparison(", "ranks.Session.init(", "Engine.initRank(", "dropPageCache(", "load_cache.finish" };
+    for (later) |call| {
+        const at = std.mem.indexOfPos(u8, source, entry, call) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(opened < at);
+    }
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfPos(u8, source, opened + 1, "carve.open("));
+}

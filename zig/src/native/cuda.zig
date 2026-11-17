@@ -370,7 +370,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = streams_room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const held = served.stream_bytes * (streams -| free);
-    const cache_room = @import("cuda_streams.zig").cacheRoom(room, served.stream_bytes, free, counted);
+    const cache_room = @import("cuda_kv_room.zig").cacheRoom(loaded, room, served.stream_bytes, counted);
     const final_host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib, cache_room.room, cache_room.streams, after.unified) else 0;
     const layout = counted.layout;
     const paged = counted.paged;

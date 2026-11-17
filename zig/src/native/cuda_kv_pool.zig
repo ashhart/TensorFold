@@ -475,6 +475,7 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
 test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
+    _ = @import("cuda_kv_room.zig");
     _ = @import("cuda_keep_others_test.zig");
 }
 
