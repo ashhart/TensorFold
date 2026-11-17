@@ -3,6 +3,7 @@
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details.
 
 ## Unreleased
+- Qwen 3.5 on CUDA: kept prompt states and disk recall reuse freed pinned buffers of the same size (#2841).
 
 - Flash Next: when an assistant makes several tool calls and their results arrive out of call order, each result is now placed after its own call's ID before the prompt is rendered, since Flash Next's template gives the model anonymous result blocks in order; only a contiguous run with exactly one result per call is reordered, any other run keeps arrival order, and every other request and backend renders as before (#3775). Thanks to @srh3877.
 
