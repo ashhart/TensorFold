@@ -509,7 +509,8 @@ pub const Attention = struct {
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; a long cache reads each chunk once for six tiles
+            // a pair a tile; tensor units run two tiles a group, other chips share a long cache's chunks across six
+            const sg: u32 = @min(plan.tiles, if (a.units) @as(u32, 2) else if (plan.prefix_chunks >= 64) @as(u32, 6) else 4);
             // a stream of one row sees every key its tile reads; only a stream of rows can mask a value
             e.setPipeline(a.prefix[if (plan.rows > plan.streams) 16 + sg - 1 else sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
