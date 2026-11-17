@@ -84,6 +84,7 @@ pub const Geometry = struct {
     context: usize, // the window ceiling: max_position_embeddings, or the YaRN window --rope-yarn makes
     rope: cuda_rope.Rope = .plain,
     linear: [max_layers]bool,
+    loop: ?@import("loop_config.zig").Config = null,
     bits: Widths = .{},
     kinds: Kinds = .{},
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
@@ -169,11 +170,23 @@ pub const Geometry = struct {
         return g.q_heads * head_dim;
     }
 
-    /// The stage's linear layers (`linear` is indexed by global layer).
+    /// Delta executions in the schedule.
     pub fn deltas(g: Geometry) usize {
+        return g.schedule().deltas;
+    }
+
+    pub fn physicalDeltas(g: Geometry) usize {
         var n: usize = 0;
-        for (g.linear[g.first..][0..g.layers]) |l| n += @intFromBool(l);
+        for (g.linear[g.first..][0..g.layers]) |is_delta| n += @intFromBool(is_delta);
         return n;
+    }
+
+    pub fn physicalAttentions(g: Geometry) usize {
+        return g.layers - g.physicalDeltas();
+    }
+
+    pub fn schedule(g: Geometry) @import("loop_schedule.zig").Schedule {
+        return @import("loop_schedule.zig").build(g.linear[g.first..][0..g.layers], g.loop) catch unreachable;
     }
 
     /// The whole model's geometry, of which this may be a stage.
@@ -189,7 +202,7 @@ pub const Geometry = struct {
 
     /// Layers [first, end) of this whole model as a stage; it holds the embedding when it starts at layer 0.
     pub fn stage(g: Geometry, first: usize, end: usize, heads: bool) error{BadStageRange}!Geometry {
-        if (g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
+        if (g.loop != null or g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
         var s = g;
         s.first = first;
         s.layers = end - first;
@@ -200,7 +213,7 @@ pub const Geometry = struct {
     }
 
     pub fn attentions(g: Geometry) usize {
-        return g.layers - g.deltas();
+        return g.schedule().attentions;
     }
 
     /// Bytes of one linear layer's recurrence (fp32) and convolution tail (bf16).
@@ -332,10 +345,12 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
     const root = try object(doc.value);
+    const type_value = root.get("model_type") orelse return error.UnsupportedQwenConfig;
+    const loop_model = type_value == .string and std.mem.eql(u8, type_value.string, "sensenova_loop");
     const moe = blk: {
         const v = root.get("model_type") orelse return error.UnsupportedQwenConfig;
         if (v != .string) return error.UnsupportedQwenConfig;
-        if (std.mem.eql(u8, v.string, "qwen3_5")) break :blk false;
+        if (std.mem.eql(u8, v.string, "qwen3_5") or loop_model) break :blk false;
         if (std.mem.eql(u8, v.string, "qwen3_5_moe")) break :blk true;
         return error.UnsupportedQwenConfig;
     };
@@ -357,7 +372,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
     // neither table nor config: the publisher's BF16 weights (a decision backbone, dense only)
     const bf16 = !modelopt and !exl3 and qv == null;
-    if (bf16 and moe) return error.UnsupportedQwenQuantization;
+    if (bf16 and moe or loop_model and !bf16) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(text, "hidden_size"),
         .intermediate = try integer(text, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -376,6 +391,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         .bf16 = bf16,
     };
     if (t.get("tensorfold_learned_neurons")) |pocket| {
+        if (loop_model and (pocket != .integer or pocket.integer != 0)) return error.SenseNovaPocket;
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
             return error.UnsupportedQwenGeometry;
         g.pocket = @intCast(pocket.integer);
@@ -397,9 +413,22 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         }
     }
     if (g.v_heads % g.k_heads != 0 or g.q_heads % g.kv_heads != 0 or g.q_heads > max_query_heads) return error.UnsupportedQwenGeometry;
+    if (loop_model) {
+        const types = t.get("layer_types") orelse return error.BadLoopConfig;
+        if (types != .array or types.array.items.len != g.layers) return error.BadLoopConfig;
+    }
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
+    if (loop_model) {
+        if (t.get("num_experts")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMoe;
+        if (t.get("mtp_num_hidden_layers")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMtp;
+        if (g.pocket != 0) return error.UnsupportedLearningFormat;
+        g.loop = try @import("loop_config.zig").parse(root, g.layers);
+        if (g.tied) return error.UnsupportedQwenConfig;
+        const plan = try @import("loop_schedule.zig").build(g.linear[0..g.layers], g.loop);
+        if (plan.attentions == 0) return error.UnsupportedQwenGeometry;
+    }
     if (modelopt or bf16) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
         const mo = @import("cuda_modelopt.zig");
@@ -583,4 +612,5 @@ test {
     _ = @import("cuda_exl3_admission_test.zig");
     _ = @import("cuda_bf16_admission_test.zig");
     _ = @import("cuda_rope.zig");
+    _ = @import("loop_geometry_test.zig");
 }
