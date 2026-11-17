@@ -77,7 +77,6 @@ pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
 }
 
 /// The prompt's chunks one after another on the engine's stream, starting at `from`.
-/// Named starts come in `chunks`; only a keep with `cut` makes its marks end a chunk too.
 pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep, chunks: []const u32) !void {
     var f = e.forward(dump);
     const shared = e.lessons();
