@@ -171,14 +171,18 @@ pub fn main(init: std.process.Init) !u8 {
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     const backend = if (std.mem.eql(u8, args.backend, "auto")) @import("benchmark_server.zig").buildBackend() else args.backend;
-    const draft = try drafter.select(a, io, init.environ_map, dir, args.drafter, args.no_drafts, backend, &problem) orelse return fail(problem);
-    args.drafter = draft.dir;
-    args.drafter_name = draft.name;
-    if (draft.automatic) log.line("drafter {s}, found in the local cache (--drafter none serves without it)", .{draft.name.?});
     const model_type = modelType(a, io, dir, &problem) catch |e| {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
     };
+    if (std.mem.eql(u8, model_type, "sensenova_loop")) {
+        if (args.drafter) |name| if (!std.mem.eql(u8, name, "none")) return fail("--drafter: SenseNova Loop supports plain decoding only");
+        args.no_drafts = true;
+    }
+    const draft = try drafter.select(a, io, init.environ_map, dir, args.drafter, args.no_drafts, backend, &problem) orelse return fail(problem);
+    args.drafter = draft.dir;
+    args.drafter_name = draft.name;
+    if (draft.automatic) log.line("drafter {s}, found in the local cache (--drafter none serves without it)", .{draft.name.?});
     if (args.silence.refusal(model_type) orelse args.redraw.refusal(model_type)) |why| return fail(why);
     // a current device profile's certain facts refuse a model this machine cannot run at all; otherwise nothing changes
     if (device_cli.serveRefusal(a, io, init.environ_map, model_type)) |why| return fail(why);
