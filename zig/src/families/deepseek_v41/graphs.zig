@@ -38,15 +38,17 @@ pub const Settings = struct {
     pub fn fromEnvOr(on_default: bool) !Settings {
         var s: Settings = .{ .on = on_default };
         s.on = try @import("sys").environment.read(bool, "TF_DSV41_GRAPHS", on_default);
-        if (std.c.getenv("TF_DSV41_GRAPHS_MAX")) |v| s.max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("TF_DSV41_GRAPH_BUCKET")) |v| s.bucket = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("TF_DSV41_GRAPH_BUCKET_GROW")) |v| s.grow = try std.fmt.parseFloat(f64, std.mem.span(v));
-        if (std.c.getenv("TF_DSV41_GRAPH_ROWS_MAX")) |v| s.rows_max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        s.room = try Room.fromEnv();
-        if (std.c.getenv("TF_DSV41_GRAPH_FLOOR")) |v| {
-            const m = std.mem.span(v);
-            if (std.mem.eql(u8, m, "hold")) s.floor_hold = true else if (!(m.len == 0 or std.mem.eql(u8, m, "shed"))) return error.BadGraphFloor;
+        s.max = try @import("sys").environment.read(u32, "TF_DSV41_GRAPHS_MAX", s.max);
+        s.bucket = try @import("sys").environment.read(u32, "TF_DSV41_GRAPH_BUCKET", s.bucket);
+        s.grow = try @import("sys").environment.read(f64, "TF_DSV41_GRAPH_BUCKET_GROW", s.grow);
+        const rows = try @import("sys").environment.read(u64, "TF_DSV41_GRAPH_ROWS_MAX", s.rows_max);
+        if (rows == 0 or rows > 64) {
+            if (!@import("builtin").is_test) std.log.err("TF_DSV41_GRAPH_ROWS_MAX={d}: graph capture requires 1..64", .{rows});
+            return error.InvalidEnvironment;
         }
+        s.rows_max = @intCast(rows);
+        s.room = try Room.fromEnv();
+        s.floor_hold = try @import("sys").environment.read(bool, "TF_DSV41_GRAPH_FLOOR", false);
         try s.validate();
         return s;
     }

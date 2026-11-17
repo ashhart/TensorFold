@@ -29,31 +29,17 @@ pub const Method = struct {
 
 /// The defaults by shape (raw: G15; fit: G14, VERSION 3), then the explicit knobs, each range-checked.
 pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
-    const shape_s = trimmed(get("TF_DSV41_CALIB_SHAPE")) orelse "raw";
-    const shape: Shape = if (std.ascii.eqlIgnoreCase(shape_s, "raw")) .raw else if (std.ascii.eqlIgnoreCase(shape_s, "fit")) .fit else return error.CalibShape;
+    const shape: Shape = @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_CALIB_SHAPE", get("TF_DSV41_CALIB_SHAPE"), 0)));
     const d: Method = if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
-    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse "median";
-    const stat: Stat = if (std.ascii.eqlIgnoreCase(stat_s, "median")) .median else if (std.ascii.eqlIgnoreCase(stat_s, "min")) .min else return error.CalibStat;
     return .{
-        .reps = try num(get("TF_DSV41_CALIB_REPS"), 5, 1, 50),
-        .warm = try num(get("TF_DSV41_CALIB_WARM"), d.warm, 0, 20),
-        .stat = stat,
-        .recheck = try num(get("TF_DSV41_CALIB_RECHECK"), d.recheck, 0, early),
+        .reps = try @import("sys").environment.value(u32, "TF_DSV41_CALIB_REPS", get("TF_DSV41_CALIB_REPS"), 5),
+        .warm = try @import("sys").environment.value(u32, "TF_DSV41_CALIB_WARM", get("TF_DSV41_CALIB_WARM"), d.warm),
+        .stat = @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_CALIB_STAT", get("TF_DSV41_CALIB_STAT"), 0))),
+        .recheck = try @import("sys").environment.value(u32, "TF_DSV41_CALIB_RECHECK", get("TF_DSV41_CALIB_RECHECK"), d.recheck),
         .shape = shape,
-        .cycle = try num(get("TF_DSV41_CALIB_CYCLE"), d.cycle, 0, early),
-        .deep = try num(get("TF_DSV41_CALIB_DEEP_REPS"), d.deep, 1, 50),
+        .cycle = try @import("sys").environment.value(u32, "TF_DSV41_CALIB_CYCLE", get("TF_DSV41_CALIB_CYCLE"), d.cycle),
+        .deep = try @import("sys").environment.value(u32, "TF_DSV41_CALIB_DEEP_REPS", get("TF_DSV41_CALIB_DEEP_REPS"), d.deep),
     };
-}
-
-fn num(raw: ?[]const u8, default: u32, lo: u32, hi: u32) !u32 {
-    const v: i64 = if (trimmed(raw)) |s| try std.fmt.parseInt(i64, s, 10) else default;
-    if (v < lo or v > hi) return error.CalibKnob;
-    return @intCast(v);
-}
-
-fn trimmed(v: ?[]const u8) ?[]const u8 {
-    const t = std.mem.trim(u8, v orelse return null, " \t\r\n");
-    return if (t.len == 0) null else t;
 }
 
 /// The median (the mean of the middle two when even) or the minimum of a window's timed runs.

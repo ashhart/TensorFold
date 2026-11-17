@@ -51,13 +51,13 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []c
     }
     const meta0 = try readJson(a, io, dirs.items[0], "ref.json");
     // the knobs this mode runs with (every rank alike), and the reference's
-    try put("TF_DSV41_POOL_TOKENS", if (std.c.getenv("TF_DSV41_KV_CHECK_POOL_TOKENS")) |v| std.mem.span(v) else "16384");
+    try put("TF_DSV41_POOL_TOKENS", if (@import("sys").environment.Process.get(.{}, "TF_DSV41_KV_CHECK_POOL_TOKENS")) |v| v else "16384");
     try put("TF_DSV41_BOOT_MEASURED", "0");
     const split = mode == .split or mode == .compact or (mode == .park and std.mem.eql(u8, envOr("TF_DSV41_KV_CHECK_PARK", "pool"), "split"));
     try put("TF_DSV41_KV_SPLIT", if (split) "1" else "0");
     try put("TF_DSV41_KV_SPLIT_COMPACT", if (mode == .compact) "force" else "0");
     if (mode == .park) try put("TF_DSV41_SESSION_DISK", try std.fmt.allocPrint(a, "{s}/disk-r{d}", .{ out, rank }));
-    if (std.c.getenv("TF_DSV41_KV_CHECK_TOPP")) |v| try put("TF_DSV41_EXPERT_TOPP", std.mem.span(v));
+    if (@import("sys").environment.Process.get(.{}, "TF_DSV41_KV_CHECK_TOPP")) |v| try put("TF_DSV41_EXPERT_TOPP", v);
     if (meta0.object.get("env")) |meta_env| if (meta_env.object.get("TF_DSV41_MHC_DEFER")) |v| if (v == .string and std.mem.eql(u8, v.string, "1")) try put("TF_DSV41_R1", "1");
     var lo: u32 = 0;
     var hi: u32 = 0;
@@ -89,7 +89,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []c
 }
 
 fn envOr(name: [*:0]const u8, d: []const u8) []const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else d;
+    return if (@import("sys").environment.Process.get(.{}, std.mem.span(name))) |v| v else d;
 }
 
 fn secs(io: std.Io, t0: std.Io.Timestamp) f64 {

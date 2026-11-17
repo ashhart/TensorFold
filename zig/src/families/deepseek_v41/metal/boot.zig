@@ -77,6 +77,7 @@ pub const Boot = struct {
 
     /// The checkpoint in `dir` loaded and served by a `serve.Metal` (the caller's `serve_lanes.Served` closes it).
     pub fn open(a: Allocator, io: std.Io, dir: []const u8, o: Options) !*serve.Metal {
+        try environment.checkScope(.dsv41, environment.Process{});
         const b = try a.create(Boot);
         errdefer a.destroy(b);
         b.a = a;

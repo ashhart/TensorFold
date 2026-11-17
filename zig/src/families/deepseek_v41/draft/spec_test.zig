@@ -17,7 +17,7 @@ test "the knobs parse as Python's" {
     try std.testing.expectEqual(spec.Settings{ .on = true }, try spec.Settings.parse(" On", ""));
     try std.testing.expectEqual(spec.Settings{ .on = true, .nucleus = true }, try spec.Settings.parse("true", "1"));
     try std.testing.expectEqual(spec.Settings{}, try spec.Settings.parse("0", "off"));
-    try std.testing.expectError(error.BadSpecKnob, spec.Settings.parse("2", null));
+    try std.testing.expectError(error.InvalidEnvironment, spec.Settings.parse("2", null));
     try std.testing.expect(spec.isNucleus(.{ .seed = 1, .temperature = 0.7, .top_k = 0, .top_p = 0.9 }));
     try std.testing.expect(!spec.isNucleus(.{ .seed = 1, .temperature = 0.7, .top_k = 20, .top_p = 0.9 }));
     try std.testing.expect(!spec.isNucleus(.{ .seed = 1, .temperature = 0.7, .top_k = 0, .top_p = 1.0 }));
