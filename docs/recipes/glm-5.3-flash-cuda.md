@@ -45,6 +45,13 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   `TF_GLM_VISION_HOST=1` keeps the tower's bf16 weights in pinned
   host memory and copies each part of a pass into one device slot as it runs (240 MiB for GLM-5.3-Flash's tower instead
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
+- With `--vision`, the other ranks wait in an NCCL broadcast for the whole of rank 0's tower pass, so a net plugin
+  that times out pending operations must allow longer than the longest pass. NNNtrance's `nccl-mesh-plugin` gives up
+  on an operation after `NCCL_MESH_TIMEOUT_SEC` (30 s by default), and then every rank stops: on three GB10s cabled
+  as a switchless triangle, a cold request with one 3840x2160 image failed at 58.7 s and one with two 3072x1728
+  images at 46.9 s. With `NCCL_MESH_TIMEOUT_SEC=3600` they answered after 66.1 s and 55.8 s, fifteen 1920x1080
+  screenshots after 75.1 s, and a 45-minute soak at four concurrent requests (chat, tool calls, images, 27K and 55K
+  prompts) served 1,870 requests with none failed (measured by @ultradaoto, #3614).
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
 - `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
