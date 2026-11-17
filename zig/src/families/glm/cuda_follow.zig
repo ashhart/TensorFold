@@ -154,7 +154,7 @@ pub const Leader = struct {
         return @intFromBool(x.e.prompt_logprobs != null);
     }
 
-    /// No stream is left: the other ranks sleep on their lines until the next step instead of spinning in NCCL.
+    /// No stream is left, or rank 0's tower is about to run: the other ranks sleep on their lines until the next step.
     pub fn idle(x: Leader) !void {
         if (x.link.asleep or !cuda.tp_watch.open()) return;
         try x.send(.{ .kind = @backingInt(Kind.idle) }, &.{});
@@ -214,6 +214,13 @@ pub const Leader = struct {
     /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
     pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
         try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
+    }
+
+    /// Rank 0's tower encodes the bound slot's images past `from` with the other ranks asleep (#3614), then their rows.
+    pub fn encode(x: Leader, v: *images_mod.Images, list: []const @import("lanes").stream.Image, from: usize) !void {
+        try x.idle(); // a net plugin may time out an NCCL wait as long as the pass: they wait on their lines instead
+        try v.begin(x.e.slot, list, from); // a refusal leaves every rank as it was, asleep until rank 0's next step
+        try x.images(v);
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
