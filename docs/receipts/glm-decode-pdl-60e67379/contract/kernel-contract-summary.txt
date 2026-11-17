@@ -1,0 +1,10 @@
+# tf-cuda-test kernel-contract, nvcc 13.3 (V13.3.73), GB10 sm_121, this branch before 1240c1908f (records only)
+KNOWN nonfinite cuda qwen35 decode attention, bf16 cache (tf_q35_attn_partial, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+KNOWN nonfinite cuda qwen35 decode attention, fp8 cache (tf_q35_attn_partial8, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+KNOWN nonfinite cuda qwen35 MT2 fp8 paged attention: a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+KNOWN nonfinite cuda qwen35 MT2 fp8 whole attention: a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+KNOWN nonfinite cuda glm tf_glm_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+KNOWN nonfinite cuda glm tf_glm_index_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+KNOWN nonfinite cuda qwen35 contiguous attention, bf16 cache (tf_q35_attn_partial_legacy, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+KNOWN nonfinite cuda qwen35 contiguous attention, fp8 cache (tf_q35_attn_partial8_legacy, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
+SUMMARY 661 kernels: 661 pass gates 1-4, 0 fail, 8 known findings; 422 controls: 422 red as planted, 0 missed; 387 limit problems; gates 3449100 ms, limits 750083 ms
