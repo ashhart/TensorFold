@@ -67,7 +67,7 @@ pub fn config(gpa: Allocator, root: std.json.ObjectMap, why: *Why) !?Config {
     return null;
 }
 
-/// The fields and the rules this reader reads; every one it does not is refused by its name.
+/// The fields and the rules this reader reads; a value outside them is refused by its field or rule name.
 fn dialect(gpa: Allocator, q: std.json.ObjectMap, why: *Why) !Config {
     const width = int(q.get("bits"));
     if (width != bits) {
@@ -83,10 +83,26 @@ fn dialect(gpa: Allocator, q: std.json.ObjectMap, why: *Why) !Config {
         why.set("quantization_config.sym: {?}, expected true", .{flag(q.get("sym"))});
         return error.UnsupportedQuantization;
     }
-    if (flag(q.get("desc_act"))) |act| if (act) {
-        why.set("quantization_config.desc_act: true, this reader reads no act order", .{});
-        return error.UnsupportedQuantization;
+    if (q.get("desc_act")) |v| switch (v) {
+        .bool => |act| if (act) {
+            why.set("quantization_config.desc_act: true, this reader reads no act order", .{});
+            return error.UnsupportedQuantization;
+        },
+        else => {
+            why.set("quantization_config.desc_act: {s}, expected a bool", .{kindOf(v)});
+            return error.UnsupportedQuantization;
+        },
     };
+    if (q.get("checkpoint_format")) |v| {
+        const format = text(v) orelse {
+            why.set("quantization_config.checkpoint_format: {s}, expected gptq", .{kindOf(v)});
+            return error.UnsupportedQuantization;
+        };
+        if (!std.mem.eql(u8, format, "gptq")) {
+            why.set("quantization_config.checkpoint_format: {s}, expected gptq", .{format});
+            return error.UnsupportedQuantization;
+        }
+    }
     const dyn = object(q.get("dynamic")) orelse {
         const found = if (q.get("dynamic") == null) "absent" else "not an object";
         why.set("quantization_config.dynamic: {s}, this reader reads its rules", .{found});
@@ -144,7 +160,8 @@ fn supported(pattern: []const u8) bool {
     while (i < pattern.len) : (i += 1) {
         switch (pattern[i]) {
             '\\' => {
-                if (i + 1 >= pattern.len) return false;
+                // an escaped alphanumeric is a class or an anchor in Python's re, never that character
+                if (i + 1 >= pattern.len or std.ascii.isAlphanumeric(pattern[i + 1])) return false;
                 i += 1;
                 atom = true;
             },
@@ -309,6 +326,18 @@ pub fn zerosOff(qzeros: []const u8) ?usize {
 fn flag(v: ?std.json.Value) ?bool {
     const x = v orelse return null;
     return if (x == .bool) x.bool else null;
+}
+
+/// The JSON kind of `v`, so a refusal of a field that is not the type it must be says what it found.
+fn kindOf(v: std.json.Value) []const u8 {
+    return switch (v) {
+        .null => "null",
+        .bool => "a bool",
+        .integer, .float, .number_string => "a number",
+        .string => "a string",
+        .array => "an array",
+        .object => "an object",
+    };
 }
 
 fn holds(v: ?std.json.Value, want: bool) bool {

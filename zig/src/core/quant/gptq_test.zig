@@ -281,6 +281,31 @@ test "gptq: the matcher reads the rule subset and anchors as Python's re.match d
     try testing.expect(!gptq.regexMatch(".*\\.48\\..*", "layers.480.x"));
 }
 
+test "gptq: an escape of an alphanumeric character is refused, as Python's re reads it as a class or an anchor" {
+    // Python's re matches model.layers.12.mlp.x here; read as a literal d it matches layers.d.mlp instead
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}, "-:.*layers\\.\\d+\\.mlp.*": {"bits": 4}}
+    , "quantization_config.dynamic -:.*layers\\.\\d+\\.mlp.*: outside this reader's matcher");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}, "-:.*\\w+.*": {"bits": 4}}
+    , "quantization_config.dynamic -:.*\\w+.*: outside this reader's matcher");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}, "-:.*\\s+\\b.*": {"bits": 4}}
+    , "quantization_config.dynamic -:.*\\s+\\b.*: outside this reader's matcher");
+    // an escape of a non-alphanumeric character is the character itself, in Python's re and in this matcher
+    try testing.expect(gptq.regexMatch("a\\+b", "a+b"));
+    try testing.expect(!gptq.regexMatch("a\\+b", "aab"));
+    try testing.expect(gptq.regexMatch("a\\$", "a$"));
+    try testing.expect(gptq.regexMatch("a\\\\b", "a\\b"));
+    var why: Why = .{};
+    var plus = (try gptq.admit(a, jsonOf(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}, "-:a\\+b.*": {"bits": 4}}
+    ), &why)).?;
+    defer plus.deinit();
+    try testing.expect(!plus.quantized("a+bzzz"));
+    try testing.expect(plus.quantized("aab"));
+}
+
 /// `fields` as a config.json's quantization_config, so one field can be changed per case.
 fn jsonOf(comptime fields: []const u8) []const u8 {
     return "{\"quantization_config\": {" ++ fields ++ "}}";
@@ -295,8 +320,8 @@ fn refuses(comptime fields: []const u8, text: []const u8) !void {
 
 /// The admitted fields: the fixture's shape, with the head rule alone in `dynamic`.
 const ok =
-    \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": true,
-    \\"dynamic": {"+:.*lm_head$": {"bits": 4}}
+    \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "checkpoint_format": "gptq",
+    \\"lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
 ;
 
 test "gptq: a config outside the dialect is refused by its field or rule name" {
@@ -324,6 +349,21 @@ test "gptq: a config outside the dialect is refused by its field or rule name" {
     try refuses(
         \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": true, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
     , "quantization_config.desc_act: true, this reader reads no act order");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": "false", "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
+    , "quantization_config.desc_act: a string, expected a bool");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": null, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
+    , "quantization_config.desc_act: null, expected a bool");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "checkpoint_format": "marlin", "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
+    , "quantization_config.checkpoint_format: marlin, expected gptq");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "checkpoint_format": "GPTQ", "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
+    , "quantization_config.checkpoint_format: GPTQ, expected gptq");
+    try refuses(
+        \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "checkpoint_format": 1, "lm_head": true, "dynamic": {"+:.*lm_head$": {"bits": 4}}
+    , "quantization_config.checkpoint_format: a number, expected gptq");
     try refuses(
         \\"quant_method": "gptq", "bits": 4, "group_size": 128, "sym": true, "desc_act": false, "lm_head": false, "dynamic": {"-:.*linear_attn.*": {"bits": 4}}
     , "quantization_config.lm_head: false, the rules do not store the head int4");
