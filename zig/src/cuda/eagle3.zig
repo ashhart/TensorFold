@@ -41,6 +41,27 @@ pub const Dims = struct {
     pub fn streamBytes(d: Dims) usize {
         return 2 * d.layers * d.ring() * d.att() * 2 + d.hidden * 2;
     }
+
+    fn attention(d: Dims) wa.Window {
+        const dh: f32 = @floatFromInt(d.head_dim);
+        return .{ .h = d.heads, .hk = d.heads, .d = d.head_dim, .win = d.window, .ring = d.ring(), .scale = 1.0 / @sqrt(dh) };
+    }
+
+    /// Each scratch buffer's bytes for a pass of `pass_rows`, in `Eagle3.Scratch`'s field order (init allocates these).
+    fn scratch(d: Dims) [@typeInfo(Eagle3.Scratch).@"struct".field_names.len]usize {
+        const n = pass_rows;
+        const h = d.hidden;
+        const wide = @max(d.taps * h, @max(3 * d.att(), 2 * d.ffn));
+        const rows_att = n * d.att() * 2;
+        return .{ n * d.taps * h * 2, n * 4, n * 4, n * 4, n * d.chain * 4, n * 2 * h * 2, n * h * 2, n * h * 2, n * wide * 4, n * h * 4, n * h * 2, 3 * rows_att, rows_att, rows_att, rows_att, rows_att, n * 2 * d.ffn * 2, n * d.ffn * 2, wa.WindowAttention.scratchBytes(d.attention(), n), n * d.vocab * 4 };
+    }
+
+    /// Device bytes the scratch takes, each buffer at least 256 as `Eagle3.alloc` makes it.
+    pub fn scratchBytes(d: Dims) usize {
+        var sum: usize = 0;
+        for (d.scratch()) |b| sum += @max(b, 256);
+        return sum;
+    }
 };
 
 /// One layer: projections bf16 [out, in] (qkv and gate|up stacked), norms fp32.
@@ -86,31 +107,8 @@ pub const Eagle3 = struct {
         if (dims.head_dim != 128 or dims.hidden % 64 != 0 or dims.ffn % 64 != 0 or dims.chain == 0) return error.Eagle3Shape;
         var x: Eagle3 = .{ .gpa = gpa, .d = d, .s = s, .dims = dims, .w = w, .ops = ops, .x = undefined, .host = try gpa.alloc(i32, 3 * pass_rows) };
         errdefer x.deinit();
-        const n = pass_rows;
-        const h = dims.hidden;
-        const wide = @max(dims.taps * h, @max(3 * dims.att(), 2 * dims.ffn));
-        x.x = .{
-            .tin = try x.alloc(n * dims.taps * h * 2),
-            .ids = try x.alloc(n * 4),
-            .pos = try x.alloc(n * 4),
-            .slot = try x.alloc(n * 4),
-            .picks = try x.alloc(n * dims.chain * 4),
-            .cat = try x.alloc(n * 2 * h * 2),
-            .e = try x.alloc(n * h * 2),
-            .st = try x.alloc(n * h * 2),
-            .f = try x.alloc(n * wide * 4),
-            .z = try x.alloc(n * h * 4),
-            .a = try x.alloc(n * h * 2),
-            .qkv = try x.alloc(n * 3 * dims.att() * 2),
-            .q = try x.alloc(n * dims.att() * 2),
-            .k = try x.alloc(n * dims.att() * 2),
-            .v = try x.alloc(n * dims.att() * 2),
-            .att = try x.alloc(n * dims.att() * 2),
-            .gu = try x.alloc(n * 2 * dims.ffn * 2),
-            .act = try x.alloc(n * dims.ffn * 2),
-            .part = try x.alloc(wa.WindowAttention.scratchBytes(x.window(), n)),
-            .logits = try x.alloc(n * dims.vocab * 4),
-        };
+        const sizes = dims.scratch();
+        inline for (@typeInfo(Scratch).@"struct".field_names, 0..) |name, i| @field(x.x, name) = try x.alloc(sizes[i]);
         return x;
     }
 
@@ -155,8 +153,7 @@ pub const Eagle3 = struct {
     }
 
     fn window(x: *const Eagle3) wa.Window {
-        const dh: f32 = @floatFromInt(x.dims.head_dim);
-        return .{ .h = x.dims.heads, .hk = x.dims.heads, .d = x.dims.head_dim, .win = x.dims.window, .ring = x.dims.ring(), .scale = 1.0 / @sqrt(dh) };
+        return x.dims.attention();
     }
 
     fn copy2d(x: *Eagle3, dst: u64, dst_pitch: usize, src: u64, src_pitch: usize, width: usize, rows: usize) !void {
