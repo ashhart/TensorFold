@@ -593,8 +593,6 @@ test {
     _ = @import("lane_host_decode_share_test.zig");
     _ = @import("lane_host_srpt.zig");
     _ = @import("lane_host_env.zig");
-}
-test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
     _ = @import("lane_host_fetch.zig");
