@@ -12,6 +12,7 @@ const ROOM_CONFIG_KEYS = new Set<keyof Room>([
 const TICKET_USER_KEYS = new Set<keyof Ticket>([
   'roomId',
   'executionMode',
+  'botId',
   'title',
   'body',
   'type',
@@ -236,6 +237,7 @@ export function appendRoomSteeringEvent(
 
 export function pickTicketUserPatch(input: unknown): Partial<Ticket> {
   const patch = strictOwnPatch<Ticket>(input, TICKET_USER_KEYS, 'ticket')
+  if (Object.prototype.hasOwnProperty.call(patch, 'botId')) assertNullableId(patch.botId, 'botId')
   if (Object.prototype.hasOwnProperty.call(patch, 'roomId')) assertNullableId(patch.roomId, 'roomId')
   if (Object.prototype.hasOwnProperty.call(patch, 'parentId')) assertNullableId(patch.parentId, 'parentId')
   if (Object.prototype.hasOwnProperty.call(patch, 'executionMode')) assertEnum(patch.executionMode, TICKET_EXECUTION_MODES, 'executionMode')
