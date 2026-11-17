@@ -6,6 +6,7 @@ const fx = tf.flashnext_engine;
 const snap = tf.flashnext_snapshot;
 const learned = tf.flashnext_learned;
 const rows = api.prompt_cache.rows;
+const frameKey = tf.flashnext_replay.vis_prompt.frameKey;
 const Allocator = std.mem.Allocator;
 
 /// The prompt cache's kept state: the snapshot and its name on both Macs of a pair (key 0: read back from disk).
@@ -18,7 +19,7 @@ pub fn ask(comptime H: type) *const fn (*anyopaque, *api.ImprintAsk) bool {
             const h: *H = @ptrCast(@alignCast(ctx));
             h.lock();
             defer h.unlock();
-            if (h.closing or (a.op == .flush and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // no store: 501
+            if (h.closing or (a.op.holds() and h.cache == null) or !h.disk.push(h.gpa, a)) return false; // 501
             h.wake.signal(h.io);
             return true;
         }
@@ -36,7 +37,7 @@ pub fn idleStep(h: anytype) bool {
     defer h.gpa.free(asks);
     defer flushes.deinit(h.gpa);
     for (asks) |a| a.answer(store, .{ .starts = false, .spans = false }); // its lookups pass neither
-    for (flushes.items) |a| a.answer(store, .{});
+    for (flushes.items) |a| a.answer(store, .{ .starts = false, .spans = false, .frame = frameKey }); // as images.key
     if (flushes.items.len > 0) if (store) |s| { // a reply's end publishes these; with none to come, the flush does
         h.lock();
         h.cache_status = api.prompt_cache.status.PromptCache(s);

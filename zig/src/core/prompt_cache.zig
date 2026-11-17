@@ -18,6 +18,7 @@ pub const rows = @import("rows_store.zig");
 pub const Saved = *anyopaque;
 pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
 pub const singleForgetChecked = imprint.singleForgetChecked;
+pub const framed = images.framed; // an image request's first cache word on a framed family
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
 pub const Snapshots = struct {
     ptr: *anyopaque,
