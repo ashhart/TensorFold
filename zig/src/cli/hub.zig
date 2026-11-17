@@ -316,7 +316,7 @@ test "cache layout helpers read a synthetic cache" {
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs" }));
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/snapshots" }));
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs/main" }), .data = "../../models--Org--Name/snapshots/0123456789abcdef0123456789abcdef01234567" });
-    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a ref that is not a sha is never joined
+    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a non-sha ref is refused
     const missing = try cachedSnapshot(a, io, hub, "Org/Other");
     try std.testing.expect(missing == null);
 }

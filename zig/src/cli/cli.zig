@@ -32,7 +32,8 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const a = init.arena.allocator();
     var out_buf: [64 << 10]u8 = undefined;
     var err_buf: [4 << 10]u8 = undefined;
-    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buf); // streaming: positional writes from both would overwrite each other in one redirected file
+    // Streaming keeps redirected stdout and stderr from overwriting each other.
+    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buf);
     var err = std.Io.File.stderr().writerStreaming(init.io, &err_buf);
     defer out.interface.flush() catch {};
     defer err.interface.flush() catch {};

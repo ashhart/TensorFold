@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const hub = @import("hub.zig");
 const cache = @import("rm_plan.zig");
 const remove = @import("rm_remove.zig");
+const locks = @import("sys").folder_lock;
 
 /// The repo id with an optional @revision, and the two flags.
 pub const Args = struct { spec: []const u8, yes: bool = false, dry_run: bool = false };
@@ -54,6 +55,9 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
         try err_out.print("tensorfold rm: {s} is {s}, and rm deletes only inside a repo's own cache folder; remove it by hand\n", .{ folder, what });
         return 1;
     }
+    var mutation: ?locks.Lease = null;
+    defer if (mutation) |l| l.release();
+    if (!args.dry_run) mutation = locks.hold(a, root, true) catch |e| return lockFailed(err_out, root, e);
     const found = cache.scan(a, io, folder) catch |e| switch (e) {
         error.OutOfMemory => return e,
         else => return unreadable(err_out, folder, e),
@@ -66,6 +70,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
         return 0;
     }
     if (!args.yes) {
+        mutation.?.release();
+        mutation = null;
         if (!ask.interactive) {
             try out.flush();
             try err_out.print("tensorfold rm: stdin is not a terminal to ask on; pass --yes to remove {s}\n", .{args.spec});
@@ -80,7 +86,31 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
             return 1;
         }
     }
-    const folder_gone = remove.apply(a, io, root, name, p) catch |e| {
+    if (mutation == null) mutation = locks.hold(a, root, true) catch |e| return lockFailed(err_out, root, e);
+    const current = cache.scan(a, io, folder) catch |e| return unreadable(err_out, folder, e);
+    const current_only = if (revision) |r| current.find(r) orelse return uncached(a, err_out, args.spec, repo, current) else null;
+    const fresh = try cache.plan(a, current, current_only);
+    if (!std.mem.eql(u8, &found.fingerprint, &current.fingerprint)) {
+        try err_out.print("tensorfold rm: {s} changed while awaiting confirmation; nothing was removed; run rm again to review the new plan\n", .{args.spec});
+        return 1;
+    }
+    var held: std.ArrayList(locks.Lease) = .empty;
+    defer {
+        for (held.items) |l| l.release();
+        held.deinit(a);
+    }
+    for (fresh.snapshots) |snapshot| {
+        const path = try std.fs.path.join(a, &.{ folder, "snapshots", snapshot.name });
+        const lease = locks.noFollow(a, io, path) catch |e| {
+            try err_out.print("tensorfold rm: snapshot {s}/{s} is held by a server or cannot be locked ({t}); nothing was removed; stop its server and retry\n", .{ repo, snapshot.name, e });
+            return 1;
+        };
+        held.append(a, lease) catch |e| {
+            lease.release();
+            return e;
+        };
+    }
+    const folder_gone = remove.apply(a, io, root, name, fresh) catch |e| {
         try out.flush();
         try err_out.print("tensorfold rm: removing from {s} stopped ({t}); run it again to finish once that is fixed\n", .{ folder, e });
         return 1;
@@ -144,6 +174,11 @@ fn uncached(a: Allocator, err_out: *std.Io.Writer, spec: []const u8, repo: []con
         try refList(err_out, try found.refsOf(a, s.name));
     }
     try err_out.writeByte('\n');
+    return 1;
+}
+
+fn lockFailed(err_out: *std.Io.Writer, root: []const u8, e: anyerror) !u8 {
+    try err_out.print("tensorfold rm: cache {s} is busy or cannot be locked ({t}); nothing was removed; retry after other pulls or removals finish\n", .{ root, e });
     return 1;
 }
 
