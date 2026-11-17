@@ -4,11 +4,15 @@ const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const rope_config = @import("rope_config");
+const eos_ids = @import("checkpoint_eos");
 
 pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
+comptime {
+    std.debug.assert(eos_ids.qwen35_hip.max.? == max_eos);
+}
 
 /// The most decoder layers a config may declare.
 pub const max_layers = 128;
@@ -88,29 +92,13 @@ pub fn products(s: Sizes) Error!void {
     for (widths) |w| if (w > limit) return error.InvalidConfig;
 }
 
-/// The end ids, config.json's (root, then text tower) and generation_config.json's, each once and below `vocab`.
+/// The HIP loader's end ids by core's qwen35_hip policy: root, text tower and generation_config.json, below `vocab`.
 pub fn eos(out: *[max_eos]u32, root: std.json.ObjectMap, tower: std.json.ObjectMap, generation: ?std.json.ObjectMap, vocab: usize) Error![]const u32 {
-    var n: usize = 0;
-    const holders = [_]?std.json.Value{ root.get("eos_token_id"), tower.get("eos_token_id"), if (generation) |g| g.get("eos_token_id") else null };
-    for (holders) |h| if (h) |v| try collect(out, &n, v, vocab);
-    if (n == 0) return error.MissingEos;
-    return out[0..n];
-}
-
-fn collect(out: *[max_eos]u32, n: *usize, v: std.json.Value, vocab: usize) Error!void {
-    switch (v) {
-        .null => {},
-        .array => |list| for (list.items) |item| try collect(out, n, item, vocab),
-        .integer => |i| {
-            if (i < 0 or i >= vocab) return error.BadEos;
-            const id: u32 = @intCast(i);
-            if (std.mem.indexOfScalar(u32, out[0..n.*], id) != null) return;
-            if (n.* == max_eos) return error.TooManyEos;
-            out[n.*] = id;
-            n.* += 1;
-        },
-        else => return error.BadEos,
-    }
+    const gen: std.json.Value = if (generation) |g| .{ .object = g } else .null;
+    return eos_ids.collect(out, eos_ids.qwen35_hip, .{ .object = root }, .{ .object = tower }, gen, vocab) catch |e| return switch (e) {
+        error.BadEosValue => error.BadEos,
+        else => |x| x,
+    };
 }
 
 fn mul(a: usize, b: usize) Error!usize {
