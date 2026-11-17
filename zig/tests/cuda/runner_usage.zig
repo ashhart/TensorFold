@@ -1,6 +1,5 @@
-//! Command help for the CUDA test runner.
-
-pub const usage =
+//! CUDA test runner help, kept separate from command dispatch.
+pub const text =
     \\usage: tf-cuda-test <command>
     \\  qwen4                     synthetic native Qwen4: binary64 logits/tokens, state seams, lanes and copied drafts
     \\  inkling2-serving MODEL IDS_FILE  Mini CUDA host-reference, resume, admission and copy-rollback serving equivalence

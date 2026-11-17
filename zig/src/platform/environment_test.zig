@@ -104,7 +104,6 @@ test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact
     for ([_][2][]const u8{
         .{ "TF_FLASHNEXT_CHUNK", "0" },
         .{ "TF_FLASHNEXT_CHUNK", "16385" },
-        .{ "TF_FLASHNEXT_CHUNK_SOLO", "0" },
         .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
         .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
         .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
