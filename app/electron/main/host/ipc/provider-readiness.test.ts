@@ -1,6 +1,4 @@
-// Issue 3539: hermetic regression for `provider:readiness` live verification.
-// checkEndpoint:true opts a Readiness screen into one bounded model-list request; every other
-// callsite keeps the presence-based answer.
+// Issue 3539: hermetic test of live verification; checkEndpoint:true opts into one bounded request, others stay pure.
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { once } from 'node:events'
