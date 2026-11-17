@@ -478,6 +478,7 @@ GLM on Metal stages every resident keep, including each planned mark, before its
 It does so whatever `--spill-gib` is set to: with `--spill-gib`, those keeps are staged when kept, not at eviction.
 That moves the gather and its GPU wait into the request path.
 A busy staging permit waits and retries; an image larger than the permit finishes through the chunk writer there.
+The log names `StagingBusy` when a keep waits, or `StagingFull` when it streams bounded pieces.
 Other admission or copy failures are named in the log; that keep remains in RAM only, without an automatic retry.
 The synchronous writer finishes at keep; otherwise an owned staged image publishes in the background.
 More marks can write more bytes per turn and consume the daily budget sooner; inspect the disk log's byte counts.

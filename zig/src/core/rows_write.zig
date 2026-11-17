@@ -279,6 +279,11 @@ fn stage(r: *Rows, q: Queued, may_wait: bool, borrowed: bool) Stage {
     }
     stageJob(r, j, may_wait) catch |err| {
         if (err == error.StagingBusy or (borrowed and err == error.StagingFull)) {
+            if (borrowed and (!q.waited or err == error.StagingFull)) pc.note("imprint: {d} borrowed tokens: {s}; {s}", .{
+                at,
+                @errorName(err),
+                if (err == error.StagingBusy) @as([]const u8, "waiting for staging permit") else "streaming bounded pieces",
+            });
             queued_again = true;
             if (err == error.StagingBusy) r.waiting = q.entry;
             r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = err == error.StagingBusy });
