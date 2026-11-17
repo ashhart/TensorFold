@@ -49,7 +49,10 @@ pub const Status = struct {
     fill_run: u64 = 0,
 
     pub const PromptCache = struct {
+        /// The miss reasons' fixed names, in the enum's order: bounded labels, no request value becomes one.
+        pub const miss_reason_names = [_][]const u8{ "none", "cold", "too_short", "bypass", "prompt_changed", "reply_changed", "image_changed", "frame_changed", "rows_changed", "ends_inside", "off_grid", "between_marks", "evicted", "shed", "expired", "cleared", "not_kept", "restore_failed" };
         states: u64 = 0,
+        miss_reasons: [miss_reason_names.len]u64 = @splat(0),
         bytes: u64 = 0,
         hits: u64 = 0,
         misses: u64 = 0,
