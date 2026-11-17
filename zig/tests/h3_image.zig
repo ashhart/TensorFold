@@ -1,9 +1,9 @@
 //! MiniMax-H3-Image's transformer on Metal from a picture case: six steps teacher-forced and gated, then free.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const h3 = @import("h3");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 
 const picture = h3.picture;
 
@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     defer case.deinit();
 
     const loading = mtl.clock.seconds();
-    const model = try h3.Model.load(gpa, transformer_dir, shards, &case, .{});
+    const model = try h3.Model.load(gpa, init.io, transformer_dir, shards, &case, .{});
     if (!model.base or model.step_heads != steps or model.audio != 0) return error.H3NotPictureModel;
     model.dense = true;
     const schedule = h3.schedule.Schedule{ .sigmas = pdd.sigmas, .timesteps = pdd.timesteps };
