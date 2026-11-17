@@ -125,7 +125,7 @@ test "message starts: the chunk plan of a request is main's, and a raw completio
     };
     var actual_cx: errors.Cx = .{ .a = a };
     const messages = (try json.parse(a, talk)).ok;
-    const actual = try @import("chat.zig").prepare(srv, &actual_cx, .{ .messages = messages, .fields = .null }, Gone{});
+    const actual = try @import("chat.zig").prepare(srv, &actual_cx, .{ .messages = messages, .fields = (try json.parse(a, "{}")).ok }, Gone{});
     defer srv.release(actual.preparing, actual.request);
     // Main's chat.prepare expression, frozen here: the comparison observes the actual prepared Request.chunks.
     const system_len = prompt_mod.systemPrefixLen(srv, &actual_cx, messages, &.{}, r.ids, false, null);
