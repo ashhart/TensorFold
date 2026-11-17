@@ -278,14 +278,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "core", .module = gpu.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = gpu.lighton } },
     }) });
     b.step("tf-lighton-hip-capture", "Capture native HIP LightOnOCR stages against a local reference fixture").dependOn(&b.addInstallArtifact(lighton_capture, .{}).step);
-    const qwen_capture_host = captureQwen(b, b.graph.host, host);
+    const qwen_capture_host = @import("lighton_hip.zig").captureQwen(b, b.graph.host, host);
     b.step("check-qwen-hip-capture-host", "Compile the Qwen HIP fixture capture without device execution").dependOn(&qwen_capture_host.step);
-    const qwen_capture_gpu = captureQwen(b, target, gpu);
+    const qwen_capture_gpu = @import("lighton_hip.zig").captureQwen(b, target, gpu);
     b.step("tf-qwen-hip-capture", "Capture native Qwen HIP stages against local reference fixtures").dependOn(&b.addInstallArtifact(qwen_capture_gpu, .{}).step);
     for ([_][]const u8{ "lighton", "qwen" }) |family_name| {
-        const exact_host = exactTool(b, b.graph.host, host, family_name);
+        const exact_host = @import("lighton_hip.zig").exactTool(b, b.graph.host, host, family_name);
         b.step(b.fmt("check-{s}-hip-exact-host", .{family_name}), "Compile native HIP image consistency checks without execution").dependOn(&exact_host.step);
-        const exact_gpu = exactTool(b, target, gpu, family_name);
+        const exact_gpu = @import("lighton_hip.zig").exactTool(b, target, gpu, family_name);
         b.step(b.fmt("tf-{s}-hip-exact", .{family_name}), "Build native HIP image consistency checks").dependOn(&b.addInstallArtifact(exact_gpu, .{}).step);
     }
     const native = server(b, target, gpu, build_options);
@@ -477,25 +477,6 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
     exe.root_module.addOptions("build_options", build_options);
     _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
     return exe;
-}
-fn captureQwen(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine) *std.Build.Step.Compile {
-    return b.addExecutable(.{ .name = "tf-qwen-hip-capture", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/lighton_hip/qwen_capture.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
-}
-fn exactTool(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, family_name: []const u8) *std.Build.Step.Compile {
-    const file = if (std.mem.eql(u8, family_name, "lighton")) "exact.zig" else "qwen_exact.zig";
-    return b.addExecutable(.{ .name = b.fmt("tf-{s}-hip-exact", .{family_name}), .root_module = b.createModule(.{
-        .root_source_file = b.path(b.fmt("zig/tests/lighton_hip/{s}", .{file})),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = e.lighton }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
 }
 /// A group's source and whether it compiles with IEEE arithmetic (`strict`: -O2 -fno-fast-math, IEEE denormals).
 const Source = struct { path: []const u8, strict: bool = false };
