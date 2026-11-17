@@ -306,11 +306,6 @@ pub fn zerosOff(qzeros: []const u8) ?usize {
     return null;
 }
 
-/// Every nibble of `qzeros` is `zero_nibble`, so every zero point is 8.
-pub fn zerosSymmetric(qzeros: []const u8) bool {
-    return zerosOff(qzeros) == null;
-}
-
 fn flag(v: ?std.json.Value) ?bool {
     const x = v orelse return null;
     return if (x == .bool) x.bool else null;

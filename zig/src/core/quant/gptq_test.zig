@@ -520,11 +520,11 @@ test "gptq: every tensor it refuses is named, the zero point and act order inclu
 }
 
 test "gptq: the zero point check reads both nibbles of every word" {
-    try testing.expect(gptq.zerosSymmetric(&[_]u8{ 0x77, 0x77, 0x77, 0x77 }));
-    try testing.expect(gptq.zerosSymmetric(&.{}));
+    try testing.expectEqual(@as(?usize, null), gptq.zerosOff(&.{ 0x77, 0x77, 0x77, 0x77 }));
+    try testing.expectEqual(@as(?usize, null), gptq.zerosOff(&.{}));
     try testing.expectEqual(@as(?usize, null), gptq.zerosOff(&.{ 0x77, 0x77 }));
     try testing.expectEqual(@as(?usize, 0), gptq.zerosOff(&.{ 0x78, 0x77 }));
     try testing.expectEqual(@as(?usize, 1), gptq.zerosOff(&.{ 0x77, 0x87 }));
     try testing.expectEqual(@as(?usize, 2), gptq.zerosOff(&.{ 0x77, 0x77, 0x00 }));
-    try testing.expect(!gptq.zerosSymmetric(&.{ 0x77, 0x7F }));
+    try testing.expectEqual(@as(?usize, 1), gptq.zerosOff(&.{ 0x77, 0x7F }));
 }
