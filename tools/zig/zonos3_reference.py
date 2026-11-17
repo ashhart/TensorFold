@@ -10,6 +10,7 @@ the commands. Every subcommand writes float32 / int32 .npy files under OUT, name
     codec    CODES.npy OUT          the codec decoder (CPU fp32) on codes [frames, 10], with its capture points
     encoder  GENERATOR AUDIO.npy OUT   the codec encoder's acoustic branch in fp32 on one lane of 44.1 kHz audio
     teacher  TEACHER_DIR FEATS.npy OUT the SSL teacher in fp32 on one lane's feature rows
+    quantize GENERATOR ACOUSTIC.npy SSL.npy OUT  the quantizer in fp32 on those two runs' rows: the lane's codes
 
 The backbone's per-layer dump and the encoder's bf16 production dump come from the publisher's tool unchanged:
     tools/dump_golden.py lm LM_DIR --input-ids OUT/input_ids.npy --dtype f32 --mode full -o DIR
@@ -190,6 +191,51 @@ def teacher(args):
     print(f"{len(feats)} rows, {len(taps)} captures -> {out}")
 
 
+def quantize(args):
+    """The quantizer in fp32 on one lane's acoustic and teacher rows: pooled, semantic, rvq.N.*, codes."""
+    from zonos3.codec.hybrid10_dual_encoding.model import MossCodec
+    from zonos3.codec.s1dac.losses import average_ssl_frames
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    state = torch.load(args.generator, map_location="cpu", mmap=True, weights_only=True)
+    cfg = state["config"]["model"]
+    model = MossCodec(cfg)
+    model.load_state_dict(state["generator"], strict=True, assign=True)
+    model.eval().requires_grad_(False).float()
+    acoustic = torch.from_numpy(np.load(args.acoustic).astype(np.float32)).T[None]  # [1, 1024, frames]
+    ssl = torch.from_numpy(np.load(args.ssl).astype(np.float32))[None]  # [1, rows, 1024]
+    frames = acoustic.shape[-1]
+    taps = {}
+
+    def rows_of(name, value):
+        taps[name] = value[0].float().T.contiguous().numpy()
+
+    with torch.inference_mode():
+        # the teacher saw a full 20 s lane: its rows pool onto the lane's 300 frames, of which the clip has `frames`
+        pooled = average_ssl_frames(ssl, 300, cfg["dual_encoding"]["window_ratio"])[..., :frames]
+        rows_of("lane.0.pooled", pooled)
+        semantic = model.semantic_encoder(pooled)
+        rows_of("lane.0.semantic", semantic)
+        q1, c1, e1, _, _ = model.quantizer.semantic_quantizer(semantic)
+        rows_of("lane.0.rvq.0.projected", e1)
+        rows_of("lane.0.rvq.0.quantized", q1)
+        prediction = model.semantic_head(q1)
+        rows_of("lane.0.semantic_prediction", prediction)
+        residual = acoustic - prediction
+        rows_of("lane.0.residual", residual)
+        codes = [c1[0, 0]]
+        for i, quantizer in enumerate(model.quantizer.quantizer.quantizers, 1):
+            z_q, _, _, indices, z_e = quantizer(residual)
+            rows_of(f"lane.0.rvq.{i}.projected", z_e)
+            rows_of(f"lane.0.rvq.{i}.quantized", z_q)
+            residual = residual - z_q
+            codes.append(indices[0])
+    np.save(out / "codes.npy", torch.stack(codes, 1).numpy().astype(np.int32))
+    save(out, taps)
+    print(f"{frames} frames, {len(taps)} captures -> {out}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -219,6 +265,12 @@ def main():
     p.add_argument("features")
     p.add_argument("out")
     p.set_defaults(run=teacher)
+    p = commands.add_parser("quantize")
+    p.add_argument("generator")
+    p.add_argument("acoustic")
+    p.add_argument("ssl")
+    p.add_argument("out")
+    p.set_defaults(run=quantize)
     args = parser.parse_args()
     args.run(args)
 

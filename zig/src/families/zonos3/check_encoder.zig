@@ -116,3 +116,83 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, teacher_dir:
     std.debug.print("RESULT zonos3 teacher {s} probes={d} low={d} missing={d} worst_row_cos={d:.7} seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, seconds });
     return if (pass) 0 else 1;
 }
+
+/// A clip's first lane end to end (acoustic branch, features, teacher, pooling, quantizer) against the fp32 codes.
+pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, audio_path: []const u8, root: []const u8) !u8 {
+    var rel = try z3.release.open(gpa, io, root, null);
+    defer rel.deinit();
+    const teacher_dir = try std.fs.path.join(gpa, &.{ root, z3.release.teacher_dir });
+    defer gpa.free(teacher_dir);
+    const f = try readNpy(gpa, io, audio_path);
+    defer gpa.free(f.bytes);
+    const all = try f.arr.floats(gpa);
+    defer gpa.free(all);
+    const lane_samples = z3.encoder.lane_frames * z3.encoder.frame_samples;
+    const audio = all[0..@min(all.len, lane_samples)];
+    const want_path = try std.fs.path.join(gpa, &.{ dir, "codes.npy" });
+    defer gpa.free(want_path);
+    const w = try readNpy(gpa, io, want_path);
+    defer gpa.free(w.bytes);
+    const want = try w.arr.ints(gpa);
+    defer gpa.free(want);
+
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    var stream = try cuda.Stream.init(&driver, true);
+    defer stream.deinit();
+    const enc = try z3.encoder.Encoder.create(gpa, io, &driver, stream, rel.generator);
+    defer enc.destroy();
+    const teach = try z3.teacher.Teacher.create(gpa, io, &driver, stream, teacher_dir);
+    defer teach.destroy();
+    const dec = try z3.codec_weights.load(gpa, io, &driver, rel.generator, rel.head);
+    defer {
+        dec.deinit();
+        gpa.destroy(dec);
+    }
+    const quant = try z3.quantizer.Quantizer.create(gpa, io, &driver, stream, rel.generator, dec);
+    defer quant.destroy();
+    const Get = struct {
+        fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
+            try @as(*z3.quantizer.Quantizer, @ptrCast(@alignCast(c))).download(ptr, out);
+        }
+    };
+    var c: Check = .{ .gpa = gpa, .io = io, .ctx = quant, .get = Get.get, .dir = dir };
+
+    const t0 = nowNs(io);
+    const frames = try enc.acoustic(audio, null);
+    // the teacher hears the lane padded to its 20 s
+    const padded = try gpa.alloc(f32, lane_samples);
+    defer gpa.free(padded);
+    @memset(padded, 0);
+    @memcpy(padded[0..audio.len], audio);
+    const low = try z3.features.resample(gpa, padded);
+    defer gpa.free(low);
+    const feats = try z3.features.rows(gpa, low);
+    defer gpa.free(feats);
+    const rows = feats.len / z3.teacher.feature_width;
+    const ssl_ptr = try teach.run(feats, null);
+    const ssl = try gpa.alloc(f32, rows * z3.teacher.d);
+    defer gpa.free(ssl);
+    try teach.download(ssl_ptr, std.mem.sliceAsBytes(ssl));
+    const pooled = try z3.quantizer.pool(gpa, ssl, frames);
+    defer gpa.free(pooled);
+    const codes = try gpa.alloc([z3.quantizer.codebooks]i32, frames);
+    defer gpa.free(codes);
+    try quant.run(enc.latent, pooled, codes, null);
+    const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
+    try quant.run(enc.latent, pooled, codes, .{ .ctx = &c, .f = Check.probe });
+
+    const n = @min(frames, w.arr.shape[0]);
+    var same: [z3.quantizer.codebooks]usize = @splat(0);
+    for (codes[0..n], 0..) |row, r| for (row, 0..) |code, cb| {
+        same[cb] += @intFromBool(code == want[r * z3.quantizer.codebooks + cb]);
+    };
+    var total: usize = 0;
+    for (same) |v| total += v;
+    const pass = c.fails == 0 and c.missing == 0 and frames == w.arr.shape[0] and same[0] == n;
+    std.debug.print("codes equal to the fp32 reference's, per codebook of {d} frames: {any}\n", .{ n, same });
+    std.debug.print("RESULT zonos3 encode {s} frames={d} reference_frames={d} probes={d} low={d} worst_row_cos={d:.6} codes_equal={d}/{d} semantic_equal={d}/{d} seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", frames, w.arr.shape[0], c.n, c.fails, c.worst, total, n * z3.quantizer.codebooks, same[0], n, seconds });
+    return if (pass) 0 else 1;
+}

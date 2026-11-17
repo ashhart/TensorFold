@@ -6,6 +6,16 @@ const wts = @import("codec_weights.zig");
 /// A layer's scratch rows: the norm's output, a projection's output, attention's output, and the wide rows.
 pub const Scratch = struct { n: u64, o: u64, att: u64, big: u64 };
 
+/// A causal ConvNeXt block on x [rows][width]; hist [width][6] holds the six inputs before these rows.
+pub fn convnext(k: *const kern.Kernels, s: cuda.Stream, sc: Scratch, b: wts.Block, hist: u64, x: u64, rows: usize) !void {
+    try k.dwconv(s, x, rows, b.dw_w, b.dw_b, hist, sc.o, wts.width);
+    try k.layernorm(s, sc.o, b.ln_w, b.ln_b, sc.n, wts.width, 1e-6, rows);
+    try k.linear(s, b.pw1_w, b.pw1_b, sc.n, wts.width, wts.width, wts.hidden, sc.big, wts.hidden, rows);
+    try k.gelu(s, sc.big, rows * wts.hidden);
+    try k.linear(s, b.pw2_w, b.pw2_b, sc.big, wts.hidden, wts.hidden, wts.width, sc.o, wts.width, rows);
+    try k.addScaled(s, x, sc.o, 0, wts.width, rows);
+}
+
 /// x [rows][d] at positions pos0 on: x += scale * attention(norm(x)), then x += scale * ffn(norm(x)).
 pub fn layer(k: *const kern.Kernels, s: cuda.Stream, sc: Scratch, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
     const d = shape.d;
