@@ -91,7 +91,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 8. Disk cache | yes | open [#3135] | open [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
-| 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
+| 11. Fused proj. | done¹ | done [#1783] | done [#3131] | done¹ | done¹ |
 | 12. Add + norm | done¹ | done¹ | done [#1256] | done¹ | done M[#1714] ? C |
 | 13. MoE grouped | done¹ | no (dense) | no (dense) | done [#1388] | done M[#1707] |
 | 14. CUDA graphs | done¹ | done¹ | done¹ | yes | done¹ |
