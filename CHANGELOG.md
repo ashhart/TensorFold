@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--cors-origin ORIGIN` (repeatable, exact origins only, no wildcard or credentials mode) lets a browser page on that origin call the API: its preflights are answered and its replies and streams name it, while keys are still required. `/v1/apply-template` returns the prompt text a chat request's `messages` render to, special tokens included, without running the model (#3166, fixes #3111).
+
 - GLM-5.3-Flash on CUDA: `TF_GLM_EXPERT_FORM=classic` or `factored` names the expert form and skips the load's race between the two, so launches and builds compare at one form; a load that times nothing still takes the named form, and unset keeps the race (#3151). Thanks to @Bizuayeu.
 - Security: on macOS and Windows, a library named without a folder is never loaded from the directory the server was started in; on macOS, name its folder in DYLD_FALLBACK_LIBRARY_PATH if it was only found there (#3100).
 
