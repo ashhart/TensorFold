@@ -168,6 +168,24 @@ The standalone tool measured the parts: 22.0 s of sampled audio took 1.15 s to g
 decoder alone turns 11.4 s of codes into audio in 0.13 s; a 9.7 s clip encodes in 0.75 s and a 47.3 s clip in 5.1 s
 (the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are no CUDA graphs and the sampler runs on the host; none of this is tuned.
 
+### A test page
+
+`tools/zig/zonos3_test_page.py` serves a small browser page (`zonos3_test_page.html`) and passes its three routes
+(`/v1/voices`, `/v1/models`, `/v1/audio/speech`) through to the model's port, so the page and the API share an
+origin. It uses the standard library only.
+
+```sh
+tensorfold-native serve RELEASE --parallel 1 --port 8080
+python3 tools/zig/zonos3_test_page.py --upstream 127.0.0.1:8080 --port 8081
+```
+
+The page lists the server's voices, speaks text with the seed and sampling fields, keeps each take with its player
+and timing, and clones a voice from an audio file: the browser decodes the file, makes a 16-bit mono WAV of its
+first 60 s and sends it as `ref_audio` with each request. It adds no authentication; it binds 127.0.0.1 unless
+`--bind` says otherwise. Checked with curl through the pass-through (the page, the voice list, a spoken reply, a
+cloned reply, a refusal's message passed back, other paths 404); the page's script was parsed but not driven in a
+browser by an automated test.
+
 ### Repo checks
 
 `zig fmt --check build.zig zig`, `tools/zig/lean_check.py` (0 new over the base), `tools/zig/cuda_common_check.py`
