@@ -1,29 +1,26 @@
-//! Which HCA carries each stripe to each peer on `roce.zig`'s path: the /24 rule of `fabric/tp/roce_multi_pairs.zig`.
+//! Which HCA carries each stripe to each peer on `roce.zig`'s path: `roce_pair_rule.zig`'s /24 rule, agreed by all.
 const std = @import("std");
 const verbs = @import("roce_verbs.zig");
 const layout = @import("roce_layout.zig");
+const pair_rule = @import("roce_pair_rule.zig");
 
 pub const max_hcas = verbs.max_hcas;
 pub const max_world = layout.max_world;
+const rule = pair_rule.Rule(max_hcas, max_world);
 
-/// One peer's stripes: stripe s leaves on our HCA `mine[s]` and lands on the peer's HCA `theirs[s]`.
-pub const Pairs = struct {
-    n: u32 = 0,
-    mine: [max_hcas]u32 = @splat(0),
-    theirs: [max_hcas]u32 = @splat(0),
-};
+const Pairs = rule.Pairs;
+const pairsOf = rule.pairsOf;
+const plan = rule.plan;
+const sameNet = pair_rule.sameNet;
 
 /// Every peer's pairs by rank (this rank's unused), each peer with `stripes` of them: the kernel's flags a peer.
-pub const Plan = struct {
-    stripes: u32 = 0,
-    pairs: [max_world]Pairs = @splat(.{}),
+pub const Plan = rule.Plan;
 
-    /// Whether stripe `s` leaves on our HCA `h` toward any peer (`post` makes room on that HCA first).
-    pub fn uses(p: *const Plan, s: usize, h: usize) bool {
-        for (p.pairs) |pp| if (s < pp.n and pp.mine[s] == h) return true;
-        return false;
-    }
-};
+/// Whether stripe `s` leaves on our HCA `h` toward any peer (`post` makes room on that HCA first).
+pub fn uses(p: *const Plan, s: usize, h: usize) bool {
+    for (p.pairs) |pp| if (s < pp.n and pp.mine[s] == h) return true;
+    return false;
+}
 
 /// Every rank's plan from every rank's GIDs: the /24 pairs when they hold on every rank, else the same-numbered HCAs.
 pub fn agreed(all: anytype, me: usize) Plan {
@@ -46,48 +43,6 @@ fn planOf(all: anytype, me: usize) error{BadRecord}!Plan {
 /// A GID carrying an IPv4 address (::ffff:a.b.c.d), the only kind whose /24 the rule can read.
 fn v4(g: [16]u8) bool {
     return std.mem.allEqual(u8, g[0..10], 0) and g[10] == 0xff and g[11] == 0xff;
-}
-
-/// Two RoCE v2 GIDs (::ffff:a.b.c.d) on one IPv4 /24.
-fn sameNet(a: [16]u8, b: [16]u8) bool {
-    return std.mem.eql(u8, a[12..15], b[12..15]);
-}
-
-/// Our k-th HCA on a /24 pairs with the peer's k-th on it; an HCA past the peer's count there does not reach that peer.
-pub fn pairsOf(mine: []const [16]u8, theirs: []const [16]u8) Pairs {
-    var out: Pairs = .{};
-    for (mine, 0..) |g, i| {
-        var k: usize = 0;
-        for (mine[0..i]) |h| k += @intFromBool(sameNet(h, g));
-        for (theirs, 0..) |h, j| if (sameNet(h, g)) {
-            if (k == 0) {
-                out.mine[out.n] = @intCast(i);
-                out.theirs[out.n] = @intCast(j);
-                out.n += 1;
-                break;
-            }
-            k -= 1;
-        };
-    }
-    return out;
-}
-
-/// The peers' pairs as a plan (`per[me]` unused): equal stripes to every peer, at least one, each of our HCAs used.
-pub fn plan(per: []const Pairs, me: usize, n_hca: u32) error{BadRecord}!Plan {
-    if (per.len > max_world or n_hca == 0 or n_hca > max_hcas) return error.BadRecord;
-    var out: Plan = .{};
-    var used: [max_hcas]bool = @splat(false);
-    for (per, 0..) |pp, r| {
-        if (r == me) continue;
-        if (pp.n == 0 or (out.stripes != 0 and pp.n != out.stripes)) return error.BadRecord;
-        out.stripes = pp.n;
-        out.pairs[r] = pp;
-        for (pp.mine[0..pp.n]) |i| used[i] = true;
-    }
-    // an HCA that reaches no peer is a cable nobody chose: refused, so every rank keeps the same-numbered layout
-    for (used[0..n_hca]) |u| if (!u) return error.BadRecord;
-    if (out.stripes == 0) return error.BadRecord;
-    return out;
 }
 
 /// The layout this path always used: every peer's stripe h from our HCA h to its HCA h.
@@ -141,7 +96,7 @@ test "a switch, two rails and two ranks on cables keep the same-numbered HCAs: q
         const q = layout.peerIndex(1, r);
         try t.expectEqual(l.flagAt(1, q, p.pairs[r].mine[s], 2), l.flagAt(1, q, s, p.stripes));
     };
-    for (0..2) |s| for (0..2) |h| try t.expectEqual(s == h, p.uses(s, h));
+    for (0..2) |s| for (0..2) |h| try t.expectEqual(s == h, uses(&p, s, h));
 }
 
 test "a switchless triangle of GB10s, the same names everywhere, each cable a port 0 to a port 1: a stripe a peer" {
@@ -164,7 +119,7 @@ test "a switchless triangle of GB10s, the same names everywhere, each cable a po
             try t.expectEqual(s.theirs[0], back.mine[0]);
         };
         // stripe 0 leaves on both HCAs, one peer each
-        try t.expect(p.uses(0, 0) and p.uses(0, 1));
+        try t.expect(uses(&p, 0, 0) and uses(&p, 0, 1));
     }
 }
 
@@ -186,17 +141,6 @@ test "a ring of four and a plan one rank alone could keep stay same-numbered on 
     var six = tri;
     six[2].gid[1][10] = 0;
     try expectSameNumbered(&six);
-}
-
-test "the plan refuses unequal stripes, a peer out of reach and an HCA reaching nobody" {
-    const one: Pairs = .{ .n = 1, .mine = .{ 0, 0 }, .theirs = .{ 0, 0 } };
-    const two: Pairs = .{ .n = 2, .mine = .{ 0, 1 }, .theirs = .{ 0, 1 } };
-    const second: Pairs = .{ .n = 1, .mine = .{ 1, 0 }, .theirs = .{ 0, 0 } };
-    try t.expectError(error.BadRecord, plan(&.{ .{}, two, one }, 0, 2));
-    try t.expectError(error.BadRecord, plan(&.{ .{}, one, .{}, second }, 0, 2));
-    try t.expectError(error.BadRecord, plan(&.{ .{}, one, one }, 0, 2));
-    try t.expectError(error.BadRecord, plan(&.{ .{}, one, second }, 0, 0));
-    try t.expectEqual(@as(u32, 1), (try plan(&.{ .{}, one, second }, 0, 2)).stripes);
 }
 
 test "TF_ROCE_HCA past max_hcas names is refused by name instead of cut, and NCCL_IB_HCA is left to NCCL" {
