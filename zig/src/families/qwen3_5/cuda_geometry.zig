@@ -4,6 +4,7 @@ const core = @import("core");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const cuda_rope = @import("cuda_rope.zig");
+const fields = @import("config_fields");
 
 pub const max_layers = 128;
 /// qwen35.cu's fixed widths.
@@ -105,7 +106,11 @@ pub const Geometry = struct {
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
         defer gpa.free(bytes);
-        var g = try parse(gpa, bytes);
+        var why: fields.Problem = .{};
+        var g = parseWhy(gpa, bytes, &why) catch |e| {
+            if (why.len != 0) std.log.err("{s}: {s}", .{ path, why.text() });
+            return e;
+        };
         if (g.kinds.ct) g.kinds = try @import("cuda_modelopt.zig").ctKinds(gpa, io, dir, g);
         return g;
     }
@@ -212,7 +217,7 @@ pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bo
 }
 
 /// Per-module overrides: routers at 8 bits, switch_mlp at 3 or 4 (one width throughout), others 4; groups of 64.
-fn expertBits(q: std.json.ObjectMap, layers: usize) !struct { bits: u8, count: usize } {
+fn expertBits(q: std.json.ObjectMap, layers: usize, p: *fields.Problem) !struct { bits: u8, count: usize } {
     var bits: ?usize = null;
     var count: usize = 0;
     var seen: [3 * max_layers]bool = @splat(false);
@@ -224,8 +229,9 @@ fn expertBits(q: std.json.ObjectMap, layers: usize) !struct { bits: u8, count: u
         if (o.get("mode")) |mode| {
             if (mode != .string or !std.mem.eql(u8, mode.string, "affine")) return error.UnsupportedQwenQuantization;
         }
-        const b = try integer(o, "bits");
-        if (try integer(o, "group_size") != 64) return error.UnsupportedQwenQuantization;
+        const r: fields.Reader = .{ .object = o, .source = name, .problem = p };
+        const b = try integer(r, "bits");
+        if (try integer(r, "group_size") != 64) return error.UnsupportedQwenQuantization;
         if (std.mem.endsWith(u8, name, ".mlp.gate") or std.mem.endsWith(u8, name, ".mlp.shared_expert_gate")) {
             if (b != 8) return error.UnsupportedQwenQuantization;
         } else if (std.mem.indexOf(u8, name, ".mlp.switch_mlp.") != null) {
@@ -264,18 +270,14 @@ fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadQwenConfig;
 }
 
-fn integer(o: std.json.ObjectMap, key: []const u8) !usize {
-    const v = o.get(key) orelse return error.BadQwenConfig;
-    if (v != .integer or v.integer < 1) return error.BadQwenConfig;
-    return @intCast(v.integer);
+/// A required positive integer; the field layer names the field, the refusal stays BadQwenConfig.
+fn integer(r: fields.Reader, key: []const u8) !usize {
+    return r.requiredInt(usize, key, .{ .min = 1 }) catch error.BadQwenConfig;
 }
 
-fn number(o: std.json.ObjectMap, key: []const u8) !f64 {
-    return switch (o.get(key) orelse return error.BadQwenConfig) {
-        .integer => |i| @floatFromInt(i),
-        .float => |f| f,
-        else => error.BadQwenConfig,
-    };
+/// A required number, an integer or a float.
+fn number(r: fields.Reader, key: []const u8) !f64 {
+    return r.requiredFloat(key) catch error.BadQwenConfig;
 }
 
 fn is(o: std.json.ObjectMap, key: []const u8, comptime T: type, want: T) !void {
@@ -290,6 +292,12 @@ fn is(o: std.json.ObjectMap, key: []const u8, comptime T: type, want: T) !void {
 }
 
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
+    var why: fields.Problem = .{};
+    return parseWhy(gpa, bytes, &why);
+}
+
+/// `parse`, with `p` naming the field behind a BadQwenConfig the field layer refused.
+pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !Geometry {
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
     const root = try object(doc.value);
@@ -307,7 +315,8 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     try is(t, "linear_key_head_dim", usize, dk);
     try is(t, "linear_value_head_dim", usize, dk);
     try is(t, "linear_conv_kernel_dim", usize, taps);
-    const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
+    const text: fields.Reader = .{ .object = t, .source = "config.json text_config", .problem = p };
+    const rope: fields.Reader = .{ .object = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary), .source = "config.json text_config.rope_parameters", .problem = p };
     if (try number(rope, "rope_theta") != cuda_rope.theta or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
     // plain rope, or YaRN from the config (rope_parameters or the older rope_scaling); --rope-yarn applies later
     const resolved = cuda_rope.resolve(t, null) catch |e| return if (e == error.BadQwenConfig) error.BadQwenConfig else error.UnsupportedQwenRotary;
@@ -319,15 +328,15 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const bf16 = !modelopt and !exl3 and qv == null;
     if (bf16 and moe) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
-        .hidden = try integer(t, "hidden_size"),
-        .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
-        .layers = try integer(t, "num_hidden_layers"),
-        .vocab = try integer(t, "vocab_size"),
-        .k_heads = try integer(t, "linear_num_key_heads"),
-        .v_heads = try integer(t, "linear_num_value_heads"),
-        .q_heads = try integer(t, "num_attention_heads"),
-        .kv_heads = try integer(t, "num_key_value_heads"),
-        .eps = @floatCast(try number(t, "rms_norm_eps")),
+        .hidden = try integer(text, "hidden_size"),
+        .intermediate = try integer(text, if (moe) "moe_intermediate_size" else "intermediate_size"),
+        .layers = try integer(text, "num_hidden_layers"),
+        .vocab = try integer(text, "vocab_size"),
+        .k_heads = try integer(text, "linear_num_key_heads"),
+        .v_heads = try integer(text, "linear_num_value_heads"),
+        .q_heads = try integer(text, "num_attention_heads"),
+        .kv_heads = try integer(text, "num_key_value_heads"),
+        .eps = @floatCast(try number(text, "rms_norm_eps")),
         .tied = try rules.tied(root, t, .cuda),
         .context = resolved.ceiling,
         .rope = resolved.rope,
@@ -345,13 +354,13 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     if (g.layers > max_layers or g.hidden % 256 != 0 or g.hidden > 8192 or g.intermediate % 64 != 0) return error.UnsupportedQwenGeometry;
     if (moe) {
         if (modelopt and !quantMethod(root, "modelopt")) return error.UnsupportedQwenQuantization; // ModelOpt's own only
-        g.experts = try integer(t, "num_experts");
-        g.top_k = try integer(t, "num_experts_per_tok");
+        g.experts = try integer(text, "num_experts");
+        g.top_k = try integer(text, "num_experts_per_tok");
         // the shared expert runs in the routed experts' table, so it needs their width
-        if (try integer(t, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
+        if (try integer(text, "shared_expert_intermediate_size") != g.intermediate) return error.UnsupportedQwenGeometry;
         if (g.experts > 256 or g.top_k > 31 or g.top_k >= g.experts) return error.UnsupportedQwenGeometry;
         if (!exl3 and !modelopt) { // an MLX table's widths; ModelOpt's experts come from their recipes
-            const w = try expertBits(try object(qv.?), g.layers);
+            const w = try expertBits(try object(qv.?), g.layers, p);
             if (w.count != 0 and w.count != 3 * g.layers) return error.UnsupportedQwenQuantization;
             g.expert_bits = w.bits;
         }
