@@ -4,8 +4,8 @@
 publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
 came from, and how each part was checked, so the checks can be rerun.
 
-Status: a work in progress on one branch, proposed in #3615. All 40 kernels have their limits records, numeric
-contract tests and a planted control each; the quality suite has not been run on this build.
+Status: one branch, proposed in #3615 and not yet opened as a pull request. All 40 kernels have their limits
+records, numeric contract tests and a planted control each; the quality suite has not been run on this build.
 
 ## Sources
 
@@ -89,8 +89,9 @@ the difference. The port has no bf16 path and none is planned as an option.
 
 ## How it was checked
 
-All figures below were measured on one RTX 5090 (driver 615.71, nvcc 13.3, Zig 0.17.0, `-Dsm=120`) at branch commit
-`39a2864ef`, with every reference dump regenerated for that run.
+All figures below were measured on one RTX 5090 (driver 615.71, nvcc 13.3, Zig 0.17.0, `-Dsm=120`). The table of
+port-side checks was last run in full on the branch rebased onto main `9489c3817`, with the contract tests and the
+two kernel changes they brought in; the reference dumps are one set, regenerated before the first full run.
 
 ### The reference side
 
@@ -153,46 +154,42 @@ I have not yet found whether a reduction order or the padded rows explain it.
 ### Sampled speech
 
 The reference draws with PyTorch's generator, so sampled frames cannot match it; a seeded draw is defined by
-TensorFold's keyed sampler instead. With it, the standalone tool gave byte-identical WAV files for one seeded
-request run twice, and Whisper transcribed that 4.9 s reply with no errors. The figures in the rest of this section
-and in the serving table below were measured before the sampler moved to the keyed one (commit 39a2864ef, the
-family's own seeded generator) and have not been repeated since.
+TensorFold's keyed sampler instead. The checks of it are on the served build, at the default sampling settings:
 
-The served build with the keyed sampler, one seeded request of 746,760 PCM bytes (373,380 samples, 8.5 s at
-44.1 kHz): sent again, sent streamed, and sent while two other requests
-arrived, it returned the same bytes each time. The server runs one lane and does not queue: the two requests that
-arrived while it spoke were refused with 503 `engine_busy` ("speech output capacity is full"), so there is no
-concurrent decoding to compare a solo reply with yet.
-
-Two indirect checks:
-
-- **Repeatability:** the served route returns the same bytes for the same seed, and a streamed reply's bytes equal
-  the whole reply's.
+- **Repeatability:** one seeded request of 1,569,960 PCM bytes (784,980 samples, 17.8 s at 44.1 kHz) returned the
+  same bytes sent whole three times, streamed three times, and once while two other requests arrived.
+- **No concurrent decoding to compare:** the server runs one lane and does not queue. The two requests that arrived
+  while it spoke were refused with 503 `engine_busy`, so there is no solo against concurrent comparison yet.
+- **Transcription:** Whisper large-v3-turbo (resampled to 16 kHz) transcribed that 17.8 s reply, 49 words in the
+  Rupert voice, with no errors.
 - **Cloned voices:** two clips sent as `ref_audio` (the release's Cillian clip, and its Thaddeus clip as 48 kHz
-  stereo) each gave speech that Whisper transcribed with no errors. By the release's speaker encoder, each output's
-  cosine to its own source clip was 0.78 and 0.83, against 0.21 and 0.17 to the other clip.
-- **Transcription:** Whisper large-v3-turbo (resampled to 16 kHz) transcribed the greedy test sentence with no
-  errors, from the port and from the reference alike, and a 62-word sampled passage with word error rates of 0.033
-  and 0.016 in two voices; each error was the word "TensorFold".
+  stereo) each gave speech that Whisper transcribed with no errors.
+
+Measured earlier, with the family's own seeded generator before the sampler moved to the keyed one, and not
+repeated since: by the release's speaker encoder each cloned output's cosine to its own source clip was 0.78 and
+0.83, against 0.21 and 0.17 to the other clip; and Whisper's word error rates on a 62-word sampled passage were
+0.033 and 0.016 in two voices, each error the word "TensorFold". It also transcribed the greedy test sentence with
+no errors, from the port and from the reference alike. None of these is a gate.
 
 ### The served route
 
-`tensorfold-native serve RELEASE --parallel 1`, default context 4,096 and 2,000 frames a request:
+`tensorfold-native serve RELEASE --parallel 1`, default context 4,096 and 2,000 frames a request, after one short
+warm-up request:
 
 | Measure | Value |
 | --- | --- |
-| A 19.4 s sampled reply, whole | 1.28 s (15 times real time) |
-| The same reply streamed | first response byte at 0.06 s, done at 1.29 s, bytes equal to the whole reply |
+| The 17.8 s sampled reply, whole (three runs) | 0.61 to 0.62 s (29 times real time) |
+| The same reply streamed (three runs) | first response byte at 0.04 s, done at 0.62 s, bytes equal to the whole reply |
 | Device memory in use after it | 3.57 GiB (2.36 GiB of it weights) |
 | Device memory once a clip has been cloned | 8.82 GiB (the clip encoder adds 4.43 GiB of weights) |
 | The first request with a clip (9.7 s), which loads the encoder | 9.0 s |
-| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 1.07 s, 1.53 s |
-| A second request while one runs | 503 |
+| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 0.93 s, 1.32 s |
+| A second and a third request while one runs | 503 each |
 | An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes`, a `ref_audio` that is no WAV or is under half a second | 400 with the reason |
 
-The standalone tool measured the parts: 22.0 s of sampled audio took 1.15 s to generate and 0.27 s to decode; the
-decoder alone turns 11.4 s of codes into audio in 0.13 s; a 9.7 s clip encodes in 0.75 s and a 47.3 s clip in 5.1 s
-(the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are no CUDA graphs and the sampler runs on the host; none of this is tuned.
+The standalone tool measured the parts: the decoder alone turns 11.4 s of codes into audio in 0.13 s; a 9.7 s clip
+encodes in 0.75 s and a 47.3 s clip in 5.1 s (the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are
+no CUDA graphs and the sampler runs on the host; none of this is tuned.
 
 ### A test page
 
@@ -214,14 +211,23 @@ browser by an automated test.
 
 ### Repo checks
 
-`zig fmt --check build.zig zig`, `tools/zig/lean_check.py` (0 new over the base), `tools/zig/cuda_common_check.py`
-(0 violations) and `zig build test-cuda-host` pass; the family's host tests run in it and alone as
-`zig build test-zonos-host`. On a machine whose umask is 0002 one unrelated test in that suite
-(`serve --config`, which refuses a group-writable file) fails; it passes under umask 022.
+On the branch rebased onto main `9489c3817`, the no-GPU workflow's steps were run on one Linux machine as the
+workflow runs them (`-Dfixed-cpu`, its test timeouts) and all passed:
 
-`zig build test-kernel-contract` passes with the family's records joined.
+- `zig fmt --check build.zig zig`; `tools/zig/lean_check.py` against the base with `lean_new.py` (221 problems on
+  both, 0 new); `tools/zig/cuda_common_check.py` (0 violations), `cuda_fragment_check.py` (0 misses) and their unit
+  tests; `host_tests_test.py`.
+- `zig build test-host-a`, `test-host-b`, `test-kernel-contract`, `test-golden`,
+  `test-gradient-serving test-qwen-serving-host`, `test-server-security test-pull-security`, `fuzz-cortheon`, `test`
+  and `check-release-paths`.
+- The family's host tests alone (`zig build test-zonos-host`), with Drama's and the CUDA host suite
+  (`test-drama-host test-cuda-host`).
 
-Not run: `zig build test`, `test-golden`, and any quality suite.
+They ran under umask 022: with 0002 one unrelated test (`serve --config`, which refuses a group-writable file)
+fails. The macOS and Metal jobs were not run, and neither was any quality suite.
+
+The family registers four kernel images, so `zig/tests/fixtures/gradient-serving.tsv` re-pins
+`zig/src/cuda/kernels.zig`, as earlier image registrations did.
 
 ### Memory admission
 
@@ -288,9 +294,10 @@ On an RTX 5090 (driver 615.71.09, images from nvcc 13.0.88, the runner built for
 
     (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6450 ms, limits 9 ms
 
-The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates) ended with
+The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates and 15 of limits,
+while other builds shared the machine's CPU) ended with
 
-    SUMMARY 647 kernels: 647 pass gates 1-4, 0 fail, 8 known findings; 418 controls: 418 red as planted, 0 missed; 186 limit problems
+    SUMMARY 684 kernels: 684 pass gates 1-4, 0 fail, 8 known findings; 459 controls: 459 red as planted, 0 missed; 186 limit problems; gates 4966609 ms, limits 899084 ms
 
 and exit code 1 for the limit problems. None of the 186 names a ZONOS3 launch: all 40 of the family's live launch
 checks pass, and the three live failures are `flashnext_mtp fn_row_topk` and `exl3_experts tf_exl3_prompt_gu` and
