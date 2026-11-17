@@ -1,7 +1,11 @@
 //! AutoGPTQ v1 weights (4-bit symmetric groups of 128, no act order): the rules, the stored tensors, an fp64 reference.
 const std = @import("std");
 const ckpt = @import("../checkpoint.zig");
-const Why = @import("../modelopt.zig").Why;
+const modelopt = @import("../modelopt.zig");
+const Why = modelopt.Why;
+const object = modelopt.object;
+const text = modelopt.text;
+const int = modelopt.int;
 
 const Allocator = std.mem.Allocator;
 const Checkpoint = ckpt.Checkpoint;
@@ -305,21 +309,6 @@ pub fn zerosOff(qzeros: []const u8) ?usize {
 /// Every nibble of `qzeros` is `zero_nibble`, so every zero point is 8.
 pub fn zerosSymmetric(qzeros: []const u8) bool {
     return zerosOff(qzeros) == null;
-}
-
-fn object(v: ?std.json.Value) ?std.json.ObjectMap {
-    const x = v orelse return null;
-    return if (x == .object) x.object else null;
-}
-
-fn text(v: ?std.json.Value) ?[]const u8 {
-    const x = v orelse return null;
-    return if (x == .string) x.string else null;
-}
-
-fn int(v: ?std.json.Value) ?i64 {
-    const x = v orelse return null;
-    return if (x == .integer) x.integer else null;
 }
 
 fn flag(v: ?std.json.Value) ?bool {
