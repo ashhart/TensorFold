@@ -20,6 +20,9 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .link_libc = true,
         .imports = &.{ .{ .name = "native_engines", .module = engines }, @import("exlr8.zig").cliImport(b, target, optimize, core) },
     });
+    const lock_test = b.addRunArtifact(b.addTest(.{ .root_module = mod, .filters = &.{"pull refuses cache mutation"} }));
+    b.step("test-pull-cache-lock-host", "Cache mutation refusal before any HTTP request").dependOn(&lock_test.step);
+    test_step.dependOn(&lock_test.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
     b.step("test-pull-host", "Checkpoint download paths: a nested shard folder, retries, resume and the whole-file fallback").dependOn(&run.step);
     test_step.dependOn(&run.step);
