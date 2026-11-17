@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: run_pass.sh ORDER(1..4) SIDE(main|branch)   one card (0), the server at 1, 4 and 8 streams, bf16 KV, one pass of the cells
+# run_pass.sh ORDER(1..4) SIDE(main|branch): card 0, 1/4/8 streams, bf16 KV.
 ORD=$1; SIDE=$2
 R=$WORK; RUNS=$R/runs; mkdir -p $RUNS
 export ZE_AFFINITY_MASK=0 LC_ALL=C
