@@ -26,6 +26,8 @@ pub const records = [_]M{
     .{ .name = "glm moe rows glu u q6 glm_moe_rows_glu_u_q6_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
     .{ .name = "glm moe rows u q8 glm_moe_rows_u_q8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
     .{ .name = "glm moe rows glu u q8 glm_moe_rows_glu_u_q8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u f8 glm_moe_rows_u_f8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u f8 glm_moe_rows_glu_u_f8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
 };
 
 test "the GLM row launches fit every Apple family" {
