@@ -132,6 +132,7 @@
       ],
       "drafter": null,
       "drafter_optional": "z-lab/Qwen3.6-35B-A3B-DFlash",
+      "native_backends": ["cuda"],
       "max_context": 262144,
       "bytes_per_token": 40000,
       "size_bytes": null,
