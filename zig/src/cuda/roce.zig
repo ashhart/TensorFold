@@ -396,7 +396,7 @@ pub const Gather = struct {
         var seq_copy: u32 = seq;
         var offset: u64 = 0;
         for (0..g.plan.stripes) |s| {
-            for (0..g.n_hca) |h| if (g.plan.uses(s, h)) while (g.hcas[h].outstanding + peers > send_depth / 4) {
+            for (0..g.n_hca) |h| if (roce_pairs.uses(&g.plan, s, h)) while (g.hcas[h].outstanding + peers > send_depth / 4) {
                 try g.drain(h);
                 if (!g.running.load(.monotonic)) return error.ProxyFailed;
             };
