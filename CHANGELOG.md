@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Security: on macOS and Windows, a library named without a folder is never loaded from the directory the server was started in; on macOS, name its folder in DYLD_FALLBACK_LIBRARY_PATH if it was only found there (#3100).
+
 - Prompt cache: with `--learn-conversations`, an image conversation's kept states stay in RAM as before, and the log now says so once per conversation ("kept RAM-only (ImageConversation)") instead of leaving disk silently unused; no prompt text or image content is logged, and replies are unchanged (#3008).
 
 - App: creating a Kanban ticket shows it once, even when its update event arrives before the create reply (#3363, fixes #3338). Thanks to @sx4im.
