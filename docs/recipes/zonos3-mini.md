@@ -4,8 +4,9 @@
 publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
 came from, and how each part was checked, so the checks can be rerun.
 
-Status: a work in progress on one branch, proposed in #3615. The kernels are not registered with the kernel contract
-yet, memory admission is not written, and the quality suite has not been run on this build.
+Status: a work in progress on one branch, proposed in #3615. Every kernel launch has its limits record, but only four
+of the 40 kernels have numeric contract tests and none has a planted control of its own; memory admission is not
+written, and the quality suite has not been run on this build.
 
 ## Sources
 
@@ -199,7 +200,41 @@ browser by an automated test.
 `zig build test-zonos-host`. On a machine whose umask is 0002 one unrelated test in that suite
 (`serve --config`, which refuses a group-writable file) fails; it passes under umask 022.
 
-Not run: `zig build test`, `test-kernel-contract`, `test-golden`, and any quality suite.
+`zig build test-kernel-contract` passes with the family's records joined.
+
+Not run: `zig build test`, `test-golden`, and any quality suite.
+
+### Kernel contract
+
+**Launch limits (gate 5).** The four images hold 40 kernels, each registered as one launch in
+`zig/src/core/contract/zonos3_cuda_records.zig` with the thread count and the largest dynamic shared memory the
+engine asks for. The records were measured, not written by hand: every image was built for sm_80, sm_86, sm_89,
+sm_120 and sm_121 and audited with
+
+    zig build fatbins kernel-contract-fatbins compile-cuda-tests -Dnvcc=NVCC -Dsm=80,86,89,120,121 --prefix OUT
+    tf-cuda-test kernel-contract-limits OUT/fatbin
+
+and the `RECORD` lines it prints were copied into the file. With nvcc 13.0.88 all 200 launch and chip pairs pass
+with their record current, and the same records are current for images built by nvcc 13.0.48. nvcc 13.2.86 compiles
+seven of the launches with other register counts (`z3_attention`, `z3_conv_silu`, `z3_embed`, `zc_dwconv`,
+`zc_resample`, `ze_resample_in`, `zt_attention`); those are the file's `cuda_132` set, joined into the registry's
+13.2 set, and nvcc 13.3.73 compiles all 40 as 13.2 does. With the set in place all 200 pairs are current under each
+of the four compilers. The audit also reports 18 stale records for launches of other families
+(`exl3_experts tf_exl3_prompt_down` and `tf_exl3_prompt_gu`, `flashnext_mtp fn_row_topk`, `qwen35 tf_q35_gdn_slots_1`,
+`_2` and `_4`); this branch does not change those kernels, and the same audit was not run on the base to compare.
+
+**Numeric gates (1 to 4).** `zig/tests/cuda/contract_zonos3.zig` registers four kernels, the ones that sum:
+`z3_rmsnorm`, `zc_layernorm`, `z3_linear` and `zc_linear`, through the contract's row and dense input families with
+the bf16 inputs widened to the fp32 rows these kernels read. On an RTX 5090 (driver 615.71.09, images from nvcc
+13.0.88), `tf-cuda-test kernel-contract zonos3` ended with
+
+    (filtered) SUMMARY 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems
+
+The layer norm's test adds a term to its bound: the kernel scales in fp32 and then adds the bias, so the roundings
+before the bias are a fraction of the scaled value and not of the sum, which gate 4's rows make cancel.
+
+Not done: numeric tests for the other 36 kernels, and a planted control for any of them. The four tests above rely
+on the gates' shared controls only.
 
 ## The reference's bf16 paths
 
