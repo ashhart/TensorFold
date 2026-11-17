@@ -1,4 +1,4 @@
-# tf-cuda-test kernel-contract, nvcc 13.3 (V13.3.73), GB10 sm_121, this branch before 1240c1908f (records only)
+# tf-cuda-test kernel-contract, nvcc 13.3 (V13.3.73), GB10 sm_121, this branch before its commit "keep main's records of qmmf's 16-row cluster tiles" (records only)
 KNOWN nonfinite cuda qwen35 decode attention, bf16 cache (tf_q35_attn_partial, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
 KNOWN nonfinite cuda qwen35 decode attention, fp8 cache (tf_q35_attn_partial8, tf_q35_attn_merge): a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
 KNOWN nonfinite cuda qwen35 MT2 fp8 paged attention: a NaN key in one of a row's several chunks leaves the row finite: tf_q35_attn_merge skips that chunk
