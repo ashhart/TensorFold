@@ -37,6 +37,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     const bytes = s.family.vtable.bytes(s.family.ptr, at);
     if (bytes > s.budget or s.most == 0) {
         s.counts.refused += 1;
+        s.ring.note(prompt[0..n], at, .not_kept);
         note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, if (bytes > s.budget) s.over else "" });
         return false;
     }
@@ -48,7 +49,11 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         // Only a charged-state family can use reusable storage for less than its conservative byte estimate.
         const reuse = promised.bytes == 0 and s.family.vtable.reuses != null and s.family.vtable.charged != null;
         if (bytes > limit or slots == 0 or (!reuse and s.held -| can.bytes + bytes > limit) or
-            s.entries.items.len - can.slots >= slots) return s.fail(at, error.CachePromised);
+            s.entries.items.len - can.slots >= slots)
+        {
+            s.ring.note(prompt[0..n], at, .not_kept);
+            return s.fail(at, error.CachePromised);
+        }
     }
     // Use fitting spare storage, otherwise make room for new storage.
     while (s.entries.items.len > 0) {
@@ -59,10 +64,16 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
             if (s.family.vtable.trim) |f| f(s.family.ptr, limit -| s.held -| bytes); // trim unusable spare first
             if (s.spare() < free_) continue;
         }
-        s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed));
+        s.remove(others.victim(s, null, prompt, born, bytes, 1) orelse {
+            s.ring.note(prompt[0..n], at, .not_kept);
+            return if (s.keep_others) others.refuse(s, at, bytes) else s.fail(at, error.CacheBorrowed);
+        });
         s.counts.evicted += 1;
     }
-    if (bytes > limit or slots == 0) return s.fail(at, error.CachePromised);
+    if (bytes > limit or slots == 0) {
+        s.ring.note(prompt[0..n], at, .not_kept);
+        return s.fail(at, error.CachePromised);
+    }
     if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
     const e = s.gpa.create(Entry) catch return s.fail(at, error.OutOfMemory);
     const last = s.gpa.dupe(u32, prompt) catch { // one copy: the state's tokens are its prefix
