@@ -83,7 +83,7 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     const data = try a.alloc(Value, srv.config.model_ids.len);
     const reasoning = try modelReasoning(a, srv);
     for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder));
+        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder, info.audio != null));
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
