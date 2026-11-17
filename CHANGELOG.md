@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on CUDA: Nemotron 3.5 Transcribe 30B-A4B (BF16) takes speech in chat requests as 16 kHz mono WAV through OpenAI `input_audio` and `audio_url` parts, up to an hour of audio a request in its trained 65,536-token window, with each clip's rows kept in the prompt cache and MTP drafts giving the same replies as `--no-drafts`; `/v1/models` lists `audio` in its `input_types` (#1632, with #1631). Thanks to @BobClawblaw.
+
 - Nemotron 3.5 Transcribe on CUDA: the language model loads from the bf16 release as published, with exact bf16 caches and no conversion. The audio encoder runs on the GPU: log-mel, the ASR encoder, the streaming speaker encoder and its cache, fusion and projection. `tf-cuda-test audio-check` writes every encoder stage. Every other Nemotron checkpoint loads as before, and audio input in the server follows in #1632 (#1631). Thanks to @BobClawblaw, and to @cwschroeder for the CI report.
 
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
