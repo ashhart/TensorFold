@@ -28,16 +28,22 @@ const short_context = [2]f64{ 10, 0.1 };
 const Clock = struct {
     target: *const fake.Fake,
     times: [2]f64,
+    draft_ms: f64 = 0, // each head drafting since the round started
+    drafts_at: usize = 0,
 
     fn clock(c: *Clock) be.Clock {
         return .{ .ptr = c, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
     }
 
-    fn start(_: *anyopaque) void {}
+    fn start(ptr: *anyopaque) void {
+        const c: *Clock = @ptrCast(@alignCast(ptr));
+        c.drafts_at = c.target.drafts_calls;
+    }
 
     fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
         const c: *Clock = @ptrCast(@alignCast(ptr));
-        return c.times[0] + c.times[1] * @as(f64, @floatFromInt(c.target.last_rows));
+        const drafts: f64 = @floatFromInt(c.target.drafts_calls - c.drafts_at);
+        return c.times[0] + c.times[1] * @as(f64, @floatFromInt(c.target.last_rows)) + c.draft_ms * drafts;
     }
 };
 
@@ -495,4 +501,23 @@ test "lone copy price: a request reads the copy prices of the one before that st
         // the second long reply starts from the first's timed copies: its first copy whole, as the first's later ones
         try std.testing.expectEqual(@as(?usize, 15), got[2].first);
     }
+}
+
+test "lone copy price: a head stream's copy rounds are timed by their verify, without the head's next drafting" {
+    var cfg = try cfgs.Config.init(gpa, hip(true), 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: Clock = .{ .target = &target, .times = short_context, .draft_ms = 30 }; // a slow head: 30 ms a drafting
+    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var c: Copier = .{ .land_from = 0, .quiet_until = prompts[0].len + 4 };
+    var s = try sm.Stream.init(gpa, .{ .id = "a", .prompt = prompts[0], .max_new = 64, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
+    defer s.deinit(gpa);
+    try e.addStream(&s);
+    while (e.activeCount() > 0) try e.step();
+    try std.testing.expect(target.drafts_calls > 0);
+    // the kept copy prices hold each whole copy's verify time, 10 ms plus 0.1 ms a row, and none of the drafting
+    const kept = e.lone_kept[0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
+    try std.testing.expectEqual(@as(?f64, short_context[0] + short_context[1] * 16), kept.copy_ms.get(15));
 }
