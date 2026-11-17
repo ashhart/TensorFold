@@ -62,6 +62,7 @@ pub const Metal = struct {
     head: ?mtp.Head = null,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     steps: @import("prefill_steps.zig").Steps = .{}, // prompt passes a chunk a call (prefill_step), by stream
+    passes: std.AutoHashMapUnmanaged(*lanes.Stream, prompt_pages.Pass) = .empty, // TF_KV_SHARE: open passes
     tokens: mtl.Buffer, // u32 [ring]: drawn tokens and host-fed ones
     prompt: mtl.Buffer, // u32 [capacity]
     fence: Fence,
@@ -124,6 +125,7 @@ pub const Metal = struct {
         }
         self.caches.deinit(self.gpa);
         self.steps.at.deinit(self.gpa);
+        self.passes.deinit(self.gpa);
         kv_pages.detach(self);
         if (self.head) |*h| h.deinit();
         if (self.masks) |*m| m.deinit();
@@ -493,7 +495,7 @@ pub const Metal = struct {
         self.drain() catch {
             @import("prompt_flight.zig").forget(self, s);
         };
-        self.steps.forget(s); // a stream that left mid-pass no longer owns the prompt ids
+        self.steps.forget(prefill_metal.Ops{ .m = self }, s); // a stream left mid-pass owns no prompt ids, no pass
         if (self.caches.fetchRemove(s)) |kv| {
             kv.value.deinit(&self.pool);
             self.gpa.destroy(kv.value);

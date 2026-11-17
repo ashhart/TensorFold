@@ -45,7 +45,17 @@ const Queue = struct {
     }
 };
 
-const Event = union(enum) { chunk: struct { id: u8, at: usize, rows: usize }, load: u8, decode: u8, keep: u32 };
+const Event = union(enum) { chunk: struct { id: u8, at: usize, rows: usize }, load: u8, decode: u8, keep: u32, mark: usize };
+
+/// TF_KV_SHARE's store as prompt_pages.zig's Pass meets the steps: its marks, pages adopted at open, one end.
+const Store = struct {
+    marks: []const u32 = &.{},
+    adopted: usize = 0, // pages the store hands the pass at open
+    held: usize = 0, // and those the pass still holds
+    open: bool = false,
+    ends: usize = 0,
+    ok: ?bool = null,
+};
 
 /// The device side as prefill_metal.zig's Ops: each chunk's rows and the head's absorbed rows recorded.
 const Ops = struct {
@@ -56,6 +66,7 @@ const Ops = struct {
     decide: ?usize = null,
     head: ?*std.ArrayList([2]usize) = null, // the MTP head's absorbed rows, [start, end) a chunk
     loads_on_empty: *bool, // every load found the queue landed (the shared prompt buffer free)
+    store: ?*Store = null,
 
     pub fn steps(o: Ops) *pass.Steps {
         return o.map;
@@ -81,9 +92,30 @@ const Ops = struct {
         if (s.isCancelled()) return error.Cancelled;
         try o.queue.drain();
         o.load(s);
+        if (o.store) |x| {
+            x.open = true;
+            x.held = x.adopted;
+        }
         return 0;
     }
-    pub fn finish(_: Ops, _: *lanes.Stream) !void {}
+    pub fn marks(o: Ops, _: *lanes.Stream) []const u32 {
+        return if (o.store) |x| (if (x.open) x.marks else &.{}) else &.{};
+    }
+    pub fn mark(o: Ops, _: *lanes.Stream, at: usize) void {
+        const x = o.store orelse return;
+        if (x.open and std.mem.indexOfScalar(u32, x.marks, @intCast(at)) != null) o.log.append(gpa, .{ .mark = at }) catch @panic("out of memory");
+    }
+    pub fn end(o: Ops, _: *lanes.Stream, ok: bool) void {
+        const x = o.store orelse return;
+        if (!x.open) return;
+        x.open = false;
+        x.held = 0;
+        x.ends += 1;
+        x.ok = ok;
+    }
+    pub fn finish(o: Ops, s: *lanes.Stream) !void {
+        o.end(s, true);
+    }
 };
 
 /// main's cuts for the 29-token prompt: starts 3 and 20, decision row 12, cap 8 (as prompt_flight_test.zig).
@@ -264,8 +296,44 @@ test "Nemotron Metal steps: cancellation inside a step publishes and keeps its l
     try t.expectEqual(@as(u32, 16), s.fill_at.load(.monotonic));
     try t.expectEqual(@as(usize, 0), q.flights.items.len);
     try t.expectEqual(@as(usize, 0), map.at.count());
-    map.forget(&s);
+    map.forget(ops, &s);
     try t.expectEqual(@as(?*lanes.Stream, null), map.ids);
+}
+
+test "Nemotron Metal steps: a stepped pass ends a chunk at each store mark and gives adopted pages back on cancel" {
+    const ids: [29]u32 = @splat(7);
+    var s = try lanes.Stream.init(gpa, .{ .id = "m", .prompt = &ids, .max_new = 1, .chunks = &.{ 3, 20 } });
+    defer s.deinit(gpa);
+    var q: Queue = .{};
+    defer q.deinit();
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    var store: Store = .{ .marks = &.{ 24, 16 }, .adopted = 2 };
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .decide = 12, .loads_on_empty = &empty, .store = &store };
+    while (!try pass.step(&q, ops, &s)) {}
+    const got = try chunksOf(log.items);
+    defer gpa.free(got);
+    const cuts = [_][2]usize{ .{ 0, 3 }, .{ 3, 8 }, .{ 11, 2 }, .{ 13, 3 }, .{ 16, 4 }, .{ 20, 4 }, .{ 24, 5 } };
+    try t.expectEqualSlices([2]usize, &cuts, got);
+    var marked: std.ArrayList(usize) = .empty;
+    defer marked.deinit(gpa);
+    for (log.items) |e| if (e == .mark) try marked.append(gpa, e.mark);
+    try t.expectEqualSlices(usize, &.{ 16, 24 }, marked.items);
+    try t.expectEqual(@as(?bool, true), store.ok);
+    try t.expectEqual(@as(usize, 1), store.ends);
+    var c = try lanes.Stream.init(gpa, .{ .id = "c", .prompt = &ids, .max_new = 1, .chunks = &.{ 3, 20 } });
+    defer c.deinit(gpa);
+    store = .{ .marks = &.{ 24, 16 }, .adopted = 2 };
+    for (0..2) |_| try t.expect(!try pass.step(&q, ops, &c));
+    try t.expectEqual(@as(usize, 2), store.held);
+    try pass.cancel(&q, ops, &c);
+    try t.expectEqual(@as(usize, 0), store.held);
+    try t.expectEqual(@as(?bool, false), store.ok);
+    map.forget(ops, &c);
+    try t.expectEqual(@as(usize, 1), store.ends); // ended once: the forget after the cancel finds no pass
 }
 
 /// The lanes fake with Nemotron's stepping in front (cap 4), every chunk, load and decode logged.
