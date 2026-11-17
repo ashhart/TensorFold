@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Benchmark: managed runs on a listed Apple silicon Mac record its coarse family in `hardware.form_factor` (`Mac mini`, `Mac Studio`, `MacBook Pro`, `MacBook Air`, `iMac` or `Mac Pro`), mapped on the device from a fixed table so the product identifier is never written; other Macs, Linux and Windows leave the field out and keep the same receipt bytes, and `benchmark check` accepts it absent, null or one of the six labels. `benchmark inspect` in 1.2.9 and earlier refuses receipts that carry it (#2009, refs #1950). Thanks to @garvrao80.
+
 - On Macs, DeepSeek V4.1's vision tower (epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge) has its own Metal kernels under the kernel contract, each with a planted control; nothing serves through them until #1722 (#1721, part of #1676).
 - DeepSeek V4.1 on CUDA: a request whose prompt and reply don't fit the free KV pool now waits in the queue until a running request ends instead of running unreserved (one that can never fit fails at once with a reason), and at TP=2 the ranks agree on each new KV page and roll back together before any device table changes; replies are unchanged (#1682). Thanks to @jayleaton.
 
