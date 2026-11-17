@@ -227,8 +227,7 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
     }
 }
 
-/// Per-token loss through the prompt path: `ids` read in chunks of `rows` (the prompt kernels a reply's prompt runs),
-/// the head over every chunk row, row i scored on ids[i + 1]: -log p into out[i] (a quality gate for prompt kernels).
+/// Per-token loss via the prompt path in `rows`-row chunks: the head over every row, -log p(ids[i + 1]) into out[i].
 pub fn promptNll(e: *Engine, ids: []const u32, rows: u32, out: []f32) !void {
     const c = &e.c;
     const V: usize = c.vocab;
