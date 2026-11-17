@@ -18,15 +18,15 @@ pub const resample_in = 736;
 pub const resample_out = 735;
 pub const resample_taps = 770;
 
-pub const StageShape = struct { in: usize, d: usize, ff: usize, ctx: usize, out: usize };
+pub const StageShape = struct { in: usize, d: usize, ff: usize, ctx: usize, out: usize, layers: usize };
 
 /// The five transformer stages, 15 Hz to 240 Hz; out 0: the last stage's features feed the head as they are.
 pub const stages = [5]StageShape{
-    .{ .in = 1024, .d = 1280, .ff = 5120, .ctx = 150, .out = 1280 },
-    .{ .in = 640, .d = 768, .ff = 3072, .ctx = 300, .out = 768 },
-    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 768 },
-    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 768 },
-    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 0 },
+    .{ .in = 1024, .d = 1280, .ff = 5120, .ctx = 150, .out = 1280, .layers = 2 },
+    .{ .in = 640, .d = 768, .ff = 3072, .ctx = 300, .out = 768, .layers = 2 },
+    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 768, .layers = 2 },
+    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 768, .layers = 2 },
+    .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 0, .layers = 2 },
 };
 
 pub const Layer = struct { n1w: u64, n1b: u64, n2w: u64, n2b: u64, qkv: u64, attn_out: u64, ffn0: u64, ffn1: u64, attn_scale: u64, ffn_scale: u64 };
@@ -191,7 +191,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator
         const s = 2 * si;
         var count: usize = 0;
         while (h.tensors.contains(fmt(&nb, "trainable/stages.{d}.layers.{d}.qkv.weight", .{ s, count }))) count += 1;
-        if (count == 0) return error.MissingTensor;
+        if (count != shape.layers) return error.MissingTensor;
         st.layers = try gpa.alloc(Layer, count);
         st.in_proj = try l.one(&h, fmt(&nb, "trainable/stages.{d}.input_proj.weight", .{s}), &.{ shape.d, shape.in });
         st.out_proj = if (shape.out == 0) 0 else try l.one(&h, fmt(&nb, "trainable/stages.{d}.output_proj.weight", .{s}), &.{ shape.out, shape.d });
