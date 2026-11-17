@@ -30,6 +30,7 @@ const dense12_k = @import("contract_dense_wmma12.zig");
 const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
+const route_k = @import("contract_route.zig");
 const kit = @import("contract_kit.zig");
 const item_k = @import("contract_wmma_item.zig");
 const embed_k = @import("contract_embed.zig");
@@ -312,6 +313,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers, [_]kit.Kind{ .f16, .bf16 }) |*x, k| x.* = router_k.Router.init(a, &r, s, &l, k);
     defer for (&routers) |*x| x.deinit();
     for (&routers) |*x| try kernels.append(a, x.kernel());
+    // the route plan in each mode the engine asks it, then a control on each rule of its cut
+    var routes: [route_k.cases.len]route_k.Route = undefined;
+    for (&routes, route_k.cases) |*x, case| x.* = .init(a, &r, s, &l, case);
+    defer for (&routes) |*x| x.deinit();
+    for (&routes) |*x| try kernels.append(a, x.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
     // the last one is the few-row passes' control, on its case's geometry
