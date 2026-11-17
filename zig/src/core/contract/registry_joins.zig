@@ -54,8 +54,7 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
     @import("qwen4_records.zig").cuda ++
-    @import("registry_media.zig").cuda_pending ++
-    @import("exl3_prompt_records.zig").cuda;
+    @import("registry_media.zig").cuda_pending;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
@@ -137,5 +136,4 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 test {
     _ = @import("mla_cuda_records.zig");
     _ = @import("inkling2_cuda_records.zig");
-    _ = @import("exl3_prompt_records.zig");
 }
