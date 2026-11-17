@@ -25,6 +25,8 @@ pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const proposal_rows = @import("proposal_rows.zig");
+pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec
+pub const wav = @import("wav.zig"); // reference clips in, speech out
 pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
@@ -73,6 +75,8 @@ pub const kv_prompts = @import("kv_prompts.zig");
 pub const state_walk = @import("state_walk.zig");
 
 test {
+    _ = torch_pth;
+    _ = wav;
     _ = startup_receipt;
     _ = benchmark_group;
     _ = dspine;

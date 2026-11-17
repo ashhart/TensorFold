@@ -13,7 +13,7 @@ pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
 pub const prompt = @import("prompt.zig");
 pub const codec = @import("cuda/codec.zig");
-pub const wav = @import("wav.zig");
+pub const wav = @import("core").wav;
 pub const tts = @import("cuda/tts.zig");
 pub const common = @import("common.zig");
 pub const shards = @import("shards.zig");
@@ -36,7 +36,6 @@ test {
     _ = @import("codec_schema.zig");
     _ = @import("cuda/stager.zig");
     _ = @import("cuda/reference_rows.zig");
-    _ = @import("codec_pth.zig");
     _ = prompt;
     _ = wav;
 }
