@@ -75,6 +75,8 @@ const valid = [_]Case{
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
@@ -259,17 +261,18 @@ test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA
     try t.expect(try e.value(bool, name, "1", false));
 }
 
-test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unset keeps pages on" {
-    const name = "TENSORFOLD_LFM2_KV_PAGES";
-    for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, name) != null);
+test "environment: LFM2's and LFM3's page switches are exact 0 or 1, refused by name, and unset keeps pages on" {
+    inline for (.{ "TENSORFOLD_LFM2_KV_PAGES", "TENSORFOLD_LFM3_KV_PAGES" }) |name| {
+        for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
+            try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
+            const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+            defer a.free(why);
+            try t.expect(std.mem.indexOf(u8, why, name) != null);
+        }
+        try t.expect(try e.value(bool, name, null, true));
+        try t.expect(try e.value(bool, name, "1", true));
+        try t.expect(!try e.value(bool, name, "0", true));
     }
-    try t.expect(try e.value(bool, name, null, true));
-    try t.expect(try e.value(bool, name, "1", true));
-    try t.expect(!try e.value(bool, name, "0", true));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
