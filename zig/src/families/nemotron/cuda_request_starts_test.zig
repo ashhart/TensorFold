@@ -28,8 +28,7 @@ test "nemotron: a fresh pass cuts at every message start, not at the grid step" 
 }
 
 test "nemotron: a resumed pass from a kept start cuts at the next start (the resume point)" {
-    // Turn N's state was kept at 300 and the next turn resumes there. A fixed-grid resume would
-    // run 300..1000 once, never computing the state at 640 a later turn resumes from.
+    // A resume at 300 must still visit the later message start at 640.
     const chunks = [_]u32{ 128, 300, 640 };
     const marks = [_]u32{640};
     var out: [8]usize = undefined;

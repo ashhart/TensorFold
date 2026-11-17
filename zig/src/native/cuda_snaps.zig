@@ -43,8 +43,7 @@ fn snapInvariant(comptime F: type) bool {
     return @hasDecl(F, "snap_cut_invariant") and F.snap_cut_invariant;
 }
 
-/// The server's chunk step: an invariant family keeps starts on its own grid by default; an opt-in family
-/// keeps them only when its `request_starts_switch` is 1, else no starts.
+/// Request-start spacing: invariant families use their grid; other families retain their opt-in switch.
 pub fn requestStep(comptime F: type) u32 {
     if (snapInvariant(F)) return if (@hasDecl(F, "snap_grid")) F.snap_grid else F.prompt_rows;
     if (!@hasDecl(F, "request_starts_switch")) return 0; // each family names its own opt-in, so it turns on alone

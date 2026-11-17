@@ -190,8 +190,7 @@ fn replay(f: *Fake, store: *pc.Store, r: *const api.Request, marks: []const u32)
 test "turn starts: a cut-invariant family defaults on and a six-turn edit resumes at the edited message" {
     const step: u32 = 2048;
     const minimum: u32 = 1;
-    // The engine info a cut-invariant family advertises: starts on, one row apart.
-    // The shared contract itself is covered by test-cuda-message-starts-host.
+    // Model invariant-family metadata here; native contract tests check its actual declaration.
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -265,8 +264,7 @@ test "turn starts: a cut-invariant family defaults on and a six-turn edit resume
     // A fresh pass cuts at the very starts a resume reuses (#2824's warm-pass case).
     const fresh_plan = try baseline.beginUser(alloc, r.prompt, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, null, r.decode_spans);
     try t.expectEqual(@as(u32, 0), fresh_plan.from);
-    // The family keeps at chunk ends, so a fresh pass and a resume share the same starts even when
-    // the store's plan marks only the history and rewind points.
+    // The request retains starts even when the store marks only history and rewind points.
     try t.expect(std.mem.indexOfScalar(u32, r.chunks, plan.from) != null);
     try replay(&f, &store, &r, plan.marks); // resumed tokens == fresh(r.prompt), greedy and seeded alike
 }
