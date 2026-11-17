@@ -119,12 +119,18 @@ pub const Sampler = struct {
 
     /// `indices.len` selected rows of `logits` made whole in `full` (bf16 [indices.len][vocab]) on every rank.
     pub fn gatherIndexed(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, rank: usize, logits: u64, indices: []const usize, full: u64) !void {
-        const V = s.vocab;
+        const n = indices.len;
+        if (n > s.rows or rank >= spans.len) return error.IndexedGatherExtent;
+        if (n == 0) return;
         const span = spans[rank];
-        for (indices, 0..) |src, row| try s.copy(stream, full + (row * V + span.lo) * 2, logits + src * span.len() * 2, span.len() * 2);
+        const staged = s.stage.ptr + n * span.lo * 2;
+        for (indices, 0..) |src, row| try s.copy(stream, staged + row * span.len() * 2, logits + src * span.len() * 2, span.len() * 2);
         switch (exchange) {
-            .local => {},
-            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = indices.len }, Spread.post),
+            .local => try s.place(stream, full, staged, span, n),
+            .nccl => |x| {
+                try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .stage = s.stage.ptr, .spans = spans, .mine = &.{}, .rows = n }, Spread.post);
+                for (spans) |part| try s.place(stream, full, s.stage.ptr + n * part.lo * 2, part, n);
+            },
         }
     }
 
