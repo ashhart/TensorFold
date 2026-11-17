@@ -472,7 +472,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
-- Qwen3.6-35B-A3B on Metal: the 4-bit text checkpoint serves on the routed expert path, with 16 query heads over 2 in the attention plan and the kernel contract's routed and attention cases at its widths; `tf-qwen27-run --stages DIR` writes each layer's stream, the final norm and the logits for a float64 comparison (#3239, part of #931). Thanks to @cshintov.
+- Qwen3.6-35B-A3B on Metal: the 4-bit text checkpoint serves on the routed expert path, with 16 query heads over 2 in the attention plan and the kernel contract's routed and attention cases at its widths; `--vision` refuses it by name, since its image path is not qualified. `tf-qwen27-run --stages DIR` writes each layer's stream, the final norm and the logits for a float64 comparison; the recorder is built into that tool only, so the served engine's code is unchanged by it (#3239, part of #931). Thanks to @cshintov.
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
 - LFM2.5 on CUDA: attention pages come from the shared KV pool and chat states are kept in the prompt cache, with the kept states' copies off the first token's path; replies are unchanged (#1503). Thanks to @jschmied.

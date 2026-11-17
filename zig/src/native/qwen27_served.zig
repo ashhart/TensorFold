@@ -287,6 +287,10 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     const model = try q.model.Model.loadDeferred(gpa, io, dir, reserve.loaded_rows);
     errdefer model.deinit();
     var with = o;
+    if (o.vision != null and q.model.a3b(model.config)) {
+        why.* = "--vision: Qwen3.6-35B-A3B is served as text only; its image path is not qualified";
+        return error.VisionUnqualified;
+    }
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
