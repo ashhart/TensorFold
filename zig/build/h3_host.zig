@@ -3,7 +3,6 @@ const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
-    const st = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target });
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "core", .module = core }} });
     const filter = b.option([]const u8, "h3-filter", "Run one H3 host regression");
     const cases = b.addTest(.{ .root_module = root, .filters = if (filter) |f| &.{f} else &.{} });
@@ -21,7 +20,7 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
     const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
-    const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "checkpoint_fixture", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target }) } } }) });
+    const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core } } }) });
     const compile = b.step("compile-h3-host", "Compile the actual H3 tools (tf-h3-dit, tf-h3-image) without compiling or executing shaders");
     compile.dependOn(&tool.step);
     compile.dependOn(&picture_tool.step);

@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const hp = @import("h3_prompt");
 const tokenizer = @import("tokenizer");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 const bf16_round = @import("bf16_round");
 const torch_noise = @import("moss_noise");
 const check = @import("h3_image_prompt_check.zig");
@@ -45,14 +45,22 @@ pub fn main(init: std.process.Init) !u8 {
         .seed = if (args.len >= 7) try std.fmt.parseInt(u64, args[6], 10) else 0,
         .min_area = if (args.len == 8) try std.fmt.parseInt(u64, args[7], 10) else hp.picture.default_min_area,
     } else null;
-    try run(init, a, args[1], args[2], args[3], args[4], request);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var encoder = try Encoder.load(init, a, args[1], args[2]);
+    defer encoder.deinit(init.gpa);
+    var prompt: []const u8 = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(16 << 20));
+    if (std.mem.endsWith(u8, prompt, "\n")) prompt = prompt[0 .. prompt.len - 1];
+    if (std.mem.endsWith(u8, prompt, "\r")) prompt = prompt[0 .. prompt.len - 1];
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = try encoder.case(a, prompt, request) });
+    std.debug.print("wrote {s}: text [{d}, {d}] bf16, text_tags and ids\n", .{ args[4], encoder.text, encoder.front.hidden });
     return 0;
 }
 
 /// A text-to-image request: the size asked for, the seed and the smallest area drawn.
-const Request = struct { size: hp.picture.Size, seed: u64, min_area: u64 };
+pub const Request = struct { size: hp.picture.Size, seed: u64, min_area: u64 };
 
-fn size(text: []const u8) !hp.picture.Size {
+pub fn size(text: []const u8) !hp.picture.Size {
     const x = std.mem.indexOfScalar(u8, text, 'x') orelse return error.BadSize;
     return .{ .width = try std.fmt.parseInt(usize, text[0..x], 10), .height = try std.fmt.parseInt(usize, text[x + 1 ..], 10) };
 }
@@ -78,67 +86,84 @@ fn image(a: std.mem.Allocator, entries: []const fixture.Entry) ![]u8 {
     return out;
 }
 
-fn run(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model_dir: []const u8, prompt_path: []const u8, out_path: []const u8, request: ?Request) !void {
-    const io = init.io;
-    const gpa = init.gpa;
-    const enc = try rules.checkEncoder(a, try read(io, a, &.{ text_dir, "config.json" }));
-    _ = try hp.picture.checkIndex(a, try read(io, a, &.{ model_dir, "model_index.json" }));
-    const transformer = try std.fs.path.join(a, &.{ model_dir, "transformer" });
-    const front = try rules.checkRefiner(a, try read(io, a, &.{ transformer, "config.json" }));
-    var tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ model_dir, "tokenizer" }));
-    defer tok.deinit();
-    var prompt: []const u8 = try std.Io.Dir.cwd().readFileAlloc(io, prompt_path, a, .limited(16 << 20));
-    if (std.mem.endsWith(u8, prompt, "\n")) prompt = prompt[0 .. prompt.len - 1];
-    if (std.mem.endsWith(u8, prompt, "\r")) prompt = prompt[0 .. prompt.len - 1];
-    const p = try rules.present(a, &tok, enc.marks, &.{}, prompt);
-    const pos = try rules.positions(a, p, enc.marks, &.{});
-    const T = p.ids.len;
+/// The prompt path loaded once: the configs, the tokenizer, the text model's and the refiner's weights and kernels.
+pub const Encoder = struct {
+    enc: rules.Encoder,
+    front: rules.Refiner,
+    tok: tokenizer.Tokenizer,
+    device: mtl.Device,
+    text_w: hp.weights.Text,
+    front_w: hp.weights.Refiner,
+    runner: hp.Runner,
+    /// The last case's token count.
+    text: usize = 0,
 
-    const pool = mtl.objc.Pool.push();
-    defer pool.pop();
-    const device = try mtl.Device.init();
-    const loading = mtl.clock.seconds();
-    var text_w = try hp.weights.loadText(gpa, io, device, text_dir, enc.text);
-    defer text_w.deinit(gpa);
-    var front_w = try hp.weights.loadRefiner(gpa, io, device, transformer, front);
-    defer front_w.deinit(gpa);
-    var runner = try hp.Runner.init(device);
-    defer runner.deinit();
-    std.debug.print("{s}: {d} tokens; weights mapped and kernels built in {d:.1} s\n", .{ device.name(), T, mtl.clock.seconds() - loading });
-
-    const rows = try a.alloc(u16, T * enc.text.hidden);
-    var started = mtl.clock.seconds();
-    try runner.encode(&text_w, p.ids, pos, null, rows);
-    std.debug.print("text encoder, {d} layers: {d:.2} s wall, {d:.2} s GPU\n", .{ enc.text.layers, mtl.clock.seconds() - started, runner.gpu });
-    const text = try a.alloc(u16, T * front.hidden);
-    started = mtl.clock.seconds();
-    try runner.refine(&front_w, rows, text);
-    std.debug.print("condition_proj and the token refiner: {d:.2} s wall, {d:.2} s GPU\n", .{ mtl.clock.seconds() - started, runner.gpu });
-    const ids = try a.alloc(i32, T);
-    for (ids, p.ids) |*o, id| o.* = @intCast(id);
-    var entries: std.ArrayList(fixture.Entry) = .empty;
-    if (request) |r| {
-        // the canvas and the seed's starting rows, ahead of the two-byte text so every tensor stays aligned
-        const canvas = try hp.picture.canvas(r.size.width, r.size.height, r.min_area);
-        const grid = try hp.picture.gridOf(canvas);
-        const start = try hp.picture.startRows(a, grid, r.seed, &torch_noise.randn);
-        const dims = try a.dupe(i32, &.{ @intCast(canvas.width), @intCast(canvas.height), @intCast(r.size.width), @intCast(r.size.height) });
-        try entries.appendSlice(a, &.{
-            .{ .name = "canvas", .dtype = "I32", .shape = &.{2}, .bytes = std.mem.sliceAsBytes(dims[0..2]) },
-            .{ .name = "requested", .dtype = "I32", .shape = &.{2}, .bytes = std.mem.sliceAsBytes(dims[2..4]) },
-            .{ .name = "noise", .dtype = "F32", .shape = try a.dupe(usize, &.{ start.len / hp.picture.row_width, hp.picture.row_width }), .bytes = std.mem.sliceAsBytes(start) },
-        });
-        std.debug.print("{d}x{d} drawn on a {d}x{d} canvas ({d} x {d} cells), seed {d}\n", .{ r.size.width, r.size.height, canvas.width, canvas.height, grid.rows, grid.columns, r.seed });
+    pub fn load(init: std.process.Init, a: std.mem.Allocator, text_dir: []const u8, model_dir: []const u8) !Encoder {
+        const io = init.io;
+        const gpa = init.gpa;
+        const enc = try rules.checkEncoder(a, try read(io, a, &.{ text_dir, "config.json" }));
+        _ = try hp.picture.checkIndex(a, try read(io, a, &.{ model_dir, "model_index.json" }));
+        const transformer = try std.fs.path.join(a, &.{ model_dir, "transformer" });
+        const front = try rules.checkRefiner(a, try read(io, a, &.{ transformer, "config.json" }));
+        var tok = try tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ model_dir, "tokenizer" }));
+        errdefer tok.deinit();
+        const device = try mtl.Device.init();
+        const loading = mtl.clock.seconds();
+        var text_w = try hp.weights.loadText(gpa, io, device, text_dir, enc.text);
+        errdefer text_w.deinit(gpa);
+        var front_w = try hp.weights.loadRefiner(gpa, io, device, transformer, front);
+        errdefer front_w.deinit(gpa);
+        const runner = try hp.Runner.init(device);
+        std.debug.print("{s}: prompt weights mapped and kernels built in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
+        return .{ .enc = enc, .front = front, .tok = tok, .device = device, .text_w = text_w, .front_w = front_w, .runner = runner };
     }
-    try entries.appendSlice(a, &.{
-        .{ .name = "text_tags", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(p.tags) },
-        .{ .name = "ids", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(ids) },
-        .{ .name = "text", .dtype = "BF16", .shape = &.{ T, front.hidden }, .bytes = std.mem.sliceAsBytes(text) },
-    });
-    const bytes = try image(a, entries.items);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = bytes });
-    std.debug.print("wrote {s}: text [{d}, {d}] bf16, text_tags and ids [{d}]\n", .{ out_path, T, front.hidden, T });
-}
+
+    pub fn deinit(e: *Encoder, gpa: std.mem.Allocator) void {
+        e.runner.deinit();
+        e.front_w.deinit(gpa);
+        e.text_w.deinit(gpa);
+        e.tok.deinit();
+    }
+
+    /// `prompt` as tf-h3-image's picture case: canvas, noise, text_tags, ids and the refiner's text rows.
+    pub fn case(e: *Encoder, a: std.mem.Allocator, prompt: []const u8, request: ?Request) ![]u8 {
+        const p = try rules.present(a, &e.tok, e.enc.marks, &.{}, prompt);
+        const pos = try rules.positions(a, p, e.enc.marks, &.{});
+        const T = p.ids.len;
+        e.text = T;
+
+        const rows = try a.alloc(u16, T * e.enc.text.hidden);
+        var started = mtl.clock.seconds();
+        try e.runner.encode(&e.text_w, p.ids, pos, null, rows);
+        std.debug.print("{d} tokens; text encoder, {d} layers: {d:.2} s wall, {d:.2} s GPU\n", .{ T, e.enc.text.layers, mtl.clock.seconds() - started, e.runner.gpu });
+        const text = try a.alloc(u16, T * e.front.hidden);
+        started = mtl.clock.seconds();
+        try e.runner.refine(&e.front_w, rows, text);
+        std.debug.print("condition_proj and the token refiner: {d:.2} s wall, {d:.2} s GPU\n", .{ mtl.clock.seconds() - started, e.runner.gpu });
+        const ids = try a.alloc(i32, T);
+        for (ids, p.ids) |*o, id| o.* = @intCast(id);
+        var entries: std.ArrayList(fixture.Entry) = .empty;
+        if (request) |r| {
+            // the canvas and the seed's starting rows, ahead of the two-byte text so every tensor stays aligned
+            const canvas = try hp.picture.canvas(r.size.width, r.size.height, r.min_area);
+            const grid = try hp.picture.gridOf(canvas);
+            const start = try hp.picture.startRows(a, grid, r.seed, &torch_noise.randn);
+            const dims = try a.dupe(i32, &.{ @intCast(canvas.width), @intCast(canvas.height), @intCast(r.size.width), @intCast(r.size.height) });
+            try entries.appendSlice(a, &.{
+                .{ .name = "canvas", .dtype = "I32", .shape = &.{2}, .bytes = std.mem.sliceAsBytes(dims[0..2]) },
+                .{ .name = "requested", .dtype = "I32", .shape = &.{2}, .bytes = std.mem.sliceAsBytes(dims[2..4]) },
+                .{ .name = "noise", .dtype = "F32", .shape = try a.dupe(usize, &.{ start.len / hp.picture.row_width, hp.picture.row_width }), .bytes = std.mem.sliceAsBytes(start) },
+            });
+            std.debug.print("{d}x{d} drawn on a {d}x{d} canvas ({d} x {d} cells), seed {d}\n", .{ r.size.width, r.size.height, canvas.width, canvas.height, grid.rows, grid.columns, r.seed });
+        }
+        try entries.appendSlice(a, &.{
+            .{ .name = "text_tags", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(p.tags) },
+            .{ .name = "ids", .dtype = "I32", .shape = &.{T}, .bytes = std.mem.sliceAsBytes(ids) },
+            .{ .name = "text", .dtype = "BF16", .shape = &.{ T, e.front.hidden }, .bytes = std.mem.sliceAsBytes(text) },
+        });
+        return image(a, entries.items);
+    }
+};
 
 /// The selftest's geometry: two layers of a 256-wide text model (4 query and 2 KV heads), a 384-wide refiner.
 const tiny_text: rules.Text = .{ .hidden = 256, .heads = 4, .kv_heads = 2, .ffn = 512, .vocab = 96, .layers = 2, .eps = 1e-6, .theta = 1e4, .sections = .{ 24, 20, 20 } };

@@ -1,6 +1,6 @@
 //! MiniMax-H3-Image's edit references on the host: sizes, the encoder's input and layers, clean and anchor rows.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const geometry = @import("geometry.zig");
 const picture = @import("picture.zig");
 const vae = @import("picture_vae.zig");

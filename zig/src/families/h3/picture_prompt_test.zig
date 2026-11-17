@@ -1,7 +1,7 @@
 //! MiniMax-H3-Image's prompt rules against hand-worked cases, each failing without its rule.
 const std = @import("std");
 const pp = @import("picture_prompt.zig");
-const picture = @import("picture");
+const picture = @import("core").picture;
 const testing = std.testing;
 
 const marks: pp.Marks = .{ .start = 151652, .image = 151655, .end = 151653 };

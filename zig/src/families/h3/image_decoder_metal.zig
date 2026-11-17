@@ -1,7 +1,7 @@
 //! MiniMax-H3-Image's image decoder on Metal: the VAE's 2D ViT decoder in bf16 on any Apple GPU, tiles in batches.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const rounding = @import("bf16_round");
 const kernels = @import("h3_image_decoder_kernels");
 pub const host = @import("image_decoder.zig");

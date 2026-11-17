@@ -1,7 +1,7 @@
 //! MiniMax-H3-Image's edit encoder on Metal in fp32: a reference's tiles through the VAE's CNN to blended moments.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const kernels = @import("h3_image_encoder_kernels");
 pub const reference = @import("picture_reference.zig");
 pub const vae = @import("picture_vae.zig");
