@@ -28,22 +28,6 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-qwen27-paged-contract-host", "Paged prompt source controls, shuffled pages and boundary witnesses without a device").dependOn(&q27_pages.step);
     step.dependOn(&q27_pages.step);
-    const inkling_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/contract/metal_inkling2_controls_host.zig"),
-        .target = b.graph.host,
-        .optimize = .debug,
-        .imports = &.{
-            .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
-            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
-            .{ .name = "inkling2_glue_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig") }) },
-            .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
-            .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
-            .{ .name = "inkling2_tree_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/tree_plan.zig") }) },
-            .{ .name = "inkling2_experts_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/experts_plan.zig") }) },
-        },
-    }) }));
-    b.step("test-inkling2-controls-host", "Inkling 2 Mini source controls plant one fault without a Metal compiler").dependOn(&inkling_controls.step);
-    step.dependOn(&inkling_controls.step);
     const mapping_stub = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_mapping_host.zig") });
     const llama_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_llama_controls.zig"),
@@ -73,23 +57,19 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .{ .name = "metal", .module = mapping_stub },
         .{ .name = "kernel_sources", .module = mapping_stub },
     } });
-    const mapping_root = b.createModule(.{
+    const mapping = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_mapping_test.zig"),
         .target = b.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
-            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
             .{ .name = "metal", .module = mapping_stub },
             .{ .name = "tensorfold", .module = mapping_tf },
             .{ .name = "kernel_sources", .module = mapping_stub },
         },
-    });
-    const mapping = b.addRunArtifact(b.addTest(.{ .root_module = mapping_root }));
+    }) }));
     mapping.has_side_effects = true;
     b.step("test-metal-launch-map-host", "Every registered Metal launch maps without a device or shader compiler").dependOn(&mapping.step);
-    const dspark_mapping = b.addRunArtifact(b.addTest(.{ .root_module = mapping_root, .filters = &.{"Metal launch map: every DSpark"} }));
-    b.step("test-inkling2-launch-map-host", "Every Inkling DSpark launch resolves without other families' device checks").dependOn(&dspark_mapping.step);
     step.dependOn(&mapping.step);
     const precision = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/attention_precision.zig"),
@@ -107,21 +87,6 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const rig_test = b.addRunArtifact(b.addTest(.{ .root_module = rig, .filters = &.{"completed CUDA fixtures"} }));
     b.step("test-cuda-contract-lifetime-host", "Completed CUDA fixtures free buffers once and remain reusable").dependOn(&rig_test.step);
     step.dependOn(&rig_test.step);
-    const family_sets_mod = b.createModule(.{
-        .root_source_file = b.path("zig/tests/cuda/contract_family_sets.zig"),
-        .target = b.graph.host,
-        .optimize = .debug,
-        .imports = &.{
-            .{ .name = "cuda", .module = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{}) },
-            .{ .name = "core", .module = b.createModule(.{
-                .root_source_file = b.path("zig/src/core/contract/contract.zig"),
-                .target = b.graph.host,
-                .optimize = .debug,
-            }) },
-        },
-    });
-    const family_sets_test = b.addRunArtifact(b.addTest(.{ .root_module = family_sets_mod, .filters = &.{"contract family sets:"} }));
-    step.dependOn(&family_sets_test.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),
@@ -164,22 +129,10 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-drama-combine-stress-host", "Shared-gate stress remains discriminating after nonlinear output").dependOn(&shared_gate.step);
 }
 
-/// A compile-only root of metal_main.zig gets tf-kernel-contract's Inkling 2 and H3 image modules, the engine's shared.
-pub fn metalRootImports(b: *std.Build, engine: *std.Build.Module, root: *std.Build.Module) void {
-    inline for (.{ "inkling2_metal", "inkling2_glue_plan", "inkling2_loop_plan" }) |name| root.addImport(name, engine.import_table.get(name).?);
-    root.addImport("inkling2_runtime_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }));
-    for (@import("h3_image_contract.zig").sources(b)) |image| root.addImport(image.name, image.module);
-}
-
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
-pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module, test_step: *std.Build.Step) void {
+pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
     @import("ling_forward.zig").steps(b, target, optimize, metal_mod, sources, kimi_metallib);
-    const inkling2_metal = engine.import_table.get("inkling2_metal").?;
-    const inkling2_glue_plan = engine.import_table.get("inkling2_glue_plan").?;
-    const inkling2_loop_plan = engine.import_table.get("inkling2_loop_plan").?;
-    const inkling2_tree_plan = engine.import_table.get("inkling2_tree_plan").?;
-    const image = @import("h3_image_contract.zig").sources(b);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,
@@ -191,27 +144,13 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "contract", .module = module(b, target, optimize) },
             .{ .name = "h3_kernels", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }) },
-            .{ .name = "h3_image_encoder_kernels", .module = image[0].module },
-            .{ .name = "h3_prompt_kernels", .module = image[1].module },
-            .{ .name = "h3_image_decoder_kernels", .module = image[2].module },
             .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
             .{ .name = "ling_route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },
             .{ .name = "masked_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) },
-            .{ .name = "inkling2_metal", .module = inkling2_metal },
-            .{ .name = "inkling2_glue_plan", .module = inkling2_glue_plan },
-            .{ .name = "inkling2_loop_plan", .module = inkling2_loop_plan },
-            .{ .name = "inkling2_tree_plan", .module = inkling2_tree_plan },
-            .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
         },
     }) });
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
-    const exl3_suites = b.step("test-dsv41-exl3-contract", "DeepSeek V4.1 EXL3 contract suites free all they took when an allocation fails");
-    for ([_][]const u8{ "metal_dsv41_exl3_row.zig", "metal_dsv41_exl3_rows.zig" }) |file| {
-        const root = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/contract/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true });
-        for (exe.root_module.import_table.keys(), exe.root_module.import_table.values()) |name, m| root.addImport(name, m);
-        exl3_suites.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"dsv41 exl3 suite:"} })).step);
-    }
     const limits_run = b.addRunArtifact(exe);
     limits_run.addArg("--no-gates");
     limits_run.has_side_effects = true;
@@ -255,45 +194,10 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     }) });
     b.step("test-ling-mla-gpu", "Ling MLA mixer on this GPU around k3_mla, against mla.zig").dependOn(&b.addRunArtifact(ling_mla_gpu).step);
-    // Inkling 2 Mini's dense-MMA tail: a partial row tile reads no row past its input, and its bits equal the matvec's.
-    const dense_guard = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/contract/metal_inkling2_dense_guard.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "metal", .module = metal_mod },
-            .{ .name = "tensorfold", .module = engine },
-            .{ .name = "kernel_sources", .module = sources },
-        },
-    }) });
-    const dense_guard_run = b.addRunArtifact(dense_guard);
-    dense_guard_run.has_side_effects = true; // a device run: never cached
-    // The GPU faults on an out-of-bounds read only with Metal's shader validation; it aborts on the fault.
-    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION", "1");
-    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1");
-    dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION_ABORT_ON_FAULT", "1");
-    b.step("test-inkling2-dense-guard", "Inkling 2 Mini's dense-MMA tail: no read past a partial tile's input, bits equal the matvec's").dependOn(&dense_guard_run.step);
-    test_step.dependOn(&dense_guard_run.step);
-    const logits_probe = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/contract/metal_inkling2_logits.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "metal", .module = metal_mod },
-            .{ .name = "tensorfold", .module = engine },
-            .{ .name = "contract", .module = module(b, target, optimize) },
-            .{ .name = "inkling2_metal", .module = inkling2_metal },
-        },
-    }) });
-    const logits_probe_run = b.addRunArtifact(logits_probe);
-    b.step("test-inkling2-logits-probe", "Inkling 2 Mini coalesced logits Suite.registerProbe FailingAllocator OOM checks").dependOn(&logits_probe_run.step);
-    test_step.dependOn(&logits_probe_run.step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
-pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, h3_image: [2]?std.Build.LazyPath) *std.Build.Step {
+pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath) *std.Build.Step {
     const opts = b.addOptions();
     opts.addOption(bool, "controls", controls != null);
     runner.root_module.addOptions("contract_options", opts);
@@ -301,12 +205,11 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     runner.root_module.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
     // MiniMax H3's image (the tf-h3 library's) for its kernels' registrations
     runner.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = h3 orelse b.addWriteFiles().add("h3.fatbin", "") });
-    const names = [2][]const u8{ "h3_image_decoder", "h3_image_prompt" };
-    for (names, h3_image) |n, file| runner.root_module.addAnonymousImport(b.fmt("fatbin_{s}", .{n}), .{ .root_source_file = file orelse b.addWriteFiles().add(b.fmt("{s}.fatbin", .{n}), "") });
+    const runner_install = b.addInstallArtifact(runner, .{});
+    b.step("install-cuda-contract-runner", "Install the CUDA contract runner without executing it").dependOn(&runner_install.step);
     const install = b.step("kernel-contract-fatbins", "Install all CUDA contract images (fatbin/)");
     if (controls) |file| install.dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     if (h3) |file| install.dependOn(&b.addInstallFile(file, "fatbin/h3.fatbin").step);
-    for (names, h3_image) |n, file| if (file) |f| install.dependOn(&b.addInstallFile(f, b.fmt("fatbin/{s}.fatbin", .{n})).step);
     const run = b.addRunArtifact(runner);
     run.addArg("kernel-contract");
     b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
