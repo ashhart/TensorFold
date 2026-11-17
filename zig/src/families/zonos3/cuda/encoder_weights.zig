@@ -17,11 +17,11 @@ pub const front_width = 256;
 
 /// The stages after the patch: 240, 120, 60, 30 and 15 Hz; each but the last is followed by a patch down by 2.
 pub const stages = [5]dec.StageShape{
-    .{ .in = front_width * patch, .d = 768, .ff = 3072, .ctx = 480, .out = 384 },
-    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 480, .out = 384 },
-    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 480, .out = 384 },
-    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 300, .out = 640 },
-    .{ .in = 1280, .d = 1280, .ff = 5120, .ctx = 150, .out = 1024 },
+    .{ .in = front_width * patch, .d = 768, .ff = 3072, .ctx = 480, .out = 384, .layers = 12 },
+    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 480, .out = 384, .layers = 12 },
+    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 480, .out = 384, .layers = 12 },
+    .{ .in = 768, .d = 768, .ff = 3072, .ctx = 300, .out = 640, .layers = 12 },
+    .{ .in = 1280, .d = 1280, .ff = 5120, .ctx = 150, .out = 1024, .layers = 32 },
 };
 
 pub const Conv = struct { w: u64, b: u64 }; // w [out][kernel * in], the kernel's taps outermost
@@ -126,7 +126,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator
         const s = 4 + 2 * si;
         var count: usize = 0;
         while (archive.tensors.contains(fmt(&nb, e ++ "{d}.layers.{d}.qkv.weight", .{ s, count }))) count += 1;
-        if (count == 0) return error.MissingTensor;
+        if (count != shape.layers) return error.MissingTensor;
         st.layers = try gpa.alloc(dec.Layer, count);
         st.in_proj = try l.one(fmt(&nb, e ++ "{d}.input_proj.weight", .{s}), &.{ shape.d, shape.in });
         st.out_proj = try l.one(fmt(&nb, e ++ "{d}.output_proj.weight", .{s}), &.{ shape.out, shape.d });

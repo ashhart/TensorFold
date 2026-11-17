@@ -9,10 +9,14 @@ const D = cfg.dim;
 const W = cfg.frame_width;
 const Buf = cuda.DeviceBuffer;
 
+/// A host's say on a load: an error refuses it.
+pub const Gate = struct { ptr: *anyopaque, check: *const fn (*anyopaque, *const cuda.Context) anyerror!void };
+
 pub const Options = struct {
     device: u32 = 0,
     max_ctx: usize = 4096, // positions (prompt rows + frames), at most the model's 32768
     max_rows: usize = 64, // rows a pass
+    gate: ?Gate = null, // asked once the context is current, before anything is allocated on it
 
     pub fn validate(o: Options) !void {
         if (o.max_ctx < 2 or o.max_ctx > cfg.max_seqlen) return error.BadContext;
@@ -44,6 +48,7 @@ pub const Engine = struct {
     k: kern.Kernels,
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
+    counted: ?usize, // set: allocations are counted, not made
     position: usize = 0,
     // state
     kv: [cfg.layers][2]u64, // attention layers: K, V fp32 [max_ctx][4][32]
@@ -86,11 +91,13 @@ pub const Engine = struct {
         e.o = o;
         e.position = 0;
         e.bufs = .empty;
+        e.counted = null;
         e.c = try cfg.Config.load(gpa, io, model_dir);
         e.driver = try cuda.Driver.open();
         errdefer e.driver.close();
         e.ctx = try cuda.Context.init(&e.driver, std.math.cast(c_int, o.device) orelse return error.NoSuchCudaDevice);
         errdefer e.ctx.deinit();
+        if (o.gate) |g| try g.check(g.ptr, &e.ctx);
         e.stream = try cuda.Stream.init(&e.driver, true);
         errdefer e.stream.deinit();
         e.k = try kern.Kernels.load(&e.driver);
@@ -124,10 +131,23 @@ pub const Engine = struct {
     }
 
     fn alloc(e: *Engine, bytes: usize) !u64 {
+        if (e.counted) |*n| {
+            n.* += @max(bytes, 256);
+            return 0;
+        }
         var b = try Buf.alloc(&e.driver, @max(bytes, 256));
         errdefer b.free();
         try e.bufs.append(e.gpa, b);
         return b.ptr;
+    }
+
+    /// Device bytes of the state and workspaces `o` allocates: the allocation code itself, counting.
+    pub fn stateBytes(o: Options) usize {
+        var e: Engine = undefined;
+        e.o = o;
+        e.counted = 0;
+        e.allocState() catch unreachable;
+        return e.counted.?;
     }
 
     fn allocState(e: *Engine) !void {
