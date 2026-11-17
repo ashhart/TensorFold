@@ -48,6 +48,8 @@ test "Kimi replies read actual XTML controls and typed arguments from the releas
             try std.testing.expectEqualStrings(" \nThink carefully.", got.reasoning);
             try std.testing.expectEqualStrings("Because.", got.content);
             try std.testing.expect(got.calls == null and !got.rejected);
+            // the reply opens inside its think channel: a prefix stopping there leaves it open; the whole closes it
+            try std.testing.expect(!got.open_think and (try reply.parse(a, t.text(), ids[0..1], true, tools)).open_think);
         } else if (calls) {
             const found = got.calls.?;
             try std.testing.expectEqual(@as(usize, 2), found.len);
