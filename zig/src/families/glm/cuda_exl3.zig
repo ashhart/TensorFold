@@ -188,7 +188,8 @@ pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Sp
     out.uniform_gu = uniform(k2s[0 .. 2 * count]);
     out.uniform_d = uniform(k2s[2 * count ..]);
     const tabs = [3][]const i32{ k2s[0..count], k2s[count .. 2 * count], k2s[2 * count ..] };
-    if (std.mem.eql(i32, tabs[0], tabs[1]) and std.mem.eql(i32, tabs[0], tabs[2])) { // one table, as a 4-bit layer has it
+    // one table, as a 4-bit layer has it
+    if (std.mem.eql(i32, tabs[0], tabs[1]) and std.mem.eql(i32, tabs[0], tabs[2])) {
         try L.host.appendSlice(L.gpa, std.mem.sliceAsBytes(tabs[0]));
         out.k2 = try L.put("layers.{d}.moe.exl3.k2", .{i});
         out.k2_up = out.k2;

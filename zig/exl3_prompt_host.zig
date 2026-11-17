@@ -247,7 +247,7 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
         l.uniform_k2_d = w[2];
         const sc = try ex.prompt.scratch(0x1000, l, 40, 8);
         Capture.reset();
-        try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan);
+        try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan, 0x400000000, 9);
         const gu: usize = if ((if (w[1] != 0) w[1] else w[0]) == 6) 14 else 12;
         const dn: usize = if ((if (w[2] != 0) w[2] else w[0]) == 6) 15 else 13;
         try std.testing.expectEqual(@as(usize, 1), Capture.by(gu).len);
