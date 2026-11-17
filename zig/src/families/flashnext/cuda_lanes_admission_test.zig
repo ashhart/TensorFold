@@ -123,7 +123,8 @@ pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype
             // every driver entry point undefined: the refusal must come before the first call
             var driver: cuda.Driver = undefined;
             const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
-            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
+            // a chunk the table refuses is named at startup, so it never reaches the reader's own BadChunk
+            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.InvalidEnvironment }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.InvalidEnvironment }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.InvalidEnvironment }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
                 _ = env.setenv(bad[0], bad[1], 1);
                 defer _ = env.unsetenv(bad[0]);
                 try std.testing.expectError(bad[2], load(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
