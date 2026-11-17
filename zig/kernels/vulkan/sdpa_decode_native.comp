@@ -329,7 +329,7 @@ void main() {
             value_data.values[v_base + (key + index) * params.in_strides[2]]);
       }
       for (uint index = 0u; index < 16u; ++index) {
-        accumulator += STREAM(key + index) * vv[index];
+        accumulator = fma(STREAM(key + index), vv[index], accumulator);
       }
     }
     for (uint index = 0u; index < 16u; ++index) {
@@ -339,7 +339,7 @@ void main() {
               kv_head * params.in_strides[1] +
               key * params.in_strides[2] +
               d * params.in_strides[3]]) : 0.0;
-      accumulator += prob * value16;
+      accumulator = fma(prob, value16, accumulator);
       ++key;
     }
 #ifdef SDPA_ROWS
