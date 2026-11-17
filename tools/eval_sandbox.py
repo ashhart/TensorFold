@@ -45,6 +45,16 @@ def mac_profile(work: str) -> str:
              f"(allow file-write* (subpath {json.dumps(work)}) (literal \"/dev/null\"))"]
     if home != "/":
         rules += [f"(deny file-read* (subpath {json.dumps(home)}))", "(allow file-read* " + " ".join(reads) + ")"]
+    rules += [
+        '(deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript") '
+        '(literal "/bin/launchctl") (literal "/usr/bin/crontab") (literal "/usr/bin/at"))',
+        '(deny appleevent-send)',
+        '(deny mach-lookup (global-name-prefix "com.apple.coreservices.") '
+        '(global-name-prefix "com.apple.lsd.") (global-name-prefix "com.apple.runningboard") '
+        '(global-name-prefix "com.apple.launchservices"))',
+        r'(deny file-read* file-write* '
+        r'(regex #"^(/private)?/tmp/(com\.apple\.launchd\.[^/]+/Listeners|tmux-[^/]+/.*)$"))',
+    ]
     return "\n".join(rules)
 
 
