@@ -63,7 +63,7 @@ pub const Plan = struct {
     }
 };
 
-test "rows: the package's _get_feat_extract_output_lengths" {
+test "rows: three halvings of a chunk's remainder, rounding up, plus 13 a whole chunk of 100 frames" {
     // values printed by qwen-asr 0.0.6's formula for these frame counts
     const cases = [_][2]usize{ .{ 1, 1 }, .{ 7, 1 }, .{ 8, 1 }, .{ 9, 2 }, .{ 99, 13 }, .{ 100, 13 }, .{ 101, 14 }, .{ 481, 63 }, .{ 585, 76 }, .{ 2940, 382 }, .{ 3000, 390 } };
     for (cases) |c| try std.testing.expectEqual(c[1], rows(c[0]));
