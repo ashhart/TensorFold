@@ -1450,11 +1450,13 @@ matches resumes from it, token for token as a fresh prompt pass, after a restart
 releasing RAM, then the engine continues while the I/O thread writes it. A full staging permit skips that save;
 the request prefills if it returns before a saved state is available. This changes cache hits, never reply tokens.
 GLM-5.3-Flash also stages each resident state when it is kept, with or without `--spill-gib`, because its slots and
-shared pool can reuse those rows before an eviction.
+shared pool can reuse those rows before an eviction. A busy permit waits and retries; an oversized image streams
+in bounded pieces. The log names the staging reason; other admission or copy failures still skip that save.
 An idle unload and a planned stop also save the states still in RAM, newest first, within the same disk cap and
 20-second stop budget. The next engine open scans those files and restores them through the same path as evictions.
-Older queued saves cannot evict states saved earlier in that close. States that exceed a staging permit, disk cap,
-daily budget or free-disk floor are skipped; unfinished writes are cancelled at the deadline.
+Older queued saves cannot evict states saved earlier in that close. States that exceed the disk cap, daily budget
+or free-disk floor are skipped; ordinary eviction saves also skip images that exceed their staging permit.
+Unfinished writes are cancelled at the deadline.
 Past N GiB other models' spilled sets go first, then the state this server used least recently. A damaged file is
 deleted and its tokens are prefilled, and a write cut off midway leaves nothing a later turn or a restart reads.
 `--checkpoint-slots N` sets how many states stay in RAM beside the store, so the next one sends the oldest to disk; it

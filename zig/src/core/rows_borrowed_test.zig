@@ -6,6 +6,7 @@ const fixture = @import("rows_async_fixture.zig");
 const fake = @import("rows_fake.zig");
 const waits = @import("rows_test_wait.zig");
 const t = std.testing;
+const notes = @import("prompt_cache_note.zig");
 
 fn transient(_: *anyopaque, _: pc.Saved) bool {
     return true;
@@ -43,8 +44,11 @@ const Keep = struct {
     started: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     err: ?anyerror = null,
+    heard: notes.Heard = .{},
 
     fn run(k: *@This()) void {
+        notes.sink = &k.heard;
+        defer notes.sink = null;
         k.started.store(true, .release);
         k.x.keep(k.tokens, 1000) catch |err| {
             k.err = err;
@@ -83,6 +87,11 @@ test "borrowed spill: a newest keep waits for the earlier write and restores aft
         try started;
         if (keep.err) |err| return err;
         try t.expectEqual(false, premature);
+        const reason = if (oversized) "StagingFull" else "StagingBusy";
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, keep.heard.text(), reason));
+        try t.expect(std.mem.indexOf(u8, keep.heard.text(), "1000 borrowed tokens") != null);
+        const action: []const u8 = if (oversized) "streaming bounded pieces" else "waiting for staging permit";
+        try t.expect(std.mem.indexOf(u8, keep.heard.text(), action) != null);
         try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
         try t.expectEqual(oversized, x.r.stage.len > 0);
         try restore(x, &next, 1000);
