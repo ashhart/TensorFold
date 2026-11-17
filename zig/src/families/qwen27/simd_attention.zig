@@ -67,7 +67,7 @@ pub fn sharedPrefix(units: bool) !bool {
     return units or try @import("sys").environment.read(bool, "TF_QWEN27_SHARED_PREFIX", true);
 }
 
-/// The attention kernels as this chip builds them (before M5: the tail rewritten, the prompt kernels if `prompt`).
+/// The attention kernels as this chip builds them (before M5: prefix and tail rewritten, prompt kernels if `prompt`).
 pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
     return compose(a, units, prompt, @import("qwen_runtime_sources"));
 }
@@ -130,7 +130,7 @@ fn region(a: std.mem.Allocator, source: []const u8, from: []const u8, to: []cons
     return std.mem.concat(a, u8, &.{ source[0..begin], part, source[end..] });
 }
 
-/// The tail kernel's ops (scores 16x32 over 256, outputs 16x128 over 64), each element where it is read.
+/// The tail and prefix kernels' ops (scores 16x32 and 16x64 over 256, outputs 16x128 over 64), each element where read.
 pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
@@ -205,7 +205,7 @@ pub fn check(device: mtl.Device, queue: mtl.Queue) !void {
     };
 }
 
-test "the rewrite changes every M5-indexed line of the tail kernel once and leaves the other kernels alone" {
+test "the rewrite changes every M5-indexed line of the tail kernel once and leaves the kernels after it alone" {
     const source = @import("qwen_runtime_sources").attention_mpp;
     const text = try rewrite(std.testing.allocator, source);
     defer std.testing.allocator.free(text);
