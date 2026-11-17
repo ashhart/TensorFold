@@ -49,7 +49,7 @@ fn whitespaceError(name: [:0]const u8, expected: anyerror, read: anytype) !void 
 
 test "DeepSeek strict env: every malformed setting stops the real loader before resources" {
     _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
-    for (rules) |r| if (r.scope == .dsv41) try refused(r);
+    for (rules) |r| if (r.scope == .dsv41 and sys.environment.rule(r.name).word_fallback == null) try refused(r);
 }
 
 test "DeepSeek strict env: each rule's permitted blank setting passes startup" {

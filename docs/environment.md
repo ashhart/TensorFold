@@ -300,3 +300,139 @@ The default path, with the switch unset, retains its existing plan, allocations 
 This is a capacity tradeoff, not a speed claim: attention reads mapped host KV over the device interconnect.
 Set `--prompt-cache-gib` explicitly to bound the separate host prompt cache.
 Host-on inference equality and performance on a discrete GPU remain device checks, not host-test results.
+
+### DeepSeek V4.1 runtime settings
+
+These settings are checked when the DeepSeek family opens, before assets or GPU resources.
+The parser treats unset or blank text as absent, except `TF_DSV41_STALL_EXIT_S`, which refuses blank.
+Readers retain their own defaults and presence checks: blank `TF_DSV41_LOOKUP` disables lookup, and presence readers see the original text.
+`TF_DSV41_BOOT_MEASURED` retains its legacy fallback to automatic selection for unrecognized text.
+Paths keep each reader's original trimming; control characters are refused without printing the path.
+Tool controls for decode-TP gates, KV checks and the session-slots CLI stay local to those tools.
+
+| Setting | Accepted values |
+| --- | --- |
+| `TF_DSV41_AOT_TRACE` | a path without control characters |
+| `TF_DSV41_GRAMMAR_TOKENIZER` | a path without control characters |
+| `TF_DSV41_ACCEPT_LOG` | a path without control characters |
+| `TF_DSV41_PHASES_OUT` | a path without control characters |
+| `TF_DSV41_PREPARED` | a path without control characters |
+| `TF_DSV41_PROFILE` | a path without control characters |
+| `TF_DSV41_TRACE_TOKENS` | a path without control characters |
+| `TF_DSV41_CALIB_DIR` | a path without control characters |
+| `TF_DSV41_CALIB_FILE` | a path without control characters |
+| `TF_DSV41_SESSION_DISK` | a path without control characters |
+| `TF_DSV41_PF_DENSE_TABLE` | a path without control characters |
+| `TF_TP_KERNEL_IMAGE` | a transport kernel image path without control characters |
+| `TF_DSV41_BRANCHES` | 0 or off or serial or e4 or 1 or on or streams (case-insensitive) |
+| `TF_DSV41_BRANCHES_ROWS` | a whole count 1..4096 (default 64) |
+| `TF_DSV41_BRANCHES_PRIO` | main or side or equal |
+| `TF_DSV41_DRAFT_GRAPHS` | 0 or device or 1 |
+| `TF_DSV41_DRAFT_GRAPHS_MAX` | a whole count 0..4294967295 (default 32) |
+| `TF_DSV41_GRAPH_FLOOR` | shed or hold |
+| `TF_DSV41_DRAFT_CHAIN` | 0 or 1 |
+| `TF_DSV41_DRAFT_OVERLAP` | 0 or 1 |
+| `TF_DSV41_DRAFT_CAPTURE` | 0 or 1 |
+| `TF_DSV41_SAMP_BATCH` | 0 or 1 |
+| `TF_DSV41_DRAFT_BATCH_PROJ` | 0 or 1 or check |
+| `TF_DSV41_SLOT_DRAFT_GROUP` | a whole count 1..4294967295 (default automatic) |
+| `TF_DSV41_ENGRAM_GATE` | 0 or 1 |
+| `TF_DSV41_ENGRAM_GATE_ROWS` | a whole count 1..4294967295 (default 128) |
+| `TF_DSV41_ENGRAM_GATE_TIMEOUT_S` | a finite number from 0 to 9223372036 (default 30) |
+| `TF_DSV41_ENGRAM_WAIT_S` | a finite number from 0 to 18446744073 (default 300) |
+| `TF_DSV41_GRAPHS_MAX` | a whole count 0..2147483647 (default 48) |
+| `TF_DSV41_GRAPH_BUCKET` | a whole count 1..4294967295 (default 2048) |
+| `TF_DSV41_GRAPH_BUCKET_GROW` | a finite number from 1 to 16 (default 1.25) |
+| `TF_DSV41_GRAPH_ROWS_MAX` | a whole count 0..18446744073709551615 (default 64) |
+| `TF_DSV41_LIN2` | 0 or off or 1 or on or lanes or linear (case-insensitive) |
+| `TF_DSV41_LIN2_PF` | 0 or 1 |
+| `TF_DSV41_LIN2_CLUSTER` | 0 or 1 |
+| `TF_DSV41_LIN2_WK` | a whole count 4 / 8 (default both) |
+| `TF_DSV41_L2PF` | 0 or off or none or false or 1 or on or true or bulk (case-insensitive) |
+| `TF_DSV41_L2PF_ROWS` | a whole count 0..4294967295 (default 16) |
+| `TF_DSV41_L2PF_MB` | any finite number (default emitter value) |
+| `TF_DSV41_L2PF_CHUNK_KB` | any finite number (default emitter value) |
+| `TF_DSV41_L2PF_PACE_GBPS` | any finite number (default emitter value) |
+| `TF_DSV41_L2PF_PACE_CTAS` | any finite number (default emitter value) |
+| `TF_DSV41_L2PF_DELAY_US` | any finite number (default emitter value) |
+| `TF_DSV41_L2PF_SITES` | comma-separated x, o or f, three entries (case-insensitive) |
+| `TF_DSV41_L2PF_PACE_SITES` | comma-separated x or f, two entries (case-insensitive) |
+| `TF_DSV41_L2PF_AT` | one comma-separated before entry (any case) (case-insensitive) |
+| `TF_DSV41_PROMPT_PROF` | 0 or 1 |
+| `TF_DSV41_PHASES` | 0 or 1 or sync |
+| `TF_DSV41_PREPARED_WRITE` | 0 or 1 |
+| `TF_DSV41_PREPARED_VERIFY` | 0 or 1 |
+| `TF_DSV41_ROUND_GRAPH` | 0, 1 or split and gate separated by comma or space |
+| `TF_DSV41_ROUND_GRAPH_HEAD` | a whole count 1..4294967295 (default existing head) |
+| `TF_DSV41_SAMP_STATS` | split or row |
+| `TF_DSV41_PIECES_FLOOR` | 0 or 1 |
+| `TF_DSV41_SESSION_DISK_MIN` | a whole count 0..18446744073709551615 (default existing minimum) |
+| `TF_DSV41_SESSION_RESIDENT` | a whole count 0..4294967295 (default existing count) |
+| `TF_DSV41_SESSION_RAM_MIB` | a whole count 0..18446744073709551615 (default existing budget) |
+| `TF_DSV41_SESSION_STAGING_MIB` | a whole count 0..4294967295 (default existing staging) |
+| `TF_DSV41_SESSION_DISK_GIB` | a finite number from 0 to 17179869183 (default existing budget) |
+| `TF_DSV41_SESSION_RESIDENT_GIB` | a finite number from 0 to 17179869183 (default existing budget) |
+| `TF_DSV41_ENGRAM_WARM` | 0 or 1 |
+| `TF_DSV41_STALL_EXIT_S` | a whole count 0..18446744073 (default 0) |
+| `TF_DSV41_GM_GU2` | 0 or 1 |
+| `TF_DSV41_PF_4K` | 0 or 1 |
+| `TF_DSV41_PF_4K_MEMORY_OK` | 0 or 1 |
+| `TF_DSV41_PF_OVERLAP_SITE` | 0 or 1 |
+| `TF_DSV41_PF_TBO` | 0 or 1 |
+| `TF_DSV41_INDEX_BOUND` | 0 or 1 |
+| `TF_DSV41_X3LD_EPI` | 0 or 1 |
+| `TF_DSV41_PF_DENSE` | off or 0 or no or false or fused (case-insensitive) |
+| `TF_DSV41_GM_V2` | 0 or 1 or split |
+| `TF_DSV41_PF_DENSE_CFG` | configuration id 0-7, optionally followed by group 1-1024 (default 8) |
+| `TF_DSV41_PF_OVERLAP` | a whole count 0..8 (default 0) |
+| `TF_DSV41_MHC_SITE_ROWS` | a whole count 0 or 256..4096, a multiple of 16 (default 0) |
+| `TF_DSV41_PF_TBO_GM_SMS` | a whole count 0 or 8..48 (default 0) |
+| `TF_DSV41_STREAM_RB` | a whole count 0 / 1 / 2 / 4 (default 0) |
+| `TF_DSV41_MHC_PFDEC` | a whole count 0..64 (default 0) |
+| `TF_DSV41_PREFILL` | full or replay |
+| `TF_DSV41_PROMPT_TAIL` | verify or prefill |
+| `TF_DSV41_MHC_DEFER_AT` | 0 or off or exchange (case-insensitive) |
+| `TF_DSV41_MHC_DEFER_AT_ROWS` | a whole count 0..64 (default 0) |
+| `TF_DSV41_ATTN_SPLIT` | a whole count 0..18446744073709551615 (default 0) |
+| `TF_DSV41_ATTN_ROPE` | 0 or 1 |
+| `TF_DSV41_MHC_TAIL` | 0 or 1 |
+| `TF_DSV41_MOE_BF16` | 0 or 1 |
+| `TF_DSV41_PRUNE_KIT` | 0 or 1 |
+| `TF_DSV41_RG_PRUNE` | 0 or 1 |
+| `TF_DSV41_RMS_FOLD` | 0 or 1 |
+| `TF_DSV41_CALIB` | cached or default or real or measure or zig (case-insensitive) |
+| `TF_DSV41_CALIB_SHAPE` | raw or fit (case-insensitive) |
+| `TF_DSV41_CALIB_STAT` | median or min (case-insensitive) |
+| `TF_DSV41_CALIB_REPS` | a whole count 1..50 (default 5) |
+| `TF_DSV41_CALIB_WARM` | a whole count 0..20 (default 3 raw / 2 fit) |
+| `TF_DSV41_CALIB_RECHECK` | a whole count 0..8 (default 4 raw / 2 fit) |
+| `TF_DSV41_CALIB_CYCLE` | a whole count 0..8 (default 4 raw / 0 fit) |
+| `TF_DSV41_CALIB_DEEP_REPS` | a whole count 1..50 (default 5 raw / 3 fit) |
+| `TF_DSV41_CODE_ACCEPT` | 0, 1, on, off, true or false (any case) |
+| `TF_DSV41_DRAFT_SKIP` | 0, 1, on, off, true or false (any case) |
+| `TF_DSV41_SPEC_DRAFT` | 0, 1, on, off, true or false (any case) |
+| `TF_DSV41_SPEC_NUCLEUS` | 0, 1, on, off, true or false (any case) |
+| `TF_DSV41_DEPTH` | cost or static (case-insensitive) |
+| `TF_DSV41_DRAFT_DEPTH` | a whole count 0..15 (default 5 cost / 3 static) |
+| `TF_DSV41_DEPTH_JOINT` | 0 or off or false or 1 or on or true or 2 (case-insensitive) |
+| `TF_DSV41_DEPTH_FAIR` | a finite number from 0 to 4 (default existing fair term) |
+| `TF_DSV41_DEPTH_HOST_MS` | a finite number from 0 to 100 (default existing host term) |
+| `TF_DSV41_DRAFT_PLAIN_STREAMS` | a whole count 0..16 (default 0) |
+| `TF_DSV41_LOOKUP_MIN` | a whole count 1..64 (default 4) |
+| `TF_DSV41_MAX_ROWS` | a whole count 2..16 (default 16) |
+| `TF_DSV41_TREE` | a whole count 0 / 2 / 3 / 4 (default 0) |
+| `TF_DSV41_TREE_DUP_MS` | a finite number from 0 (default 0.4) |
+| `TF_DSV41_TREE_ROWS` | a whole count 1..15 (default 4) |
+| `TF_DSV41_TREE_PC` | 0 or off or false |
+| `TF_DSV41_POST_BOOT_GIB` | a finite number from 0 (default existing budget) |
+| `TF_DSV41_BOOT_GROWTH_GIB` | a finite number from 0 (default existing budget) |
+| `TF_DSV41_SERVE_DIP_GIB` | a finite number from 0 (default existing budget) |
+| `TF_DSV41_BOOT_MEASURED` | auto or 1 or on or yes or true or 0 or off or no or false (case-insensitive) |
+| `TF_DSV41_KV_SPLIT_COMPACT` | 0 or off or no or false or 1 or on or yes or true or force (case-insensitive) |
+| `TF_DSV41_PREFILL_CHUNK` | a whole count 32..4096, a multiple of 16 (default automatic) |
+
+`TF_DSV41_GRAPH_ROWS_MAX` keeps both readers: graph capture requires 1–64, while draft pricing clamps to its window.
+`TF_DSV41_PF_4K=1` still requires `TF_DSV41_PF_4K_MEMORY_OK=1`; configured prompt rows must then equal 4096.
+Without PF_4K, prompt chunks and rows use multiples of 16 in 32–2048; the lower configured size wins.
+L2 prefetch numeric overrides must match the active emitter; its site lists keep their original fixed entry counts.
+Accept logging and prompt profiling retain presence semantics: a present `0` still enables the marker.

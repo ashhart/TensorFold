@@ -265,7 +265,7 @@ pub const Recorder = struct {
     const Structure = struct { kind: []const u8, text: []const u8 };
 
     pub fn init(gpa: Allocator, io: std.Io, inner: api.Engine) Recorder {
-        return .{ .gpa = gpa, .io = io, .inner = inner, .path = if (std.c.getenv("TF_DSV41_TRACE_TOKENS")) |p| std.mem.span(p) else null };
+        return .{ .gpa = gpa, .io = io, .inner = inner, .path = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_TRACE_TOKENS")) |p| p else null };
     }
 
     pub fn deinit(r: *Recorder) void {

@@ -10,9 +10,9 @@ var buf: [16384]u8 = undefined;
 fn on() bool {
     if (fd == -2) {
         fd = -1;
-        if (std.c.getenv("TF_DSV41_ACCEPT_LOG")) |p| {
-            const f = std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
-            if (f >= 0) fd = f else if (!quiet) std.log.warn("TF_DSV41_ACCEPT_LOG: cannot open {s}", .{std.mem.span(p)});
+        if (@import("sys").environment.Process.get(.{}, "TF_DSV41_ACCEPT_LOG")) |p| {
+            const f = std.c.open(p.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
+            if (f >= 0) fd = f else if (!quiet) std.log.warn("TF_DSV41_ACCEPT_LOG: cannot open {s}", .{p});
         }
     }
     return fd >= 0;

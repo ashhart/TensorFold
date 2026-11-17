@@ -77,12 +77,10 @@ pub const Settings = struct {
     dup: Dup = .{ .ms = 0.4, .rows = true },
 
     pub fn parse(tree: ?[]const u8, dup_ms: ?[]const u8, rows: ?[]const u8, pc: ?[]const u8) !Settings {
-        const b = try std.fmt.parseInt(u32, trimmed(tree) orelse "0", 10);
-        if (b == 1 or b > max_siblings + 1) return error.TreeBranches;
-        const ms = try std.fmt.parseFloat(f64, trimmed(dup_ms) orelse "0.4");
-        const r = try std.fmt.parseInt(u32, trimmed(rows) orelse "4", 10);
-        if (ms < 0.0 or r < 1 or r > 15) return error.TreeKnobs;
-        if (trimmed(pc)) |v| if (!std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "off") and !std.mem.eql(u8, v, "false")) return error.TreePcNotPorted;
+        const b = try @import("sys").environment.value(u32, "TF_DSV41_TREE", tree, 0);
+        const ms = try @import("sys").environment.value(f64, "TF_DSV41_TREE_DUP_MS", dup_ms, 0.4);
+        const r = try @import("sys").environment.value(u32, "TF_DSV41_TREE_ROWS", rows, 4);
+        try @import("sys").environment.check("TF_DSV41_TREE_PC", pc);
         return .{ .siblings = if (b == 0) 0 else b - 1, .sib_rows = r, .dup = .{ .ms = ms, .rows = true } };
     }
 
@@ -91,12 +89,7 @@ pub const Settings = struct {
     }
 
     fn env(name: [*:0]const u8) ?[]const u8 {
-        return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
-    }
-
-    fn trimmed(v: ?[]const u8) ?[]const u8 {
-        const t = std.mem.trim(u8, v orelse return null, " \t");
-        return if (t.len == 0) null else t;
+        return if (@import("sys").environment.Process.get(.{}, std.mem.span(name))) |v| v else null;
     }
 };
 
@@ -198,9 +191,9 @@ test "tree settings read as Python's tree.settings" {
     try std.testing.expectEqual(@as(u32, 2), on.siblings);
     try std.testing.expectEqual(@as(u32, 6), on.sib_rows);
     try std.testing.expect(on.dup.rows and on.dup.ms == 0.5);
-    try std.testing.expectError(error.TreeBranches, Settings.parse("1", null, null, null));
-    try std.testing.expectError(error.TreeKnobs, Settings.parse("2", null, "16", null));
-    try std.testing.expectError(error.TreePcNotPorted, Settings.parse("2", null, null, "1"));
+    try std.testing.expectError(error.InvalidEnvironment, Settings.parse("1", null, null, null));
+    try std.testing.expectError(error.InvalidEnvironment, Settings.parse("2", null, "16", null));
+    try std.testing.expectError(error.InvalidEnvironment, Settings.parse("2", null, null, "1"));
 }
 
 test "a confident main chain takes no sibling; an unsure first draft buys one" {

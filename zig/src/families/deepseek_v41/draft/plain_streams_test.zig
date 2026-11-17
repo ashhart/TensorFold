@@ -29,7 +29,7 @@ test "TF_DSV41_DRAFT_PLAIN_STREAMS: 0 when unset, 0 to 16 taken, anything else r
     try t_.expectEqual(@as(usize, 0), (try calib_env.depthSettings(&Env.get)).plain_streams);
     for ([_][]const u8{ "0", "3", " 16 " }, [_]usize{ 0, 3, 16 }) |raw, want| try t_.expectEqual(want, try plainStreams(raw));
     for ([_][]const u8{ "17", "4294967296", "18446744073709551616", "-1", "oops", "3x" }) |raw|
-        try t_.expectError(error.DraftPlainStreams, plainStreams(raw));
+        try t_.expectError(error.InvalidEnvironment, plainStreams(raw));
 }
 
 /// A run's settings: the switch, the target's history, the drafter's ring check, staggered arrivals, sampling.

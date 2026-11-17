@@ -67,14 +67,8 @@ pub const Settings = struct {
         s.copy_drafter = checked.copy_drafter;
         s.lookup = checked.lookup;
         s.plan = plan or s.copy_drafter;
-        if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
-            s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
-        };
-        if (std.c.getenv("TF_DSV41_MAX_ROWS")) |v| if (std.mem.span(v).len > 0) {
-            s.max_rows = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadMaxRows;
-        };
-        if (s.min_match < 1 or s.min_match > 64) return error.BadLookupMin;
-        if (s.max_rows < 2 or s.max_rows > max_rows) return error.BadMaxRows;
+        s.min_match = try @import("sys").environment.read(i64, "TF_DSV41_LOOKUP_MIN", s.min_match);
+        s.max_rows = try @import("sys").environment.read(i64, "TF_DSV41_MAX_ROWS", s.max_rows);
         return s;
     }
 };

@@ -19,7 +19,7 @@ const Group = enum { switches, integers, reals, structured };
 fn group(r: e.Rule) Group {
     if (r.kind == .flag or r.kind == .toggle) return .switches;
     if (e.isReal(r.kind)) return .reals;
-    return if (r.kind == .word or r.kind == .range or r.kind == .path or r.only.len > 0) .structured else .integers;
+    return if (r.kind == .word or r.kind == .range or r.kind == .pair or r.kind == .word_set or r.kind == .path or r.only.len > 0) .structured else .integers;
 }
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
@@ -36,17 +36,21 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     }
     try t.expectError(error.InvalidEnvironment, env_validate.check(fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
-    if (std.mem.trim(u8, raw, " \t\r\n").len != 0) try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
+    if (e.rule(name).kind != .path) {
+        const escaped = try std.fmt.allocPrint(t.allocator, "{f}", .{std.zig.fmtString(raw)});
+        defer t.allocator.free(escaped);
+        try t.expect(std.mem.indexOf(u8, why.?, escaped) != null);
+    }
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "DeepSeek strict env: the shared table holds all 107 settings: 54 switches, 24 integers, 19 reals and 10 structured" {
+test "DeepSeek strict env: the shared table holds every runtime setting in its family scope" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .dsv41) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_") or std.mem.eql(u8, r.name, "TF_EXPERIMENTAL"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_") or std.mem.eql(u8, r.name, "TF_EXPERIMENTAL") or std.mem.eql(u8, r.name, "TF_TP_KERNEL_IMAGE"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 54, 24, 19, 10 }, counts);
+    try t.expectEqual([4]usize{ 77, 46, 32, 47 }, counts);
 }
 
 test "DeepSeek strict env: unset and each rule's permitted blank settings read as the caller's default" {
@@ -56,7 +60,7 @@ test "DeepSeek strict env: unset and each rule's permitted blank settings read a
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            else => if (r.kind == .range) try t.expect(try e.range(r.name, raw) == null) else if (r.kind == .path) try t.expect(try e.path(r.name, raw) == null) else try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
+            else => if (r.kind == .range) try t.expect(try e.range(r.name, raw) == null) else if (r.kind == .pair) try t.expect(try e.pair(r.name, raw) == null) else if (r.kind == .path) try t.expect(try e.path(r.name, raw) == null) else try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
 }
@@ -74,8 +78,9 @@ test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its e
         try t.expect(try e.value(bool, r.name, "1", false));
         for ([_][]const u8{ "bad", "2", "00", "0 trailing", "truee", "-1" }) |raw| try check(r.name, raw, false);
         for ([_][]const u8{ "true", "on", "yes", "TRUE", "On", "YES" }) |raw| {
-            try check(r.name, raw, r.kind == .toggle);
-            if (r.kind == .toggle) try t.expect(try e.value(bool, r.name, raw, false));
+            const on = r.kind == .toggle and (r.yes_word or !std.ascii.eqlIgnoreCase(raw, "yes"));
+            try check(r.name, raw, on);
+            if (on) try t.expect(try e.value(bool, r.name, raw, false));
         }
         for ([_][]const u8{ "false", "off", "no", "FALSE", "Off", "NO" }) |raw| {
             const off = r.kind == .toggle and (r.no_word or !std.ascii.eqlIgnoreCase(raw, "no"));
@@ -86,7 +91,7 @@ test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its e
 }
 
 test "DeepSeek strict env: the word forms belong to exactly the switches that read words on main" {
-    const words = [_][]const u8{ "MHC_DEFER", "COEF_LATE", "LOOKUP", "LOOKUP_PLAN" };
+    const words = [_][]const u8{ "MHC_DEFER", "COEF_LATE", "LOOKUP", "LOOKUP_PLAN", "CODE_ACCEPT", "DRAFT_SKIP", "SPEC_DRAFT", "SPEC_NUCLEUS" };
     var toggles: usize = 0;
     for (e.rules) |r| if (r.scope == .dsv41 and r.kind == .toggle) {
         toggles += 1;
@@ -101,7 +106,8 @@ test "DeepSeek strict env: the word forms belong to exactly the switches that re
 test "DeepSeek strict env: every numeric refusal is named, not defaulted or clamped" {
     for (e.rules) |r| if (r.scope == .dsv41) switch (group(r)) {
         .integers => {
-            try check(r.name, if (r.min == 16) "16" else "1", true);
+            var buf: [32]u8 = undefined;
+            try check(r.name, try std.fmt.bufPrint(&buf, "{d}", .{@max(r.min, 1)}), true);
             for ([_][]const u8{ "nan", "inf", "-1", "1.5", "1x", "18446744073709551616", " bad " }) |raw| try check(r.name, raw, false);
         },
         .reals => {

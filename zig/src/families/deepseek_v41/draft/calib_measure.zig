@@ -53,33 +53,22 @@ pub fn method(get: *const fn ([*:0]const u8) ?[]const u8) !Method {
 
 /// `method` where a backend's own defaults (`base`) stand in for the reference's when the shape is not named.
 pub fn methodFrom(get: *const fn ([*:0]const u8) ?[]const u8, base: Method) !Method {
-    const named = trimmed(get("TF_DSV41_CALIB_SHAPE"));
-    const shape: Shape = if (named) |n| (if (std.ascii.eqlIgnoreCase(n, "raw")) .raw else if (std.ascii.eqlIgnoreCase(n, "fit")) .fit else return error.CalibShape) else base.shape;
+    const env = @import("sys").environment;
+    const named = try env.parse("TF_DSV41_CALIB_SHAPE", get("TF_DSV41_CALIB_SHAPE"));
+    const shape: Shape = if (named) |n| @enumFromInt(n) else base.shape;
     const d: Method = if (named == null) base else if (shape == .raw) .{} else .{ .shape = .fit, .warm = 2, .recheck = 2, .cycle = 0, .deep = 3 };
-    const stat_s = trimmed(get("TF_DSV41_CALIB_STAT")) orelse @tagName(d.stat);
-    const stat: Stat = if (std.ascii.eqlIgnoreCase(stat_s, "median")) .median else if (std.ascii.eqlIgnoreCase(stat_s, "min")) .min else return error.CalibStat;
+    const stat: Stat = @enumFromInt(try env.value(u8, "TF_DSV41_CALIB_STAT", get("TF_DSV41_CALIB_STAT"), @intFromEnum(d.stat)));
     return .{
-        .reps = try num(get("TF_DSV41_CALIB_REPS"), d.reps, 1, 50),
-        .warm = try num(get("TF_DSV41_CALIB_WARM"), d.warm, 0, 20),
+        .reps = try env.value(u32, "TF_DSV41_CALIB_REPS", get("TF_DSV41_CALIB_REPS"), d.reps),
+        .warm = try env.value(u32, "TF_DSV41_CALIB_WARM", get("TF_DSV41_CALIB_WARM"), d.warm),
         .stat = stat,
-        .recheck = try num(get("TF_DSV41_CALIB_RECHECK"), d.recheck, 0, early),
+        .recheck = try env.value(u32, "TF_DSV41_CALIB_RECHECK", get("TF_DSV41_CALIB_RECHECK"), d.recheck),
         .shape = shape,
-        .cycle = try num(get("TF_DSV41_CALIB_CYCLE"), d.cycle, 0, early),
-        .deep = try num(get("TF_DSV41_CALIB_DEEP_REPS"), d.deep, 1, 50),
-        .budget_ms = try num(get("TF_DSV41_CALIB_BUDGET_MS"), d.budget_ms, 0, 600_000),
+        .cycle = try env.value(u32, "TF_DSV41_CALIB_CYCLE", get("TF_DSV41_CALIB_CYCLE"), d.cycle),
+        .deep = try env.value(u32, "TF_DSV41_CALIB_DEEP_REPS", get("TF_DSV41_CALIB_DEEP_REPS"), d.deep),
+        .budget_ms = try env.value(u32, "TF_DSV41_CALIB_BUDGET_MS", get("TF_DSV41_CALIB_BUDGET_MS"), d.budget_ms),
         .sparse = d.sparse,
     };
-}
-
-fn num(raw: ?[]const u8, default: u32, lo: u32, hi: u32) !u32 {
-    const v: i64 = if (trimmed(raw)) |s| try std.fmt.parseInt(i64, s, 10) else default;
-    if (v < lo or v > hi) return error.CalibKnob;
-    return @intCast(v);
-}
-
-fn trimmed(v: ?[]const u8) ?[]const u8 {
-    const t = std.mem.trim(u8, v orelse return null, " \t\r\n");
-    return if (t.len == 0) null else t;
 }
 
 /// The median (the mean of the middle two when even) or the minimum of a window's timed runs.

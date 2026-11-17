@@ -1,7 +1,6 @@
 //! x3gm v2 on prefill (TF_DSV41_GM_V2): a segment's routed experts through gm2_kernel, same bits as gm_kernel.
 
 const std = @import("std");
-const quiet = @import("builtin").is_test; // a test's stderr is the build runner's channel
 const calls = @import("block_calls.zig");
 const knob_types = @import("knob_types.zig");
 const block = @import("block.zig");
@@ -34,12 +33,7 @@ pub const Get = *const fn ([]const u8) ?[]const u8;
 
 /// TF_DSV41_GM_V2 by x3gm.config's rule: `(env or "0").strip()` one of "0", "1", "split", else refused.
 pub fn mode(get: Get) !Mode {
-    const raw = std.mem.trim(u8, get("TF_DSV41_GM_V2") orelse "", " \t");
-    if (raw.len == 0 or std.mem.eql(u8, raw, "0")) return .off;
-    if (std.mem.eql(u8, raw, "1")) return .one;
-    if (std.mem.eql(u8, raw, "split")) return .split;
-    if (!quiet) std.log.warn("TF_DSV41_GM_V2={s}: expected 0, 1 or split", .{raw});
-    return error.BadKnob;
+    return @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_GM_V2", get("TF_DSV41_GM_V2"), 0)));
 }
 
 /// The mode a capture's prefill ran, read from its launches: no `gateup2` is off, one a rotation `one`, more `split`.
@@ -79,7 +73,7 @@ pub const Routed = struct {
 /// The calls of x3gm._run_v2's block for `m` (not off).
 pub fn emit(e: *E, m: Mode, r: Routed) !void {
     std.debug.assert(m != .off);
-    if (r.widths) |w| if ((w[0] | w[1]) & ~k2s != 0 or w[0] == 0 or w[1] == 0) return error.Unsupported; // x3gm.supported: "width"
+    if (r.widths) |w| if ((w[0] | w[1]) & ~k2s != 0 or w[0] == 0 or w[1] == 0) return error.Unsupported;
     const L = r.L;
     const tmax = @divFloor(r.P, bm) + r.Et + 1;
     const tab = [3]Arg{
