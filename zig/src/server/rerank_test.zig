@@ -410,7 +410,7 @@ test "rerank: a client gone before a document stops before its pass" {
 }
 
 /// The bytes a dispatched request wrote back.
-const Wire = struct {
+pub const Wire = struct {
     bytes: std.ArrayList(u8) = .empty,
     fn write(ptr: *anyopaque, bytes: []const u8) error{Closed}!void {
         const w: *@This() = @ptrCast(@alignCast(ptr));
@@ -419,12 +419,12 @@ const Wire = struct {
 };
 
 /// POSTs `body` to `path` through the server's dispatcher; the reply's bytes land in `wire`.
-fn dispatch(srv: *Server, path: []const u8, body: []const u8, wire: *Wire) !void {
+pub fn dispatch(srv: *Server, path: []const u8, body: []const u8, wire: *Wire) !void {
     return dispatchAs(srv, "POST", path, body, wire);
 }
 
 /// `dispatch` by `method`.
-fn dispatchAs(srv: *Server, method: []const u8, path: []const u8, body: []const u8, wire: *Wire) !void {
+pub fn dispatchAs(srv: *Server, method: []const u8, path: []const u8, body: []const u8, wire: *Wire) !void {
     const http = @import("http_conn.zig");
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
