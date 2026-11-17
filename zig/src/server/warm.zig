@@ -25,7 +25,7 @@ const Pass = struct {
     }
 };
 
-/// Whether the client sends reasoning back: its latest assistant message has `reasoning_content`, or there is none.
+/// Whether the client sends reasoning back: its latest assistant message has `reasoning_content`.
 pub fn echoesReasoning(messages: Value) bool {
     if (messages != .array) return false;
     var i = messages.array.len;
@@ -37,7 +37,7 @@ pub fn echoesReasoning(messages: Value) bool {
         if (role != .string or !std.mem.eql(u8, role.string, "assistant")) continue;
         return m.get("reasoning_content") != null;
     }
-    return true;
+    return false;
 }
 
 /// Prefill the conversation, the reply as its client will send it back and the next turn's opening (warm_turns).
