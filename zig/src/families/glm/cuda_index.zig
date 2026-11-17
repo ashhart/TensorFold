@@ -83,10 +83,10 @@ pub const Kernels = struct {
         return rows >= rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
     }
 
-    /// Whether a decode window takes the scores kernel: under rows_from rows, 8 or more (4 from 2,048 blocks), aligned.
+    /// Whether a decode window takes the scores kernel: under rows_from rows, 8 from 64 blocks (4 from 2,048), aligned.
     pub fn takesDecode(k: *const Kernels, rows: usize, np: usize, nb: usize, pk: u64, ps: u64) bool {
         _ = k;
-        const wide = rows >= 8 or (rows >= 4 and nb >= 2048);
+        const wide = (rows >= 8 and nb >= 64) or (rows >= 4 and nb >= 2048);
         return wide and rows < rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
     }
 
@@ -157,14 +157,16 @@ test "GLM index: a decode window's tiles a CTA follow its rows and blocks" {
 
 test "GLM index: decode windows on aligned key caches take the scores kernel" {
     const k: Kernels = undefined;
-    try std.testing.expect(k.takesDecode(8, 1024, 16, 0x1000, 32768));
+    try std.testing.expect(k.takesDecode(8, 4096, 64, 0x1000, 32768)); // 16K: the contract's 8 rows over 4,096 pools
+    try std.testing.expect(!k.takesDecode(8, 4096, 63, 0x1000, 32768)); // under 64: tf_glm_scores, no slower on GB10
+    try std.testing.expect(!k.takesDecode(rows_from - 1, 4096, 63, 0x1000, 32768));
     try std.testing.expect(k.takesDecode(rows_from - 1, 216080, 3376, 0x1000, 32768));
     try std.testing.expect(k.takesDecode(4, 216080, 2048, 0x1000, 32768)); // 4 rows from ~512K
     try std.testing.expect(!k.takesDecode(4, 65536, 800, 0x1000, 32768));
     try std.testing.expect(!k.takesDecode(1, 216080, 3376, 0x1000, 32768)); // one row: tf_glm_scores
-    try std.testing.expect(!k.takesDecode(rows_from, 1024, 16, 0x1000, 32768)); // prompt-sized: Kernels.takes
-    try std.testing.expect(!k.takesDecode(16, 1024, 16, 0x1008, 32768));
-    try std.testing.expect(!k.takesDecode(16, topk - 1, 8, 0x1000, 32768));
+    try std.testing.expect(!k.takesDecode(rows_from, 4096, 64, 0x1000, 32768)); // prompt-sized: Kernels.takes
+    try std.testing.expect(!k.takesDecode(16, 4096, 64, 0x1008, 32768));
+    try std.testing.expect(!k.takesDecode(16, topk - 1, 64, 0x1000, 32768));
 }
 
 test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {
