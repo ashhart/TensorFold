@@ -261,3 +261,6 @@ pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
 
 /// Qwen3 embeddings' projected-head RMS norm (128-wide Q and K, V unchanged).
 pub const qwen3_heads = @embedFile("qwen3/heads.metal");
+
+/// Qwen27 flat activation shares the production specialization with its contract.
+pub const q27_mlp_xs = @embedFile("qwen27/mlp_xs.metal");
