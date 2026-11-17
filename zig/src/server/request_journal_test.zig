@@ -177,6 +177,7 @@ test "request journal: a two-prompt completion finishes whole and streamed with 
         const bytes = try a.alloc(u8, try decoder.calcSizeForSlice(encoded));
         try decoder.decode(bytes, encoded);
         try t.expectEqualStrings(wire.bytes.items, bytes);
+        try t.expectEqual(@as(usize, 0), (try kinds(a, path, "prepared")).len);
     }
 }
 
@@ -419,7 +420,7 @@ test "request journal: a write that fails loses its record and the request still
     const j = try Journal.open(t.allocator, t.io, path);
     defer j.close();
     const writable = j.fd;
-    j.fd = platform.c.open(try a.dupeSentinel(u8, path, 0), .{ .ACCMODE = .RDONLY }); // every write now fails, as on a full disk
+    j.fd = platform.c.open(try a.dupeSentinel(u8, path, 0), .{ .ACCMODE = .RDONLY }); // writes fail, as on a full disk
     defer {
         _ = platform.c.close(j.fd);
         j.fd = writable;
