@@ -10,6 +10,7 @@ const ev = @import("events.zig");
 const win = @import("windows.zig");
 const lone_copy = @import("lone_copy.zig");
 const copy_price = @import("copy_price.zig");
+const lone_costs = @import("lone_costs.zig");
 
 const gpa = std.testing.allocator;
 
@@ -44,10 +45,11 @@ const Clock = struct {
 const Copier = struct {
     out: [15]u32 = undefined,
     land_from: usize = std.math.maxInt(usize),
+    quiet_until: usize = 0, // no proposal before this context length
 
     fn propose(ptr: *anyopaque, context: []const u32, most: i64) anyerror![]const u32 {
         const c: *Copier = @ptrCast(@alignCast(ptr));
-        if (most < 2) return &.{};
+        if (most < 2 or context.len < c.quiet_until) return &.{};
         var history: [256]u32 = undefined;
         @memcpy(history[0..context.len], context);
         const n: usize = @intCast(@min(c.out.len, most));
@@ -74,6 +76,7 @@ const Watch = struct {
     var copies: [2]u64 = @splat(0);
     var copy_rows: u64 = 0;
     var shared: [3]u64 = @splat(0); // shared rounds' windows, copy windows and copy rows
+    var first: ?usize = null; // the first copy window's rows
 
     fn verify(ptr: *anyopaque, ws: []const be.Window, out: []be.Verified) anyerror!void {
         for (ws) |w| {
@@ -81,6 +84,7 @@ const Watch = struct {
             windows[late] += 1;
             if (ws.len > 1) shared[0] += 1;
             if (w.held > 0 or w.tokens.len == 0) continue;
+            if (first == null) first = w.tokens.len;
             copies[late] += 1;
             copy_rows += w.tokens.len;
             if (ws.len > 1) {
@@ -253,6 +257,11 @@ fn sharedPhase(log: *ev.Log) ![2]u64 {
     } else if (step) |at| if (!turns) {
         end = at; // the run's last step was a lone one
     };
+    return hashed(log, end);
+}
+
+/// A hash of the trail's first `end` lines, and `end`.
+fn hashed(log: *ev.Log, end: usize) ![2]u64 {
     var h = std.hash.Wyhash.init(0);
     for (0..end) |i| {
         const text = try log.line(gpa, i);
@@ -329,4 +338,118 @@ test "lone copy price: copyAhead reads the price the plan takes, backoff probes 
         found += 1;
     }
     try std.testing.expectEqualSlices(usize, &.{ 8, 24 }, &probes); // after 8, then 16 more, priced-off copies
+}
+
+/// A request's reply, its first copy window's rows, and its copy windows and rows.
+const Request = struct { tokens: [160]u32 = undefined, len: usize = 0, first: ?usize = null, copies: u64 = 0, copy_rows: u64 = 0 };
+
+/// One engine serving `out.len` lone requests one after another, each copier quiet for its first `quiet` tokens.
+fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_new: u32) !void {
+    var cfg = try cfgs.Config.init(gpa, m, 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var backend = target.backend();
+    var table = backend.vtable.*;
+    Watch.inner = table.verify;
+    table.verify = Watch.verify;
+    backend.vtable = &table;
+    var clock: Clock = .{ .target = &target, .times = times };
+    var e = Engine.init(gpa, &cfg, backend, clock.clock());
+    defer e.deinit();
+    e.log = trail;
+    for (out, prompts[0..out.len], ids[0..out.len]) |*r, p, id| {
+        Watch.copies = @splat(0);
+        Watch.copy_rows = 0;
+        Watch.first = null;
+        var c: Copier = .{ .land_from = 0, .quiet_until = p.len + quiet };
+        var s = try sm.Stream.init(gpa, .{ .id = id, .prompt = p, .max_new = max_new, .drafts = true, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
+        defer s.deinit(gpa);
+        try e.addStream(&s);
+        while (e.activeCount() > 0) try e.step();
+        r.len = s.emitted().len;
+        @memcpy(r.tokens[0..r.len], s.emitted());
+        r.first = Watch.first;
+        r.copies = Watch.copies[0] + Watch.copies[1];
+        r.copy_rows = Watch.copy_rows;
+    }
+}
+
+test "lone copy price: a request's first copies are priced from the copy rounds the request before it timed" {
+    for ([_]bool{ false, true }) |head| {
+        var got: [2]Request = @splat(.{});
+        try sequential(hip(head), short_context, 4, &got, 64);
+        const plain = try run(hip(head), short_context, null, 2, 64);
+        for (got, 0..) |r, i| try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], r.tokens[0..r.len]);
+        // the second request starts from the first's timed copies: its first copy is whole, as the first's later ones
+        try std.testing.expectEqual(@as(?usize, 15), got[1].first);
+        // without a head the first request timed its plain rounds before any copy: the untimed price cut its first one
+        if (!head) try std.testing.expect(got[0].first.? < 15);
+    }
+}
+
+test "lone copy price: kept copy prices skip shared streams, keep a head's own times out, and never replace a stream's" {
+    for ([_]bool{ false, true }) |head| {
+        var cfg = try cfgs.Config.init(gpa, hip(head), 16, 15);
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: Clock = .{ .target = &target, .times = short_context };
+        var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer e.deinit();
+        var done = try sm.Stream.init(gpa, .{ .id = "a", .prompt = prompts[0], .max_new = 8 });
+        defer done.deinit(gpa);
+        try copy_price.observeCopy(&e.rule, 15, 11.6, false, win.who(&done));
+        try copy_price.observeOwn(&e.rule, 0, 10.1, false, win.who(&done));
+        done.shared_round = true;
+        lone_copy.keep(&e, &done);
+        try std.testing.expect(e.lone_kept[0][0] == null); // a round beside another stream: its times were not its own
+        done.shared_round = false;
+        lone_copy.keep(&e, &done);
+        var next = try sm.Stream.init(gpa, .{ .id = "b", .prompt = prompts[1], .max_new = 8 });
+        defer next.deinit(gpa);
+        _ = try e.rule.rates(win.who(&next));
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &next).*, &next);
+        try std.testing.expectEqual(@as(?f64, 11.6), next.depth.?.copy_ms.?.get(15));
+        // a head's own round times are its depth rule's, never carried by copy pricing
+        try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (next.depth.?.ms) |t| t.get(0) else null);
+        const long = try gpa.alloc(u32, 8192);
+        defer gpa.free(long);
+        @memset(long, 1);
+        var far = try sm.Stream.init(gpa, .{ .id = "c", .prompt = long, .max_new = 8 });
+        defer far.deinit(gpa);
+        _ = try e.rule.rates(win.who(&far));
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &far).*, &far);
+        try std.testing.expect(far.depth.?.copy_ms == null); // another context band starts unpriced
+        var timed = try sm.Stream.init(gpa, .{ .id = "d", .prompt = prompts[2], .max_new = 8 });
+        defer timed.deinit(gpa);
+        try copy_price.observeCopy(&e.rule, 15, 30, false, win.who(&timed));
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &timed).*, &timed);
+        try std.testing.expectEqual(@as(?f64, 30), timed.depth.?.copy_ms.?.get(15)); // its own copy times stay
+        try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (timed.depth.?.ms) |t| t.get(0) else null);
+    }
+}
+
+test "lone copy price: engines that leave copies unpriced decide two requests in a row as before" {
+    // e5478c4ab: the trail of two requests in a row on one engine, hashed, where the copy gate is off
+    var tile = hip(true);
+    tile.lone_cost_tile = 2; // CUDA's lone window prices, which keep their own calibration (lanes/lone_costs.zig)
+    var head = hip(true);
+    head.copy_guard = false;
+    var copies = hip(false);
+    copies.copy_guard = false;
+    const cases = [_]struct { m: cfgs.Model, expected: [2]u64 }{
+        .{ .m = tile, .expected = .{ 14840352178686162370, 75 } },
+        .{ .m = head, .expected = .{ 12942564931587194512, 69 } },
+        .{ .m = copies, .expected = .{ 14652143946053147409, 62 } },
+    };
+    for (cases) |c| {
+        var log = ev.Log.init(gpa);
+        defer log.deinit();
+        trail = &log;
+        defer trail = null;
+        var got: [2]Request = @splat(.{});
+        try sequential(c.m, short_context, 4, &got, 64);
+        try std.testing.expectEqual(c.expected, try hashed(&log, log.events.items.len));
+    }
 }
