@@ -13,13 +13,6 @@ pub fn on() bool {
     return want;
 }
 
-/// A GLM image's symbol (tf_glm_*, glm_mm* and glm_vis_*, glm_dflash's df_*), or a name the driver cannot give.
-pub fn glmKernel(name: []const u8) bool {
-    if (std.mem.eql(u8, name, "?")) return true;
-    for ([_][]const u8{ "tf_glm_", "glm_", "df_" }) |p| if (std.mem.startsWith(u8, name, p)) return true;
-    return false;
-}
-
 /// `cfg` as a GLM launch makes it: dependent when `pdl`.
 pub fn config(cfg: cuda.launch.Config, pdl: bool) cuda.launch.Config {
     var c = cfg;
@@ -27,12 +20,8 @@ pub fn config(cfg: cuda.launch.Config, pdl: bool) cuda.launch.Config {
     return c;
 }
 
-/// Launches a GLM image's kernel, dependent under TF_GLM_PDL; safe builds refuse any other kernel (it does not wait).
+/// Launches a GLM image's kernel (test-glm-pdl-scan: each one opens with its wait), dependent under TF_GLM_PDL.
 pub fn launch(f: cuda.Function, cfg: cuda.launch.Config, s: cuda.Stream, a: *cuda.Args) !void {
-    if (std.debug.runtime_safety) {
-        const name = f.d.functionName(f.handle);
-        if (!glmKernel(name)) std.debug.panic("cuda_pdl.launch: {s} is not a GLM kernel; launch it with cuda.launch.launch", .{name});
-    }
     return cuda.launch.launch(f, config(cfg, on()), s, a);
 }
 
@@ -44,11 +33,6 @@ pub fn forwardEx(comptime plain: @FieldType(cuda.abi.Api, "cuLaunchKernel")) @Fi
             return plain(f, c.grid_x, c.grid_y, c.grid_z, c.block_x, c.block_y, c.block_z, c.shared_bytes, c.stream, p, e);
         }
     }.ex;
-}
-
-test "GLM symbols pass, shared kernels do not" {
-    for ([_][]const u8{ "tf_glm_hc_post", "glm_mm_reduce", "glm_vis_rmsnorm", "df_attn", "?" }) |n| try std.testing.expect(glmKernel(n));
-    for ([_][]const u8{ "tf_draw", "tf_pack_dense", "roce_gather", "_ZN7tf_qmmf11qmmf_kernel", "" }) |n| try std.testing.expect(!glmKernel(n));
 }
 
 test "a GLM launch keeps its config and sets only pdl" {
