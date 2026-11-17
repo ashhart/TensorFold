@@ -4,7 +4,7 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, present, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -78,6 +78,9 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },
+    .{ .name = "TF_SLIDE_ROUTED", .scope = .slide, .kind = .present, .forms = "any present value, including empty or 0; unset leaves this mode off" },
+    .{ .name = "TF_SLIDE_EDIT", .scope = .slide, .kind = .present, .forms = "any present value, including empty or 0; unset leaves this mode off" },
+    .{ .name = "TF_SLIDE_PROBE", .scope = .slide, .kind = .present, .forms = "any present value, including empty or 0; unset leaves this mode off" },
     .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .scope = .slide, .kind = .path, .forms = "a directory path without control characters, where each lesson's read rows are written" },
@@ -226,6 +229,7 @@ pub fn registered(comptime name: []const u8) void {
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
+    if (r.kind == .present) return if (raw != null) 1 else null;
     if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return if (r.blank_default) null else error.InvalidEnvironment;
     const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
@@ -325,6 +329,19 @@ fn decode(comptime T: type, n: u64) T {
         .float => @floatCast(@as(f64, @bitCast(n))),
         else => @intCast(n),
     };
+}
+
+/// A named presence rule keeps even empty and zero values set, without a fallible parse.
+pub fn present(comptime name: [:0]const u8, raw: ?[]const u8) bool {
+    comptime {
+        registered(name);
+        if (rule(name).kind != .present) @compileError(name ++ " is not a presence rule");
+    }
+    return raw != null;
+}
+
+pub fn isSet(comptime name: [:0]const u8) bool {
+    return present(name, sys.getenv(name));
 }
 
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {

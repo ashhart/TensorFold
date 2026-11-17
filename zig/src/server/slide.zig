@@ -260,9 +260,9 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, initial: teach.Plan, g
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
         // a correction keeps main's plain continuation: its wordings stay as its old-belief references were read
         redraw = verdict.took == null and !std.mem.allEqual(bool, verdict.recalled, true) and plan.corrections.len == 0 and
-            @import("core").profile.lookup("TF_SLIDE_ROUTED") == null and
-            @import("core").profile.lookup("TF_SLIDE_EDIT") == null and
-            @import("core").profile.lookup("TF_SLIDE_PROBE") == null;
+            !@import("sys").environment.isSet("TF_SLIDE_ROUTED") and
+            !@import("sys").environment.isSet("TF_SLIDE_EDIT") and
+            !@import("sys").environment.isSet("TF_SLIDE_PROBE");
         srv.slide.checked(id, verdict.damage == null and std.mem.allEqual(bool, verdict.recalled, true));
         log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
