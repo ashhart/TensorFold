@@ -314,3 +314,6 @@ pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
 pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
+
+/// Qwen27 flat activation shares the production specialization with its contract.
+pub const q27_mlp_xs = @embedFile("qwen27/mlp_xs.metal");

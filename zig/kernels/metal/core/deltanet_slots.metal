@@ -56,6 +56,7 @@ TF_TREE_SLOTS(16)
 
 // The slot scan for 128-wide heads, 4 value columns a simdgroup; a flow word holds a row and slots to restore and save.
 template <uint SLOTS>
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_delta_gdn_columns(device const vec<bfloat, 4>* query [[buffer(0)]],
                                  device const vec<bfloat, 4>* key [[buffer(1)]],
                                  device const bfloat* value [[buffer(2)]],
@@ -124,6 +125,7 @@ TF_COLUMNS(2)
 TF_COLUMNS(4)
 
 // tf_delta_gdn_pre for 128-wide heads, four taps and bf16 weights: a lane's channels load together, and no tails.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_delta_gdn_pre_vectors(device const vec<bfloat, 4>* projection [[buffer(0)]],
                                      device const bfloat* a [[buffer(1)]],
                                      device const bfloat* b [[buffer(2)]],

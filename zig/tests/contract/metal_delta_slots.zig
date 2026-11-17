@@ -91,3 +91,6 @@ fn one(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, pipeline: mtl
         try expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, original_inputs, try rig.inputBytes()));
     }
 }
+
+/// Column tests reuse this FP64 fixture and original slot pipeline through the normal gates.
+pub const Columns = @import("metal_q27_columns.zig");
