@@ -851,6 +851,16 @@ A complete call at the end of reasoning is also returned when the think-close ma
 empty or whitespace. While streaming, those calls stay held until the reply ends. When the block closes, a call
 followed by more reasoning or a nonempty answer stays reasoning.
 
+A reply that ends at the model's own end token while its think block is still open, with no tool call in it, also
+answers with its reasoning (#3687): `content` repeats the text, which stays in `reasoning_content` as well, so
+`/v1/messages` gives a thinking block and then a text block, and `/v1/responses` a reasoning item and then a message.
+It applies only when the model ended the reply itself: not at a stop string, `max_tokens` or the loop guard, and not
+for a request with a forced tool call or structured output, which prose cannot satisfy. Streaming sends the answer as
+one content delta at the end, so the joined deltas equal the finished reply. The response carries
+`tensorfold.reasoning_recovered: true` and the server logs one line. Token ids, `token_sha256` and token counts are
+the model's own, unchanged; `logprobs` keeps those tokens under `reasoning_content`. A client that sends the reasoning
+back sends the text twice, which costs prompt tokens on the next turn.
+
 `thinking_budget` (the request's; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
 The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block

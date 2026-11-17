@@ -57,6 +57,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - App: selecting Supervisor or applying the Supervised build preset is accepted instead of failing with `collaborationMode has an invalid value` (#3472). Thanks to @AIFlowML.
 
 - Qwen3.8-27B on Metal: when a reply ends, the optional pin that keeps its history for a same-prompt regeneration counts everything the prompt cache already holds and every promised slot first, so it can no longer evict another conversation's newest state in a tight cache (#3556).
+- Thinking replies: a reply that ends at the model's own end token inside a think block that never closed, with no tool call, now answers with its text instead of an empty answer, on chat completions, `/v1/messages` and `/v1/responses`, streamed and whole; the text stays in the reasoning too, the reply says `tensorfold.reasoning_recovered: true`, and the server logs one line. Stop strings, `max_tokens`, the loop guard, forced tool calls and structured output keep today's reply, and token ids, `token_sha256` and token counts are unchanged ([#3687](https://github.com/ashhart/TensorFold/issues/3687)).
 
 - Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
 
