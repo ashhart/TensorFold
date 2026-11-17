@@ -128,9 +128,7 @@ __device__ int fn_scan(int v, int* waves, int* total) {
 // Keys a select thread holds in registers (a row's blocks in contiguous runs): wider rows take the global path.
 constexpr int kSelectHeld = 32;
 
-// tf_fn_idx_select's search for the cut, from a thread's `held` keys (runs of blocks [lo, lo + held)): each pass a
-// histogram a wave (no shared atomic address across waves), summed a bin, and the bin found by a parallel suffix scan
-// of the 256 bins. The same cut and need as the serial search: the same keys out.
+// tf_fn_idx_select's held-key cut: per pass a wave histogram, suffix-scanned over 256 bins; same cut as serial.
 __device__ __forceinline__ void fn_cut_held(const unsigned (&k)[kSelectHeld], int held, int top, int (*whist)[256],
                                             int* hist, unsigned* cut_s, int* need_s, unsigned& prefix, int& need) {
     const int t = threadIdx.x, lane = t & 31, wave = t >> 5;
@@ -148,7 +146,7 @@ __device__ __forceinline__ void fn_cut_held(const unsigned (&k)[kSelectHeld], in
         int c = 0, x = 0;
         if (t < 256) {
 #pragma unroll 4
-            for (int w = 0; w < kSelectWaves; ++w) c += whist[w][255 - t];  // t's place in the scan from the top bin down
+            for (int w = 0; w < kSelectWaves; ++w) c += whist[w][255 - t];  // t's rank from the top bin down
             x = c;
 #pragma unroll
             for (int off = 1; off < 32; off <<= 1) {
