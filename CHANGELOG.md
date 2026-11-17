@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: with `--learn-conversations`, an image conversation's kept states stay in RAM as before, and the log now says so once per conversation ("kept RAM-only (ImageConversation)") instead of leaving disk silently unused; no prompt text or image content is logged, and replies are unchanged (#3008).
+
 - App: creating a Kanban ticket shows it once, even when its update event arrives before the create reply (#3363, fixes #3338). Thanks to @sx4im.
 
 - CLI: `tensorfold rm REPO[@REVISION]` removes a checkpoint `pull` cached, or one of its snapshots with the refs that name it and the blobs no other snapshot links to. It lists what goes and the bytes freed, then asks; `--yes` skips the question and `--dry-run` only lists. It refuses paths and repos the cache does not hold, and never deletes outside the repo's cache folder or through a link. It coordinates with TensorFold pulls, rechecks the plan after confirmation, and refuses snapshots a running server holds (#3525).
