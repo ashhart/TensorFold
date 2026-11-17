@@ -29,6 +29,7 @@ const dense12_k = @import("contract_dense_wmma12.zig");
 const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
+const index_k = @import("contract_flashnext_index.zig");
 const kit = @import("contract_kit.zig");
 const item_k = @import("contract_wmma_item.zig");
 const embed_k = @import("contract_embed.zig");
@@ -297,6 +298,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers, [_]kit.Kind{ .f16, .bf16 }) |*x, k| x.* = router_k.Router.init(a, &r, s, &l, k);
     defer for (&routers) |*x| x.deinit();
     for (&routers) |*x| try kernels.append(a, x.kernel());
+    // series 6: tf_fn_idx_select's held and global cut branches, plus its planted control
+    var idx_select: [3]index_k.Select = undefined;
+    for (&idx_select, [_]index_k.Which{ .held, .global, .control }) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&idx_select) |*m| m.deinit();
+    for (&idx_select) |*m| try kernels.append(a, m.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
     // the last one is the few-row passes' control, on its case's geometry
