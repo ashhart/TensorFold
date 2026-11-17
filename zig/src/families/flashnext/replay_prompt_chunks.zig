@@ -325,7 +325,6 @@ pub fn mtpKeys(p: *Prompt, m: *Model, start: usize, nexts: []const u32, streams:
     const n = nexts.len;
     if (n == 0) return;
     if (n > PMAX) return error.ChunkSize;
-    if (!Model.inVocab(nexts)) return error.TokenOutsideVocabulary;
     @memcpy(b.mids.b.slice(u32, n), nexts);
     for (0..n) |i| b.pos.b.slice(i32, PMAX)[i] = @intCast(start + i);
     const kvm = b.kvmeta.b.slice(u32, 3);

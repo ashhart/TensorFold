@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal (Nemotron, Gemma 4, GLM, GLM DSA, Flash Next, MiniMax-M3's drafters and Step-5's draft head): a token id at or past the embedding table is refused before lookup, and loaders check the stored embedding shape (#3045).
+
 - CLI: `tensorfold launch <agent>` starts Claude Code, Codex, OpenCode or Hermes against the local server, with the API base URL and key set only in the agent's environment; no agent config or home-folder files change (#3248, fixes #3199).
 
 - Nemotron 3.5 Super at TP=2 on CUDA: rank 1 gets one header a decode window and one exact-size message a layer, so it queues a window's layers with no host read between them (#2839).

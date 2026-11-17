@@ -109,7 +109,9 @@ pub const Backend = struct {
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         for (prompt) |t| if (t >= e.c.vocab) return error.TokenOutsideVocabulary; // before rank 1 hears of the prompt
+        for (s.think_close) |t| if (t >= e.c.vocab) return error.TokenOutsideVocabulary;
         if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
+        if (s.recall) |reader| try reader.checkVocabulary(e.c.vocab);
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
@@ -374,7 +376,6 @@ pub const Backend = struct {
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }
         if (total > st.max_rows) return error.WindowOutOfStep;
-        try b.sl.checkWindows(b.wins.items); // before rank 1 hears of them
         const draws = @import("draw_rule.zig").windowDraws(windows, b.sl.e.c.vocab);
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);

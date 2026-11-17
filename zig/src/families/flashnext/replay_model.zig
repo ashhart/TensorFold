@@ -166,7 +166,6 @@ pub const Model = struct {
 
     /// One forward over `tokens` (a window of up to MAXR rows from the cache's position): each row's argmax.
     pub fn window(m: *Model, tokens: []const u32, picks: []u32) !void {
-        if (!inVocab(tokens)) return error.TokenOutsideVocabulary;
         const r = m.r;
         const t = &m.t;
         const rows = tokens.len;

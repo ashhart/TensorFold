@@ -271,20 +271,11 @@ pub const Slots = struct {
         }
     };
 
-    /// Windows whose host tokens are rows of the embedding; rank 0 asks before rank 1 hears of them.
-    pub fn checkWindows(sl: *const Slots, wins: []const Win) !void {
-        for (wins) |w| {
-            if (w.pending >= sl.e.c.vocab) return error.TokenOutsideVocabulary;
-            for (w.tokens) |t| if (t >= sl.e.c.vocab) return error.TokenOutsideVocabulary;
-        }
-    }
-
     /// One forward over every window, each stream's rows against its own caches; `draws` rules its rows.
     pub fn window(sl: *Slots, wins: []const Win, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
-        try sl.checkWindows(wins);
         const t_in = platform.c.mach_absolute_time();
         sl.settleAll();
         try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
@@ -427,7 +418,6 @@ pub const Slots = struct {
             const n = r.follow.len;
             if (!slot.mtp or n == 0 or r.depth >= st.max_rows or (r.prompt and n != 1)) return error.DraftOutOfStep;
             if (!r.prompt and (slot.seen != sl.windows or n > slot.width)) return error.DraftOutOfStep; // this window's
-            for (r.follow) |t| if (t >= sl.e.c.vocab) return error.TokenOutsideVocabulary;
             for (reqs[0..k]) |o| if (o.slot == r.slot) return error.DraftOutOfStep;
             total += n;
         }
