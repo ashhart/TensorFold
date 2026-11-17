@@ -275,13 +275,13 @@ test "GLM KV split: a class shorter than a stream's window is refused before any
     try expectEqual(live, F.live);
 }
 
-test "GLM KV split: a request longer than a class fits admission and is refused by name, never as LaneMemory" {
+test "GLM KV split: a request longer than a class is refused by name, never as LaneMemory" {
     var f: Fake = undefined;
     try f.init(true);
     const p = try f.pool(3, 16, true);
     defer f.deinit(p);
     f.e.capacity = 8192; // as a table longer than a class would be, were it not refused at init
-    try expect(p.fits(5000, 100)); // 11 pages: past a class of 8, so the lane host does not wait for it
+    try expect(!p.fits(5000, 100)); // 11 pages past a class of 8: the lane host refuses it first (kvNeed, C1)
     try std.testing.expectError(error.ClassTooSmall, p.open(1, 5000, 100));
     try expect(!p.used[1] and p.pool.idle());
 }
