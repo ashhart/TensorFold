@@ -141,7 +141,7 @@ Use `agent_loops` for stable conversations or `agent_cohorts` to replace every c
 Each agent turn is followed by two unique one-off prompts. Histories grow through public user messages and
 the measured assistant replies, including reasoning when present. One-off replies are discarded.
 Matching token replies preserve identical A/B histories; request fingerprints detect later divergence if replies differ.
-The schedule follows E24's shapes, with tokenizer-dependent chat-template overhead and Python's seeded one-off choices.
+The schedule follows the replay's shapes (`zig/cache_agent_trace.zig`, `zig build cache-agent-replay`), with tokenizer-dependent chat-template overhead and Python's seeded one-off choices.
 
 ```sh
 python3 tools/bench_cache_agents.py run http://127.0.0.1:8080 MODEL \
