@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
+const ir = @import("int4_ref.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -28,6 +29,10 @@ const used = 8;
 /// Pairs a token row: five routed picks and the shared expert, whose slot is skipped.
 const slots = 6;
 const shared = used - 1;
+/// The inputs whose mirror carries the nudge: small, so the nudge 4 is exact in bf16 at their size.
+const nudged = 8;
+/// Gate 4's bf16 proof for a bf16 SwiGLU output: its own roundings leave the gate no wider margin to prove.
+const gate_up_why = "a mirrored row cancels exactly in the halves order, so a low-precision sum's largest miss is want itself, and the epilogue's roundings and the store already allow 4.1 u of it: at most 1 / (4.1 u) = 62x is provable";
 
 const up_rows = [4]c.Shape{ .{ .rows = 1, .n = width, .k = dims }, .{ .rows = 3, .n = width, .k = dims }, .{ .rows = 16, .n = width, .k = dims }, .{ .rows = 64, .n = width, .k = dims } };
 const prompt_rows = [2]c.Shape{ .{ .rows = 64, .n = width, .k = dims }, .{ .rows = 200, .n = width, .k = dims } };
@@ -76,6 +81,7 @@ pub fn spec(e: Entry) c.Spec {
             s.out = .bf16;
             s.ops = 5;
             s.mids = 3;
+            s.sums = .{ .bf16 = 60, .why = gate_up_why };
         },
         .down_bf16, .head => s.out = .bf16,
         .down_f32, .prompt_down => {},
@@ -125,6 +131,10 @@ pub const Fixture = struct {
     tab: u64 = 0,
     out: u64 = 0,
     base: u64 = 0,
+    /// what a gate asked the inputs to hold: gate 4's stress rows make the sums exact in fp32
+    fill: g.Fill = .random,
+    /// every output's derived allowance, from its own terms (reference), which `bounds` hands the harness
+    allow: []f64 = &.{},
     msg: [192]u8 = undefined,
 
     pub fn deinit(self: *Fixture) void {
@@ -139,16 +149,19 @@ pub const Fixture = struct {
         a.free(self.src);
         a.free(self.x);
         a.free(self.ids);
+        a.free(self.allow);
         self.qw = &.{};
         self.sc = &.{};
         self.src = &.{};
         self.x = &.{};
         self.ids = &.{};
+        self.allow = &.{};
     }
 
     pub fn kernel(self: *Fixture) g.Kernel {
         const control: ?g.Gate = switch (self.entry.fault) {
-            .none, .unshuffled_nibbles => null,
+            .none => null,
+            .unshuffled_nibbles => .shapes,
             .bf16_group_sums => .sums,
         };
         return .{ .spec = spec(self.entry), .ctx = self, .vt = &vt, .control = control };
@@ -191,14 +204,15 @@ pub const Fixture = struct {
         }
     }
 
-    /// Gate 4's inputs: integer rows and codes whose partial sums reach 2^20 and cancel, so the result stays small.
+    /// Gate 4's inputs: integers whose terms cancel in pairs, so a low-precision sum loses the whole result.
     fn stress(self: *Fixture, rng: std.Random) void {
         const k = self.shape.k;
         const h = k / 2;
         for (0..self.x_rows()) |r| for (0..h) |i| {
-            const v: f32 = @floatFromInt(4 * (1 + 2 * rng.uintLessThan(u32, 64)));
+            const small = i < nudged;
+            const v: f32 = @floatFromInt(if (small) 4 * (1 + rng.uintLessThan(u32, 4)) else 8 * (1 + 2 * rng.uintLessThan(u32, 128)));
             self.x[r * k + i] = c.toBf16(v);
-            self.x[r * k + h + i] = c.toBf16(if (i < 8) 4 - v else -v);
+            self.x[r * k + h + i] = c.toBf16(if (small) 4 - v else -v);
         };
         // the same code at both halves of an input pair, so a column's sums cancel to a small integer
         for (self.src) |s| {
@@ -228,6 +242,7 @@ pub const Fixture = struct {
         self.free();
         self.rig.reset();
         self.shape = shape;
+        self.fill = fill;
         const a = self.rig.gpu.gpa;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
@@ -291,6 +306,7 @@ pub const Fixture = struct {
             try self.router.route(self.rig.s, ids, self.pairs, 512, int4.prompt_tile, self.plan);
         }
         try self.rig.s.synchronize();
+        self.allow = try a.alloc(f64, self.count());
         self.out = try self.rig.output(self.count() * self.elem());
         self.base = try self.rig.scratch(self.count() * self.elem());
         return true;
@@ -367,10 +383,15 @@ pub const Fixture = struct {
     }
 
     pub fn reference(self: *Fixture, want: []f64, mag: []f64) !void {
-        const t = try self.rig.gpu.gpa.alloc(f64, self.shape.k);
-        defer self.rig.gpu.gpa.free(t);
-        const u = try self.rig.gpu.gpa.alloc(f64, self.shape.k);
-        defer self.rig.gpu.gpa.free(u);
+        const gpa = self.rig.gpu.gpa;
+        const t = try gpa.alloc(f64, self.shape.k);
+        defer gpa.free(t);
+        const u = try gpa.alloc(f64, self.shape.k);
+        defer gpa.free(u);
+        const sp = spec(self.entry);
+        const d = depth(self.shape);
+        // gate 4's stress inputs are integers whose partial sums are exact in fp32 in any order
+        const ex = self.fill == .stress;
         if (self.entry.kind == .head) {
             for (0..self.shape.rows) |r| for (0..self.shape.n) |j| {
                 self.headTerms(r, j, t);
@@ -380,8 +401,10 @@ pub const Fixture = struct {
                     sum += v;
                     abs += @abs(v);
                 }
-                want[r * self.shape.n + j] = sum;
-                mag[r * self.shape.n + j] = abs;
+                const o = r * self.shape.n + j;
+                want[o] = sum;
+                mag[o] = abs;
+                self.allow[o] = ir.rows(d, abs, sum, sp.out, ex);
             };
             return;
         }
@@ -397,15 +420,26 @@ pub const Fixture = struct {
             if (!self.up()) {
                 want[o] = sum;
                 mag[o] = abs;
+                self.allow[o] = ir.rows(d, abs, sum, sp.out, ex);
                 continue;
             }
             self.terms(p, j, 1, u);
             var usum: f64 = 0;
-            for (u) |v| usum += v;
+            var uabs: f64 = 0;
+            for (u) |v| {
+                usum += v;
+                uabs += @abs(v);
+            }
             want[o] = swiglu(sum, usum);
-            // silu's derivative reaches the output as up's own magnitude
-            mag[o] = abs * @abs(usum) + abs;
+            mag[o] = abs + uabs;
+            self.allow[o] = ir.gateUp(d, sp.ops, sum, usum, abs, uabs, want[o], ex);
         };
+    }
+
+    /// Each output's derived allowance (from reference): the generic formula counts a SwiGLU's roundings at |want|.
+    pub fn bounds(self: *Fixture, want: []const f64, _: []const f64, allow: []f64) !void {
+        if (want.len != self.allow.len or allow.len != self.allow.len) return error.BadLength;
+        @memcpy(allow, self.allow);
     }
 
     pub fn simulate(self: *Fixture, acc: c.Accum, order: g.Order, out: []f64) !void {
@@ -525,15 +559,12 @@ fn skipped(set: *Set) !void {
             continue;
         }
         skipped_rows += 1;
-        for (row, want[p * sh.n * 2 ..][0 .. sh.n * 2]) |x, y| {
-            if (x != 0xff or y == 0xff) {
-                differ += 1;
-                break;
-            }
-        }
+        // the skip run leaves the row at its poison, and the all-live run wrote it: a 0xff byte is a value too
+        const base = want[p * sh.n * 2 ..][0 .. sh.n * 2];
+        if (std.mem.indexOfNone(u8, row, &.{0xff}) != null or std.mem.indexOfNone(u8, base, &.{0xff}) == null) differ += 1;
     }
     try check.expect(skipped_rows > 0, "int4 skipped slot: the plan has no skipped pair", .{});
-    try check.expect(differ == 0, "int4 skipped slot: {d} rows differ from the all-live run ({d} skipped)", .{ differ, skipped_rows });
+    try check.expect(differ == 0, "int4 skipped slot: {d} of {d} skipped rows differ from the all-live run", .{ differ, skipped_rows });
     std.debug.print("PASS int4 skipped slot: {d} of {d} pair rows left at 0xff, the others byte-equal to the all-live run\n", .{ skipped_rows, f.pairs });
 }
 
