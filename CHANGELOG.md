@@ -4,10 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 2.9% to 5.4% for a lone drafted stream and 12.9% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen5 x16 slot, and only the with and without pairs compare (#3051 via #3722, for #3050). Thanks to @Mirrdhyn.
+
 - Tests: the tokenizer parity corpus adds one sentence in each of the 22 scheduled Indian languages, the canonical-composition exclusions in both forms and ZWJ/ZWNJ conjuncts, each as written, NFC and NFD (#1988). Thanks to @currencycaver29.
 
 - Flash Next on Metal: an explicit `--context` smaller than the trained one now sizes the caches and selectors to that context, with the rotary positions unchanged, so a smaller context holds less memory; tokens are unchanged (#3691, part of #3667).
-- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 2.9% to 5.4% for a lone drafted stream and 12.9% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen5 x16 slot, and only the with and without pairs compare (#3051, for #3050). Thanks to @Mirrdhyn.
 
 - Server: every chat request records where each message starts in the rendered prompt, at exact token boundaries; nothing uses the starts yet, so replies are unchanged (#3679, step 0 of #3617).
 
@@ -58,7 +59,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: when a reply ends, the optional pin that keeps its history for a same-prompt regeneration counts everything the prompt cache already holds and every promised slot first, so it can no longer evict another conversation's newest state in a tight cache (#3556).
 - Thinking replies: a reply that ends at the model's own end token inside a think block that never closed, with no tool call, now answers with its text instead of an empty answer, on chat completions, `/v1/messages` and `/v1/responses`, streamed and whole; the text stays in the reasoning too, the reply says `tensorfold.reasoning_recovered: true`, and the server logs one line. Stop strings, `max_tokens`, the loop guard, forced tool calls and structured output keep today's reply, and token ids, `token_sha256` and token counts are unchanged ([#3687](https://github.com/ashhart/TensorFold/issues/3687)).
 - CUDA on WSL2: an integrated GPU such as the RTX Spark N1X admits a model against its CUDA memory pool instead of WSL's share of RAM in `/proc/meminfo`, so a checkpoint the GPU holds is no longer refused; `TENSORFOLD_UNIFIED_HOST_COUNTS=1` keeps `/proc/meminfo` and `=0` reads the pool, any other value is refused at startup, and native Linux admits as before. Drama 3 on native Windows opens cuBLAS as `cublas64_13.dll` too. Admission and library loading only; replies are unchanged (#2107). Thanks to @drowzeys.
-- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 4.9% for a lone drafted stream and 12.9% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen5 x16 slot, and only the with and without pairs compare (#3051, for #3050).
 
 - Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
 
