@@ -183,7 +183,7 @@ pub const Lanes = struct {
         const gop = try l.lanes.getOrPut(l.gpa, s);
         s.cached = 0;
         if (l.pins != null) {
-            if (gop.found_existing) l.free |= bit(gop.value_ptr.slot); // bound again: a kept state may want another slot
+            if (gop.found_existing) l.free |= bit(gop.value_ptr.slot); // rebound: a kept state may want another slot
             gop.value_ptr.* = .{ .slot = l.bind(s, ids.len) catch |err| {
                 l.lanes.removeByPtr(gop.key_ptr);
                 return err;

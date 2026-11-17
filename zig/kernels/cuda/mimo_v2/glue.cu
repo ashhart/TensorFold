@@ -40,9 +40,9 @@ extern "C" __global__ void mimo_rope_tables(float* __restrict__ cos_out, float* 
     }
 }
 
-// logits.argmax(-1) over the gathered head (rank-major recv [world, n, vr], or one rank's [n, vr] when world 1): the
+// logits.argmax(-1) over the gathered head: rank-major recv [world, n, vr], or one rank's [n, vr] when world 1.
 
-// first index of the maximum, as torch.argmax; a NaN counts as the maximum (its first index). out int32 [n].
+// The first index of the maximum, as torch.argmax; a NaN counts as the maximum (its first index). out int32 [n].
 extern "C" __global__ void mimo_argmax(const float* __restrict__ recv, int32_t* __restrict__ out, int world, int n,
                                        int vr) {
     __shared__ float bv[256];
