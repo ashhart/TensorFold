@@ -14,12 +14,11 @@ pub fn check(s: ?Sampling) ?Sampling {
     return if (x.temperature > 0) x else null;
 }
 
-/// sample.cu's Rule: the seed, 1 / T, top_p, the candidates' near window, ln(min_p) and top_k (0: off).
-pub const Rule = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+pub const Rule = cuda.sample.Rule;
 
-/// The rule as nemotron/cuda_sampler.zig fills it.
+/// The rule sample.cu reads for `s` (cuda.sample.rule over lanes.gpu_rule).
 pub fn rule(s: Sampling) Rule {
-    return .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .near = 20.0, .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+    return cuda.sample.rule(s);
 }
 
 /// A rank's logits rows: bf16 [rows][its vocabulary span].
@@ -158,6 +157,31 @@ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
     try std.testing.expect(std.math.isInf(r.min_log));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Rule));
     try std.testing.expectEqual(@as(?Sampling, null), check(.{ .seed = 0, .temperature = 0 }));
+}
+
+test "GLM sampler rule: the hand-built rule it replaced, byte for byte; check is ruleFor's gate" {
+    const Hand = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+    const inf = std.math.inf(f64);
+    const seeds = [_]u64{ 0, 1234, 1 << 63 | 5, std.math.maxInt(u64) };
+    const temps = [_]f64{ -1, 0, 1e-9, 1e-6, 0.5, 0.7, 1, 2, inf };
+    const ks = [_]u32{ 0, 1, 20, 1024, 1025 };
+    const ps = [_]f64{ 0, 0.5, 0.95, 1, 1.5 };
+    const mins = [_]f64{ -1, 0, 1e-12, 0.05, 1 };
+    var sampled: usize = 0;
+    for (seeds) |seed| for (temps) |t| for (ks) |k| for (ps) |p| for (mins) |m| {
+        const s: Sampling = .{ .seed = seed, .temperature = t, .top_k = k, .top_p = p, .min_p = m };
+        const h: Hand = .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .near = 20.0, .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+        const r = rule(s);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&h), std.mem.asBytes(&r));
+        const via = cuda.sample.ruleFor(@as(?Sampling, s));
+        try std.testing.expectEqual(check(s) == null, via == null);
+        if (via) |v| {
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&h), std.mem.asBytes(&v));
+            sampled += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 4 * 7 * 5 * 5 * 5), sampled);
+    try std.testing.expect(cuda.sample.ruleFor(@as(?Sampling, null)) == null);
 }
 
 /// Each rank's columns as one block from that rank (spans may differ in width: TP=3), in one group: world broadcasts.
