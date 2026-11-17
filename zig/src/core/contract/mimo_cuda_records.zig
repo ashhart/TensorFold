@@ -24,9 +24,6 @@ pub const cuda = [_]registry.CudaRecord{
     rec("mimo_attention", "mimo_attn_rows", 128, 2 * 64 * (200 + 136) * 2, .{ .regs = 164, .static = 0, .bound = 128 }),
     rec("mimo_attention", "mimo_attn_merge", 128, 0, .{ .regs = 36, .static = 0, .bound = 0 }),
     rec("mimo_attention", "mimo_attn_prompt", 128, 2 * 64 * (200 + 136) * 2, .{ .regs = 218, .static = 0, .bound = 128 }),
-    // the shared EXL3 prompt kernels' 3-bit mul1 instances
-    rec("exl3_experts", "tf_exl3_prompt_gu_k6_mul1", 256, 0, .{ .regs = 128, .static = 40192, .bound = 256 }),
-    rec("exl3_experts", "tf_exl3_prompt_down_k6_mul1", 256, 0, .{ .regs = 128, .static = 40192, .bound = 256 }),
     rec("mimo_dflash", "dr_block_embed", 256, 0, .{ .regs = 24, .static = 0, .bound = 0 }),
     rec("mimo_dflash", "dr_tap", 256, 0, .{ .regs = 18, .static = 0, .bound = 0 }),
     rec("mimo_dflash", "dr_norm_rope", 128, 0, .{ .regs = 21, .static = 528, .bound = 0 }),
