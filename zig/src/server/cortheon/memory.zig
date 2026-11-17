@@ -240,7 +240,7 @@ test "a kept exchange goes back in front of its reply, whitespace and argument o
     const later = [_]Value{ try msg(a, "system", "s"), try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", " It added std.Io."), try msg(a, "user", "And 0.16?") };
     const out = try splice(a, &store, &later, 0);
     try std.testing.expectEqual(@as(usize, 5), out.len);
-    try std.testing.expectEqual(later.len, (try splice(a, &store, &later, 0x5a17)).len); // another cache salt: not its own
+    try std.testing.expectEqual(later.len, (try splice(a, &store, &later, 0x5a17)).len); // another salt
     try std.testing.expectEqualStrings("tool", out[2].strField("role").?);
     try std.testing.expectEqualStrings("assistant", out[3].strField("role").?);
     const other = [_]Value{ try msg(a, "user", "Different question"), try msg(a, "assistant", "It added std.Io.") };

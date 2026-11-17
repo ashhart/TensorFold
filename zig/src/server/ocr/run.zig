@@ -69,7 +69,7 @@ pub fn runSalted(srv: *Server, a: Allocator, sources: []const Source, sink: Page
     var enc = budget.Encodes.init(total, pages.len);
     for (pages) |p| {
         if (gone.check()) return error.Cancelled;
-        try onePage(srv, a, reader, id, p, sink, &enc, fault, gone);
+        try onePage(srv, a, reader, id, p, sink, &enc, fault, gone, salt);
     }
 }
 
@@ -156,7 +156,7 @@ fn renderOne(a: Allocator, pa: Allocator, doc: []const u8, index: u32, width: u3
 }
 
 /// One page in its own arena: decode, generate, parse, validate, then the sink while the pixels live.
-fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype) Step!void {
+fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype, salt: u64) Step!void {
     var arena = std.heap.ArenaAllocator.init(srv.gpa);
     defer arena.deinit();
     const pa = arena.allocator();
