@@ -1,6 +1,4 @@
-//! Reply lines in TENSORFOLD_REQUEST_LOG: one per finished request, written off the decode path.
-//! The CPU fake engine emits scripted tokens over a loopback socket, so these are real HTTP
-//! request/reply pairs with a real request log, not mocks of either side.
+//! TENSORFOLD_REQUEST_LOG reply lines over real loopback HTTP pairs from the CPU fake engine.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -33,8 +31,7 @@ const Text = struct {
     }
 };
 
-/// Closed until the test opens it: holds the engine between its first token chunk and its
-/// terminal chunk so the log can be inspected while a stream is still open.
+/// Holds the engine between its first and last chunk, so the log can be read mid-stream.
 const Gate = struct {
     open: std.atomic.Value(bool) = .init(false),
 };
