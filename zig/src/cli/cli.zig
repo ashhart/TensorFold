@@ -7,6 +7,8 @@ const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const rm = @import("rm.zig");
 const lora_merge = @import("core").lora_merge;
+/// The checkpoints `models` lists, sized, for `tensorfold device`.
+pub const onDisk = models.onDisk;
 
 const usage =
     \\usage: tensorfold models [--json]
