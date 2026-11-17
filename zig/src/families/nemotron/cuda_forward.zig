@@ -13,6 +13,7 @@ const lesson_route = @import("living").lesson_route;
 const kept = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
 const worker = @import("cuda_worker.zig");
+const window_marks = @import("cuda_window_marks.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -28,22 +29,8 @@ pub const Mask = struct { bits: u64 = 0, words: usize = 0 };
 /// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
 
-/// A window's kernel classes as a profile names them: each mark closes the span since the one before.
-pub const Class = enum { embed, norm, mamba_in, conv_scan, gnorm, mamba_out, qkv, attention, attn_o, route, plan, experts_up, experts_down, shared_wait, head, sample };
-
-/// Timing events recorded between kernel classes (the window profile's; null in every other forward).
-pub const Marks = struct {
-    ev: []cuda.Event,
-    class: []Class,
-    n: usize = 0,
-
-    fn add(m: *Marks, s: cuda.Stream, c: Class) !void {
-        if (m.n == m.ev.len) return error.TooManyMarks;
-        try m.ev[m.n].record(s);
-        m.class[m.n] = c;
-        m.n += 1;
-    }
-};
+pub const Class = window_marks.Class;
+pub const Marks = window_marks.Marks;
 
 /// A multi-stream window's batched draw: device slabs for rules, positions and tokens, its host words, its mode.
 pub const Batch = struct { rules: u64, meta: u64, tokens: u64, host_rules: []const u8, host_meta: []const i32, sampled: bool };
