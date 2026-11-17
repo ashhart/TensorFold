@@ -7,7 +7,7 @@ encoders, the decoders and the PLY writer are not ported, and nothing registers 
 **Where it has run.** The kernel contract and the synthetic case have passed on a GB10 (sm_121) and on an RTX 5090
 (sm_120).
 
-- GB10, nvcc 13.0, on `05ab1990a` (GustavBlack's run of 15 Nov on #1767): `idol-contract` gives
+- GB10, nvcc 13.0, on `05ab1990a` (GustavBlack's [run][gb10-current] of 15 Nov on #1767): `idol-contract` gives
   `SUMMARY idol: 13 kernels, 13 pass gates 1-4, 0 fail; 3 controls: 3 red as planted, 0 missed`, and `tf-idol` on the
   shared synthetic case (`idol-synthetic-case-2731c229`) has 100 of 100 branch-steps within the gate, all 23 joint
   blocks passing at `blocks 0` and a repeat with identical bytes; its 50 steps took 53.04 s. Its peak memory is not
@@ -19,6 +19,7 @@ encoders, the decoders and the PLY writer are not ported, and nothing registers 
   and `tf-idol` on the shared synthetic case (`idol-synthetic-case-2731c229`) has 100 of 100 branch-steps within the
   gate and a repeat with identical bytes. Idol's CUDA sources are unchanged since `f5b88dd98`.
 
+[gb10-current]: https://github.com/ashhart/TensorFold/pull/1767#issuecomment-6886995407
 [gb10]: https://github.com/ashhart/TensorFold/pull/1767#issuecomment-6777718609
 [gb10-rerun]: https://github.com/ashhart/TensorFold/pull/1767#issuecomment-6802382536
 [rtx5090]: https://github.com/ashhart/TensorFold/pull/1767#issuecomment-6869833180
