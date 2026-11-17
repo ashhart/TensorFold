@@ -177,7 +177,7 @@ pub fn reserveTwoChunk(optional: ?*Runtime, d: *const cuda.Driver, free: u64, pr
         return 0;
     }
     const second = try dp.gpa.create(Deep);
-    second.* = .{ .gpa = dp.gpa, .owner = dp.owner, .rows = dp.rows, .world = dp.world, .lay = dp.lay, .hl = dp.hl, .dev = undefined, .host = undefined, .kern = dp.kern, .aux = dp.aux, .red = dp.red, .red_ev = undefined, .red_go = undefined, .shared = dp };
+    second.* = .{ .runtime = dp.runtime, .gpa = dp.gpa, .owner = dp.owner, .rows = dp.rows, .world = dp.world, .lay = dp.lay, .hl = dp.hl, .dev = undefined, .host = undefined, .kern = dp.kern, .aux = dp.aux, .red = dp.red, .red_ev = undefined, .red_go = undefined, .shared = dp };
     var device_allocated = false;
     var host_allocated = false;
     var made_events: usize = 0;
