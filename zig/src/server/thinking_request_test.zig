@@ -14,6 +14,7 @@ const Script = struct {
     seen: bool = false,
     prompt: [4096]u32 = undefined,
     count: usize = 0,
+    emit: []const u32 = &.{2},
 
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -28,7 +29,7 @@ const Script = struct {
         s.count = request.prompt.len;
         @memcpy(s.prompt[0..s.count], request.prompt);
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        sink.event(sink.ctx, id, &.{ .tokens = &.{2} });
+        sink.event(sink.ctx, id, &.{ .tokens = s.emit });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -310,7 +311,7 @@ fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u
     try std.testing.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
     const message = whole.get("choices").?.array[0].get("message").?;
     const is_closed = ids[ids.len - 1] == 301;
-    try std.testing.expectEqualStrings(if (is_closed) "K" else "", message.strField("content").?);
+    try std.testing.expectEqualStrings("K", message.strField("content").?);
     if (is_closed) {
         try std.testing.expect(message.strField("reasoning_content") == null);
     } else try std.testing.expectEqualStrings("K", message.strField("reasoning_content").?);
@@ -401,4 +402,93 @@ test "thinking request: a named effort is the request's own, with no fallback, s
     try std.testing.expect(fields.namedEffort("none", &levels) == null);
     try std.testing.expectEqualStrings("high", fields.namedEffort("high", &levels).?);
     try std.testing.expectEqualStrings("high", fields.namedEffort("medium", &levels).?); // on GLM-5.3's levels
+}
+
+test "thinking request: a reply that ends on its own end-of-sequence inside an unclosed think block answers with its text on every route" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try fixture.Fixture.init(t.allocator, t.io, null);
+    defer f.deinit();
+    const eos_name = "<" ++ "|im_end" ++ "|" ++ ">";
+    const tok_json = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"H\":0,\"O\":1,\"K\":2,\"<think>\":300,\"</think>\":301,\"" ++ eos_name ++ "\":127906},\"merges\":[]},\"decoder\":{\"type\":\"Fuse\"},\"added_tokens\":[{\"id\":300,\"content\":\"<think>\",\"special\":true},{\"id\":301,\"content\":\"</think>\",\"special\":true},{\"id\":127906,\"content\":\"" ++ eos_name ++ "\",\"special\":true}]}";
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data = tok_json });
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = dangling });
+    var problem: []const u8 = "";
+    const text = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer text.deinit();
+    var script: Script = .{};
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = true,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+
+    // chat completions: the text is the answer and stays the reasoning too
+    const whole = try post(srv, a, &script, "");
+    const message = whole.get("choices").?.array[0].get("message").?;
+    try t.expectEqualStrings("K", message.strField("content").?);
+    try t.expectEqualStrings("K", message.strField("reasoning_content").?);
+
+    // messages: a text block carries it beside the thinking block
+    const sent = try exchange(srv, "/v1/messages", "{\"model\":\"m\",\"max_tokens\":4,\"messages\":[{\"role\":\"user\",\"content\":\"H\"}]}");
+    defer t.allocator.free(sent.body);
+    try t.expectEqual(@as(u16, 200), sent.status);
+    const reply = (try json.parse(a, sent.body)).ok;
+    var text_block: ?json.Value = null;
+    for (reply.get("content").?.array) |block| {
+        if (block.strField("type")) |kind| {
+            if (std.mem.eql(u8, kind, "text")) text_block = block;
+        }
+    }
+    try t.expectEqualStrings("K", text_block.?.strField("text").?);
+
+    // responses: an output_text part carries it
+    const sent2 = try exchange(srv, "/v1/responses", "{\"model\":\"m\",\"max_output_tokens\":4,\"store\":false,\"input\":\"H\"}");
+    defer t.allocator.free(sent2.body);
+    try t.expectEqual(@as(u16, 200), sent2.status);
+    const reply2 = (try json.parse(a, sent2.body)).ok;
+    var out_text: ?[]const u8 = null;
+    for (reply2.get("output").?.array) |item| {
+        if (item.get("content")) |parts| for (parts.array) |part| {
+            if (std.mem.eql(u8, part.strField("type") orelse "", "output_text")) out_text = part.strField("text");
+        };
+    }
+    try t.expectEqualStrings("K", out_text.?);
+}
+
+test "thinking off on a channel model: the model's own unclosed block keeps its scratch text out of the answer" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try fixture.Fixture.init(t.allocator, t.io, null);
+    defer f.deinit();
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"model":{"type":"BPE","vocab":{"H":0,"O":1,"K":2,"<|channel>thought":302,"<channel|>":303,"<|im_end|>":127906},"merges":[]},"decoder":{"type":"Fuse"},
+        \\ "added_tokens":[{"id":302,"content":"<|channel>thought","special":true},{"id":303,"content":"<channel|>","special":true},{"id":127906,"content":"<|im_end|>","special":true}]}
+    });
+    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = unclosed_switch });
+    var problem: []const u8 = "";
+    const text = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer text.deinit();
+    var script: Script = .{ .emit = &.{ 302, 2, 127906 } }; // its own open, then K, then its end-of-sequence: never closed
+    const srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = true,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    const body = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"max_tokens\":4" ++ off ++ "}")).ok;
+    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
+    var response: Reply = .{ .a = a };
+    openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(?u16, 200), response.status);
+    try t.expect(script.seen);
+    const message = response.whole.?.get("choices").?.array[0].get("message").?;
+    try t.expectEqualStrings("", json.strOr(message.get("content")));
 }
