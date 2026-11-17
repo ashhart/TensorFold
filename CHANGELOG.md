@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Templates: the chat template compiler accepts Jinja's `float` filter, `float(value, default=0.0)`, instead of refusing the template, and reads text as ASCII only (#3577). Thanks to @Nipale-ai.
+
 - Tests: `tf-nemotron-hip-test invariance` checks Nemotron-H within-path bit invariance on HIP (prompt chunk cuts with the single-row first-token head, decode window widths and multi-stream grouping, and served prompt-cache resume against fresh prefill) (#3580, refs #3409).
 
 - Qwen3.8-Flash-Next on HIP: `tf_fn_idx_scores` exits inactive decode-graph tiles before synchronization and stages each tile's q rows once in LDS before walking the four key-position slots, cutting kernel time from 276.0 ms to 141.5 ms at 8K and 2,873.9 ms to 2,091.4 ms at 32K on gfx1151 with identical tokens (#3601).
