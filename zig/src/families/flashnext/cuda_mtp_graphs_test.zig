@@ -96,7 +96,8 @@ const Draft = struct {
     keep: parts.Keep = .{},
 };
 
-const Scratch = struct { s: *const parts.Scratch };
+/// The pass's scratch and model as the pieces read them: no layers, so no pooled EXL3 experts block the graph.
+const Scratch = struct { s: *const parts.Scratch, m: struct { layers: []const @import("cuda_prompt_load.zig").Layer = &.{} } = .{} };
 
 const Piece = struct {
     o: struct { e: *Engine },
