@@ -2,13 +2,17 @@
 """Served exactness gates for one family profile: drafted, repeat, concurrent, resumed, refusals, cancel and evict.
 
 Each gate prints one PASS or FAIL line with its counts; any FAIL exits 1. Equality is the reply's full token-id hash
-(``tensorfold.token_sha256``), so a reply without one is unverified and fails its gate.
+(``tensorfold.token_sha256``, reasoning included), so a reply without one, or without a token, is unverified and fails
+its gate: two empty replies hash the same.
 
-- drafted: every prompt, greedy and seeded-sampled, equals its ``"draft": false`` reply; at least one draft must be
-  accepted, or the gate fails as vacuous.
-- repeat: the drafted replies again, one at a time, equal the first ones.
+- drafted: every prompt, greedy and seeded-sampled, equals its ``"draft": false`` reply; each sampling mode must
+  accept a draft and the plain replies must draft none, or the gate fails as vacuous.
+- repeat: the drafted replies again, one at a time, equal the first ones; a sampled reply under another seed must
+  differ from its first for some prompt, or the seed never reached the sampler and the gate fails.
 - concurrent: at each level, that many requests at once (drafted and plain) each equal their solo reply; a long
-  prompt sent among three decoding streams leaves them unchanged and equals its solo reply.
+  prompt sent among three decoding streams leaves them unchanged and equals its solo reply. While each batch runs,
+  ``GET /v1/load`` must show at least two chat requests open at once, or the batch never overlapped and fails; at
+  each level the drafted rows must accept a draft and the plain rows draft none.
 - resumed: a multi-turn chat on the cached server equals the same chat on a server with the prompt cache off; the
   fresh side must report ``cached_tokens == 0`` and every later resumed turn ``cached_tokens > 0``. A profile's
   ``conversation_context_items`` puts a long document in the first turn, for families that keep only long prompts.
@@ -61,6 +65,7 @@ def lifecycle_gaps(profile: dict) -> list[str]:
     return [g for g in SKIPPABLE if not (isinstance(skip, dict) and skip.get(g))
             and not (isinstance(profile.get(g), dict) and profile[g].get(NEEDS[g]))]
 SHA256 = re.compile(r"[0-9a-f]{64}")
+POLL_S = 0.005  # seconds between the census reads that look for overlapping requests
 
 
 def reply_row(status: int, doc) -> dict:
@@ -104,8 +109,9 @@ def count(value):
 
 
 def same(a: dict, b: dict):
-    """True or False when both replies carry a full token hash; None (unverified) otherwise."""
-    if a.get("error") or b.get("error") or not a.get("sha") or not b.get("sha"):
+    """True or False when both replies carry a full token hash and a token; None (unverified) otherwise."""
+    if a.get("error") or b.get("error") or not a.get("sha") or not b.get("sha") or not a.get("tokens") \
+            or not b.get("tokens"):
         return None
     return a["sha"] == b["sha"]
 
@@ -128,15 +134,41 @@ def equality_gate(name: str, pairs, extra_ok=True, extra="") -> dict:
     return {"gate": name, "passed": passed, "counts": counts, "line": equal_line(counts) + extra}
 
 
-def drafted_gate(pairs) -> dict:
-    """drafted == plain over (plain, drafted) pairs; fails as vacuous when no drafted reply accepted a draft."""
-    accepted = sum(d.get("accepted", 0) for _, d in pairs)
-    drafted = sum(d.get("drafted", 0) for _, d in pairs)
-    gate = equality_gate("drafted == plain", pairs, accepted > 0, f"; {accepted} of {drafted} drafts accepted")
-    gate["counts"].update(accepted=accepted, drafted=drafted)
-    if accepted == 0:
-        gate["line"] += " (vacuous: no draft accepted)"
+def drafted_gate(by_mode: dict) -> dict:
+    """drafted == plain over each mode's (plain, drafted) pairs; vacuous if a mode accepts no draft or plain drafts."""
+    pairs = [pair for mode_pairs in by_mode.values() for pair in mode_pairs]
+    accepted, drafted = sum(d.get("accepted", 0) for _, d in pairs), sum(d.get("drafted", 0) for _, d in pairs)
+    idle = [mode for mode, mode_pairs in by_mode.items() if not sum(d.get("accepted", 0) for _, d in mode_pairs)]
+    plain = sum(p.get("drafted", 0) for p, _ in pairs)
+    extra = f"; {accepted} of {drafted} drafts accepted"
+    gate = equality_gate("drafted == plain", pairs, not idle and not plain, extra)
+    gate["counts"].update(accepted=accepted, drafted=drafted, plain_drafted=plain)
+    if idle:
+        gate["line"] += f" (vacuous: no draft accepted {'/'.join(idle)})"
+    if plain:
+        gate["line"] += f"; the plain replies drafted {plain} tokens (\"draft\": false not honoured)"
     return gate
+
+
+def seeded_problem(pairs) -> str | None:
+    """Why the sampled arm is unproven: each (first, other seed) pair is equal, so the seed never reached sampling."""
+    vacuous = pairs and not any(same(a, b) is False for a, b in pairs)
+    return f"another seed gave the same reply for all {len(pairs)} prompts tried (the seed never reached sampling)" \
+        if vacuous else None
+
+
+def batch_drafts_problem(drafts: dict) -> str | None:
+    """Why drafting under batching is unproven: a level whose drafted rows accept none, or whose plain rows draft."""
+    idle = [level for level, (accepted, _) in drafts.items() if not accepted]
+    plain = {level: drafted for level, (_, drafted) in drafts.items() if drafted}
+    return f"drafted rows accepted no draft at {idle}; plain rows drafted at {plain}" if idle or plain else None
+
+
+def overlap_problem(peaks) -> str | None:
+    """Why concurrency is unproven: a batch whose census never showed two chat requests open at once."""
+    alone = len([p for p in peaks if not p or p < 2])
+    return f"{alone} of {len(peaks)} batches never showed two chat requests open at once in GET /v1/load" \
+        if alone else None
 
 
 def resumed_gate(turns) -> dict:
@@ -246,6 +278,25 @@ def inventory(items: int) -> str:
     return "An inventory: " + " ".join(f"crate{i % 89}-{(i * 6151) % 997}" for i in range(items))
 
 
+def watched(client: Client, run):
+    """``run()``'s result and, in a list, the most chat requests ``GET /v1/load`` showed open at once meanwhile."""
+    from conformance_lifecycle import census
+    done, peak = threading.Event(), [None]
+
+    def poll():
+        while not done.is_set():
+            seen = (census(client) or {}).get("active")
+            peak[0] = max(peak[0] or 0, seen) if type(seen) is int else peak[0]
+            done.wait(POLL_S)
+    thread = threading.Thread(target=poll, daemon=True)
+    thread.start()
+    try:
+        return run(), peak
+    finally:
+        done.set()
+        thread.join(timeout=60)
+
+
 def together(client: Client, bodies, delays=None) -> list:
     """Send every body at once (or after its delay) and return the reply rows in order."""
     out = [None] * len(bodies)
@@ -286,9 +337,8 @@ class Runner:
         return row
 
     def drafted(self) -> dict:
-        pairs = [(self.solo(n, m, False), self.solo(n, m, True)) for n in self.plan.profile["prompts"]
-                 for m in self.plan.modes]
-        return drafted_gate(pairs)
+        return drafted_gate({m: [(self.solo(n, m, False), self.solo(n, m, True)) for n in self.plan.profile["prompts"]]
+                             for m in self.plan.modes})
 
     def repeat(self) -> dict:
         pairs = []
@@ -297,30 +347,52 @@ class Runner:
                 first = self.solo(n, m, True)
                 again = self.client.post(self.plan.ask(n, m, True, self.plan.plant == "repeat"))
                 pairs.append((first, self.record("repeat", (n, m, True), again)))
-        return equality_gate("repeat == first", pairs)
+        problem = seeded_problem(self.other_seeds())
+        return equality_gate("repeat == first", pairs, not problem, "; " + (problem or "another seed differs"))
+
+    def other_seeds(self) -> list:
+        """(first, next seed) pairs of sampled drafted replies, prompt by prompt until one differs."""
+        out = []
+        for m, mode in self.plan.modes.items():
+            for n in self.plan.profile["prompts"] if mode.get("temperature") else []:
+                body = self.plan.ask(n, m, True, self.plan.plant == "drafted")  # the drafted solo's seed
+                body["seed"] += 1
+                out.append((self.solo(n, m, True), self.record("other-seed", (n, m), self.client.post(body))))
+                if same(*out[-1]) is False:
+                    break
+        return out
 
     def concurrent(self) -> dict:
         names, pairs, planted = list(self.plan.profile["prompts"]), [], self.plan.plant == "concurrent"
         levels = self.plan.profile.get("levels", [1, 2, 4, 8])
+        peaks, drafts = [], {}
         for level in levels:
             for draft in (True, False):
                 for mode in self.plan.modes:
                     picks = [names[i % len(names)] for i in range(level)]
-                    rows = together(self.client, [self.plan.ask(n, mode, draft, planted) for n in picks])
+                    bodies = [self.plan.ask(n, mode, draft, planted) for n in picks]
+                    rows, peak = watched(self.client, lambda: together(self.client, bodies))
+                    peaks += [peak[0]] if level > 1 else []
                     for n, row in zip(picks, rows):
                         row = self.record(f"concurrent{level}", (n, mode, draft), row)
                         pairs.append((self.solo(n, mode, draft), row))
+                        drafts.setdefault(level, [0, 0])[not draft] += row.get("accepted" if draft else "drafted") or 0
         mixed = 0
         for draft in (True, False):
             for mode in self.plan.modes:
                 picks = names[:3] + ["long"]
                 bodies = [self.plan.ask(n, mode, draft, planted) for n in picks]
-                rows = together(self.client, bodies, delays=[0, 0, 0, 0.5])
+                rows, peak = watched(self.client, lambda: together(self.client, bodies, [0, 0, 0, 0.5]))
+                peaks.append(peak[0])
                 mixed += len(rows)
                 for n, row in zip(picks, rows):
                     pairs.append((self.solo(n, mode, draft), self.record("mixed", (n, mode, draft), row)))
-        return equality_gate("concurrent == solo", pairs, extra=f" (levels {levels}, drafted and plain, "
-                                                                  f"{mixed} with a long prompt among decoders)")
+                    drafts.setdefault("mixed", [0, 0])[not draft] += row.get("accepted" if draft else "drafted") or 0
+        self.rows.append({"kind": "overlap", "peaks": peaks})
+        problem = "; ".join(filter(None, (overlap_problem(peaks), batch_drafts_problem(drafts))))
+        extra = f" (levels {levels}, drafted and plain, {mixed} with a long prompt among decoders); "
+        return equality_gate("concurrent == solo", pairs, not problem,
+                             extra + (problem or f"chat requests open at once: {min(peaks)} to {max(peaks)}"))
 
     def refusals(self) -> dict:
         results = []
