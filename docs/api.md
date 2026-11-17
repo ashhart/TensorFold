@@ -1569,11 +1569,10 @@ otherwise answers 400, as does a response not created with `background`, and an 
 `background: true` needs `store: true` (the default) and refuses `stream: true`: there is no event stream to start
 or resume (a GET of a background response with `stream=true`, as `starting_after` resumes one, answers 400), so poll
 instead. It is an HTTP request only; a Responses socket refuses it, and a true value that is not a boolean, such as
-`1`, is refused. At most 64
-background responses are queued or running at once on a server, 16 for one API key, holding 256 MiB of copied
-requests in all; past those a create answers 429 `background_limit_exceeded` before any work starts. Each keeps its
-request's place under `--max-inflight` until it is stored, and a stop gives it the drain window any request in
-progress gets.
+`1`, is refused. At most 64 background responses are queued or running at once on a server, 16 for one API key,
+holding 256 MiB of copied requests in all; past those a create answers 429 `background_limit_exceeded` before any
+work starts. Each keeps its request's place under `--max-inflight` until it is stored, and a stop gives it the drain
+window any request in progress gets.
 
 Stored responses are the server's, so with API keys only a full or `[admin]` key may create, poll or cancel one; a
 scoped key gets 403 (see [Key scopes](#key-scopes)). A server without keys takes the response's id, 128 random bits,
