@@ -1797,3 +1797,5 @@ same tokens for the same prompt and seed with or without drafts, alone or batche
 checkpoints, after the server's defaults change, when a Messages request relied on the server's thinking default, when
 the body was restored with different media, or for a request whose server ran several generations for it (Cortheon)
 without a client seed or `--prompt-seed`, since only the last drawn seed is journaled.
+Unseeded prompt lists are not replay-exact either: each prompt draws its own seed, and those per-prompt prepared
+records are omitted. Send a client seed or keep the same `--prompt-seed` setting for an exact list replay.
