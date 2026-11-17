@@ -6,8 +6,8 @@ const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
 const grammar_library = @import("grammar_library.zig");
 
-pub const Id = enum { cublaslt, cublas, rocblas, hipblaslt, miopen, aotriton, nccl, verbs, video, jpeg, webp, pdfium, grammar, rccl, mcdma_rpc, mcdma_fabric };
-pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, HipblasltUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, PdfiumLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
+pub const Id = enum { cublaslt, cublas, rocblas, hipblaslt, miopen, aotriton, nccl, verbs, video, jpeg, webp, pdfium, grammar, rccl, mcdma_rpc, mcdma_fabric, mp3lame, opus, fdkaac };
+pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, HipblasltUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, PdfiumLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable, Mp3LibraryUnavailable, OpusLibraryUnavailable, AacLibraryUnavailable };
 pub const Spec = struct {
     id: Id,
     name: []const u8,
@@ -43,6 +43,9 @@ pub const all = [_]Spec{
     item(.rccl, "RCCL", if (win) &.{"rccl.dll"} else &.{ "librccl.so.1", "librccl.so", "/opt/rocm/lib/librccl.so.1" }, "HIP tensor-parallel ranks", "install the RCCL runtime matching the ROCm installation; " ++ loader_path ++ "", error.RcclUnavailable, null, false),
     item(.mcdma_rpc, "MCDMA RPC", if (mac) &.{"libmcdma-rpc.dylib"} else &.{"libmcdma-rpc.so"}, "MCDMA mailbox and Metal speed-up communication", "build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file", error.McdmaRpcUnavailable, "MCDMA_RPC_LIBRARY", false),
     item(.mcdma_fabric, "MCDMA fabric", if (mac) &.{"libmcdma-fabric.dylib"} else &.{"libmcdma-fabric.so"}, "MCDMA peer fabric", "build MCDMA's fabric helper and name its inspected absolute path in the peer settings", error.McdmaFabricUnavailable, null, false),
+    item(.mp3lame, "LAME", if (mac) &.{"libmp3lame.0.dylib"} else if (win) &.{"libmp3lame-0.dll"} else &.{"libmp3lame.so.0"}, "MP3 speech replies (response_format mp3)", "install LAME 3.100 (libmp3lame) and set TENSORFOLD_LIBMP3LAME to its file, or put it on the loader path", error.Mp3LibraryUnavailable, "TENSORFOLD_LIBMP3LAME", true),
+    item(.opus, "libopus", if (mac) &.{"libopus.0.dylib"} else if (win) &.{"libopus-0.dll"} else &.{"libopus.so.0"}, "Opus speech replies (response_format opus)", "install libopus 1.x and set TENSORFOLD_LIBOPUS to its file, or put it on the loader path", error.OpusLibraryUnavailable, "TENSORFOLD_LIBOPUS", true),
+    item(.fdkaac, "FDK AAC", if (mac) &.{"libfdk-aac.2.dylib"} else if (win) &.{"libfdk-aac-2.dll"} else &.{"libfdk-aac.so.2"}, "AAC speech replies (response_format aac)", "install FDK AAC 2.0 (libfdk-aac) and set TENSORFOLD_LIBFDKAAC to its file, or put it on the loader path", error.AacLibraryUnavailable, "TENSORFOLD_LIBFDKAAC", true),
 };
 
 pub fn spec(id: Id) Spec {
@@ -133,8 +136,14 @@ pub fn open(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8)
         }
     };
     if (s.id == .pdfium) return null;
-    if (mac and (s.id == .jpeg or s.id == .webp)) {
-        const package = if (s.id == .jpeg) "jpeg-turbo" else "webp";
+    if (mac and (s.id == .jpeg or s.id == .webp or s.id == .mp3lame or s.id == .opus or s.id == .fdkaac)) {
+        const package = switch (s.id) {
+            .jpeg => "jpeg-turbo",
+            .webp => "webp",
+            .mp3lame => "lame",
+            .opus => "opus",
+            else => "fdk-aac",
+        };
         for ([_][]const u8{ "/opt/homebrew/opt", "/usr/local/opt" }) |root| {
             const path = std.fs.path.join(a, &.{ root, package, "lib", s.names[0] }) catch continue;
             defer a.free(path);
