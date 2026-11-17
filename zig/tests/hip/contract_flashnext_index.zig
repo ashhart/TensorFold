@@ -1,6 +1,4 @@
-//! Contract for the Flash Next indexer's tf_fn_idx_select (indexer.hpp, series 6).
-//! Both internal cut branches are exercised: the held-key wave histogram (nb <= 32*1024) and
-//! the global histogram (nb > 32*1024). fn_cut_held is a device helper, not a separate launch.
+//! Contract hooks for tf_fn_idx_select and its held/global cut branches.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
