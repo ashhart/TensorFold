@@ -43,7 +43,10 @@ pub fn start(b: anytype, s: *Stream, slot: ?usize) !void {
 /// A nonzero `max_rows` caps the call in place of `besideRows`; only a prefill policy sends this family one.
 pub fn step(b: anytype, s: *Stream, max_rows: u32) !bool {
     errdefer b.abortPrompt(s);
-    if (s.isCancelled()) return error.Cancelled;
+    if (s.isCancelled()) {
+        try cancel(b, s);
+        return error.Cancelled;
+    }
     if (!b.filling.contains(s)) try start(b, s, null);
     var p = b.filling.get(s).?;
     const prompt = s.prompt();
@@ -70,12 +73,20 @@ pub fn step(b: anytype, s: *Stream, max_rows: u32) !bool {
         const entry = b.filling.getPtr(s) orelse return error.PromptOutOfStep;
         entry.* = p;
         s.fill_at.store(p.at, .monotonic);
-        if (std.mem.indexOfScalar(u32, s.reuse.marks, p.at) != null) try b.markPrompt(s, p.at);
+        if (std.mem.indexOfScalar(u32, s.reuse.marks, p.at) != null) try b.markPrompt(s, p.at, false);
     }
     if (p.at < prompt.len) return false;
     try b.finishPrompt(s);
     _ = b.filling.remove(s);
     return true;
+}
+
+/// Retain only the completed prompt cursor while its recurrent and head state still belong to this session.
+pub fn cancel(b: anytype, s: *Stream) !void {
+    const p = b.filling.get(s) orelse return;
+    if (p.at <= s.cached or p.at >= s.prompt_len) return;
+    try b.settlePrompt(s);
+    try b.markPrompt(s, p.at, true);
 }
 
 // True means the prompt completed; false hands its unfinished cursor to the shared host after a completed call.
@@ -90,6 +101,12 @@ pub fn lone(b: anytype, s: *Stream, hooks: anytype) !bool {
 // Both actual vtable entries use this driver; host controls replace only its engine boundary.
 pub fn Callbacks(comptime B: type) type {
     return struct {
+        pub fn cancelPrompt(ptr: *anyopaque, s: *Stream) anyerror!void {
+            const b = B.self(ptr);
+            const pool = b.promptPool();
+            defer pool.pop();
+            try cancel(b, s);
+        }
         pub fn whole(ptr: *anyopaque, s: *Stream) anyerror!void {
             const b = B.self(ptr);
             const pool = b.promptPool();
