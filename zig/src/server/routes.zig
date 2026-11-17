@@ -126,7 +126,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         discardBody(conn, a);
         return cancel_ids.post(srv, conn, a, rid);
     }
-    if (@import("responses_background.zig").cancelPath(route)) |rid| { // answered at once, outside admission, as the one above
+    if (@import("responses_background.zig").cancelPath(route)) |rid| { // cancel bypasses admission
         discardBody(conn, a);
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
     }
