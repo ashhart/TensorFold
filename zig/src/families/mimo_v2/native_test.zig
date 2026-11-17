@@ -28,7 +28,8 @@ test "MiMo-V2 refuses every GPU but GB10 (sm_121) before reading anything" {
         try std.testing.expectError(error.MimoV2RequiresSm121, native.open(a, std.testing.io, &ctx, "no-such-pack", null, o));
     }
     Fake.sm = 121;
-    try std.testing.expectError(error.Slots, native.open(a, std.testing.io, &ctx, "no-such-pack", null, o)); // past the GPU check
+    // past the GPU check
+    try std.testing.expectError(error.Slots, native.open(a, std.testing.io, &ctx, "no-such-pack", null, o));
 }
 
 test "the admission refusals say what was validated" {

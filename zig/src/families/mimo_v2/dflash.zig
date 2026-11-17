@@ -400,7 +400,7 @@ pub const Drafter = struct {
                 a.add(@as(c_int, @intCast(H)));
                 a.add(@as(c_int, @intCast(dr.kv)));
                 a.add(dr.scale);
-                try launch(dr.f.attn, s, n, dr.kv, 256, 0, &a); // a block per (row, KV head), a warp per head of the group
+                try launch(dr.f.attn, s, n, dr.kv, 256, 0, &a); // a block per (row, KV head), a warp per query head
             }
             try dr.proj(s, L.o, dr.a, dr.o32, true, n);
             try m.add2(s, dr.x32, dr.o32, dr.x32, n * D);

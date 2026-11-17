@@ -350,8 +350,9 @@ fn readFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u
 
 test "bf16 rounding is torch's" {
     try std.testing.expectEqual(@as(u32, 0x3F80_0000), @as(u32, @bitCast(bf16Round(1.0))));
-    try std.testing.expectEqual(@as(u32, 0x3F80_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F80_8000)))))); // tie to even
-    try std.testing.expectEqual(@as(u32, 0x3F82_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F81_8000)))))); // tie to even (up)
+    // both ties round to even (down, then up)
+    try std.testing.expectEqual(@as(u32, 0x3F80_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F80_8000))))));
+    try std.testing.expectEqual(@as(u32, 0x3F82_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F81_8000))))));
     try std.testing.expectEqual(@as(u32, 0x3F81_0000), @as(u32, @bitCast(bf16Round(@bitCast(@as(u32, 0x3F80_8001))))));
 }
 

@@ -112,7 +112,8 @@ pub const Glue = struct {
             },
             .rope_full, .rope_swa => {
                 if (D % 2 != 0) return false;
-                self.th = if (nf) nan else if (self.kind == .rope_full) theta_full else theta_swa; // column 0: theta^0 = 1
+                // column 0: theta^0 = 1
+                self.th = if (nf) nan else if (self.kind == .rope_full) theta_full else theta_swa;
                 self.dev[0] = try self.rig.output(n * D * 4);
             },
             .argmax => {
