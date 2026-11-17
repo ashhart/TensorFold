@@ -255,10 +255,7 @@ pub const GpuTarget = struct {
 
     /// TF_DSV41_ENGRAM_WARM: 0 (default) | 1.
     pub fn engramWarmEnv() !bool {
-        const v = std.mem.trim(u8, std.mem.span(std.c.getenv("TF_DSV41_ENGRAM_WARM") orelse return false), " ");
-        if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-        if (std.mem.eql(u8, v, "1")) return true;
-        return error.BadEngramWarm;
+        return @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_WARM", false);
     }
 
     /// `finish` up to the last token (TF_DSV41_TAIL_JOIN): the decoder replay and its taps, no window pending.

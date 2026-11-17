@@ -52,7 +52,7 @@ pub const Device = struct {
 /// The calibration prompt (rank 0): the calibration text's ids over the checkpoint's tokenizer. gpa-owned.
 pub fn promptOf(gpa: Allocator, io: std.Io, dir: []const u8, vocab: u32) ![]u32 {
     var fb: [64]u32 = undefined;
-    const tok_dir = if (std.c.getenv("TF_DSV41_GRAMMAR_TOKENIZER")) |d| std.mem.span(d) else dir;
+    const tok_dir = if (@import("sys").environment.Process.get(.{}, "TF_DSV41_GRAMMAR_TOKENIZER")) |d| d else dir;
     var t = tokenizer.loadTokenizer(io, gpa, tok_dir) catch |e| {
         if (!quiet) log.warn("calibration: no tokenizer in {s} ({t}); the fixed fallback ids", .{ tok_dir, e });
         return gpa.dupe(u32, cm.fallbackIds(vocab, &fb));

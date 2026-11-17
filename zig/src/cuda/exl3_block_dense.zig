@@ -514,8 +514,8 @@ test "TF_DSV41_LIN2 reader: unset / 0 / off none, 1 both, lanes / linear one, _P
     try t.expectEqual(Lin2Mode{ .lanes = true, .linear = true }, try lin2Mode("1", null));
     try t.expectEqual(Lin2Mode{ .lanes = true }, try lin2Mode(" lanes ", "1"));
     try t.expectEqual(Lin2Mode{ .linear = true, .pf = false }, try lin2Mode("linear", "0"));
-    for ([_][]const u8{ "2", "head", "lanes,linear" }) |v| try t.expectError(error.BadLin2, lin2Mode(v, null));
-    try t.expectError(error.BadLin2, lin2Mode("1", "on"));
+    for ([_][]const u8{ "2", "head", "lanes,linear" }) |v| try t.expectError(error.InvalidEnvironment, lin2Mode(v, null));
+    try t.expectError(error.InvalidEnvironment, lin2Mode("1", "on"));
     // TF_DSV41_LIN2_WK: lanes2 at one CTA width only
     const four = try lin2ModeWk("lanes", null, "4");
     try t.expect(four.lanes and four.wk4 and !four.wk8);
@@ -523,7 +523,7 @@ test "TF_DSV41_LIN2 reader: unset / 0 / off none, 1 both, lanes / linear one, _P
     try t.expect(eight.lanes and eight.linear and !eight.pf and !eight.wk4 and eight.wk8);
     const both = try lin2ModeWk("1", null, null);
     try t.expect(both.wk4 and both.wk8);
-    for ([_][]const u8{ "2", "48", "all" }) |w| try t.expectError(error.BadLin2, lin2ModeWk("1", null, w));
+    for ([_][]const u8{ "2", "48", "all" }) |w| try t.expectError(error.InvalidEnvironment, lin2ModeWk("1", null, w));
 }
 
 test "TF_DSV41_LIN2: only the original's two-pass launches (17-32 rows) take the variant" {
@@ -537,7 +537,7 @@ test "TF_DSV41_LIN2_CLUSTER: the reader, and the launches the cluster variant ta
     const t = std.testing;
     for ([_]?[]const u8{ null, "", "0" }) |v| try t.expect(!try lin2Cluster(v));
     try t.expect(try lin2Cluster(" 1 "));
-    for ([_][]const u8{ "on", "2", "yes" }) |v| try t.expectError(error.BadLin2, lin2Cluster(v));
+    for ([_][]const u8{ "on", "2", "yes" }) |v| try t.expectError(error.InvalidEnvironment, lin2Cluster(v));
     var tab = std.mem.zeroes(LinTable);
     tab.n = 2;
     tab.s[0] = .{ .xh = 0, .T = 0, .stride_k = 0, .stride_nb = 0, .svh = 0, .y = 0, .Z = 0, .counters = 0, .K = 4096, .N = 512, .SK = 4, .wk = 4, .p0 = 0, .ld = 512 };

@@ -133,7 +133,7 @@ pub const Prompt = struct {
 
     /// The prompt's encoder profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
     pub fn report(p: *const Prompt, rows: usize, wall_ns: u64) void {
-        if (std.c.getenv("TF_DSV41_PROMPT_PROF") == null) return;
+        if (@import("sys").environment.Process.get(.{}, "TF_DSV41_PROMPT_PROF") == null) return;
         const ms = struct {
             fn of(ns: u64) f64 {
                 return @as(f64, @floatFromInt(ns)) / 1e6;

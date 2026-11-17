@@ -43,10 +43,7 @@ pub const Knobs = struct {
 };
 
 pub fn mode(raw: ?[]const u8) !Mode {
-    const v = trimmed(raw) orelse return .cached;
-    var buf: [16]u8 = undefined;
-    if (v.len > buf.len) return error.CalibMode;
-    return std.meta.stringToEnum(Mode, std.ascii.lowerString(&buf, v)) orelse error.CalibMode;
+    return @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_CALIB", raw, 0)));
 }
 
 /// The cost table for `want` per `k`; `default_rows`: the defaults' row count (16, the served engine prices 64).
@@ -212,44 +209,22 @@ pub const max_plain_streams = 16;
 /// The depth's knobs (TF_DSV41_DEPTH, _DRAFT_DEPTH, _DRAFT_SKIP, _DEPTH_JOINT, _DEPTH_FAIR, _DEPTH_HOST_MS, rows cap).
 pub fn depthSettings(get: *const fn ([*:0]const u8) ?[]const u8) !depth.Settings {
     var s: depth.Settings = .{};
-    if (trimmed(get("TF_DSV41_CODE_ACCEPT"))) |v| s.code_accept = try flag(v, error.CodeAccept);
-    if (s.code_accept) if (trimmed(get("TF_DSV41_GRAPH_BUCKET"))) |v| {
-        s.context_bucket = try std.fmt.parseInt(u32, v, 10);
-        if (s.context_bucket == 0) return error.BadGraphBucket;
-    };
-    const m = trimmed(get("TF_DSV41_DEPTH")) orelse "cost";
-    s.mode = if (std.ascii.eqlIgnoreCase(m, "cost")) .cost else if (std.ascii.eqlIgnoreCase(m, "static")) .static else return error.DepthMode;
-    if (trimmed(get("TF_DSV41_DRAFT_DEPTH"))) |v| {
-        s.cap = try std.fmt.parseInt(usize, v, 10);
-        if (s.cap > 15) return error.DraftDepth;
-    } else s.cap = if (s.mode == .cost) 5 else 3;
-    if (trimmed(get("TF_DSV41_DRAFT_SKIP"))) |v| s.skip = try flag(v, error.DraftSkip);
-    if (trimmed(get("TF_DSV41_DEPTH_JOINT"))) |v| s.joint = if (std.mem.eql(u8, v, "2")) 2 else @intFromBool(try flag(v, error.DepthJoint));
-    s.fair = try float(get("TF_DSV41_DEPTH_FAIR"), joint.fair, 0.0, 4.0);
-    s.host_ms = try float(get("TF_DSV41_DEPTH_HOST_MS"), joint.host_ms, 0.0, 100.0);
-    if (trimmed(get("TF_DSV41_GRAPH_ROWS_MAX"))) |v| s.max_rows = @max(1, @min(try std.fmt.parseInt(u64, v, 10), costs_mod.max_rows));
-    if (trimmed(get("TF_DSV41_DRAFT_PLAIN_STREAMS"))) |v| {
-        s.plain_streams = std.fmt.parseInt(usize, v, 10) catch return error.DraftPlainStreams;
-        if (s.plain_streams > max_plain_streams) return error.DraftPlainStreams;
-    }
+    s.code_accept = try @import("sys").environment.value(bool, "TF_DSV41_CODE_ACCEPT", get("TF_DSV41_CODE_ACCEPT"), s.code_accept);
+    if (s.code_accept) s.context_bucket = try @import("sys").environment.value(u64, "TF_DSV41_GRAPH_BUCKET", get("TF_DSV41_GRAPH_BUCKET"), s.context_bucket);
+    s.mode = @fromBackingInt(@intCast(try @import("sys").environment.value(u8, "TF_DSV41_DEPTH", get("TF_DSV41_DEPTH"), 0)));
+    s.cap = try @import("sys").environment.value(usize, "TF_DSV41_DRAFT_DEPTH", get("TF_DSV41_DRAFT_DEPTH"), if (s.mode == .cost) 5 else 3);
+    s.skip = try @import("sys").environment.value(bool, "TF_DSV41_DRAFT_SKIP", get("TF_DSV41_DRAFT_SKIP"), s.skip);
+    s.joint = try @import("sys").environment.value(u2, "TF_DSV41_DEPTH_JOINT", get("TF_DSV41_DEPTH_JOINT"), s.joint);
+    s.fair = try @import("sys").environment.value(f64, "TF_DSV41_DEPTH_FAIR", get("TF_DSV41_DEPTH_FAIR"), joint.fair);
+    s.host_ms = try @import("sys").environment.value(f64, "TF_DSV41_DEPTH_HOST_MS", get("TF_DSV41_DEPTH_HOST_MS"), joint.host_ms);
+    if (try @import("sys").environment.value(?u64, "TF_DSV41_GRAPH_ROWS_MAX", get("TF_DSV41_GRAPH_ROWS_MAX"), null)) |v|
+        s.max_rows = @max(1, @min(v, costs_mod.max_rows));
+    s.plain_streams = try @import("sys").environment.value(usize, "TF_DSV41_DRAFT_PLAIN_STREAMS", get("TF_DSV41_DRAFT_PLAIN_STREAMS"), s.plain_streams);
     return s;
 }
 
-fn flag(v: []const u8, bad: anyerror) !bool {
-    for ([_][]const u8{ "1", "on", "true" }) |t| if (std.ascii.eqlIgnoreCase(v, t)) return true;
-    for ([_][]const u8{ "0", "off", "false" }) |t| if (std.ascii.eqlIgnoreCase(v, t)) return false;
-    return bad;
-}
-
-fn float(raw: ?[]const u8, default: f64, lo: f64, hi: f64) !f64 {
-    const v = trimmed(raw) orelse return default;
-    const x = try std.fmt.parseFloat(f64, v);
-    if (x < lo or x > hi) return error.DepthKnob;
-    return x;
-}
-
 pub fn env(name: [*:0]const u8) ?[]const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+    return if (@import("sys").environment.Process.get(.{}, std.mem.span(name))) |v| v else null;
 }
 
 /// TF_DSV41_DRAFT_PLAIN_STREAMS as depthSettings reads it (set and non-blank).

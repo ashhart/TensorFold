@@ -50,10 +50,7 @@ pub const GpuSampler = struct {
 
     /// TF_DSV41_SAMP_BATCH: 0 (default) | 1.
     pub fn batchEnv() !bool {
-        const v = std.mem.span(std.c.getenv("TF_DSV41_SAMP_BATCH") orelse return false);
-        if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-        if (std.mem.eql(u8, v, "1")) return true;
-        return error.BadSampBatch;
+        return @import("sys").environment.read(bool, "TF_DSV41_SAMP_BATCH", false);
     }
 
     /// Whether `chooseSegments` takes a segment under `s` (sampling_pipe.Pipe.batchable, with the knob on).

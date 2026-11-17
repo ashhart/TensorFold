@@ -150,8 +150,8 @@ fn paramOf(f: *const Fn, name: []const u8) ?Param {
 // -- the served config's programs ---------------------------------------------------------------------------------
 
 fn envInt(name: [:0]const u8, default: i64) !i64 {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseInt(i64, std.mem.span(v), 10);
+    const v = @import("sys").environment.Process.get(.{}, name) orelse return default;
+    return std.fmt.parseInt(i64, v, 10);
 }
 
 fn envOn(name: [:0]const u8, default: bool) !bool {

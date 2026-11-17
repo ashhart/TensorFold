@@ -27,8 +27,8 @@ test "TF_DSV41_PF_TBO and _GM_SMS: 0 / 1; 0 or 8-48 SMs, 0 (every SM) by default
     try testing.expect(try pk.pfTbo(&Fake.get));
     try testing.expectEqual(@as(u32, 36), try pk.pfTboGmSms(&Fake.get));
     Fake.pairs = &.{ .{ "TF_DSV41_PF_TBO", "2" }, .{ "TF_DSV41_PF_TBO_GM_SMS", "4" } };
-    try testing.expectError(error.BadKnob, pk.pfTbo(&Fake.get));
-    try testing.expectError(error.BadKnob, pk.pfTboGmSms(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pfTbo(&Fake.get));
+    try testing.expectError(error.InvalidEnvironment, pk.pfTboGmSms(&Fake.get));
     Fake.pairs = &.{.{ "TF_DSV41_PF_TBO_GM_SMS", "0" }};
     try testing.expectEqual(@as(u32, 0), try pk.pfTboGmSms(&Fake.get));
     // two whole segments; a shorter rest halved on the 16-row grid; under 2 x 512 rows one segment at a time

@@ -38,7 +38,7 @@ pub const Policy = struct {
 
     fn choose(ptr: *anyopaque, windows: []const lt.Window, alone: bool, arena: Allocator, out: []lt.Choice) anyerror!void {
         try chooseRows(ptr, windows, alone, arena, out);
-        if (std.c.getenv("TF_DSV41_ACCEPT_LOG") != null) try logRound(self(ptr), windows, arena);
+        if (@import("sys").environment.Process.get(.{}, "TF_DSV41_ACCEPT_LOG") != null) try logRound(self(ptr), windows, arena);
     }
 
     /// TF_DSV41_ACCEPT_LOG: the round's windows, each drafted slot's raw / calibrated confidences and chosen depth.
