@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Benchmark: managed runs on a listed Apple silicon Mac record its coarse family in `hardware.form_factor` (`Mac mini`, `Mac Studio`, `MacBook Pro`, `MacBook Air`, `iMac` or `Mac Pro`), mapped on the device from a fixed table so the product identifier is never written; other Macs, Linux and Windows leave the field out and keep the same receipt bytes, and `benchmark check` accepts it absent, null or one of the six labels. `benchmark inspect` in 1.2.9 and earlier refuses receipts that carry it (#2009, refs #1950). Thanks to @garvrao80.
+
 - CUDA: dots.mocr's image tower weights load on CUDA as BF16 matrices for cuBLASLt, with fc1 and fc3 stacked into one gate|up projection and the patch weight zero-padded from 588 to 592 columns; every `vision_tower` tensor is consumed, a failed load drains its uploads before it frees a buffer, and no served path opens the tower yet (#2769, part of #1927). Thanks to @laudney.
 
 - Drama speech: an explicit `--max-frames` is now honored exactly or refused at open, so `--context` - 2 (once trimmed silently to `--context` - 3) is refused by name; an overlong prompt's 400 names the assembled-row limit, the request text's tokens as the prompt encodes them and the reference frames; and `GET /v1/models` lists a `speech` object with the loaded budgets. Admitted audio is unchanged (#2143). Thanks to @akol1.
