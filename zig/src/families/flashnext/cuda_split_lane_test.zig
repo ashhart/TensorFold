@@ -112,7 +112,6 @@ const Rig = struct {
         r.s = undefined;
         r.s.cap = 256;
         r.s.slots = wt.slots;
-        r.s.shared_w = wt.moe_w;
         r.s.part = part_at;
         r.s.native_part = native_part_at;
         r.s.dummy = 0x99;

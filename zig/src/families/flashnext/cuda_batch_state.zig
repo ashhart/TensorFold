@@ -240,9 +240,8 @@ const partRows = sizes.partRows;
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
-    /// A row's expert slots (the checkpoint's top-k and the shared one) and the widest shared expert it holds.
+    /// A row's expert slots: the checkpoint's top-k and the shared one.
     slots: usize = slots,
-    shared_w: usize = moe_w,
     /// The shared expert's stream (cuda_batch_side.zig); null: it runs after the routed experts on the pass's stream.
     side: ?shared.Side = null,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -407,7 +406,7 @@ pub const Scratch = struct {
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, z: Sizes) !Scratch {
         const head_rows = z.head_rows;
-        var s: Scratch = .{ .cap = cap, .head_rows = head_rows, .slots = z.slots, .shared_w = z.shared };
+        var s: Scratch = .{ .cap = cap, .head_rows = head_rows, .slots = z.slots };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);
