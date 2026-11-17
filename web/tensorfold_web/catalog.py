@@ -41,6 +41,7 @@ class Entry:
     drafter_bytes: int | None = None
     drafter_size_bytes: int | None = None  # the drafter's files as last measured: its weight before sizes are fetched
     native: bool = False                 # fallback when no native binary is installed to report its capabilities
+    native_backends: list[str] | None = None  # checkpoint-level limit when a family/format is not enough
     format: str | None = None            # the checkpoint's weight format as the engine names it ("mlx-q4g64")
     native_from: str | None = None       # first native release for mixed widths, absent from uniform-format listings
     native_overhead_bytes: int | None = None   # what the native engine holds above `info`'s floor at idle, if measured
@@ -238,10 +239,17 @@ class Catalog:
             self._facts[e.id] = facts
         return self._facts[e.id]
 
-    def native_here(self, e: Entry) -> bool:
+    def native_here(self, e: Entry, *, backend: str | None = None) -> bool:
 
         from . import native
 
+        if e.native_backends is not None:
+            if backend is None:
+                from .machine import detect
+
+                backend = detect().backend
+            if backend not in e.native_backends:
+                return False
         binary = native.find_binary()
         if binary is None or not (e.format or e.native_from):
             return e.native
@@ -265,7 +273,7 @@ class Catalog:
         out = []
         for e in self.entries:
             e = Entry(**asdict(e))
-            e.native = self.native_here(e)
+            e.native = self.native_here(e, backend=backend)
             e.size_bytes = self.size_of(e.id) or e.size_bytes
             e.drafter_bytes = self.size_of(e.drafter) if e.drafter else None
             e.installed = installed(e.id, e.size_bytes) and (not e.drafter or installed(e.drafter, e.drafter_bytes))
