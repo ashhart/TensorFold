@@ -26,14 +26,19 @@ pub fn rows(e: *Engine, s: *Stream, copy: win.Copy, take: bool) !usize {
     return kept;
 }
 
-/// A priced stream's copy round by its rows, and its plain and head rounds the head's timing keeps out of its times.
-pub fn time(e: *Engine, s: *Stream, kind: win.Kind, window_rows: usize) !void {
-    if (!enabled(e, s)) return;
+/// Whether `time` records this round: its copy rounds, and the plain and head rounds the head's timing keeps out.
+pub fn records(e: *const Engine, s: *const Stream, kind: win.Kind) bool {
+    if (!enabled(e, s)) return false;
     // engine.zig's familyRound times a head's and plain rounds into the stream's own times only under plain_guard
-    const own = (kind == .none or kind == .head) and !(e.cfg.family_mtp and e.cfg.plain_guard);
-    if (kind != .copy and !own) return;
+    return kind == .copy or ((kind == .none or kind == .head) and !(e.cfg.family_mtp and e.cfg.plain_guard));
+}
+
+/// A priced stream's round by its rows (`records`); `verified`: its time before the head drafted (a copy's verify).
+pub fn time(e: *Engine, s: *Stream, kind: win.Kind, window_rows: usize, verified: ?f64) !void {
+    if (!records(e, s, kind)) return;
+    const own = kind != .copy;
     try seed(e, s);
-    const ms = e.clock.elapsedMs(.cost);
+    const ms = verified orelse e.clock.elapsedMs(.cost);
     const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
     try trail.event(e, &.{ f("ev", trail.str(if (own) "plain-cost" else "copy-cost")), f("stream", trail.str(s.id)), f("drafts", trail.int(window_rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
     const drafts: i64 = @intCast(window_rows - 1);
