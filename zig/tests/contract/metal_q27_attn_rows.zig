@@ -26,7 +26,7 @@ pub const Which = enum { decode, prompt };
 /// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
 pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false };
 
-/// The control's edit: prompts never pick the masked kernel; decode rows before M5 take the tail (no control).
+/// The control's edit: prompts never pick the masked kernel; decode rows off a shared prefix take the tail, no control.
 fn controlEdit(w: Which, shared: bool) ?at_.Edit {
     return switch (w) {
         .prompt => .{ .from = "if (simd_any(inf != 0) && lane == 0) atomic_fetch_or", .to = "if (false && lane == 0) atomic_fetch_or" },
@@ -77,7 +77,7 @@ pub fn spec(r: Reg) c.Spec {
     };
 }
 
-/// Whether this chip has the control: decode rows before M5 run the tail kernel, whose round sees every key it reads.
+/// Whether these rows have the control: off a shared prefix decode rows run the tail kernel, which sees every key.
 pub fn hasControl(w: Which, shared: bool) bool {
     return controlEdit(w, shared) != null;
 }
