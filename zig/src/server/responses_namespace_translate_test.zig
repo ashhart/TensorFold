@@ -1,10 +1,33 @@
 //! ``tools`` of a Responses request as the chat tools that run them: one level of namespaces, flattened.
 const std = @import("std");
+const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
 const responses = @import("responses_translate.zig");
 const tool_specs = @import("tool_specs.zig");
+const f = @import("control_tokens_fixture.zig");
+const HfText = @import("hf_text.zig").HfText;
+const prompt = @import("prompt.zig");
+const Server = @import("server.zig").Server;
 const a = std.testing.allocator;
+
+/// A host engine with nothing to answer but the template's own ids.
+const Script = struct {
+    fn engine(s: *@This()) api.Engine {
+        return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+    }
+    fn info(_: *anyopaque) api.Info {
+        return .{ .context_window = 32768 };
+    }
+    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {}
+    fn cancel(_: *anyopaque, _: api.Id) void {}
+    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{};
+    }
+    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+        return null;
+    }
+};
 
 const History = struct {
     pub fn conversation(_: @This(), c: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
@@ -30,6 +53,14 @@ fn chosen(cx: *errors.Cx, tools: []const u8, choice: []const u8) ![]const u8 {
 /// The chat tools a request with these tools offers.
 fn offered(cx: *errors.Cx, tools: []const u8) ![]json.Value {
     return (try chat(cx, tools, null)).object.get("tools").?.array;
+}
+
+/// A request with these tools and these input items as the chat completion that runs them.
+fn chatWith(cx: *errors.Cx, tools: []const u8, items: []const u8) !json.Value {
+    const b = try json.newObject(cx.a);
+    try b.put(cx.a, "input", (try json.parse(cx.a, items)).ok);
+    try b.put(cx.a, "tools", (try json.parse(cx.a, tools)).ok);
+    return (try responses.translate(cx, .{ .object = b }, History{})).chat;
 }
 
 test "namespace tools: a function child is flattened as <namespace>__<tool> with both descriptions" {
@@ -182,7 +213,98 @@ test "tool_choice: allowed_tools drops a name no tool carries instead of refusin
     const none = try chat(&cx, flat, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"absent\"}]}");
     try std.testing.expectEqual(@as(usize, 0), none.object.get("tools").?.array.len);
     const stray = try chat(&cx, flat, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"now\",\"namespace\":\"anything\"}]}");
-    try std.testing.expectEqual(@as(usize, 0), stray.object.get("tools").?.array.len); // a namespace no group carries names nothing
+    try std.testing.expectEqual(@as(usize, 1), stray.object.get("tools").?.array.len); // a flat-only entry is its name: the extra key goes unread
+    try std.testing.expectEqualStrings("now", stray.object.get("tools").?.array[0].get("function").?.strField("name").?);
+}
+
+test "tool_choice: an allowed_tools entry with no name is dropped flat-only, refused with a namespace" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const flat = "[{\"type\":\"function\",\"name\":\"lookup\"},{\"type\":\"function\",\"name\":\"now\"}]";
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const ch = try chat(&cx, flat, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\"},{\"type\":\"function\"}]}");
+    const list = ch.object.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("lookup", list[0].get("function").?.strField("name").?);
+    try std.testing.expectEqualStrings("auto", ch.object.get("tool_choice").?.string);
+    var mixed: errors.Cx = .{ .a = arena.allocator() };
+    try std.testing.expectError(error.Refused, chat(&mixed, weather_ns, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"get_weather\"},{\"type\":\"function\"}]}"));
+    try std.testing.expect(std.mem.indexOf(u8, mixed.message, "allowed_tools") != null);
+}
+
+test "namespace parity: a namespaced request's chat body is its flat twin's, in bytes and in prompt ids" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    const ns_items =
+        \\[{"role":"user","content":"weather"},{"type":"function_call","call_id":"c1","name":"get_weather","namespace":"weather","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"sunny"}]
+    ;
+    const flat_items =
+        \\[{"role":"user","content":"weather"},{"type":"function_call","call_id":"c1","name":"weather__get_weather","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"sunny"}]
+    ;
+    const flat_tools = "[{\"type\":\"function\",\"name\":\"weather__get_weather\",\"description\":\"weather tools: now\"}]";
+    var first: errors.Cx = .{ .a = al };
+    var second: errors.Cx = .{ .a = al };
+    const ns = try chatWith(&first, weather_ns, ns_items);
+    const flat = try chatWith(&second, flat_tools, flat_items);
+    try std.testing.expectEqualStrings(try json.stringify(al, flat, .{ .compact = true }), try json.stringify(al, ns, .{ .compact = true }));
+    const given = ns.object.get("tools").?.array;
+    try std.testing.expectEqual(@as(usize, 1), given.len);
+    try std.testing.expectEqualStrings("weather__get_weather", given[0].get("function").?.strField("name").?);
+    try std.testing.expectEqualStrings("weather tools: now", given[0].get("function").?.strField("description").?);
+    // the same prompt, rendered by the template for both spellings
+    var fixture = try f.Fixture.init(al, 0);
+    defer fixture.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(al, std.testing.io, fixture.path, null, al, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try Server.init(al, std.testing.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    const ns_ids = try prompt.renderIds(srv, &first, ns.object.get("messages").?, ns.object.get("tools").?.array, false, null, true);
+    const flat_ids = try prompt.renderIds(srv, &second, flat.object.get("messages").?, flat.object.get("tools").?.array, false, null, true);
+    try std.testing.expectEqualSlices(u32, flat_ids, ns_ids);
+    try std.testing.expect(ns_ids.len > 0);
+}
+
+test "input: a function_call item's namespace is an offered group, or left off" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const ns_items =
+        \\[{"role":"user","content":"weather"},{"type":"function_call","call_id":"c1","name":"get_weather","namespace":"weather","arguments":"{}"}]
+    ;
+    const calls = (try chatWith(&cx, weather_ns, ns_items)).object.get("messages").?.array[1].get("tool_calls").?.array;
+    try std.testing.expectEqual(@as(usize, 1), calls.len);
+    try std.testing.expectEqualStrings("weather__get_weather", calls[0].get("function").?.strField("name").?);
+    // a null or absent namespace is the old answer: the name exactly as it was sent
+    const flat_tools = "[{\"type\":\"function\",\"name\":\"get_weather\"},{\"type\":\"function\",\"name\":\"now\"}]";
+    const plain_items =
+        \\[{"role":"user","content":"weather"},{"type":"function_call","call_id":"c1","name":"get_weather","namespace":null,"arguments":"{}"},{"type":"function_call","call_id":"c2","name":"now","arguments":"{}"}]
+    ;
+    const kept = (try chatWith(&cx, flat_tools, plain_items)).object.get("messages").?.array[1].get("tool_calls").?.array;
+    try std.testing.expectEqual(@as(usize, 2), kept.len);
+    try std.testing.expectEqualStrings("get_weather", kept[0].get("function").?.strField("name").?);
+    try std.testing.expectEqualStrings("now", kept[1].get("function").?.strField("name").?);
+}
+
+test "input: a function_call item's namespace no offered group carries is refused by name" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const items =
+        \\[{"role":"user","content":"weather"},{"type":"function_call","call_id":"c1","name":"get_weather","namespace":"ops","arguments":"{}"}]
+    ;
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    try std.testing.expectError(error.Refused, chatWith(&cx, weather_ns, items));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "'ops'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "not among offered") != null);
+    // with no tools declared there is no group to name either
+    var none: errors.Cx = .{ .a = arena.allocator() };
+    const body = try json.newObject(none.a);
+    try body.put(none.a, "input", (try json.parse(none.a, items)).ok);
+    try std.testing.expectError(error.Refused, responses.translate(&none, .{ .object = body }, History{}));
+    try std.testing.expect(std.mem.indexOf(u8, none.message, "'ops'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, none.message, "not among offered") != null);
 }
 
 test "tool_choice: allowed_tools may spell the namespace on an entry" {
@@ -233,21 +355,34 @@ test "a flat name that spells a flattened child collides with it, in either orde
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "weather__get_weather") != null);
 }
 
-test "two flat tools with one name are refused without any namespace wording" {
+test "flat-only tools keep main's answers: one name twice is no refusal, no namespace wording" {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     var cx: errors.Cx = .{ .a = arena.allocator() };
-    try std.testing.expectError(error.Refused, offered(&cx, "[{\"type\":\"function\",\"name\":\"lookup\"},{\"type\":\"function\",\"name\":\"lookup\"}]"));
-    try std.testing.expect(std.mem.indexOf(u8, cx.message, "lookup") != null);
+    const list = try offered(&cx, "[{\"type\":\"function\",\"name\":\"lookup\"},{\"type\":\"function\",\"name\":\"lookup\"}]");
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqualStrings("lookup", list[0].get("function").?.strField("name").?);
+    try std.testing.expectEqualStrings("lookup", list[1].get("function").?.strField("name").?);
+    // once a namespace is offered, the same pair is refused by the name they share
+    var mixed: errors.Cx = .{ .a = arena.allocator() };
+    const with_ns =
+        \\[{"type":"function","name":"lookup"},{"type":"namespace","name":"weather","description":"w","tools":[{"type":"function","name":"get_weather"}]},{"type":"function","name":"lookup"}]
+    ;
+    try std.testing.expectError(error.Refused, offered(&mixed, with_ns));
+    try std.testing.expect(std.mem.indexOf(u8, mixed.message, "lookup") != null);
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "namespace") == null);
 }
 
-test "a flat function tool that asks to be loaded later is refused" {
+test "flat-only tools ignore defer_loading, which a namespaced request still refuses" {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     var cx: errors.Cx = .{ .a = arena.allocator() };
-    try std.testing.expectError(error.Refused, offered(&cx, "[{\"type\":\"function\",\"name\":\"lookup\",\"defer_loading\":true}]"));
-    try std.testing.expect(std.mem.indexOf(u8, cx.message, "defer_loading") != null);
+    const list = try offered(&cx, "[{\"type\":\"function\",\"name\":\"lookup\",\"defer_loading\":true}]");
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqualStrings("lookup", list[0].get("function").?.strField("name").?);
+    var mixed: errors.Cx = .{ .a = arena.allocator() };
+    try std.testing.expectError(error.Refused, offered(&mixed, "[{\"type\":\"function\",\"name\":\"lookup\",\"defer_loading\":true},{\"type\":\"namespace\",\"name\":\"weather\",\"description\":\"w\",\"tools\":[{\"type\":\"function\",\"name\":\"get_weather\"}]}]"));
+    try std.testing.expect(std.mem.indexOf(u8, mixed.message, "defer_loading") != null);
 }
 
 test "a namespace group missing its name, its description or its list is refused" {
