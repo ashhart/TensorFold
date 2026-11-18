@@ -414,10 +414,14 @@ row, 1 to 2,048 keys across the 256-key join and the 1,024-key split, against a 
 The hyper-connection boundary as `core/hc.zig` launches it (the expand's parts on six groups a slice to 4 rows) keeps
 main's expand and split (a frozen `hc_boundary.metal`) in the streams, partial sums, normed row, post and comb, as raw
 words, for separate streams, in place and at a first read. The decode experts at `moe.zig`'s outputs a simdgroup keep
-the four-output gate/up and down kernels' activations and outputs. Gate 1 plants NaN and both infinities and requires
-the predecessor's bytes, NaN payloads included; these entries compare and keep sums rather than requalify them, so gate
-4 does not apply. Each has a control, a planted source fault red at `shapes`, and its launches are in
-`glm_launch_records.zig`.
+the four-output gate/up and down kernels' activations and outputs. On an Ultra's GPU the KDA step's two groups a head
+with the norm after (`glm_kda_parts`, `glm_kda_norm`) keep `kda_rows`' bytes at 2 to 16 rows. The boundary's two-group
+split runs in the same boundary entries, and the attention entry runs the prefetched score and value bodies with a
+control that multiplies the prefetched block. The one-row router and indexer-gate logits (`glm_route_logits_one`, fp32
+and bf16 out) also meet float64 at every gate, each row its own one-row launch, and give `tf_route_logits`' bits. Gate 1
+plants NaN and both infinities and requires the predecessor's bytes, NaN payloads included; these entries compare and
+keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source fault red at
+`shapes`, and its launches are in `glm_launch_records.zig`.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
 3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
 replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into

@@ -1,4 +1,4 @@
-//! GLM's windowed KDA step (glm_kda_window.metal) against the generated kda_rows on the same window, state and weights.
+//! GLM's windowed KDA steps (glm_kda_window.metal, glm_kda_parts.metal) against kda_rows on the same window and state.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -15,11 +15,12 @@ const TAPS = 4;
 const lower_bound: f32 = -5.0; // config.zig's gate_lower_bound and rms_norm_eps
 const eps: f32 = 1e-5;
 
-pub const Form = enum { window, window_tp };
+/// The window step (all heads, one Mac's 32 heads at TP2), and an Ultra's two groups a head with the norm after.
+pub const Form = enum { window, window_tp, parts };
 
-/// kernels.zig's KDA library: kda_rows' source, then the prompt passes and the window step appended.
+/// kernels.zig's KDA library: kda_rows' source, then the prompt passes, the window step and the parts appended.
 pub fn text(a: std.mem.Allocator) ![]u8 {
-    return std.mem.concat(a, u8, &.{ comptime kernels.generatedSource("kda_rows"), sources.glm_kda_prompt, sources.glm_kda_window });
+    return std.mem.concat(a, u8, &.{ comptime kernels.generatedSource("kda_rows"), sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
 }
 
 fn heads(f: Form) usize {
@@ -33,7 +34,7 @@ fn servedOf(comptime f: Form) [served_rows.len]c.Shape {
     for (&out, served_rows) |*s, r| s.* = .{ .rows = r, .n = heads(f), .k = D };
     return out;
 }
-const served = [2][served_rows.len]c.Shape{ servedOf(.window), servedOf(.window_tp) };
+const served = [3][served_rows.len]c.Shape{ servedOf(.window), servedOf(.window_tp), servedOf(.parts) };
 
 /// The step's buffers in kda_rows' binding order (P, its shape is a value), then Y, the state and the window out.
 const Slots = enum(u8) { p, cs, cw, fbw, fbs, fbb, gbw, gbs, gbb, a, dtb, st, onw, y, st_out, cs_out };
@@ -42,6 +43,7 @@ pub const Case = struct {
     form: Form,
     control: bool,
     new: mtl.Pipeline,
+    norm: ?mtl.Pipeline = null,
     old: mtl.Pipeline,
 
     pub fn init(s: *bits.Suite, form: Form, control: bool) !Case {
@@ -49,20 +51,29 @@ pub const Case = struct {
         const own = try text(s.a);
         defer s.a.free(own);
         _ = try loader.require(own);
-        const body = if (control) try bits.edited(s.a, own, "void glm_kda_window(", "P[(size_t)(r0 + (int)tid) * PS + BO + h]", "P[(size_t)r0 * PS + BO + h]") else try s.a.dupe(u8, own);
+        const body = if (!control) try s.a.dupe(u8, own) else if (form == .parts) try bits.edited(s.a, own, "void glm_kda_parts(", "const uint dv0 = part * (uint)DV;", "const uint dv0 = 0u * part;") else try bits.edited(s.a, own, "void glm_kda_window(", "P[(size_t)(r0 + (int)tid) * PS + BO + h]", "P[(size_t)r0 * PS + BO + h]");
         defer s.a.free(body);
-        const new = try bits.pipeline(s.device, body, if (form == .window_tp) "glm_kda_window_tp" else "glm_kda_window");
+        const fun = switch (form) {
+            .window => "glm_kda_window",
+            .window_tp => "glm_kda_window_tp",
+            .parts => "glm_kda_parts",
+        };
+        const new = try bits.pipeline(s.device, body, fun);
         errdefer new.deinit();
-        return .{ .form = form, .control = control, .new = new, .old = try oldPipe(s, form == .window_tp) };
+        const norm = if (form == .parts) try bits.pipeline(s.device, body, "glm_kda_norm") else null;
+        errdefer if (norm) |p| p.deinit();
+        return .{ .form = form, .control = control, .new = new, .norm = norm, .old = try oldPipe(s, form == .window_tp) };
     }
     pub fn deinit(x: *Case) void {
         x.new.deinit();
+        if (x.norm) |p| p.deinit();
         x.old.deinit();
     }
     pub fn name(form: Form, control: bool) []const u8 {
         return switch (form) {
             .window => if (control) "control: metal glm launch kda glm_kda_window, every row's beta read from the first row" else "metal glm launch kda glm_kda_window 64 heads",
             .window_tp => if (control) "control: metal glm launch kda glm_kda_window_tp, every row's beta read from the first row" else "metal glm launch kda glm_kda_window_tp 32 heads",
+            .parts => if (control) "control: metal glm launch kda glm_kda_parts, the second group on the first group's value columns" else "metal glm launch kda glm_kda_parts and glm_kda_norm 64 heads",
         };
     }
     pub fn spec(x: *const Case) c.Spec {
@@ -73,13 +84,22 @@ pub const Case = struct {
     }
     pub fn layout(x: *const Case, s: c.Shape) ?bits.Layout {
         if (s.rows < 2 or s.rows > 16 or s.n != heads(x.form) or s.k != D) return null;
-        return kdaLayout(s.rows, heads(x.form), false);
+        return kdaLayout(s.rows, heads(x.form), x.form == .parts);
     }
     pub fn fill(x: *const Case, s: c.Shape, f: g.Fill, seed: u64, data: [][]u8) !void {
         kdaFill(s.rows, heads(x.form), f, seed, data);
     }
+    /// forward.zig's kdaStep: the parts take the gate rows at buffer 13 and 16 rows of lanes, then the norm.
     pub fn encode(x: *const Case, e: mtl.ComputeEncoder, r: []const rig_.Ref, s: c.Shape, new: bool) void {
-        kdaEncode(e, r, if (new) x.new else x.old, s.rows, heads(x.form), 32);
+        const h = heads(x.form);
+        if (!new or x.form != .parts) return kdaEncode(e, r, if (new) x.new else x.old, s.rows, h, 32, null);
+        kdaEncode(e, r, x.new, s.rows, h, 16, r[16]);
+        e.setPipeline(x.norm.?);
+        e.setBuffer(r[13].buf, r[13].off, 0);
+        e.setBuffer(r[16].buf, r[16].off, 1);
+        e.setBuffer(r[12].buf, r[12].off, 2);
+        e.setValue(eps, 3);
+        e.dispatchGroups(mtl.Size.of(h / 8, s.rows, 1), mtl.Size.of(256, 1, 1));
     }
 };
 
@@ -152,7 +172,7 @@ pub fn kdaFill(rows: usize, h: usize, f: g.Fill, seed: u64, data: [][]u8) void {
 }
 
 /// forward.zig's kdaStep for the generated gate: `pipe` over a (32, 32, heads) grid of (32, `ty`) groups.
-pub fn kdaEncode(e: mtl.ComputeEncoder, r: []const rig_.Ref, pipe: mtl.Pipeline, rows: usize, h: usize, ty: usize) void {
+pub fn kdaEncode(e: mtl.ComputeEncoder, r: []const rig_.Ref, pipe: mtl.Pipeline, rows: usize, h: usize, ty: usize, gate: ?rig_.Ref) void {
     e.setPipeline(pipe);
     e.setBuffer(r[0].buf, r[0].off, 0);
     const shape = [2]i32{ @intCast(rows), @intCast(3 * h * D + 2 * D + h) };
@@ -161,11 +181,12 @@ pub fn kdaEncode(e: mtl.ComputeEncoder, r: []const rig_.Ref, pipe: mtl.Pipeline,
     e.setValue(lower_bound, 14);
     e.setValue(eps, 15);
     for (13..16) |i| e.setBuffer(r[i].buf, r[i].off, i + 3);
+    if (gate) |q| e.setBuffer(q.buf, q.off, 13);
     e.dispatchThreads(mtl.Size.of(32, 32, h), mtl.Size.of(32, ty, 1));
 }
 
 pub fn collect(s: *bits.Suite, only: ?[]const u8) !void {
-    for ([_]Form{ .window, .window_tp }) |form| for ([_]bool{ false, true }) |control| {
+    for (std.enums.values(Form)) |form| for ([_]bool{ false, true }) |control| {
         if (s.wanted(only, Case.name(form, control))) try s.add(Case, try Case.init(s, form, control));
     };
 }
