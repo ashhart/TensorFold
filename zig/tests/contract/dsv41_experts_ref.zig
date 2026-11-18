@@ -179,6 +179,9 @@ pub fn sane(d: Dot, k: usize) !void {
     if (@abs(@as(f64, d.sum) - d.exact) > c.gamma(@floatFromInt(depth(k)), 0x1p-24) * d.mag + 0x1p-149) return error.OracleDrift;
 }
 
+/// How a plan's rows take experts: every row the same six, no two rows one, or each row six at random.
+pub const Routing = enum { same, disjoint, random };
+
 /// The routes of a call and the plan the kernels take: slots by expert, pairs grouped by expert in ascending order.
 pub const Plan = struct {
     a: std.mem.Allocator,
@@ -191,13 +194,25 @@ pub const Plan = struct {
     where: []u32,
 
     pub fn init(a: std.mem.Allocator, rows: usize, experts: usize, rng: std.Random) !Plan {
+        return routed(a, rows, experts, rng, .random);
+    }
+
+    /// A plan whose rows take their experts by `how` (`disjoint` needs topk * rows experts).
+    pub fn routed(a: std.mem.Allocator, rows: usize, experts: usize, rng: std.Random, how: Routing) !Plan {
         const np = rows * topk;
         const ids = try a.alloc(u32, np);
         errdefer a.free(ids);
+        var order: [1024]u32 = undefined;
+        for (order[0..experts], 0..) |*o, i| o.* = @intCast(i);
+        if (how != .random) rng.shuffle(u32, order[0..experts]);
         for (0..rows) |r| for (0..topk) |i| {
-            ids[r * topk + i] = while (true) {
-                const e = rng.uintLessThan(u32, @intCast(experts));
-                if (std.mem.indexOfScalar(u32, ids[r * topk ..][0..i], e) == null) break e;
+            ids[r * topk + i] = switch (how) {
+                .same => order[(i + r) % topk],
+                .disjoint => order[r * topk + i],
+                .random => while (true) {
+                    const e = rng.uintLessThan(u32, @intCast(experts));
+                    if (std.mem.indexOfScalar(u32, ids[r * topk ..][0..i], e) == null) break e;
+                },
             };
         };
         const weights = try a.alloc(f32, np);
