@@ -23,6 +23,8 @@ pub const SpeechRequest = struct {
     speaker: []const f32 = &.{},
     /// A reference clip to clone the voice from: mono samples at the family's rate; empty: none.
     reference_audio: []const f32 = &.{},
+    /// The rate of `reference_audio` when an edit's place step sends a clip as uploaded; 0: the family's rate.
+    reference_rate: u32 = 0,
     /// The family's condition rows by bucket, in prompt order; empty: every one unknown.
     conditions: []const u32 = &.{},
     /// What the request's steering controls add to its generated frames; null: nothing.

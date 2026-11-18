@@ -68,7 +68,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, weights: []const
     const al = try z3.aligner.Aligner.create(gpa, io, &driver, stream, weights, &blas);
     defer al.destroy();
     const loaded = @as(f64, @floatFromInt(gen.nowNs(io) - t0)) / 1e9;
-    const wav = try z3.features.resample(a, audio);
+    const rate = try @import("check_speaker.zig").dumpRate(a, io, dir);
+    const wav = try z3.features.resampleFrom(a, audio, rate);
     var c: Check = .{ .gpa = gpa, .io = io, .dir = dir };
     const first = try al.forward(a, wav, words.items, .{ .ctx = &c, .f = Check.tap });
     const t1 = gen.nowNs(io);
@@ -90,6 +91,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, weights: []const
     const n = found.start_ms.len;
     const mean = @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(2 * n));
     const pass = n == want_start.len and widest <= 20 and c.worst > 0.99;
-    std.debug.print("RESULT zonos3 aligner {s} words={d} identical={d} mean_abs_ms={d:.2} widest_ms={d} worst_row_cos={d:.6} audio_s={d:.2} seconds={d:.3} load_seconds={d:.2} weight_bytes={d}\n", .{ if (pass) "PASS" else "FAIL", n, exact, mean, widest, c.worst, @as(f64, @floatFromInt(audio.len)) / 44100.0, seconds, loaded, al.bytes() });
+    std.debug.print("RESULT zonos3 aligner {s} words={d} identical={d} mean_abs_ms={d:.2} widest_ms={d} worst_row_cos={d:.6} audio_s={d:.2} seconds={d:.3} load_seconds={d:.2} weight_bytes={d}\n", .{ if (pass) "PASS" else "FAIL", n, exact, mean, widest, c.worst, @as(f64, @floatFromInt(audio.len)) / @as(f64, @floatFromInt(rate)), seconds, loaded, al.bytes() });
     return if (pass) 0 else 1;
 }

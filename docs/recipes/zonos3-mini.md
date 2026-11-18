@@ -447,8 +447,12 @@ What differs from the release:
 - **Sampling:** `top_k` is the route's name for the release's `topk`, and the draws are TensorFold's keyed sampler,
   as for speech, so a sampled edit is not the reference's sample. Without `seed`, takes follow from the clip's
   length and the target text, so the same request gives the same edit.
-- **Clips at other rates** are resampled to 44.1 kHz first, and the speaker encoder and the aligner hear that
-  resampled to 16 kHz; the release resamples the upload to 16 kHz directly.
+- **Clips at other rates** are resampled to 44.1 kHz for the codec; the speaker encoder and the aligner hear the
+  upload resampled straight to 16 kHz from its own rate, as the release's do (torchaudio's default resampler for any
+  rate: `features.resampleFrom`, which gives torchaudio's sample count at 8 to 96 kHz and its values within 1.6e-5).
+  A float WAV whose peak is above 1 is scaled for the codec but reaches these two as sent. Checked at 48 and
+  22.05 kHz (the 4.7 s and 17.5 s clips): every stage of the speaker encoder at cosine 1.0000000, and the aligner's
+  word times as at 44.1 kHz (15 of 16 and 61 of 64 words identical, the rest within 1 ms).
 
 `POST /v1/audio/edit/align` (`{audio_base64, text}`) answers the text's words with their place in the clip, in the
 form `original_words` takes.
@@ -984,6 +988,8 @@ bf16-encoded references, clones as well from fp32 codes.
 - `core/speech_api.zig` gained `SpeechRequest.edit` (`SpeechEdit`: one step of a speech edit on the engine: a
   clip's codes, a fill's rows, edited codes' audio, words placed in a clip), re-exported by `core/engine_api.zig`.
   A request without it is as before.
+- `core/speech_api.zig`: `SpeechRequest.reference_rate` (the rate of a clip an edit's place step sends as uploaded;
+  0 is the family's rate).
 - `core/speech_api.zig`: `SpeechInfo.decoders` and `SpeechRequest.decoder` (an index into them, 0 the default);
   `core/engine_api.zig`: `Open.decoders` (`--decoders`). A family with one decoder leaves both empty and 0.
 - `core/speech_api.zig`: `SpeechSteering.follow` (each span's text positions, the gate's lead and lag, the heads

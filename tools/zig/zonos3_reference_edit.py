@@ -231,7 +231,7 @@ def edit(args):
 
 
 def speaker(args):
-    """The release's speaker encoder (MECT-B2, fp32, CPU) on 44.1 kHz audio: its stages and embedding.npy [192]."""
+    """The release's speaker encoder (MECT-B2, fp32, CPU) on audio at --rate: its stages and embedding.npy [192]."""
     from zonos3.models.mect_speaker import MECTFbankSpeakerEmbedding, registry_entry
 
     out = Path(args.out)
@@ -243,7 +243,7 @@ def speaker(args):
     taps = {}
     net = model.model
     with torch.inference_mode():
-        wav = model.prepare_input(audio, 44100)
+        wav = model.prepare_input(audio, args.rate)
         feats = model.fbank(wav[0].float())
         x = feats[None].transpose(1, 2)
         x = x - torch.mean(x, -1, keepdim=True)
@@ -260,15 +260,16 @@ def speaker(args):
         pooled = net.encoding_layers(mixed)
         taps["pooled"] = pooled[0]
         embedding = net.linear(net.bn(pooled))[0]
-        whole = model(audio, 44100)[0]
+        whole = model(audio, args.rate)[0]
     if not torch.equal(embedding, whole):
         raise SystemExit("the staged run is not the model's forward")
     np.save(out / "audio.npy", audio[0].numpy())
     np.save(out / "wav16.npy", wav[0].numpy())
     np.save(out / "fbank.npy", feats.numpy())
     np.save(out / "embedding.npy", embedding.numpy())
+    (out / "rate.json").write_text(json.dumps(args.rate) + "\n")
     save(out, {k: v.numpy() for k, v in taps.items()})
-    print(f"{audio.shape[1] / 44100:.2f} s, {feats.shape[0]} frames, embedding norm {float(embedding.norm()):.4f} -> {out}")
+    print(f"{audio.shape[1] / args.rate:.2f} s, {feats.shape[0]} frames, embedding norm {float(embedding.norm()):.4f} -> {out}")
 
 
 def web_aligner(folder):
@@ -337,7 +338,7 @@ def web_aligner(folder):
 
 
 def aligner(args):
-    """fusealign_hub's aligner on the web/aligner weights for 44.1 kHz audio and its tokens: words.json and taps."""
+    """fusealign_hub's aligner on the web/aligner weights for audio at --rate (44.1 kHz) and its tokens: words.json."""
     from fusealign_hub.aligner import FuseAlignAligner
 
     out = Path(args.out)
@@ -359,7 +360,7 @@ def aligner(args):
 
     hub._forward_group = logged
     with torch.inference_mode():
-        words = hub.align(audio, 44100, tokens)
+        words = hub.align(audio, args.rate, tokens)
     for h in hooks:
         h.remove()
     np.save(out / "audio.npy", audio.numpy())
@@ -370,7 +371,8 @@ def aligner(args):
     np.save(out / "end_ms.npy", np.asarray([b for _, b in ms], dtype=np.int32))
     listed = [{"word": w.word, "start": w.start, "end": w.end, "presence": w.presence, "placed": w.placed} for w in words]
     (out / "words.json").write_text(json.dumps({"tokens": tokens, "words": listed}) + "\n")
-    print(f"{len(audio) / 44100:.2f} s, {len(tokens)} tokens, {sum(w.placed for w in words)} placed -> {out}")
+    (out / "rate.json").write_text(json.dumps(args.rate) + "\n")
+    print(f"{len(audio) / args.rate:.2f} s, {len(tokens)} tokens, {sum(w.placed for w in words)} placed -> {out}")
 
 
 def clips(args):
@@ -475,14 +477,16 @@ def main():
     p.set_defaults(run=edit)
     p = commands.add_parser("speaker")
     p.add_argument("checkpoint", help="the release's speaker_encoders/ownmect_s2/ckpt_0037.pth")
-    p.add_argument("audio", help="44.1 kHz mono float32 .npy")
+    p.add_argument("audio", help="mono float32 .npy at --rate")
     p.add_argument("out")
+    p.add_argument("--rate", type=int, default=44100)
     p.set_defaults(run=speaker)
     p = commands.add_parser("aligner")
     p.add_argument("weights", help="the release's web/aligner folder")
-    p.add_argument("audio", help="44.1 kHz mono float32 .npy")
+    p.add_argument("audio", help="mono float32 .npy at --rate")
     p.add_argument("tokens", help="a JSON list of the transcript's tokens")
     p.add_argument("out")
+    p.add_argument("--rate", type=int, default=44100)
     p.set_defaults(run=aligner)
     args = parser.parse_args()
     args.run(args)

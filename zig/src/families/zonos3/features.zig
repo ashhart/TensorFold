@@ -9,46 +9,66 @@ const frame = 400;
 const hop = 160;
 const fft = 512;
 const bins = fft / 2 + 1;
-// the resampler: 441 samples in for 160 out
-const in_step = 441;
-const out_step = 160;
 const lowpass = 6;
-const taps_before = 17; // ceil(lowpass * in_step / (out_step * 0.99))
-const taps = 2 * taps_before + in_step;
+const rolloff = 0.99;
 
-/// The sinc kernel of a phase, Hann-windowed over six zero crossings at 0.99 of the output's Nyquist rate.
-fn kernel(phase: usize, out: *[taps]f32) void {
-    const base: f64 = @as(f64, out_step) * 0.99;
-    const shift: f64 = -@as(f32, @floatFromInt(phase)) / @as(f32, out_step);
-    for (out, 0..) |*k, j| {
-        const idx = (@as(f64, @floatFromInt(j)) - taps_before) / in_step;
-        var t = (shift + idx) * base;
-        t = @min(@max(t, -lowpass), lowpass);
-        const c = @cos(t * std.math.pi / lowpass / 2.0);
-        t *= std.math.pi;
-        const sinc = if (t == 0) 1.0 else @sin(t) / t;
-        k.* = @floatCast(sinc * c * c * (base / in_step));
+/// torchaudio.functional.resample's kernels (sinc_interp_hann) over the rates' gcd steps; a phase's at phase * taps.
+const Kernels = struct {
+    orig: usize,
+    target: usize,
+    pad: usize,
+    taps: usize,
+    k: []f32,
+
+    fn init(gpa: std.mem.Allocator, from: u32) !Kernels {
+        const g = std.math.gcd(from, rate);
+        const orig: usize = from / g;
+        const target: usize = rate / g;
+        const base: f64 = @as(f64, @floatFromInt(@min(orig, target))) * rolloff;
+        const half: usize = @intFromFloat(@ceil(lowpass * @as(f64, @floatFromInt(orig)) / base));
+        const taps = 2 * half + orig;
+        const k = try gpa.alloc(f32, target * taps);
+        for (0..target) |phase| {
+            const shift: f64 = -@as(f32, @floatFromInt(phase)) / @as(f32, @floatFromInt(target));
+            for (k[phase * taps ..][0..taps], 0..) |*w, j| {
+                const idx = (@as(f64, @floatFromInt(j)) - @as(f64, @floatFromInt(half))) / @as(f64, @floatFromInt(orig));
+                var t = (shift + idx) * base;
+                t = @min(@max(t, -lowpass), lowpass);
+                const c = @cos(t * std.math.pi / lowpass / 2.0);
+                t *= std.math.pi;
+                const sinc = if (t == 0) 1.0 else @sin(t) / t;
+                w.* = @floatCast(sinc * c * c * (base / @as(f64, @floatFromInt(orig))));
+            }
+        }
+        return .{ .orig = orig, .target = target, .pad = half, .taps = taps, .k = k };
     }
-}
+};
 
 /// 44.1 kHz samples to 16 kHz (caller frees): ceil(160 n / 441) samples.
 pub fn resample(gpa: std.mem.Allocator, x: []const f32) ![]f32 {
-    const n = (x.len * out_step + in_step - 1) / in_step;
+    return resampleFrom(gpa, x, source_rate);
+}
+
+/// Samples at `from` Hz to 16 kHz as torchaudio.functional.resample makes them (caller frees).
+pub fn resampleFrom(gpa: std.mem.Allocator, x: []const f32, from: u32) ![]f32 {
+    if (from == rate) return gpa.dupe(f32, x);
+    const ks = try Kernels.init(gpa, from);
+    defer gpa.free(ks.k);
+    // ceil(target n / orig), and no more than the strided convolution's frames hold
+    const frames = (ks.pad + x.len + ks.pad + ks.orig - ks.taps) / ks.orig + 1;
+    const n = @min((x.len * ks.target + ks.orig - 1) / ks.orig, frames * ks.target);
     const out = try gpa.alloc(f32, n);
     errdefer gpa.free(out);
-    const kernels = try gpa.alloc([taps]f32, out_step);
-    defer gpa.free(kernels);
-    for (kernels, 0..) |*k, phase| kernel(phase, k);
     // each output sample is its own sum, so the cores share them
     const Part = struct {
-        fn run(y: []f32, first: usize, in: []const f32, ks: []const [taps]f32) void {
+        fn run(y: []f32, first: usize, in: []const f32, kk: *const Kernels) void {
             for (y, first..) |*o, m| {
-                const q = m / out_step;
-                const k = &ks[m % out_step];
+                const q = m / kk.target;
+                const k = kk.k[(m % kk.target) * kk.taps ..][0..kk.taps];
                 var acc: f32 = 0;
                 for (k, 0..) |w, j| {
-                    const p = q * in_step + j;
-                    if (p >= taps_before and p - taps_before < in.len) acc = @mulAdd(f32, w, in[p - taps_before], acc);
+                    const p = q * kk.orig + j;
+                    if (p >= kk.pad and p - kk.pad < in.len) acc = @mulAdd(f32, w, in[p - kk.pad], acc);
                 }
                 o.* = acc;
             }
@@ -60,8 +80,8 @@ pub fn resample(gpa: std.mem.Allocator, x: []const f32) ![]f32 {
     for (0..cores) |i| {
         const lo = @min(n, i * share);
         const hi = @min(n, lo + share);
-        if (i + 1 < cores) threads[i] = std.Thread.spawn(.{}, Part.run, .{ out[lo..hi], lo, x, kernels }) catch null;
-        if (threads[i] == null) Part.run(out[lo..hi], lo, x, kernels);
+        if (i + 1 < cores) threads[i] = std.Thread.spawn(.{}, Part.run, .{ out[lo..hi], lo, x, &ks }) catch null;
+        if (threads[i] == null) Part.run(out[lo..hi], lo, x, &ks);
     }
     for (threads) |th| if (th) |t| t.join();
     return out;

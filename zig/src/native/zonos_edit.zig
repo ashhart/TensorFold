@@ -24,8 +24,10 @@ pub fn valid(sp: api.SpeechInfo, r: *const api.SpeechRequest, ed: *const api.Spe
         },
         .place => {
             if (ed.words.len == 0 or ed.spans_ms.len < ed.words.len or ed.presence.len < ed.words.len) return false;
-            // 30 s of audio, at least one patch of it at 16 kHz, and the transcript's bytes
-            if (r.reference_audio.len > 30 * 44100 or r.reference_audio.len < 1412) return false;
+            // at most 30 s and at least 32 ms of audio at the clip's rate, and the transcript's bytes
+            const at: usize = if (r.reference_rate != 0) r.reference_rate else 44100;
+            if (r.reference_rate != 0 and (r.reference_rate < 8000 or r.reference_rate > 192000)) return false;
+            if (r.reference_audio.len > 30 * at or r.reference_audio.len * 44100 < 1412 * at) return false;
             var bytes: usize = ed.words.len - 1;
             for (ed.words) |w| bytes += w.len;
             for (r.reference_audio) |x| if (!std.math.isFinite(x)) return false;
@@ -37,7 +39,7 @@ pub fn valid(sp: api.SpeechInfo, r: *const api.SpeechRequest, ed: *const api.Spe
 
 /// The step's words placed in the clip by the aligner.
 pub fn alignWords(gpa: std.mem.Allocator, aligner: *z3.aligner.Aligner, r: *const api.SpeechRequest, ed: *const api.SpeechEdit) !void {
-    const wav = try z3.features.resample(gpa, r.reference_audio);
+    const wav = try z3.features.resampleFrom(gpa, r.reference_audio, if (r.reference_rate != 0) r.reference_rate else z3.features.source_rate);
     defer gpa.free(wav);
     const found = try aligner.forward(gpa, wav, ed.words, null);
     defer gpa.free(found.start_ms);
