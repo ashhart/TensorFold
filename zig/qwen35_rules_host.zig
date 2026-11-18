@@ -168,3 +168,41 @@ test "qwen35 rules: Metal 27B's parse refuses a nested tie disagreement and a ti
     try t.expectError(error.BadTiedHead, metal27.parse(t.allocator, try ties(a, base, "false", "true"), null));
     try t.expectError(error.BadTiedHead, metal27.parse(t.allocator, try ties(a, base, "false", "1"), null));
 }
+
+/// Each entry point's refusal of a head count of 0: its reader's word for a count below 1, HIP's by name.
+fn zeroWord(b: rules.Backend) anyerror {
+    return switch (b) {
+        .metal27 => error.BadConfig,
+        .metal2b, .cuda => error.BadQwenConfig,
+        .hip => error.ZeroHeadCount,
+    };
+}
+
+/// The head counts the host divides by or groups with.
+const head_counts = [_][]const u8{ "num_attention_heads", "num_key_value_heads", "linear_num_key_heads", "linear_num_value_heads" };
+
+test "qwen35 rules: a head count of 0 is refused by name at every entry point, before any division" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cases: std.EnumArray(rules.Backend, usize) = .initFill(0);
+    var derived: usize = 0;
+    for (try layers_host.reals(a)) |r| for ([_]bool{ true, false }) |declared| {
+        // without head_dim the width is hidden / num_attention_heads, the division a 0 reached on main
+        const base = if (declared) r.json else try variant(a, r.json, "head_dim", null);
+        for (std.enums.values(rules.Backend)) |b| {
+            entry(b, base) catch continue; // another backend's model, or a width this backend does not run
+            derived += @intFromBool(!declared);
+            for (head_counts) |key| {
+                const got = entry(b, try variant(a, base, key, "0"));
+                errdefer std.debug.print("{s} on {s}, head_dim {}: {s} = 0 gave {any}\n", .{ @tagName(b), r.file, declared, key, got });
+                try t.expectError(zeroWord(b), got);
+                cases.getPtr(b).* += 1;
+            }
+        }
+    };
+    errdefer std.debug.print("cases {any}, without head_dim {d}\n", .{ cases.values, derived });
+    // four zeros on each admitted base: CUDA 7, Metal 27B 8, Metal 2B 1, HIP 18 (13 of all without head_dim)
+    try t.expectEqual([_]usize{ 4 * 7, 4 * 8, 4 * 1, 4 * 18 }, cases.values);
+    try t.expectEqual(@as(usize, 13), derived);
+}
