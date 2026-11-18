@@ -9,6 +9,7 @@ pub const modulation = @import("modulation.zig");
 pub const schedule = @import("schedule.zig");
 pub const geometry = @import("geometry.zig");
 pub const picture = @import("picture.zig");
+pub const euler = @import("euler.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;

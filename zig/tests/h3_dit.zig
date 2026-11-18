@@ -41,11 +41,6 @@ fn write(gpa: std.mem.Allocator, prefix: []const u8, comptime suffix: []const u8
     if (fwrite(values.ptr, 4, values.len, file) != values.len) return error.CannotWrite;
 }
 
-/// One Euler step as the reference takes it: x0 from the sigma the model saw, then the grid's ratio.
-fn advance(x: []f32, velocity: []const f32, seen: f32, ratio: f32) void {
-    for (x, velocity) |*o, v| o.* = ratio * o.* + (1.0 - ratio) * (o.* + seen * v);
-}
-
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 5 and args.len != 6) {
@@ -128,10 +123,10 @@ pub fn main(init: std.process.Init) !void {
             try write(gpa, args[4], ".first-video.f32", vv);
             try write(gpa, args[4], ".first-audio.f32", av);
         }
-        advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
+        h3.euler.advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
         // reference audio rows are clean and never stepped
         const held = model.held_audio * model.audio_in;
-        advance(audio[held..], av[held..], audio_step[2 * step], audio_step[2 * step + 1]);
+        h3.euler.advance(audio[held..], av[held..], audio_step[2 * step], audio_step[2 * step + 1]);
         std.debug.print("step {d}/{d}: {d:.3} s wall, {d:.3} s on the GPU\n", .{ step + 1, steps, took.wall, took.gpu });
     }
     try write(gpa, args[4], ".video.f32", video);
