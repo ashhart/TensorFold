@@ -1,4 +1,4 @@
-//! Hy4-flash family host checks: config, layer plan, weight map, refusals and chat template. No GPU.
+//! Hy4-flash family host checks: config, layer plan, weight map, refusals, chat template and tokenizer. No GPU.
 const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
@@ -12,7 +12,12 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         .target = target,
         .link_libc = true,
     }));
+    root.addImport("tokenizer", b.createModule(.{
+        .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"),
+        .target = target,
+        .link_libc = true,
+    }));
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
-    b.step("test-hy4-flash-host", "Hy4-flash family package: config, layer plan, weight map, refusals and chat template").dependOn(&run.step);
+    b.step("test-hy4-flash-host", "Hy4-flash family package: config, layer plan, weight map, refusals, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
 }
