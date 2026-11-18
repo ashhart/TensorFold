@@ -10,6 +10,7 @@ var shown = false; // the live line is on screen
 var line_start = true; // the newest write ended its line, so a redraw cannot split it
 var quiet = false;
 var stamped = false; // TENSORFOLD_LOG_TIME: each log line starts with its UTC time
+var json_log = false; // --log-json: access, ended and refused lines as one JSON object each
 
 pub const Test = if (@import("builtin").is_test) struct {
     pub threadlocal var sink: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, []const u8) void } = null;
@@ -25,6 +26,11 @@ pub fn init(io_: std.Io, silent: bool) void {
 pub fn timeWanted(text: ?[]const u8) bool {
     const s = std.mem.trim(u8, text orelse return false, " \t");
     return std.mem.eql(u8, s, "1") or std.ascii.eqlIgnoreCase(s, "on");
+}
+
+/// --log-json: access, ended and refused lines as compact JSON; off (the default) keeps the text lines.
+pub fn setJson(on: bool) void {
+    json_log = on;
 }
 
 /// ``2026-10-30T18:54:04.123Z``: a UTC time given in milliseconds since the epoch, an earlier one as the epoch.
@@ -175,20 +181,127 @@ fn label_suffix(label: []const u8) []const u8 {
     return std.fmt.bufPrint(&suffix_buf, " key={s}", .{label}) catch " key=?";
 }
 
-/// The access line ``send_response`` prints: ``ip "GET / HTTP/1.1" 200 -``.
+/// A JSON string in at most ``cap`` bytes with its quotes, cut before an escape or character that would not fit.
+fn jsonString(w: *std.Io.Writer, s: []const u8, cap: usize) void {
+    const room = @min(cap, w.buffer.len - w.end);
+    if (room < 2) return;
+    const limit = w.end + room - 1; // the closing quote always fits
+    w.writeByte('"') catch return;
+    var i: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        const c1 = b == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f;
+        var esc: [6]u8 = undefined;
+        var step: usize = 1;
+        const piece: []const u8 = if (c1 or b < 0x20 or b == 0x7f) blk: {
+            if (c1) step = 2;
+            break :blk std.fmt.bufPrint(&esc, "\\u00{x:0>2}", .{s[i + step - 1]}) catch unreachable;
+        } else if (b == '"' or b == '\\') blk: {
+            esc[0] = '\\';
+            esc[1] = b;
+            break :blk esc[0..2];
+        } else blk: {
+            step = @min(std.unicode.utf8ByteSequenceLength(b) catch 1, s.len - i);
+            break :blk s[i .. i + step];
+        };
+        if (w.end + piece.len > limit) break;
+        w.writeAll(piece) catch return;
+        i += step;
+    }
+    w.writeByte('"') catch return;
+}
+
+const json_field_cap = 256; // ids, peers, key labels and error names
+const json_request_cap = 4096; // the request line, of up to 65,536 bytes, so the whole line stays one parsable object
+
+fn jsonKey(w: *std.Io.Writer, first: *bool, key: []const u8) void {
+    if (!first.*) w.writeByte(',') catch return;
+    first.* = false;
+    jsonString(w, key, json_field_cap);
+    w.writeByte(':') catch return;
+}
+
+fn jsonAccess(buf: []u8, c: *const Conn, code: u16) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var first = true;
+    w.writeByte('{') catch {};
+    jsonKey(&w, &first, "event");
+    jsonString(&w, "access", json_field_cap);
+    if (c.id) |id| {
+        jsonKey(&w, &first, "id");
+        jsonString(&w, id, json_field_cap);
+    }
+    jsonKey(&w, &first, "status");
+    w.print("{d}", .{code}) catch {};
+    jsonKey(&w, &first, "peer");
+    jsonString(&w, c.peer, json_field_cap);
+    jsonKey(&w, &first, "request");
+    jsonString(&w, c.requestline, json_request_cap);
+    if (c.auth_enabled) {
+        jsonKey(&w, &first, "key");
+        jsonString(&w, c.key_label orelse "unauthenticated", json_field_cap);
+    }
+    w.writeByte('}') catch {};
+    return w.buffered();
+}
+
+fn jsonEnded(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens: usize, after: f64) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    var first = true;
+    w.writeByte('{') catch {};
+    jsonKey(&w, &first, "event");
+    jsonString(&w, "ended", json_field_cap);
+    jsonKey(&w, &first, "id");
+    jsonString(&w, id, json_field_cap);
+    jsonKey(&w, &first, "reason");
+    if (why) |e| {
+        var reason: [320]u8 = undefined;
+        jsonString(&w, std.fmt.bufPrint(&reason, "error ({s})", .{e}) catch "error", json_field_cap);
+    } else jsonString(&w, "client-left", json_field_cap);
+    jsonKey(&w, &first, "prompt");
+    w.print("{d}", .{prompt}) catch {};
+    jsonKey(&w, &first, "tokens");
+    w.print("{d}", .{tokens}) catch {};
+    jsonKey(&w, &first, "after");
+    w.print("{d:.2}", .{after}) catch {};
+    w.writeByte('}') catch {};
+    return w.buffered();
+}
+
+/// The access line ``send_response`` prints: ``ip "GET / HTTP/1.1" 200 -``; JSON when ``--log-json``.
 pub fn request(c: *const Conn, code: u16) void {
+    if (json_log) {
+        var buf: [8192]u8 = undefined;
+        line("{s}", .{jsonAccess(&buf, c, code)});
+        return;
+    }
     line("{s} \"{s}\" {d} -{s}", .{ c.peer, c.requestline, code, keySuffix(c) });
 }
 
 /// ``refused <id>: <message>``, the message cut to 300 characters: why a request got an error reply.
 pub fn refused(buf: []u8, id: []const u8, message: []const u8) []const u8 {
+    const cut = message[0 .. message.len - afterChars(message, 300).len];
+    if (json_log) {
+        var w: std.Io.Writer = .fixed(buf);
+        var first = true;
+        w.writeByte('{') catch {};
+        jsonKey(&w, &first, "event");
+        jsonString(&w, "refused", json_field_cap);
+        jsonKey(&w, &first, "id");
+        jsonString(&w, id, json_field_cap);
+        jsonKey(&w, &first, "reason");
+        jsonString(&w, cut, (buf.len -| w.end) -| 1); // room for the closing brace
+        w.writeByte('}') catch {};
+        return w.buffered();
+    }
     var w: std.Io.Writer = .fixed(buf);
-    w.print("refused {s}: {s}", .{ id, message[0 .. message.len - afterChars(message, 300).len] }) catch {};
+    w.print("refused {s}: {s}", .{ id, cut }) catch {};
     return w.buffered();
 }
 
 /// ``ended <id> reason=...``: a request ending without its reply, because its client left (``why`` null) or it failed.
 pub fn ended(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens: usize, after: f64) []const u8 {
+    if (json_log) return jsonEnded(buf, id, why, prompt, tokens, after);
     var w: std.Io.Writer = .fixed(buf);
     w.print("ended {s} reason=", .{id}) catch {};
     if (why) |e| w.print("error ({s})", .{e}) catch {} else w.writeAll("client-left") catch {};
