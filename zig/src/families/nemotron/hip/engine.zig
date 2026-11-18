@@ -75,7 +75,8 @@ pub const Engine = struct {
     comm: ?hip.collective.Comm = null,
     arena: hip.Arena,
     pool: pages.Pool,
-    /// A lane round's plan and its windows, sized with the pool for `o.streams` streams of `rounds.max_window` rows.
+    /// A stream's window, its round plan and its windows, sized with the pool for `o.streams` streams.
+    window: usize,
     plan: rounds.Plan,
     wins: []rounds.Window,
     sized: bool,
@@ -110,6 +111,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.io = io;
         e.o = o;
+        e.window = rounds.windowFor(o.policy.mtp.drafts);
         e.stopped = false;
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
@@ -175,7 +177,7 @@ pub const Engine = struct {
             head_kv,
         );
         errdefer e.pool.deinit();
-        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams, d.vocab);
+        e.plan = try rounds.Plan.init(&e.driver, &e.pool, rounds.planRows(streams, e.window), streams, d.vocab);
         errdefer e.plan.deinit();
         e.wins = try e.gpa.alloc(rounds.Window, streams);
         e.sized = true;
