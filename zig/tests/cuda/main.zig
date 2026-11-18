@@ -1,8 +1,6 @@
 //! GPU test runner for the CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on failure.
 
 const std = @import("std");
-const q27_back_tests = @import("q27_back_tests.zig");
-const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const dump = @import("byte_dump.zig");
@@ -247,6 +245,7 @@ const usage =
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
+    \\  qmmf-many-contract grouped NVFP4 byte replacements and controls against separate launches
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
@@ -377,6 +376,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-fp8-experts")) return flashnext_fp8_experts_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moetile")) return @import("moetile_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-many-contract")) return @import("contract_qmmf_many.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moetile-contract")) return @import("contract_qmmf_shared.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
@@ -518,8 +518,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
-    if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
-    if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "q27-back")) return @import("q27_back_tests.zig").run(gpu, .all);
+    if (std.mem.eql(u8, cmd, "q27-gemm")) return @import("q27_gemm_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return @import("contract_gb10_many.zig").runAll(gpu);
