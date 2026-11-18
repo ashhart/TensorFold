@@ -20,6 +20,18 @@ const cuda: support.Offer = .{ .version = "test", .backends = &.{"cuda"}, .famil
     .{ .model_type = "minimax_m3_vl", .formats = &.{"mlx-q3g64"} },
 }, .kernel_sms = &support.release_sms };
 
+test "device report: a known zero weight budget is printed as a size" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = try parse.macos(a, "aarch64", fx.m5_ultra);
+    m.gpu_wired_limit = metal.margin;
+    const got = try scan.current(a, t.io, null, m, .{ .version = "test", .offer = metal }, "2026-11-13T01:22:01Z", false, true);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try report.full(&out.writer, got.doc, got.support, "test", &.{});
+    try t.expect(std.mem.indexOf(u8, out.written(), "Memory for model weights: 0.0 GiB (") != null);
+}
+
 fn summary(a: std.mem.Allocator, m: machine.Machine, o: support.Offer) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     try report.summary(&out.writer, m, try support.derive(a, m, o));
