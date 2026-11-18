@@ -290,6 +290,15 @@ pub fn reply(a: Allocator, chat: bool, completion: u64, gap_ms: u32) ![]const Wr
     return drafted(a, chat, completion, gap_ms, "");
 }
 
+/// ``drafted`` padded past benchmark_stream's 576 KiB read buffer after its first text event: the two arrive apart.
+pub fn apart(a: Allocator, chat: bool, completion: u64, speculative: []const u8) ![]const Write {
+    const w: []Write = @constCast(try drafted(a, chat, completion, 0, speculative));
+    const pad = try a.alloc(u8, 1 << 20);
+    for (pad, 0..) |*b, i| b.* = if (i % 8 == 7) '\n' else if (i % 8 == 0) ':' else ' ';
+    w[0].bytes = try std.mem.concat(a, u8, &.{ w[0].bytes, pad });
+    return w;
+}
+
 /// ``reply`` whose finishing chunk carries ``speculative`` members (such as ``"rounds": 3``) when not empty.
 pub fn drafted(a: Allocator, chat: bool, completion: u64, gap_ms: u32, speculative: []const u8) ![]const Write {
     const first = if (chat) "{\"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"synthetic\"}}]}" else "{\"choices\": [{\"index\": 0, \"text\": \"synthetic\"}]}";
