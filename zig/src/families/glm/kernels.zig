@@ -47,6 +47,9 @@ pub const Kernels = struct {
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     kda_window: mtl.Pipeline, // windows of 2+ rows: kda_rows' values, the rows' gates, convolutions and norms at once
     kda_window_tp: mtl.Pipeline,
+    kda_parts: mtl.Pipeline, // all 64 heads on two threadgroups each (their value columns), raw outputs and gates
+    kda_norm: mtl.Pipeline, // then each row's head normed and gated: kda_rows' values
+    kda_split: bool = false, // 2+ row steps take kda_parts and kda_norm (an Ultra's GPU idles at 64 groups)
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
     shared_gateup: mtl.Pipeline, // the shared expert's kernels at one output a simdgroup: four times the threadgroups, the same sums
@@ -116,7 +119,7 @@ pub const Kernels = struct {
         inline for (info.field_names, info.field_types) |name, T| {
             if (T == mtl.Pipeline) @field(k, name).deinit() else if (T == ?wide.Pipes) {
                 if (k.wide) |*w| w.deinit();
-            } else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
+            } else if (T != u64 and T != bool) for (&@field(k, name)) |*p| p.deinit();
         }
     }
 
@@ -222,6 +225,11 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
     @compileError("no generated GLM kernel " ++ key);
 }
 
+/// The KDA step's 64 heads on two threadgroups each for 2+ rows on an Ultra's GPU (faster there), not on a Max's.
+pub fn splitKda(gpu: []const u8) bool {
+    return std.mem.indexOf(u8, gpu, "Ultra") != null;
+}
+
 /// Compile every library on worker threads.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
@@ -276,10 +284,10 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(m32_src);
     jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
-    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window });
+    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
     defer gpa.free(kda_src);
-    var kda_out: [8]mtl.Pipeline = undefined;
-    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp" }, .out = &kda_out };
+    var kda_out: [10]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp", "glm_kda_parts", "glm_kda_norm" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     var sparse_out: [3]mtl.Pipeline = undefined;
@@ -375,6 +383,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.kda_post_tp = kda_out[5];
     k.kda_window = kda_out[6];
     k.kda_window_tp = kda_out[7];
+    k.kda_parts = kda_out[8];
+    k.kda_norm = kda_out[9];
+    k.kda_split = splitKda(std.mem.span(device.name()));
     k.sparse_nax = sparse_out[0];
     k.sparse_split = sparse_out[1];
     k.sparse_combine = sparse_out[2];
