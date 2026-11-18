@@ -119,7 +119,7 @@ pub fn Run(comptime Replace: type) type {
                 _ = s.drain(false);
                 r.steps += 1;
                 r.probed.masks = probe_mod.masks(s.heads, r.probe.center, r.setup.text_len, &r.masks);
-                const steer: []const Steer = if (r.steer) |st| st.at(st.ctx, r.history + r.run.rows.items.len) else &.{};
+                const steer: []const Steer = if (r.steer) |st| try st.at(st.ctx, r.history + r.run.rows.items.len) else &.{};
                 return .{ .rows = r.final(), .turn = .{ .row = row, .probe = &r.probed, .steer = steer }, .row = row, .reading = reading, .center = center };
             }
             const cont = try s.finishAttempt() orelse {

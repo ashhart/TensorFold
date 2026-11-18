@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const z3 = @import("zonos3");
 const cuda = @import("cuda");
 const zedit = @import("zonos_edit.zig");
+const zfollow = @import("zonos_follow.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -39,12 +40,6 @@ pub fn twinBytes(o: z3.Options) u64 {
 /// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
 pub fn need(context: u32, frames: u32) u64 {
     return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
-}
-
-/// Device bytes the speech-edit adapter at `path` adds to a load: its factors, and the scratch its passes take.
-pub fn editBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8, context: u32) !u64 {
-    const scratch = z3.Engine.stateBytes(.{ .max_ctx = context, .adapter = path }) - z3.Engine.stateBytes(.{ .max_ctx = context });
-    return scratch + try z3.adapter.deviceBytes(gpa, io, path);
 }
 
 /// Device bytes each request at once past the first adds: a backbone lane and a decoder lane.
@@ -102,16 +97,18 @@ const Slot = struct {
     heads: []z3.laci.Head = &.{},
     short: z3.short_text.Config = undefined, // a short text's cut settings, over the request's weights
     kept: [1 + cfg.conditions]z3.Replace = undefined, // the replaced rows, which a regeneration's prompt takes again
+    follow: ?zfollow.State = null, // spans placed by the reading position
 
-    fn steerFor(ctx: *anyopaque, frame: usize) []const z3.Steer {
+    fn steerFor(ctx: *anyopaque, frame: usize) anyerror![]const z3.Steer {
         return @as(*Slot, @ptrCast(@alignCast(ctx))).steerAt(frame);
     }
 
     /// The deltas of the forward that takes generated row `frame`; none when the frame is not steered.
-    fn steerAt(s: *Slot, frame: usize) []const z3.Steer {
+    fn steerAt(s: *Slot, frame: usize) ![]const z3.Steer {
         if (s.steer.len == 0) return &.{};
         const half = s.delta.len / 2;
-        return if (s.steering.at(frame, s.delta[0..half], s.delta[half..])) s.steer else &.{};
+        const weights: ?[]const f32 = if (s.follow) |*f| try f.at(frame) else null;
+        return if (s.steering.weighed(frame, s.delta[0..half], s.delta[half..], weights)) s.steer else &.{};
     }
 };
 
@@ -255,6 +252,7 @@ const Host = struct {
         const layout = Layout.of(r.frames) catch return false;
         if (r.cfg_gamma != 1 and layout.condition_row == 0 and r.reference_audio.len == 0) return false;
         if (r.steering) |st| if (!z3.steering.valid(st, r.cfg_gamma != 1)) return false;
+        if (!zfollow.fits(r, r.frames.len - layout.prefill - layout.condition_row - cfg.conditions)) return false;
         // LACI runs one stream: no guidance twin of either kind
         if (r.laci) |lc| if (!z3.laci.valid(lc, r.cfg_gamma != 1 or (r.steering != null and r.steering.?.guidance != 1))) return false;
         return true;
@@ -386,12 +384,14 @@ const Host = struct {
             return null;
         }
         const finished = try slot.run.sample();
+        if (slot.follow) |*f| try f.observeLast(slot.run.rows.items.len);
         if (fill == null) try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
         if (finished) if (fill) |ed| try zedit.fillOut(ed, slot.run.rows.items, slot.run.eos_frame);
         if (finished) return if (slot.run.eos_frame != null) .stop else .length;
         const row = slot.run.lastRow();
-        const steer = slot.steerAt(slot.run.rows.items.len);
-        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits), .steer = steer, .end = if (slot.run.edit) |*ed| &ed.end else null };
+        const steer = try slot.steerAt(slot.run.rows.items.len);
+        const probe = if (slot.follow) |*f| f.probe() else null;
+        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits), .steer = steer, .probe = probe, .end = if (slot.run.edit) |*ed| &ed.end else null };
         n.* += 1;
         if (slot.run.unconditional) |out| {
             h.turns[n.*] = .{ .lane = slot.twin.?, .row = row, .out = out, .steer = if (slot.twin_steered) steer else &.{} };
@@ -447,6 +447,7 @@ const Host = struct {
             slot.spans = try gpa.alloc(z3.steering.Span, st.spans.len);
             for (slot.spans, st.spans) |*to, from| to.* = .{ .start = from.start, .end = from.end, .ramp = from.ramp, .delta = from.delta };
             slot.steering = .{ .sources = st.sources, .constant = st.constant, .released = st.released, .release = .{ .onset = st.onset, .ramp = st.ramp, .hold = st.hold }, .spans = slot.spans };
+            if (st.follow) |f| slot.follow = try zfollow.State.init(gpa, f);
         }
         if (twin.len != 0) {
             if (slot.twin == null) {
@@ -476,7 +477,12 @@ const Host = struct {
             const setup: z3.laci_run.Setup = .{ .short = cut, .heads = .{ .heads = slot.heads, .frames_per_token = lc.frames_per_token }, .text_start = text, .text_len = rows.len - layout.prefill - text, .prefill = layout.prefill, .hold = !r.stream };
             slot.laci = try LaciRun.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, slot.kept[0..n], setup, sampling, r.max_frames);
             if (r.steering != null) slot.laci.?.steer = .{ .ctx = slot, .at = Slot.steerFor, .twin = false };
-        } else slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
+            if (slot.follow) |*f| slot.laci.?.session.follower = &f.follower;
+        } else {
+            slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
+            const text = layout.condition_row + cfg.conditions;
+            if (slot.follow) |*f| try f.read(gpa, Guarded{ .h = h, .slot = slot }, text, rows.len - layout.prefill - text);
+        }
         slot.started = true;
         if (r.edit) |ed| try slot.run.asEdit(Guarded{ .h = h, .slot = slot }, ed.min_frames);
     }
@@ -490,6 +496,8 @@ const Host = struct {
         h.gpa.free(slot.delta);
         h.gpa.free(slot.steer);
         h.gpa.free(slot.spans);
+        if (slot.follow) |*f| f.deinit(h.gpa);
+        slot.follow = null;
         slot.spans = &.{};
         slot.delta = &.{};
         slot.steer = &.{};
@@ -538,7 +546,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     var rel = try z3.release.open(gpa, io, dir, null);
     errdefer rel.deinit();
     if (o.parallel == 0 or o.parallel > max_parallel) return error.BadZonosParallel;
-    const editing = if (rel.edit_adapter.len != 0) try editBytes(gpa, io, rel.edit_adapter, o.context) else 0;
+    const editing = if (rel.edit_adapter.len != 0) try zedit.editBytes(gpa, io, rel.edit_adapter, o.context) else 0;
     var door: Door = .{ .o = o, .need = need(o.context, b.frames) + (o.parallel - 1) * laneBytes(o.context, b.frames) + editing };
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check }, .adapter = rel.edit_adapter });
     errdefer e.destroy();

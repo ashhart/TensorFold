@@ -84,9 +84,9 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 - **Forced aligner** (`cuda/aligner.zig`, `cuda/aligner_weights.zig`, `align_words.zig`): where each word of a
   transcript is spoken in a clip. See "The aligner".
 
-Refused or absent: clips in formats other than WAV, spans placed by the reading position
-(`control_span_follow: "reading"`), LACI's duration targets and extended speaking-rate buckets, accent adapters, the
-`full_mr` decoder, Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
+Refused or absent: clips in formats other than WAV, LACI's duration targets and extended speaking-rate buckets,
+accent adapters (the publisher has published none: its guide's adapters were trained on an earlier backbone in its
+private repository), the `full_mr` decoder, Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
 the clip's transcript), Japanese and Mandarin, clips over 60 s, and the aligner's long-form routing (a clip over
 30 s needs its word timings from the caller).
 
@@ -175,8 +175,8 @@ fields below are refused. The pinned bundle has 65 directions in 14 sets.
 - **`control_spans`**: `[{"start": c0, "end": c1, "controls": {...}}]` adds hidden controls while characters
   [c0, c1) of the text as sent are spoken. Frames are placed by character position at `control_span_rate` frames
   a character (1 when left out), stretched by the bundle's `timing` tables of the controls that change the pace,
-  with ramps of 3 frames at both edges. Spans may not overlap. `control_span_follow: "reading"`, which places
-  spans by the model's reading position, needs the alignment heads and is refused.
+  with ramps of 3 frames at both edges. Spans may not overlap. With `control_span_follow: "reading"` they follow
+  the model's reading position instead: see "Spans that follow the reading".
 - **`controls_cfg_scale`**: guidance on the hidden controls through a twin stream that runs the same prompt
   without them, mixed as speaker guidance is. It takes effect with an embedding voice and a request-level hidden
   control, as in the reference, and cannot be combined with `speaker_cfg_scale`: a request has one twin. A
@@ -251,8 +251,10 @@ Checked against the publisher's code:
 - **The session logic** (`zonos3-generate --laci-replay TRACE --expected EXPECTED`): the reference repository's
   own replay fixtures (`servers/ggml/tests/fixtures/laci-replay`), which pin its three implementations. The seven
   that need nothing unserved pass (`clean`, `early_eos`, `skip`, `slow_two_bins` and three short-text ones):
-  every drained row, mask change, continuation and the final record. Four are skipped: one needs a duration
-  target and three the span follower.
+  every drained row, mask change, continuation and the final record. With the span follower ported (see "Spans
+  that follow the reading"), three more pass: `stall` and `stall_held` with the follower's weights at every step,
+  and `span_follow_scheduler`, 278 scripted readings, decisions and rollbacks. One is skipped: `pace_miss` needs a
+  duration target.
 - **On the model** (`zonos3-generate --model LM --laci-check D/gen_laci_X --laci-heads FILE`), greedy, eleven
   requests dumped with `rows --laci-heads` (each attempt's readings, masks and rows): two voice paths, three texts
   that might invite a failure, and six with strong steering doses, four of which the reference retried eight
@@ -296,6 +298,43 @@ a start marker that is not first, an unclosed or empty group and a phone outside
   prompt without silence rows) and a pronunciation group on a reference voice (55), at `--max-rows` 1 and 64;
   served, the three replies have the reference audio's sample counts and match it at 68.9, 76.2 and 67.0 dB.
   `start_immediately` gives the bytes of the typed marker.
+
+## Spans that follow the reading
+
+`control_span_follow: "reading"` places a request's `control_spans` by where the model is in its text rather than
+by the character rate (`zonos3.tts.span_follow`). It needs the server's LACI heads (`--laci-heads`); without them,
+as in the reference, the spans keep the character rate. `control_span_lead` (0 to 8, default 1) and
+`control_span_lag` (-4 to 8, default 0) are in text tokens.
+
+- **The tokens of a span** (`server/zonos_reading.zig`): a span's characters of the text as sent are mapped into
+  the text the prompt spells (after normalization and the start marker: exact in unchanged stretches, proportional
+  in rewritten ones, through the same `difflib` diff the reference takes), then to the text positions whose
+  characters, outer whitespace trimmed, overlap it. A token's characters are those its bytes fall in, which is
+  what the reference's tokenizer offsets give for this byte-level BPE; a marker or a phone is its own position.
+- **The reading:** after every generated row the host reads the row's queries at the two attention layers against
+  the text rows' keys (read once after the prompt) with the language's heads, as LACI does, and takes the argmax
+  position. Under LACI the session's own readings are used, masks included, and a rollback rolls the follower back.
+- **The gate** (`span_follow.zig`): the running median of the last three readings, never moving back and at most a
+  token a reading. A span ramps in over 3 frames on the first frame decided with the reading at or past its first
+  token less the lead, and ramps out on the first frame decided at or past the token after it plus the lag. Each
+  frame's weights are decided once, so a speaker-guidance twin takes the same ones; they are kept in float64 and
+  scale the span's delta in fp32, as the reference's do.
+
+Checked against the publisher's code, greedy, six requests (`requests` writes them; `rows` dumps the follower's
+readings, rollbacks and every frame's weights in `follow.json`): two spans on the test sentence alone, under LACI,
+with speaker guidance on a reference voice, with a lead of 2, a lag of 1 and a constant control, on a text the
+normalizer rewrites ("It costs $5 at 3 pm today"), and under LACI with `delivery.tempo` at -6, which the reference
+retried eight times.
+
+- **Each check** (`zonos3-generate --model LM --follow-check D/gen_follow_X --steer-bundle BUNDLE --laci-heads
+  FILE`) resolves the request's steering with the bundle (the span deltas bit-identical to the reference's), feeds
+  the follower the port's own readings, and compares the readings after every rollback, every frame's weights
+  (exact in float64) and the frames (`rows.npy`, or the LACI check's readings, masks, rows and record). All six
+  pass at prompt passes of 64 and 7 rows; the retried one over nine attempts and 970 readings.
+- **Served**, `/v1/audio/speech` at `--parallel 4`: all six have the reference audio's sample count and match it at
+  64.4 to 73.5 dB; each repeats byte for byte and streams the same bytes. The token ranges the server found are
+  the reference's, or the frames would differ. The same request with `"rate"` gives other bytes, and equals the
+  request without the field.
 
 ## Short texts
 
@@ -511,6 +550,11 @@ done
 for X in embedding reference repeats digits long; do
   python tools/zig/zonos3_reference.py rows LM D/requests/laci_$X.json D/gen_laci_$X --device cpu --laci-heads ZONOS/assets/laci_heads
 done
+for X in plain laci guided gate normalized retry; do
+  python tools/zig/zonos3_reference.py rows LM D/requests/follow_$X.json D/gen_follow_$X --device cpu \
+      --steer-bundle ZONOS/assets/steering/studio_bundle_mect60k_x10.json --laci-heads ZONOS/assets/laci_heads \
+      --text-rows RELEASE/lm/zonos3_mini/text_rows/pause_tokens_s5000.pt
+done
 for X in hidden raw spans guided reference; do
   python tools/zig/zonos3_reference.py rows LM D/requests/steer_$X.json D/gen_steer_$X --device cpu \
       --steer-bundle ZONOS/assets/steering/studio_bundle_mect60k_x10.json
@@ -595,6 +639,7 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | SSL teacher | `--teacher-check D/teacher_cillian_fp32 --teacher RELEASE/autoencoder/teacher` | 18 captures of the fp32 run, 999 rows | worst row's cosine 0.9999252 |
 | Clip to codes, one lane | `--encode-check D/clip_cillian --checkpoint RELEASE` | the fp32 run's codes, 145 frames | 1,450 of 1,450 codes equal |
 | Clip to codes, four lanes | `--encode-check D/clip_cillian_47s --checkpoint RELEASE` | the fp32 run's codes, 710 frames | 7,100 of 7,100 codes equal |
+| Spans that follow the reading, six requests | `--model LM --follow-check D/gen_follow_X --steer-bundle BUNDLE --laci-heads FILE --max-rows N` | the span deltas, every reading after each rollback, every frame's weights, the frames | all equal at N = 64 and 7 in all six |
 | Speech edit, one span (1.0 to 1.6 s) | `--model LM --edit-check D/edit_span --edit-adapter A --max-rows N` | the reference's region, minimum length, prompt and 20 rows; the spliced codes | all equal at N = 64 and 7 |
 | Speech edit without the speaker row, no minimum length | the same with `D/edit_plain_row` | 20 rows | all equal at N = 64 and 7 |
 | Speech edit, three spans with `controls`, `region_controls` (a hidden and a speaker-embedding control), an onset and a speaking rate | the same with `D/edit_three` | three fills of 18, 18 and 16 rows, the later prompts holding the earlier fills | all equal at N = 64 and 7 |
@@ -892,6 +937,8 @@ bf16-encoded references, clones as well from fp32 codes.
 - `core/speech_api.zig` gained `SpeechRequest.edit` (`SpeechEdit`: one step of a speech edit on the engine: a
   clip's codes, a fill's rows, edited codes' audio, words placed in a clip), re-exported by `core/engine_api.zig`.
   A request without it is as before.
+- `core/speech_api.zig`: `SpeechSteering.follow` (each span's text positions, the gate's lead and lag, the heads
+  that read). A request without it is as before.
 - `core/torch_pth.zig` gained `readF32Strided`, which reads a tensor stored in any stride order (the speaker
   encoder's checkpoint holds 13 channels-last convolution weights). The existing readers are unchanged.
 - `server/`: `speech_edit.zig` and its two routes (`routes.zig`), their place among the routes an inference key may

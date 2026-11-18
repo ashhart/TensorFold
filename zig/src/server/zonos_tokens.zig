@@ -63,6 +63,11 @@ fn markerAt(s: []const u8, i: usize) ?u8 {
     return if (i + 2 < s.len and s[i] == 0xee and s[i + 1] == 0x80 and s[i + 2] >= 0x80 and s[i + 2] <= last_marker) s[i + 2] else null;
 }
 
+/// Whether a marker starts at byte `i`.
+pub fn isMarker(s: []const u8, i: usize) bool {
+    return markerAt(s, i) != null;
+}
+
 pub fn hasMarkers(s: []const u8) bool {
     for (0..s.len) |i| if (markerAt(s, i) != null) return true;
     return false;

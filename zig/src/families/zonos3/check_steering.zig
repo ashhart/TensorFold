@@ -17,15 +17,8 @@ fn number(v: std.json.Value) f64 {
     return if (v == .float) v.float else @floatFromInt(v.integer);
 }
 
-/// GEN_DIR/steer.json's request resolved with the bundle at `path`: the embedding and every frame's delta, bit for bit.
-pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) !u8 {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const cwd = std.Io.Dir.cwd();
-    var b = try bundle.load(gpa, io, path);
-    defer b.deinit();
-    const side = (try std.json.parseFromSliceLeaky(std.json.Value, a, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "steer.json" }), a, .limited(1 << 22)), .{})).object;
+/// The steering request a dump's steer.json holds; `base` takes its speaker embedding, when it has one.
+pub fn dumped(a: std.mem.Allocator, side: std.json.ObjectMap, base: *[E]f32) !bundle.Request {
     const sent = side.get("request").?.object;
     var r: bundle.Request = .{ .controls = try doses(a, sent.get("controls")), .chars = try std.unicode.utf8CountCodepoints(sent.get("text").?.string) };
     if (sent.get("control_spans")) |list| {
@@ -37,11 +30,24 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8
     if (sent.get("steer_hold")) |v| r.hold = number(v);
     if (sent.get("steer_onset_seconds")) |v| r.onset_seconds = number(v);
     if (sent.get("steer_ramp_seconds")) |v| r.ramp_seconds = number(v);
-    var base: [E]f32 = undefined;
     if (sent.get("speaker_embedding")) |v| {
-        for (&base, v.array.items) |*x, y| x.* = @floatCast(number(y));
-        r.embedding = &base;
+        for (base, v.array.items) |*x, y| x.* = @floatCast(number(y));
+        r.embedding = base;
     }
+    return r;
+}
+
+/// GEN_DIR/steer.json's request resolved with the bundle at `path`: the embedding and every frame's delta, bit for bit.
+pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) !u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cwd = std.Io.Dir.cwd();
+    var b = try bundle.load(gpa, io, path);
+    defer b.deinit();
+    const side = (try std.json.parseFromSliceLeaky(std.json.Value, a, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "steer.json" }), a, .limited(1 << 22)), .{})).object;
+    var base: [E]f32 = undefined;
+    const r = try dumped(a, side, &base);
     var message: []const u8 = "";
     const got = bundle.resolve(a, &b, r, &message) catch |e| {
         std.debug.print("RESULT zonos3 steer FAIL {s}: {s}\n", .{ @errorName(e), message });

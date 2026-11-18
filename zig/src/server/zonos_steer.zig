@@ -19,7 +19,9 @@ pub const fields = struct {
     pub const onset = "steer_onset_seconds";
     pub const ramp = "steer_ramp_seconds";
     pub const guidance = "controls_cfg_scale";
-    pub const all = [_][]const u8{ controls, spans, rate, follow, hold, onset, ramp, guidance };
+    pub const lead = "control_span_lead";
+    pub const lag = "control_span_lag";
+    pub const all = [_][]const u8{ controls, spans, rate, follow, hold, onset, ramp, guidance, lead, lag };
 };
 
 /// The ZONOS3 paths and decoders a server may be started with (Args.zonos).
@@ -44,7 +46,9 @@ pub fn flag(out: anytype, name: []const u8, value: []const u8) bool {
 pub const Made = struct {
     /// The speaker embedding after the raw controls; null: as it was.
     embedding: ?[req.config.speaker_dim]f32 = null,
-    steering: ?*const api.SpeechSteering = null,
+    steering: ?*api.SpeechSteering = null,
+    /// `control_span_follow: "reading"` with spans that steer: each span's characters, and the gate's lead and lag.
+    follow: ?struct { chars: []const [2]usize, lead: f64, lag: f64 } = null,
 };
 
 fn number(v: json.Value) ?f64 {
@@ -78,11 +82,16 @@ pub fn plan(bundle: ?*const Bundle, cx: *errors.Cx, raw: json.Value, chars: usiz
     const guidance = try optional(cx, raw, fields.guidance) orelse 1;
     if (!std.math.isFinite(guidance) or guidance < 0) return cx.refuse(prefix ++ "controls_cfg_scale must be finite and not negative");
     if (guidance != 1 and speaker_guided) return cx.refuse(prefix ++ "speaker_cfg_scale and controls_cfg_scale cannot be combined: a request has one guidance twin");
+    var reading = false;
     if (raw.field(fields.follow)) |v| {
-        const name = v.str() orelse return cx.refuse(prefix ++ "control_span_follow must be \"rate\"");
-        if (std.mem.eql(u8, name, "reading")) return cx.refuse(prefix ++ "control_span_follow \"reading\" needs the alignment heads, which are not served; spans are placed by control_span_rate");
-        if (!std.mem.eql(u8, name, "rate")) return cx.refuse(prefix ++ "control_span_follow must be \"rate\"");
+        const name = v.str() orelse return cx.refuse(prefix ++ "control_span_follow must be \"rate\" or \"reading\"");
+        reading = std.mem.eql(u8, name, "reading");
+        if (!reading and !std.mem.eql(u8, name, "rate")) return cx.refuse(prefix ++ "control_span_follow must be \"rate\" or \"reading\"");
     }
+    const lead = try optional(cx, raw, fields.lead) orelse 1.0;
+    const lag = try optional(cx, raw, fields.lag) orelse 0.0;
+    if (!(lead >= 0 and lead <= 8)) return cx.refuse(prefix ++ "control_span_lead must be from 0 through 8 tokens");
+    if (!(lag >= -4 and lag <= 8)) return cx.refuse(prefix ++ "control_span_lag must be from -4 through 8 tokens");
     if (raw.field(fields.controls)) |v| r.controls = try doses(cx, fields.controls, v);
     if (raw.field(fields.spans)) |v| {
         const list = v.items() orelse return cx.refuse(prefix ++ "control_spans must be a list of {start, end, controls}");
@@ -112,6 +121,7 @@ pub fn plan(bundle: ?*const Bundle, cx: *errors.Cx, raw: json.Value, chars: usiz
         error.Refused => cx.fail(.request, prefix ++ "{s}", .{message}),
     };
     var out: Made = .{ .embedding = got.embedding };
+    if (reading and got.span_chars.len != 0) out.follow = .{ .chars = got.span_chars, .lead = lead, .lag = lag };
     if (!got.plan.active()) return out;
     const spans = try cx.a.alloc(api.SpeechSteering.Span, got.plan.spans.len);
     for (spans, got.plan.spans) |*to, from| to.* = .{ .start = from.start, .end = from.end, .ramp = from.ramp, .delta = from.delta };
@@ -180,7 +190,9 @@ test "without a bundle controls are refused, and a hold below 1; plain requests 
         .{ "{\"steer_hold\": 0.5}", "steer_hold below 1 needs its steer_release" },
         .{ "{\"controls\": [1]}", "controls must be an object of control names and doses" },
         .{ "{\"controls_cfg_scale\": -1}", "controls_cfg_scale must be finite and not negative" },
-        .{ "{\"control_span_follow\": \"reading\"}", "needs the alignment heads" },
+        .{ "{\"control_span_follow\": \"words\"}", "must be \"rate\" or \"reading\"" },
+        .{ "{\"control_span_lead\": 9}", "control_span_lead must be" },
+        .{ "{\"control_span_lag\": -5}", "control_span_lag must be" },
         .{ "{\"control_spans\": [{\"start\": 0, \"end\": 2}]}", "a control span is" },
     };
     for (cases) |c| {
