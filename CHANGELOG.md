@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- macOS: the native binary imports `_memcpy` from libSystem again, so the release link check passes; the saved device profile is decoded with checked decimal arithmetic and keeps its format (#3761, fixes #3760). Thanks to @AIFlowML.
+
 - Server: a reranker server also answers `/score`, TEI's `/rerank` with `texts` and Cohere's `/v2/rerank`, each translated onto the existing `/v1/rerank` path (#3203).
 
 - Shared decoding: fixed DFlash2 block work stays separate from verification rows; MTP heads keep their step costs and copied rows keep their measured cost feedback (#3755).
