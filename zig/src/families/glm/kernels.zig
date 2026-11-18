@@ -58,6 +58,8 @@ pub const Kernels = struct {
     moe_down_0: mtl.Pipeline,
     moe_gateup_0_one: mtl.Pipeline, // the same at two outputs a simdgroup, for one-row rounds (more weight reads in flight)
     moe_down_0_one: mtl.Pipeline,
+    moe_gateup_pick: mtl.Pipeline, // one row: each routed group replays the route select's picks, no select launch
+    moe_down_pick: mtl.Pipeline, // and the down projections of the picks in pick order
     combine_0: mtl.Pipeline, // their combine: the shared expert's row read from the last slot
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
@@ -234,6 +236,29 @@ pub fn splitKda(gpu: []const u8) bool {
     return std.mem.indexOf(u8, gpu, "Ultra") != null;
 }
 
+/// `src` with `old` replaced by `new` once: error.KernelCompile when the generated text no longer has it.
+fn edit(gpa: std.mem.Allocator, src: []const u8, old: []const u8, new: []const u8) ![]u8 {
+    if (std.mem.count(u8, src, old) != 1) return error.KernelCompile;
+    return std.mem.replaceOwned(u8, gpa, src, old, new);
+}
+
+/// One row's experts with no select launch: gate/up groups replay the select's picks, slot u takes pick u (same slots).
+fn pickSources(gpa: std.mem.Allocator, route_core: []const u8, gu: []const u8, down: []const u8) ![2][]u8 {
+    const member = "  if (!shared && u >= UCOUNT[0]) return;\n  const int pick = shared ? (m < R ? m * TOPK : -1) : UMEM[u * MAXR + m];";
+    const by_pick = "  const int pick = shared ? (m < R ? m * TOPK : -1) : u;";
+    const g1 = try edit(gpa, gu, member, by_pick);
+    defer gpa.free(g1);
+    const g2 = try edit(gpa, g1, "  const size_t e = shared ? 0 : size_t(UIDS[u]);", "  const size_t e = shared ? 0 : size_t(tf_route_pick_at(RLOGITS, RBIAS, u, lane, u == TOPK - 1 && threadgroup_position_in_grid.y == 0, RPICK, RWTS, RSCALE));");
+    defer gpa.free(g2);
+    const g3 = try edit(gpa, g2, "  const device int32_t* UIDS [[buffer(11)]],\n  const device int32_t* UMEM [[buffer(12)]],\n  const device int32_t* UCOUNT [[buffer(13)]],", "  const device float* RLOGITS [[buffer(11)]],\n  const device float* RBIAS [[buffer(12)]],\n  device int32_t* RPICK [[buffer(13)]],");
+    defer gpa.free(g3);
+    const g4 = try edit(gpa, g3, "  device bfloat16_t* ACT [[buffer(15)]],", "  device bfloat16_t* ACT [[buffer(15)]],\n  device float* RWTS [[buffer(16)]],\n  constant float& RSCALE [[buffer(17)]],");
+    defer gpa.free(g4);
+    const gate_up = try std.mem.concat(gpa, u8, &.{ route_core, g4 });
+    errdefer gpa.free(gate_up);
+    return .{ gate_up, try edit(gpa, down, member, by_pick) };
+}
+
 /// Compile every library on worker threads.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
@@ -250,7 +275,7 @@ pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype
 
 fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
-    var jobs: [generated.len + 25]Job = undefined;
+    var jobs: [generated.len + 27]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -340,6 +365,11 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     if (std.mem.eql(u8, gu0_one, gu0_src) or std.mem.eql(u8, down0_one, down0_src)) return error.KernelCompile;
     jobs[generated.len + 20] = .{ .device = device, .source = gu0_one, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0_one) };
     jobs[generated.len + 21] = .{ .device = device, .source = down0_one, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0_one) };
+    const picks = try pickSources(gpa, route_core, gu0_one, down0_one);
+    defer gpa.free(picks[0]);
+    defer gpa.free(picks[1]);
+    jobs[generated.len + 25] = .{ .device = device, .source = picks[0], .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_pick) };
+    jobs[generated.len + 26] = .{ .device = device, .source = picks[1], .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_pick) };
     const comb = comptime kernelOf("moe_combine");
     const comb_a = try std.mem.replaceOwned(u8, gpa, comb.source, "const device bfloat* y = Y + size_t(r) * TOPK * D + d;", "const device bfloat* y = Y + size_t(r) * (TOPK + 1) * D + d;");
     defer gpa.free(comb_a);
