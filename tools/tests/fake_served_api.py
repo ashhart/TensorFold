@@ -24,8 +24,8 @@ server that prefills the chat's next turn in the background; ``lanes_free=False`
 of ``GET /v1/load``, as a server without lanes.
 
 A request is counted in ``GET /v1/load``'s running and active chat requests while open. One that finds another in
-flight within ``PARTNER_WINDOW`` stays open ``HOLD`` seconds more, so a census taken while requests run together
-sees them; a request alone leaves after the window.
+flight within ``PARTNER_WINDOW`` stays open until a census counts two open at once (at most ``HOLD`` seconds), so
+however slow a census read is, one taken while requests run together sees them; a request alone leaves after the window.
 
 The cached server reports five cached tokens for a later chat turn (more than one message), and for a one-message
 prompt it answered before. It keeps the prompts it
@@ -61,7 +61,7 @@ CAPACITY = 4  # prompt cache entries the cached server keeps
 LANES = 8
 TOKEN_GAP = 0.0002  # seconds between streamed events
 PARTNER_WINDOW = 0.01  # seconds a request waits for another to share the server with
-HOLD = 0.025  # seconds a request that shares the server stays open
+HOLD = 2.0  # most seconds a request that shares the server waits for a census to count it
 
 
 def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi", tokens=4, sampling="greedy", prompt=9):
@@ -164,6 +164,9 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if self.path == "/v1/load":
             with server.lock:
                 busy, warming = server.streams + server.leaked + server.inflight, time.monotonic() < server.warm_until
+                if busy > 1:
+                    server.overlaps += 1
+                    server.cond.notify_all()
             capacity = {"mode": "window", "lanes_free": LANES - busy - server.lost} if server.lanes_free else {}
             return self.reply(200, {"lanes": LANES, "running": busy + warming, "waiting": 19 * warming,
                                     "http_active": {"chat_completions": busy}, "capacity": capacity})
@@ -205,7 +208,8 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             server.cut.discard(key)
         try:
             batched = self.batched(BATCH_WINDOW if server.fault == "concurrent" else PARTNER_WINDOW)
-            time.sleep(HOLD if batched else 0)
+            if batched:
+                self.counted()
             sampled = bool(body.get("temperature")) and server.fault != "unsampled"
             cached, stale = self.lookup(messages)
             salt = "stale" if stale else "after a cut" if after_cut and server.fault == "cancel_reply" else None
@@ -256,6 +260,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         with server.cond:
             server.cond.notify_all()
             return server.cond.wait_for(lambda: server.inflight > 1, timeout=window)
+
+    def counted(self):
+        """Wait, at most ``HOLD`` seconds, for a ``GET /v1/load`` that counts two chat requests open at once."""
+        server = self.server
+        with server.cond:
+            mark = server.overlaps
+            server.cond.wait_for(lambda: server.overlaps > mark, timeout=HOLD)
 
     def salt(self, body, arrival, batched):
         """A planted fault changes the reply by adding a salt to its hash; None leaves it correct."""
@@ -309,7 +320,7 @@ def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_fre
     server = FixtureHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
-    server.streams = server.leaked = server.lost = server.disconnects = 0
+    server.streams = server.leaked = server.lost = server.disconnects = server.overlaps = 0
     server.warm, server.warm_until, server.lanes_free = warm, 0.0, lanes_free
     server.lock, server.one = threading.Lock(), threading.Lock()
     server.cond = threading.Condition(server.lock)
