@@ -53,6 +53,24 @@ test "exl3: a paired window's head splits into two deep slices that cannot decli
     }
 }
 
+/// Bound before doubling; Zig 0.17 ReleaseSafe can miscompile doubling a `@min` expression.
+fn headScratchRows(n: usize) usize {
+    const limit = @import("../../cuda_mtp.zig").piece_rows;
+    return if (n >= limit) 2 * limit else @max(@as(usize, 32), 2 * n);
+}
+
+test "exl3: head scratch row count stays bounded for deep prompt chunks" {
+    var cases = [_]struct { n: usize, want: usize }{
+        .{ .n = 1, .want = 32 },
+        .{ .n = 255, .want = 510 },
+        .{ .n = 256, .want = 512 },
+        .{ .n = 1023, .want = 512 },
+        .{ .n = std.math.maxInt(usize), .want = 512 },
+    };
+    std.mem.doNotOptimizeAway(&cases);
+    for (cases) |c| try std.testing.expectEqual(c.want, headScratchRows(c.n));
+}
+
 fn headSlice(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").Draft, next: []const u32, rows: u64, scores: bool) !bool {
     const op = try o.e.exl3_prefill.opts();
     const n = next.len;
@@ -68,7 +86,7 @@ fn headSlice(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").D
     try @import("../dplan/cuda_exl3_dplan.zig").toHost(&e.exl3_dplan);
     const mtp = @import("../../cuda_mtp.zig");
     const tri = o.tri;
-    const want = @max(@as(usize, 32), 2 * @min(n, mtp.piece_rows));
+    const want = headScratchRows(n);
     const s = try e.reserve(want);
     const piece = @max(@as(usize, 1), @min(mtp.piece_rows, s.cap / 2)) / att_rows * att_rows;
     if (piece == 0) return false;
