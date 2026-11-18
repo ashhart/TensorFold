@@ -38,9 +38,10 @@ pub const Ask = struct { slot: u32, anchor: u32, start: u64, params: Params };
 /// One slot's results: `block` drafts and confidences; `cand` and `base` (candidate ids, base logits) for trees.
 pub const Proposal = struct { drafts: []u32, conf: []f32, cand: ?[]i32 = null, base: ?[]f32 = null };
 
-/// A launch prepared for a group of asks: its rows and their positions; the records are in the pass's plan buffer.
+/// A launch prepared for a group of asks: its rows (`n` an ask) and their positions; the records in the plan buffer.
 pub const Launch = struct {
     rows: u32,
+    n: u32,
     asks: []const Ask,
     /// asks whose chain runs on the GPU behind the head (the whole vocabulary; greedy, or keyed rows the host races)
     gpu: bool = false,
@@ -52,6 +53,8 @@ pub const Options = struct {
     slots: u32,
     /// candidates a draft row keeps from its base logits (the Markov bias is added to these only)
     candidates: u32 = 64,
+    /// the drafts of a pass for a slot whose last window verified fewer (0: every pass makes the config's block)
+    narrow: u32 = 0,
     /// chains on the GPU over the whole vocabulary (the release's rule) in place of the candidates' chain
     gpu_chain: bool = false,
 };
@@ -96,6 +99,8 @@ pub const Pass = struct {
     /// one ring buffer a stage: [slots][window + block][head_dim] bf16
     rings: []mtl.Buffer,
     runs: []Run,
+    /// each slot's last window verified `narrow` drafts or more (its passes make the whole block)
+    wide: []bool,
     /// each slot's ring rows its last ingest overwrote (put back when a commit cuts that ingest's window)
     undo: undo_.Undo,
     /// the context-free slot the layer encoders' Ctx names (the drafter reads its own rings)
@@ -106,7 +111,7 @@ pub const Pass = struct {
     queued: [4]?mtl.CommandBuffer = @splat(null),
     /// a pass queued by `begin` that `collect` finishes
     begun: ?Begun = null,
-    /// greedy chains on the GPU (Options.gpu_chain, with a confidence head of the kernels' rank)
+    /// chains on the GPU (Options.gpu_chain, with a confidence head of a rank the kernels take)
     mk: ?Chain = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
@@ -114,7 +119,7 @@ pub const Pass = struct {
         if (opt.slots == 0 or c.dspark_block == 0 or c.dspark_block > R or opt.candidates == 0) return error.Slots;
         const x = try a.create(Pass);
         errdefer a.destroy(x);
-        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .rings = undefined, .runs = undefined, .undo = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
+        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .rings = undefined, .runs = undefined, .wide = undefined, .undo = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
         x.b = try forward.Bufs.init(device, c);
         errdefer x.b.deinit();
         x.plan = try plan_.Plan.init(device);
@@ -134,6 +139,9 @@ pub const Pass = struct {
         x.runs = try a.alloc(Run, opt.slots);
         errdefer a.free(x.runs);
         @memset(x.runs, .{});
+        x.wide = try a.alloc(bool, opt.slots);
+        errdefer a.free(x.wide);
+        @memset(x.wide, false);
         x.undo = try undo_.Undo.init(a, c, x.rings, opt.slots);
         errdefer x.undo.deinit();
         if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) x.mk = try Chain.init(device, w.markov(c));
@@ -171,6 +179,7 @@ pub const Pass = struct {
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
+        x.a.free(x.wide);
         x.quant.deinit();
         x.plan.deinit();
         x.b.deinit();
@@ -187,9 +196,28 @@ pub const Pass = struct {
         return x.w.markov(x.c);
     }
 
+    /// After a slot's verify window of `rows`: whether its next passes make the whole block or the narrow one.
+    pub fn note(x: *Pass, slot: u32, rows: u32) void {
+        if (slot < x.wide.len) x.wide[slot] = rows > x.opt.narrow;
+    }
+
+    /// The drafts a pass makes for a slot: the whole block after a wide window, else the narrow one.
+    pub fn blockOf(x: *const Pass, slot: u32) u32 {
+        if (x.opt.narrow == 0 or x.opt.narrow >= x.c.dspark_block) return x.c.dspark_block;
+        return if (slot < x.wide.len and x.wide[slot]) x.c.dspark_block else x.opt.narrow;
+    }
+
+    /// The drafts a pass makes for these asks: the least of their slots'.
+    pub fn blockFor(x: *const Pass, asks: []const Ask) u32 {
+        var n = x.c.dspark_block;
+        for (asks) |a| n = @min(n, x.blockOf(a.slot));
+        return n;
+    }
+
     /// A new request on the slot: its context restarts at position 0.
     pub fn reset(x: *Pass, slot: u32) void {
         if (slot < x.runs.len) x.runs[slot] = .{};
+        if (slot < x.wide.len) x.wide[slot] = false;
         x.undo.forget(slot);
     }
 
@@ -321,9 +349,9 @@ pub const Pass = struct {
 
     /// The plan and the block ids of a launch for these asks (at most `group`, distinct slots).
     pub fn prepare(x: *Pass, asks: []const Ask) !Launch {
-        const n = x.c.dspark_block;
+        const n = x.blockFor(asks);
         if (asks.len == 0 or asks.len > x.group()) return error.Slots;
-        var l: Launch = .{ .rows = @intCast(asks.len * n), .asks = asks, .gpu = x.mk != null };
+        var l: Launch = .{ .rows = @intCast(asks.len * n), .n = n, .asks = asks, .gpu = x.mk != null };
         for (asks) |a| l.gpu = l.gpu and x.drawsOnGpu(a.params);
         if (l.gpu) for (asks, x.mk.?.o.asks()[0..asks.len]) |a, *k| {
             k.* = askOf(a.params);
@@ -337,7 +365,7 @@ pub const Pass = struct {
             x.runs[a.slot].cut(a.start);
             for (asks[0..j]) |o| if (o.slot == a.slot) return error.DuplicateSlot;
             if (a.start + n > x.tables.positions or a.anchor >= x.c.vocab) return error.PastLimit;
-            try x.plan.writeBlock(x.c, @intCast(j), a.slot, a.start, x.runs[a.slot]);
+            try x.plan.writeBlock(x.c, @intCast(j), a.slot, a.start, x.runs[a.slot], n);
             host.dspark.blockIds(.{ .block = n, .noise = x.c.dspark_noise_token }, a.anchor, ids[j * n ..][0..n]);
             for (0..n) |i| l.at[j * n + i] = @intCast(a.start + i);
         }
@@ -378,14 +406,15 @@ pub const Pass = struct {
         try x.encodeHead(e, l);
         if (!l.gpu) return;
         const m = &(x.mk orelse return error.NoGpuChain);
-        const n = x.c.dspark_block;
+        const n = l.n;
         e.barrier();
         mkv.encode(&m.p, e, &m.t, &m.o, ctx_.cv(mkv.Ref, x.b.logits), ctx_.cv(mkv.Ref, x.b.hf), ctx_.cv(mkv.Ref, x.b.ids), x.c.vocab, x.c.hidden, l.rows / n, n);
     }
 
     /// Candidates and the Markov chain over a launch's head outputs, each ask's results into `out` (its order).
     pub fn finish(x: *Pass, l: *const Launch, out: []Proposal) !void {
-        const n: usize = x.c.dspark_block;
+        const n: usize = l.n;
+        const B: usize = x.c.dspark_block;
         const k: usize = @min(x.opt.candidates, x.c.vocab);
         const D: usize = x.c.hidden;
         const V: usize = x.c.vocab;
@@ -402,38 +431,52 @@ pub const Pass = struct {
         if (l.gpu) return x.finishGpu(l, out, logits, k, cand, base);
         try host.dspark.candidateRows(logits, V, k, cand, base);
         for (l.asks, out, 0..) |a, *o, j| {
-            if (o.drafts.len != n or o.conf.len != n) return error.BadOutput;
+            if (o.drafts.len != B or o.conf.len != B) return error.BadOutput;
             const cd = cand[j * n * k ..][0 .. n * k];
             const cv = base[j * n * k ..][0 .. n * k];
-            for (hid, hf[j * n * D ..][0 .. n * D]) |*h, v| h.* = host.dspark.bf16(v);
-            try host.dspark.chain(sa, mk, cd, cv, k, a.anchor, a.params, if (mk.conf != null) hid else null, o.drafts, o.conf);
+            for (hid[0 .. n * D], hf[j * n * D ..][0 .. n * D]) |*h, v| h.* = host.dspark.bf16(v);
+            try host.dspark.chain(sa, mk, cd, cv, k, a.anchor, a.params, if (mk.conf != null) hid[0 .. n * D] else null, o.drafts[0..n], o.conf[0..n]);
+            // a narrow pass's missing drafts never land: no confidence, so no depth verifies them
+            @memset(o.drafts[n..], o.drafts[n - 1]);
+            @memset(o.conf[n..], 0);
             if (o.cand) |t| {
-                if (t.len != cd.len) return error.BadOutput;
-                @memcpy(t, cd);
+                if (t.len != B * k) return error.BadOutput;
+                @memcpy(t[0..cd.len], cd);
+                @memset(t[cd.len..], -1);
             }
             if (o.base) |t| {
-                if (t.len != cv.len) return error.BadOutput;
-                @memcpy(t, cv);
+                if (t.len != B * k) return error.BadOutput;
+                @memcpy(t[0..cv.len], cv);
+                @memset(t[cv.len..], -std.math.inf(f32));
             }
         }
     }
 
     /// A GPU chain's results: each ask's drafts and confidences as its kernels left them; candidates only for trees.
     fn finishGpu(x: *Pass, l: *const Launch, out: []Proposal, logits: []const f32, k: usize, cand: []i32, base: []f32) !void {
-        const n: usize = x.c.dspark_block;
+        const n: usize = l.n;
+        const B: usize = x.c.dspark_block;
         const m = &x.mk.?;
         const drafts = m.o.drafts(l.rows);
         const conf = m.o.conf(l.rows);
         for (out, 0..) |*o, j| {
-            if (o.drafts.len != n or o.conf.len != n) return error.BadOutput;
-            @memcpy(o.drafts, drafts[j * n ..][0..n]);
-            @memcpy(o.conf, conf[j * n ..][0..n]);
+            if (o.drafts.len != B or o.conf.len != B) return error.BadOutput;
+            @memcpy(o.drafts[0..n], drafts[j * n ..][0..n]);
+            @memcpy(o.conf[0..n], conf[j * n ..][0..n]);
+            @memset(o.drafts[n..], o.drafts[n - 1]);
+            @memset(o.conf[n..], 0);
             if (o.cand == null and o.base == null) continue;
             const cd = cand[j * n * k ..][0 .. n * k];
             const cv = base[j * n * k ..][0 .. n * k];
             try host.dspark.candidateRows(logits[j * n * x.c.vocab ..][0 .. n * x.c.vocab], x.c.vocab, k, cd, cv);
-            if (o.cand) |t| @memcpy(t, cd);
-            if (o.base) |t| @memcpy(t, cv);
+            if (o.cand) |t| {
+                @memcpy(t[0..cd.len], cd);
+                @memset(t[cd.len..], -1);
+            }
+            if (o.base) |t| {
+                @memcpy(t[0..cv.len], cv);
+                @memset(t[cv.len..], -std.math.inf(f32));
+            }
         }
     }
 

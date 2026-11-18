@@ -36,8 +36,10 @@ pub const Pass = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// Right after a window: each slot's next passes wide or narrow by its rows, then the chain behind it.
     fn queueChain(ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: mtl.Buffer) void {
         const p = self(ctx);
+        for (group) |g| p.x.note(g.slot, @intCast(g.tokens.len));
         if (p.early) |e| e.queue(group, logits, off, taps);
     }
 
