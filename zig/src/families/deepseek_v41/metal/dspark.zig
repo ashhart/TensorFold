@@ -13,6 +13,7 @@ const forward = @import("forward.zig");
 const plan_ = @import("dspark_plan.zig");
 const dw = @import("dspark_weights.zig");
 const st = @import("dspark_stage.zig");
+const undo_ = @import("dspark_undo.zig");
 
 const Config = host.config.Config;
 const Params = host.dspark.Params;
@@ -68,17 +69,23 @@ pub const Pass = struct {
     /// one ring buffer a stage: [slots][window + block][head_dim] bf16
     rings: []mtl.Buffer,
     runs: []Run,
+    /// each slot's ring rows its last ingest overwrote (put back when a commit cuts that ingest's window)
+    undo: undo_.Undo,
     /// the context-free slot the layer encoders' Ctx names (the drafter reads its own rings)
     noslot: kv.Slot,
     /// the drafter's weights and buffers held resident on the queue (null: no residency sets on this OS)
     resident: ?mtl.ResidencySet = null,
+    /// command buffers committed and not yet waited for (`settle` waits), in commit order
+    queued: [4]?mtl.CommandBuffer = @splat(null),
+    /// a pass queued by `begin` that `collect` finishes
+    begun: ?Begun = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
         if (c.mtp_layers == 0 or p.route_dspark == null or w.stages.len != c.mtp_layers) return error.NoDspark;
         if (opt.slots == 0 or c.dspark_block == 0 or c.dspark_block > R or opt.candidates == 0) return error.Slots;
         const x = try a.create(Pass);
         errdefer a.destroy(x);
-        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .rings = undefined, .runs = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
+        x.* = .{ .a = a, .c = c, .p = p, .s = s, .tables = tables, .top = top, .w = w, .device = device, .queue = queue, .opt = opt, .b = undefined, .plan = undefined, .quant = undefined, .rings = undefined, .runs = undefined, .undo = undefined, .noslot = .{ .regions = &.{}, .limit = 0, .a = a } };
         x.b = try forward.Bufs.init(device, c);
         errdefer x.b.deinit();
         x.plan = try plan_.Plan.init(device);
@@ -96,7 +103,9 @@ pub const Pass = struct {
             made += 1;
         }
         x.runs = try a.alloc(Run, opt.slots);
+        errdefer a.free(x.runs);
         @memset(x.runs, .{});
+        x.undo = try undo_.Undo.init(a, c, x.rings, opt.slots);
         x.resident = x.holdResident();
         return x;
     }
@@ -120,10 +129,12 @@ pub const Pass = struct {
     }
 
     pub fn deinit(x: *Pass) void {
+        x.settle() catch {};
         if (x.resident) |set| {
             x.queue.removeResidencySet(set);
             set.deinit();
         }
+        x.undo.deinit();
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
@@ -146,15 +157,23 @@ pub const Pass = struct {
     /// A new request on the slot: its context restarts at position 0.
     pub fn reset(x: *Pass, slot: u32) void {
         if (slot < x.runs.len) x.runs[slot] = .{};
+        x.undo.forget(slot);
     }
 
     /// The slot's context restarts after `at` (rows that are not on the device).
     pub fn restart(x: *Pass, slot: u32, at: u64) void {
         if (slot < x.runs.len) x.runs[slot] = .{ .first = at, .end = at };
+        x.undo.forget(slot);
     }
 
     /// The command buffer of one encoder of `kind`: `f` encodes, then it is committed and waited for.
-    fn run(x: *const Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
+    fn run(x: *Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
+        try x.queue1(F, f, kind);
+        try x.settle();
+    }
+
+    /// `run` without the wait: the buffer is committed and kept for `settle` (the queue runs buffers in order).
+    fn queue1(x: *Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = x.queue.commandBuffer();
@@ -164,18 +183,49 @@ pub const Pass = struct {
             return err;
         };
         e.end();
+        try x.hold(cb);
+    }
+
+    /// Commits `cb` and keeps it until `settle` (a full list is settled first).
+    pub fn hold(x: *Pass, cb: mtl.CommandBuffer) !void {
+        if (x.queued[x.queued.len - 1] != null) try x.settle();
         cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.debug.print("dspark command buffer failed: {s}\n", .{msg});
-            return error.CommandBufferFailed;
-        }
+        for (&x.queued) |*q| if (q.* == null) {
+            q.* = cb.retain();
+            return;
+        };
+        unreachable;
+    }
+
+    /// Waits for every queued command buffer (the last one: the queue runs them in order) and checks each.
+    pub fn settle(x: *Pass) !void {
+        var last: ?mtl.CommandBuffer = null;
+        for (x.queued) |q| if (q) |cb| {
+            last = cb;
+        };
+        if (last) |cb| cb.wait();
+        var failed = false;
+        for (&x.queued) |*q| if (q.*) |cb| {
+            if (cb.failure()) |msg| {
+                std.debug.print("dspark command buffer failed: {s}\n", .{msg});
+                failed = true;
+            }
+            cb.release();
+            q.* = null;
+        };
+        if (failed) return error.CommandBufferFailed;
     }
 
     // ingest -------------------------------------------------------------------------------------------------------
 
     /// Committed rows into the slot's rings: `taps` rows `rows[i]` (a contiguous run) land at positions start + i.
     pub fn ingest(x: *Pass, slot: u32, start: u64, taps: Taps, rows: []const u32) !void {
+        try x.ingestQueued(slot, start, taps, rows);
+        try x.settle();
+    }
+
+    /// `ingest` whose last launch is left queued (`settle` waits); the taps must stay as they are until then.
+    pub fn ingestQueued(x: *Pass, slot: u32, start: u64, taps: Taps, rows: []const u32) !void {
         if (slot >= x.runs.len) return error.Slots;
         if (rows.len == 0) return;
         for (rows, 0..) |r, i| if (r != rows[0] + i) return error.NotAPrefix;
@@ -184,6 +234,10 @@ pub const Pass = struct {
         const sp = ingestSpan(rows.len, x.c.window);
         const keep = sp.count;
         const skip = sp.skip;
+        // the rings as the GPU leaves them: a cut window's rows from this ingest's end put back, its own rows kept
+        try x.settle();
+        x.undo.settle(slot, start + rows.len);
+        x.undo.save(slot, start + skip, @intCast(keep));
         var at: usize = 0;
         while (at < keep) : (at += R) {
             const n: u32 = @intCast(@min(R, keep - at));
@@ -193,9 +247,10 @@ pub const Pass = struct {
         x.runs[slot].land(start + skip, keep);
     }
 
-    /// `n` main rows from taps row `row0`, landing at `start`.
+    /// `n` main rows from taps row `row0`, landing at `start` (queued; a queued ingest still reads the plan's rows).
     fn ingestRows(x: *Pass, slot: u32, start: u64, taps: Taps, row0: usize, n: u32) !void {
         if (start + n > x.tables.positions) return error.PastLimit;
+        try x.settle();
         try x.plan.writeIngest(x.c, slot, start, n);
         const row_bytes = x.c.dspark_targets.len * x.c.hidden * 2;
         const refs = x.plan.ingestRefs();
@@ -209,7 +264,14 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
+        try x.queue1(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
+    }
+
+    /// The ingest's encoders for `n` rows of `taps` (from its first row) with the plan's ingest rows, in `e` (serial).
+    pub fn encodeIngest(x: *const Pass, e: mtl.ComputeEncoder, taps: Taps, n: u32) !void {
+        const cx = x.ctx(n);
+        const refs = x.plan.ingestRefs();
+        try st.ingest(&cx, e, x.w, .{ .buf = taps.buf, .off = taps.off }, .{ .buf = x.quant }, x.rings, refs.pos, refs.dest);
     }
 
     // propose ------------------------------------------------------------------------------------------------------
@@ -224,9 +286,13 @@ pub const Pass = struct {
         const n = x.c.dspark_block;
         if (asks.len == 0 or asks.len > x.group()) return error.Slots;
         var l: Launch = .{ .rows = @intCast(asks.len * n), .asks = asks };
+        for (asks) |a| if (a.slot < x.runs.len and x.undo.pending(a.slot, a.start)) try x.settle();
         const ids: []u32 = @alignCast(std.mem.bytesAsSlice(u32, x.b.bytes(x.b.ids, 4 * l.rows)));
         for (asks, 0..) |a, j| {
             if (a.slot >= x.runs.len) return error.Slots;
+            // a block reads the context before it: rows a cut window's ingest wrote from its start on put back
+            x.undo.settle(a.slot, a.start);
+            x.runs[a.slot].cut(a.start);
             for (asks[0..j]) |o| if (o.slot == a.slot) return error.DuplicateSlot;
             if (a.start + n > x.tables.positions or a.anchor >= x.c.vocab) return error.PastLimit;
             try x.plan.writeBlock(x.c, @intCast(j), a.slot, a.start, x.runs[a.slot]);
@@ -324,11 +390,47 @@ pub const Pass = struct {
         }
     }
 
+    /// A pass of one launch queued (`collect` finishes it); more asks than a launch holds: false, nothing queued.
+    pub fn begin(x: *Pass, asks: []const Ask) !bool {
+        if (x.begun != null) return error.PassBegun;
+        if (asks.len == 0 or asks.len > x.group()) return false;
+        x.begun = .{ .n = asks.len, .l = undefined };
+        const b = &x.begun.?;
+        @memcpy(b.asks[0..asks.len], asks);
+        b.l = x.prepare(b.asks[0..b.n]) catch |e| {
+            x.begun = null;
+            return e;
+        };
+        const job = struct {
+            x: *const Pass,
+            l: *const Launch,
+            fn encode(j: @This(), e: mtl.ComputeEncoder) !void {
+                try j.x.encodeAll(e, j.l);
+            }
+        };
+        x.queue1(job, .{ .x = x, .l = &b.l }, .concurrent) catch |e| {
+            x.begun = null;
+            return e;
+        };
+        return true;
+    }
+
+    /// The begun pass's results, in its asks' order.
+    pub fn collect(x: *Pass, out: []Proposal) !void {
+        if (x.begun == null) return error.NothingBegun;
+        defer x.begun = null;
+        try x.settle();
+        try x.finish(&x.begun.?.l, out);
+    }
+
     /// One slot's context for a block starting at `start`, as the attention reads it.
     pub fn context(x: *const Pass, slot: u32, start: u64) plan_.Context {
         return x.runs[slot].context(x.c.window, start);
     }
 };
+
+/// A queued pass: its asks (the launch's own copy) and launch.
+pub const Begun = struct { asks: [R]Ask = undefined, n: usize, l: Launch };
 
 /// Which committed rows an ingest writes: only the last `window` (older ones are never read).
 pub fn ingestSpan(n: usize, window: usize) struct { skip: usize, count: usize } {

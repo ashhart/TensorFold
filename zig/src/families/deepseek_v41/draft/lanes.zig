@@ -462,8 +462,10 @@ pub const Lanes = struct {
             if (r.rows) |path| {
                 if (r.start != st.base) return error.PositionMismatch;
                 const done = if (x.spec) |*sp| sp.ingested(st.slot, r.start, path) else false;
+                // the speculation ingested another path of this window than the commit kept: the kept one lands now
+                const redo = !done and if (x.spec) |*sp| sp.differs(st.slot, r.start) else false;
                 // a shared round drafts before its keep: the path, not st.len; no ask: the next ingest catches it up
-                if (!done and (asks_now or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
+                if (!done and (asks_now or redo or !@import("lane_ingest.zig").deferred(x))) try x.ingest(st, r.start, path);
                 at = r.start + path.len;
             }
             if (r.position != at + 1) return error.PositionMismatch;
