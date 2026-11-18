@@ -221,23 +221,40 @@ pub fn candidates(scratch: Allocator, logits: []const f32, id0: u32, ids: []i32,
     const best = try scratch.alloc(Ranked, k);
     defer scratch.free(best);
     var n: usize = 0;
-    for (logits, 0..) |v, i| {
-        const r: Ranked = .{ .value = v, .id = @intCast(i) };
-        if (n == k) {
-            if (k == 0 or !rankedBefore({}, r, best[k - 1])) continue;
-            n -= 1;
+    var i: usize = 0;
+    while (i < logits.len) {
+        // a full list takes a value only above its last (a later id loses the tie): a block with none is skipped whole
+        if (n == k and k > 0 and i + vlanes <= logits.len) {
+            const v: V = logits[i..][0..vlanes].*;
+            if (@reduce(.Or, v > @as(V, @splat(best[k - 1].value)))) {
+                for (i..i + vlanes) |j| take(best, &n, logits[j], j);
+            }
+            i += vlanes;
+        } else {
+            take(best, &n, logits[i], i);
+            i += 1;
         }
-        var j = n;
-        while (j > 0 and rankedBefore({}, r, best[j - 1])) : (j -= 1) best[j] = best[j - 1];
-        best[j] = r;
-        n += 1;
     }
-    for (ids[0..k], vals[0..k], best[0..k]) |*i, *v, r| {
-        i.* = @intCast(r.id + id0);
+    for (ids[0..k], vals[0..k], best[0..k]) |*o, *v, r| {
+        o.* = @intCast(r.id + id0);
         v.* = r.value;
     }
     @memset(ids[k..], -1);
     @memset(vals[k..], -std.math.inf(f32));
+}
+
+/// Value `v` of id `i` into the ranked list `best` holding `n` (full at best.len: only one ranked before its last).
+inline fn take(best: []Ranked, n: *usize, v: f32, i: usize) void {
+    const k = best.len;
+    const r: Ranked = .{ .value = v, .id = @intCast(i) };
+    if (n.* == k) {
+        if (k == 0 or !rankedBefore({}, r, best[k - 1])) return;
+        n.* -= 1;
+    }
+    var j = n.*;
+    while (j > 0 and rankedBefore({}, r, best[j - 1])) : (j -= 1) best[j] = best[j - 1];
+    best[j] = r;
+    n.* += 1;
 }
 
 test "candidates: the bounded selection == the first k of a full sort (ties by id)" {
@@ -265,6 +282,36 @@ test "candidates: the bounded selection == the first k of a full sort (ties by i
     var vals: [4]f32 = undefined;
     try candidates(a, &.{ 1.0, 3.0, 3.0 }, 10, &ids, &vals);
     try std.testing.expectEqualSlices(i32, &.{ 11, 12, 10, -1 }, &ids);
+}
+
+test "candidates: rows with NaN, infinities and long ties == a stable full sort, whatever their length" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(4102);
+    const rnd = prng.random();
+    for (0..60) |case| {
+        const len = 1 + rnd.uintLessThan(usize, 3000);
+        const logits = try a.alloc(f32, len);
+        defer a.free(logits);
+        for (logits) |*v| v.* = switch (rnd.uintLessThan(u32, 40)) {
+            0 => std.math.nan(f32),
+            1 => std.math.inf(f32),
+            2 => -std.math.inf(f32),
+            else => if (case % 3 == 0) @floatFromInt(rnd.intRangeAtMost(i32, -3, 3)) else rnd.floatNorm(f32),
+        };
+        // the reference: the scalar bounded selection, value by value
+        const k = @min(64, len);
+        const want = try a.alloc(Ranked, k);
+        defer a.free(want);
+        var n: usize = 0;
+        for (logits, 0..) |v, i| take(want, &n, v, i);
+        var ids: [64]i32 = undefined;
+        var vals: [64]f32 = undefined;
+        try candidates(a, logits, 3, &ids, &vals);
+        for (want[0..k], ids[0..k], vals[0..k]) |r, i, v| {
+            try std.testing.expectEqual(@as(i32, @intCast(r.id + 3)), i);
+            try std.testing.expectEqual(@as(u32, @bitCast(r.value)), @as(u32, @bitCast(v)));
+        }
+    }
 }
 
 /// window = [pending, d_1 .. d_k], chosen = the target's choice after each row -> drafts kept.
