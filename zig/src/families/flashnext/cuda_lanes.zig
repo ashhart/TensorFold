@@ -149,7 +149,6 @@ pub fn Namespace(comptime Tri: type) type {
 
         const Parts = @import("cuda_lane_parts.zig").Parts;
         const seq_parts = @import("cuda_seq_parts.zig");
-
         const Ops = mtp.Ops(Tri);
         const snaps = @import("cuda_lanes_snap.zig").Snaps(Cuda);
 
