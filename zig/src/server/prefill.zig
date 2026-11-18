@@ -14,7 +14,7 @@ const Cx = errors.Cx;
 /// Written after the final message's text in a second render, to find where the template puts that text.
 const probe = "\u{2063}probe";
 
-pub const thinking_on = "continuing a final assistant message needs thinking off, or the reply would open in a reasoning block: send chat_template_kwargs {\"enable_thinking\": false} (on /v1/messages, thinking {\"type\": \"disabled\"})";
+pub const thinking_on = "this request enables thinking, and a reply that opens in a reasoning block cannot continue the final assistant message: leave thinking unset or send chat_template_kwargs {\"enable_thinking\": false} (on /v1/messages, no thinking or thinking {\"type\": \"disabled\"})";
 pub const rewritten = "this chat template does not end the final assistant message with its text as sent, so the reply cannot continue it";
 pub const calls = "a final assistant message with tool calls cannot be continued: send its text alone";
 pub const not_assistant = "continue_final_message needs the last message to be an assistant message, which the reply continues";
@@ -54,7 +54,7 @@ fn final(cx: *Cx, messages: Value) errors.Refused![]const u8 {
 
 /// The prompt that continues the final assistant message: its turn as the template renders it, up to its text's end.
 pub fn ids(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8) errors.Refused![]const u32 {
-    if (thinking and srv.info.capability(.reasoning)) return cx.refuse(thinking_on);
+    if (thinking and srv.info.capability(.reasoning)) return cx.refuse(thinking_on); // on only when the request asked
     const list = try prompt.templateMessages(srv, cx, messages);
     const text = try final(cx, list);
     const options = prompt.renderOptions(srv, cx, tools, thinking, effort, false);
