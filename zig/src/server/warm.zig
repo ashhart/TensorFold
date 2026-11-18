@@ -97,13 +97,18 @@ fn start(srv: *Server, input: chat.Input, sent: Value, reasoning: ?[]const u8, t
 
 /// The tokens every next user or tool turn shares: two renderings agree up to that turn's text.
 fn shared(srv: *Server, cx: *errors.Cx, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) !struct { ids: []const u32, messages: []Value } {
-    const before = input.messages.array;
+    var before = input.messages.array;
+    var turn = message;
+    if (input.prefill) { // the next turn holds the continued message and the reply as one
+        before = before[0 .. before.len - 1];
+        turn = try @import("prefill.zig").joined(cx.a, input.messages.array[before.len], message);
+    }
     var ids: [2][]const u32 = undefined;
     var first: []Value = undefined;
     for ([_][]const u8{ "A", "B" }, &ids, 0..) |text, *out, i| {
         const list = try cx.a.alloc(Value, before.len + 2);
         @memcpy(list[0..before.len], before);
-        list[before.len] = message;
+        list[before.len] = turn;
         const user = try json.newObject(cx.a);
         try user.put(cx.a, "role", .{ .string = "user" });
         try user.put(cx.a, "content", .{ .string = text });

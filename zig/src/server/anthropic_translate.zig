@@ -218,7 +218,9 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const model = try string(cx, body.get("model"), "model", false);
     const chat = try json.newObject(a);
     try chat.put(a, "model", .{ .string = model });
-    try chat.put(a, "messages", try messages(cx, body.get("messages"), body.get("system")));
+    const turns = try messages(cx, body.get("messages"), body.get("system"));
+    try chat.put(a, "messages", turns);
+    if (try @import("prefill.zig").continues(cx, turns)) try chat.put(a, "continue_final_message", .{ .bool = true });
     if (!count) {
         _ = positiveInt(body.get("max_tokens")) orelse return cx.refuse("max_tokens must be a positive integer");
         try chat.put(a, "max_tokens", body.get("max_tokens").?);

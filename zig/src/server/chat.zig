@@ -67,6 +67,8 @@ pub const Input = struct {
     fill_room: bool = false,
     /// ``"execution_witness": true``: the reply binds the witness, its prompt, resolved request and tokens.
     execution_witness: bool = false,
+    /// The reply continues the final assistant message (continue_final_message, or a Messages prefill): prefill.zig.
+    prefill: bool = false,
 
     /// The prompt rows the engine computes: ``prompt_logprobs``' alternatives, or echo's ``logprobs`` when more.
     pub fn promptRows(input: Input) ?u8 {
