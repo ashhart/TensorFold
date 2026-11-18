@@ -38,6 +38,8 @@ pub const records = [_]M{
     .{ .name = "glm launch prompt experts glm_gather_scatter_32", .threads = 128, .tg_memory = 9728, .offline = false },
     .{ .name = "glm launch prompt experts glm_gather_scatter_64", .threads = 128, .tg_memory = 9728, .offline = false },
     .{ .name = "glm launch prompt dense glm_mm_grouped", .threads = 128, .tg_memory = 9728, .offline = false },
+    // a prompt chunk's index scores in 128-row tiles (nax.h: no M1/M2 build ahead of time)
+    .{ .name = "glm launch index glm_index_scores_nax", .threads = 256, .tg_memory = 17408, .offline = false },
 };
 
 test "the GLM launches fit every Apple family" {
