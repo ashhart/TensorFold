@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: at head size 256 on long spans (16,384 keys or more), the planned decode walk scores keys in its own kernels without per-element tests or a per-key branch, with byte-identical scores (Qwen3.6-35B-A3B, Qwen3.8-27B); Nemotron's d = 128 kernels are unchanged (#3508). Thanks to @AbrahamCete.
+
 - Lanes: Qwen 3.5's bounded top-k row draw moves into core's shared sampler (`core/lanes/sampling_row_topk.zig`), the same code and the same tokens (#3214, part of #2460). Thanks to @jschmied.
 
 - Server: a slow grammar compile no longer holds up other requests' grammars; a request waits at most 2,000 ms for its grammar and past that gets HTTP 400 naming the limit, each model runs at most 4 compiles at once, and grammars that compile within the limit are unchanged (#3231).
