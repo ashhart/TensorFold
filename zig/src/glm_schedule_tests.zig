@@ -26,3 +26,7 @@ test {
 test {
     _ = @import("glm_order_tests.zig");
 }
+
+test {
+    _ = @import("families/glm/pool_size_test.zig");
+}

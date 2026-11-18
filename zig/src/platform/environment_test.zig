@@ -176,6 +176,9 @@ const valid = [_]Case{
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
     .{ .name = "GLM_ROUND_PROF", .raw = "0", .n = 0 },
     .{ .name = "GLM_ROUND_PROF", .raw = "1", .n = 1 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = "1024", .n = 1024 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = " 2000000 ", .n = 2000000 },
+    .{ .name = "GLM_POOL_TOKENS", .raw = "4294967231", .n = 4294967231 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
@@ -318,6 +321,10 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
         .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
+        .{ "GLM_POOL_TOKENS", "0" },                   .{ "GLM_POOL_TOKENS", "1023" },
+        .{ "GLM_POOL_TOKENS", "4294967232" },          .{ "GLM_POOL_TOKENS", "2k" },
+        .{ "GLM_POOL_TOKENS", "+2000000" },            .{ "GLM_POOL_TOKENS", "-1" },
+        .{ "GLM_POOL_TOKENS", "1e6" },                 .{ "GLM_POOL_TOKENS", "lots" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
