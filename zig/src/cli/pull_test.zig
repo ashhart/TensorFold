@@ -8,7 +8,7 @@ const exlr8_pull = @import("pull_exlr8.zig");
 const TestClient = @import("pull_test_client.zig").Client;
 
 /// A fake hub on 127.0.0.1: revision and tree APIs, ranged resolve endpoints, a body cut once, a repo ignoring ranges.
-const FakeHub = struct {
+pub const FakeHub = struct {
     allocator: Allocator = std.heap.page_allocator, // the fake server owns its worker allocations
     server: std.Io.net.Server,
     io: std.Io,
@@ -28,8 +28,9 @@ const FakeHub = struct {
     config_git_hex: [40]u8,
     flaky_git_hex: [40]u8,
     port: u16,
-
-    const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
+    /// Routes a test puts before the fake's own: the answer's keep-alive, or null when the request is not theirs.
+    route: ?*const fn (fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) ?bool = null,
+    pub const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
     const config_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/config.json";
     const nested_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/tensors/model-00001-of-00001.safetensors";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
@@ -38,7 +39,7 @@ const FakeHub = struct {
     var nested_body_storage: [1234]u8 = @splat(0x5A);
     const nested_body: []const u8 = &nested_body_storage;
 
-    fn open() !FakeHub {
+    pub fn open() !FakeHub {
         const a = std.heap.page_allocator;
         const threaded = try a.create(std.Io.Threaded);
         errdefer a.destroy(threaded);
@@ -141,6 +142,7 @@ const FakeHub = struct {
 
     /// Answers one request; false closes the connection.
     fn respondOne(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) bool {
+        if (fake.route) |r| if (r(fake, conn, head)) |keep| return keep;
         var tree_buf: [256]u8 = undefined;
         const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return false;
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
@@ -244,25 +246,25 @@ const FakeHub = struct {
         fake.sendAll(conn, body);
     }
 
-    fn respond(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
+    pub fn respond(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
         var head_buf: [128]u8 = undefined;
         const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{body.len}) catch return;
         fake.sendAll(conn, head_text);
         fake.sendAll(conn, body);
     }
 
-    fn sendAll(fake: *FakeHub, conn: std.Io.net.Stream, bytes: []const u8) void {
+    pub fn sendAll(fake: *FakeHub, conn: std.Io.net.Stream, bytes: []const u8) void {
         var buf: [4096]u8 = undefined;
         var w = conn.writer(fake.io, &buf);
         w.interface.writeAll(bytes) catch return;
         w.interface.flush() catch return;
     }
 
-    fn start(fake: *FakeHub) void {
+    pub fn start(fake: *FakeHub) void {
         fake.thread = std.Thread.spawn(.{}, serve, .{fake}) catch null;
     }
 
-    fn endpoint(fake: *FakeHub, a: Allocator) ![]const u8 {
+    pub fn endpoint(fake: *FakeHub, a: Allocator) ![]const u8 {
         return std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{fake.port});
     }
 
@@ -277,7 +279,7 @@ const FakeHub = struct {
         }
     }
 
-    fn stopServer(fake: *FakeHub) void {
+    pub fn stopServer(fake: *FakeHub) void {
         fake.stop.store(true, .release);
         fake.live_lock.lockUncancelable(fake.io);
         for (fake.live.items) |conn| conn.shutdown(fake.io, .both) catch {};
@@ -438,7 +440,7 @@ test "shared pieces fill every byte across files, restart only unmarked pieces a
         .{ .url = url, .path = try std.fs.path.join(a, &.{ root, "second.ranges" }), .size = size },
     };
 
-    try ranged.fetch(a, io, &files, 1250, null);
+    try ranged.fetch(a, io, &files, 1250, .{}, null);
     try std.testing.expectEqual(@as(u32, 8), fake_hub.weight_requests.load(.monotonic));
     for (files) |f| try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try std.Io.Dir.cwd().readFileAlloc(io, f.path, a, .limited(1 << 20)));
 
@@ -447,13 +449,13 @@ test "shared pieces fill every byte across files, restart only unmarked pieces a
     try std.Io.Dir.cwd().deleteFile(io, first.path);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = first.path, .data = FakeHub.weights_body });
     for ([_]u32{ 0, 2 }) |i| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}.part{d}", .{ first.path, i }), .data = "" });
-    try ranged.fetch(a, io, &.{first}, 1250, null);
+    try ranged.fetch(a, io, &.{first}, 1250, .{}, null);
     try std.testing.expectEqual(@as(u32, 10), fake_hub.weight_requests.load(.monotonic));
     try std.testing.expectEqualSlices(u8, &(try ranged.digest(a, io, first.path, size)), &(try hexBytes(fake_hub.weights_sha_hex)));
 
     // A server that answers a range with the whole file (the config endpoint here) is refused for pieces.
     const config_url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake_hub.endpoint(a), FakeHub.config_path });
-    try std.testing.expectError(error.RangeUnsupported, ranged.fetch(a, io, &.{.{ .url = config_url, .path = try std.fs.path.join(a, &.{ root, "config.ranges" }), .size = FakeHub.config_body.len }}, 50, null));
+    try std.testing.expectError(error.RangeUnsupported, ranged.fetch(a, io, &.{.{ .url = config_url, .path = try std.fs.path.join(a, &.{ root, "config.ranges" }), .size = FakeHub.config_body.len }}, 50, .{}, null));
 }
 
 fn hexBytes(text: []const u8) ![32]u8 {
@@ -487,7 +489,7 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u32, 2), try exlr8_pull.fetchWhole(a, io, &client, &out.writer, &err_out.writer, try fake_hub.endpoint(a), "Org/Flash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", dir, &whole));
+    try std.testing.expectEqual(@as(u32, 2), try exlr8_pull.fetchWhole(a, io, &client, &out.writer, &err_out.writer, .{ .endpoint = try fake_hub.endpoint(a) }, "Org/Flash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", dir, &whole));
     const cwd = std.Io.Dir.cwd();
     try std.testing.expectEqualStrings(FakeHub.config_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 20)));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }), a, .limited(1 << 20)));
@@ -511,7 +513,7 @@ test "security: a hub response cannot write beyond the manifest file size" {
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, &out.writer, url, dir, .{
+    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, .{}, &out.writer, url, dir, .{
         .path = "overflow.bin",
         .size = 8,
     }));

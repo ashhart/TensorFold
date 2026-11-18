@@ -87,6 +87,10 @@ It refuses a checkpoint whose `model_type` has no native family, and fetches the
 Each line gives the memory the engine keeps (weights, any drafter and a 2 GiB margin; context and caches take more) and a one-stream speed with drafts as shipped: measured on this chip, or `~` estimated from a measurement on another chip of the same backend, scaled by memory bandwidth.
 Quality is the share of TensorFold Web's 228-item quality suite the checkpoint answers right, greedy with thinking off, measured once a checkpoint with `tools/quality_suite.py`; each score's receipt is in [quality receipts](receipts/quality-suite/README.md), and `-` means not rated yet.
 The line under it installs the checkpoint. `--all` also lists what needs more memory, two machines or the other backend. Last come the cached checkpoints with a model type it knows.
+A gated repo (one whose terms you accept on its Hugging Face page first, such as Llama or Gemma) or a private one needs your Hugging Face token.
+`pull` reads `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read: the file `HF_TOKEN_PATH` names, else `$HF_HOME/token`, else `~/.cache/huggingface/token`, where `hf auth login` saves it.
+It sends the token only to the hub's own host (`huggingface.co`, or the host of `HF_ENDPOINT`), never to the storage hosts the hub redirects downloads to, and never prints it.
+When the hub refuses a repo, `pull` names it and says whether a token is missing or the token lacks access; without a token, Hugging Face refuses a mistyped repo name the same way.
 `models --json` prints one document for programs: `schema` 1 and `models`, each cached checkpoint's `repo`, `family` and `model_type` (`family` is a display title and `model_type` is the key to match on), plus `machine` and `catalog`, each entry's `need_bytes`, `fit`, `tok_s` (null when unmeasured), `quality` (passed, items, share, suite digest and receipt; null when unrated), `on_disk` and `install`.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 `rm REPO` removes a cached checkpoint with all its snapshots, blobs and refs, and then the repo's folder.
