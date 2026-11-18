@@ -62,6 +62,7 @@ test {
     _ = edit_plan;
     _ = @import("difflib.zig");
     _ = span_follow;
+    _ = @import("laci_pace.zig");
     _ = align_words;
     _ = @import("speaker_blocks.zig");
     _ = codec_weights;

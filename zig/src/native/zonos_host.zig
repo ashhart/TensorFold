@@ -6,6 +6,7 @@ const cuda = @import("cuda");
 const zedit = @import("zonos_edit.zig");
 const zfollow = @import("zonos_follow.zig");
 const zdec = @import("zonos_decoders.zig");
+const zdur = @import("zonos_duration.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -248,6 +249,7 @@ const Host = struct {
         if (!zfollow.fits(r, r.frames.len - layout.prefill - layout.condition_row - cfg.conditions)) return false;
         // LACI runs one stream: no guidance twin of either kind
         if (r.laci) |lc| if (!z3.laci.valid(lc, r.cfg_gamma != 1 or (r.steering != null and r.steering.?.guidance != 1))) return false;
+        if (!zdur.valid(r)) return false;
         return true;
     }
 
@@ -470,7 +472,8 @@ const Host = struct {
                 slot.short = .{ .pause_marker = "", .max_words = 0, .max_ratio = .{ 0, 0 }, .lookback = sh.lookback, .min_voiced = sh.min_voiced, .max_frames = sh.max_frames, .max_retries = sh.max_retries, .threshold = sh.threshold, .weights = sh.weights, .fillers = &.{} };
             }
             const cut: ?z3.short_text.Cut = if (lc.short) |sh| z3.short_text.Cut.init(gpa, &slot.short, sh.filler_token) else null;
-            const setup: z3.laci_run.Setup = .{ .short = cut, .heads = .{ .heads = slot.heads, .frames_per_token = lc.frames_per_token }, .text_start = text, .text_len = rows.len - layout.prefill - text, .prefill = layout.prefill, .hold = !r.stream };
+            var setup: z3.laci_run.Setup = .{ .short = cut, .heads = .{ .heads = slot.heads, .frames_per_token = lc.frames_per_token }, .text_start = text, .text_len = rows.len - layout.prefill - text, .prefill = layout.prefill, .hold = !r.stream };
+            try zdur.hold(h.e, r, layout.condition_row, slot.kept[0..n], &setup);
             slot.laci = try LaciRun.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, slot.kept[0..n], setup, sampling, r.max_frames);
             if (r.steering != null) slot.laci.?.steer = .{ .ctx = slot, .at = Slot.steerFor, .twin = false };
             if (slot.follow) |*f| slot.laci.?.session.follower = &f.follower;
