@@ -61,6 +61,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
+    @import("zig/build/test_allocator.zig").checks(b);
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
     if (@import("zig/build/product.zig").requested(b)) |gpu| {
         @import("zig/build/product.zig").build(b, gpu);
@@ -276,7 +277,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
     @import("zig/build/host_ci.zig").steps(b);
-    @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
+    @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
+    @import("zig/build/test_allocator.zig").wire(b);
 }
 
 /// The native Metal server build is owned by the shared Metal target module.
