@@ -14,11 +14,11 @@ const swizzle = 6;
 
 /// d (rows, n) = x (rows, k) w^T for w (n, k) in bf16.
 fn gemm(m: *const Model, enc: mtl.ComputeEncoder, x: mtl.Buffer, w: Ref, d: mtl.Buffer, n: usize, k: usize) void {
-    const pipe = if (m.rows % 64 == 0) m.pipeline(kernels.gemm_whole) else m.pipeline(kernels.gemm_ragged);
-    product(enc, pipe, swizzle, x, w, d, m.rows, n, k);
+    const pipe = if (m.rows % 64 == 0) m.pipeline(kernels.gemm_32x64) else m.pipeline(kernels.gemm_32x64_ragged);
+    product(enc, pipe, swizzle, x, w, d, m.rows, n, k, 128);
 }
 
-fn product(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: usize, x: mtl.Buffer, w: Ref, d: mtl.Buffer, rows: usize, n: usize, k: usize) void {
+fn product(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: usize, x: mtl.Buffer, w: Ref, d: mtl.Buffer, rows: usize, n: usize, k: usize, comptime threads: usize) void {
     const band = @as(usize, 1) << @intCast(s);
     const tn = n / 128;
     const tm = (rows + 63) / 64;
@@ -30,7 +30,7 @@ fn product(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: usize, x: mtl.Buffer,
     for (values, 0..) |v, i| p[i] = @intCast(v);
     enc.setBytes(std.mem.asBytes(&p), 2);
     enc.setBuffer(d, 0, 3);
-    enc.dispatchGroups(mtl.Size.of(tn * band, (tm + band - 1) / band, 1), mtl.Size.of(32, 4, 2));
+    enc.dispatchGroups(mtl.Size.of(tn * band, (tm + band - 1) / band, 1), mtl.Size.of(32, 4, threads / 128));
 }
 
 /// The stream's modulated norm to bf16 rows in xn; with `gates` it first adds the branch in `y` gated by that part.
@@ -141,7 +141,7 @@ pub fn run(m: *Model, pass: *h3.Pass, index: usize) void {
     m.lap(pass, "mlp out");
 }
 
-test "h3 gemm: 64-tile bands write every tile, as MLX's band of 4 does, across a band edge and a ragged tile" {
+test "h3 gemm: 32x64-warp products write every tile as MLX's 32x32 band of 4 does, across a band edge and a ragged tile" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     if (!device.tensorUnits()) return error.SkipZigTest;
@@ -154,14 +154,21 @@ test "h3 gemm: 64-tile bands write every tile, as MLX's band of 4 does, across a
     defer a.free(text);
     const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
+    const whole_pipe = try mtl.Pipeline.init(device, lib, kernels.gemm_whole, false);
+    defer whole_pipe.deinit();
+    const ragged_pipe = try mtl.Pipeline.init(device, lib, kernels.gemm_ragged, false);
+    defer ragged_pipe.deinit();
+    const wide_pipe = try mtl.Pipeline.init(device, lib, kernels.gemm_32x64, false);
+    defer wide_pipe.deinit();
+    const wide_ragged_pipe = try mtl.Pipeline.init(device, lib, kernels.gemm_32x64_ragged, false);
+    defer wide_ragged_pipe.deinit();
     const n = 256;
     const k = 512;
     const guard = 64 * n; // one more row tile than the product writes, which must stay untouched
     var prng = std.Random.DefaultPrng.init(81);
-    // 65 whole tiles put one tile past the first band; 65 tiles and 24 rows end the second band ragged
-    for ([_]usize{ 64 * 65, 64 * 65 + 24 }) |rows| {
-        const pipe = try mtl.Pipeline.init(device, lib, if (rows % 64 == 0) kernels.gemm_whole else kernels.gemm_ragged, false);
-        defer pipe.deinit();
+    // a whole band of 64 tiles, one tile past it, and 65 tiles plus a ragged tail
+    for ([_]usize{ 64 * 64 + 24, 64 * 65, 64 * 65 + 24 }) |rows| {
+        const whole = rows % 64 == 0;
         const shared = mtl.ResourceOptions.shared;
         const x = try device.buffer(rows * k * 2, shared);
         defer x.deinit();
@@ -173,19 +180,29 @@ test "h3 gemm: 64-tile bands write every tile, as MLX's band of 4 does, across a
         }
         const old = try device.buffer((rows * n + guard) * 2, shared);
         defer old.deinit();
-        const new = try device.buffer((rows * n + guard) * 2, shared);
-        defer new.deinit();
-        for ([_]mtl.Buffer{ old, new }, [_]usize{ 2, swizzle }) |d, s| {
-            @memset(d.slice(u16, rows * n + guard), 0xffff); // a NaN no product of these inputs makes
+        const wide = try device.buffer((rows * n + guard) * 2, shared);
+        defer wide.deinit();
+        for ([_]mtl.Buffer{ old, wide }) |d| @memset(d.slice(u16, rows * n + guard), 0xffff); // a NaN no product of these inputs makes
+        // MLX's geometry: 32 x 32 a warp, 256 threads; ours: 32 x 64, 128 threads
+        {
             const cb = queue.commandBuffer();
             const enc = cb.compute(.concurrent);
-            product(enc, pipe, s, x, .{ .buffer = w }, d, rows, n, k);
+            product(enc, if (whole) whole_pipe else ragged_pipe, 2, x, .{ .buffer = w }, old, rows, n, k, 256);
             enc.end();
             cb.commit();
             cb.wait();
             try std.testing.expect(cb.failure() == null);
         }
-        const after = new.slice(u16, rows * n + guard);
+        {
+            const cb = queue.commandBuffer();
+            const enc = cb.compute(.concurrent);
+            product(enc, if (whole) wide_pipe else wide_ragged_pipe, swizzle, x, .{ .buffer = w }, wide, rows, n, k, 128);
+            enc.end();
+            cb.commit();
+            cb.wait();
+            try std.testing.expect(cb.failure() == null);
+        }
+        const after = wide.slice(u16, rows * n + guard);
         try std.testing.expectEqualSlices(u16, old.slice(u16, rows * n + guard), after);
         try std.testing.expect(std.mem.indexOfScalar(u16, after[0 .. rows * n], 0xffff) == null);
         for (after[rows * n ..]) |v| try std.testing.expectEqual(@as(u16, 0xffff), v);
