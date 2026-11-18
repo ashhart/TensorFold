@@ -38,8 +38,7 @@ pub const Ctx = struct {
     q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
 };
 
-/// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.
-pub const Inject = struct { rows: Ref, spans: []const Span };
+pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
 pub const Span = struct { at: u32, n: u32, row: u32 };
 
 /// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.

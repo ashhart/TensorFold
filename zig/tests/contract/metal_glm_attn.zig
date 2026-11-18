@@ -1,4 +1,4 @@
-//! GLM's dense latent attention for a window (dense_attn.zig's attendRows) against main's one-row launches, row by row.
+//! GLM's dense latent attention for a window (dense_attn.zig's attendRows) against main's scale and one-row launches.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -17,11 +17,14 @@ const lat = H * RANK; // a row's latent queries and outputs
 const plane = H * TOP; // and its scores and probabilities
 /// Main's glm_attn.metal, before the window kernels: the one-row scores and values every window row must equal.
 pub const main_attn = @embedFile("baselines/glm_attn_main.metal.txt");
+/// Main's glm_glue.metal: glm_scale, which scaled the dense rows' queries by 1/16 before the scores kernel read them.
+pub const main_glue = @embedFile("baselines/glm_glue_main.metal.txt");
+const q_scale: f32 = 1.0 / 16.0; // forward.zig's attend
 
 /// Rows: the window's dense rows; n: the heads; k: the first row's keys (edges: the 256-key join, the 1,024-key split).
 const served = [_]c.Shape{ .{ .rows = 8, .n = H, .k = 400 }, .{ .rows = 1, .n = H, .k = 1 }, .{ .rows = 16, .n = H, .k = 1 }, .{ .rows = 3, .n = H, .k = 5 }, .{ .rows = 2, .n = H, .k = 31 }, .{ .rows = 4, .n = H, .k = 33 }, .{ .rows = 16, .n = H, .k = 240 }, .{ .rows = 2, .n = H, .k = 255 }, .{ .rows = 1, .n = H, .k = 256 }, .{ .rows = 3, .n = H, .k = 700 }, .{ .rows = 16, .n = H, .k = 1010 }, .{ .rows = 2, .n = H, .k = 1024 }, .{ .rows = 8, .n = H, .k = 1500 }, .{ .rows = 16, .n = H, .k = 2033 }, .{ .rows = 1, .n = H, .k = 2048 } };
 
-pub const Fault = enum { none, halves, softmax, split, prefetch };
+pub const Fault = enum { none, halves, softmax, split, prefetch, unscaled };
 
 /// The loader's latent attention library on this GPU (nax.h inlined for it).
 pub fn attnText(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
@@ -36,7 +39,7 @@ pub const Case = struct {
     fault: Fault,
     control: bool,
     kern: glm.kernels.Kernels = undefined,
-    old: [3]mtl.Pipeline,
+    old: [4]mtl.Pipeline,
     cfg: glm.config.Config = .{},
 
     pub fn init(s: *bits.Suite, fault: Fault) !Case {
@@ -45,9 +48,9 @@ pub const Case = struct {
         defer s.a.free(attn);
         _ = try loader.require(attn);
         _ = try loader.require(softmax_rows_text);
-        const faults = [_][3][]const u8{ .{ "", "", "" }, .{ "void glm_latent_scores_rows(", "n, n < 256,", "n, n < 255," }, .{ "void glm_softmax_rows(", "a.n0 + int(tg.y)", "a.n0 + int(tg.y) + 1" }, .{ "void glm_latent_values_rows(", "n > 1024 ? 1024 : 0", "n > 1024 ? 512 : 0" }, .{ "inline void glm_scores_at(", "mma_16x32<false, true>(c0, c1, ca, cb0, cb1);", "mma_16x32<false, true>(c0, c1, a, cb0, cb1);" } };
+        const faults = [_][3][]const u8{ .{ "", "", "" }, .{ "void glm_latent_scores_rows(", "n, n < 256,", "n, n < 255," }, .{ "void glm_softmax_rows(", "a.n0 + int(tg.y)", "a.n0 + int(tg.y) + 1" }, .{ "void glm_latent_values_rows(", "n > 1024 ? 1024 : 0", "n > 1024 ? 512 : 0" }, .{ "inline void glm_scores_at(", "mma_16x32<false, true>(c0, c1, ca, cb0, cb1);", "mma_16x32<false, true>(c0, c1, a, cb0, cb1);" }, .{ "if (k0 + 16 < 512) {", "glm_q_scaled<QS>(a, qs);", "" } };
         const f = faults[@backingInt(fault)];
-        const own_attn = if (fault == .halves or fault == .split or fault == .prefetch) try bits.edited(s.a, attn, f[0], f[1], f[2]) else try s.a.dupe(u8, attn);
+        const own_attn = if (fault == .halves or fault == .split or fault == .prefetch or fault == .unscaled) try bits.edited(s.a, attn, f[0], f[1], f[2]) else try s.a.dupe(u8, attn);
         defer s.a.free(own_attn);
         const own_soft = if (fault == .softmax) try bits.edited(s.a, softmax_rows_text, f[0], f[1], f[2]) else try s.a.dupe(u8, softmax_rows_text);
         defer s.a.free(own_soft);
@@ -65,6 +68,8 @@ pub const Case = struct {
         x.old[1] = try bits.pipeline(s.device, try loader.require(sources.ops_softmax), "tf_softmax_bf16");
         errdefer x.old[1].deinit();
         x.old[2] = try bits.pipeline(s.device, frozen, "glm_latent_values");
+        errdefer x.old[2].deinit();
+        x.old[3] = try bits.pipeline(s.device, main_glue, "glm_scale");
         return x;
     }
     pub fn deinit(x: *Case) void {
@@ -80,10 +85,11 @@ pub const Case = struct {
             .softmax => "control: metal glm launch attn rows, each row's softmax one key long",
             .split => "control: metal glm launch attn rows, the values split at 512 keys",
             .prefetch => "control: metal glm launch attn rows, a scores step multiplying the prefetched next query block",
+            .unscaled => "control: metal glm launch attn rows, the prefetched query blocks left unscaled",
         };
     }
     pub fn spec(x: *const Case) c.Spec {
-        return bits.spec(name(x.fault), "main's glm_latent_scores, tf_softmax_bf16 and glm_latent_values a row", "main's one-row bytes in the scores, probabilities and outputs, NaN payloads included", &served, "the one-row kernels' 16-wide MMA steps, both joins and the softmax's sums in their order");
+        return bits.spec(name(x.fault), "main's glm_scale, then glm_latent_scores, tf_softmax_bf16 and glm_latent_values a row", "main's one-row bytes in the scores, probabilities and outputs, NaN payloads included", &served, "the one-row kernels' 16-wide MMA steps, both joins and the softmax's sums in their order");
     }
     pub fn layout(_: *const Case, s: c.Shape) ?bits.Layout {
         if (s.rows == 0 or s.rows > 16 or s.n != H or s.k == 0 or s.k + s.rows - 1 > TOP) return null;
@@ -93,6 +99,7 @@ pub const Case = struct {
         _ = l.add(.output, s.rows * plane * 2, .bf16);
         _ = l.add(.output, s.rows * plane * 2, .bf16);
         _ = l.add(.output, s.rows * lat * 2, .bf16);
+        _ = l.add(.scratch, s.rows * lat * 2, .bf16);
         return l;
     }
     /// The harness's queries and keys; gate 1 and every third shape plant NaN and both infinities in a query and keys.
@@ -101,7 +108,7 @@ pub const Case = struct {
         const rnd = prng.random();
         const q = std.mem.bytesAsSlice(u16, data[0]);
         const keys = std.mem.bytesAsSlice(u16, data[1]);
-        for (q) |*v| v.* = bits.bf((rnd.float(f32) - 0.5) * 0.25);
+        for (q) |*v| v.* = bits.bf((rnd.float(f32) - 0.5) * 4);
         for (keys) |*v| v.* = bits.bf((rnd.float(f32) - 0.5) * 2);
         if (f == .stress or (f == .random and seed % 3 != 2)) return;
         q[3] = 0x7fc0;
@@ -118,8 +125,13 @@ pub const Case = struct {
         }.of;
         if (new) {
             const ctx: glm.forward.Ctx = .{ .k = &x.kern, .c = &x.cfg, .w = undefined, .s = undefined, .sc = undefined };
-            return glm.forward.attendRows(&ctx, e, ref(r[1]), ref(r[0]), ref(r[2]), ref(r[3]), ref(r[4]), @intCast(s.k), @intCast(s.rows));
+            return glm.forward.attendRows(&ctx, e, ref(r[1]), ref(r[0]), q_scale, ref(r[2]), ref(r[3]), ref(r[4]), @intCast(s.k), @intCast(s.rows));
         }
+        e.setPipeline(x.old[3]); // main's attend: every dense row's queries through glm_scale, then each row's launches
+        e.setBuffer(r[0].buf, r[0].off, 0);
+        e.setBuffer(r[5].buf, r[5].off, 1);
+        e.setValue(glm.forward.Rows{ .rows = @intCast(s.rows * H), .width = RANK, .x_stride = RANK, .y_stride = RANK, .eps = q_scale }, 2);
+        e.dispatchThreads(mtl.Size.of(RANK, s.rows * H, 1), mtl.Size.of(256, 1, 1));
         for (0..s.rows) |z| x.oneRow(e, r, z, @intCast(s.k + z));
     }
     /// Main's attendDense for window row z (forward.zig before the window kernels): its three launches as they were.
@@ -130,7 +142,7 @@ pub const Case = struct {
             }
         }.at;
         e.setPipeline(x.old[0]);
-        bind(e, r[0], z * lat * 2, 0);
+        bind(e, r[5], z * lat * 2, 0);
         bind(e, r[1], 0, 1);
         bind(e, r[2], z * plane * 2, 2);
         e.setValue([2]i32{ @intCast(n), @intFromBool(n < 256) }, 3);
