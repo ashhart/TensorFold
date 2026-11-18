@@ -1,4 +1,4 @@
-//! GLM's linears tiled at load for glm_mm: bf16, or packed to 4, 6 or 8 bits in place (TF_GLM_DENSE_BITS, _HEAD_BITS).
+//! GLM's linears tiled at load for glm_mm: bf16, exact 12-bit, or 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS).
 const std = @import("std");
 const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
@@ -149,6 +149,9 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
     for (list.items) |e| most = @max(most, e.n * e.k * 2);
     var tmp = try cuda.DeviceBuffer.alloc(d, most);
     defer tmp.free();
+    var count = try cuda.DeviceBuffer.alloc(d, 4); // width 12's raw blocks, one linear at a time
+    defer count.free();
+    var kept: usize = 0; // width-12 linears left bf16: more raw blocks than their bytes hold
     errdefer @import("cuda_load_owner.zig").drain(s, d);
     var host: std.ArrayList(u16) = .empty; // a packed linear's bf16 rows, then its codes and scales, on the host
     defer host.deinit(gpa);
@@ -166,7 +169,28 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
         const k = e.k;
         const ptr = e.field.*;
         const bits = if (i + 1 == list.items.len and w.head == .bf16) head_bits else dense_bits; // an MXFP8 head stays
-        if (bits == 16) {
+        if (bits == 12) exact: {
+            const sizes = mm_mod.packedBytes(n, k, 12);
+            const room = (n * k * 2 - sizes[0] - sizes[1]) / mm_mod.raw_bytes;
+            try d.check(d.api.cuMemsetD8Async(count.ptr, 0, 4, s.handle), "cuMemsetD8Async");
+            try mm_mod.tile12(mk, s, ptr, tmp.ptr, count.ptr, n, k, room);
+            var raw: [1]i32 = undefined;
+            try s.synchronize();
+            try cuda.memory.download(d, count.ptr, std.mem.sliceAsBytes(&raw));
+            const blocks: usize = @intCast(raw[0]);
+            if (blocks > @min(room, mm_mod.max_raw)) {
+                kept += 1;
+                break :exact; // the bf16 tiles below
+            }
+            const bytes = sizes[0] + sizes[1] + blocks * mm_mod.raw_bytes;
+            try d.check(d.api.cuMemcpyDtoDAsync_v2(ptr, tmp.ptr, bytes, s.handle), "cuMemcpyDtoDAsync");
+            try s.synchronize(); // tmp is the next linear's
+            freed += try compact(w, d, s, e.field, bytes);
+            try packed_ptrs.append(gpa, e.field.*);
+            try packed_bits.append(gpa, 12);
+            continue;
+        }
+        if (bits == 16 or bits == 12) {
             try mm_mod.tile(mk, s, ptr, tmp.ptr, n, k);
             try d.check(d.api.cuMemcpyDtoDAsync_v2(ptr, tmp.ptr, n * k * 2, s.handle), "cuMemcpyDtoDAsync");
             continue;
@@ -188,6 +212,7 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
     }
     try s.synchronize();
     if (packed_ptrs.items.len > 0) std.log.info("glm: {d} linears packed ({d}/{d} bits), {d:.2} GiB freed", .{ packed_ptrs.items.len, dense_bits, head_bits, @as(f64, @floatFromInt(freed)) / (1 << 30) });
+    if (kept > 0) std.log.info("glm: {d} linears kept bf16 tiles: more raw blocks than 12 bits hold", .{kept});
     // sorted by pointer, the bits beside them (Packed.tiled searches)
     const ptrs = try packed_ptrs.toOwnedSlice(gpa);
     errdefer gpa.free(ptrs);

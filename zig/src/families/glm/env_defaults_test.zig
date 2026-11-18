@@ -25,5 +25,5 @@ test "env defaults: TF_GLM_DENSE_BITS unset keeps bf16, 0 spells bf16, and 5 is 
     try std.testing.expectEqual(@as(u8, 16), (try ranks.Settings.read(&absent, &problem)).dense_bits);
     try std.testing.expectEqual(@as(u8, 16), (try ranks.Settings.read(&denseZero, &problem)).dense_bits);
     try std.testing.expectError(error.BadSetting, ranks.Settings.read(&denseFive, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8 or 16", problem);
+    try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8, 12 or 16", problem);
 }

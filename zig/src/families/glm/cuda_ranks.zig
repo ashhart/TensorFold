@@ -22,8 +22,9 @@ pub const Settings = struct {
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
-    dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
+    dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits, 12 (bf16 exactly) or 16 (bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
+    bits_named: bool = false, // either bits set: else a GB10 holds both at 12 (exactBits)
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
     roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
@@ -128,17 +129,18 @@ pub const Settings = struct {
         }
         inline for (.{ .{ "TF_GLM_DENSE_BITS", "dense_bits" }, .{ "TF_GLM_HEAD_BITS", "head_bits" } }) |e| if (get(e[0])) |v| {
             const b = std.fmt.parseInt(u8, v, 10) catch {
-                problem.* = e[0] ++ ": 4, 6, 8 or 16";
+                problem.* = e[0] ++ ": 4, 6, 8, 12 or 16";
                 return error.BadSetting;
             };
             @field(s, e[1]) = switch (b) {
-                4, 6, 8, 16 => b,
+                4, 6, 8, 12, 16 => b,
                 0 => 16, // the old family's spelling of bf16
                 else => {
-                    problem.* = e[0] ++ ": 4, 6, 8 or 16";
+                    problem.* = e[0] ++ ": 4, 6, 8, 12 or 16";
                     return error.BadSetting;
                 },
             };
+            s.bits_named = true;
         };
         s.heat = heat.bandsFrom(get("TF_HEAT_HIGH"), get("TF_HEAT_LOW")) catch {
             problem.* = "TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high";
@@ -184,7 +186,22 @@ pub const Settings = struct {
         }
         return s;
     }
+
+    /// The bits the linears tile to on `cap`: unnamed bits on glm_mm hold bf16 exactly at 12 on a GB10 (sm_121).
+    pub fn exactBits(s: Settings, cap: usize) Settings {
+        var out = s;
+        if (!s.bits_named and s.tiled and cap == 121) {
+            out.dense_bits = 12;
+            out.head_bits = 12;
+        }
+        return out;
+    }
 };
+
+/// The values a width reads: 12 holds bf16 exactly, so ranks at 12 and 16 compute the same sums.
+pub fn sameValues(bits: u8) u8 {
+    return if (bits == 12) 16 else bits;
+}
 
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
@@ -232,7 +249,7 @@ pub const Fingerprint = extern struct {
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
     l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
-    bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
+    bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS (12 as 16): every rank's matmuls read the same values
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
@@ -308,7 +325,7 @@ pub const Fingerprint = extern struct {
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
             .l2pf = s.l2pf.words(),
-            .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
+            .bits = @as(u32, sameValues(s.dense_bits)) << 8 | sameValues(s.head_bits),
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
             .heat_low = if (s.heat) |b| b.low_c else 0,
