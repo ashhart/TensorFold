@@ -434,6 +434,11 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
 }
 
+/// The index scores' tile rows: 128 (a row's queries read once for 64 blocks), 64 where that leaves the GPU half idle.
+pub fn scoreRows(most: u32, n: u32) u32 {
+    return if (((most + 63) / 64) * ((n + 127) / 128) >= 128) 128 else 64;
+}
+
 /// `n` rows' key lists from index scores over every pooled block they read (positions p0..), scores on tensor units.
 fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, iw: Ref, indices: Ref, n: u32, p0: u32) void {
     const c = x.c;
@@ -442,7 +447,8 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
     e.setPipeline(x.k.index_scores_nax);
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, p.sscore });
     e.setValue([5]u32{ p0, c.qrProj(), c.i_heads, s_stride, n }, 4);
-    e.dispatchGroups(size((most + 63) / 64, (n + 63) / 64, 1), size(128, 1, 1));
+    const rows = scoreRows(most, n);
+    e.dispatchGroups(size((most + 63) / 64, (n + rows - 1) / rows, 1), size(2 * rows, 1, 1));
     e.setPipeline(x.k.index_select);
     bind(e, 0, .{ p.sscore, indices });
     e.setValue([5]u32{ p0, c.i_topk / c.kpool, c.keyWidth(), s_stride, c.keyWidth() }, 2);
