@@ -11,14 +11,12 @@ MODEL = "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP"
 DENSE = "TensorFold/Qwen3.8-27B-MLX-4bit"
 
 
-@pytest.mark.parametrize(("backend", "has_python", "want_native", "want_runnable"), [
-    ("mlx", True, False, True),
-    ("mlx", False, False, False),
-    ("cuda", False, True, True),
+@pytest.mark.parametrize(("backend", "has_python"), [
+    ("mlx", True),
+    ("mlx", False),
+    ("cuda", False),
 ])
-def test_qwen35b_catalog_and_start_agree_on_the_backend(
-    tmp_path, monkeypatch, backend, has_python, want_native, want_runnable,
-):
+def test_qwen35b_is_cuda_only_in_the_catalog_and_start_route(tmp_path, monkeypatch, backend, has_python):
     machine = Machine("macOS" if backend == "mlx" else "Linux", "test", "arm64", "test",
                       128 * GIB, 120 * GIB, True, gpus=[Gpu("test", 128 * GIB)], backend=backend)
     monkeypatch.setattr(settings, "config_dir", lambda: tmp_path)
@@ -50,12 +48,18 @@ def test_qwen35b_catalog_and_start_agree_on_the_backend(
     monkeypatch.setattr(engine, "info", dict)
     client = TestClient(create_app(settings=s, engine=engine, catalog=cat))
     rows = {row["id"]: row for row in client.get("/api/catalog").json()["models"]}
-    context = client.get(f"/api/catalog/{MODEL}/verdicts").json()
     response = client.post("/api/engine/start", json={"model": MODEL})
-    assert (rows[MODEL]["native"], rows[MODEL]["runs_here"], response.status_code, starts) == (
-        want_native, want_runnable, 200 if want_runnable else 409, [(MODEL, want_native, None)],
-    )
+    row = rows[MODEL]
+    assert row["backends"] == ["cuda"]
+    assert row["runs_here"] is (backend == "cuda")
     assert rows[DENSE]["native"] is True  # another Qwen checkpoint still uses the native engine
     if backend == "mlx":
-        assert rows[MODEL]["verdict"]["basis"] == "mlx-calibrated"
-        assert {row["basis"] for row in context["verdicts"]} == {"mlx-calibrated"}
+        assert not row.get("recommended")
+        assert "CUDA" in row["runs_note"] and "0.6.6" not in row["runs_note"]
+        assert response.status_code == 409
+        assert "CUDA" in response.json()["detail"]
+        assert starts == []
+    else:
+        assert row["native"] is True
+        assert response.status_code == 200
+        assert starts == [(MODEL, True, None)]

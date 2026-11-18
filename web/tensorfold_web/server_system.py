@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from fastapi import HTTPException
 
 from . import (
@@ -97,7 +95,6 @@ def install(app, cat, kept, s, used, eng):
             raise HTTPException(404, "unknown model")
         if cap is None:
             raise HTTPException(409, "no supported GPU on this machine")
-        entry = replace(entry, native=cat.native_here(entry, backend=m.backend))
         weights, workspace, _ = cat.fit_inputs(entry)
         if not weights:
             raise HTTPException(409, "size unknown yet")
