@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "158"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"continue_final_message needs the last message to be an assistant message, which the reply continues\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

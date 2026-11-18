@@ -83,6 +83,16 @@ def main() -> int:
         ],
     })
 
+    # the prefill server: final assistant messages the reply continues, apart from the main log and metrics
+    steps.append({
+        "kind": "serve",
+        "args": [],
+        "env": {},
+        "cases": [{"group": group, "name": name, "raws": raw_bytes(raws), "opts": {}}
+                  for group, name, raws in corpus.prefill_cases()],
+        "then": [{"kind": "terminate"}],
+    })
+
     # the metrics-open server
     steps.append({
         "kind": "serve",

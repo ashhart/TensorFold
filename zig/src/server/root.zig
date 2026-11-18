@@ -385,6 +385,8 @@ test {
     _ = @import("audio_out.zig");
     _ = @import("flac.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_format_http_test.zig"); // over a Unix socket pair
+    _ = @import("prefill.zig");
+    _ = @import("prefill_test.zig");
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");

@@ -40,22 +40,9 @@ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Valu
 
 /// `renderRequest`, and with `starts` the token where each message the template renders begins (sorted, past 0).
 pub fn renderStarts(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool, starts: ?*[]const u32) errors.Refused![]const u32 {
-    const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
-    const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
-    // Flash Next's positional tool_response blocks carry no call IDs.
-    if (std.mem.eql(u8, srv.info.name, "flashnext-zig") and normalized == .array)
-        try messages_mod.orderParallelResults(cx.a, normalized.array);
+    const normalized = try templateMessages(srv, cx, messages);
     var problem: []const u8 = "";
-    const options: model_text.RenderOptions = .{
-        .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
-        .add_generation_prompt = generation,
-        .enable_thinking = thinking,
-        .reasoning_effort = if (thinking) effort else cx.named_effort orelse srv.off_effort,
-        .clear_thinking = cx.clear_thinking,
-        .tool_choice = cx.template_fields.get("tool_choice"),
-        .response_format = cx.template_fields.get("response_format"),
-        .images = srv.info.vision != null,
-    };
+    const options = renderOptions(srv, cx, tools, thinking, effort, generation);
     const rendered = render(srv, cx.a, normalized, options, &problem, starts) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "{s}", .{problem}),
@@ -82,6 +69,30 @@ pub fn renderStarts(srv: *Server, cx: *Cx, messages: Value, tools: []const Value
     if (require_off and !thinking and generation and srv.info.capability(.thinking_applicable) and !srv.thinking_switch and !closed)
         return cx.refuse("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix");
     return ids;
+}
+
+/// The messages as this template reads them: normalized for it, with call arguments as objects (not Kimi's).
+pub fn templateMessages(srv: *Server, cx: *Cx, messages: Value) errors.Refused!Value {
+    const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
+    const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
+    // Flash Next's positional tool_response blocks carry no call IDs.
+    if (std.mem.eql(u8, srv.info.name, "flashnext-zig") and normalized == .array)
+        try messages_mod.orderParallelResults(cx.a, normalized.array);
+    return normalized;
+}
+
+/// The template switches a request renders with.
+pub fn renderOptions(srv: *const Server, cx: *const Cx, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) model_text.RenderOptions {
+    return .{
+        .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
+        .add_generation_prompt = generation,
+        .enable_thinking = thinking,
+        .reasoning_effort = if (thinking) effort else cx.named_effort orelse srv.off_effort,
+        .clear_thinking = cx.clear_thinking,
+        .tool_choice = cx.template_fields.get("tool_choice"),
+        .response_format = cx.template_fields.get("response_format"),
+        .images = srv.info.vision != null,
+    };
 }
 
 /// Info.thinking_switch at start-up: a simple chat's explicit off passes the same render and refusal as a request.
@@ -121,6 +132,16 @@ fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options_: model_t
     const ids = try rendered.encode(srv.text, a, problem);
     if (starts) |out| out.* = try @import("message_starts.zig").tokens(srv.text, a, rendered, ids, bytes);
     return .{ .ids = ids, .closed = templateClosed(rendered, srv.markers.close) };
+}
+
+/// The template's text for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
+pub fn renderText(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+    var rendered = try srv.text.render(a, messages, options, problem);
+    if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
+        const word = try srv.text.tokenString(a, o.video_token);
+        rendered = try rendered.replaceTemplate(a, o.video_text, word);
+    };
+    return rendered;
 }
 
 /// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.
@@ -168,6 +189,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         .ids => |ids| return .{ .ids = ids },
     };
     cx.template_fields = input.fields;
+    if (input.prefill) return @import("prefill.zig").prepare(srv, cx, input, thinking, effort);
     var message_starts: []const u32 = &.{};
     const marks = srv.info.prompt_cache or srv.chunks.step > 0; // read only by the prompt cache and prompt cuts
     const prompt = try renderStarts(srv, cx, input.messages, input.tools, thinking, effort, true, input.explicit_off, if (marks) &message_starts else null);
