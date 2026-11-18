@@ -206,7 +206,9 @@ pub fn main(init: std.process.Init) !void {
             hi = @max(hi, c);
         }
         std.debug.print("{d} rows ({d} pairs, {d}-{d} an expert): equal at 32 and 64 rows and each choice\n", .{ rows, io.n, lo, hi });
-        if (rows < 1024) continue;
+        if (rows < 128) continue;
+        var hit: f64 = 0; // the experts a launch reads
+        for (counts) |c| hit += @floatFromInt(@intFromBool(c > 0));
         var t: [2][2][7]f64 = undefined; // [side][glu, down][trial], interleaved
         for (0..7) |trial| for (0..2) |side| {
             t[side][0][trial] = try once(queue, mm, p, &io, side, true);
@@ -215,6 +217,8 @@ pub fn main(init: std.process.Init) !void {
         for (&t) |*s| for (s) |*v| std.mem.sort(f64, v, {}, std.sort.asc(f64));
         const fl = @as(f64, @floatFromInt(io.n)) * D * I * 2;
         std.debug.print("  gate/up {d:.3} -> {d:.3} ms ({d:.1} -> {d:.1} TFLOPS), down {d:.3} -> {d:.3} ms ({d:.1} -> {d:.1} TFLOPS)\n", .{ t[0][0][3], t[1][0][3], 2 * fl / t[0][0][3] / 1e9, 2 * fl / t[1][0][3] / 1e9, t[0][1][3], t[1][1][3], fl / t[0][1][3] / 1e9, fl / t[1][1][3] / 1e9 });
+        const wb = hit * D * I * (0.5 + 4.0 / 64.0); // an expert matrix's codes, scales and biases
+        std.debug.print("  weights read: gate/up {d:.0} -> {d:.0} GB/s, down {d:.0} -> {d:.0} GB/s\n", .{ 2 * wb / t[0][0][3] / 1e6, 2 * wb / t[1][0][3] / 1e6, wb / t[0][1][3] / 1e6, wb / t[1][1][3] / 1e6 });
     }
     for ([_][3]u32{ .{ 300, 4096, 8192 }, .{ 1000, 2240, 4096 }, .{ 8192, 4096, 8192 }, .{ 8192, 4096, 16384 }, .{ 8192, 24896, 4096 }, .{ 16384, 4096, 8192 } }) |sh| {
         compared += try denseCase(device, queue, mm, p, r, sh[0], sh[1], sh[2]);
