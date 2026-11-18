@@ -95,7 +95,9 @@ fn check(c: Case) !void {
     const launched = tmp.dir.readFileAlloc(io, "launch.log", a, .limited(4096)) catch "";
     try t.expectEqualStrings(if (c.launches) "/example path/tensorfold\n--port\n9090\ntwo words\n$(untouched);*\n\n" else "", launched);
     try t.expectEqualStrings("wrong-binary", env.get("TENSORFOLD_BIN").?);
-    if (!c.uv and !c.installed) try t.expect(std.mem.indexOf(u8, out.written(), "python3 -m pip install --user uv") != null);
+    const uv_guide = "Install uv and add it to PATH: https://docs.astral.sh/uv/getting-started/installation/";
+    try t.expectEqual(!c.uv and !c.installed, std.mem.indexOf(u8, out.written(), uv_guide) != null);
+    try t.expect(std.mem.indexOf(u8, out.written(), "pip install --user uv") == null);
     if (!c.version.is_release and !c.installed) try t.expect(std.mem.indexOf(u8, out.written(), "Development build without a release tag") != null);
 }
 
