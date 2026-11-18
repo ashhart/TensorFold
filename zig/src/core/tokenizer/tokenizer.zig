@@ -15,6 +15,7 @@ pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
 pub const Span = [2]usize;
 pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0, masked: usize = 0 };
+const Pre = struct { text: []const u8, zero: usize }; // a gap already normalized, and its first-piece offset
 const scratch_stack_bytes = 4096; // small calls keep their scratch on the stack before spilling to the allocator
 
 pub const AddedToken = struct {
@@ -192,7 +193,7 @@ pub const Tokenizer = struct {
         }
         var ids: std.ArrayList(u32) = .empty;
         for (try t.splitAdded(&ctx, &t.raw, valid)) |seg| {
-            if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeSegment(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids);
+            if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeSegment(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids, null);
         }
         return a.dupe(u32, ids.items);
     }
@@ -231,13 +232,12 @@ pub const Tokenizer = struct {
             }
             const request = cursor < valid.spans.len and valid.spans[cursor][0] < seg.end;
             const gap = valid.text[seg.start..seg.end];
-            if (!request or t.normalized.ends.items.len == 0 or blk: {
-                var zero: usize = if (seg.start == 0) unicode.decodeAt(gap, 0).len else 0;
-                const normalized = if (t.normalizer) |*n| try n.apply(&ctx, gap, &zero) else gap;
-                break :blk t.normalized.next(normalized, 0) == null;
-            }) {
+            var pre: Pre = .{ .text = gap, .zero = if (seg.start == 0) unicode.decodeAt(gap, 0).len else 0 };
+            const check = request and t.normalized.ends.items.len > 0;
+            if (check and t.normalizer != null) pre.text = try t.normalizer.?.apply(&ctx, gap, &pre.zero);
+            if (!check or t.normalized.next(pre.text, 0) == null) {
                 const from = ids.items.len;
-                try t.encodeSegment(&ctx, gap, seg.start == 0, &ids);
+                try t.encodeSegment(&ctx, gap, seg.start == 0, &ids, if (check) pre else null);
                 if (request) try t.refuseAdded(ids.items[from..]);
             } else {
                 if (work) |w| w.masked += 1;
@@ -249,7 +249,7 @@ pub const Tokenizer = struct {
                     try clipped.append(ctx.a, .{ @max(seg.start, p[0]) - seg.start, @min(seg.end, p[1]) - seg.start });
                     if (work) |w| w.spans += 1;
                 }
-                try t.encodeTextMasked(&ctx, gap, seg.start == 0, &ids, true, clipped.items);
+                try t.encodeTextMasked(&ctx, gap, seg.start == 0, &ids, true, clipped.items, pre);
             }
         }
         return a.dupe(u32, ids.items);
@@ -263,13 +263,13 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// encodeText through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
-    fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
-        const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
-        if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
+    /// Encode through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
+    fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), pre: ?Pre) Error!void {
+        const m = t.memo orelse return t.encodeTextMasked(ctx, text, first, ids, true, &.{}, pre);
+        if (text.len < @import("memo.zig").min_bytes) return t.encodeTextMasked(ctx, text, first, ids, true, &.{}, pre);
         if (try m.append(text, first, ctx.a, ids)) return;
         const from = ids.items.len;
-        try t.encodeText(ctx, text, first, ids);
+        try t.encodeTextMasked(ctx, text, first, ids, true, &.{}, pre);
         m.put(text, first, ids.items[from..]);
     }
 
@@ -291,17 +291,13 @@ pub const Tokenizer = struct {
         return a.dupe(u32, ids.items);
     }
 
-    fn encodeText(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
-        return t.encodeTextWith(ctx, text, first, ids, true);
-    }
-
     fn encodeTextWith(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool) Error!void {
-        return t.encodeTextMasked(ctx, text, first, ids, added, &.{});
+        return t.encodeTextMasked(ctx, text, first, ids, added, &.{}, null);
     }
 
-    fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span) Error!void {
-        var zero: usize = if (first) unicode.decodeAt(text, 0).len else 0;
-        const normalized = if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
+    fn encodeTextMasked(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32), added: bool, spans: []const Span, pre: ?Pre) Error!void {
+        var zero: usize = if (pre) |p| p.zero else if (first) unicode.decodeAt(text, 0).len else 0;
+        const normalized = if (pre) |p| p.text else if (t.normalizer) |*n| try n.apply(ctx, text, &zero) else text;
         const whole = [_]Segment{.{ .start = 0, .end = normalized.len, .id = null }};
         // A normalized match in a mixed gap requires exact byte offsets; otherwise refuse it.
         const exact_offsets = if (t.normalizer) |*n| n.preservesBytes() else true;
