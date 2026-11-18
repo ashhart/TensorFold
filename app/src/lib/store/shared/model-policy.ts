@@ -81,8 +81,12 @@ export function applyProjectModel(get: () => AppState, s: Settings | null, proje
   let model = surface.model
   if (project && (project.localOnly || project.defaultProviderId)) {
     const d = projectDefaultModel(project, s.providers)
-    if (d.providerId) { providerId = d.providerId; model = d.model }
-    providerAccountId = d.providerAccountId ?? providerAccountId
+    if (d.providerId) {
+      providerId = d.providerId
+      const usesProjectBaseAccount = project.defaultProviderAccountId === null && project.defaultProviderId === d.providerId
+      providerAccountId = usesProjectBaseAccount ? null : d.providerAccountId ?? providerAccountId
+      model = d.model
+    }
   }
   const provider = s.providers.find((p) => p.id === providerId)
   providerAccountId = selectedAccountId(provider, providerAccountId)
