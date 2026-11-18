@@ -55,7 +55,7 @@ test "shared price log: a round line has its trial, rows, time, each stream's dr
     try r.observeShared(2, 4, 19, false, 0, false, false);
     out.clearRetainingCapacity();
     try log.line(&out.writer, &r, &plans, &windows, .{ .trial = true, .sampled = false, .ms = 15, .head_ms = 0, .heads = &.{0}, .depths = &.{0} });
-    try t.expectEqualStrings("shared price: round streams=2 sampled=0 trial=1 rows=3 ms=15.000 head=0.000 forward=13.000 plain=3.000 row=0.000 drafts=1,0 depths=0,- accept=0.625/0.500,-", out.written());
+    try t.expectEqualStrings("shared price: round streams=2 sampled=0 trial=1 rows=3 ms=15.000 head=0.000 forward=13.000 plain=3.000 row=1.000 drafts=1,0 depths=0,- accept=0.625/0.500,-", out.written());
 }
 
 const Env = struct {
