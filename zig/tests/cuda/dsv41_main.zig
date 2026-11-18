@@ -13,6 +13,7 @@ const mhcdec = @import("deepseek_v41/mhcdec.zig");
 const mhc_probe = @import("deepseek_v41/mhc_probe.zig");
 const mhc_alloc = @import("deepseek_v41/mhc_alloc_bench.zig");
 const x3gm3_bench = @import("deepseek_v41/x3gm3_bench.zig");
+const combine_add = @import("deepseek_v41/combine_add.zig");
 const stream_rb_bench = @import("deepseek_v41/stream_rb_bench.zig");
 const lin2_bench = @import("deepseek_v41/lin2_bench.zig");
 const scores_b_bench = @import("deepseek_v41/scores_b_bench.zig");
@@ -30,6 +31,7 @@ const usage =
     \\  exchanges          embedding, Engram and mHC exchanges at worlds 1-4 as threads on this GPU (no fixture)
     \\  mhc-probe [windows]  the 16-row mHC boundary under cache states, buffer layouts and a cross-stream dependency
     \\  x3gm3-bench [rows,..] [reps]  x3gm v3 against v2 at the served prefill shapes: bits and time (synthetic data)
+    \\  combine-add        routed combine plus shared add: byte equality, rounding edges, bounds and time
     \\  x3ld-epi [rows,..] [reps]  TF_DSV41_X3LD_EPI: fused x3ld + epilogues against the four launches (bits, time)
     \\  mhc-alloc [windows]  the 16-row mHC boundary's time with buffers per cuMemAlloc / arena / VMM (TF_DSV41_ARENA)
     \\  stream-rb <aot dir> [--reps N]  _stream_rb2 / _rb4 against _stream (Triton AOT set): bits and time (synthetic)
@@ -90,6 +92,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "mhc-alloc")) return mhc_alloc.run(gpu, &k, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "lin2")) return lin2_bench.run(gpu, &k, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "x3gm3-bench")) return x3gm3_bench.run(gpu, &k, if (rest.len > 0) rest[0] else null, if (rest.len > 1) rest[1] else null);
+    if (std.mem.eql(u8, cmd, "combine-add")) return combine_add.run(gpu, &k);
     if (std.mem.eql(u8, cmd, "topk-b")) return topk_b_bench.run(gpu, &k, rest);
     if (std.mem.eql(u8, cmd, "x3ld-epi")) return x3ld_epi_bench.run(gpu, &k, if (rest.len > 0) rest[0] else null, if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "all")) return all(gpu, &k, try arg(rest, 0));
