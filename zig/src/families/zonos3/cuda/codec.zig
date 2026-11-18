@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const kern = @import("codec_kernels.zig");
+const Blas = @import("blas.zig").Blas;
 const wts = @import("codec_weights.zig");
 const stage_layer = @import("codec_layers.zig");
 
@@ -11,6 +12,7 @@ const W = wts.width;
 pub const sample_rate = 44100;
 pub const frame_samples = 2940; // output samples a code frame
 const internal_frame = 2944; // 44160 Hz samples a code frame
+const blas_ws_bytes = 32 << 20; // as Drama gives cuBLAS
 const head_rate = 16; // head frames a code frame
 
 pub const Options = struct {
@@ -48,6 +50,7 @@ pub const Codec = struct {
     d: *const cuda.Driver,
     stream: cuda.Stream,
     k: kern.Kernels,
+    blas: Blas,
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
     counted: ?usize, // set: allocations are counted, not made
@@ -70,6 +73,8 @@ pub const Codec = struct {
     o_: u64,
     att: u64,
     big: u64, // [R][3072]
+    ones: u64, // [R], each 1.0: a bias reaches every row as bias x ones
+    blas_ws: u64, // cuBLAS's workspace
     // the tail, whole request
     branches: u64, // [2][internal samples]
     mixed: u64, // [internal samples]
@@ -101,12 +106,22 @@ pub const Codec = struct {
         }
         errdefer c.freeState();
         try c.allocState();
+        const ones = try gpa.alloc(f32, head_rate * o.pass_frames);
+        defer gpa.free(ones);
+        @memset(ones, 1.0);
+        try c.buf(c.ones).uploadAsync(0, std.mem.sliceAsBytes(ones), stream.handle);
+        try stream.synchronize();
+        c.blas = try Blas.open(c.blas_ws, blas_ws_bytes);
+        errdefer c.blas.close();
+        c.k.blas = &c.blas;
+        c.k.ones = c.ones;
         try c.reset();
         return c;
     }
 
     pub fn destroy(c: *Codec) void {
         c.stream.synchronize() catch {};
+        c.blas.close();
         c.freeState();
         c.w.deinit();
         c.gpa.destroy(c.w);
@@ -221,6 +236,8 @@ pub const Codec = struct {
         c.o_ = try c.alloc(R * W * 4);
         c.att = try c.alloc(R * W * 4);
         c.big = try c.alloc(R * 3072 * 4);
+        c.ones = try c.alloc(R * 4);
+        c.blas_ws = try c.alloc(blas_ws_bytes);
         c.audio = try c.alloc(T * frame_samples * 4);
     }
 
