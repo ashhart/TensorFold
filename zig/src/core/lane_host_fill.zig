@@ -4,6 +4,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const load = @import("lane_host_load.zig");
 const ends = @import("lane_host_end.zig");
 const lane_trace = @import("lane_trace.zig");
+pub const decodeShare = @import("lane_host_decode_share.zig"); // --decode-share: the flag/env/default resolution and its tests
 
 pub const preference_rounds = 8;
 
@@ -54,7 +55,10 @@ fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
 
 /// Takes `job` off the filling list, wherever it is.
 pub fn unfill(h: *LaneHost, job: anytype) void {
-    for (h.filling.items, 0..) |j, i| if (j == job) { _ = h.filling.orderedRemove(i); return; };
+    for (h.filling.items, 0..) |j, i| if (j == job) {
+        _ = h.filling.orderedRemove(i);
+        return;
+    };
 }
 
 /// Prompt steps' share p of wall time beside decoders (TENSORFOLD_PREFILL_SHARE): a step of t owes them t (1 - p) / p.
@@ -66,7 +70,8 @@ pub const Share = struct {
     policy: Policy = .stock,
     tokens: u32 = default_tokens, // TENSORFOLD_PREFILL_TOKENS: a policy's rows a visit, clamped to [min_tokens, max_tokens]
     call_rows: u32 = 0, // the row hint policyRun set for the call in flight (capRows); 0 outside its calls
-    defaulted: bool = false, env_share: bool = false, // the share came from an engine default; the env's TENSORFOLD_PREFILL_SHARE is set
+    defaulted: bool = false, // the share came from an engine default
+    env_share: bool = false, // the env's TENSORFOLD_PREFILL_SHARE is set
 
     pub const short_rows = 512;
     pub const Policy = enum { stock, fcfs };
@@ -75,19 +80,6 @@ pub const Share = struct {
     pub const max_tokens: u32 = 16384; // 2 x flashnext Metal's prompt step (PMAX 8192), the most one staggered call takes (a solo 14336-row prompt is one 2 x 7168 call)
     pub const min_share = 0.01; // below it a step's debt is minutes of decoding, and is no share
     pub const default_arm_rows: u64 = 32768; // an engine default's share and cap arm only past this many rows left to fill
-
-    /// --decode-share's share x: the prompt's p is its complement, floored at min_share; 0 keeps whole prompts.
-    pub fn fromDecode(x: f64) Share {
-        if (!(x > 0 and x < 1)) return .{};
-        return .{ .p = @max(1 - x, min_share) };
-    }
-
-    /// The env's share, with --decode-share's p in its place when given; the row budget always comes from the env.
-    pub fn withDecode(decode_share: ?f64) Share {
-        var s = fromEnv();
-        if (decode_share) |x| s.p = fromDecode(x).p;
-        return s;
-    }
 
     pub fn fromEnv() Share {
         const share_text = std.c.getenv("TENSORFOLD_PREFILL_SHARE");
