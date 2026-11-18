@@ -217,6 +217,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const t = try @import("metal_gemma4_attention.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "lfm3-omni ")) {
+        if (!assemble) return undefined;
+        const body = try @import("metal_omni.zig").limitsSource(a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         if (!assemble) return undefined;
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);

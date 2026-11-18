@@ -1,0 +1,32 @@
+{
+ "bf16 reference on its own replies": {
+  "text": [
+   524,
+   524
+  ],
+  "codes": [
+   21024,
+   21024
+  ]
+ },
+ "fp32 reference on its own replies": {
+  "text": [
+   468,
+   468
+  ],
+  "codes": [
+   18540,
+   18540
+  ]
+ },
+ "bf16 reference on the fp32 replies": {
+  "text": [
+   464,
+   468
+  ],
+  "codes": [
+   16019,
+   18540
+  ]
+ }
+}

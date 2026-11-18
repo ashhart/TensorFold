@@ -1,0 +1,138 @@
+{
+ "branch-1": [
+  {
+   "prompt": "fibonacci-raw",
+   "prompt_tokens": 14,
+   "tokens": 256,
+   "token_sha": [
+    "a10c9b848ed9",
+    "a10c9b848ed9",
+    "a10c9b848ed9"
+   ],
+   "output_sha256": [
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d"
+   ],
+   "decode_tps_median": 47.93
+  },
+  {
+   "prompt": "gpu-chat-no-think",
+   "prompt_tokens": 31,
+   "tokens": 256,
+   "token_sha": [
+    "a06fab348fbe",
+    "a06fab348fbe",
+    "a06fab348fbe"
+   ],
+   "output_sha256": [
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053"
+   ],
+   "decode_tps_median": 47.77
+  }
+ ],
+ "branch-2": [
+  {
+   "prompt": "fibonacci-raw",
+   "prompt_tokens": 14,
+   "tokens": 256,
+   "token_sha": [
+    "a10c9b848ed9",
+    "a10c9b848ed9",
+    "a10c9b848ed9"
+   ],
+   "output_sha256": [
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d"
+   ],
+   "decode_tps_median": 44.13
+  },
+  {
+   "prompt": "gpu-chat-no-think",
+   "prompt_tokens": 31,
+   "tokens": 256,
+   "token_sha": [
+    "a06fab348fbe",
+    "a06fab348fbe",
+    "a06fab348fbe"
+   ],
+   "output_sha256": [
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053"
+   ],
+   "decode_tps_median": 45.71
+  }
+ ],
+ "main-1": [
+  {
+   "prompt": "fibonacci-raw",
+   "prompt_tokens": 14,
+   "tokens": 256,
+   "token_sha": [
+    "a10c9b848ed9",
+    "a10c9b848ed9",
+    "a10c9b848ed9"
+   ],
+   "output_sha256": [
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d"
+   ],
+   "decode_tps_median": 48.05
+  },
+  {
+   "prompt": "gpu-chat-no-think",
+   "prompt_tokens": 31,
+   "tokens": 256,
+   "token_sha": [
+    "a06fab348fbe",
+    "a06fab348fbe",
+    "a06fab348fbe"
+   ],
+   "output_sha256": [
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053"
+   ],
+   "decode_tps_median": 48.0
+  }
+ ],
+ "main-2": [
+  {
+   "prompt": "fibonacci-raw",
+   "prompt_tokens": 14,
+   "tokens": 256,
+   "token_sha": [
+    "a10c9b848ed9",
+    "a10c9b848ed9",
+    "a10c9b848ed9"
+   ],
+   "output_sha256": [
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d",
+    "f4b2680d79d0af408bb763a74b20357ad3590a02822b906336862c22a0dc859d"
+   ],
+   "decode_tps_median": 47.89
+  },
+  {
+   "prompt": "gpu-chat-no-think",
+   "prompt_tokens": 31,
+   "tokens": 256,
+   "token_sha": [
+    "a06fab348fbe",
+    "a06fab348fbe",
+    "a06fab348fbe"
+   ],
+   "output_sha256": [
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053",
+    "d9498b28203378db2785d7dfab35cb6629a885344b79f20b318e4b45454e2053"
+   ],
+   "decode_tps_median": 47.87
+  }
+ ]
+}
