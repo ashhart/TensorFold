@@ -204,3 +204,130 @@ test "the lone driver's image opt-out keeps both opening and reclaim on the lane
     try std.testing.expectEqual(@as(u32, 1), text.opened);
     try std.testing.expectEqual(@as(u32, 1), text.resumed);
 }
+
+/// A request's tokens and stats, with the order in which replies finished, for queue tests.
+const LogBox = struct {
+    mutex: std.Io.Mutex = .init,
+    seq: *std.atomic.Value(usize),
+    order: usize = 0,
+    tokens: std.ArrayList(u32) = .empty,
+    events: std.ArrayList(usize) = .empty,
+    stats: api.Stats = .{},
+    done: ?Reason = null,
+
+    fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+        const b: *@This() = @ptrCast(@alignCast(ctx));
+        b.mutex.lockUncancelable(std.testing.io);
+        defer b.mutex.unlock(std.testing.io);
+        switch (e.*) {
+            .tokens => |t| {
+                b.tokens.appendSlice(gpa, t) catch {};
+                b.events.append(gpa, t.len) catch {};
+            },
+            .finished => |f| {
+                b.done = f.reason;
+                b.stats = f.stats;
+                b.order = b.seq.fetchAdd(1, .monotonic);
+            },
+            else => {},
+        }
+    }
+
+    fn wait(b: *@This()) Reason {
+        while (true) {
+            b.mutex.lockUncancelable(std.testing.io);
+            const d = b.done;
+            b.mutex.unlock(std.testing.io);
+            if (d) |r| return r;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    fn deinit(b: *@This()) void {
+        b.tokens.deinit(gpa);
+        b.events.deinit(gpa);
+    }
+};
+
+test "a third stream at two lanes waits engine_busy in FIFO order, then decodes in every shared round" {
+    const Wait = @import("wait_reason.zig").Wait;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    var lone: Lone = .{ .be = target.backend() };
+    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = true };
+    try host.start();
+    defer host.stop();
+
+    var seq = std.atomic.Value(usize).init(0);
+    var a: LogBox = .{ .seq = &seq };
+    var b: LogBox = .{ .seq = &seq };
+    var c: LogBox = .{ .seq = &seq };
+    var d: LogBox = .{ .seq = &seq };
+    defer {
+        a.deinit();
+        b.deinit();
+        c.deinit();
+        d.deinit();
+    }
+    const ra: Request = .{ .prompt = &prompt, .max_tokens = 40 };
+    const rb: Request = .{ .prompt = &prompt, .max_tokens = 400 };
+    const rc: Request = .{ .prompt = &prompt, .max_tokens = 24 };
+    const rd: Request = .{ .prompt = &prompt, .max_tokens = 8 };
+    try host.engine().submit(1, &ra, .{ .ctx = &a, .event = LogBox.event });
+    try host.engine().submit(2, &rb, .{ .ctx = &b, .event = LogBox.event });
+    try host.engine().submit(3, &rc, .{ .ctx = &c, .event = LogBox.event });
+
+    // A and B hold both lanes; C waits, with a named reason, until one frees.
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        host.mutex.lockUncancelable(std.testing.io);
+        const held = host.admitted.items.len;
+        const queued = host.queued.items.len;
+        const reason: ?Wait = if (queued > 0) host.queued.items[0].wait_reason else null;
+        host.mutex.unlock(std.testing.io);
+        if (held == 2 and queued == 1 and reason != null) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    host.mutex.lockUncancelable(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 2), host.admitted.items.len);
+    try std.testing.expectEqual(@as(usize, 1), host.queued.items.len);
+    try std.testing.expectEqual(Wait.engine_busy, host.queued.items[0].wait_reason);
+    host.mutex.unlock(std.testing.io);
+
+    // A fourth request joins behind C and must not pass it.
+    try host.engine().submit(4, &rd, .{ .ctx = &d, .event = LogBox.event });
+    spins = 0;
+    while (spins < 1000) : (spins += 1) {
+        host.mutex.lockUncancelable(std.testing.io);
+        const queued = host.queued.items.len;
+        host.mutex.unlock(std.testing.io);
+        if (queued == 2) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expectEqual(Reason.length, a.wait());
+    try std.testing.expectEqual(Reason.length, c.wait());
+    try std.testing.expectEqual(Reason.length, d.wait());
+    try std.testing.expectEqual(Reason.length, b.wait());
+    try std.testing.expect(c.stats.queued_seconds > 0);
+    try std.testing.expect(c.stats.rounds > 0);
+    try std.testing.expect(c.order < d.order); // FIFO: C finished before the later request
+    try std.testing.expectEqual(@as(u32, 0), lone.opened); // C never took the lone path
+
+    // C's tokens are the fake's own continuation, one per round beside the survivor.
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, &prompt);
+    for (c.tokens.items) |t| {
+        try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+        try history.append(gpa, t);
+    }
+    try std.testing.expectEqual(@as(usize, rc.max_tokens), c.tokens.items.len);
+    try std.testing.expect(c.events.items.len >= 2); // several shared rounds, not one degraded pass
+    try std.testing.expect(b.events.items.len >= c.events.items.len);
+}
