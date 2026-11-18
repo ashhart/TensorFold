@@ -9,6 +9,18 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
+/// A generation's slices can live in a per-prompt arena freed before the deferred write; copy them here.
+fn copyText(a: Allocator, text: ?[]const u8) ?[]const u8 {
+    const t = text orelse return null;
+    return a.dupe(u8, t) catch null;
+}
+
+fn copyCalls(a: Allocator, calls: ?[]Value) ?[]Value {
+    const c = calls orelse return null;
+    const copy = json.deepCopy(a, .{ .array = c }) catch return null;
+    return copy.array;
+}
+
 /// Reply-line state, written by runLogged's defer after the last byte is sent (streams end at [DONE]).
 pub const ReplyLog = struct {
     a: Allocator,
@@ -32,10 +44,10 @@ pub const ReplyLog = struct {
     /// A finished reply: its text, calls, usage and engine timings, captured once generation ends.
     pub fn done(s: *ReplyLog, reply: *const chat.Reply, calls: ?[]Value) void {
         s.status = 200;
-        s.text = reply.content;
-        s.reasoning = reply.reasoning;
-        s.calls = calls;
-        s.finish_reason = reply.finish_reason;
+        s.text = s.a.dupe(u8, reply.content) catch null;
+        s.reasoning = copyText(s.a, reply.reasoning);
+        s.calls = copyCalls(s.a, calls);
+        s.finish_reason = s.a.dupe(u8, reply.finish_reason) catch null;
         s.usage = .{ .prompt = reply.prompt_tokens, .cached = reply.cached_tokens, .completion = reply.completion_tokens };
         s.queued = reply.queued_seconds;
         s.ttft = reply.ttft_seconds;
@@ -46,7 +58,7 @@ pub const ReplyLog = struct {
     /// A refusal or failure before a complete reply: its status and message, with no usage.
     pub fn fail(s: *ReplyLog, status: u16, message: ?[]const u8) void {
         s.status = status;
-        s.error_msg = message;
+        s.error_msg = copyText(s.a, message);
         s.finish_reason = "error";
     }
 
