@@ -85,7 +85,7 @@ pub const Run = struct {
     pub const Steering = struct {
         ctx: *anyopaque,
         /// The deltas of the forward that takes generated row `frame` (1 on); none: that frame is not steered.
-        at: *const fn (ctx: *anyopaque, frame: usize) []const Steer,
+        at: *const fn (ctx: *anyopaque, frame: usize) anyerror![]const Steer,
         twin: bool,
     };
 
@@ -155,7 +155,7 @@ pub const Run = struct {
     /// Runs the row `sample` appended, on the request's lane and its twin's, for the next frame's logits.
     pub fn advance(r: *Run, engine: anytype) !void {
         const last = r.rows.items[r.rows.items.len - 1 ..];
-        const steer: []const Steer = if (r.steer) |s| s.at(s.ctx, r.rows.items.len) else &.{};
+        const steer: []const Steer = if (r.steer) |s| try s.at(s.ctx, r.rows.items.len) else &.{};
         try step(engine, last, steer);
         try engine.lastLogits(@ptrCast(r.logits));
         if (r.edit) |*ed| try endOf(engine, &ed.end);

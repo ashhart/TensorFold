@@ -83,6 +83,7 @@ pub fn addTo(
             \\pub const short_text = r.short_text;
             \\pub const edit = r.edit;
             \\pub const edit_plan = r.edit_plan;
+            \\pub const difflib = r.difflib;
             \\pub const align_words = r.align_words;
             \\pub const speaker = @import("zonos3").speaker;
             \\pub const temperature = r.temperature;

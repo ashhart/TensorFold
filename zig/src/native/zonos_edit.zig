@@ -115,3 +115,9 @@ pub fn wordAligner(h: anytype) !*z3.aligner.Aligner {
     std.log.info("zonos3: aligner loaded, {d} bytes of weights on the device ({d} admitted)", .{ h.aligner.?.bytes(), aligner_bytes });
     return h.aligner.?;
 }
+
+/// Device bytes the speech-edit adapter at `path` adds to a load: its factors, and the scratch its passes take.
+pub fn editBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8, context: u32) !u64 {
+    const scratch = z3.Engine.stateBytes(.{ .max_ctx = context, .adapter = path }) - z3.Engine.stateBytes(.{ .max_ctx = context });
+    return scratch + try z3.adapter.deviceBytes(gpa, io, path);
+}
