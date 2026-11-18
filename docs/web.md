@@ -19,6 +19,8 @@ The application's exit status is retained.
 
 With either stdin or stdout redirected, without `uv`, or with `TENSORFOLD_WEB_NO_PROMPT=1`, the launcher prints manual
 commands and exits 1. It never installs in those cases. A negative or empty answer does the same.
+If `uv` is missing, follow [uv's installation guide](https://docs.astral.sh/uv/getting-started/installation/) and
+make sure `uv` is on PATH before running the printed `uv tool install` command.
 An already installed application starts without prompting in all of these cases.
 Builds without an explicit `-Dversion` never install automatically: their printed command targets the manifest version,
 which is identified as a manual suggestion rather than the development build's release tag.
