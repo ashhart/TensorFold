@@ -9,6 +9,7 @@ const fwd = @import("forward.zig");
 const pk = @import("../nemotron/prefill_kernels.zig");
 const ep_mod = @import("ep.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const mm_groups = @import("mm_groups.zig");
 const hc = @import("../../core/hc.zig");
 const kernels = @import("kernels.zig");
 const wide = @import("wide.zig");
@@ -191,7 +192,13 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     if (!wide.native(q)) return qmmAt(p, e, x, q.k, q, y, M);
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
+    denseOf(p, e, x, q, y, M, .{ .x_row = @intCast(q.k), .y_row = @intCast(std.mem.alignForward(u32, q.n, 64)) });
+}
+
+/// affine_mm's dense product at one batch: deep ones in column groups (mm_groups.zig, the same bits).
+fn denseOf(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32, s: affine_mm.Strides) void {
+    if (q.k >= mm_groups.dense_from) return mm_groups.dense(e, p.mm.mm_groups, x, p.sums, q, y, M, s);
+    affine_mm.denseBatch(e, p.mm.mm_bf16, x, p.sums, q, y, M, 1, s);
 }
 
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
@@ -204,9 +211,8 @@ fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine
         .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M },
         p.sums,
     );
-    const mm = p.mm.mm_bf16;
-    affine_mm.rowSumsAt(e, mm, 64, x, p.sums, M, q.k, ld);
-    affine_mm.denseBatch(e, mm, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
+    affine_mm.rowSumsAt(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k, ld);
+    denseOf(p, e, x, q, y, M, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
 }
 
 /// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
@@ -215,10 +221,12 @@ fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref
     affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
 }
 
-/// Routed experts' gate, up and SwiGLU on the M rows of `x_in` its pairs read (expert order) into `act` ([n, gate.n]).
-fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
+/// Routed experts' gate, up and SwiGLU into `act` ([n, gate.n]); `groups`: 4/64 in column groups (the same bits).
+fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, groups: bool, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
     affine_mm.rowSums(e, mm, 64, x_in, p.sums, M, w.gate.k);
-    affine_mm.gatherGlu(e, mm, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
+    if (groups) {
+        mm_groups.gatherGlu(e, p.mm.mm_groups, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
+    } else affine_mm.gatherGlu(e, mm, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
     affine_mm.rowSums(e, mm, 64, p.act, p.sums, n, w.down.k);
 }
 
@@ -261,7 +269,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
-            gateUp(p, p.mm.mm_bf16, x, e, w, x_in, M, n);
+            gateUp(p, p.mm.mm_bf16, false, x, e, w, x_in, M, n);
             affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
         if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
@@ -299,8 +307,11 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
-        if (fwd.on(x, "e_gateup")) gateUp(p, mm, x, e, w, x_in, M, n);
-        if (fwd.on(x, "e_down")) affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        const groups = path == .mm4 and mm_groups.fits(w.gate, w.down);
+        if (fwd.on(x, "e_gateup")) gateUp(p, mm, groups, x, e, w, x_in, M, n);
+        if (fwd.on(x, "e_down") and groups) {
+            mm_groups.gatherTo(e, p.mm.mm_groups, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        } else if (fwd.on(x, "e_down")) affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0 or !fwd.on(x, "combine")) return;
     e.setPipeline(k.moe_combine);
