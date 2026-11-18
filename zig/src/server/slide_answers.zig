@@ -80,3 +80,11 @@ test "a fact's expected answers survive the graph file, short answers, probes an
     try std.testing.expectEqualStrings("", back[0].context);
     try std.testing.expectEqualStrings("recall", (try dupe(a, back))[2].context);
 }
+
+/// A JSON array of strings as read (none: empty).
+pub fn readQuestions(a: Allocator, v: ?json.Value) ![]const []const u8 {
+    const xs = (v orelse return &.{}).items() orelse return &.{};
+    const out = try a.alloc([]const u8, xs.len);
+    for (xs, out) |x, *o| o.* = x.str() orelse "";
+    return out;
+}

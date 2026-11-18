@@ -47,6 +47,7 @@ pub fn plan(a: A, facts: []const graph.Fact, ats: []const usize) !Batch {
         if (at >= facts.len) return error.NoSuchFact;
         if (std.mem.indexOfScalar(usize, ats[0..i], at) != null) return error.DuplicateFact;
         const f = facts[at];
+        if (f.pinned) return error.FactPinned;
         ids[i] = f.id;
         states[i] = f.state;
         try order.append(a, f);

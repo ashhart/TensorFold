@@ -5,7 +5,7 @@ const json = @import("json");
 const probes = @import("slide_audit_probes.zig");
 const A = std.mem.Allocator;
 
-pub const activation_floor = 1e-4;
+pub const activation_floor = api.pocket_usage.activation_floor;
 pub const default_threshold = 0.01;
 
 pub fn value(a: A, plan: probes.Plan, ns: []const api.Neuron, peaks: []const api.pocket_audit.Peak, threshold: f64) !json.Value {
@@ -50,7 +50,7 @@ fn neuron(a: A, plan: probes.Plan, peaks: []const api.pocket_audit.Peak, width: 
         const c = probes.cohort(p, fact) orelse continue;
         const kind = @backingInt(c);
         counts[kind] += 1;
-        fires[kind] += @intFromBool(@abs(x) > activation_floor);
+        fires[kind] += @intFromBool(api.pocket_usage.fires(x));
         if (c == .own) continue;
         for (0..strongest.len) |rank| {
             if (strongest[rank]) |old| if (@abs(x) <= @abs(peaks[old * width + col].activation)) continue;

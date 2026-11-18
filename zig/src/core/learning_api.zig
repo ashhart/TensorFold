@@ -2,6 +2,7 @@ const Example = @import("engine_api.zig").Example;
 pub const LearnRequest = struct {
     audit: ?*const @import("pocket_audit.zig").Request = null,
     train: []const Example = &.{},
+    reuse_deleted: bool = false, // opt-in capacity policy may reuse silent, unowned interior neurons
     against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},

@@ -198,6 +198,7 @@ pub const Compaction = struct { len: usize, n: usize, path: [replay_rows]u32 };
 
 /// One stream's caches: its KV rows (backbone and draft head), its Mamba slot, its window ids on the GPU.
 pub const Cache = struct {
+    usage: ?@import("lanes").pocket_usage.Masks = null,
     kv: [cfg.max_layers]Kv = undefined, // by attention index
     mtp: ?Kv = null,
     attentions: usize,

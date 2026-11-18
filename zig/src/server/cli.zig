@@ -109,6 +109,7 @@ pub const flags = [_]Flag{
     .{ .name = "--slide", .kind = .store_true, .native = true },
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
     .{ .name = "--slide-graph", .path = true, .native = true },
+    .{ .name = "--slide-forget", .kind = .store_true, .native = true },
     .{ .name = "--drafter", .native = true },
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--rope-yarn", .native = cuda_build },
@@ -393,7 +394,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide-forget")) out.slide_forget = true else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -461,6 +462,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .learn_daily_gib = args.learn_daily_gib,
         .spill = if (!spills(args)) .off else if (args.learn) .finish else .evicted,
         .slide = args.slide,
+        .slide_forget = args.slide and args.slide_forget,
         .recall = args.recall,
         .device = args.device,
         .segments = args.segments,

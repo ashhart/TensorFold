@@ -16,6 +16,8 @@ pub const Stop = struct {
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
+    /// Accounts for an external request when usage collection is enabled.
+    usage: ?lanes.pocket_usage.Observer = null,
     prompt: []const u32,
     embedding: ?lanes.embedding.Batch = null,
     readout: ?*const lanes.readout.Spec = null, // an answer from the prompt's rows (Info.readouts engines only)

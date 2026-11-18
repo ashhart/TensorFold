@@ -43,7 +43,7 @@ pub fn step(h: *LaneHost) void {
         const blocked = lesson.request.audit != null and h.stale.load(.acquire);
         h.unlock();
         if (blocked) {
-            const failed: api.LearnEvent = .{ .done = .{ .message = "AuditUnresolved" } };
+            const failed: api.LearnEvent = .{ .done = .{ .message = "AuditUnresolved", .before_begin = true } };
             return lesson.sink.event(lesson.sink.ctx, &failed);
         }
         learner.begin(learner.ctx, lesson.request, lesson.sink) catch |e| {
