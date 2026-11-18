@@ -3,9 +3,9 @@ name: TensorFold Web
 on:
   push:
     branches: [main]
-    paths: ["web/**", ".github/workflows/web.yml"]
+    paths: ["web/**", ".github/workflows/web.yml", "build.zig.zon"]
   pull_request:
-    paths: ["web/**", ".github/workflows/web.yml"]
+    paths: ["web/**", ".github/workflows/web.yml", "build.zig.zon"]
 
 permissions:
   contents: read
@@ -60,9 +60,12 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      # the built page ships in the package, so it must match the sources
-      - name: Built page is committed
+      # The page and stand-in version ship in the package, so both must match the sources.
+      - name: Generated Web files are committed
         run: |
-          git diff --exit-code -- ../tensorfold_web/ui_dist || { echo "tensorfold_web/ui_dist is stale; run npm run build in ui/ and commit"; exit 1; }
+          git diff --exit-code -- ../tensorfold_web/ui_dist ../tensorfold_web/data/native-version.json || {
+            echo "Generated Web files are stale; run npm run build in web/ui and commit"
+            exit 1
+          }
       - name: No untracked built files
         run: test -z "$(git status --porcelain -- ../tensorfold_web/ui_dist)"
