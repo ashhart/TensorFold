@@ -449,6 +449,10 @@ test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
     while (it.next()) |t| {
         const rows = try std.fmt.parseInt(u32, t, 10);
         fixture.fillInput(r, rows, 31);
+        if (env("TF_DSV41_TIMING_HOT") != null) {
+            try @import("timing_hot.zig").run(a, r, &names, p0, rows, n);
+            continue;
+        }
         // TF_DSV41_TIMING_SAME: every row's input is row 0's, so the rows mostly share their experts (a draft block)
         if (env("TF_DSV41_TIMING_SAME") != null) {
             const x = r.io[0].slice(u16, rows * 4 * r.c.hidden);
