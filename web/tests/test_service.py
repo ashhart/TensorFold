@@ -1,4 +1,5 @@
 import plistlib
+import shlex
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,35 @@ def test_macos_agent(home, monkeypatch):
     assert str(tmp / ".tensorfold" / "bin") in doc["EnvironmentVariables"]["PATH"]   # the official installer's
     service.install(p)
     assert any(c[:2] == ("launchctl", "bootstrap") for c in calls)
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_service_uses_callers_relative_token_path(home, monkeypatch, platform):
+    tmp, _, calls = home
+    caller = tmp / "invoking folder"
+    caller.mkdir()
+    fixture = caller / "fixture"
+    fixture.write_text("synthetic")
+    path = caller / "web token"
+    path.symlink_to(fixture.name)
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr(service, "platform_name", lambda: platform)
+
+    plan = service.plan(token_file=Path(path.name))
+    assert plan.token_file == path
+    if platform == "macos":
+        doc = plistlib.loads(plan.content.encode())
+        working_dir, args = doc["WorkingDirectory"], doc["ProgramArguments"]
+    else:
+        unit = dict(line.split("=", 1) for line in plan.content.splitlines()
+                    if line.startswith(("WorkingDirectory=", "ExecStart=")))
+        working_dir, args = unit["WorkingDirectory"], shlex.split(unit["ExecStart"])
+    emitted = Path(args[args.index("--token-file") + 1])
+    assert emitted == path
+    assert Path(working_dir) == tmp
+    monkeypatch.chdir(working_dir)
+    assert emitted.read_text() == "synthetic"
+    assert not calls
 
 
 def test_other_platforms_refused(monkeypatch):
