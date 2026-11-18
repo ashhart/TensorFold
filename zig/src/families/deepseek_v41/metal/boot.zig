@@ -84,6 +84,7 @@ pub const Boot = struct {
         b.vw = null;
         b.c = try readConfig(a, io, dir, o.small);
         const c = &b.c;
+        c.dspark_block = try blockOf(c.dspark_block);
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
@@ -135,6 +136,14 @@ pub const Boot = struct {
         if (b.kit) |*k| k.deinit();
         b.vw = null;
         b.kit = null;
+    }
+
+    /// The drafts a pass makes: TF_DSV41_DSPARK_BLOCK, else the checkpoint's (a verify of all of them fits a launch).
+    fn blockOf(checkpoint: u32) !u32 {
+        const n = try environment.read(u32, "TF_DSV41_DSPARK_BLOCK", 0);
+        if (n == 0) return checkpoint;
+        if (n >= pipelines.max_rows) return error.DsparkBlock;
+        return n;
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {

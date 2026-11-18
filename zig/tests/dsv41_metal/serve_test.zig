@@ -492,7 +492,11 @@ const Rounds = struct { windows: u64, rows: u64, drafted: u64 };
 
 /// The asks one after another, drafts behind the verify on or off (every `skew` chain parted); replies into `out`.
 fn served(asks: []const Ask, early: bool, skew: u32, out: [][]u32, stats: ?*pkg.early.Stats) !Rounds {
-    const m = try fs.open(gpa, io, seed, .{ .early = early });
+    return servedWith(asks, .{ .early = early }, skew, out, stats);
+}
+
+fn servedWith(asks: []const Ask, o: fs.Opts, skew: u32, out: [][]u32, stats: ?*pkg.early.Stats) !Rounds {
+    const m = try fs.open(gpa, io, seed, o);
     const s = try Served.open(gpa, io, m.model(), ".", null);
     defer Served.close(s);
     if (m.early) |e| e.skew_every = skew;
@@ -560,4 +564,38 @@ test "dsv41 metal serve: (h) sampled drafts behind the verify (keyed picks on th
     try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
     try testing.expect(rounds_same);
     try testing.expect(st_on.keyed == st_on.queued and st_on.used > 0 and st_on.dropped == 0 and st_sk.skewed > 0 and st_sk.dropped >= st_sk.skewed);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "dsv41 metal serve: (i) a block of 7 past the drafter's 5, every draft verified, with and behind the verify == serial" {
+    const p0 = try ids(150, 34);
+    defer gpa.free(p0);
+    const p1 = try ids(210, 35);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 999, .temperature = 0.9, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 40 }, .{ .prompt = p1, .max = 40, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    // the static depth verifies every draft of the block, so windows of 8 rows run
+    _ = setenv("TF_DSV41_DEPTH", "static", 1);
+    _ = setenv("TF_DSV41_DRAFT_DEPTH", "7", 1);
+    defer {
+        _ = unsetenv("TF_DSV41_DEPTH");
+        _ = unsetenv("TF_DSV41_DRAFT_DEPTH");
+    }
+    var off: [2][]u32 = undefined;
+    const r_off = try servedWith(&asks, .{ .early = false, .block = 7 }, 0, &off, null);
+    defer freeAll(&off);
+    var on: [2][]u32 = undefined;
+    var st: pkg.early.Stats = .{};
+    const r_on = try servedWith(&asks, .{ .early = true, .block = 7 }, 2, &on, &st);
+    defer freeAll(&on);
+    const bad = [2]usize{ same(&want, &off), same(&want, &on) };
+    const deep = r_off.rows > 6 * r_off.windows;
+    say(bad[0] + bad[1] == 0 and deep, "(i) block 7: drafted / behind the verify (parted) vs serial: {d} / {d} differ; {d} rows in {d} windows; chains {d} queued, {d} used, {d} dropped", .{ bad[0], bad[1], r_off.rows, r_off.windows, st.queued, st.used, st.dropped });
+    try testing.expectEqual([2]usize{ 0, 0 }, bad);
+    try testing.expect(deep and std.meta.eql(r_off, r_on) and st.used > 0 and st.dropped > 0);
 }
