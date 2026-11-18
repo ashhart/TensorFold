@@ -1,4 +1,4 @@
-//! tf-glm-attn-rows: a window's dense latent attention in three launches against each row's own, bit for bit, timed.
+//! tf-glm-attn-rows: a window's dense attention in three launches against each row's glm_attn_ref.metal launches; time.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -58,6 +58,14 @@ pub fn main(init: std.process.Init) !void {
     const k = try glm.kernels.load(gpa, device);
     const c: glm.config.Config = .{};
     const x: glm.forward.Ctx = .{ .k = k, .c = &c, .w = undefined, .s = undefined, .sc = undefined };
+    const ref_src = try tf.frags.source(device, gpa, @embedFile("glm_attn_ref.metal"));
+    const ref_lib = try mtl.Library.fromSource(device, ref_src, mtl.CompileOptions.mlx());
+    var kr = k.*; // the reference kernels in the production launches
+    kr.latent_scores = try mtl.Pipeline.init(device, ref_lib, "glm_latent_scores", false);
+    kr.latent_values = try mtl.Pipeline.init(device, ref_lib, "glm_latent_values", false);
+    kr.latent_scores_rows = try mtl.Pipeline.init(device, ref_lib, "glm_latent_scores_rows", false);
+    kr.latent_values_rows = try mtl.Pipeline.init(device, ref_lib, "glm_latent_values_rows", false);
+    const xr: glm.forward.Ctx = .{ .k = &kr, .c = &c, .w = undefined, .s = undefined, .sc = undefined };
     const opts = mtl.ResourceOptions.shared;
     const planes = MAXR * H * TOP;
     var b: Bufs = .{ .keys = try device.buffer((TOP + MAXR) * RANK * 2, opts), .q = try device.buffer(MAXR * H * RANK * 2, opts), .s = undefined, .p = undefined, .o = undefined };
@@ -72,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     for (b.q.slice(u16, MAXR * H * RANK)) |*v| v.* = toBf((r.float(f32) - 0.5) * 0.25);
     const cases = [_][2]u32{ .{ 1, 1 }, .{ 1, 16 }, .{ 5, 3 }, .{ 31, 2 }, .{ 33, 4 }, .{ 240, 16 }, .{ 255, 2 }, .{ 256, 1 }, .{ 400, 1 }, .{ 400, 2 }, .{ 400, 4 }, .{ 400, 8 }, .{ 700, 3 }, .{ 1010, 16 }, .{ 1024, 2 }, .{ 1500, 8 }, .{ 2033, 16 }, .{ 2048, 1 } };
     var outputs: usize = 0;
-    std.debug.print("GPU {s}: a window's dense rows in three launches against a row's own launches ({d} layers a timing)\n", .{ device.name(), reps });
+    std.debug.print("GPU {s}: a window's dense rows in three launches against each row's reference launches ({d} layers a timing)\n", .{ device.name(), reps });
     for (cases) |cs| {
         const n0 = cs[0];
         const rows = cs[1];
@@ -81,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
             @memset(b.p[i].slice(u16, planes), 0x7fc1);
             @memset(b.o[i].slice(u16, MAXR * H * RANK), 0x7fc1);
         }
-        _ = try run(queue, perRow, .{ &x, &b, 0, n0, rows }, 1);
+        _ = try run(queue, perRow, .{ &xr, &b, 0, n0, rows }, 1);
         _ = try run(queue, batched, .{ &x, &b, 1, n0, rows }, 1);
         const same = std.mem.eql(u16, b.s[0].slice(u16, planes), b.s[1].slice(u16, planes)) and std.mem.eql(u16, b.p[0].slice(u16, planes), b.p[1].slice(u16, planes)) and std.mem.eql(u16, b.o[0].slice(u16, MAXR * H * RANK), b.o[1].slice(u16, MAXR * H * RANK));
         if (!same) {
@@ -91,10 +99,10 @@ pub fn main(init: std.process.Init) !void {
         var n: usize = 0;
         for (0..rows) |i| n += 2 * H * (n0 + i) + H * RANK;
         outputs += n;
-        for (0..16) |_| _ = try run(queue, perRow, .{ &x, &b, 0, n0, rows }, reps); // clocks up
-        const t0 = try time(queue, perRow, .{ &x, &b, 0, n0, rows });
+        for (0..16) |_| _ = try run(queue, batched, .{ &xr, &b, 0, n0, rows }, reps); // clocks up
+        const t0 = try time(queue, batched, .{ &xr, &b, 0, n0, rows });
         const t1 = try time(queue, batched, .{ &x, &b, 1, n0, rows });
-        std.debug.print("  keys {d:4}, {d:2} rows: each row {d:7.1} us, the window {d:7.1} us a layer ({d:.2}x)\n", .{ n0, rows, t0, t1, t0 / t1 });
+        std.debug.print("  keys {d:4}, {d:2} rows: reference window {d:7.1} us, ours {d:7.1} us a layer ({d:.2}x)\n", .{ n0, rows, t0, t1, t0 / t1 });
     }
-    std.debug.print("{d} outputs equal each row's own launches\n", .{outputs});
+    std.debug.print("{d} outputs equal each row's own reference launches\n", .{outputs});
 }
