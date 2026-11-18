@@ -77,17 +77,19 @@ pub const Kernels = struct {
         try k.go(.layernorm, s, rows, 1, 256, 0, &a);
     }
 
-    pub fn attnPrep(k: *const Kernels, s: cuda.Stream, qkv: u64, d: usize, pos0: usize, kc: u64, vc: u64, rows: usize) !void {
+    /// Rows' q and k rotated at positions pos0.., k and v into cache rows (position % cap).
+    pub fn attnPrep(k: *const Kernels, s: cuda.Stream, qkv: u64, d: usize, pos0: usize, kc: u64, vc: u64, cap: usize, rows: usize) !void {
         var a: cuda.Args = .{};
         a.add(qkv);
         a.add(i(d));
         a.add(i(pos0));
         a.add(kc);
         a.add(vc);
+        a.add(i(cap));
         try k.go(.attn_prep, s, rows, d / 64, 32, 0, &a);
     }
 
-    pub fn attention(k: *const Kernels, s: cuda.Stream, qkv: u64, d: usize, kc: u64, vc: u64, pos0: usize, ctx: usize, out: u64, rows: usize) !void {
+    pub fn attention(k: *const Kernels, s: cuda.Stream, qkv: u64, d: usize, kc: u64, vc: u64, cap: usize, pos0: usize, ctx: usize, out: u64, rows: usize) !void {
         var a: cuda.Args = .{};
         a.add(qkv);
         a.add(i(d));
@@ -96,6 +98,7 @@ pub const Kernels = struct {
         a.add(i(pos0));
         a.add(i(ctx));
         a.add(out);
+        a.add(i(cap));
         try k.go(.attention, s, rows, d / 64, 128, 0, &a);
     }
 

@@ -80,6 +80,11 @@ pub const Attention = struct {
         return if (self.which == .backbone) 128 else self.shape.n;
     }
 
+    /// The codec's cache rows: the window and the rows, the least a ring may hold.
+    fn ring(self: *const Attention) usize {
+        return self.shape.k + self.shape.rows;
+    }
+
     /// Rows of keys the launch can reach.
     fn keys(self: *const Attention) usize {
         return if (self.which == .teacher) self.shape.rows else self.pos0 + self.shape.rows;
@@ -130,8 +135,18 @@ pub const Attention = struct {
             if (T > 4) vals[(self.pos0 + 4) * vstride + vfirst + 2 * hd + 1] = -ref.inf; // key head 2, from row 4 on
         }
         self.dev[0] = try ref.input(rig, self.q);
-        if (self.kc.len > 0) self.dev[1] = try ref.input(rig, self.kc);
-        if (self.vc.len > 0) self.dev[2] = try ref.input(rig, self.vc);
+        if (self.which == .codec) {
+            // the codec's caches are a ring of a window and the rows: position j at row j % ring, newest last
+            for ([_][]f32{ self.kc, self.vc }, self.dev[1..3]) |cache, *dev| {
+                const rows = try a.alloc(f32, self.ring() * cw);
+                defer a.free(rows);
+                for (0..L) |j| @memcpy(rows[(j % self.ring()) * cw ..][0..cw], cache[j * cw ..][0..cw]);
+                dev.* = try ref.input(rig, rows);
+            }
+        } else {
+            if (self.kc.len > 0) self.dev[1] = try ref.input(rig, self.kc);
+            if (self.vc.len > 0) self.dev[2] = try ref.input(rig, self.vc);
+        }
         if (self.extra.len > 0) self.dev[3] = try ref.input(rig, self.extra);
         self.out = try rig.output(T * n * 4);
         return true;
@@ -160,6 +175,7 @@ pub const Attention = struct {
                 a.add(ref.int(self.pos0));
                 a.add(ref.int(self.shape.k - less));
                 a.add(self.out);
+                a.add(ref.int(self.ring()));
                 try ref.go(self.f, rig.s, T, n / 64, 128, 0, &a);
             },
             .teacher => {
@@ -395,7 +411,8 @@ pub const CodecPrep = struct {
         self.pos0 = rng.uintLessThan(usize, 2048);
         self.qkv = try ref.values(a, rng, self.T * shape.n, fill, 2);
         if (fill == .nonfinite) ref.plant(self.qkv, self.T, shape.n);
-        const cache = (self.T + ref.one(self.fault)) * self.d * 4;
+        // a ring of the rows alone: every row lands once, the first at pos0 % rows
+        const cache = self.T * self.d * 4;
         self.out = .{ try rig.output(self.qkv.len * 4), try rig.output(cache), try rig.output(cache) };
         return true;
     }
@@ -406,8 +423,9 @@ pub const CodecPrep = struct {
         a.add(self.out[0]);
         a.add(ref.int(self.d));
         a.add(ref.int(self.pos0 + ref.one(self.fault)));
-        a.add(ref.before(self.out[1], self.pos0 * self.d));
-        a.add(ref.before(self.out[2], self.pos0 * self.d));
+        a.add(self.out[1]);
+        a.add(self.out[2]);
+        a.add(ref.int(self.T));
         try ref.go(self.f, rig.s, self.T, self.d / 64, 32, 0, &a);
     }
 
@@ -427,7 +445,8 @@ pub const CodecPrep = struct {
                 const phase = Iv.of(@floatFromInt(self.pos0 + t)).mul(Iv.of(m).mul(Iv.of(rate)).exp());
                 const cs = phase.trig(false);
                 const sn = phase.trig(true);
-                for ([_][]Iv{ out[t * 3 * d ..], kc[t * d ..] }, [_]usize{ 0, d }) |dst, from| {
+                const at = (self.pos0 + t) % T;
+                for ([_][]Iv{ out[t * 3 * d ..], kc[at * d ..] }, [_]usize{ 0, d }) |dst, from| {
                     const re = Iv.of(row[from + 2 * pair]);
                     const im = Iv.of(row[from + 2 * pair + 1]);
                     dst[2 * pair] = re.mul(cs).sub(im.mul(sn));
@@ -435,7 +454,7 @@ pub const CodecPrep = struct {
                 }
             }
             for (row[d..], 0..) |v, i| out[t * 3 * d + d + i] = Iv.of(v);
-            for (row[2 * d ..], 0..) |v, i| vc[t * d + i] = Iv.of(v);
+            for (row[2 * d ..], 0..) |v, i| vc[((self.pos0 + t) % T) * d + i] = Iv.of(v);
         }
     }
 };

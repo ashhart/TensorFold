@@ -531,6 +531,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .model_type = model_type,
         .context = args.context,
         .max_frames = args.max_frames,
+        .decoders = args.zonos.decoders,
         .silence = args.silence,
         .lanes = parallel(args.parallel) orelse 8,
         .lanes_fixed = parallelFixed(args.parallel),

@@ -5,6 +5,7 @@ const z3 = @import("zonos3");
 const cuda = @import("cuda");
 const zedit = @import("zonos_edit.zig");
 const zfollow = @import("zonos_follow.zig");
+const zdec = @import("zonos_decoders.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -17,6 +18,7 @@ pub const Options = struct {
     device: u32 = 0,
     max_frames: ?u32 = null,
     parallel: u32 = 1, // requests at once, taking turns a frame at a time
+    decoders: ?[]const u8 = null, // --decoders: the ids served, comma-separated; null: every one the release holds
     admit: ?Admit = null, // null: nothing is asked, as the tool and tests load
     refusal: ?*Refusal = null,
 };
@@ -27,25 +29,12 @@ pub const Admit = struct { ptr: *anyopaque, room: *const fn (*anyopaque, *const 
 /// A refused load's sizes, in bytes.
 pub const Refusal = struct { need: u64 = 0, room: u64 = 0 };
 
-/// The pinned release's weights as the device holds them: the backbone's bf16 and the keep2_plain decoder's fp32.
-pub const weight_bytes: u64 = 2_531_483_136;
-/// The clip encoder's weights, state and workspaces: the acoustic encoder, the SSL teacher and the quantizers.
-pub const clip_bytes: u64 = 5_643_510_688;
-
-/// Device bytes a guided request's second stream takes, allocated by the first such request.
-pub fn twinBytes(o: z3.Options) u64 {
-    return z3.Engine.laneBytes(o);
-}
-
-/// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
-pub fn need(context: u32, frames: u32) u64 {
-    return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
-}
-
-/// Device bytes each request at once past the first adds: a backbone lane and a decoder lane.
-pub fn laneBytes(context: u32, frames: u32) u64 {
-    return z3.Engine.laneBytes(.{ .max_ctx = context }) + z3.Codec.laneBytes(.{ .max_frames = frames });
-}
+pub const sizes = @import("zonos_sizes.zig");
+pub const weight_bytes = sizes.weight_bytes;
+pub const clip_bytes = sizes.clip_bytes;
+const twinBytes = sizes.twinBytes;
+pub const need = sizes.need;
+pub const laneBytes = sizes.laneBytes;
 
 /// Requests at once a server may ask for.
 pub const max_parallel = 16;
@@ -80,7 +69,8 @@ const LaciRun = z3.laci_run.Run(z3.Replace);
 
 /// A request's place among those running: its lanes on the backbone and the decoder, and its generation so far.
 const Slot = struct {
-    index: usize, // its backbone lane and its decoder lane
+    index: usize, // its backbone lane and its lane in each decoder
+    codec: *z3.Codec = undefined, // its request's decoder
     twin: ?usize = null, // the backbone lane of its guidance twin, made by its first guided request
     job: ?Job = null,
     cancelled: bool = false,
@@ -147,6 +137,8 @@ const Audio = struct {
     h: *Host,
     job: Job,
     prefill: []const [W]i32,
+    codec: *z3.Codec,
+    headroom_db: f32,
     decoded: usize = 0, // frames handed to the codec
     samples: usize = 0, // samples in the request's buffer
 
@@ -163,15 +155,15 @@ const Audio = struct {
             const chunk = (s.prefill.len -| s.decoded) + chunkFrames(s.decoded -| s.prefill.len);
             if (!finished and all.len - s.decoded < chunk) break;
             const n = @min(chunk, all.len - s.decoded);
-            try h.codec.decode(all[s.decoded..][0..n], null);
+            try s.codec.decode(all[s.decoded..][0..n], null);
             s.decoded += n;
         }
         if (s.decoded == before and !finished) return;
-        const pcm = try h.codec.emit(h.gpa, finished, null);
+        const pcm = try s.codec.emit(h.gpa, finished, null);
         defer h.gpa.free(pcm);
         if (pcm.len > r.pcm.len - s.samples) return error.AudioOverflow;
         for (pcm) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
-        z3.speech.output(pcm, h.rel.headroom_db);
+        z3.speech.output(pcm, s.headroom_db);
         @memcpy(r.pcm[s.samples..][0..pcm.len], pcm);
         s.samples += pcm.len;
         if (r.stream and pcm.len > 0) s.job.sink.event(s.job.sink.ctx, s.job.id, &.{ .audio = s.samples });
@@ -183,7 +175,8 @@ const Host = struct {
     io: std.Io,
     rel: z3.release.Release,
     e: *z3.Engine,
-    codec: *z3.Codec,
+    codec: *z3.Codec, // the default decoder's, whose tables the clip encoder and aligner share
+    decoders: zdec.Set,
     clip: ?*z3.clip.Clip = null, // the clip encoder, loaded by the first request that brings a clip
     aligner: ?*z3.aligner.Aligner = null, // the forced aligner, loaded by the first edit that needs word timings
     admit: ?Admit = null,
@@ -341,8 +334,8 @@ const Host = struct {
         if (dead) return h.finish(slot, job, .failed, "speech engine closed after execution failure");
         if (stop) return h.finish(slot, job, .cancelled, "");
         h.e.use(slot.index);
-        h.codec.use(slot.index);
         const reason = h.step(slot, job, n) catch |err| switch (err) {
+            error.DecoderNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "this decoder is loaded on its first request, and the device has too little memory free for it"),
             // refused before anything ran on the device: the engine is as it was
             error.ClipEncoderNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free"),
             error.GuidanceNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "speaker guidance needs device memory for a second stream's state, and less than that is free"),
@@ -361,12 +354,15 @@ const Host = struct {
 
     /// The request's prompt rows on its first turn, then a frame a turn; its reason once its last frame is spoken.
     fn step(h: *Host, slot: *Slot, job: Job, n: *usize) !?api.Reason {
+        slot.codec = try zdec.codecFor(h, job.request.decoder);
+        slot.codec.use(slot.index);
+        const headroom = h.decoders.headroom_db[@backingInt(try h.decoders.of(job.request.decoder))];
         const fill: ?*const api.SpeechEdit = job.request.edit;
         if (fill) |ed| if (ed.op != .fill) {
-            slot.audio = .{ .h = h, .job = job, .prefill = &.{} };
+            slot.audio = .{ .h = h, .job = job, .prefill = &.{}, .codec = slot.codec, .headroom_db = headroom };
             if (ed.op == .encode) try zedit.encode(h.gpa, try zedit.clipEncoder(h), job.request, ed);
             if (ed.op == .place) try zedit.alignWords(h.gpa, try zedit.wordAligner(h), job.request, ed);
-            if (ed.op == .decode) slot.audio.samples = try zedit.decode(h.gpa, h.codec, h.rel.headroom_db, job.request, ed);
+            if (ed.op == .decode) slot.audio.samples = try zedit.decode(h.gpa, slot.codec, headroom, job.request, ed);
             return .stop;
         };
         if (!slot.started) {
@@ -460,9 +456,9 @@ const Host = struct {
         }
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
-        try h.codec.reset();
+        try slot.codec.reset();
         // a fill's rows after the text are the clip around its spans, not silence to speak
-        slot.audio = .{ .h = h, .job = job, .prefill = if (r.edit != null) &.{} else rows[rows.len - layout.prefill ..] };
+        slot.audio = .{ .h = h, .job = job, .prefill = if (r.edit != null) &.{} else rows[rows.len - layout.prefill ..], .codec = slot.codec, .headroom_db = h.decoders.headroom_db[@backingInt(try h.decoders.of(r.decoder))] };
         h.e.adapt = r.edit != null;
         defer h.e.adapt = false;
         if (r.laci) |lc| {
@@ -528,7 +524,7 @@ const Host = struct {
         h.e.ctx.makeCurrent() catch {};
         if (h.clip) |c| c.destroy();
         if (h.aligner) |a| a.destroy();
-        h.codec.destroy();
+        h.decoders.deinit();
         h.e.destroy();
         h.rel.deinit();
         h.gpa.free(h.dir);
@@ -547,15 +543,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     errdefer rel.deinit();
     if (o.parallel == 0 or o.parallel > max_parallel) return error.BadZonosParallel;
     const editing = if (rel.edit_adapter.len != 0) try zedit.editBytes(gpa, io, rel.edit_adapter, o.context) else 0;
-    var door: Door = .{ .o = o, .need = need(o.context, b.frames) + (o.parallel - 1) * laneBytes(o.context, b.frames) + editing };
+    var decoders = try zdec.Set.open(rel.arena.allocator(), io, dir, o.decoders, .{ .max_frames = b.frames }, o.parallel);
+    const first = decoders.default();
+    var door: Door = .{ .o = o, .need = need(o.context, b.frames, first) + (o.parallel - 1) * laneBytes(o.context, b.frames, first) + editing };
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check }, .adapter = rel.edit_adapter });
     errdefer e.destroy();
-    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
-    errdefer codec.destroy();
-    for (1..o.parallel) |_| {
-        _ = try e.addLane();
-        _ = try codec.addLane();
-    }
+    const codec = try decoders.load(gpa, io, e, rel.generator, first);
+    errdefer decoders.deinit();
+    for (1..o.parallel) |_| _ = try e.addLane();
     if (cuda.usage(false).device > door.need) return error.LoadOverItsAdmission;
     const slots = try gpa.alloc(Slot, o.parallel);
     errdefer gpa.free(slots);
@@ -571,6 +566,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         .rel = rel,
         .e = e,
         .codec = codec,
+        .decoders = decoders,
         .slots = slots,
         .turns = turns,
         .admit = o.admit,
@@ -581,12 +577,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
             .context_window = o.context,
             .plain_only = true,
             .prompt_cache = false,
-            .speech = .{ .sample_rate = z3.codec.sample_rate, .frame_length = z3.codec.frame_samples, .max_frames = b.frames, .max_prompt_tokens = b.prompt },
+            .speech = .{ .sample_rate = z3.codec.sample_rate, .frame_length = z3.codec.frame_samples, .max_frames = b.frames, .max_prompt_tokens = b.prompt, .decoders = decoders.ids },
         },
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     const held = cuda.usage(false).device;
-    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} at once, speech editing {s}, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, o.parallel, if (editing != 0) "on" else "off", held, door.need });
+    const listed = try std.mem.join(h.rel.arena.allocator(), ", ", h.decoders.ids);
+    std.log.info("zonos3: decoders {s} (the first loaded), {d} frames a request, {d} at once, speech editing {s}, {d} bytes on the device ({d} admitted)", .{ listed, b.frames, o.parallel, if (editing != 0) "on" else "off", held, door.need });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 

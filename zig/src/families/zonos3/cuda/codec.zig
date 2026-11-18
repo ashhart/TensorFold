@@ -15,9 +15,17 @@ const internal_frame = 2944; // 44160 Hz samples a code frame
 const blas_ws_bytes = 32 << 20; // as Drama gives cuBLAS
 const head_rate = 16; // head frames a code frame
 
+pub const Decoder = wts.Decoder;
+
 pub const Options = struct {
     max_frames: usize = 2048, // code frames a request
     pass_frames: usize = 32, // code frames a pass through the trunk
+    decoder: Decoder = .keep2_plain,
+
+    /// A stage's K and V cache rows: its attention window and a pass's rows, a ring over positions.
+    pub fn ring(o: Options, stage: usize) usize {
+        return wts.stages[stage].ctx + (o.pass_frames << @intCast(stage));
+    }
 
     pub fn validate(o: Options) !void {
         if (o.max_frames == 0 or o.max_frames > 8192) return error.BadFrameBudget;
@@ -99,7 +107,7 @@ pub const Codec = struct {
         for (&c.kv) |*layers| layers.* = &.{};
         c.k = try kern.Kernels.load(d);
         errdefer c.k.unload();
-        c.w = try wts.load(gpa, io, d, generator, head);
+        c.w = try wts.load(gpa, io, d, generator, head, o.decoder);
         errdefer {
             c.w.deinit();
             gpa.destroy(c.w);
@@ -206,12 +214,13 @@ pub const Codec = struct {
         for (&l.sem_hist, 0..) |*h, i| h.* = l.hist + i * one;
         for (&l.head_hist, 0..) |*h, i| h.* = l.hist + (wts.sem_blocks + i) * one;
         for (&l.kv, wts.stages, 0..) |*layers, shape, si| {
-            const bytes = (T << @intCast(si)) * shape.d * 4;
+            const bytes = c.o.ring(si) * shape.d * 4;
+            const n = c.o.decoder.layers(si);
             if (c.counted != null) {
-                for (0..2 * shape.layers) |_| _ = try c.alloc(bytes);
+                for (0..2 * n) |_| _ = try c.alloc(bytes);
                 continue;
             }
-            layers.* = try c.gpa.alloc([2]u64, shape.layers);
+            layers.* = try c.gpa.alloc([2]u64, n);
             for (layers.*) |*pair| pair.* = .{ try c.alloc(bytes), try c.alloc(bytes) };
         }
         for (&l.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
@@ -277,8 +286,8 @@ pub const Codec = struct {
         try stage_layer.convnext(&c.k, c.stream, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, b, hist, x, rows);
     }
 
-    fn layer(c: *Codec, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
-        try stage_layer.layer(&c.k, c.stream, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, shape, L, kv, x, rows, pos0);
+    fn layer(c: *Codec, si: usize, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
+        try stage_layer.layer(&c.k, c.stream, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, wts.stages[si], L, kv, c.o.ring(si), x, rows, pos0);
     }
 
     fn pass(c: *Codec, codes: []const [10]i32, probe: ?Probe) !void {
@@ -301,7 +310,7 @@ pub const Codec = struct {
         for (wts.stages, w.stages, c.kv, 0..) |shape, st, kv, si| {
             const pos0 = c.frames << @intCast(si);
             try k.linear(s, st.in_proj, 0, x, shape.in, shape.in, shape.d, y, shape.d, rows);
-            for (st.layers, kv) |L, pair| try c.layer(shape, L, pair, y, rows, pos0);
+            for (st.layers, kv) |L, pair| try c.layer(si, L, pair, y, rows, pos0);
             if (shape.out == 0) {
                 std.mem.swap(u64, &x, &y);
                 if (probe) |p| try p.f(p.ctx, "stage_8", x, rows, shape.d);
