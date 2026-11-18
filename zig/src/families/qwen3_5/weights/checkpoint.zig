@@ -112,6 +112,8 @@ pub const Checkpoint = struct {
             c.main.release(c.text(&buf, "norm."));
             c.main.release(c.names.head);
         }
+        // Windows has no per-range advice: one trim of the process's set after the step, not one per tensor
+        @import("sys").working_set.release();
     }
 
     /// Layer `index`, read and converted; free it with `deinit`.
