@@ -29,8 +29,8 @@ pub const Manager = struct {
     closed: bool = false,
     limits: Limits = .{},
 
-    fn find(m: *Manager, id: []const u8) ?*Job {
-        for (m.jobs.items) |j| if (!j.deleted and std.mem.eql(u8, j.id, id)) return j;
+    fn find(m: *Manager, id: []const u8, owner: ?[32]u8) ?*Job {
+        for (m.jobs.items) |j| if (!j.deleted and std.mem.eql(u8, j.id, id) and std.meta.eql(j.key, owner)) return j;
         return null;
     }
 
@@ -65,39 +65,39 @@ pub const Manager = struct {
     }
 
     /// GET's answer for a queued or running response, copied into `a`; null when none has `id`.
-    pub fn poll(m: *Manager, io: std.Io, a: Allocator, id: []const u8) ?Value {
+    pub fn poll(m: *Manager, io: std.Io, a: Allocator, id: []const u8, owner: ?[32]u8) ?Value {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
-        const j = m.find(id) orelse return null;
+        const j = m.find(id, owner) orelse return null;
         return j.snapshot(a) catch null;
     }
 
     /// Whether `id` names a response still queued or running.
-    pub fn running(m: *Manager, io: std.Io, id: []const u8) bool {
+    pub fn running(m: *Manager, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
-        return m.find(id) != null;
+        return m.find(id, owner) != null;
     }
 
     /// DELETE of a queued or running response: it stops, and its end is not stored; false when none has `id`.
-    pub fn forget(m: *Manager, io: std.Io, id: []const u8) bool {
+    pub fn forget(m: *Manager, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
-        const j = m.find(id) orelse return false;
+        const j = m.find(id, owner) orelse return false;
         j.deleted = true;
         j.stop();
         return true;
     }
 
     /// Cancels `id` and waits briefly for its end; the response as it stands if still running, null if it ended.
-    fn cancel(m: *Manager, io: std.Io, a: Allocator, id: []const u8) ?Value {
+    fn cancel(m: *Manager, io: std.Io, a: Allocator, id: []const u8, owner: ?[32]u8) ?Value {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
-        (m.find(id) orelse return null).stop();
+        (m.find(id, owner) orelse return null).stop();
         const wait: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(cancel_wait_ms), .clock = .awake } };
         const deadline = wait.toDeadline(io);
-        while (m.find(id) != null) m.ended.waitTimeout(io, &m.mutex, deadline) catch break;
-        const j = m.find(id) orelse return null;
+        while (m.find(id, owner) != null) m.ended.waitTimeout(io, &m.mutex, deadline) catch break;
+        const j = m.find(id, owner) orelse return null;
         return j.snapshot(a) catch null;
     }
 
@@ -118,7 +118,7 @@ pub const Manager = struct {
         m.mutex.lockUncancelable(srv.io);
         defer m.mutex.unlock(srv.io);
         // stored before the job leaves `jobs`, so a poll always finds one of the two
-        if (!j.deleted) if (j.ending(cx.a, got)) |final| srv.store.put(srv.io, cx, final, j.t.added) catch |e|
+        if (!j.deleted) if (j.ending(cx.a, got)) |final| srv.store.put(srv.io, cx, final, j.t.added, j.key) catch |e|
             log.line("background response {s} was not stored: {s}", .{ j.id, @errorName(e) });
         j.held.release();
         for (m.jobs.items, 0..) |x, i| if (x == j) {
@@ -183,7 +183,7 @@ const Job = struct {
     fn stop(j: *Job) void {
         if (j.cancelled) return;
         j.cancelled = true;
-        if (!cancel_ids.registry.cancel(j.srv.io, j.id)) j.dropped.store(true, .release);
+        if (!cancel_ids.registry.cancel(j.srv.io, j.id, j.key)) j.dropped.store(true, .release);
     }
 
     fn gone(ctx: *anyopaque) bool {
@@ -205,7 +205,7 @@ const Job = struct {
 
     /// The turn as a whole (unstreamed) POST runs it, on a connection that is gone only when cancelled.
     fn work(j: *Job, cx: *errors.Cx) ?Value {
-        var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = cx.a, .gone_hook = .{ .ctx = j, .call = gone } };
+        var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = cx.a, .gone_hook = .{ .ctx = j, .call = gone }, .key_digest = j.key };
         const sink: Sink = .{ .ctx = j, .vt = &.{ .open = quiet, .event = unheard, .keepalive = quiet } };
         return switch (responses.turn(j.srv, cx.a, &conn, cx, .null, j.t, sink, .{ .base = j.base })) {
             .whole => |v| v,
@@ -283,8 +283,8 @@ pub fn cancelPath(route: []const u8) ?[]const u8 {
 
 /// POST /v1/responses/{id}/cancel: the cancelled response; again for one already cancelled; 400 for any other end.
 pub fn cancel(srv: *Server, conn: *Conn, a: Allocator, id: []const u8) void {
-    if (srv.background_jobs.cancel(srv.io, a, id)) |still| return routes.sendValue(conn, a, 200, still);
-    const kept = (srv.store.get(srv.io, a, id) catch null) orelse return responses.notStored(conn, a, id);
+    if (srv.background_jobs.cancel(srv.io, a, id, conn.key_digest)) |still| return routes.sendValue(conn, a, 200, still);
+    const kept = (srv.store.get(srv.io, a, id, conn.key_digest) catch null) orelse return responses.notStored(conn, a, id);
     if (!json.truthyField(kept, "background")) return responses.refuse(conn, a, "only a response created with background: true can be cancelled", 400, "response_id");
     const status = json.strOr(kept.get("status"));
     if (std.mem.eql(u8, status, "cancelled")) return routes.sendValue(conn, a, 200, kept);

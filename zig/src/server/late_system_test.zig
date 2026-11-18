@@ -335,7 +335,7 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
                 try std.testing.expectEqualStrings("function_call", items[1].get("type").?.string);
                 try std.testing.expectEqualStrings("{\"q\":\"a\"}", items[1].get("arguments").?.string);
                 call_id = items[1].get("call_id").?.string;
-                const stored = (try srv.store.get(srv.io, a, body.get("id").?.string)).?;
+                const stored = (try srv.store.get(srv.io, a, body.get("id").?.string, null)).?;
                 try std.testing.expectEqualStrings(retained_prose, stored.get("output").?.array[0].get("content").?.array[0].get("text").?.string);
             },
             else => unreachable,
