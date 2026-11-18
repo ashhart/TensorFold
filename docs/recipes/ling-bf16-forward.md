@@ -36,6 +36,13 @@ The fixed IDs are `(37*t + 11) % 157182`, at 2, 8 and 32 rows.
 The native diagnostic compares whole execution with single-row chunks and a fresh
 instance restored after token 1. It compares logits, KDA recurrent/conv state and
 MLA cache bytes. A truncated snapshot must be rejected.
+Both the chunked and resumed instances' final recurrent states and caches are compared
+with the whole run. A temporary one-byte corruption of the resumed final MLA slot
+was planted after the logits check: the new state comparison failed, and the fault
+was removed before the clean 2/8/32-row rerun.
+Forced late-Forward and early-MLA buffer errors also test owned-buffer rollback.
+Pipeline/library error cleanup is guarded by `errdefer`; driver object counts are
+not independently instrumented by these allocator-failure checks.
 The snapshot is an internal same-checkpoint diagnostic format, not a serving or
 portable checkpoint handover API. These receipts exercise in-process restoration.
 The oracle remains `families/ling/oracle/ling_forward.py`, using native expert picks
