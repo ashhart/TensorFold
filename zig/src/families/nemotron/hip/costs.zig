@@ -13,6 +13,7 @@ pub const Costs = shared.Costs;
 /// A scratch lane's kept length in the timings, and the positions it covers past it (the head steps' too).
 const at = 16;
 const room = 2 * shared.window * 4;
+const timed_depth = 3;
 
 const Rig = struct {
     h: *Hip,
@@ -63,10 +64,10 @@ const Rig = struct {
         }
     };
 
-    /// One chained head step: a lone chain of the deepest depth from a scratch lane's (garbage) row.
+    /// One chained head step: a chain of `timed_depth` from a scratch lane's (garbage) row.
     fn step(r: *Rig, hd: *head.Head) !f64 {
         const run: Chain = .{ .r = r, .hd = hd };
-        return try shared.mean(run, Chain.go) / head.max_depth;
+        return try shared.mean(run, Chain.go) / timed_depth;
     }
 
     const Chain = struct {
@@ -78,7 +79,7 @@ const Rig = struct {
             const l = x.r.ls[0];
             l.s.len = at;
             l.s.mtp_len = at;
-            var out: [head.max_depth]u32 = undefined;
+            var out: [timed_depth]u32 = undefined;
             var jobs = [_]head.Job{.{ .s = &l.s, .hidden = l.hidden.base(), .next = x.r.tokens[0][0..1], .out = &out }};
             try h.e.fresh();
             try x.hd.chains(h.e.ops(&h.e.arena), &jobs);
@@ -98,6 +99,6 @@ pub fn measure(h: *Hip, out: *Costs) !void {
         try l.s.cover(&e.pool, at + room);
         l.s.len = at;
     }
-    try shared.forwards(&r, @min(lanes.max_window, e.plan.rows), streams, e.plan.rows, out);
+    try shared.forwards(&r, @min(e.window, e.plan.rows), streams, e.plan.rows, out);
     if (h.head) |hd| out.step_ms = try r.step(hd);
 }
