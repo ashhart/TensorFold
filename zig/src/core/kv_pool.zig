@@ -6,6 +6,7 @@ pub const retirement = @import("kv_pool_retire.zig");
 
 test {
     _ = @import("kv_groups_test.zig");
+    _ = @import("kv_pool_trim_cost_test.zig");
 }
 
 /// A family's stream memory: a fixed part at any length, paged caches a token, and a kept snapshot's slot.
