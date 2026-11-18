@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: Cancel is honored at the final download byte update, before verification; a cancelled download is not registered as a model and its bytes stay cached for a later retry (#3795, fixes #3794). Thanks to @AIFlowML.
+
 - Desktop: downloader diagnostics are assembled per stream with split UTF-8 intact and an unterminated final line flushed before the exit is handled; a bounded tail keeps long diagnostics usable (#3793, fixes #3792). Thanks to @AIFlowML.
 
 - Desktop: the Hub check and local model library recognize Spark's declared BF16 dtype when a config has no quantization or compression field, while still comparing the detected format with the active engine's capabilities (#3791, fixes #3789). Thanks to @AIFlowML.
