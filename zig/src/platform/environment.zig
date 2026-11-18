@@ -405,6 +405,8 @@ pub const Flags = struct {
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
+    /// --parallel named: TENSORFOLD_PARALLEL then stays out of the way, as a flag-named device does.
+    parallel_named: bool = false,
 
     fn includes(f: Flags, scope: Scope) bool {
         return switch (scope) {
@@ -431,6 +433,7 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
         if (!flags.includes(r.scope) or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
+        if (std.mem.eql(u8, r.name, "TENSORFOLD_PARALLEL") and flags.parallel_named) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT") and flags.carveout) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_MIB") and !flags.carveout and
             !std.mem.eql(u8, environment.get("TF_CUDA_CARVEOUT") orelse "0", "1")) continue;
