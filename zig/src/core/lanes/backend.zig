@@ -91,6 +91,8 @@ pub const Backend = struct {
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Whether image requests may run a background warm prefill; wrappers preserve the target policy.
+    warm_images: bool = true,
     ptr: *anyopaque,
     vtable: *const VTable,
 

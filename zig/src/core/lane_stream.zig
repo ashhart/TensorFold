@@ -15,6 +15,8 @@ pub fn freeProposer(h: *LaneHost, job: *Job) void {
 /// An admitted job's stream (its kept prefix looked up, its drafter): false when it failed (the job is finished).
 pub fn open(h: *LaneHost, job: *Job) bool {
     const r = job.request;
+    // A family may skip image warm passes before any cache lookup or backend call.
+    if (!h.core.backend.warm_images and h.info_.warm_turns and r.background and r.max_tokens == 0 and r.images.len > 0) return !h.cancel(job);
     var reuse: lanes.stream.Reuse = .{};
     // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
     if (h.frame_key) |frame| if (h.cache != null and r.images.len > 0 and r.cacheKey().len > 0) {

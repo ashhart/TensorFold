@@ -44,6 +44,7 @@ const Driver = struct {
     foreground: ?*const api.Request = null,
     reply: ?*Reply = null,
     completed: usize = 0,
+    warm_chunks: usize = 0,
     arrived: bool = false,
     restored: u32 = 0,
     fn of(ptr: *anyopaque) *Driver {
@@ -53,7 +54,8 @@ const Driver = struct {
     fn prefill(ptr: *anyopaque, s: *lanes.Stream) !void {
         const d = of(ptr);
         while (!s.yields()) if (try step(ptr, s, 0)) return;
-        s.keepInterruptedPrefill(@intCast(d.target.lanes.getPtr(s).?.history.items.len));
+        const at = if (d.target.lanes.getPtr(s)) |l| l.history.items.len else 0;
+        s.keepInterruptedPrefill(@intCast(at));
         return error.Yielded;
     }
     fn step(ptr: *anyopaque, s: *lanes.Stream, _: u32) !bool {
@@ -80,6 +82,7 @@ const Driver = struct {
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
         d.completed += 1;
+        d.warm_chunks += @intFromBool(s.max_new == 0);
         s.fill_at.store(@intCast(end), .monotonic);
         return end == s.prompt_len;
     }
@@ -99,8 +102,9 @@ const Driver = struct {
     }
 };
 
-const Result = struct { ids: [8]u32, cached: u32, completed: usize, restored: u32 };
-fn run(warming: bool, sampled: bool) !Result {
+const Result = struct { ids: [8]u32, cached: u32, completed: usize, restored: u32, warm_chunks: usize };
+const Options = struct { image: bool = false, reserved: bool = false, warm_images: bool = false };
+fn run(warming: bool, sampled: bool, options: Options) !Result {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a };
@@ -110,12 +114,12 @@ fn run(warming: bool, sampled: bool) !Result {
     vt.prefill_step = Driver.step;
     vt.reports_fill = true;
     var clock: lanes.fake.FixedClock = .{};
-    var core = lanes.Engine.init(a, &cfg, .{ .ptr = &target, .vtable = &vt }, clock.clock());
+    var core = lanes.Engine.init(a, &cfg, .{ .ptr = &target, .vtable = &vt, .warm_images = options.warm_images }, clock.clock());
     defer core.deinit();
     var host = api.LaneHost.init(a, t.io, &core, .{ .lanes = 2, .warm_turns = warming });
     var d: Driver = .{ .target = &target, .engine = host.engine() };
     target.prefill_hook_ctx = &d;
-    var store = pc.Store.init(a, .{ .ptr = &d, .vtable = &.{ .bytes = Driver.bytes, .save = Driver.save, .restore = Driver.restore, .drop = Driver.drop } }, .{ .min_prompt = 0, .min_gap = 0, .lookahead = 1, .warm = .waits }, 128);
+    var store = pc.Store.init(a, .{ .ptr = &d, .vtable = &.{ .bytes = Driver.bytes, .save = Driver.save, .restore = Driver.restore, .drop = Driver.drop } }, .{ .min_prompt = 0, .min_gap = 0, .lookahead = if (options.reserved) 0 else 1, .warm = .waits }, if (options.reserved) 224 else 128);
     defer store.deinit();
     host.cache = &store;
     var seed = try lanes.Stream.init(a, .{ .id = "seed", .prompt = &words, .max_new = 0 });
@@ -123,38 +127,73 @@ fn run(warming: bool, sampled: bool) !Result {
     const initial = try target.lanes.getOrPut(a, &seed);
     initial.value_ptr.* = .{};
     try initial.value_ptr.history.appendSlice(a, words[0..4]);
-    try t.expect(store.keepBorn(words[0..20], 4, 4, &seed, &.{}, &.{}));
+    const pictures: []const api.Image = if (options.image) &.{.{ .pixels = &.{}, .gh = 1, .gw = 1, .at = 2, .tokens = 1, .hash = 17 }} else &.{};
+    try t.expect(store.keepBornFrame(words[0..20], 4, 4, &seed, &.{}, &.{}, pictures, 0));
     target.backend().release(&seed);
-    try host.start();
-    defer host.stop();
-    const request: api.Request = .{ .prompt = &words, .max_tokens = 8, .history_len = 20, .born = 4, .sampling = if (sampled) .{ .seed = 19, .temperature = 1 } else null };
+    const request: api.Request = .{ .prompt = &words, .max_tokens = 8, .history_len = 20, .born = 4, .images = pictures, .sampling = if (sampled) .{ .seed = 19, .temperature = 1 } else null };
     var real: Reply = .{ .driver = &d };
     defer real.ids.deinit(a);
     var warm: Reply = .{ .driver = &d };
     defer warm.ids.deinit(a);
-    const pass: api.Request = .{ .prompt = words[0..20], .max_tokens = 0, .background = true, .history_len = 20, .born = 4 };
+    const pass: api.Request = .{ .prompt = words[0..20], .max_tokens = 0, .background = true, .history_len = 20, .born = 4, .images = pictures };
     d.foreground = &request;
     d.reply = &real;
+    const other_words: [24]u32 = @splat(99);
+    const other_request: api.Request = .{ .prompt = &other_words, .max_tokens = 1, .history_len = 20 };
+    var other: Reply = .{ .driver = &d };
+    defer other.ids.deinit(a);
+    if (options.reserved) {
+        try host.engine().submit(3, &other_request, .{ .ctx = &other, .event = Reply.event });
+        try t.expect(host.admitOne());
+        try t.expectEqual(@as(usize, 1), host.filling.items.len);
+        try t.expectEqual(@as(u64, 120), host.filling.items[0].cache_promise.bytes);
+        try t.expectEqual(store.budget, store.held + host.filling.items[0].cache_promise.bytes);
+    }
+    var before_work: usize = 0;
+    var before_promise: u64 = 120;
+    var before_held: u64 = 104;
     if (warming) {
         try host.engine().submit(1, &pass, .{ .ctx = &warm, .event = Reply.event });
-    } else try host.engine().submit(2, &request, .{ .ctx = &real, .event = Reply.event });
+        if (options.reserved) {
+            try t.expect(host.admitOne());
+            try warm.wait();
+            before_work = d.completed;
+            before_promise = host.filling.items[0].cache_promise.bytes;
+            before_held = store.held;
+        }
+    }
+    if (options.reserved and !d.arrived) try host.engine().submit(2, &request, .{ .ctx = &real, .event = Reply.event });
+    try host.start();
+    defer host.stop();
+    if (!options.reserved) {
+        if (warming and options.image) {
+            try warm.wait();
+            if (!d.arrived) try host.engine().submit(2, &request, .{ .ctx = &real, .event = Reply.event });
+        } else if (!warming) try host.engine().submit(2, &request, .{ .ctx = &real, .event = Reply.event });
+    }
     try real.wait();
     try t.expectEqual(api.Reason.length, real.reason);
     if (warming) {
         try warm.wait();
         try t.expectEqual(api.Reason.cancelled, warm.reason);
-        try t.expect(d.arrived);
+        if (!options.image and !options.reserved) try t.expect(d.arrived);
+    }
+    if (options.reserved) {
+        try other.wait();
+        try t.expectEqual(@as(usize, 0), before_work);
+        try t.expectEqual(@as(u64, 120), before_promise);
+        try t.expectEqual(@as(u64, 104), before_held);
     }
     try t.expectEqual(@as(usize, 8), real.ids.items.len);
-    var out: Result = .{ .ids = undefined, .cached = real.cached, .completed = real.at, .restored = d.restored };
+    var out: Result = .{ .ids = undefined, .cached = real.cached, .completed = real.at, .restored = d.restored, .warm_chunks = d.warm_chunks };
     @memcpy(&out.ids, real.ids.items);
     return out;
 }
 
 test "queued cache: progress a follow-up arriving mid-warm-chunk uses that chunk before further prefill" {
     for ([_]bool{ false, true }) |sampled| {
-        const main = try run(false, sampled);
-        const warm = try run(true, sampled);
+        const main = try run(false, sampled, .{});
+        const warm = try run(true, sampled, .{});
         errdefer std.debug.print("warm handoff: main cached={d} chunks={d}; warm cached={d} chunks={d}\n", .{ main.cached, main.completed, warm.cached, warm.completed });
         try t.expectEqual(@as(u32, 4), main.cached);
         try t.expectEqual(@as(usize, 5), main.completed);
@@ -208,4 +247,45 @@ test "queued cache: progress a warm handoff keeps other promises and never repla
         const promised: u64 = if (mode == .reserved or mode == .full) later.cache_promise.bytes else 0;
         try t.expect(store.held + promised <= store.budget);
     }
+}
+
+test "queued cache: progress image warm passes run no chunk and preserve ordinary image follow-ups" {
+    for ([_]bool{ false, true }) |sampled| {
+        const main = try run(false, sampled, .{ .image = true });
+        const warm = try run(true, sampled, .{ .image = true });
+        errdefer std.debug.print("image warm: main cached={d} chunks={d}; warm cached={d} chunks={d}\n", .{ main.cached, main.completed, warm.cached, warm.completed });
+        try t.expectEqual(@as(u32, 4), main.cached);
+        try t.expectEqual(@as(usize, 0), warm.warm_chunks);
+        try t.expectEqual(main.cached, warm.cached);
+        try t.expectEqual(main.completed, warm.completed);
+        try t.expectEqualDeep(main.ids, warm.ids);
+    }
+}
+
+test "queued cache: progress another admitted cache promise yields warm work before its first chunk" {
+    for ([_]bool{ false, true }) |sampled| {
+        const main = try run(false, sampled, .{ .reserved = true });
+        const warm = try run(true, sampled, .{ .reserved = true });
+        try t.expectEqual(@as(u32, 4), main.cached);
+        try t.expectEqual(@as(usize, 0), warm.warm_chunks);
+        try t.expectEqual(main.cached, warm.cached);
+        try t.expectEqual(main.completed, warm.completed);
+        try t.expectEqualDeep(main.ids, warm.ids);
+    }
+}
+
+test "queued cache: progress image warm policy belongs to the target through wrappers" {
+    var target: lanes.fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    try t.expect(target.backend().warm_images);
+    for ([_]bool{ false, true }) |allowed| {
+        var backend = target.backend();
+        backend.warm_images = allowed;
+        var recorded: lanes.recorder.Recorded = .{ .inner = backend, .recorder = undefined };
+        try t.expectEqual(allowed, recorded.backend().warm_images);
+        var drafted: lanes.drafted.Drafted = .{ .gpa = a, .target = recorded.backend(), .drafter = .{ .ptr = &target, .vtable = undefined } };
+        try t.expectEqual(allowed, drafted.backend().warm_images);
+    }
+    const unchanged = try run(true, false, .{ .image = true, .warm_images = true });
+    try t.expectEqual(@as(usize, 1), unchanged.warm_chunks);
 }
