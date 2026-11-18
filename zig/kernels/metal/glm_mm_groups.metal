@@ -5,6 +5,66 @@
 
 constant constexpr int GT_GROUP = 32; // column tiles a group
 
+// am_k_loop with each step's codes, scale and bias loaded a step ahead: the same tiles, MMAs and sums.
+template <int TM>
+inline void gt_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int K, int live,
+                      const device uchar* wq, const device bfloat* scales, const device bfloat* biases,
+                      threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t, short2 home) {
+  threadgroup bfloat* mine = tile + (t / 2) * PAD + 32 * (t % 2);
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    acc[i][0] = frag<float>(0);
+    acc[i][1] = frag<float>(0);
+  }
+  Codes next = am_load(wq);
+  bfloat ns = scales[0], nb = biases[0];
+  for (int k = 0; k < K; k += 64) {
+    const Codes cur = next;
+    const bfloat cs = ns, cb = nb;
+    if (k + 64 < K) {
+      next = am_load(wq + STEP_BYTES);
+      ns = scales[1];
+      nb = biases[1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    am_codes(cur, mine);
+    if (t % 2 == 0) {
+      const float s = float(cs);
+      sb[t / 2] = s;
+      sb[64 + t / 2] = float(cb) - OFF * s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (live > 16 * (TM - 1)) {
+      am_step<TM, TM>(acc, rows, k, tile, sb, tn, home);
+    } else if (TM > 1 && live > 0) {
+      am_step<TM, 1>(acc, rows, k, tile, sb, tn, home);
+    }
+    wq += STEP_BYTES;
+    scales += 1;
+    biases += 1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// am_block<BM> on gt_k_loop, outputs scattered to rows dst[i].
+template <int BM>
+inline void gt_block(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int K,
+                     int ldy, int col, long wrow0, const device uint32_t* w, const device bfloat* scales,
+                     const device bfloat* biases, device TF_OUT_T* y, threadgroup bfloat* tile, threadgroup float* sb,
+                     uint sg, uint lane, const device int32_t* dst) {
+  constexpr int SM = BM / 2;
+  constexpr int TM = SM / 16;
+  const int t = int(sg) * 32 + int(lane);
+  const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);
+  const long wrow = wrow0 + t / 2;
+  const short2 home = frag_home(ushort(lane));
+  const AmRows<TM> starts = am_rows<TM>(x, ldx, xs, ldxs, row, rows, tm, home, nullptr, 1);
+  frag<float> acc[TM][2];
+  gt_k_loop<TM>(acc, starts, K, live, (const device uchar*)w + wrow * (K * TF_BITS / 8) + HALF_BYTES * (t % 2),
+                scales + wrow * (K / TF_GROUP), biases + wrow * (K / TF_GROUP), tile, sb, tn, uint(t), home);
+  if (live > 0) am_scatter<TM>(acc, y, dst + row + tm, ldy, col + tn, live, home);
+}
+
 // Launch id's row tile and column tile (`col`): groups of GT_GROUP columns, row tiles in order within a group.
 template <int BM>
 inline int gt_order(uint id, constant MmArgs& a, thread int& col) {
@@ -37,7 +97,7 @@ template <int BM>
   const short2 home = frag_home(ushort(lane));
   const AmRows<TM> starts = am_rows<TM>(X, a.k, XS, a.k / TF_GROUP, row, rows, tm, home, ORDER, int(glu.x));
   frag<float> acc[TM][2];
-  am_k_loop<TM>(acc, starts, a.k, live, (const device uchar*)(up ? WU : WG) + wrow * (a.k * TF_BITS / 8) + HALF_BYTES * (t % 2),
+  gt_k_loop<TM>(acc, starts, a.k, live, (const device uchar*)(up ? WU : WG) + wrow * (a.k * TF_BITS / 8) + HALF_BYTES * (t % 2),
                 (up ? SU : SG) + wrow * (a.k / TF_GROUP), (up ? BU : BG) + wrow * (a.k / TF_GROUP), tile, sb, tn, uint(t), home);
   am_store_glu<TM>(acc, Y + long(row + tm) * a.n + c0 + tn / 2, a.n, live, home, glu.y);
 }
@@ -56,7 +116,7 @@ template <int BM>
   const int rt = gt_order<BM>(tg.x, a, ct);
   if (!am_tile<BM>(OFFS, a.experts, a.rows, rt, lane, expert, row, rows)) return;
   const int col = ct * 64;
-  am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y, tile, sb, sg,
+  gt_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y, tile, sb, sg,
                lane, DST);
 }
 
