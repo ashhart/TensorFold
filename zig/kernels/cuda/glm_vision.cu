@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include "glm_pdl.cuh"
 
+#include "glm_vis_qk.cuh"
+
 namespace {
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ __nv_bfloat16 tobf(float x) { return __float2bfloat16_rn(x); }
@@ -106,6 +108,13 @@ extern "C" __global__ void glm_vis_qkv(const __nv_bfloat16* __restrict__ qkv, co
     const __nv_bfloat16* v = base + 2 * H * 64;
     vt[(blk * 64 + lane) * seg + j] = v[lane];
     vt[(blk * 64 + lane + 32) * seg + j] = v[lane + 32];
+}
+
+// vit's full attention inputs: glm_vis_qkv's q and k, in place in qkv's rows [N, 3 H 64]; a warp a (row, head).
+extern "C" __global__ void glm_vis_qk(__nv_bfloat16* qkv, const __nv_bfloat16* __restrict__ qn,
+                                      const __nv_bfloat16* __restrict__ kn, const int* __restrict__ pos,
+                                      const float* __restrict__ inv_freq, int N, int H, float eps) {
+    glm_vis_rows::qk<true>(qkv, qn, kn, pos, inv_freq, N, H, eps);
 }
 
 // A scores row's softmax: pr = bf16(exp(scale (s - max))) and its sum (of the bf16 values), a block a row

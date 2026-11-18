@@ -332,10 +332,7 @@ template __global__ void tf_prefill_attention::tree_kernel<64, 8, 4, 8>(const __
 // Head dim 72, eight warps of one head, eight staging slots (SigLIP2's tower, 72 dims padded to 80 inside).
 template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
-// Head dim 80, eight warps, two blocks an SM (RADIO's tower, 16 heads of 80): full_kernel<80>'s bits, 1.35x faster.
-template __global__ void tf_prefill_attention::vision_kernel<80, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
-    float);
-// Head dim 64, eight warps (Qwen3-ASR's audio tower, 14 or 16 heads of 64 over a window of its rows).
+// Head dim 64, eight warps (Qwen3-ASR's audio tower and GLM-5.3-Flash's image tower over their respective windows or frame groups).
 template __global__ void tf_prefill_attention::vision_kernel<64, 8>(const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int,
     float);
 // Head dim 128, eight warps (MOSS-Image's denoiser, 24 heads of 128 over its image and prompt rows).
