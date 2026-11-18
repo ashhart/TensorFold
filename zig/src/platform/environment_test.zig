@@ -195,6 +195,10 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_DRAFTS", .raw = "3", .n = 3 },
+    .{ .name = "TF_MTP_PLAIN_GUARD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_BITS", .raw = "4", .n = 4 },
+    .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
@@ -331,6 +335,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "GLM_POOL_TOKENS", "4294967232" },          .{ "GLM_POOL_TOKENS", "2k" },
         .{ "GLM_POOL_TOKENS", "+2000000" },            .{ "GLM_POOL_TOKENS", "-1" },
         .{ "GLM_POOL_TOKENS", "1e6" },                 .{ "GLM_POOL_TOKENS", "lots" },
+        .{ "TF_MTP_BITS", "8" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

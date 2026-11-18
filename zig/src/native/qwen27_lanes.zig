@@ -97,6 +97,8 @@ pub const Metal = struct {
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
     give_back: [max_streams]bool = @splat(false), // a free slot's grown K/V and ring wait to go back (slots.giveBack)
     draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
+    held_taps: ?mtl.Buffer = null,
+    features_state: @import("sensenova_features.zig").State = .{},
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -147,6 +149,7 @@ pub const Metal = struct {
         q.residency.setBack(b, null);
         b.standing.deinit(b.gpa);
         if (b.rewind) |x| x.deinit();
+        if (b.held_taps) |x| x.deinit();
         b.dropRound();
         b.dropTree();
         b.freeContexts();
@@ -167,12 +170,13 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        const feat = @import("sensenova_features.zig");
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .prefill_features = feat.prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
-        const drafting = b.draft != null or b.external;
+        const drafting = b.draft != null or b.features_state.enabled or b.external;
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
@@ -508,6 +512,7 @@ pub const Metal = struct {
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        try @import("sensenova_features.zig").recordVerify(b, windows, inputs[0..windows.len]);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
@@ -583,11 +588,14 @@ pub const Metal = struct {
         if (b.round == null or windows.len != b.count) return error.NothingToKeep;
         for (windows, paths, b.windows[0..b.count]) |w, path, slot| if (path.len == 0 or path[0] != 0 or b.slotOf(w.stream) != slot) return error.NothingToKeep;
         try b.keepPaths(paths);
+        @import("sensenova_features.zig").recordKeep(b, windows, paths);
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-        slots.endFill(self(ptr), s);
-        self(ptr).unbind(s);
+        const b = self(ptr);
+        if (b.slotOf(s)) |slot| b.features_state.clearSlot(slot);
+        slots.endFill(b, s);
+        b.unbind(s);
     }
 };
 

@@ -53,6 +53,7 @@ pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
 /// Staged references: a round's stage rows copied to their planes (tf-qwen27-run --stages).
 pub const stage_planes = @import("stage_planes.zig");
+pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
@@ -89,6 +90,7 @@ test {
     _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
     _ = @import("slot_pages_test.zig");
+    _ = sn_mtp;
 }
 
 pub const residency = @import("residency.zig");
