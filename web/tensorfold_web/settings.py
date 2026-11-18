@@ -151,6 +151,8 @@ def load() -> Settings:
         data = json.loads(path().read_text())
     except (OSError, ValueError):
         return Settings()
+    if not isinstance(data, dict):
+        return Settings()
     return Settings(**{k: v for k, v in data.items() if k in Settings.__dataclass_fields__})
 
 
