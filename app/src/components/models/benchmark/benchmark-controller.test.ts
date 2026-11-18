@@ -98,6 +98,39 @@ freshStatus.resolve(fixtureRun({ revision: 10 })); await freshRead
 oldStatus.resolve(fixtureRun({ revision: 1 })); await oldRead
 assert.equal(reactivated.snapshot().selected?.revision, 10)
 reactivated.dispose()
+
+const runningRefresh = fixtureRun({ state: 'running', revision: 3 })
+const finishedRefresh = fixtureRun({ state: 'complete', revision: 6 })
+const backgroundStatus = deferred<ReturnType<typeof fixtureRun>>()
+const refreshStatus = deferred<ReturnType<typeof fixtureRun>>()
+const statusReads = [Promise.resolve(runningRefresh), backgroundStatus.promise, refreshStatus.promise]
+let refreshedHistory: ReturnType<typeof fixtureRun>[] = []
+let refreshHistoryReads = 0
+const refreshing = createBenchmarkController({
+  ...port,
+  status: () => { const read = statusReads.shift(); assert.ok(read); return read },
+  history: async () => { refreshHistoryReads++; return refreshedHistory },
+}, () => {})
+await refreshing.refresh()
+const backgroundPoll = refreshing.poll()
+const manualRefresh = refreshing.refresh()
+assert.equal(refreshing.snapshot().loading, true, 'manual refresh starts while a status poll is pending')
+await refreshing.refresh()
+await refreshing.poll()
+assert.equal(statusReads.length, 0, 'only one status request is made for the manual refresh')
+refreshedHistory = [finishedRefresh]
+refreshStatus.resolve(finishedRefresh)
+await manualRefresh
+assert.deepEqual(refreshing.snapshot().history, [finishedRefresh])
+assert.equal(refreshing.snapshot().active, null)
+assert.equal(refreshing.snapshot().loading, false)
+backgroundStatus.resolve(runningRefresh)
+await backgroundPoll
+assert.equal(refreshing.snapshot().active, null, 'the superseded poll cannot restore a finished run')
+assert.equal(refreshing.snapshot().selected?.revision, finishedRefresh.revision)
+assert.equal(refreshHistoryReads, 2, 'manual refresh reads saved history once')
+refreshing.dispose()
+
 // A storage-failure session can retain more than20 receipts; none may become unreachable.
 latest = null
 history = Array.from({ length: 30 }, (_, index) => fixtureRun({ id: `benchmark_retained_fixture_${index}`, saved: false, storageError: 'Synthetic profile write failure' }))
