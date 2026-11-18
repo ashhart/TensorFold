@@ -536,12 +536,19 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    const sn_mhc = try @import("metal_sensenova_mhc.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer sn_mhc.destroy();
+    var sn_lin = @import("metal_sensenova_linear.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer sn_lin.deinit();
+    try sn_lin.collect(o.only);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
+        if (try sn_mhc.invariance(o.seed) != 0) return 1;
+        if (wanted(o, "sensenova")) try sn_lin.rowCountInvariant();
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

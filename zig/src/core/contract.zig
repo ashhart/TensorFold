@@ -12,6 +12,7 @@ pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
+pub const sensenova_linear_records = @import("contract/sensenova_linear_records.zig");
 pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
 pub const hsaco = @import("contract/hsaco.zig");
@@ -63,6 +64,8 @@ test {
     _ = @import("contract/hip_records_qwen3.zig");
     _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
+    _ = sensenova_linear_records;
+    _ = @import("contract/sensenova_mhc_records.zig");
 }
 
 test {
