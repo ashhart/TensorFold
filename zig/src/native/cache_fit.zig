@@ -255,7 +255,8 @@ test "the OS readings: RAM and this process's footprint" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const r = ram() orelse return error.SkipZigTest;
     const p = footprint() orelse return error.SkipZigTest;
-    try std.testing.expect(r >= 8 * GiB and p > 0 and p < r);
+    // hw.memsize is bytes on every Mac; the 8 GiB floor held on the large hosts but not the arm64 runner.
+    try std.testing.expect(r >= GiB and p > 0 and p < r);
 }
 
 test "a host's memory counts keep the footprint, its measured peak and the limit apart" {
