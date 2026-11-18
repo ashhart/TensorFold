@@ -4,19 +4,24 @@ import argparse
 import http.client
 import json
 import os
+from pathlib import Path
 import re
+import select
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import conformance_lifecycle as lifecycle  # noqa: E402
+
 COLD = (1024, 2048, 8192, 16384, 32768, 65536)  # cold prompt lengths: a warm-up, then the PP rule's
 PROBE = chr(0x2063) + "probe"  # the server's system-prefix probe (prompt.zig systemPrefixLen)
 USAGE = """modes:
   record BASE MODEL ROWS.jsonl     every scenario on a server with the prompt cache on; cached tokens checked per reply
   replay BASE MODEL ROWS.jsonl OUT the same bodies, in order, on a server started with --prompt-cache-gib 0
-  compare ROWS.jsonl OUT           full token digests equal, drafted == "draft": false; timing apart
+  compare ROWS.jsonl OUT           full token digests equal, drafted == "draft": false, the cancel held; timing apart
   evict BASE MODEL ROWS.jsonl GIB  a budget that holds one conversation: alternating ones evict, a big one is refused
   cold BASE MODEL PROMPTS.json OUT cold prompts 2k-64k (built once through /v1/tokenize): time to first token
   pp OUT...                        cold medians by length, each run against the first
@@ -40,6 +45,8 @@ TOOLS = [
 
 
 class Client:
+    SETTLE_S = 60  # seconds a cancel waits for the server to go idle, before the cut and after it
+
     def __init__(self, base: str, model: str) -> None:
         self.base, self.model = base.rstrip("/"), model
 
@@ -66,15 +73,39 @@ class Client:
                 "finish": choice.get("finish_reason"), "content": msg.get("content") or "",
                 "reasoning": msg.get("reasoning_content") or "", "calls": msg.get("tool_calls") or []}
 
+    def get(self, path: str):
+        """A GET's status and raw body (conformance_lifecycle's census, disconnects and health read it)."""
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=30) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(1 << 16)
+        except OSError:
+            return 0, b""
+
     def cancel(self, body: dict, after: float) -> dict:
         """Sends the request and closes the socket after `after` seconds, before any reply (a cancel in prefill)."""
+        # "error": the reply came before the cut, 1 disconnect not counted, /v1/load not idle again, or /health not ok
+        settle_s = self.SETTLE_S
+        base, before = lifecycle.idle(self, settle_s), lifecycle.disconnects(self)
         u = urllib.parse.urlparse(self.base)
         c = http.client.HTTPConnection(u.hostname, u.port, timeout=7200)
         c.request("POST", "/v1/chat/completions", json.dumps(body), {"Content-Type": "application/json"})
         time.sleep(after)
+        early = bool(select.select([c.sock], [], [], 0)[0])  # the reply already arriving: there was nothing to cancel
         c.sock.shutdown(2)
         c.close()
-        return {"cancelled_after": after}
+        seen, held = lifecycle.settle(self, lambda s: base is not None and s == base, settle_s)
+        now = lifecycle.disconnects(self)
+        counted = now - before if now is not None and before is not None else None
+        problems = [why for bad, why in [
+            (base is None, f"no idle census from GET /v1/load within {settle_s} s before the cut"),
+            (early, f"the reply came before the cut at {after} s: nothing was cancelled (lower --cancel-after)"),
+            (counted != 1, f"the server counted {counted} disconnects for 1 cut"),
+            (base is not None and not held, f"the census {seen} did not return to {base} (a lane or page held)"),
+            (not lifecycle.healthy(self), "GET /health not ok after the cut")] if bad]
+        out = {"cancelled_after": after, "disconnects": counted, "census": seen}
+        return {**out, "error": "; ".join(problems)} if problems else out
 
     def tokens(self, messages: list, tools: list | None, thinking: bool, generation: bool) -> list[int]:
         body = {"model": self.model, "messages": messages, "add_generation_prompt": generation,
@@ -346,10 +377,13 @@ def replay(client: Client, rows_path: str, out_path: str) -> int:
 def compare(rows_path: str, fresh_path: str) -> int:
     rows = {r["i"]: r for r in map(json.loads, open(rows_path))}
     fresh = {r["i"]: r["got"] for r in map(json.loads, open(fresh_path))}
-    bad, faster, slow, total = 0, [], [], 0
+    bad, faster, slow, total, cut = 0, [], [], 0, 0
     by_messages: dict[tuple, set] = {}
     for i, r in sorted(rows.items()):
         if r["arm"] == "cancel":
+            cut += not r["ok"]
+            verdict = "held" if r["ok"] else f"FAIL {r['got'].get('error')}"
+            print(f"{i:3d} {r['conv']:>4} t{r['turn']} cancel  {verdict}")
             continue
         f, g = fresh.get(i), r["got"]
         total += 1
@@ -377,9 +411,11 @@ def compare(rows_path: str, fresh_path: str) -> int:
     print(f"drafted == plain on the same messages: {len(by_messages) - len(split)}/{len(by_messages)}")
     for conv, turn, arm, prompt, cached, t, ft in faster:
         print(f"  {conv:>4} t{turn} {arm:<7} prompt {prompt:6d} cached {cached:6d}: ttft {t:6.2f} s vs fresh {ft:6.2f} s ({ft / max(t, 1e-6):5.1f}x)")
-    print(f"{'PASS' if bad == 0 and not split else 'FAIL'}: {total - bad}/{total} replies equal and as cached as planned")
+    ok = bad == 0 and not split and not cut
+    print(f"{'PASS' if ok else 'FAIL'}: {total - bad}/{total} replies equal and as cached as planned"
+          + (f"; {cut} cancels did not hold" if cut else ""))
     print(f"timing: {len(slow)} resumed replies no sooner than fresh{': ' + str(slow) if slow else ''}")
-    return 1 if bad or split else 0
+    return 0 if ok else 1
 
 
 def ranks(r0_path: str, r1_path: str) -> int:
