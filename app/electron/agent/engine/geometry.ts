@@ -32,7 +32,7 @@ const QWEN35: PinnedGeometry = {
     linear_num_value_heads: 16,
     linear_key_head_dim: 128,
     linear_value_head_dim: 128,
-    linear_conv_kernel_dim: 6144,
+    linear_conv_kernel_dim: 4,
     num_attention_heads: 8,
     num_key_value_heads: 2,
     head_dim: 256,
