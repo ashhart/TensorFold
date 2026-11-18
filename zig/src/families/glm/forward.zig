@@ -536,7 +536,8 @@ pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, l
     if (n > 0) {
         var q = hw;
         q.n = n;
-        qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
+        if (on(x, "head_qmv")) qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
+        if (!on(x, "head_argmax")) return;
         const payload = @import("draw_rule.zig").Payload.init(if (greedy) null else x.draws, rows, vocab);
         // draw_dispatch splits the rows into runs of one mode: sampled tf_sample_full, else argmax.
         @import("draw_dispatch.zig").encode(e, x.k.sample, x.k.argmax, logits.buf, logits.off, picks.buf, picks.off, &payload, n);
