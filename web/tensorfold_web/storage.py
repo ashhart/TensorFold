@@ -76,24 +76,26 @@ def clean(conf: Path, kind: str, older_than_days: float | None, *, dry_run: bool
         return {"kind": kind, "matched": 0, "removed": 0, "dry_run": dry_run}
     where, args = _where(k, cutoff)
     with _connect(p) as db:
+        if k.id == "bench" and not dry_run:
+            db.execute("begin immediate")
         if k.id == "conversations":                   # a pin lives in the document: a pinned conversation is kept
             kept = [i for i, doc in db.execute(f"select id, doc from conversations{where}", args) if not _pinned(doc)]
             n = len(kept)
         else:
             n = db.execute(f"select count(*) from {k.table}{where}", args).fetchone()[0]
-        removed = 0
-        if not dry_run and n:
+        removed = series_removed = 0
+        if not dry_run and (n or (k.id == "bench" and cutoff is None)):
             if k.id == "bench":
-                ids = [r[0] for r in db.execute(f"select id from runs{where}", args)]
+                ids = None if cutoff is None else {r[0] for r in db.execute(f"select id from runs{where}", args)}
                 removed = db.execute(f"delete from runs{where}", args).rowcount
-                _drop_series_of(db, set(ids))
+                series_removed = _drop_empty_series(db, ids)
             elif k.id == "conversations":
                 removed = db.executemany("delete from conversations where id = ?", [(i,) for i in kept]).rowcount
             else:
                 removed = db.execute(f"delete from {k.table}{where}", args).rowcount
             if k.id == "usage" and cutoff is None:
                 db.execute("delete from state")    # the baseline goes too: the next reading starts afresh
-    if removed:
+    if removed or series_removed:
         with sqlite3.connect(p, timeout=10) as db:
             db.execute("vacuum")                   # give the space back
     return {"kind": kind, "matched": n, "removed": removed, "dry_run": dry_run}
@@ -106,17 +108,25 @@ def _pinned(doc: str) -> bool:
         return False
 
 
-def _drop_series_of(db: sqlite3.Connection, run_ids: set[str]) -> None:
-    """A comparison series is kept while one of its runs is; one whose runs all went goes too."""
+def _drop_empty_series(db: sqlite3.Connection, deleted_ids: set[str] | None) -> int:
+    """Remove finished comparisons with no retained runs, limited to affected comparisons for age cleanup."""
 
     try:
         rows = db.execute("select id, doc from series").fetchall()
     except sqlite3.Error:
-        return
-    for sid, doc in rows:
-        runs = [r for r in (json.loads(doc).get("runs") or []) if r]
-        if runs and all(r in run_ids for r in runs):
-            db.execute("delete from series where id = ?", (sid,))
+        return 0
+    retained_ids = {r[0] for r in db.execute("select id from runs")}
+    removed = 0
+    for sid, raw in rows:
+        doc = json.loads(raw)
+        runs = [r for r in (doc.get("runs") or []) if r]
+        if not runs or doc.get("status") == "running":
+            continue
+        if deleted_ids is not None and deleted_ids.isdisjoint(runs):
+            continue
+        if retained_ids.isdisjoint(runs):
+            removed += db.execute("delete from series where id = ?", (sid,)).rowcount
+    return removed
 
 
 # -- models in the Hugging Face cache ---------------------------------------------------------------------------------
