@@ -67,6 +67,7 @@ const Ops = struct {
         return o.decide;
     }
     pub fn grow(_: Ops, _: *lanes.Stream, _: usize) !void {}
+    pub fn landed(_: Ops, _: *lanes.Stream, _: usize) !void {}
     pub fn body(o: Ops, s: *lanes.Stream, at: usize, rows: usize) struct { rows: usize } {
         o.log.append(gpa, .{ .chunk = .{ .id = s.id[0], .at = at, .rows = rows } }) catch @panic("out of memory");
         if (o.head) |h| h.append(gpa, .{ at, at + pass.absorbed(at, rows, s.prompt_len) }) catch @panic("out of memory");

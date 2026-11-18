@@ -354,3 +354,15 @@ test {
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");
 }
+
+test {
+    _ = @import("slide_policy_test.zig");
+}
+
+test {
+    _ = @import("slide_pin_cli.zig");
+}
+
+test {
+    _ = @import("slide_usage_live_test.zig");
+}

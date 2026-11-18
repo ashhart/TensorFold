@@ -243,6 +243,7 @@ test "restored head: 15 and 16 token transitions reach mixed shrinking real chai
     Fake.e = e;
     Fake.used = @splat(false);
     e.* = undefined;
+    e.usage = null;
     e.gpa = t.allocator;
     e.ctx = &ctx;
     e.stream = .{ .d = &d, .handle = null };

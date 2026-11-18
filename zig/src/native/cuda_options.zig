@@ -4,6 +4,7 @@ const api = @import("engine_api");
 
 /// Sets what `o` asks of `F` in `opts`; false with `problem` set when F cannot take a flag given (--precision).
 pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8) bool {
+    if (@hasField(F.Options, "slide_forget")) opts.slide_forget = api.pocket_usage.enabled(o.slide, o.slide_forget);
     if (@hasField(F.Options, "mtp_drafts")) opts.mtp_drafts = o.mtp_drafts;
     if (@hasField(F.Options, "mtp_confidence")) opts.mtp_confidence = o.mtp_confidence;
     if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
@@ -108,4 +109,18 @@ test "full-only precision: checkpoint is unknown before a family can load or all
     var existing: Both.Options = .{};
     try std.testing.expect(set(Both, .{ .dir = "d", .model_type = "nemotron_h", .precision = .checkpoint }, &existing, &why));
     try std.testing.expectEqual(@as(?@typeInfo(@TypeOf(existing.precision)).optional.child, .checkpoint), existing.precision);
+}
+
+test "fact usage: native CUDA options require both slide and explicit forgetting" {
+    const F = struct {
+        pub const Options = struct { slide_forget: bool = true };
+    };
+    for ([_]bool{ false, true }) |slide| for ([_]bool{ false, true }) |forget| {
+        var o: F.Options = .{};
+        var why: []const u8 = "";
+        const request: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .slide = slide, .slide_forget = forget };
+        try std.testing.expect(set(F, request, &o, &why));
+        try std.testing.expectEqual(slide and forget, o.slide_forget);
+        try std.testing.expectEqual(slide and forget, api.pocket_usage.enabled(request.slide, request.slide_forget));
+    };
 }

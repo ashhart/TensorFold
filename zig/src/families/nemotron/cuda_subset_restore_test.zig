@@ -122,6 +122,7 @@ test "restored head: a neighbor cannot leave the restored stream on a stale head
     Fake.copies = 0;
     Fake.used = @splat(false);
     e.* = undefined;
+    e.usage = null;
     e.gpa = t.allocator;
     e.ctx = &ctx;
     e.stream = .{ .d = &d, .handle = null };
