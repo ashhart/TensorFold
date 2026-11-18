@@ -8,6 +8,7 @@ const glm = tf.glm;
 const ge = glm.engine;
 const glm_disk = @import("glm_disk.zig");
 const cache_fit = @import("cache_fit.zig");
+const order = @import("glm_order.zig");
 const Allocator = std.mem.Allocator;
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
@@ -126,6 +127,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     // sampled draws on one Mac (the pair refuses them per request)
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
+    // a reply that ends soon goes first beside a long prompt; the pair and a share someone set keep main's order
+    if (order.srptByDefault(eng.ep != null, decode_share, h.host.share.p)) h.host.srpt = @TypeOf(h.host.srpt).withDefault(true);
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {

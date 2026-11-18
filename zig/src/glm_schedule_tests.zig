@@ -7,3 +7,7 @@ test {
 test {
     _ = @import("core/lane_host_fill_aging_test.zig");
 }
+
+test {
+    _ = @import("glm_order_tests.zig");
+}
