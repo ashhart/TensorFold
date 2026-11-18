@@ -140,8 +140,8 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     input.fields = .{ .object = sampling };
     input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
-    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
+    try @import("completion_echo.zig").plan(srv, cx, body, &input, !is_chat, streamed);
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -318,7 +318,7 @@ pub const Run = struct {
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
-        @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.unsent(&cx, e, field);
+        @import("completion_echo.zig").project(r.srv, &cx, &reply, r.plan.input, calls) catch |e| return r.unsent(&cx, e, field);
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
         r.out.vt.reply(r.out.ctx, 200, .{ .object = o });

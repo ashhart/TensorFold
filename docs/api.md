@@ -468,6 +468,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
+| `echo` | `/v1/completions` only: the prompt's text, and with `logprobs` its tokens' entries, ahead of the reply's, described below | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -511,6 +512,20 @@ and on GLM-5.3-Flash's CUDA engine.
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
 itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
 cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
+
+Nonstreamed `/v1/completions` takes OpenAI's legacy `echo` on the engines that advertise
+`capabilities.prompt_logprobs`, so evaluation harnesses can score a prompt's own tokens. With `echo: true`, `text`
+starts with the prompt: its token ids decoded, which is the text as sent unless the tokenizer adds or normalizes
+something, such as a beginning-of-text token. With `logprobs`, the legacy arrays list each prompt token before the
+reply's: `tokens`, `token_logprobs`, `top_logprobs` (the likeliest tokens at that place, as many as `logprobs` asks
+for), `null` in both for the first prompt token, and `text_offset` counting each token's own text from 0. The
+reply's own entries are the ones the same request gets without `echo`, with their offsets counted on past the
+prompt's. `max_tokens: 0` with `echo`
+generates nothing: `text` is the prompt alone, `finish_reason` is `length` and `usage.completion_tokens` is 0
+(without `echo`, 0 still means the server's default length). With `logprobs`, the whole prompt is prefilled, as for
+`prompt_logprobs`; asked together, each lists its own number of alternatives. A non-boolean `echo`, a streamed
+request, a body with `messages` and other engines return HTTP 400 naming `echo`; chat routes ignore the field.
+
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
