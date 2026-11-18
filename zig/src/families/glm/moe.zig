@@ -44,7 +44,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
-    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
+    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
         if (s & Class.combine != 0 or !on(x, "combine")) return;
@@ -161,13 +161,16 @@ fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows
     const N = c.moe_inter;
     const zs: u32 = rows * c.topk + 1; // the routed ids' slots, then the shared expert's
     const rps: u32 = if (rows == 1) 2 else 4; // one row: two outputs a simdgroup, more reads in flight (the same sums)
-    e.setPipeline(if (rows == 1) k.moe_gateup_0_one else k.moe_gateup_0);
-    bind(e, 0, .{x_in});
-    shape(e, 1, .{ rows, D });
-    bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
-    e.setValue(c.swiglu_limit, 14);
-    bind(e, 15, .{sc.act});
-    e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
+    if (on(x, "e_gateup")) { // a profile's knock-outs leave out one launch of this path, never the path
+        e.setPipeline(if (rows == 1) k.moe_gateup_0_one else k.moe_gateup_0);
+        bind(e, 0, .{x_in});
+        shape(e, 1, .{ rows, D });
+        bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
+        e.setValue(c.swiglu_limit, 14);
+        bind(e, 15, .{sc.act});
+        e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
+    }
+    if (!on(x, "e_down")) return;
     e.setPipeline(if (rows == 1) k.moe_down_0_one else k.moe_down_0);
     bind(e, 0, .{sc.act});
     shape(e, 1, .{ rows, c.topk + 1, N });

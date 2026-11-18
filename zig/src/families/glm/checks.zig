@@ -104,11 +104,15 @@ pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { sam
 
 /// Knock-out profile: a `depth`-draft round replayed `reps` times, each launch class left out in turn; median GPU time.
 pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !void {
+    const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
+    if (d > 0) return profileRows(e, d, d + 1, reps, only, parts);
+    var it = std.mem.tokenizeScalar(u8, if (platform.c.getenv("GLM_PROFILE_ROWS")) |v| std.mem.span(v) else "1", ','); // copy windows' rows, without the MTP head
+    while (it.next()) |v| try profileRows(e, 0, std.math.clamp(std.fmt.parseInt(u32, v, 10) catch 1, 1, st.max_rows), reps, only, parts);
+}
+
+fn profileRows(e: *Engine, d: u32, R: u32, reps: usize, only: bool, parts: bool) !void {
     const c = &e.c;
     const D = c.hidden;
-    const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
-    const wide = if (platform.c.getenv("GLM_PROFILE_ROWS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1 else 1; // a copy window's rows, without the MTP head
-    const R = if (d == 0) std.math.clamp(wide, 1, st.max_rows) else d + 1;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (e.s.pos + R + 1 > e.s.cap) return error.ContextFull;
@@ -144,6 +148,7 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
         std.mem.sort(f64, times, {}, std.sort.asc(f64));
         const med = times[reps / 2];
         if (mi == 0) full = med;
+        if (mi == 0) std.debug.print("profile {d} rows: the last MoE layer's unique experts {d}\n", .{ R, Engine.u32s(e.sc.ucount, 1)[0] });
         const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == 0xffff_ffff) "none" else if (parts) fwd.Part.names[@ctz(mask)] else fwd.Class.names[@ctz(mask)];
         std.debug.print("profile {d} rows{s}: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == 0xffff_ffff) "\n" else "" });
         if (mask != 0 and !only and mask != 0xffff_ffff) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });

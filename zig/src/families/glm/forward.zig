@@ -320,10 +320,8 @@ fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
     if (on(x, "mla_absorb") and dense > 0) scale(x, e, sc.ql.at(g.row0 * lat), sc.qls.at(g.row0 * lat), dense * H, RANK, RANK, RANK, 1.0 / 16.0);
     if (!on(x, "mla_attn")) return;
     const plane = @as(usize, H) * c.i_topk * 2;
-    for (0..dense) |ri| {
-        const r: usize = g.row0 + ri;
-        attendDense(x, e, x.s.mla[mi].keys, sc.qls.at(r * lat), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(r * lat), g.pos + @as(u32, @intCast(ri)) + 1);
-    }
+    const r: usize = g.row0;
+    if (dense > 0) attendRows(x, e, x.s.mla[mi].keys, sc.qls.at(r * lat), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(r * lat), g.pos + 1, dense);
     if (dense < g.rows) attendSparse(x, e, mi, g, dense);
 }
 
@@ -371,24 +369,9 @@ pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Re
     e.dispatchGroups(size(1, c.v_dim / 4, rows * c.mla_heads), size(32, 1, 1));
 }
 
-/// One row's 64 heads over keys [0, n) as one 64-row matrix against the latent keys: scores, a precise softmax, values.
-pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: Ref, probs: Ref, out: Ref, n: u32) void {
-    const k = x.k;
-    const H = x.c.mla_heads;
-    e.setPipeline(k.latent_scores);
-    bind(e, 0, .{ q, keys, scores });
-    e.setValue([2]i32{ @intCast(n), @intFromBool(n < 256) }, 3); // fewer than 256 keys: the 512 dims in two halves
-    e.dispatchGroups(size((n + 31) / 32, 1, 1), size(2 * H, 1, 1)); // a simdgroup each 16 heads
-    e.setPipeline(k.softmax);
-    bind(e, 0, .{scores});
-    shape(e, 1, .{n});
-    bind(e, 2, .{probs});
-    e.dispatchGroups(size(H, 1, 1), size(((n + 3) / 4 + 31) / 32 * 32, 1, 1));
-    e.setPipeline(k.latent_values);
-    bind(e, 0, .{ probs, keys, out });
-    e.setValue([2]i32{ @intCast(n), if (n > 1024) 1024 else 0 }, 3); // past 1,024 keys: the first 1,024 apart
-    e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(2 * H, 1, 1));
-}
+/// Dense latent attention (dense_attn.zig): one row's launches, and a window's rows in three launches.
+pub const attendDense = @import("dense_attn.zig").attendDense;
+pub const attendRows = @import("dense_attn.zig").attendRows;
 
 /// A stream's rows [first, rows) past index_topk keys: fp32 block scores, top blocks in order, the tail, sparse kernel.
 fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: u32) void {

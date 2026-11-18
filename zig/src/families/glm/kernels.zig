@@ -89,6 +89,9 @@ pub const Kernels = struct {
     embed: mtl.Pipeline,
     latent_scores: mtl.Pipeline,
     latent_values: mtl.Pipeline,
+    latent_scores_rows: mtl.Pipeline, // a window's dense rows at once: each row the one-row kernels' bits
+    latent_values_rows: mtl.Pipeline,
+    softmax_rows: mtl.Pipeline,
     route_logits: mtl.Pipeline,
     route_select: mtl.Pipeline,
     igate_logits: mtl.Pipeline,
@@ -235,7 +238,7 @@ pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype
 
 fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
-    var jobs: [generated.len + 24]Job = undefined;
+    var jobs: [generated.len + 25]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -257,8 +260,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 3] = .{ .device = device, .source = sources.ops_embed_norm, .names = &.{"tf_embed_b4_g64"}, .out = @as(*[1]mtl.Pipeline, &k.embed) };
     const attn_src = try frags.source(device, gpa, sources.glm_attn);
     defer gpa.free(attn_src);
-    var attn_out: [2]mtl.Pipeline = undefined;
-    jobs[generated.len + 4] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values" }, .out = &attn_out };
+    var attn_out: [4]mtl.Pipeline = undefined;
+    jobs[generated.len + 4] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values", "glm_latent_scores_rows", "glm_latent_values_rows" }, .out = &attn_out };
     const route_src = try moe_route.source(gpa, route_shape);
     defer gpa.free(route_src);
     var route_out: [2]mtl.Pipeline = undefined;
@@ -330,6 +333,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 22] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
     var select_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 23] = .{ .device = device, .source = sources.glm_select, .names = &.{ "glm_select_mark", "glm_select_merge" }, .out = &select_out };
+    const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
+    jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
 
     if (comptime @TypeOf(visitor) != void) {
         for (jobs) |j| try visitor.raw("glm", j.names[0], j.source);
@@ -357,6 +362,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.sample = sample_out[0]; // the shared sampler's own library: glm_glue's table never named it
     k.latent_scores = attn_out[0];
     k.latent_values = attn_out[1];
+    k.latent_scores_rows = attn_out[2];
+    k.latent_values_rows = attn_out[3];
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
     k.igate_logits = igate_out[0];
