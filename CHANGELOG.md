@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the macOS nightly builds again: the row dispatch tests handle both pipeline representations, and the OS readings test accepts a small runner's RAM with its footprint check unchanged (#3854).
+
 - Desktop: a Room's health counter shows completed tickets out of the Room's total, and the bot VM guest's cleanup after a bounded command treats macOS's EPERM as already stopped instead of failing the command (#3698). Thanks to @devopsfortunato.
 
 - Tests: the benchmark TTFT test pins its send clock and requires a nonempty result set before its exact assertion, so rounding no longer decides the result; it still separates first content from headers and role or usage frames (#3783, fixes #3779). Thanks to @AIFlowML.
