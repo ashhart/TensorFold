@@ -123,7 +123,7 @@ def mini_cases(cut_text):
 def prompt_cases(release):
     """Rendered prompts, ids and decoded text of CHAT and RAW, from transformers loading the release's files."""
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(str(release))
+    tok = AutoTokenizer.from_pretrained(str(release), local_files_only=True)
     chat = []
     for case in CHAT:
         messages = [{"role": "system", "content": case["system"]}] if "system" in case else []
