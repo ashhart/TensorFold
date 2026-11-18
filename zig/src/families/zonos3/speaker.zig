@@ -11,7 +11,7 @@ const Dense = blocks.Dense;
 
 pub const dim = 192;
 /// What the encoder reads of a clip: the first 60 s, and at least a filterbank frame.
-pub const max_samples = 60 * features.source_rate;
+pub const max_seconds = 60;
 const hidden = 64;
 const mel = features.mel_bins;
 const width = mel * 32; // a stage's bins * channels
@@ -51,13 +51,13 @@ pub const Encoder = struct {
         arena.deinit();
     }
 
-    /// The embedding of 44.1 kHz mono audio; `taps`, when given, sees the stages by the reference dump's names.
-    pub fn embed(e: *const Encoder, gpa: A, audio: []const f32, taps: ?blocks.Taps) ![dim]f32 {
+    /// The embedding of mono audio at `rate` Hz; `taps`, when given, sees the stages by the reference dump's names.
+    pub fn embed(e: *const Encoder, gpa: A, audio: []const f32, rate: u32, taps: ?blocks.Taps) ![dim]f32 {
         var pool: blocks.Pool = .init(gpa);
         defer pool.deinit();
         const p = &pool;
         const a = pool.arena.allocator();
-        const wav = try features.resample(a, audio[0..@min(audio.len, max_samples)]);
+        const wav = try features.resampleFrom(a, audio[0..@min(audio.len, max_seconds * rate)], rate);
         const fbank = try features.logMel(a, wav, true);
         const t = fbank.len / mel;
         if (taps) |tp| try tp.f(tp.ctx, "fbank", fbank, t, mel);

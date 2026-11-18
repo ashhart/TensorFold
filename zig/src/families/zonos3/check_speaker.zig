@@ -44,6 +44,15 @@ const Check = struct {
     }
 };
 
+/// The rate DIR's audio.npy is at: DIR/rate.json, else 44.1 kHz.
+pub fn dumpRate(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u32 {
+    const path = try std.fs.path.join(gpa, &.{ dir, "rate.json" });
+    defer gpa.free(path);
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64)) catch |e| return if (e == error.FileNotFound) z3.features.source_rate else e;
+    defer gpa.free(text);
+    return std.fmt.parseInt(u32, std.mem.trim(u8, text, " \n"), 10);
+}
+
 /// DIR/audio.npy through the encoder at `checkpoint`: every stage and the embedding beside the reference's.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, checkpoint: []const u8) !u8 {
     const e = try z3.speaker.load(gpa, io, checkpoint);
@@ -54,16 +63,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, checkpoint: []co
     defer gpa.free(bytes);
     const audio = try (try z3.npy.parse(bytes)).floats(gpa);
     defer gpa.free(audio);
+    const rate = try dumpRate(gpa, io, dir);
     var c: Check = .{ .gpa = gpa, .io = io, .dir = dir };
     const t0 = gen.nowNs(io);
     c.last_ns = t0;
-    const got = try e.embed(gpa, audio, .{ .ctx = &c, .f = Check.tap });
+    const got = try e.embed(gpa, audio, rate, .{ .ctx = &c, .f = Check.tap });
     const checked = @as(f64, @floatFromInt(gen.nowNs(io) - t0)) / 1e9;
     const t1 = gen.nowNs(io);
-    _ = try e.embed(gpa, audio, null);
+    _ = try e.embed(gpa, audio, rate, null);
     const seconds = @as(f64, @floatFromInt(gen.nowNs(io) - t1)) / 1e9;
     try Check.tap(&c, "embedding", &got, 1, got.len);
     const pass = c.low == 0 and c.seen > 0;
-    std.debug.print("RESULT zonos3 speaker {s} stages={d} low={d} worst_row_cos={d:.7} audio_s={d:.2} seconds={d:.3} checked_seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.seen, c.low, c.worst, @as(f64, @floatFromInt(audio.len)) / 44100.0, seconds, checked });
+    std.debug.print("RESULT zonos3 speaker {s} stages={d} low={d} worst_row_cos={d:.7} audio_s={d:.2} rate={d} seconds={d:.3} checked_seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.seen, c.low, c.worst, @as(f64, @floatFromInt(audio.len)) / @as(f64, @floatFromInt(rate)), rate, seconds, checked });
     return if (pass) 0 else 1;
 }
