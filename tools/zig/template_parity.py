@@ -212,6 +212,12 @@ SYNTHETIC = [
     "{{ 1|float(2, 3) }}",
     "{{ 1|float(boolean=true) }}",
     "{{ undefined_name|float }}",
+    "{{ '<a{}b>'.format('X') }}|{{ '{}{}'.format(1, 'z') }}|{{ '{1}{0}'.format('a','b') }}|{{ '{{}}{}'.format(none) }}|{{ 'x'.format() }}",
+    "{{ '{}'.format(true) }}|{{ '{}'.format(1.5) }}|{{ '{0}{0}'.format('q') }}",
+    "{{ '{}{}'.format(1) }}",
+    "{{ '{0}{}'.format(1,2) }}",
+    "{{ '{'.format() }}",
+    "{{ '}'.format() }}",
 ]
 # Jinja2 features the native engine refuses on purpose; parity here means the native render fails loudly.
 UNSUPPORTED = [
