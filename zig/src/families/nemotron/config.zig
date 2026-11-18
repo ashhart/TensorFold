@@ -419,6 +419,10 @@ pub fn parseWith(allocator: std.mem.Allocator, text: []const u8, why: *Why, allo
         .routed_scaling = if (o.get("routed_scaling_factor")) |v| @floatCast(try number(v)) else 1.0,
         .eps = if (o.get("layer_norm_epsilon")) |v| @floatCast(try number(v)) else 1e-5,
     };
+    if (c.heads == 0 or c.kv_heads == 0) { // before hidden / heads below, and the engine's heads / kv_heads groups
+        why.set("config.json declares {d} attention and {d} key/value heads; both must be positive", .{ c.heads, c.kv_heads });
+        return error.BadConfig;
+    }
     c.head_dim = if (o.get("head_dim")) |v| @intCast(v.integer) else c.hidden / c.heads;
     if (o.get(pocket_key)) |v| {
         if (v != .integer or v.integer < 0 or @as(usize, @intCast(v.integer)) >= c.shared_width or @mod(v.integer, 64) != 0) return error.BadConfig;
