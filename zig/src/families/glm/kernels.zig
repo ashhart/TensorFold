@@ -98,6 +98,8 @@ pub const Kernels = struct {
     route_logits: mtl.Pipeline,
     route_select: mtl.Pipeline,
     igate_logits: mtl.Pipeline,
+    route_logits_one: mtl.Pipeline, // both for a one-row window: row 0's sums alone (glm_route_one.metal)
+    igate_logits_one: mtl.Pipeline,
     kda_prep: mtl.Pipeline, // a prompt chunk's KDA layer (glm_kda_prompt.metal): conv, norms, decay and beta
     kda_scan: mtl.Pipeline, // the recurrence alone
     kda_post: mtl.Pipeline, // the output norm and gate
@@ -270,14 +272,18 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(attn_src);
     var attn_out: [4]mtl.Pipeline = undefined;
     jobs[generated.len + 4] = .{ .device = device, .source = attn_src, .names = &.{ "glm_latent_scores", "glm_latent_values", "glm_latent_scores_rows", "glm_latent_values_rows" }, .out = &attn_out };
-    const route_src = try moe_route.source(gpa, route_shape);
+    const route_core = try moe_route.source(gpa, route_shape);
+    defer gpa.free(route_core);
+    const route_src = try std.mem.concat(gpa, u8, &.{ route_core, sources.glm_route_one });
     defer gpa.free(route_src);
-    var route_out: [2]mtl.Pipeline = undefined;
-    jobs[generated.len + 5] = .{ .device = device, .source = route_src, .names = &moe_route.names, .out = &route_out };
-    const igate_src = try moe_route.source(gpa, igate_shape);
+    var route_out: [3]mtl.Pipeline = undefined;
+    jobs[generated.len + 5] = .{ .device = device, .source = route_src, .names = &.{ moe_route.names[0], moe_route.names[1], "glm_route_logits_one" }, .out = &route_out };
+    const igate_core = try moe_route.source(gpa, igate_shape);
+    defer gpa.free(igate_core);
+    const igate_src = try std.mem.concat(gpa, u8, &.{ igate_core, sources.glm_route_one });
     defer gpa.free(igate_src);
-    var igate_out: [1]mtl.Pipeline = undefined;
-    jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
+    var igate_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{ moe_route.names[0], "glm_route_logits_one" }, .out = &igate_out };
     const m16_src = try affine_mm.source(device, gpa, .{});
     defer gpa.free(m16_src);
     const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true });
@@ -374,7 +380,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.latent_values_rows = attn_out[3];
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
+    k.route_logits_one = route_out[2];
     k.igate_logits = igate_out[0];
+    k.igate_logits_one = igate_out[1];
     k.kda_prep = kda_out[0];
     k.kda_scan = kda_out[1];
     k.kda_post = kda_out[2];
