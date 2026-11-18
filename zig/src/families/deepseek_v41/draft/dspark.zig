@@ -209,6 +209,24 @@ pub fn chain(scratch: Allocator, m: Markov, ids: []const i32, base: []const f32,
     }
 }
 
+/// The chain over the whole vocabulary (the release's rule): each draft the keyed pick of base + bias(prev).
+pub fn chainFull(scratch: Allocator, m: Markov, logits: []const f32, v: usize, anchor: u32, params: Params, hid: ?[]const f32, drafts: []u32, conf: []f32) !void {
+    const d = if (hid) |h| h.len / drafts.len else 0;
+    const ids = try scratch.alloc(i32, v);
+    defer scratch.free(ids);
+    const z = try scratch.alloc(f32, v);
+    defer scratch.free(z);
+    for (ids, 0..) |*id, i| id.* = @intCast(i);
+    var prev = anchor;
+    for (drafts, conf, 0..) |*t, *q, i| {
+        for (z, logits[i * v ..][0..v], 0..) |*o, b, id| o.* = b + m.bias(prev, @intCast(id));
+        const tok = (try pick(scratch, ids, z, params.pos0 + i, params.sampling())) orelse prev;
+        q.* = if (hid) |h| m.confidence(h[i * d ..][0..d], prev) else 0.5;
+        t.* = tok;
+        prev = tok;
+    }
+}
+
 const Ranked = struct { value: f32, id: u32 };
 
 fn rankedBefore(_: void, a: Ranked, b: Ranked) bool {

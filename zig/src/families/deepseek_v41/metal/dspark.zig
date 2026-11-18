@@ -14,6 +14,8 @@ const plan_ = @import("dspark_plan.zig");
 const dw = @import("dspark_weights.zig");
 const st = @import("dspark_stage.zig");
 const undo_ = @import("dspark_undo.zig");
+const mkv = @import("markov.zig");
+const picks_ = @import("early_picks.zig");
 
 const Config = host.config.Config;
 const Params = host.dspark.Params;
@@ -40,6 +42,8 @@ pub const Proposal = struct { drafts: []u32, conf: []f32, cand: ?[]i32 = null, b
 pub const Launch = struct {
     rows: u32,
     asks: []const Ask,
+    /// asks whose chain runs on the GPU behind the head (the whole vocabulary; greedy, or keyed rows the host races)
+    gpu: bool = false,
     at: [R]u32 = undefined,
 };
 
@@ -48,6 +52,29 @@ pub const Options = struct {
     slots: u32,
     /// candidates a draft row keeps from its base logits (the Markov bias is added to these only)
     candidates: u32 = 64,
+    /// chains on the GPU over the whole vocabulary (the release's rule) in place of the candidates' chain
+    gpu_chain: bool = false,
+};
+
+/// The GPU chain's kernels, the heads' tables on the device and its results.
+const Chain = struct {
+    p: mkv.Pipelines,
+    t: mkv.Tables,
+    o: mkv.Out,
+
+    fn init(device: mtl.Device, m: host.dspark.Markov) !Chain {
+        var p = try mkv.Pipelines.load(device, m.rank);
+        errdefer p.deinit();
+        var t = try mkv.Tables.init(device, m.w1, m.w2, m.conf.?);
+        errdefer t.deinit();
+        return .{ .p = p, .t = t, .o = try mkv.Out.init(device) };
+    }
+
+    fn deinit(ch: *Chain) void {
+        ch.p.deinit();
+        ch.t.deinit();
+        ch.o.deinit();
+    }
 };
 
 /// The drafter's state and working buffers; the config, kernels, scratch, rope tables and heads are borrowed.
@@ -79,6 +106,8 @@ pub const Pass = struct {
     queued: [4]?mtl.CommandBuffer = @splat(null),
     /// a pass queued by `begin` that `collect` finishes
     begun: ?Begun = null,
+    /// greedy chains on the GPU (Options.gpu_chain, with a confidence head of the kernels' rank)
+    mk: ?Chain = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
         if (c.mtp_layers == 0 or p.route_dspark == null or w.stages.len != c.mtp_layers) return error.NoDspark;
@@ -106,6 +135,8 @@ pub const Pass = struct {
         errdefer a.free(x.runs);
         @memset(x.runs, .{});
         x.undo = try undo_.Undo.init(a, c, x.rings, opt.slots);
+        errdefer x.undo.deinit();
+        if (opt.gpu_chain and w.conf != null and mkv.takes(c.dspark_markov_rank)) x.mk = try Chain.init(device, w.markov(c));
         x.resident = x.holdResident();
         return x;
     }
@@ -121,6 +152,7 @@ pub const Pass = struct {
             for (l.backing()) |b| set.add(b);
         }
         if (x.w.head) |h| set.add(h.buf);
+        if (x.mk) |*m| for ([_]mtl.Buffer{ m.t.buf, m.o.buf }) |b| set.add(b);
         set.commit();
         set.requestResidency();
         x.queue.addResidencySet(set);
@@ -135,6 +167,7 @@ pub const Pass = struct {
             set.deinit();
         }
         x.undo.deinit();
+        if (x.mk) |*m| m.deinit();
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
@@ -276,6 +309,11 @@ pub const Pass = struct {
 
     // propose ------------------------------------------------------------------------------------------------------
 
+    /// Whether an ask's drafts can be drawn by the GPU chain: greedy, or keyed where the host races the row.
+    pub fn drawsOnGpu(x: *const Pass, p: Params) bool {
+        return x.mk != null and (!p.sampled or picks_.raced(p.sampling().?, x.c.vocab));
+    }
+
     /// The most slots a launch carries (rows are limited to 16).
     pub fn group(x: *const Pass) u32 {
         return @max(1, R / x.c.dspark_block);
@@ -285,7 +323,11 @@ pub const Pass = struct {
     pub fn prepare(x: *Pass, asks: []const Ask) !Launch {
         const n = x.c.dspark_block;
         if (asks.len == 0 or asks.len > x.group()) return error.Slots;
-        var l: Launch = .{ .rows = @intCast(asks.len * n), .asks = asks };
+        var l: Launch = .{ .rows = @intCast(asks.len * n), .asks = asks, .gpu = x.mk != null };
+        for (asks) |a| l.gpu = l.gpu and x.drawsOnGpu(a.params);
+        if (l.gpu) for (asks, x.mk.?.o.asks()[0..asks.len]) |a, *k| {
+            k.* = askOf(a.params);
+        };
         for (asks) |a| if (a.slot < x.runs.len and x.undo.pending(a.slot, a.start)) try x.settle();
         const ids: []u32 = @alignCast(std.mem.bytesAsSlice(u32, x.b.bytes(x.b.ids, 4 * l.rows)));
         for (asks, 0..) |a, j| {
@@ -334,6 +376,11 @@ pub const Pass = struct {
         e.barrier();
         for (0..x.w.stages.len) |i| try x.encodeStage(e, l, i);
         try x.encodeHead(e, l);
+        if (!l.gpu) return;
+        const m = &(x.mk orelse return error.NoGpuChain);
+        const n = x.c.dspark_block;
+        e.barrier();
+        mkv.encode(&m.p, e, &m.t, &m.o, ctx_.cv(mkv.Ref, x.b.logits), ctx_.cv(mkv.Ref, x.b.hf), ctx_.cv(mkv.Ref, x.b.ids), x.c.vocab, x.c.hidden, l.rows / n, n);
     }
 
     /// Candidates and the Markov chain over a launch's head outputs, each ask's results into `out` (its order).
@@ -352,6 +399,7 @@ pub const Pass = struct {
         const base = try sa.alloc(f32, l.rows * k);
         const hid = try sa.alloc(f32, n * D);
         const mk = x.markov();
+        if (l.gpu) return x.finishGpu(l, out, logits, k, cand, base);
         try host.dspark.candidateRows(logits, V, k, cand, base);
         for (l.asks, out, 0..) |a, *o, j| {
             if (o.drafts.len != n or o.conf.len != n) return error.BadOutput;
@@ -367,6 +415,25 @@ pub const Pass = struct {
                 if (t.len != cv.len) return error.BadOutput;
                 @memcpy(t, cv);
             }
+        }
+    }
+
+    /// A GPU chain's results: each ask's drafts and confidences as its kernels left them; candidates only for trees.
+    fn finishGpu(x: *Pass, l: *const Launch, out: []Proposal, logits: []const f32, k: usize, cand: []i32, base: []f32) !void {
+        const n: usize = x.c.dspark_block;
+        const m = &x.mk.?;
+        const drafts = m.o.drafts(l.rows);
+        const conf = m.o.conf(l.rows);
+        for (out, 0..) |*o, j| {
+            if (o.drafts.len != n or o.conf.len != n) return error.BadOutput;
+            @memcpy(o.drafts, drafts[j * n ..][0..n]);
+            @memcpy(o.conf, conf[j * n ..][0..n]);
+            if (o.cand == null and o.base == null) continue;
+            const cd = cand[j * n * k ..][0 .. n * k];
+            const cv = base[j * n * k ..][0 .. n * k];
+            try host.dspark.candidateRows(logits[j * n * x.c.vocab ..][0 .. n * x.c.vocab], x.c.vocab, k, cd, cv);
+            if (o.cand) |t| @memcpy(t, cd);
+            if (o.base) |t| @memcpy(t, cv);
         }
     }
 
@@ -428,6 +495,11 @@ pub const Pass = struct {
         return x.runs[slot].context(x.c.window, start);
     }
 };
+
+/// An ask's draws as the GPU chain reads them (the host's keyed rule: the seed, T floored at 1e-6, pos0 + i).
+pub fn askOf(p: Params) mkv.Ask {
+    return .{ .seed = p.seed, .pos0 = p.pos0, .t = @floatCast(@max(p.temperature, 1e-6)), .sampled = @intFromBool(p.sampled) };
+}
 
 /// A queued pass: its asks (the launch's own copy) and launch.
 pub const Begun = struct { asks: [R]Ask = undefined, n: usize, l: Launch };
