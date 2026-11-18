@@ -64,6 +64,7 @@ pub const Job = struct {
         keepAt(ptr, s, at, false);
     }
 
+    /// An interrupted pass reports its completed prefix; warm passes may hand it to a queued follow-up.
     pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
         keepAt(ptr, s, at, true);
     }
