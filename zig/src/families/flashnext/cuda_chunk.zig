@@ -44,7 +44,8 @@ pub fn readoutTileRows() usize {
 
 test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
     try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
-    try std.testing.expectEqual(@as(usize, 1536), try parseChunk(""));
+    try std.testing.expectEqual(batch.default_chunk, try parseChunk(""));
+    try std.testing.expectEqual(@as(usize, 1536), try parseChunk("1536"));
     try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
     try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
     for ([_][]const u8{ "0", "16385", "-1", "4k" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
