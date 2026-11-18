@@ -97,18 +97,28 @@ pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []con
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const found = try shards.headers(arena, io, dir);
+    const prefixes = [_][]const u8{ prefix, "model.visual." };
+    var used_prefix: []const u8 = prefix;
+    var found: std.StringArrayHashMapUnmanaged(Src) = .empty;
+    for (prefixes, 0..) |pfx, pi| {
+        found = shards.headersFor(arena, io, dir, pfx) catch |err| switch (err) {
+            error.NoVisionTower => if (pi + 1 < prefixes.len) continue else return err,
+            else => return err,
+        };
+        used_prefix = pfx;
+        break;
+    }
     var w: Weights = .{ .buf = undefined, .blocks = try gpa.alloc(Block, c.depth) };
     errdefer gpa.free(w.blocks);
     const wants = (try wanted(arena, c, &w)).items;
     if (found.count() != wants.len) {
-        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), prefix, wants.len });
+        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), used_prefix, wants.len });
         return error.UnexpectedVisionTensors;
     }
     const srcs = try arena.alloc(Src, wants.len);
     var total: usize = 0;
     for (wants, srcs, 0..) |want, *s, i| {
-        const name = try std.fmt.allocPrint(arena, prefix ++ "{s}", .{want.name});
+        const name = try std.fmt.allocPrint(arena, "{s}{s}", .{ used_prefix, want.name });
         s.* = found.get(name) orelse {
             std.log.err("qwen vision: the checkpoint has no tensor {s}", .{name});
             return error.MissingVisionTensor;

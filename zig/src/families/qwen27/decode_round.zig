@@ -21,7 +21,6 @@ const kv_pages = @import("kv_pages.zig");
 pub const pagesOn = kv_pages.on;
 pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
-const kvp = kv_pages.kvp;
 
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
@@ -67,6 +66,9 @@ pub const Runner = struct {
     images: ?image_rows.Images = null,
     /// A kept state's blit still reading a slot, by slot: the slot's next write waits for it (settleSlot).
     reading: [attn.planning.max_streams]?mtl.CommandBuffer = @splat(null),
+    /// Host-submitted keep in flight on the queue, and slots waiting for it before `trimSlot` runs.
+    pending_keep: ?mtl.CommandBuffer = null,
+    pending_trim_slots: [attn.planning.max_streams]bool = @splat(false),
     /// A tensor-parallel rank's all-reduce, threaded straight into the layer program; null on one Mac.
     reduce: ?forward.Reduce = null,
     /// The pair's head-seam picks (one u32 a row), required with `reduce`: unexchanged halves make the ranks diverge.
@@ -93,19 +95,17 @@ pub const Runner = struct {
         errdefer a.free(linear_index);
         const attention_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(attention_index);
+        @memset(linear_index, std.math.maxInt(u32));
+        @memset(attention_index, std.math.maxInt(u32));
         var ng: u32 = 0;
         var na: u32 = 0;
-        for (linear_index, attention_index, 0..) |*g, *v, block| {
-            g.* = std.math.maxInt(u32);
-            v.* = std.math.maxInt(u32);
-            if (m.config.kind(block) == .linear) {
-                g.* = ng;
-                ng += 1;
-            } else {
-                v.* = na;
-                na += 1;
-            }
-        }
+        for (linear_index, attention_index, 0..) |*g, *v, block| if (m.config.kind(block) == .linear) {
+            g.* = ng;
+            ng += 1;
+        } else {
+            v.* = na;
+            na += 1;
+        };
         var pool = try GdnPool.init(m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
@@ -164,18 +164,17 @@ pub const Runner = struct {
 
     /// Slot `slot` holds the pages of its first `rows` rows before a pass or a copy writes them (paged runners).
     pub fn cover(r: *Runner, slot: u32, rows: u32) !void {
-        const k = r.kv orelse return;
-        try k.pages.cover(slot, @min(rows, r.capacity));
+        if (r.kv) |k| try k.pages.cover(slot, @min(rows, r.capacity));
     }
 
     /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
     fn trimSlot(r: *Runner, slot: u32) void {
-        const k = r.kv orelse return;
-        k.pages.trim(slot, r.offsets[slot]);
+        if (r.kv) |k| k.pages.trim(slot, r.offsets[slot]);
     }
 
     /// Slot `slot`'s first `at` rows of each attention layer's keys then values, head by head, page by page.
     pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void {
+        if (r.pending_keep != null) try @constCast(r).settleKeep();
         return kv_pages.spans(r, a, slot, at, list);
     }
 
@@ -254,12 +253,18 @@ pub const Runner = struct {
         return r.verifyImpl(round, head, true);
     }
 
+    fn fail(r: *Runner, err: anytype) @TypeOf(err) {
+        r.failed = true;
+        return err;
+    }
+
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
         const metric = mtl.pass_metrics.phase(.verify);
         defer metric.end();
+        try r.settleKeep();
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         mtl.pass_metrics.rows(round.ids.len);
-        if (r.tail != null and (accepted or head != .all)) return error.BadVerifyTail;
+        if (r.tail != null and head == .none) return error.BadVerifyTail;
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
@@ -305,19 +310,10 @@ pub const Runner = struct {
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (r.keysOnly(head)) keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
-            r.failed = true;
-            return err;
-        };
+        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| return r.fail(err);
         // A seam cannot fail while encoding: the transport reports it out of band, and a broken pair fails the round.
-        if (r.reduce) |red| if (red.broken()) {
-            r.failed = true;
-            return error.PairFailed;
-        };
-        if (r.model.ane) |share| share.drain() catch |err| {
-            r.failed = true;
-            return err;
-        };
+        if (r.reduce) |red| if (red.broken()) return r.fail(error.PairFailed);
+        if (r.model.ane) |share| share.drain() catch |err| return r.fail(err);
         if (r.trace) |t| {
             r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
             t.round();
@@ -329,8 +325,8 @@ pub const Runner = struct {
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        try r.settleKeep();
+        if (r.failed or r.active == null or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
         var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
@@ -343,36 +339,33 @@ pub const Runner = struct {
         errdefer if (!ended) e.end(); // an encoder the pool releases unended aborts the process, and the error is lost
         var gi: usize = 0;
         var ai: usize = 0;
-        for (r.model.weights.layers) |layer| switch (layer.mixer) {
-            .linear => {
-                try r.gdn.commit(gi, .{ .host = recurrent, .metadata = r.metadata() }, e);
-                gi += 1;
-            },
-            .attention => {
-                var views: [attn.planning.max_streams]attn.Cache = undefined;
-                const caches = r.layerCaches(ai, round, &views);
-                const kept = try r.bindings[ai].uploadKeep(attention_plan, caches, paths);
-                try r.attention.keep(e, &r.scratch, &r.bindings[ai], kept, caches);
-                ai += 1;
-            },
+        for (r.model.weights.layers) |layer| if (layer.mixer == .linear) {
+            try r.gdn.commit(gi, .{ .host = recurrent, .metadata = r.metadata() }, e);
+            gi += 1;
+        } else {
+            var views: [attn.planning.max_streams]attn.Cache = undefined;
+            const caches = r.layerCaches(ai, round, &views);
+            const kept = try r.bindings[ai].uploadKeep(attention_plan, caches, paths);
+            try r.attention.keep(e, &r.scratch, &r.bindings[ai], kept, caches);
+            ai += 1;
         };
         e.end();
         ended = true;
         cb.commit();
-        cb.wait();
-        if (gpuFailed(cb, "a round's keep")) {
-            r.failed = true;
-            return error.RoundGpuFailure;
+        if (r.model.config.looped) r.pending_keep = cb.retain() else {
+            cb.wait();
+            if (gpuFailed(cb, "a round's keep")) return r.fail(error.RoundGpuFailure);
         }
         for (round.slots, round.windows, paths) |slot, window, path| {
             r.offsets[slot] = (try window.keep(path)).length;
-            r.trimSlot(slot); // the keep waited: its dropped rows' pages are read by nothing
+            if (r.model.config.looped) r.pending_trim_slots[slot] = true else r.trimSlot(slot);
         }
         r.active = null;
     }
 
     /// A validated single-window round consumes authoritative GPU keep metadata without host path selection.
     pub fn keepDevice(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        try r.settleKeep();
         try r.checkDeviceKeep(round);
         var recurrent = try round.recurrent(try r.params(round.ids.len), &.{&.{}});
         defer recurrent.deinit();
@@ -384,25 +377,19 @@ pub const Runner = struct {
     }
 
     pub fn checkDeviceKeep(r: *const Runner, round: *const Round) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        if (r.failed or r.active == null or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
     }
 
     /// Encode only: the caller commits after the lane core publishes its authoritative path.
     pub fn prepareDeviceKeep(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
-        if (r.failed or r.accepted_chain or r.current_round != round or r.tail == null) return error.RoundNotReady;
-        if (round.windows.len != 1) return error.RoundNotReady;
-        const recurrent = r.current_gdn orelse return error.RoundNotReady;
-        const attention_plan = r.current_attention orelse return error.RoundNotReady;
-        return r.encodeDeviceKeep(round, recurrent.*, attention_plan.*, e, ops, result);
+        if (r.failed or r.accepted_chain or r.current_round != round or r.tail == null or round.windows.len != 1) return error.RoundNotReady;
+        return r.encodeDeviceKeep(round, (r.current_gdn orelse return error.RoundNotReady).*, (r.current_attention orelse return error.RoundNotReady).*, e, ops, result);
     }
 
     fn encodeDeviceKeep(r: *Runner, round: *const Round, recurrent: GdnPlan, attention_plan: attn.Plan, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
         const m = r.metadata();
         const p = @import("core").tree_commit_gpu.Meta{ .rows = @intCast(round.ids.len), .slot = round.slots[0] };
-        const keep_ref = @import("core").tree_commit_gpu.Ref{ .buf = m.keeps.buffer, .off = m.keeps.offset };
-        const rows = @import("core").tree_commit_gpu.Ref{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset };
-        try ops.metadata(e, result, keep_ref, rows, null, p);
+        try ops.metadata(e, result, .{ .buf = m.keeps.buffer, .off = m.keeps.offset }, .{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset }, null, p);
         e.barrier();
         const plan = @import("gdn_pool_gpu.zig").DevicePlan{ .host = recurrent, .metadata = m };
         for (0..r.gdn.budget.layers) |gi| try r.gdn.commitScan(gi, plan, e);
@@ -410,41 +397,54 @@ pub const Runner = struct {
         for (0..r.gdn.budget.layers) |gi| try r.gdn.commitPublish(gi, plan, e);
         e.barrier();
         var ai: usize = 0;
-        for (r.model.weights.layers) |layer| switch (layer.mixer) {
-            .linear => {},
-            .attention => {
-                var views: [attn.planning.max_streams]attn.Cache = undefined;
-                const caches = r.layerCaches(ai, round, &views);
-                try r.bindings[ai].admitDeviceKeep(attention_plan, caches, p.rows);
-                const map = r.bindings[ai].get(.keep_map);
-                try ops.metadata(e, result, keep_ref, rows, .{ .buf = map.buffer, .off = map.offset }, p);
-                e.barrier();
-                try r.attention.keep(e, &r.scratch, &r.bindings[ai], p.rows, caches);
-                ai += 1;
-            },
+        for (r.model.weights.layers) |layer| if (layer.mixer == .attention) {
+            var views: [attn.planning.max_streams]attn.Cache = undefined;
+            const caches = r.layerCaches(ai, round, &views);
+            try r.bindings[ai].admitDeviceKeep(attention_plan, caches, p.rows);
+            const map = r.bindings[ai].get(.keep_map);
+            try ops.metadata(e, result, .{ .buf = m.keeps.buffer, .off = m.keeps.offset }, .{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset }, .{ .buf = map.buffer, .off = map.offset }, p);
+            e.barrier();
+            try r.attention.keep(e, &r.scratch, &r.bindings[ai], p.rows, caches);
+            ai += 1;
         };
     }
 
     pub fn completeDeviceKeep(r: *Runner, round: *const Round, path: []const u32) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        if (r.failed or r.active == null or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
         r.offsets[round.slots[0]] = (try round.windows[0].keep(path)).length;
         r.active = null;
     }
 
     /// After a GPU failure, once no stream holds a slot: rounds run again, each slot reset by its next prompt.
     pub fn recover(r: *Runner) void {
+        r.settleKeep() catch {};
         r.failed = false;
         r.active = null;
     }
 
     /// An idle or newly lone host may drop scratch only after the previous verify has been kept.
     pub fn trimBefore(r: *Runner) void {
+        r.settleKeep() catch {};
         if (r.active == null) r.gdn.releaseBefore();
+    }
+
+    /// Finish any committed keep pass on the GPU and trim dropped KV pages.
+    pub fn settleKeep(r: *Runner) !void {
+        const cb = r.pending_keep orelse return;
+        r.pending_keep = null;
+        defer cb.release();
+        cb.wait();
+        const failed = gpuFailed(cb, "a round's keep");
+        for (&r.pending_trim_slots, 0..) |*p, slot| if (p.*) {
+            p.* = false;
+            if (!failed) r.trimSlot(@intCast(slot));
+        };
+        if (failed) return r.fail(error.RoundGpuFailure);
     }
 
     /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
     pub fn settleSlot(r: *Runner, slot: u32) void {
+        r.settleKeep() catch {};
         const cb = r.reading[slot] orelse return;
         r.reading[slot] = null;
         cb.wait();
@@ -458,6 +458,7 @@ pub const Runner = struct {
     }
 
     pub fn reset(r: *Runner, slot: u32) !void {
+        try r.settleKeep();
         r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
@@ -468,10 +469,7 @@ pub const Runner = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (gpuFailed(cb, "a slot reset")) {
-            r.failed = true;
-            return error.RoundGpuFailure;
-        }
+        if (gpuFailed(cb, "a slot reset")) return r.fail(error.RoundGpuFailure);
         r.offsets[slot] = 0;
     }
 
@@ -515,14 +513,18 @@ pub const Runner = struct {
         var views: [attn.planning.max_streams]attn.Cache = undefined;
         const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
         try r.bindings[layer].upload(plan, caches);
-        try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);
-        try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
-        e.barrier();
-        const kv: u32 = @intCast(r.model.config.kvDim());
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
-        e.barrier();
-        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            try @import("loop.zig").encodeAttnProj(&r.model.kernels, r.model.glue, e, weights, f, rows, @intCast(r.model.config.qDim()), @intCast(r.model.config.kvDim()));
+        } else {
+            try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);
+            try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
+            e.barrier();
+            const kv: u32 = @intCast(r.model.config.kvDim());
+            try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
+            try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
+            e.barrier();
+        }
+        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry, .shift = r.model.config.shift_norms, .rope = r.model.config.rope });
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
@@ -552,7 +554,7 @@ pub const Runner = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
-        try r.attention.keysOnly(e, &r.scratch, &r.bindings[layer], plan, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry }, f.get(.value), caches);
+        try r.attention.keysOnly(e, &r.scratch, &r.bindings[layer], plan, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry, .shift = r.model.config.shift_norms, .rope = r.model.config.rope }, f.get(.value), caches);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {
@@ -563,9 +565,7 @@ pub const Runner = struct {
 
 fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
     const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
-    const key = try allocation(a, m.device, owned, bytes);
-    const value = try allocation(a, m.device, owned, bytes);
-    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
+    return .{ .keys = .{ .buffer = try allocation(a, m.device, owned, bytes) }, .values = .{ .buffer = try allocation(a, m.device, owned, bytes) }, .capacity = capacity };
 }
 
 fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {

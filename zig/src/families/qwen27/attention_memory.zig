@@ -13,7 +13,9 @@ pub const Layout = struct {
         const rp: usize = tiles * 16;
         const a: usize = if (limits.shared_prefix) hk * @as(usize, chunks) * rp else 0;
         const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
-        const b: usize = hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
+        const wide_tree_b: usize = hk * @as(usize, tail_chunks) * @as(usize, @min(limits.rows, planning.max_rows)) * 16;
+        const wide_prompt_b: usize = if (limits.shared_prefix) 0 else hk * @as(usize, chunks) * rp;
+        const b: usize = if (limits.geometry.wide_prompt) @max(wide_tree_b, wide_prompt_b) else hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
         const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * planning.path_width * 4, limits.rows * 4, hk * rp * dim * 2, hk * @as(usize, limits.rows) * 16 * dim * 2, a * dim * 4, a * 4, a * 4, b * dim * 4, b * 4, b * 4, limits.rows * hk * dim * 2, limits.rows * hk * dim * 2, 48, limits.rows * 3 * 4 }; // pick: the scan's flag, then two indirect grids
         return .{ .tiles = tiles, .chunks = chunks, .tail_chunks = tail_chunks, .sizes = sizes };
     }

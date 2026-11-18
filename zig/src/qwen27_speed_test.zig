@@ -45,7 +45,7 @@ test "qwen27 speed: prompt parts fit the actual fused or unfused attention plan"
         const geometry = planning.Geometry{ .shared_prefix = tensor, .fuse_chain = fuse };
         for ([_]u32{ 16, 128, 129, 512, 2048 }) |requested| {
             const part = geometry.promptRows(requested);
-            const want = @min(requested, @as(u32, if (tensor and fuse) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
+            const want = @min(requested, @as(u32, if (fuse) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
             try std.testing.expectEqual(want, part);
             for ([_]u32{ 128, 129, 512, 2051 }) |length| {
                 var at: u32 = 0;

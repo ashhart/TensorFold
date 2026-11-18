@@ -3,10 +3,18 @@ const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const rope_config = @import("rope_config");
+const yarn = @import("yarn.zig");
+
+pub const MhcRole = if (@hasDecl(@import("core"), "sensenova_loop"))
+    @import("core").sensenova_loop.config.MhcRole
+else
+    enum { none, enter, inner, exit };
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
 pub const max_eos = 8;
+
+pub const ParseOptions = struct { rope_yarn: ?f64 = null, loops: ?u32 = null };
 
 pub const Config = struct {
     hidden: usize,
@@ -33,6 +41,14 @@ pub const Config = struct {
     rank: u32 = 0,
     ranks: u32 = 1,
     split_attention: bool = false,
+    looped: bool = false,
+    physical_layers: usize = 0,
+    exec_phys: [max_layers]u8 = initExecPhys(),
+    mhc_roles: [max_layers]MhcRole = @splat(.none),
+    mhc_iterations: u32 = 0,
+    mhc_pre_scale: f32 = 1.0,
+    shift_norms: bool = false,
+    rope: yarn.Rope = .plain,
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
     experts: usize = 0,
     top_k: usize = 0,
@@ -40,6 +56,21 @@ pub const Config = struct {
     moe_intermediate: usize = 0,
     /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
     renorm: bool = false,
+
+    fn initExecPhys() [max_layers]u8 {
+        var out: [max_layers]u8 = undefined;
+        for (&out, 0..) |*x, i| x.* = @intCast(i);
+        return out;
+    }
+
+    pub fn physicalLayers(c: Config) usize {
+        return if (c.physical_layers != 0) c.physical_layers else c.layers;
+    }
+
+    pub fn physKind(c: Config, phys: usize) Kind {
+        for (0..c.layers) |exec| if (c.exec_phys[exec] == phys) return c.kinds[exec];
+        return c.kinds[phys];
+    }
 
     pub fn moe(c: Config) bool {
         return c.experts != 0;
@@ -190,8 +221,8 @@ pub const Mode = enum { full, mlp };
 /// Split the even dimensions: heads, GQA groups, GDN heads, MLP width and vocabulary; embeddings and norms stay whole.
 pub fn split(c: *Config, rank: u32, ranks: u32, mode: Mode) !Shard {
     if (ranks < 2 or ranks > 8 or rank >= ranks) return error.BadShard;
-    // routed experts are one Mac's only: no rank split of the experts or the router is qualified
-    if (c.moe()) return error.BadShard;
+    // routed experts and looped mHC run on one Mac only: no rank split is qualified
+    if (c.moe() or c.looped) return error.BadShard;
     if (c.intermediate % ranks != 0 or c.vocab % ranks != 0) return error.BadShard;
     if (mode == .full and (c.heads % ranks != 0 or c.kv_heads % ranks != 0 or c.k_heads % ranks != 0 or c.v_heads % ranks != 0 or c.hidden % ranks != 0)) return error.BadShard;
     const global = c.*;
@@ -273,14 +304,21 @@ fn shapeProducts(c: Config) !void {
 }
 
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
+    return parseWithOptions(gpa, json, generation, .{});
+}
+
+pub fn parseWithOptions(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, opts: ParseOptions) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
-    const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
+    const root_model = root.get("model_type");
+    const is_loop_root = root_model != null and root_model.? == .string and (std.mem.eql(u8, root_model.?.string, "sensenova_loop") or std.mem.eql(u8, root_model.?.string, "sensenova_loop_text"));
+    const model = if (is_loop_root) root_model.? else (t.get("model_type") orelse root_model orelse return error.BadConfig);
     const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
     if (model != .string) return error.NotQwenDense;
-    const routed = for (kinds_of, 0..) |k, i| {
+    const looped = std.mem.eql(u8, model.string, "sensenova_loop") or std.mem.eql(u8, model.string, "sensenova_loop_text");
+    const routed = if (looped) false else for (kinds_of, 0..) |k, i| {
         if (std.mem.eql(u8, model.string, k)) break i >= 2;
     } else return error.NotQwenDense;
     const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
@@ -294,8 +332,8 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         break :blk try integer(v, false);
     } else hidden / heads;
     const rope = rope_config.params(t) catch return error.BadConfig;
-    // theta alone: a scaled rope (rope_scaling from the tower when it has the key, else the root) runs as plain rope
-    if (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root)) return error.UnsupportedRopeScaling;
+    // qwen3_5 without --rope-yarn still refuses YaRN/rope_scaling as config_test requires
+    if (!looped and opts.rope_yarn == null and (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root))) return error.UnsupportedRopeScaling;
     const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
@@ -323,7 +361,12 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         c.renorm = if (t.get("norm_topk_prob")) |v| (if (v == .bool) v.bool else return error.BadConfig) else true;
         if (c.experts > 256 or c.top_k >= c.experts or c.top_k > 15 or c.moe_intermediate != c.intermediate) return error.UnsupportedRouting;
     }
-    if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
+    if (t.get("max_position_embeddings") orelse root.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
+    if (looped or opts.rope_yarn != null) {
+        const res = try yarn.resolve(t, root, rope, c.rope_theta, c.max_position, opts.rope_yarn);
+        c.rope = res.rope;
+        c.max_position = res.ceiling;
+    }
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
         c.mrope_interleaved = v.bool;
@@ -334,9 +377,31 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
         for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
     };
-    var full: [max_layers]bool = undefined;
-    try layer_pattern.read(full[0..c.layers], t);
-    for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
+    if (looped) {
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            const sn_cfg = @import("core").sensenova_loop.config;
+            const sn = try sn_cfg.Config.parseWithGeneration(gpa, json, generation);
+            const mhc = sn.mhc orelse return error.BadConfig;
+            if (mhc.streams != 2) return error.BadConfig;
+            var step_buf: [max_layers]sn_cfg.ExecutionStep = undefined;
+            const steps = try sn.fillPlan(&step_buf, opts.loops);
+            c.looped = true;
+            c.shift_norms = true;
+            c.physical_layers = sn.num_hidden_layers;
+            c.layers = steps.len;
+            c.mhc_iterations = mhc.iterations;
+            c.mhc_pre_scale = mhc.pre_scale;
+            for (steps, 0..) |st, exec| {
+                c.kinds[exec] = if (st.is_linear) .linear else .attention;
+                c.exec_phys[exec] = st.phys;
+                c.mhc_roles[exec] = st.mhc_role;
+            }
+        } else return error.NotQwenDense;
+    } else {
+        var full: [max_layers]bool = undefined;
+        try layer_pattern.read(full[0..c.layers], t);
+        for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
+    }
     if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
     if (generation) |text| {
         const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
