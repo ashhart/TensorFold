@@ -11,6 +11,7 @@ pub const schedule = @import("schedule.zig");
 pub const geometry = @import("geometry.zig");
 pub const picture = @import("picture.zig");
 pub const picture_vae = @import("picture_vae.zig");
+pub const euler = @import("euler.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;
