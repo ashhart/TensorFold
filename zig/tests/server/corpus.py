@@ -216,7 +216,8 @@ def prefill_cases() -> list[tuple[str, str, list[Any]]]:
         ("prefill", "refuse-messages-tool", [post("/v1/messages", {**base, "messages": called, "tools": [tool]})]),
         ("prefill", "refuse-chat-user-last", [post("/v1/chat/completions", {**chat_body, "messages": say("plain")})]),
         ("prefill", "refuse-chat-generation", [post("/v1/chat/completions", {**chat_body, "add_generation_prompt": True})]),
-        ("prefill", "refuse-chat-thinking", [post("/v1/chat/completions", {k: v for k, v in chat_body.items() if k not in off})]),
+        ("prefill", "chat-default-thinking", [post("/v1/chat/completions", {k: v for k, v in chat_body.items() if k not in off})]),
+        ("prefill", "refuse-chat-thinking", [post("/v1/chat/completions", {**chat_body, "chat_template_kwargs": {"enable_thinking": True}})]),
     ]
 
 
