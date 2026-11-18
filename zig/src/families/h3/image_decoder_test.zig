@@ -1,6 +1,6 @@
 //! MiniMax-H3-Image's image decoder host rules (image_decoder.zig): ids, angles, the suffix, unpatchify, tensors.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const rounding = @import("bf16_round");
 const h = @import("image_decoder.zig");
 const vae = @import("picture_vae.zig");
