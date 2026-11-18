@@ -7,6 +7,7 @@ const index_format = @import("checkpoint_index.zig");
 const prefetching = @import("checkpoint_prefetch.zig");
 
 pub const cache = @import("checkpoint_cache.zig");
+pub const coded = @import("checkpoint_coded.zig");
 pub const direct = @import("checkpoint_direct.zig");
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
@@ -72,6 +73,8 @@ pub const Checkpoint = struct {
     scope: []const u8 = "",
     /// Copies `get` returns in place of the mapping's bytes, by full name (checkpoint_direct's current layer).
     copies: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    /// DFloat11 groups answered under their members' weight names (`coded.attach`); null: every name is a header's.
+    coded: ?*coded.Coded = null,
 
     fn scoped(self: *const Checkpoint, buf: *[320]u8, name: []const u8) ![]const u8 {
         if (self.scope.len == 0) return name;
@@ -107,6 +110,7 @@ pub const Checkpoint = struct {
     }
 
     pub fn close(self: *Checkpoint) void {
+        if (self.coded) |c| c.deinit(self.gpa);
         for (self.files.items) |*f| f.close(self.io);
         self.files.deinit(self.gpa);
         self.used.deinit(self.gpa);
@@ -116,7 +120,11 @@ pub const Checkpoint = struct {
     /// The tensor named `name`, marked as used; a missing name is an error naming it.
     pub fn get(self: *Checkpoint, short: []const u8) !Tensor {
         var buf: [320]u8 = undefined;
-        const name = try self.scoped(&buf, short);
+        return self.find(try self.scoped(&buf, short), null);
+    }
+
+    /// The tensor a header names `name` (the full name), marked as used; null when no file holds it.
+    pub fn stored(self: *Checkpoint, name: []const u8) !?Tensor {
         for (self.files.items) |*f| if (f.get(name)) |t| {
             const key = f.names.getKey(name).?;
             try self.used.put(self.gpa, key, {});
@@ -126,13 +134,21 @@ pub const Checkpoint = struct {
             };
             return out;
         };
+        return null;
+    }
+
+    /// A header's tensor, else a coded one in `shape` (its loader's shape for the name without one).
+    fn find(self: *Checkpoint, name: []const u8, shape: ?[]const usize) !Tensor {
+        if (try self.stored(name)) |t| return t;
+        if (self.coded) |c| if (try c.get(self, name, shape)) |t| return t;
         std.log.err("checkpoint has no tensor {s}", .{name});
         return error.MissingTensor;
     }
 
     /// `get` with the dtype and shape checked.
     pub fn expect(self: *Checkpoint, name: []const u8, dtype: DType, shape: []const usize) !Tensor {
-        const t = try self.get(name);
+        var buf: [320]u8 = undefined;
+        const t = try self.find(try self.scoped(&buf, name), shape);
         if (!t.is(dtype, shape)) {
             std.log.err("{s}: {t} {any}, expected {t} {any}", .{ name, t.dtype, t.shape[0..t.rank], dtype, shape });
             return error.UnexpectedTensor;
@@ -145,7 +161,7 @@ pub const Checkpoint = struct {
         var buf: [320]u8 = undefined;
         const name = self.scoped(&buf, short) catch return false;
         for (self.files.items) |*f| if (f.get(name) != null) return true;
-        return false;
+        return if (self.coded) |c| c.names.contains(name) else false;
     }
 
     /// Marks every name starting with `prefix` as used: a part the loader leaves out on purpose.
@@ -157,8 +173,9 @@ pub const Checkpoint = struct {
         };
     }
 
-    /// Every file's pages out of the page cache (safetensors.File.release).
+    /// Every file's pages out of the page cache (safetensors.File.release), and every decoded group freed.
     pub fn release(self: *const Checkpoint) void {
+        if (self.coded) |c| c.drop(self.gpa);
         for (self.files.items) |*f| f.release(self.gpa);
         // Windows has no per-range advice: the step's whole set goes, once, rather than once a shard
         @import("sys").working_set.release();
