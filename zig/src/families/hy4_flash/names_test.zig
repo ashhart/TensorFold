@@ -72,8 +72,31 @@ test "Engram tensors exist on the Engram layers only, and the dense MLP on layer
 test "an unknown name, another format and another shape are refused by name" {
     try refused("model.layers.42.input_layernorm.weight", "BF16", &.{3072}, error.UnknownTensor, "not a Hy4-flash tensor");
     try refused("model.layers.1.mlp.experts.512.gate_proj.weight", "U8", &.{ 1536, 768 }, error.UnknownTensor, "not a Hy4-flash tensor");
-    try refused("model.layers.1.mlp.experts.0.gate_proj.weight", "BF16", &.{ 1536, 1536 }, error.TensorFormat, "the family reads u8 there");
+    try refused("model.layers.1.mlp.experts.0.gate_proj.weight", "F32", &.{ 1536, 1536 }, error.TensorFormat, "the family reads u8 there");
+    try refused("model.layers.1.mlp.experts.0.gate_proj.weight", "BF16", &.{ 1536, 768 }, error.TensorShape, "another shape");
     try refused("model.layers.1.mlp.experts.0.gate_proj.weight_scale", "F8_E4M3", &.{ 1536, 48 }, error.TensorShape, "another shape");
-    try refused("model.layers.1.engram_layer.multi_head_embedding.embedding.weight", "BF16", &.{ 164994380, 96 }, error.TensorFormat, "reads e4m3 there");
+    try refused("model.layers.1.engram_layer.multi_head_embedding.embedding.weight", "F32", &.{ 164994380, 96 }, error.TensorFormat, "reads e4m3 there");
+    try refused("model.layers.1.engram_layer.multi_head_embedding.embedding.weight", "BF16", &.{ 164994380, 128 }, error.TensorShape, "another shape");
     try refused("model.layers.2.self_attn.learnable_sink_param", "F32", &.{32}, error.TensorShape, "another shape");
+}
+
+test "transformers' tiny export (BF16, fused experts, indexed_attention) maps with the same rules" {
+    var why: config.Why = .{};
+    const c = try config.parse(t.allocator, @embedFile("fixtures/tiny_config.json"), &why);
+    try t.expectEqual(@as(u32, 3), c.text.layers);
+    try t.expectEqual(@as(u32, 2), c.text.count(.sparse));
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("fixtures/tiny_header.txt"), '\n');
+    var n: u32 = 0;
+    while (lines.next()) |line| : (n += 1) {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        const name = f.next().?;
+        const dtype = f.next().?;
+        var buf: [4]u64 = undefined;
+        const dims = try sizes(f.next().?, &buf);
+        _ = names.check(&c, name, dtype, dims, &why) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ line, why.text() });
+            return err;
+        };
+    }
+    try t.expect(n > 100);
 }

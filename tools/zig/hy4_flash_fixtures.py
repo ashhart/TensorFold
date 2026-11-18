@@ -11,7 +11,7 @@ KEEP_LAYERS = {"0", "1", "2"}
 
 
 def headers(root):
-    for path in sorted(glob.glob(f"{root}/*.safetensors")):
+    for path in sorted(glob.glob(f"{root}/model*.safetensors")):
         with open(path, "rb") as f:
             (n,) = struct.unpack("<Q", f.read(8))
             for name, meta in json.loads(f.read(n)).items():
@@ -92,7 +92,7 @@ def main():
     if sys.argv[1] == "--tokenizer":
         return mini_tokenizer(sys.argv[2], sys.argv[3])
     rows = list(headers(sys.argv[1]))
-    last = str(max(int(m.group(1)) for n, _, _ in rows if (m := re.search(r"\.experts\.(\d+)\.", n))))
+    last = str(max((int(m.group(1)) for n, _, _ in rows if (m := re.search(r"\.experts\.(\d+)\.", n))), default=0))
     for name, dtype, shape in sorted(rows):
         if keep(name, last):
             print(name, dtype, "x".join(map(str, shape)) or "scalar")

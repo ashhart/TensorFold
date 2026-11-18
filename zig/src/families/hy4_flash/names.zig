@@ -11,7 +11,7 @@ pub const Part = enum { top, attention, indexer, streams, dense_mlp, router, exp
 /// A tensor's expected shape; a 0 stands for a size the config does not fix (an Engram table's rows).
 pub const Dims = struct {
     n: u8 = 0,
-    d: [2]u64 = .{ 0, 0 },
+    d: [3]u64 = .{ 0, 0, 0 },
 
     pub fn matches(want: Dims, got: []const u64) bool {
         if (want.n != got.len) return false;
@@ -20,14 +20,15 @@ pub const Dims = struct {
     }
 };
 
-pub const Expected = struct { part: Part, format: Format, dims: Dims, checked: bool = true };
+/// `plain`: the same tensor stored unquantized (BF16 at these dims), as the BF16 release and transformers' exports keep it.
+pub const Expected = struct { part: Part, format: Format, dims: Dims, checked: bool = true, plain: ?Dims = null };
 
 fn vec(part: Part, format: Format, a: u64) Expected {
-    return .{ .part = part, .format = format, .dims = .{ .n = 1, .d = .{ a, 0 } } };
+    return .{ .part = part, .format = format, .dims = .{ .n = 1, .d = .{ a, 0, 0 } } };
 }
 
 fn mat(part: Part, format: Format, a: u64, b: u64) Expected {
-    return .{ .part = part, .format = format, .dims = .{ .n = 2, .d = .{ a, b } } };
+    return .{ .part = part, .format = format, .dims = .{ .n = 2, .d = .{ a, b, 0 } } };
 }
 
 fn eq(a: []const u8, b: []const u8) bool {
@@ -48,7 +49,11 @@ fn indexed(name: []const u8) ?struct { i: u32, rest: []const u8 } {
 
 /// One ModelOpt NVFP4 linear of `out` by `in`: e2m1 codes two to a byte, an e4m3 scale every 16 inputs, two scalars.
 fn nvfp4(part: Part, leaf: []const u8, out: u64, in: u64) ?Expected {
-    if (eq(leaf, "weight")) return mat(part, .u8, out, in / 2);
+    if (eq(leaf, "weight")) {
+        var e = mat(part, .u8, out, in / 2);
+        e.plain = .{ .n = 2, .d = .{ out, in, 0 } };
+        return e;
+    }
     if (eq(leaf, "weight_scale")) return mat(part, .e4m3, out, in / 16);
     if (eq(leaf, "weight_scale_2") or eq(leaf, "input_scale")) return .{ .part = part, .format = .f32, .dims = .{} };
     return null;
@@ -107,6 +112,9 @@ fn mlp(c: *const config.Text, i: u32, rest: []const u8) ?Expected {
     if (eq(rest, "routed_expert_up_proj.weight")) return mat(.experts, .bf16, H, c.latent);
     if (eq(rest, "combine_output_norm.weight")) return vec(.experts, .bf16, H);
     if (after(rest, "shared_experts.")) |s| return swiglu(.shared, s, H, @as(u64, c.expert_inter) * c.shared);
+    const fused: Dims = .{ .n = 3, .d = .{ c.experts, 2 * @as(u64, c.expert_inter), c.latent } };
+    if (eq(rest, "experts.gate_up_proj")) return .{ .part = .experts, .format = .bf16, .dims = fused };
+    if (eq(rest, "experts.down_proj")) return .{ .part = .experts, .format = .bf16, .dims = .{ .n = 3, .d = .{ c.experts, c.latent, c.expert_inter } } };
     const e = indexed(after(rest, "experts.") orelse return null) orelse return null;
     if (e.i >= c.experts) return null;
     return swiglu(.experts, e.rest, c.latent, c.expert_inter);
@@ -116,7 +124,12 @@ fn engram(c: *const config.Config, rest: []const u8) ?Expected {
     const H = c.text.hidden;
     const g = c.engram;
     const heads: u64 = @as(u64, g.max_ngram - 1) * g.heads; // every n-gram size has `heads` hash heads
-    if (eq(rest, "multi_head_embedding.embedding.weight")) return mat(.engram, if (g.fp8) .e4m3 else .bf16, 0, g.dim);
+    if (eq(rest, "multi_head_embedding.embedding.weight")) {
+        // Tencent's own releases keep BF16 rows under engram_fp8_embedding; the reference rounds them to fp8 as it runs
+        var e = mat(.engram, if (g.fp8) .e4m3 else .bf16, 0, g.dim);
+        e.plain = e.dims;
+        return e;
+    }
     if (eq(rest, "multi_head_embedding.embedding.weight_scale_inv")) return if (g.fp8) vec(.engram, .bf16, 0) else null;
     if (eq(rest, "lookup_table")) return vec(.engram, .i32, 0);
     if (eq(rest, "value_proj.weight")) return mat(.engram, .bf16, H, heads * g.dim);
@@ -158,7 +171,11 @@ fn backbone(c: *const config.Config, i: u32, rest: []const u8) ?Expected {
 /// What the config says `name` must be, or null for a tensor the family does not know.
 pub fn expect(c: *const config.Config, name: []const u8) ?Expected {
     const x = &c.text;
-    if (eq(name, "lm_head.weight")) return mat(.top, .f32, x.vocab, x.hidden);
+    if (eq(name, "lm_head.weight")) {
+        var e = mat(.top, .f32, x.vocab, x.hidden);
+        e.plain = e.dims;
+        return e;
+    }
     if (after(name, "vit.")) |_| return if (c.has_vision) .{ .part = .vision, .format = .bf16, .dims = .{}, .checked = false } else null;
     const m = after(name, "model.") orelse return null;
     if (eq(m, "embed_tokens.weight")) return mat(.top, .bf16, x.vocab, x.hidden);
@@ -186,7 +203,13 @@ pub fn check(c: *const config.Config, name: []const u8, dtype: []const u8, dims:
         return error.UnknownTensor;
     };
     if (!want.checked) return want.part;
-    if (formatOf(dtype) != want.format) {
+    const f = formatOf(dtype);
+    if (want.plain) |plain| if (f == .bf16 and f != want.format) {
+        if (plain.matches(dims)) return want.part;
+        why.set("{s} has another shape than its config gives it", .{name});
+        return error.TensorShape;
+    };
+    if (f != want.format) {
         why.set("{s} is stored as {s}: the family reads {s} there", .{ name, dtype, @tagName(want.format) });
         return error.TensorFormat;
     }

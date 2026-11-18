@@ -242,8 +242,10 @@ fn layerTables(o: std.json.ObjectMap, c: *Text, why: *Why) !void {
     for (0..c.layers) |i| {
         const k = if (kinds[i] == .string) kinds[i].string else "";
         const sliding = std.mem.eql(u8, k, "sliding_attention");
-        if (!sliding and !std.mem.eql(u8, k, "deepseek_sparse_attention")) {
-            why.set("layer {d} is \"{s}\": the engine runs deepseek_sparse_attention and sliding_attention", .{ i, k });
+        // the release names sparse layers deepseek_sparse_attention, transformers' exports indexed_attention
+        const sparse = std.mem.eql(u8, k, "deepseek_sparse_attention") or std.mem.eql(u8, k, "indexed_attention");
+        if (!sliding and !sparse) {
+            why.set("layer {d} is \"{s}\": the engine runs sparse (indexed) and sliding attention", .{ i, k });
             return error.LayerList;
         }
         if (swa[i] != .integer or (swa[i].integer == 1) != sliding) {
