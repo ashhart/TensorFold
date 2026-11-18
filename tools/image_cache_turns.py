@@ -9,7 +9,10 @@ Each scenario is one conversation whose client resends the whole history every t
 
 Per request: prompt and cached tokens (computed = prompt - cached), time to first streamed piece, total time, the
 server's prefill seconds and token hash. With --fresh-url (the same model served with --prompt-cache-gib 0), every
-request is sent there too and its token hash must equal the resumed one. GET /v1/memory is recorded before and after.
+request is sent there too and its token hash must equal the resumed one; then each fresh reply must report 0 cached
+tokens, and the text, image and repeat scenarios must each resume, on some request after their first, more tokens than
+their first request did (repeat: than the image chat's first; a fresh turn may resume the template's first tokens),
+or resumed == fresh compared fresh with fresh and fails by name. GET /v1/memory is recorded before and after.
 Standard library only; Python 3.11+.
 
   python3 tools/image_cache_turns.py --url http://127.0.0.1:8080 --image a.png --image-b b.png \
@@ -117,6 +120,19 @@ def scenarios(a: str, b: str | None, turns: int) -> dict:
     return out
 
 
+def unexercised(name: str, rows: list[dict], first: int) -> str | None:
+    """Why a scenario's resumed == fresh compared nothing: a fresh reply that resumed, or no later request resumed
+    more than ``first``, the cached tokens of a first turn."""
+    fresh = [r["turn"] for r in rows if r.get("fresh_cached_tokens") != 0]
+    if fresh:
+        return f"the fresh server's replies for turns {fresh} report cached tokens other than 0 (not fresh)"
+    later = rows if name == "repeat" else rows[1:]
+    if name != "changed" and later and not any((r.get("cached_tokens") or 0) > first for r in later):
+        return (f"no request after the first resumed more than a first turn's {first} cached tokens, so resumed == "
+                "fresh compared fresh with fresh")
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--url", default="http://127.0.0.1:8080")
@@ -158,6 +174,11 @@ def main() -> int:
                   + (f" ERROR {row['error']}" if row.get("error") else ""))
             failures += bool(row.get("error"))
         report["scenarios"][name] = rows
+        first = (report["scenarios"].get("image") if name == "repeat" else rows) or [{}]
+        problem = unexercised(name, rows, first[0].get("cached_tokens") or 0) if args.fresh_url else None
+        if problem:
+            failures += 1
+            print(f"FAIL {name}: {problem}")
     report["memory_after"] = memory(args.url, key)
     if args.output:
         args.output.write_text(json.dumps(report, indent=1) + "\n")
