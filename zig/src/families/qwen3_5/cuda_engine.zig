@@ -18,12 +18,13 @@ pub const recurrent = @import("cuda_recurrent.zig");
 pub const stage_fwd = @import("cuda_stage_forward.zig");
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
-pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
-/// Rows of one forward at most: a prompt chunk, or a shared round's windows.
+const S = @import("cuda_solo.zig"); // TF_QWEN35_CHUNK_SOLO: the prompt pass's rows
+/// Rows of one forward at most: a solo prompt pass, or a shared round's windows.
 pub const max_rows = Round.max_rows;
+pub const grid_rows = Round.grid_rows; // the cold pass's chunk: cuts, kept states and resumes sit on it
 /// Streams' windows in one forward at most.
 pub const max_segs = Round.max_segs;
 /// Rows of a verify forward at most: each row's logits are kept and drawn.
@@ -103,8 +104,8 @@ pub const Engine = struct {
     /// Forward scratch is a separate device allocation: one additional CUDA allocation/driver object under WDDM.
     scratch_buf: ?DeviceBuffer = null,
     scratch_capacity: usize = 0,
-    /// Maximum prompt rows admitted by the configured context (capped by the forward kernel limit).
-    scratch_rows: usize = max_rows,
+    /// A prompt forward's rows at most: the context's, capped by grid_rows or TF_QWEN35_CHUNK_SOLO's rows.
+    scratch_rows: usize = grid_rows,
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -217,7 +218,7 @@ pub const Engine = struct {
         e.scratch_buf = null;
         e.scratch_capacity = 0;
         // Reserve the configured ceiling before running the 32-row warm-up forwards.
-        e.scratch_rows = @max(32, @min(max_rows, prompt_rows_limit));
+        e.scratch_rows = S.scratchRows(try S.rows(span != null), prompt_rows_limit); // refused before device memory
         errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
@@ -231,7 +232,7 @@ pub const Engine = struct {
         e.held = null;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
+        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, grid_rows));
         errdefer if (e.boundary) |*b| b.free();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer core.checkpoint.cache.close(&ck);
@@ -276,7 +277,7 @@ pub const Engine = struct {
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         if (g.exl3) {
-            e.kit = try x3w.Kit.init(gpa, d, g);
+            e.kit = try x3w.Kit.init(gpa, d, g, S.passRows(e));
             errdefer e.kit.?.deinit(gpa);
             try x3w.load(e, &ck);
         } else {
@@ -353,10 +354,11 @@ pub const Engine = struct {
         return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
     }
 
-    /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
+    /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
     pub fn tapBytes(e: *const Engine) usize {
-        return tap_rows * e.n_taps * e.g.hidden * 2;
+        return e.tapRows() * e.n_taps * e.g.hidden * 2;
     }
+    pub const tapRows = S.tapRows;
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {

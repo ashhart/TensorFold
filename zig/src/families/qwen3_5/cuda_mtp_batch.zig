@@ -147,8 +147,8 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         if (it.rows) |rs| {
             var tr: mtp.TapRows = .{ .n = @intCast(n), .rows = @splat(0) };
             for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-            try e.run(d.ring_fns.gather_rows, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), out });
-        } else try e.run(d.ring_fns.gather_taps, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), out });
+            try e.run(d.ring_fns.gather_rows, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), out });
+        } else try e.run(d.ring_fns.gather_taps, .{ n, 1, 1 }, .{ 256, 1, 1 }, .{ it.features.buffer, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), out });
         for (0..n) |r| {
             tab[at + r] = ringRow(d, ctx, start, at);
             ids[at + r] = it.follow[r];

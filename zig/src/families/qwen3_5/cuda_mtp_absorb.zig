@@ -20,7 +20,8 @@ pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, row
     if (rows_) |rs| if (rs.len != n or n > most_window) return error.BadDraftRows;
     if (start < ctx.end) ctx.end = start;
     if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-    const held = engine.tap_rows - engine.max_rows; // the target's ring holds this many rows behind its newest chunk
+    // the target's ring holds this many rows behind its newest forward
+    const held = @import("cuda_cache.zig").tap_window;
     if (n > held) {
         fi = n - held;
         start += n - held;
@@ -33,8 +34,8 @@ pub fn absorbRole(d: *Mtp, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, row
         if (rows_) |rs| {
             var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
             for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-            try e.run(d.ring_fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), d.taps_in });
-        } else try e.run(d.ring_fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), d.taps_in });
+            try e.run(d.ring_fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), d.taps_in });
+        } else try e.run(d.ring_fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), d.taps_in });
         try d.norm(d.taps_in, 0, e.final_norm, d.hin, rows); // the target's final norm: the rows the head read
         try d.putIds(follow[fi..][0..rows]);
         try d.layerMode(ctx, rows, start, .ring, propose);

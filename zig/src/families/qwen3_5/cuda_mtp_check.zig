@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const Mtp = @import("cuda_mtp.zig").Mtp;
-const max_rows = @import("cuda_engine.zig").max_rows;
+const max_rows = @import("cuda_engine.zig").grid_rows;
 
 /// Siblings 0 and 1 at depth 0, six siblings 3 to 8 at depth 1, lane 9 at depth 2 under 3 and 0; each has a child.
 const parents = [_]i32{ -1, -1, -1, 0, 0, 0, 0, 1, 1, 3, 4, 5, 6, 7, 8, 9 };
