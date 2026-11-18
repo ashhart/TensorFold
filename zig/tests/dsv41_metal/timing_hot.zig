@@ -194,9 +194,9 @@ fn weightOf(l: *const pkg.weights.Layer, spec: []const u8) !struct { buf: mtl.Bu
     }
     const W = struct { n: []const u8, w: ?pkg.weights.Fp8 };
     const all = [_]W{
-        .{ .n = "wq_a", .w = l.wq_a },       .{ .n = "wkv", .w = l.wkv },          .{ .n = "wq_b", .w = l.wq_b },
-        .{ .n = "ix_wq_b", .w = l.ix_wq_b }, .{ .n = "wo_a", .w = l.wo_a },        .{ .n = "wo_b", .w = l.wo_b },
-        .{ .n = "w1", .w = l.shared[0] },    .{ .n = "w2", .w = l.shared[1] },     .{ .n = "w3", .w = l.shared[2] },
+        .{ .n = "wq_a", .w = l.wq_a },       .{ .n = "wkv", .w = l.wkv },      .{ .n = "wq_b", .w = l.wq_b },
+        .{ .n = "ix_wq_b", .w = l.ix_wq_b }, .{ .n = "wo_a", .w = l.wo_a },    .{ .n = "wo_b", .w = l.wo_b },
+        .{ .n = "w1", .w = l.shared[0] },    .{ .n = "w2", .w = l.shared[1] }, .{ .n = "w3", .w = l.shared[2] },
     };
     for (all) |x| if (std.mem.eql(u8, x.n, name)) {
         const w = x.w orelse return error.NoSuchWeight;
