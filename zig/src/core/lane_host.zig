@@ -464,8 +464,7 @@ pub const LaneHost = struct {
         job.reported();
         if (h.cache) |store| {
             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
-            if (job.request.promptOnly()) {
-                // never kept, so a repeat of it is not worth noting
+            if (job.request.promptOnly()) { // never kept, so a repeat of it is not worth noting
             } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
