@@ -84,6 +84,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
     b.step("tf-glm-route-select", "GLM-5.3-Flash's route select of 1-16 rows against the kept reference kernel, byte for byte, GPU time").dependOn(&b.addInstallArtifact(route_sel, .{}).step);
+    const norms = b.addExecutable(.{ .name = "tf-glm-mla-norms", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_mla_norms.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    b.step("tf-glm-mla-norms", "GLM-5.3-Flash's MLA key norm, indexer key norm and indexer weights in one launch against the kept kernels, bit for bit, GPU time").dependOn(&b.addInstallArtifact(norms, .{}).step);
     b.step("tf-glm-kda-speed", "GLM-5.3-Flash's fused KDA decode step: the window kernel against kda_rows bit for bit, GPU time").dependOn(&b.addInstallArtifact(kda, .{}).step);
 }
 
