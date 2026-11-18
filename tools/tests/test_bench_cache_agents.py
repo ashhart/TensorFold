@@ -125,10 +125,12 @@ class AgentTests(unittest.TestCase):
                 arrivals = iter([sent + 1, sent + 2, sent + 3])
                 self.clock = lambda: next(arrivals)
 
-        with patch.object(bench.bench_stream, "Collector", TimedCollector):
+        # Keep the send time and scripted arrivals on one exactly representable clock.
+        with patch.object(bench, "time") as clock, patch.object(bench.bench_stream, "Collector", TimedCollector):
+            clock.perf_counter.return_value = 0.0
             code, report, _ = invoke(Fixture("role_first"))
         self.assertEqual(code, 0)
-        self.assertTrue(all(row["ttft_s"] == 3 for row in report["rows"]))
+        self.assertEqual([row["ttft_s"] for row in report["rows"]], [3.0] * 24)
 
     def test_unsupported_thinking_switch_is_omitted_and_its_mode_is_recorded(self):
         fixture = Fixture("thinking_default")
