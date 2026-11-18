@@ -11,6 +11,13 @@ pub const Step = struct {
     leave: bool = false,
 };
 
+/// Whether the schedule executes physical layer `layer` exactly once.
+pub fn once(steps: []const Step, layer: usize) bool {
+    var count: usize = 0;
+    for (steps) |s| count += @intFromBool(s.layer == layer);
+    return count == 1;
+}
+
 pub const Schedule = struct {
     steps: [max_steps]Step = undefined,
     len: usize = 0,

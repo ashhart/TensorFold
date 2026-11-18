@@ -375,10 +375,9 @@ pub const Engine = struct {
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
-        if (e.g.loop != null and taps.len > 0) return error.SenseNovaDrafter;
         if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
         if (taps.len > e.taps.len) return error.TooManyTaps;
-        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
+        for (taps) |t| if (t >= e.g.layers) return error.BadTap else if (e.g.loop != null and !@import("loop_schedule.zig").once(e.steps, t)) return error.LoopTapRepeated;
         @memcpy(e.taps[0..taps.len], taps);
         e.n_taps = taps.len;
     }

@@ -14,7 +14,6 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, asked: Asked) 
     const g = geometry.Geometry.read(gpa, io, dir) catch return false;
     if (g.loop != null) {
         if (asked.vision) return error.SenseNovaVision;
-        if (asked.drafter) return error.SenseNovaDrafter;
         if (asked.slide) return error.SenseNovaLearning;
         if (asked.kv8 or asked.prompt_int8) return error.SenseNovaPrecision;
         return false;
@@ -60,13 +59,14 @@ pub fn present(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.SenseNovaVision => "SenseNova Loop supports text only; image input and --vision are not supported",
-        error.SenseNovaDrafter => "--drafter: SenseNova Loop supports plain decoding only",
+        error.SenseNovaDrafter => "--drafter: SenseNova Loop drafts with its MTP head only; pass --drafter mtp",
+        error.NoLoopMtpFile => "--drafter: no MTP file found; expected <dir>/mtp.safetensors or <dir>/mtp/" ++ "*.safetensors",
         error.SenseNovaLearning => "SenseNova Loop does not support learning or training",
         error.SenseNovaRanks => "SenseNova Loop does not support pipeline stages or tensor-parallel ranks",
         error.UnsupportedSenseNovaMhc => "SenseNova mHC requires 2 streams, fixed_identity false, at most 1000 iterations and a pre_scale that fits FP32",
         error.SenseNovaPocket => "SenseNova Loop CUDA does not support learned pocket shards",
         error.SenseNovaMoe => "SenseNova Loop CUDA does not support MoE checkpoints",
-        error.SenseNovaMtp => "SenseNova Loop CUDA does not support MTP layers",
+        error.SenseNovaMtp => "SenseNova Loop CUDA does not support MTP layers in the target configuration",
         error.SenseNovaPrecision => "SenseNova Loop requires BF16 prompts and KV caches",
         error.BadLoops => "--loops: SenseNova Loop accepts a count from 1 to 4",
         error.BadLoopConfig => "invalid SenseNova Loop or mHC configuration",

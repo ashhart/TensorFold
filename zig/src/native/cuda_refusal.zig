@@ -11,8 +11,6 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "sensenova_loop")) {
         if (o.loops) |count| if (count < 1 or count > 4) return "--loops: SenseNova Loop accepts a count from 1 to 4";
         if (o.vision != null) return "SenseNova Loop supports text only; image input and --vision are not supported";
-        if (o.drafter != null) return "--drafter: SenseNova Loop supports plain decoding only";
-        if (o.mtp_drafts != null or o.mtp_confidence != null) return "SenseNova Loop does not support MTP drafts";
         if (o.slide or o.learn != null or o.learn_conversations or o.record != null) return "SenseNova Loop does not support learning or training";
         if (o.tp != 1 or o.rank != 0) return "SenseNova Loop does not support pipeline stages or tensor-parallel ranks";
     }
@@ -413,11 +411,12 @@ test "SenseNova loop: CUDA rejects unsupported modes" {
     o.vision = .{};
     try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop supports text only");
     o = base;
-    o.drafter = "draft";
-    try std.testing.expectStringStartsWith(backend(o).?, "--drafter");
+    o.drafter = "mtp";
+    try std.testing.expect(backend(o) == null);
+    try std.testing.expect(family(qwen35.native_loop, o) == null);
     o = base;
     o.mtp_drafts = 1;
-    try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support MTP");
+    try std.testing.expectStringStartsWith(backend(o).?, "--mtp-drafts: this CUDA family");
     o = base;
     o.slide = true;
     try std.testing.expectStringStartsWith(backend(o).?, "SenseNova Loop does not support learning");

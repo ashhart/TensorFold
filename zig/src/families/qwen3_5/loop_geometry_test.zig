@@ -2,7 +2,26 @@
 const std = @import("std");
 const geometry = @import("cuda_geometry.zig");
 const loop_weights = @import("loop_weights.zig");
+const mtp_file = @import("cuda_mtp_dense_file.zig");
 const t = std.testing;
+
+test "SenseNova MTP refuses DFlash2, DSpine and unsupported draft bits" {
+    const route = @import("cuda_drafter_open.zig").loopRoute;
+    const config_ = @import("cuda_draft_config.zig");
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    for ([_][]const u8{ "{\"dflash_config\":{}}", "{\"dflash_config\":{\"selected_prefix_code_bridge\":{}}}" }) |data| {
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = data });
+        try t.expectError(error.SenseNovaDrafter, route(config_.declared(t.allocator, t.io, dir), 4));
+    }
+    const msg = @import("cuda_decide.zig").explain(error.SenseNovaDrafter).?;
+    try t.expect(std.mem.indexOf(u8, msg, "drafts with its MTP head only") != null);
+    try route(false, 0);
+    try route(false, 4);
+    try t.expectError(error.DrafterBitsUnsupported, route(false, 8));
+}
 
 fn config(kind: []const u8, extra: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -161,10 +180,63 @@ test "SenseNova loop: checkpoint YaRN settings pass CUDA geometry" {
     try t.expectEqual(@as(f64, 2), g.rope.yarn.factor);
 }
 
-test "SenseNova loop: a direct tap request is refused" {
+test "SenseNova loop: taps require one execution of a physical layer" {
+    const bytes = try config("sensenova_loop", settings);
+    defer t.allocator.free(bytes);
+    const g = try geometry.parse(t.allocator, bytes);
+    const schedule = g.schedule();
     var e: @import("cuda_engine.zig").Engine = undefined;
-    e.g.loop = .{ .start = 1, .end = 2, .count = 2, .mhc = null };
-    try t.expectError(error.SenseNovaDrafter, e.setTaps(&.{1}));
+    e.g = g;
+    e.steps = @constCast(schedule.slice());
+    try e.setTaps(&.{31});
+    try t.expectEqual(@as(usize, 1), e.n_taps);
+    try t.expectEqual(@as(u32, 31), e.taps[0]);
+    try t.expectError(error.LoopTapRepeated, e.setTaps(&.{10}));
+    try t.expectError(error.BadTap, e.setTaps(&.{32}));
+    e.g.whole = 32;
+    try t.expectError(error.StageTaps, e.setTaps(&.{31}));
+}
+
+test "SenseNova MTP file discovery prefers the root and accepts the mtp directory" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer t.allocator.free(dir);
+    try t.expectError(error.NoLoopMtpFile, mtp_file.discover(io, dir));
+    try tmp.dir.createDir(io, "mtp", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "mtp/model-00001-of-00001.safetensors", .data = "" });
+    try t.expectEqual(mtp_file.Location.child, try mtp_file.discover(io, dir));
+    const child = try std.fs.path.join(t.allocator, &.{ dir, "mtp" });
+    defer t.allocator.free(child);
+    try t.expectEqual(mtp_file.Location.direct, try mtp_file.discover(io, child));
+    try tmp.dir.writeFile(io, .{ .sub_path = "mtp.safetensors", .data = "" });
+    try t.expectEqual(mtp_file.Location.root, try mtp_file.discover(io, dir));
+}
+
+test "SenseNova MTP norms shift BF16 and F32 with ties to even" {
+    const f = [_]f32{ 0, 0.00390625, 0.01171875, -0.5 };
+    const tensor: @import("core").checkpoint.Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 4, 0, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(&f) };
+    var out: [4]u16 = undefined;
+    try mtp_file.shift(tensor, &out);
+    try t.expectEqualSlices(u16, &.{ 0x3f80, 0x3f80, 0x3f82, 0x3f00 }, &out);
+    const b = [_]u16{ 0, 0x3b80, 0x3c40, 0xbf00 };
+    const bf: @import("core").checkpoint.Tensor = .{ .dtype = .bf16, .rank = 1, .shape = .{ 4, 0, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(&b) };
+    try mtp_file.shift(bf, &out);
+    try t.expectEqualSlices(u16, &.{ 0x3f80, 0x3f80, 0x3f82, 0x3f00 }, &out);
+    try t.expectError(error.UnexpectedTensor, mtp_file.shift(bf, out[0..3]));
+    var wrong = bf;
+    wrong.dtype = .f16;
+    try t.expectError(error.UnexpectedTensor, mtp_file.shift(wrong, &out));
+}
+
+test "SenseNova MTP projection requires the BF16 matrix shape" {
+    const tensor: @import("core").checkpoint.Tensor = .{ .dtype = .bf16, .rank = 2, .shape = .{ 8, 16, 0, 0, 0 }, .bytes = &.{} };
+    try mtp_file.projection(tensor, 8, 16);
+    try t.expectError(error.UnexpectedTensor, mtp_file.projection(tensor, 16, 8));
+    var wrong = tensor;
+    wrong.dtype = .f32;
+    try t.expectError(error.UnexpectedTensor, mtp_file.projection(wrong, 8, 16));
 }
 
 test "SenseNova loop: F32 delta bias converts to BF16 with ties to even" {

@@ -59,11 +59,10 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     const aw = g.attnWidth();
     const kw = d.kvWidth();
     try e.embed(d.ids, d.emb, rows, 0);
-    try d.norm(d.emb, 0, w.norm_e, d.en, rows);
-    try d.norm(d.hin, 0, w.norm_h, d.hn, rows);
-    try d.proj(.{ .a4 = w.fc_e }, d.en, d.h, rows);
-    try d.proj(.{ .a4 = w.fc_h }, d.hn, d.r, rows);
-    try d.norm(d.h, d.r, w.input_norm, d.x, rows);
+    try d.norm(d.emb, 0, w.norm_e, w.raw.norm_e, d.en, rows);
+    try d.norm(d.hin, 0, w.norm_h, w.raw.norm_h, d.hn, rows);
+    try d.fc(rows);
+    try d.norm(d.h, d.r, w.input_norm, w.raw.input, d.x, rows);
     try d.projQkv(rows);
     for (segs) |s| { // rope positions run from each segment's first slot
         const p0: c_longlong = @intCast(s.p0);
@@ -72,9 +71,9 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     }
     try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
     try d.proj(w.o, d.att, d.r, rows);
-    try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-    try d.routed(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows);
-    try d.norm(d.h, d.r, w.norm, d.x, rows);
+    try d.norm(d.h, d.r, w.post_norm, w.raw.post, d.x, rows);
+    try d.mlp(rows);
+    try d.norm(d.h, d.r, w.norm, w.raw.norm, d.x, rows);
 }
 
 /// Each segment's keys and values from the pass into its context's ring, at its slots.
@@ -157,7 +156,7 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         at += n;
     }
     const s = segs[0..items.len];
-    try d.norm(d.taps_in, 0, e.final_norm, d.hin, at); // the target's final norm: the rows the head read
+    try d.tapNorm(at);
     try upload(d, ids[0..at], tab[0..at]);
     try layerRows(d, s, at);
     try ringPut(d, s);

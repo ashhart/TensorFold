@@ -28,6 +28,10 @@ pub const Weights = struct {
     arena_at: usize = 0,
     fc_e: Affine4, // fc's halves: the embedding's inputs, then the hidden state's
     fc_h: Affine4,
+    dense_fc_e: ?Proj = null,
+    dense_fc_h: ?Proj = null,
+    main_norm: ?u64 = null,
+    raw: struct { norm_e: bool = false, norm_h: bool = false, norm: bool = false, main: bool = false, input: bool = false, post: bool = false } = .{},
     norm_e: u64,
     norm_h: u64,
     input_norm: u64,
@@ -69,6 +73,7 @@ pub fn stageBytes(g: geometry.Geometry) usize {
 
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !Weights {
     const g = e.g;
+    if (g.loop != null) return @import("cuda_mtp_dense.zig").load(gpa, io, e, dir);
     // a ModelOpt checkpoint keeps its MTP layer in bf16 in its own shards: quantized at load unless the file is there
     if (g.kinds.modelopt and !hasFile(io, dir)) return @import("cuda_mtp_bf16.zig").load(gpa, io, e, dir);
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };

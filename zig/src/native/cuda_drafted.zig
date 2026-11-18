@@ -64,6 +64,12 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
         return null;
     }
     const opened = F.openDrafter(gpa, io, loaded.ctx, dir, o.drafter_bits) catch |e| {
+        if (comptime std.mem.eql(u8, F.model_type, "sensenova_loop")) {
+            if (F.explain(null, e)) |why| {
+                problem.* = why;
+                return null;
+            }
+        }
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load the drafter {s} ({s})", .{ dir, @errorName(e) });
         return null;
     };

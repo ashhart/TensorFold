@@ -157,13 +157,13 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
     const kernels = [_]@import("core").contract.gates.Kernel{g.kernel()};
     for (kernels) |k| _ = try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 0, .k = 0 }, .random, 0);
 }
-
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen4")) {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);
     }
     if (std.mem.eql(u8, cmd, "compile-contract-glue")) return compileContractGlue();
+    if (std.mem.eql(u8, cmd, "qwen-loop-mtp")) return @import("qwen_loop_mtp_check.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qwen-draft-frames")) {
         if (rest.len != 4) return error.FrameGateArguments;
         return qwen_draft_frames.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));

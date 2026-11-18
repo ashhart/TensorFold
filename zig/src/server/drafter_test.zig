@@ -10,6 +10,15 @@ const repo = "z-lab/Qwen3.8-27B-DFlash2";
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const cache_repo = "cache/models--z-lab--Qwen3.8-27B-DFlash2";
 
+test "serve drafter: mtp keyword selects only the Loop CUDA target" {
+    const selected = drafter.ownLoopMtp("sensenova_loop", "cuda", "mtp", "target").?;
+    try t.expectEqualStrings("target", selected.dir.?);
+    try t.expectEqualStrings("mtp", selected.name.?);
+    try t.expect(drafter.ownLoopMtp("sensenova_loop", "metal", "mtp", "target") == null);
+    try t.expect(drafter.ownLoopMtp("qwen3_5", "cuda", "mtp", "target") == null);
+    try t.expect(drafter.ownLoopMtp("sensenova_loop", "cuda", "none", "target") == null);
+}
+
 test "serve drafter: the shared table matches only its target family and complete shape" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
