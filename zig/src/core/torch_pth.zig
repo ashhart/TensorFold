@@ -164,6 +164,43 @@ pub const Archive = struct {
         gpa.free(all);
         return out;
     }
+
+    /// As readF32 for a tensor of any shape stored in any stride order (a channels-last weight): row-major out.
+    pub fn readF32Strided(self: *const Archive, gpa: Allocator, name: []const u8) ![]f32 {
+        const t = try self.tensor(name);
+        if (t.dtype != .f32) return error.UnexpectedDType;
+        if (t.shape.len == 0 or t.shape.len > 8 or t.stride.len != t.shape.len) return error.BadArchive;
+        var numel: u64 = 1;
+        var last: u64 = t.offset;
+        for (t.shape, t.stride) |n, step| {
+            if (n == 0) return error.BadArchive;
+            numel = std.math.mul(u64, numel, n) catch return error.BadArchive;
+            last = std.math.add(u64, last, std.math.mul(u64, n - 1, step) catch return error.BadArchive) catch return error.BadArchive;
+        }
+        if (last >= t.storage_numel) return error.BadArchive;
+        const key = try std.fmt.allocPrint(gpa, "{s}data/{s}", .{ self.prefix, t.storage });
+        defer gpa.free(key);
+        const m = self.members.get(key) orelse return error.MissingStorage;
+        if (m.size != std.math.mul(u64, t.storage_numel, 4) catch return error.BadArchive) return error.BadArchive;
+        const all = try gpa.alloc(f32, @intCast(t.storage_numel));
+        defer gpa.free(all);
+        try readMember(self.io, self.file, m, std.mem.sliceAsBytes(all));
+        const out = try gpa.alloc(f32, @intCast(numel));
+        var index: [8]u64 = @splat(0);
+        for (out) |*o| {
+            var at = t.offset;
+            for (index[0..t.shape.len], t.stride) |i, step| at += i * step;
+            o.* = all[@intCast(at)];
+            var d = t.shape.len;
+            while (d > 0) {
+                d -= 1;
+                index[d] += 1;
+                if (index[d] < t.shape[d]) break;
+                index[d] = 0;
+            }
+        }
+        return out;
+    }
 };
 
 const GlobalRef = union(enum) { ordered_dict, rebuild_tensor_v2, storage_type: DType };

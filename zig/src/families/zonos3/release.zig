@@ -5,6 +5,10 @@ const cfg = @import("config.zig");
 pub const lm_dir = "lm/zonos3_mini";
 /// The SuperBPE tokenizer params.json names, inside the language model's folder.
 pub const tokenizer_file = "tokenizer/superbpe8192.json";
+/// The speech-edit adapter (zonos-accent-lora/3), inside the language model's folder.
+pub const edit_adapter_file = "edit_lora/z3m_omni3b_edit_lora.pt";
+/// The forced aligner as the release publishes it: its in-browser export.
+pub const aligner_dir = "web/aligner";
 /// The codec encoder's SSL teacher, a folder with its model.safetensors.
 pub const teacher_dir = "autoencoder/teacher";
 /// The reference servers' default decoder: the pruned multi-resolution iSTFT head.
@@ -22,6 +26,12 @@ pub const Release = struct {
     decoder: []const u8,
     silence: [cfg.codebooks]i32, // the codec's frame of digital silence
     headroom_db: f32,
+    /// The speech-edit adapter, when the snapshot holds it: edits are served with it, and not without.
+    edit_adapter: []const u8 = "",
+    /// The speaker encoder's checkpoint, when the snapshot holds it: a clip's embedding for the speaker row.
+    speaker_encoder: []const u8 = "",
+    /// The forced aligner's folder (web/aligner), when the snapshot holds it: word timings for edits.
+    aligner: []const u8 = "",
 
     pub fn deinit(r: *Release) void {
         r.arena.deinit();
@@ -105,8 +115,36 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, root: []const u8, decoder: ?[]co
         if (v != .integer or v.integer < 0 or v.integer >= cfg.codebook_size) return error.BadRegistry;
         code.* = @intCast(v.integer);
     }
+    const adapter = try std.fs.path.join(a, &.{ lm, edit_adapter_file });
+    if (std.Io.Dir.cwd().access(io, adapter, .{})) |_| {
+        r.edit_adapter = adapter;
+    } else |_| {}
+    r.speaker_encoder = speakerEncoder(a, io, root, model.object) catch "";
+    const manifest = try std.fs.path.join(a, &.{ root, aligner_dir, "manifest.json" });
+    if (std.Io.Dir.cwd().access(io, manifest, .{})) |_| {
+        r.aligner = try std.fs.path.join(a, &.{ root, aligner_dir });
+    } else |_| {}
     r.arena = arena;
     return r;
+}
+
+/// The checkpoint the speaker encoder registry names for the model's speaker_embedding_codec, inside the release.
+fn speakerEncoder(a: std.mem.Allocator, io: std.Io, root: []const u8, model: std.json.ObjectMap) ![]const u8 {
+    const codec = try string(model, "speaker_embedding_codec");
+    const doc = try readJson(a, io, try std.fs.path.join(a, &.{ root, "registries/speaker_encoder_registry.json" }));
+    const entry = (doc.get(codec) orelse return error.BadRegistry).object;
+    if (!std.mem.eql(u8, try string(entry, "type"), "mect_fbank") or !std.mem.eql(u8, try string(entry, "backbone_type"), "MECT_B2")) return error.BadRegistry;
+    // hf://owner/repo/path: the path inside the repository
+    var path = try string(entry, "checkpoint");
+    if (std.mem.startsWith(u8, path, "hf://")) {
+        var parts = std.mem.splitScalar(u8, path["hf://".len..], '/');
+        _ = parts.next();
+        _ = parts.next();
+        path = parts.rest();
+    }
+    const full = try std.fs.path.join(a, &.{ root, try inside(path) });
+    try std.Io.Dir.cwd().access(io, full, .{});
+    return full;
 }
 
 test "inside: a path in the release, never out of the folder" {

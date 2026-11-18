@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const z3 = @import("zonos3");
 const cuda = @import("cuda");
+const zedit = @import("zonos_edit.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -38,6 +39,12 @@ pub fn twinBytes(o: z3.Options) u64 {
 /// Device bytes a load takes at a context and frame budget: the weights, then each part's own count of its state.
 pub fn need(context: u32, frames: u32) u64 {
     return weight_bytes + z3.Engine.stateBytes(.{ .max_ctx = context }) + z3.Codec.stateBytes(.{ .max_frames = frames });
+}
+
+/// Device bytes the speech-edit adapter at `path` adds to a load: its factors, and the scratch its passes take.
+pub fn editBytes(gpa: std.mem.Allocator, io: std.Io, path: []const u8, context: u32) !u64 {
+    const scratch = z3.Engine.stateBytes(.{ .max_ctx = context, .adapter = path }) - z3.Engine.stateBytes(.{ .max_ctx = context });
+    return scratch + try z3.adapter.deviceBytes(gpa, io, path);
 }
 
 /// Device bytes each request at once past the first adds: a backbone lane and a decoder lane.
@@ -121,6 +128,10 @@ const Guarded = struct {
         try g.h.e.lastLogits(out);
     }
 
+    pub fn lastEnd(g: Guarded, out: *[C]f32) !void {
+        try g.h.e.lastEnd(out);
+    }
+
     pub fn reset(g: Guarded) !void {
         try g.h.e.reset();
     }
@@ -177,6 +188,7 @@ const Host = struct {
     e: *z3.Engine,
     codec: *z3.Codec,
     clip: ?*z3.clip.Clip = null, // the clip encoder, loaded by the first request that brings a clip
+    aligner: ?*z3.aligner.Aligner = null, // the forced aligner, loaded by the first edit that needs word timings
     admit: ?Admit = null,
     dir: []const u8,
     info_: api.Info,
@@ -216,8 +228,11 @@ const Host = struct {
 
     fn valid(h: *Host, r: *const api.SpeechRequest) bool {
         const sp = h.info_.speech.?;
+        if (r.edit) |ed| if (ed.op != .fill) return zedit.valid(sp, r, ed);
+        if (r.edit) |ed| if (!zedit.validFill(h.e, r, ed)) return false;
+        const audio_ids = cfg.audio_vocab + @as(i32, @intFromBool(r.edit != null));
         if (r.frames.len == 0 or r.frames.len > sp.max_prompt_tokens or r.max_frames == 0 or r.max_frames > sp.max_frames) return false;
-        if (r.pcm.len < @as(usize, r.max_frames) * sp.frame_length) return false;
+        if (r.edit == null and r.pcm.len < @as(usize, r.max_frames) * sp.frame_length) return false;
         if (r.speaker.len != 0 and r.speaker.len != cfg.speaker_dim) return false;
         for (r.speaker) |x| if (!std.math.isFinite(x)) return false;
         if (r.reference_audio.len != 0) {
@@ -234,7 +249,7 @@ const Host = struct {
         if (r.conditions.len != 0 and r.conditions.len != cfg.conditions) return false;
         for (r.conditions, 0..) |bucket, i| if (bucket > h.e.c.buckets[i]) return false;
         for (r.frames) |row| {
-            for (row[0..C]) |code| if (code < 0 or code >= cfg.audio_vocab) return false;
+            for (row[0..C]) |code| if (code < 0 or code >= audio_ids) return false;
             if (row[C] < 0 or row[C] >= h.e.w.textIds()) return false;
         }
         const layout = Layout.of(r.frames) catch return false;
@@ -333,6 +348,8 @@ const Host = struct {
             // refused before anything ran on the device: the engine is as it was
             error.ClipEncoderNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free"),
             error.GuidanceNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "speaker guidance needs device memory for a second stream's state, and less than that is free"),
+            error.AlignerNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "aligning words needs 2.2 GiB of device memory for the aligner, and less than that is free"),
+            error.NoAlignerInRelease => return h.finish(slot, job, .failed, "this release folder has no aligner (web/aligner)"),
             else => {
                 h.lock();
                 h.failed = true;
@@ -346,6 +363,14 @@ const Host = struct {
 
     /// The request's prompt rows on its first turn, then a frame a turn; its reason once its last frame is spoken.
     fn step(h: *Host, slot: *Slot, job: Job, n: *usize) !?api.Reason {
+        const fill: ?*const api.SpeechEdit = job.request.edit;
+        if (fill) |ed| if (ed.op != .fill) {
+            slot.audio = .{ .h = h, .job = job, .prefill = &.{} };
+            if (ed.op == .encode) try zedit.encode(h.gpa, try zedit.clipEncoder(h), job.request, ed);
+            if (ed.op == .place) try zedit.alignWords(h.gpa, try zedit.wordAligner(h), job.request, ed);
+            if (ed.op == .decode) slot.audio.samples = try zedit.decode(h.gpa, h.codec, h.rel.headroom_db, job.request, ed);
+            return .stop;
+        };
         if (!slot.started) {
             try h.start(slot, job);
             return null;
@@ -361,11 +386,12 @@ const Host = struct {
             return null;
         }
         const finished = try slot.run.sample();
-        try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
+        if (fill == null) try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
+        if (finished) if (fill) |ed| try zedit.fillOut(ed, slot.run.rows.items, slot.run.eos_frame);
         if (finished) return if (slot.run.eos_frame != null) .stop else .length;
         const row = slot.run.lastRow();
         const steer = slot.steerAt(slot.run.rows.items.len);
-        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits), .steer = steer };
+        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits), .steer = steer, .end = if (slot.run.edit) |*ed| &ed.end else null };
         n.* += 1;
         if (slot.run.unconditional) |out| {
             h.turns[n.*] = .{ .lane = slot.twin.?, .row = row, .out = out, .steer = if (slot.twin_steered) steer else &.{} };
@@ -380,15 +406,7 @@ const Host = struct {
         const gpa = h.gpa;
         var rows = r.frames;
         if (r.reference_audio.len != 0) {
-            if (h.clip == null) {
-                if (h.admit) |a| if (clip_bytes > try a.room(a.ptr, &h.e.ctx)) return error.ClipEncoderNeedsMoreDeviceMemory;
-                const before = cuda.usage(false).device;
-                h.clip = try z3.clip.Clip.create(gpa, h.io, &h.e.driver, h.e.stream, h.dir, h.rel.generator, h.codec.w);
-                const took = cuda.usage(false).device - before;
-                std.log.info("zonos3: clip encoder loaded, {d} bytes on the device ({d} admitted)", .{ took, clip_bytes });
-                if (took > clip_bytes) return error.ClipEncoderOverItsAdmission;
-            }
-            const codes = try h.clip.?.encode(gpa, r.reference_audio);
+            const codes = try (try zedit.clipEncoder(h)).encode(gpa, r.reference_audio);
             defer gpa.free(codes);
             const prefix = try z3.prompt.referenceRows(gpa, codes);
             defer gpa.free(prefix);
@@ -442,7 +460,10 @@ const Host = struct {
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
         try h.codec.reset();
-        slot.audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
+        // a fill's rows after the text are the clip around its spans, not silence to speak
+        slot.audio = .{ .h = h, .job = job, .prefill = if (r.edit != null) &.{} else rows[rows.len - layout.prefill ..] };
+        h.e.adapt = r.edit != null;
+        defer h.e.adapt = false;
         if (r.laci) |lc| {
             slot.heads = try gpa.alloc(z3.laci.Head, lc.heads.len);
             for (slot.heads, lc.heads) |*to, from| to.* = .{ .layer = from.layer, .head = from.head, .radius = from.radius };
@@ -457,6 +478,7 @@ const Host = struct {
             if (r.steering != null) slot.laci.?.steer = .{ .ctx = slot, .at = Slot.steerFor, .twin = false };
         } else slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
         slot.started = true;
+        if (r.edit) |ed| try slot.run.asEdit(Guarded{ .h = h, .slot = slot }, ed.min_frames);
     }
 
     fn finish(h: *Host, slot: *Slot, job: Job, reason: api.Reason, message: []const u8) void {
@@ -497,6 +519,7 @@ const Host = struct {
         drain(h);
         h.e.ctx.makeCurrent() catch {};
         if (h.clip) |c| c.destroy();
+        if (h.aligner) |a| a.destroy();
         h.codec.destroy();
         h.e.destroy();
         h.rel.deinit();
@@ -515,8 +538,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     var rel = try z3.release.open(gpa, io, dir, null);
     errdefer rel.deinit();
     if (o.parallel == 0 or o.parallel > max_parallel) return error.BadZonosParallel;
-    var door: Door = .{ .o = o, .need = need(o.context, b.frames) + (o.parallel - 1) * laneBytes(o.context, b.frames) };
-    const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check } });
+    const editing = if (rel.edit_adapter.len != 0) try editBytes(gpa, io, rel.edit_adapter, o.context) else 0;
+    var door: Door = .{ .o = o, .need = need(o.context, b.frames) + (o.parallel - 1) * laneBytes(o.context, b.frames) + editing };
+    const e = try z3.Engine.create(gpa, io, rel.lm, .{ .device = o.device, .max_ctx = o.context, .gate = .{ .ptr = &door, .check = Door.check }, .adapter = rel.edit_adapter });
     errdefer e.destroy();
     const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = b.frames });
     errdefer codec.destroy();
@@ -554,44 +578,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
     const held = cuda.usage(false).device;
-    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} at once, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, o.parallel, held, door.need });
+    std.log.info("zonos3: decoder {s}, {d} frames a request, {d} at once, speech editing {s}, {d} bytes on the device ({d} admitted)", .{ h.rel.decoder, b.frames, o.parallel, if (editing != 0) "on" else "off", held, door.need });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 
 test {
     _ = @import("zonos_layout.zig");
-}
-
-test "need: the weights, then state that grows with the context and with the frame budget" {
-    const t = std.testing;
-    const base = need(4096, 2000);
-    try t.expectEqual(@as(u64, 3_866_946_048), base);
-    try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
-    // two attention layers keep a key row and a value row a position, and a masked head's scratch one of each
-    try t.expectEqual(@as(u64, (2 * 2 + 2) * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
-}
-
-test "budget: the release's frame budget where the context holds it, the rest for the prompt" {
-    const t = std.testing;
-    const d = try budget(4096, null);
-    try t.expectEqual(@as(u32, 2000), d.frames);
-    try t.expectEqual(@as(u32, 2096), d.prompt);
-    try t.expectEqual(@as(u32, 512), (try budget(1025, null)).frames);
-    try t.expectError(error.BadZonosContext, budget(1024, null));
-    try t.expectError(error.BadZonosContext, budget(32769, null));
-    try t.expectError(error.BadZonosFrames, budget(4096, 4096));
-    try t.expectError(error.BadZonosFrames, budget(4096, 5));
-}
-
-test "laneBytes: each request at once past the first adds a backbone lane and a decoder lane, no weights" {
-    const t = std.testing;
-    try t.expectEqual(@as(u64, 1_236_862_976), laneBytes(4096, 2000));
-    try t.expectEqual(@as(u64, 10_913_792), laneBytes(4096, 2000) - z3.Codec.laneBytes(.{ .max_frames = 2000 }));
-    try t.expect(laneBytes(4096, 1000) < laneBytes(4096, 2000));
-}
-
-test "twinBytes: a guided request's second stream is the caches and recurrent state again, no weights" {
-    const t = std.testing;
-    try t.expectEqual(@as(u64, 10_913_792), twinBytes(.{ .max_ctx = 4096 }));
-    try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), twinBytes(.{ .max_ctx = 8192 }) - twinBytes(.{ .max_ctx = 4096 }));
+    _ = @import("zonos_host_test.zig");
 }

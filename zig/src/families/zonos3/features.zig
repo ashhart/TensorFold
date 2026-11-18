@@ -39,16 +39,31 @@ pub fn resample(gpa: std.mem.Allocator, x: []const f32) ![]f32 {
     const kernels = try gpa.alloc([taps]f32, out_step);
     defer gpa.free(kernels);
     for (kernels, 0..) |*k, phase| kernel(phase, k);
-    for (out, 0..) |*o, m| {
-        const q = m / out_step;
-        const k = &kernels[m % out_step];
-        var acc: f32 = 0;
-        for (k, 0..) |w, j| {
-            const p = q * in_step + j;
-            if (p >= taps_before and p - taps_before < x.len) acc = @mulAdd(f32, w, x[p - taps_before], acc);
+    // each output sample is its own sum, so the cores share them
+    const Part = struct {
+        fn run(y: []f32, first: usize, in: []const f32, ks: []const [taps]f32) void {
+            for (y, first..) |*o, m| {
+                const q = m / out_step;
+                const k = &ks[m % out_step];
+                var acc: f32 = 0;
+                for (k, 0..) |w, j| {
+                    const p = q * in_step + j;
+                    if (p >= taps_before and p - taps_before < in.len) acc = @mulAdd(f32, w, in[p - taps_before], acc);
+                }
+                o.* = acc;
+            }
         }
-        o.* = acc;
+    };
+    const cores = @min(16, std.Thread.getCpuCount() catch 1, @max(1, n / 16000));
+    var threads: [16]?std.Thread = @splat(null);
+    const share = (n + cores - 1) / cores;
+    for (0..cores) |i| {
+        const lo = @min(n, i * share);
+        const hi = @min(n, lo + share);
+        if (i + 1 < cores) threads[i] = std.Thread.spawn(.{}, Part.run, .{ out[lo..hi], lo, x, kernels }) catch null;
+        if (threads[i] == null) Part.run(out[lo..hi], lo, x, kernels);
     }
+    for (threads) |th| if (th) |t| t.join();
     return out;
 }
 
@@ -73,8 +88,29 @@ fn filters(out: *[bins][mel_bins]f64) void {
     }
 }
 
+/// The FFT's rotations, a stage after another: cos and sin of -2 pi k / len for len = 2, 4, .. fft and k < len / 2.
+const Twiddles = struct {
+    wr: [fft - 1]f64,
+    wi: [fft - 1]f64,
+
+    fn init() Twiddles {
+        var t: Twiddles = undefined;
+        var at: usize = 0;
+        var len: usize = 2;
+        while (len <= fft) : (len <<= 1) {
+            const angle = -2.0 * std.math.pi / @as(f64, @floatFromInt(len));
+            for (0..len / 2) |k| {
+                t.wr[at] = @cos(angle * @as(f64, @floatFromInt(k)));
+                t.wi[at] = @sin(angle * @as(f64, @floatFromInt(k)));
+                at += 1;
+            }
+        }
+        return t;
+    }
+};
+
 /// In-place radix-2 FFT of `fft` points.
-fn transform(re: *[fft]f64, im: *[fft]f64) void {
+fn transform(re: *[fft]f64, im: *[fft]f64, tw: *const Twiddles) void {
     var j: usize = 0;
     for (1..fft) |i| {
         var bit: usize = fft >> 1;
@@ -86,13 +122,13 @@ fn transform(re: *[fft]f64, im: *[fft]f64) void {
         }
     }
     var len: usize = 2;
+    var first: usize = 0;
     while (len <= fft) : (len <<= 1) {
-        const angle = -2.0 * std.math.pi / @as(f64, @floatFromInt(len));
         var start: usize = 0;
         while (start < fft) : (start += len) {
             for (0..len / 2) |k| {
-                const wr = @cos(angle * @as(f64, @floatFromInt(k)));
-                const wi = @sin(angle * @as(f64, @floatFromInt(k)));
+                const wr = tw.wr[first + k];
+                const wi = tw.wi[first + k];
                 const a = start + k;
                 const b = a + len / 2;
                 const tr = re[b] * wr - im[b] * wi;
@@ -103,23 +139,28 @@ fn transform(re: *[fft]f64, im: *[fft]f64) void {
                 im[a] += ti;
             }
         }
+        first += len / 2;
     }
 }
 
-/// Stacked feature rows [frames / 2][width] of 16 kHz audio (caller frees); at least two frames of audio.
-pub fn rows(gpa: std.mem.Allocator, audio: []const f32) ![]f32 {
-    if (audio.len < frame + hop) return error.AudioTooShort;
-    const frames = (1 + (audio.len - frame) / hop) & ~@as(usize, 1); // an odd last frame has no pair
+/// Kaldi log-mel rows [frames][mel_bins] of 16 kHz audio (caller frees); `hamming`: that window, else Povey's.
+pub fn logMel(gpa: std.mem.Allocator, audio: []const f32, hamming: bool) ![]f32 {
+    if (audio.len < frame) return error.AudioTooShort;
+    const frames = 1 + (audio.len - frame) / hop;
     const bank = try gpa.create([bins][mel_bins]f64);
     defer gpa.destroy(bank);
     filters(bank);
     var window: [frame]f64 = undefined;
-    for (&window, 0..) |*w, n| w.* = std.math.pow(f64, 0.5 - 0.5 * @cos(2.0 * std.math.pi * @as(f64, @floatFromInt(n)) / (frame - 1)), 0.85);
+    for (&window, 0..) |*w, n| {
+        const c = @cos(2.0 * std.math.pi * @as(f64, @floatFromInt(n)) / (frame - 1));
+        w.* = if (hamming) 0.54 - 0.46 * c else std.math.pow(f64, 0.5 - 0.5 * c, 0.85);
+    }
     const logmel = try gpa.alloc(f32, frames * mel_bins);
-    defer gpa.free(logmel);
+    errdefer gpa.free(logmel);
     var re: [fft]f64 = undefined;
     var im: [fft]f64 = undefined;
     var power: [bins]f64 = undefined;
+    const tw: Twiddles = .init();
     for (0..frames) |f| {
         var mean: f64 = 0;
         for (re[0..frame], audio[f * hop ..][0..frame]) |*r, x| {
@@ -134,7 +175,7 @@ pub fn rows(gpa: std.mem.Allocator, audio: []const f32) ![]f32 {
         for (re[0..frame], window) |*r, w| r.* *= w;
         @memset(re[frame..], 0);
         @memset(&im, 0);
-        transform(&re, &im);
+        transform(&re, &im, &tw);
         // the publisher's spectrogram holds single-precision complex values before the power
         for (&power, re[0..bins], im[0..bins]) |*p, r, i| {
             const mag = std.math.hypot(@as(f64, @as(f32, @floatCast(r))), @as(f64, @as(f32, @floatCast(i))));
@@ -146,6 +187,16 @@ pub fn rows(gpa: std.mem.Allocator, audio: []const f32) ![]f32 {
             logmel[f * mel_bins + m] = @floatCast(@log(@max(acc, 1.192092955078125e-07)));
         }
     }
+    return logmel;
+}
+
+/// Stacked feature rows [frames / 2][width] of 16 kHz audio (caller frees); at least two frames of audio.
+pub fn rows(gpa: std.mem.Allocator, audio: []const f32) ![]f32 {
+    if (audio.len < frame + hop) return error.AudioTooShort;
+    const frames = (1 + (audio.len - frame) / hop) & ~@as(usize, 1); // an odd last frame has no pair
+    const all = try logMel(gpa, audio, false);
+    defer gpa.free(all);
+    const logmel = all[0 .. frames * mel_bins];
     // each bin to zero mean and unit variance over the frames (n - 1 in the variance)
     for (0..mel_bins) |m| {
         var mean: f64 = 0;
@@ -179,7 +230,7 @@ test "transform: a cosine lands in its own bin" {
     var re: [fft]f64 = undefined;
     var im: [fft]f64 = @splat(0);
     for (&re, 0..) |*r, n| r.* = @cos(2.0 * std.math.pi * 5.0 * @as(f64, @floatFromInt(n)) / fft);
-    transform(&re, &im);
+    transform(&re, &im, &Twiddles.init());
     try t.expectApproxEqAbs(@as(f64, fft / 2), re[5], 1e-9);
     try t.expectApproxEqAbs(@as(f64, 0), re[6], 1e-9);
     try t.expectApproxEqAbs(@as(f64, 0), im[5], 1e-9);

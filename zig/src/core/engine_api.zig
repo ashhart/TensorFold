@@ -126,6 +126,7 @@ pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSteering = @import("speech_api.zig").SpeechSteering;
 pub const SpeechLaci = @import("speech_api.zig").SpeechLaci;
+pub const SpeechEdit = @import("speech_api.zig").SpeechEdit;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 pub const EncodeVoiceError = error{ BadWav, Closed, Failed, OutOfMemory };
 pub const ImageRequest = @import("image_api.zig").ImageRequest;

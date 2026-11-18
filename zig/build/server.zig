@@ -81,6 +81,10 @@ pub fn addTo(
             \\pub const steer_bundle = r.steer_bundle;
             \\pub const laci = r.laci;
             \\pub const short_text = r.short_text;
+            \\pub const edit = r.edit;
+            \\pub const edit_plan = r.edit_plan;
+            \\pub const align_words = r.align_words;
+            \\pub const speaker = @import("zonos3").speaker;
             \\pub const temperature = r.temperature;
             \\pub const top_p = r.top_p;
             \\pub const top_k = r.top_k;
