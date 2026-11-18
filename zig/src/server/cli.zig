@@ -329,8 +329,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
-    out.silence.validate() catch |err|
-        return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
+    out.silence.validate() catch |err| return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
@@ -442,8 +441,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (is(name, "--profile")) {
         if (is(v, "fast-exact")) return fail(u, a, "argument --profile: fast-exact is not yet qualified: it needs solo, concurrent 1/2/4/8 and resumed runs equal to stable, and a measurement where no served cell for its family gets slower", .{});
         if (is(v, "fast")) return fail(u, a, "argument --profile: fast is not planned: a speed mode that changes output tokens is not shipped, so the arithmetic class has no profile to join", .{});
-        out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse
-            return fail(u, a, "argument --profile: unknown profile '{s}': stable is the only served profile", .{v});
+        out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse return fail(u, a, "argument --profile: unknown profile '{s}': stable is the only served profile", .{v});
         return;
     }
     if (is(name, "--max-frames")) {
