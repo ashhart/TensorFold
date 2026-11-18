@@ -109,7 +109,7 @@ inline void h3_gemm(const device T* A, const device T* B, device bfloat* D, cons
 }  // namespace tfp
 
 // Each of P[0] rows of X (P[1] values) to int8 in groups of P[2], each at its absolute max over 127: Q = rint(X / S),
-// S [row, group] its scale. One simdgroup a row, its groups in turn.
+// S [row, group] its scale (non-finite when the group holds NaN or an infinity). One simdgroup a row, its groups in turn.
 [[kernel]] void h3_quantize_rows(
   const device bfloat16_t* X [[buffer(0)]],
   const device int32_t* P [[buffer(1)]],
@@ -123,9 +123,15 @@ inline void h3_gemm(const device T* A, const device T* B, device bfloat* D, cons
   S += long(at) * (k / g);
   for (int from = 0; from < k; from += g) {
     float most = 0;
-    for (int i = from + int(lane); i < from + g; i += 32) most = max(most, abs(float(X[i])));
-    most = simd_max(most);
-    const float scale = most > 0 ? most / 127 : 1;
+    bool nan = false;
+    for (int i = from + int(lane); i < from + g; i += 32) {
+      const float v = abs(float(X[i]));
+      most = max(most, v);
+      nan = nan || isnan(v);
+    }
+    // max drops NaN: a group holding one takes a NaN scale, so its products come out NaN
+    most = simd_any(nan) ? NAN : simd_max(most);
+    const float scale = most > 0 || isnan(most) ? most / 127 : 1;
     for (int i = from + int(lane); i < from + g; i += 32) Q[i] = int8_t(rint(float(X[i]) / scale));
     if (lane == 0) S[from / g] = scale;
   }

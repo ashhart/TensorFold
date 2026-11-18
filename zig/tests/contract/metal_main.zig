@@ -510,6 +510,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var h3_image_suites = try @import("metal_h3_image_suites.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer h3_image_suites.destroy();
+    const h3_products = try @import("metal_h3_gemm.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer h3_products.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     const sn_mhc = try @import("metal_sensenova_mhc.zig").Suite.create(a, device, queue, &kernels, o.only);
