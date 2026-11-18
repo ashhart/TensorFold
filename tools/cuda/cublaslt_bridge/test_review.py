@@ -14,7 +14,7 @@ from unittest.mock import patch
 import zipfile
 
 from artifact_gate import (unpack, verify_source, stable_snapshot, require_catalog,
-                           require_bridge_cuda, resolve_encoded_findings, secret_scan, allowed_import)
+                           require_bridge_cuda, require_native_images, resolve_encoded_findings, secret_scan, allowed_import)
 from build_preview import verify_publication
 from cuda_review import containers
 from pe_review import review
@@ -158,6 +158,19 @@ class RefusalControls(unittest.TestCase):
             self.assertEqual(len(require_catalog(root, complete)), 2)
             with self.assertRaisesRegex(ValueError, "complete source catalog"):
                 require_catalog(root, complete[:1])
+
+    def test_server_images_bind_only_linked_fatbins_and_refuse_unknown_payloads(self):
+        linked = cuda_fixture()
+        unused = cuda_fixture(compressed=True)
+        known = {hashlib.sha256(linked).hexdigest(): "serve.fatbin",
+                 hashlib.sha256(unused).hexdigest(): "test-only.fatbin"}
+        self.assertEqual(require_native_images(b"host code" + linked, known, {"serve.fatbin"}), {"serve.fatbin"})
+        with self.assertRaisesRegex(ValueError, "unbound CUDA"):
+            require_native_images(linked + unused, {hashlib.sha256(linked).hexdigest(): "serve.fatbin"}, {"serve.fatbin"})
+        with self.assertRaisesRegex(ValueError, "duplicated CUDA"):
+            require_native_images(linked + linked, known, {"serve.fatbin"})
+        with self.assertRaisesRegex(ValueError, "required CUDA"):
+            require_native_images(unused, known, {"serve.fatbin"})
 
     def test_bridge_device_coverage_is_separate_from_other_images(self):
         require_bridge_cuda({"transform-a", "transform-b"}, 1, ["transform-a", "transform-b"])

@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import zipfile
@@ -124,6 +125,32 @@ def require_catalog(repo, rows):
             or set(actual) != {name + ".fatbin" for name in expected}):
         raise ValueError("fatbin inputs do not equal the complete source catalog")
     return expected
+
+
+def require_native_images(data, inputs, required):
+    """Bind every linked CUDA container and distinguish it from a catalog-only input."""
+    linked = set()
+    cursor = 0
+    while (start := data.find(MAGIC, cursor)) >= 0:
+        cursor = start + len(MAGIC)
+        if start + 16 > len(data):
+            continue
+        version, header_size, payload_size = struct.unpack_from("<HHQ", data, cursor)
+        if version != 1 or header_size < 16 or not payload_size:
+            continue
+        end = start + header_size + payload_size
+        if end > len(data):
+            raise ValueError("truncated CUDA container in native server")
+        name = inputs.get(hashlib.sha256(memoryview(data)[start:end]).hexdigest())
+        if name is None:
+            raise ValueError("unbound CUDA container in native server")
+        if name in linked:
+            raise ValueError("duplicated CUDA container in native server")
+        linked.add(name)
+        cursor = end
+    if not required <= linked:
+        raise ValueError("required CUDA images are missing from native server")
+    return linked
 
 
 def require_bridge_cuda(functions, image_count, expected):
@@ -338,17 +365,20 @@ def qualify(repo, work, archive, gitleaks, context, public_sidecars=()):
             pe_reports.append({"image": relative, **pe})
         for sidecar in public_sidecars:
             emit(sidecar.read_bytes(), sidecar.name)
-        native_data = native.read_bytes()
+        native_inputs = {}
         for row in source["fatbin_inputs"]:
             path = work / "native-out/fatbin" / row["file"]
             data = path.read_bytes()
             if digest(path) != row["sha256"] or path.stat().st_size != row["bytes"]:
                 raise ValueError("fatbin producer input changed")
-            at = native_data.find(data)
-            if at < 0 or native_data.find(data, at + 1) >= 0:
-                raise ValueError("fatbin is not embedded exactly once in this executable")
+            if row["sha256"] in native_inputs:
+                raise ValueError("different catalog inputs have identical fatbin bytes")
+            native_inputs[row["sha256"]] = row["file"]
             for item in iter_containers(data, lambda value, name: emit(value, row["file"] + ":" + name), cuda_state):
                 cuda_report.write(json.dumps({"image": "bin/tensorfold.exe", "fatbin": row["file"], **item}) + "\n")
+        required = {"qwen35.fatbin", "qwen35_draft.fatbin", "qwen35_bf16_rows.fatbin",
+                    "modelopt_pack.fatbin", "nvfp4_prompt.fatbin"}
+        linked = require_native_images(native.read_bytes(), native_inputs, required)
         require_bridge_cuda(bridge_functions, bridge_images, expected_bridge)
         if cuda_state["entries"] < len(source["fatbin_inputs"]):
             raise ValueError("CUDA coverage is empty")
@@ -373,6 +403,8 @@ def qualify(repo, work, archive, gitleaks, context, public_sidecars=()):
         raise ValueError("archive companion checksum mismatch")
     report = {"schema": 1, "status": "PASSED", "source_commit": revision, "source_tree": source["source_tree"], "archive_sha256": digest(archive),
               "files": before, "PE_images": len(pe_reports), "CUDA_images": cuda_state["entries"],
+              "linked_native_fatbins": sorted(linked),
+              "catalog_only_fatbins": sorted(set(native_inputs.values()) - linked),
               "CUDA_decoded_bytes": cuda_state["decoded_bytes"], "contextual_findings": 0,
               "secret_findings": 0, "full_source_and_toolchain_provenance": True,
               "public_sidecars": sidecar_snapshot, "gitleaks_scanned_bytes": secret_receipt["scanned_bytes"],

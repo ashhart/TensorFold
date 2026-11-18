@@ -66,7 +66,9 @@ A successful scan is evidence for the specified inputs, not a guarantee that no 
 ## Artifact review before upload
 
 The gate verifies the source commit/tree and clean checkout, native executable hash,
-complete catalog-derived fatbin set and each fatbin's exact embedding in the executable.
+complete catalog-derived fatbin set and the source input of each CUDA container embedded in the executable.
+The report lists linked images separately from compiled test and tool images omitted by the serving link.
+Unknown, duplicate, or missing required Qwen serving images fail the gate.
 It checks the bridge output against the fresh producer receipt and requires its complete eight-transform payload.
 It separately validates PE imports, exports, debug data, resources, certificates, overlay bounds,
 CUDA registration wrappers and every accepted CUDA payload section.
