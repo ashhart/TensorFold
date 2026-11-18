@@ -16,7 +16,7 @@ pub fn run(init: std.process.Init, a: std.mem.Allocator, dir: []const u8, out_pa
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
     if (std.c.getenv("TF_STAGE_RANK") == null) {
-        const e = try E.Engine.init(init.gpa, init.io, &ctx, dir, kv8, null, E.max_rows);
+        const e = try E.Engine.init(init.gpa, init.io, &ctx, dir, kv8, null, E.max_rows, null);
         defer e.deinit();
         var lead = try S.Lead.init(init.gpa, e, null, parallel, context, 1);
         defer lead.deinit(init.gpa);
