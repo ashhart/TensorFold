@@ -66,6 +66,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
+| `TF_GLM_VISION_FUSED` | Exactly `0` or `1`; default off (the GLM vision tower's attention as cuBLASLt products around a softmax kernel) |
 | `TF_GLM_PAIR_EXPERTS` | Exactly `0` or `1`; default off. On, GLM paired CUDA prompt chunks share 128-pair routed NVFP4 expert items, with separate per-chunk outputs and unchanged slot combines |
 | `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, all four prompt traces are created before readiness; startup, gate, final-draw, cache-admission and memory-counter records go to the log. A prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |

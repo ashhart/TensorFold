@@ -606,6 +606,11 @@ of the two branches), each output within float64's range at its bf16 points, and
 `contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
 dropped each).
 
+CUDA also checks GLM-5.3-Flash's image tower on that attention: `vision_kernel` at head dim 64 against the same
+float64 reference (`contract_vit_full.zig`, the MOSS-Image test's type at any head dim), and `glm_vis_qk`, which
+norms and rotates q and k in place in the rows it reads, bit-equal to `glm_vis_qkv` at segments of one row (one
+control: the rotation before a head's bf16 rounding).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
