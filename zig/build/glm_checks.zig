@@ -37,6 +37,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
     b.step("tf-glm-index-speed", "GLM-5.3-Flash's decode indexer and sparse attention at long positions: GPU time a launch").dependOn(&b.addInstallArtifact(index, .{}).step);
+    const psel = b.addExecutable(.{ .name = "tf-glm-prompt-select", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_prompt_select.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-prompt-select", "GLM-5.3-Flash's prompt index scores and key lists at long positions, mark and merge against glm_index_select, bit for bit, GPU time").dependOn(&b.addInstallArtifact(psel, .{}).step);
     const kda = b.addExecutable(.{ .name = "tf-glm-kda-speed", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/glm_kda_speed.zig"),
         .target = target,
