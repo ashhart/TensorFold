@@ -26,6 +26,7 @@ pub const Binding = struct {
     rows: usize,
     references: usize,
     tags: []const i32,
+    weights: ?mtl.ResidencySet,
 
     pub fn init(gpa: std.mem.Allocator, folder: *const image_tool.Folder, case: *const image_tool.Case, tags: []const i32, weights: ?mtl.ResidencySet) !Binding {
         const arena = try gpa.create(std.heap.ArenaAllocator);
@@ -34,8 +35,15 @@ pub const Binding = struct {
         errdefer arena.deinit();
         const model = try folder.bind(arena.allocator(), arena.allocator(), case);
         errdefer model.release();
-        if (weights) |set| model.queue.addResidencySet(set);
-        return .{ .arena = arena, .model = model, .canvas = case.canvas, .rows = case.rows, .references = case.layout.references.len, .tags = try arena.allocator().dupe(i32, tags) };
+        const own_tags = try arena.allocator().dupe(i32, tags);
+        // the binding's int8 fc1 copy joins the weights' set while it lives: a step's encode drops from 0.19 to 0.04 s
+        if (weights) |set| {
+            model.queue.addResidencySet(set);
+            set.add(model.fc1_q);
+            set.add(model.fc1_s);
+            set.commit();
+        }
+        return .{ .arena = arena, .model = model, .canvas = case.canvas, .rows = case.rows, .references = case.layout.references.len, .tags = own_tags, .weights = weights };
     }
 
     // Text-to-image only: canvas, rows and tags determine every row and rotary position.
@@ -44,6 +52,11 @@ pub const Binding = struct {
     }
 
     pub fn release(b: *Binding) void {
+        if (b.weights) |set| {
+            set.remove(b.model.fc1_q);
+            set.remove(b.model.fc1_s);
+            set.commit();
+        }
         b.model.release();
         const gpa = b.arena.child_allocator;
         b.arena.deinit();

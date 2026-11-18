@@ -1,4 +1,5 @@
-//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), routed attention in bf16.
+//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), a picture's fc1 on int8
+//! operands (int32 sums), routed attention in bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
@@ -30,6 +31,30 @@ fn product(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: usize, x: mtl.Buffer,
     enc.setBytes(std.mem.asBytes(&p), 2);
     enc.setBuffer(d, 0, 3);
     enc.dispatchGroups(mtl.Size.of(tn * band, (tm + band - 1) / band, 1), mtl.Size.of(32, 4, threads / 128));
+}
+
+/// fc1's weights' quantization group: one scale a row for each 256 values of K, the product's K block.
+pub const fc1_group = 256;
+
+/// `rows` rows of x (k values each) to int8 in q, in groups of `g` values, each group's scale in s.
+pub fn quantize(m: *const Model, enc: mtl.ComputeEncoder, x: Ref, rows: usize, k: usize, g: usize, q: Ref, s: Ref) void {
+    enc.setPipeline(m.pipeline("h3_quantize_rows"));
+    enc.setBuffer(x.buffer, x.offset, 0);
+    enc.setValue([3]i32{ @intCast(rows), @intCast(k), @intCast(g) }, 1);
+    enc.setBuffer(q.buffer, q.offset, 2);
+    enc.setBuffer(s.buffer, s.offset, 3);
+    enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
+}
+
+/// m.wide = xn fc1^T for block `index`: xn in int8 a row, fc1's int8 rows per 256 values of K.
+fn fc1(m: *const Model, enc: mtl.ComputeEncoder, index: usize) void {
+    const n = 2 * m.mlp;
+    quantize(m, enc, .{ .buffer = m.xn }, m.rows, m.hidden, m.hidden, .{ .buffer = m.xq }, .{ .buffer = m.xs });
+    enc.barrier();
+    // the scales' slots are past product's own; an encoder keeps them across its pipeline change
+    enc.setBuffer(m.xs, 0, 4);
+    enc.setBuffer(m.fc1_s, index * n * (m.hidden / fc1_group) * 4, 5);
+    product(enc, m.pipeline(kernels.gemm_32x64_i8), swizzle, m.xq, .{ .buffer = m.fc1_q, .offset = index * n * m.hidden }, m.wide, m.rows, n, m.hidden, 128);
 }
 
 /// The stream's modulated norm to bf16 rows in xn; with `gates` it first adds the branch in `y` gated by that part.
@@ -128,7 +153,7 @@ pub fn run(m: *Model, pass: *h3.Pass, index: usize) void {
     norm(m, enc.*, b.norm2, b.tables, h3.gate_a, b.tables, h3.scale_m, h3.shift_m);
     m.lap(pass, "norms");
     // the first projection's rows are [value | gate] ([gate | value] in the released layout), one product
-    gemm(m, enc.*, m.xn, b.fc1, m.wide, 2 * m.mlp, m.hidden);
+    fc1(m, enc.*, index);
     enc.barrier();
     enc.setPipeline(m.pipeline("h3_swiglu"));
     enc.setBuffer(m.wide, 0, 0);
@@ -206,4 +231,92 @@ test "h3 gemm: 32x64-warp products write every tile as MLX's 32x32 band of 4 doe
         try std.testing.expect(std.mem.indexOfScalar(u16, after[0 .. rows * n], 0xffff) == null);
         for (after[rows * n ..]) |v| try std.testing.expectEqual(@as(u16, 0xffff), v);
     }
+}
+
+test "h3 gemm: int8 fc1 operands give their exact dequantized product to bf16 rounding, across a ragged tile" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (!device.tensorUnits()) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const a = std.testing.allocator;
+    const text = try @import("source.zig").library(a, 56, 18432, 288, "");
+    defer a.free(text);
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    var m: Model = undefined;
+    inline for (kernels.names, 0..) |name, i| m.pipelines[i] = try mtl.Pipeline.init(device, lib, name, false);
+    defer for (m.pipelines) |p| p.deinit();
+    const rows = 64 * 3 + 24;
+    const n = 256;
+    const k = 2 * fc1_group;
+    const groups = k / fc1_group;
+    const guard = 64 * n; // past the last row, which must stay untouched
+    const shared = mtl.ResourceOptions.shared;
+    const x = try device.buffer(rows * k * 2, shared);
+    defer x.deinit();
+    const w = try device.buffer(n * k * 2, shared);
+    defer w.deinit();
+    var prng = std.Random.DefaultPrng.init(84);
+    // bf16 values of magnitude [1, 2) times a power of two that differs by row and by weight group
+    for (x.slice(u16, rows * k), 0..) |*v, i| v.* = (0x3f80 + @as(u16, @intCast(i / k % 8)) * 0x80) | (prng.random().int(u16) & 0x807f);
+    for (w.slice(u16, n * k), 0..) |*v, i| v.* = (0x3c00 + @as(u16, @intCast(i / fc1_group % 16)) * 0x80) | (prng.random().int(u16) & 0x807f);
+    const xq = try device.buffer(rows * k, shared);
+    defer xq.deinit();
+    const xs = try device.buffer(rows * 4, shared);
+    defer xs.deinit();
+    const wq = try device.buffer(n * k, shared);
+    defer wq.deinit();
+    const ws = try device.buffer(n * groups * 4, shared);
+    defer ws.deinit();
+    const d = try device.buffer((rows * n + guard) * 2, shared);
+    defer d.deinit();
+    @memset(d.slice(u16, rows * n + guard), 0xffff); // a NaN no product of these inputs makes
+    const cb = queue.commandBuffer();
+    const enc = cb.compute(.concurrent);
+    quantize(&m, enc, .{ .buffer = x }, rows, k, k, .{ .buffer = xq }, .{ .buffer = xs });
+    quantize(&m, enc, .{ .buffer = w }, n, k, fc1_group, .{ .buffer = wq }, .{ .buffer = ws });
+    enc.barrier();
+    enc.setBuffer(xs, 0, 4);
+    enc.setBuffer(ws, 0, 5);
+    product(enc, m.pipeline(kernels.gemm_32x64_i8), swizzle, xq, .{ .buffer = wq }, d, rows, n, k, 128);
+    enc.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+
+    const bf = struct {
+        fn f(v: u16) f32 {
+            return @bitCast(@as(u32, v) << 16);
+        }
+    }.f;
+    // each group's largest magnitude maps to 127 and every value to its nearest step of the group's scale
+    const sx = xs.slice(f32, rows);
+    const sw = ws.slice(f32, n * groups);
+    for ([_][]const u16{ x.slice(u16, rows * k), w.slice(u16, n * k) }, [_][]const i8{ xq.slice(i8, rows * k), wq.slice(i8, n * k) }, [_][]const f32{ sx, sw }, [_]usize{ k, fc1_group }) |src, q, s, g| {
+        for (s, 0..) |scale, gi| {
+            var most: f32 = 0;
+            for (src[gi * g ..][0..g]) |v| most = @max(most, @abs(bf(v)));
+            try std.testing.expectApproxEqRel(most / 127, scale, 1e-6);
+            for (src[gi * g ..][0..g], q[gi * g ..][0..g]) |v, qi| try std.testing.expect(@abs(bf(v) / scale - @as(f32, @floatFromInt(qi))) <= 0.5 + 1e-3);
+        }
+    }
+    const xi = xq.slice(i8, rows * k);
+    const wi = wq.slice(i8, n * k);
+    const out = d.slice(u16, rows * n + guard);
+    for (0..rows) |r| for (0..n) |c| {
+        var exact: f64 = 0;
+        var size: f64 = 0;
+        for (0..k) |j| {
+            const term = @as(f64, @floatFromInt(@as(i32, xi[r * k + j]) * wi[c * k + j])) * sw[c * groups + j / fc1_group];
+            exact += term;
+            size += @abs(term);
+        }
+        exact *= sx[r];
+        // one bf16 rounding of the result, and fp32 folds of the groups' sums
+        try std.testing.expect(@abs(bf(out[r * n + c]) - exact) <= @abs(exact) * 0x1p-8 + size * sx[r] * 1e-6);
+    };
+    for (out[rows * n ..]) |v| try std.testing.expectEqual(@as(u16, 0xffff), v);
 }
