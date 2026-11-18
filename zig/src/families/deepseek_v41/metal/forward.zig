@@ -166,7 +166,12 @@ fn engram(x: *const Ctx, e: mtl.ComputeEncoder, b: *const Bufs, w: weights.Engra
     if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
     try eng.encodeAq(p, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
     e.barrier();
-    try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
+    // the projection on the MMA tile at the rows it takes (the same bits), else on the row kernel
+    const t = pipelines.fp8_tile;
+    const tc: t.Call = .{ .k = w.wkv.k, .n = w.wkv.n, .rows = x.rows, .out = .bf16 };
+    if (t.takes(tc, 1)) {
+        try t.encode(&x.p.tile, e, cv(t.Ref, b.emb), cv(t.Ref, w.wkv.w), cv(t.Ref, w.wkv.s), cv(t.Ref, b.ekv), tc, .{});
+    } else try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
     e.barrier();
     try eng.encodeGate(p, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
     e.barrier();

@@ -9,8 +9,6 @@ pub const Call = struct { k: u32, n: u32, rows: u32, out: Out = .f32 };
 /// Launches of one call shape in grid y: the byte strides from one launch's x, weight, scale and output to the next.
 pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys: i64 = 0 };
 
-/// Rows the decode forward takes this tile from: below them the row kernel reads the weights faster.
-pub const min_rows = 6;
 pub const max_rows = 16;
 /// Simdgroups a threadgroup's K split takes at most, times its 8-column blocks (they share the staging memory).
 pub const max_lanes = 16;
@@ -54,7 +52,12 @@ fn padded(groups: u32) u32 {
 
 /// A shape's form: 16 columns for the widest N, each simdgroup an aligned run of at least 8 groups; bits never change.
 pub fn formOf(k: u32, n: u32) Form {
-    const nj: u32 = if (n >= 16384 and n % 16 == 0) 2 else 1;
+    return formFor(k, n, 1);
+}
+
+/// `formOf` for a batch: 16 columns once its launches hold 2048 or more columns between them.
+pub fn formFor(k: u32, n: u32, launches: u32) Form {
+    const nj: u32 = if (n * launches >= 2048 and n % 16 == 0) 2 else 1;
     return .{ .nj = nj, .sgs = std.math.clamp(padded(k / 32) / 8, 1, max_lanes / nj) };
 }
 
@@ -70,14 +73,23 @@ pub fn fits(c: Call) bool {
     return valid(c, formOf(c.k, c.n));
 }
 
-/// Whether the decode forward runs a call here (by its row count only); a row's bits are the same either way.
-pub fn takes(c: Call) bool {
-    return c.rows >= min_rows and fits(c);
+/// Rows the decode forward takes this tile from for `launches` launches of a call (above max_rows: never), by its
+/// columns: below 1024 the row kernel reads the weights faster at every count; wide K = 1280 and 2304 from 5 rows.
+pub fn minRows(c: Call, launches: u32) u32 {
+    const cols = c.n * launches;
+    if (cols < 1024) return max_rows + 1;
+    if (cols < 2048) return 7;
+    return if (c.k % 1024 == 0) 6 else 5;
+}
+
+/// Whether the decode forward runs a call here (by its rows and columns only); a row's bits are the same either way.
+pub fn takes(c: Call, launches: u32) bool {
+    return c.rows >= minRows(c, launches) and fits(c) and valid(c, formFor(c.k, c.n, launches));
 }
 
 /// X [rows][K] bf16, W [N][K] E4M3, S [N/32][K/32] E8M0, Y [rows][N]; equal to fp8_rows at any row count or form.
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, c: Call, b: Batch) !void {
-    return encodeAs(p, e, x, w, s, y, c, b, formOf(c.k, c.n));
+    return encodeAs(p, e, x, w, s, y, c, b, formFor(c.k, c.n, b.n));
 }
 
 /// `encode` with the form chosen by the caller; every valid form gives the same bits.
@@ -97,12 +109,13 @@ pub fn encodeAs(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: R
 
 test "the tile's form covers every release shape within its tree" {
     for ([_]u32{ 512, 1280, 2304, 4096, 5120, 6144, 8192, 15360 }) |k| {
-        const c: Call = .{ .k = k, .n = 64, .rows = min_rows };
-        try std.testing.expect(takes(c));
-        const f = formOf(k, 64);
-        try std.testing.expect(valid(c, f) and padded(k / 32) % f.sgs == 0);
+        const c: Call = .{ .k = k, .n = 2048, .rows = 6 };
+        try std.testing.expect(takes(c, 1));
+        for ([_]Form{ formOf(k, 64), formFor(k, 2048, 1) }) |f| try std.testing.expect(valid(c, f) and padded(k / 32) % f.sgs == 0);
     }
-    try std.testing.expect(!takes(.{ .k = 5120, .n = 64, .rows = min_rows - 1 }) and fits(.{ .k = 5120, .n = 64, .rows = 1 }));
+    try std.testing.expect(!takes(.{ .k = 5120, .n = 1280, .rows = 6 }, 1) and takes(.{ .k = 5120, .n = 1280, .rows = 7 }, 1));
+    try std.testing.expect(!takes(.{ .k = 5120, .n = 512, .rows = 16 }, 1) and fits(.{ .k = 5120, .n = 64, .rows = 1 }));
+    try std.testing.expect(takes(.{ .k = 1280, .n = 4096, .rows = 5 }, 1) and !takes(.{ .k = 4096, .n = 1024, .rows = 5 }, 8));
     try std.testing.expect(!fits(.{ .k = 5120, .n = 64, .rows = 17 }));
     try std.testing.expect(!valid(.{ .k = 5120, .n = 64, .rows = 2 }, .{ .nj = 2, .sgs = 16 }));
 }
