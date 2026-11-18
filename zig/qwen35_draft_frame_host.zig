@@ -155,13 +155,26 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
-    e.affine.mlp128 = false;
-    e.affine.prefill_fn = function(&driver, 11);
-    e.affine.group_fn = function(&driver, 10);
-    e.affine.gemv_fn = function(&driver, 7);
-    e.affine.split = null;
-    e.affine.pdl = false;
-    e.affine.wide_verify = false;
+    e.affine = .{
+        .group_fn = function(&driver, 10),
+        .mlp128_fn = function(&driver, 10),
+        .gemv_fn = function(&driver, 7),
+        .verify_fn = function(&driver, 10),
+        .verify64_fn = function(&driver, 10),
+        .verify128_fn = function(&driver, 10),
+        .split_fn = function(&driver, 10),
+        .seg_fn = function(&driver, 10),
+        .many_fn = function(&driver, 10),
+        .prefill_fn = function(&driver, 11),
+        .prefill22_fn = function(&driver, 10),
+        .prefill_many_fn = function(&driver, 10),
+        .words_fn = function(&driver, 10),
+        .scales_fn = function(&driver, 10),
+        .gemv_blocks = 0,
+        .split = null,
+        .pdl = false,
+        .wide_verify = false,
+    };
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
