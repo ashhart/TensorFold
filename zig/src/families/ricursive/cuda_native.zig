@@ -278,6 +278,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.CapturedKernels => "Ripple runs on the engine's own kernels: unset TENSORFOLD_CUDA_KERNELS",
         error.BuiltWithoutKernels => "this build carries no CUDA kernel images: build with -Dnvcc",
         error.RicursiveCudaNeedsNvfp4 => "Ripple on CUDA serves the NVFP4 release (ModelOpt W4A16 MLPs, bf16 attention): the BF16 checkpoint's 130 GB do not fit GB10",
+        error.UnmeasuredRicursiveBitrate => "Ripple on CUDA serves one measured ExLlamaV3 pack, 5.0 bits a weight with an 8-bit head (ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw): this pack is another",
         error.UnsupportedRicursiveCudaShape => "this Ripple checkpoint's shape is not one the CUDA kernels take (group of 2 to 16 query heads in pairs, hidden size at most 8,192, widths in whole 128s)",
         error.Unimplemented => "Ripple's CUDA global-layer decode is not in this build yet",
         error.DrafterPastMemory => "--drafter: the CUDA memory budget fits no Ripple stream beside the DFlash2 drafter's weights and buffers at this context: lower --context, serve without --drafter, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
@@ -295,7 +296,7 @@ test "ricursive cuda native: a reply thinks or answers bare, with no thinking bu
 }
 
 test "ricursive cuda native: every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnsupportedRicursiveCudaShape, error.Unimplemented, error.DrafterPastMemory, error.NotRippleDFlash2, error.UnqualifiedRippleDFlash2, error.UnsupportedRicursiveDFlash2Shape }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnmeasuredRicursiveBitrate, error.UnsupportedRicursiveCudaShape, error.Unimplemented, error.DrafterPastMemory, error.NotRippleDFlash2, error.UnqualifiedRippleDFlash2, error.UnsupportedRicursiveDFlash2Shape }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     for ([_]anyerror{ error.OutOfMemory, error.SamplingUnsupported, error.LogprobsUnsupported, error.WindowTooWide }) |e| {
