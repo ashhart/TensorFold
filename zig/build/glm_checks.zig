@@ -44,6 +44,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
+    const arows = b.addExecutable(.{ .name = "tf-glm-attn-rows", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_attn_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-attn-rows", "GLM-5.3-Flash's dense latent attention of a window's rows in three launches against each row's own, bit for bit, GPU time").dependOn(&b.addInstallArtifact(arows, .{}).step);
     b.step("tf-glm-kda-speed", "GLM-5.3-Flash's fused KDA decode step: the window kernel against kda_rows bit for bit, GPU time").dependOn(&b.addInstallArtifact(kda, .{}).step);
 }
 
