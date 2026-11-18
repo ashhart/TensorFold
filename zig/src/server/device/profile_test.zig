@@ -89,6 +89,33 @@ test "device profile: a driver that does not answer keeps the OS's listing and a
     try t.expectEqual(profile.Scan.full, mac.doc.scan); // sysctl is a Mac's whole story
 }
 
+test "device profile: exact integer values and nested defaults survive decoding" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text =
+        \\{"schema":1,"scanned_at":"2026-11-13T01:00:00Z","binary_version":"1.2.9",
+        \\ "fingerprint":"fixture","scan":"full",
+        \\ "machine":{"os":"linux","arch":"x86_64","ram":18446744073709551615,
+        \\            "gpus":[{"vendor":"nvidia","name":"Fixture GPU","sm":"12e1"}]},
+        \\ "support":{"budget":18446744073709551615.0,"backend":"cuda","gpu":0,"new_field":[1,2]}}
+    ;
+    const doc = profile.parse(a, text).?;
+    try t.expectEqual(std.math.maxInt(u64), doc.machine.ram);
+    try t.expectEqual(std.math.maxInt(u64), doc.support.budget);
+    try t.expectEqual(@as(?usize, 0), doc.support.gpu);
+    try t.expectEqual(@as(u32, 120), doc.machine.gpus[0].sm);
+    try t.expectEqual(@as(u64, 0), doc.machine.gpus[0].memory);
+    try t.expectEqual(machine.Source.os, doc.machine.gpus[0].source);
+    try t.expectEqualStrings("Fixture GPU", doc.machine.gpus[0].name);
+    try t.expect(doc.support.certain);
+    for ([_][]const u8{ "-1", "1.5", "18446744073709551616", "1e20" }) |invalid| {
+        const bad = try std.mem.replaceOwned(u8, a, text, "18446744073709551615.0", invalid);
+        defer a.free(bad);
+        try t.expect(profile.parse(a, bad) == null);
+    }
+}
+
 test "device profile: the driver's GPUs replace the OS's NVIDIA entries in ordinal order and keep the rest" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
