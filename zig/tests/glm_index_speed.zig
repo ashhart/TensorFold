@@ -84,7 +84,7 @@ fn encode(e: mtl.ComputeEncoder, r: *const Rig, op: Op, s: Shape) void {
             e.setValue(sel, 2);
             e.dispatchGroups(mtl.Size.of(s.rows, 1, 1), mtl.Size.of(1024, 1, 1));
         },
-        .select_new, .mark, .merge => { // forward.zig's selectKeys after its scores
+        .select_new, .mark, .merge => { // glm_select.metal's mark and merge (forward.zig: past 8,192 blocks)
             const words = st.selectWords(r.cap, KPOOL);
             if (most > 3072 and op != .merge) {
                 e.setPipeline(k.select_mark);
@@ -249,6 +249,7 @@ pub fn main() !void {
     };
     std.debug.print("select: {d} of {d} cases give the old kernel's key lists\n", .{ cases - failures, cases });
     if (platform.c.getenv("GLM_INDEX_TIMES") != null) {
+        _ = try submit(&r, .select_old, .{ .p0 = 120000, .rows = 16 }, 400); // the GPU at its clocks
         var pit = std.mem.tokenizeScalar(u8, std.mem.span(platform.c.getenv("GLM_POS") orelse "4096,16384,32768,65536,90000,120000"), ',');
         while (pit.next()) |pv| {
             const p0 = try std.fmt.parseInt(u32, pv, 10);

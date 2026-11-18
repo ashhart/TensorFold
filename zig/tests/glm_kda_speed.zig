@@ -167,6 +167,7 @@ pub fn main() !void {
         };
     }
     std.debug.print("kda window: {d} of {d} cases give kda_rows' outputs, state and conv window\n", .{ cases - failures, cases });
+    if (platform.c.getenv("GLM_KDA_TIMES") != null) _ = try submit(&r, k.kda_rows, 16, 400); // the GPU at its clocks
     if (platform.c.getenv("GLM_KDA_TIMES") != null) for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 }) |rows| {
         const t_old = try time(&r, k.kda_rows, rows);
         const t_new = try time(&r, k.kda_window, rows);
