@@ -112,12 +112,21 @@ fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contrac
 directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
 
 On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
-linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
-`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over the registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed` and of decode attention's `attn_merge`,
+the planted controls, and gate 5
 live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
 native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
+
+The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
+`zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
+in the slices a row does not hold) at 1 to 16 tree rows and 33 to 131,073 visible keys, including 32-key slice edges.
+Gate 4 uses unit weights and cancelling integer values, and gate 1 plants NaN and infinities in the partials, an
+infinity of each sign in a row's last slice among them. Its two planted controls go red at gate 3: the real kernel on
+the old one-subgroup-a-head grid, and a copy that weighs the lanes past the last slice (it adds the last slice again).
+The tree table is the only row source; the multi-stream row positions are outside it.
 
 On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
 norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has

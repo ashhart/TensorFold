@@ -16,20 +16,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     // ocloc writes a native zebin beside the SPIR-V; the audit reads the zebin's .ze_info
     const files = b.addWriteFiles();
-    const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread";
-    const glue = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
-    glue.addFileArg(b.path("zig/kernels/xpu/qwen27/glue.cl"));
-    glue.addArgs(&.{ "-device", device, "-options", b.fmt("{s} -I zig/kernels/xpu/qwen27", .{opts}), "-output_no_suffix", "-output", "glue", "-out_dir" });
-    glue.setCwd(b.path("."));
-    for ([_][]const u8{ "glue_attn.cl", "glue_quant.cl" }) |part| glue.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
-    const glue_dir = glue.addOutputDirectoryArg("ocloc-glue");
-    _ = files.addCopyFile(glue_dir.path(b, "glue.bin"), b.fmt("{s}/glue.bin", .{device}));
-    const ctl = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
-    ctl.addFileArg(b.path("zig/kernels/xpu/contract_controls.cl"));
-    ctl.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", "contract_controls", "-out_dir" });
-    ctl.setCwd(b.path("."));
-    const ctl_dir = ctl.addOutputDirectoryArg("ocloc-controls");
-    _ = files.addCopyFile(ctl_dir.path(b, "contract_controls.bin"), b.fmt("{s}/contract_controls.bin", .{device}));
+    for (sources) |src| {
+        _ = files.addCopyFile(object(b, ocloc, device, src), b.fmt("{s}/{s}.bin", .{ device, src.name }));
+    }
     const install = b.addInstallDirectory(.{
         .source_dir = files.getDirectory(),
         .install_dir = .prefix,
@@ -57,30 +46,17 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     xpu.addImport("core", core);
 
     const files = b.addWriteFiles();
-    if (prebuilt) |dir| {
-        for ([_][]const u8{ "glue", "contract_controls", "contract_gate_controls" }) |name| {
-            _ = files.addCopyFile(.{ .cwd_relative = b.fmt("{s}/{s}.bin", .{ dir, name }) }, b.fmt("{s}.bin", .{name}));
-        }
-    } else {
-        const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread";
-        const glue = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
-        glue.addFileArg(b.path("zig/kernels/xpu/qwen27/glue.cl"));
-        glue.addArgs(&.{ "-device", device, "-options", b.fmt("{s} -I zig/kernels/xpu/qwen27", .{opts}), "-output_no_suffix", "-output", "glue", "-out_dir" });
-        glue.setCwd(b.path("."));
-        for ([_][]const u8{ "glue_attn.cl", "glue_quant.cl" }) |part| glue.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
-        const glue_dir = glue.addOutputDirectoryArg("ocloc-glue-run");
-        _ = files.addCopyFile(glue_dir.path(b, "glue.bin"), "glue.bin");
-        for ([_][]const u8{ "contract_controls", "contract_gate_controls" }) |name| {
-            const run = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
-            run.addFileArg(b.path(b.fmt("zig/kernels/xpu/{s}.cl", .{name})));
-            run.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", name, "-out_dir" });
-            run.setCwd(b.path("."));
-            const dir = run.addOutputDirectoryArg(b.fmt("ocloc-{s}-run", .{name}));
-            _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{name})), b.fmt("{s}.bin", .{name}));
-        }
+    for (sources) |src| {
+        const bin = if (prebuilt) |dir|
+            std.Build.LazyPath{ .cwd_relative = b.fmt("{s}/{s}.bin", .{ dir, src.name }) }
+        else
+            object(b, ocloc, device, src);
+        _ = files.addCopyFile(bin, b.fmt("{s}.bin", .{src.name}));
     }
     const images = b.createModule(.{ .root_source_file = files.add("xpu_contract_images.zig",
         \\pub const glue align(8) = @embedFile("glue.bin").*;
+        \\pub const decode align(8) = @embedFile("decode.bin").*;
+        \\pub const merge_upstream align(8) = @embedFile("contract_merge_upstream.bin").*;
         \\pub const controls align(8) = @embedFile("contract_controls.bin").*;
         \\pub const gate_controls align(8) = @embedFile("contract_gate_controls.bin").*;
     ), .target = target, .optimize = optimize });
@@ -99,4 +75,26 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     b.step("tf-xpu-contract-run", "Build the XPU kernel-contract runner: gates 1 to 4 and gate 5 live on a card").dependOn(&b.addInstallArtifact(exe, .{}).step);
     const run = b.addRunArtifact(exe);
     b.step("xpu-contract-run", "Run the XPU kernel contract on this card (tf-xpu-contract-run [--device N])").dependOn(&run.step);
+}
+
+const Source = struct { name: []const u8, path: []const u8 };
+const sources = [_]Source{
+    .{ .name = "glue", .path = "zig/kernels/xpu/qwen27/glue.cl" },
+    .{ .name = "decode", .path = "zig/kernels/xpu/qwen27/decode.cl" },
+    .{ .name = "contract_merge_upstream", .path = "zig/kernels/xpu/contract_merge_upstream.cl" },
+    .{ .name = "contract_controls", .path = "zig/kernels/xpu/contract_controls.cl" },
+    .{ .name = "contract_gate_controls", .path = "zig/kernels/xpu/contract_gate_controls.cl" },
+};
+
+fn object(b: *std.Build, ocloc: []const u8, device: []const u8, src: Source) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
+    run.addFileArg(b.path(src.path));
+    const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread -I zig/kernels/xpu/qwen27";
+    run.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", src.name, "-out_dir" });
+    run.setCwd(b.path("."));
+    for ([_][]const u8{ "shape.h", "glue_attn.cl", "glue_quant.cl" }) |part| {
+        run.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
+    }
+    const dir = run.addOutputDirectoryArg(b.fmt("ocloc-contract-{s}", .{src.name}));
+    return dir.path(b, b.fmt("{s}.bin", .{src.name}));
 }
