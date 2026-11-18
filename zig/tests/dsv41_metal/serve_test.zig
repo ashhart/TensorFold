@@ -487,3 +487,47 @@ test "dsv41 metal serve: (j) with a residency owner the server gets an idle tick
     defer Served.close(s);
     try testing.expect(s.engine().keepaliveTarget() == null);
 }
+
+/// What a model's rounds came to: the target's windows and rows, the drafted rows of the replies.
+const Rounds = struct { windows: u64, rows: u64, drafted: u64 };
+
+/// The asks one after another, drafts behind the verify on or off (every `skew` chain parted); replies into `out`.
+fn served(asks: []const Ask, early: bool, skew: u32, out: [][]u32, stats: ?*pkg.early.Stats) !Rounds {
+    const m = try fs.open(gpa, io, seed, .{ .early = early });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    if (m.early) |e| e.skew_every = skew;
+    var drafted: u64 = 0;
+    try serve(s.engine(), asks, false, out, &drafted);
+    if (stats) |st| st.* = m.early.?.stats;
+    return .{ .windows = m.t.stats.windows, .rows = m.t.stats.rows, .drafted = drafted };
+}
+
+test "dsv41 metal serve: (k) drafts behind the verify (kept, or dropped when the GPU's acceptance parts) == serial, same rounds" {
+    const p0 = try ids(160, 30);
+    defer gpa.free(p0);
+    const p1 = try ids(240, 31);
+    defer gpa.free(p1);
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 48 }, .{ .prompt = p1, .max = 48 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    var off: [2][]u32 = undefined;
+    const r_off = try served(&asks, false, 0, &off, null);
+    defer freeAll(&off);
+    var on: [2][]u32 = undefined;
+    var st_on: pkg.early.Stats = .{};
+    const r_on = try served(&asks, true, 0, &on, &st_on);
+    defer freeAll(&on);
+    var sk: [2][]u32 = undefined;
+    var st_sk: pkg.early.Stats = .{};
+    const r_sk = try served(&asks, true, 2, &sk, &st_sk);
+    defer freeAll(&sk);
+    const bad = [3]usize{ same(&want, &off), same(&want, &on), same(&want, &sk) };
+    const rounds_same = std.meta.eql(r_off, r_on) and std.meta.eql(r_off, r_sk);
+    say(bad[0] + bad[1] + bad[2] == 0 and rounds_same, "(g) behind the verify off / on / parted vs serial: {d} / {d} / {d} differ; windows {d} / {d} / {d}, drafted rows {d} / {d} / {d}", .{ bad[0], bad[1], bad[2], r_off.windows, r_on.windows, r_sk.windows, r_off.drafted, r_on.drafted, r_sk.drafted });
+    say(st_on.used > 0 and st_sk.dropped > 0, "(g) chains: {d} queued, {d} used; parted: {d} queued, {d} swapped, {d} dropped", .{ st_on.queued, st_on.used, st_sk.queued, st_sk.skewed, st_sk.dropped });
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
+    try testing.expect(rounds_same);
+    try testing.expect(st_on.used > 0 and st_on.dropped == 0 and st_sk.skewed > 0 and st_sk.dropped >= st_sk.skewed);
+}
