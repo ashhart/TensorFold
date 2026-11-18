@@ -1,4 +1,4 @@
-// Prompt products in column groups, core/affine_mm.metal's tiles, sums and bits (appended to it at 4 bits, g64).
+// Prompt experts and dense products in column groups on the tensor units: 4-bit g64 tiles, 32 columns a group.
 #if TF_GROUP != 64 || TF_BITS != 4
 #error "the column-group products read 4-bit codes in groups of 64"
 #endif
