@@ -193,8 +193,8 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 8. Disk cache | yes | yes | no (prompt) | done¹ |
 | 9. FP8 KV | yes | yes | no (prompt) | yes |
 | 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) | no (Metal) |
-| 11. Fused proj. | yes | yes | yes | open M |
-| 12. Add + norm | done¹ | done M¹ | yes | open M |
+| 11. Fused proj. | yes | yes | yes | open M[#3859] |
+| 12. Add + norm | done¹ | done M¹ | yes | open M[#3859] |
 | 13. MoE grouped | done¹ | done¹ | no (dense) | no (dense) |
 | 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
 | 15. MTP | done¹ | no (DSpark) | no (prompt) | yes |

@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: serve SenseNova-Loop-9B natively in BF16 and AWQ 4-bit (g128) with 56-step two-stream mHC, 512K YaRN and vision (#3859, refs #3781).
+
 - App: confirming an `ultrathink` effort change now applies it (#3502). Thanks to @AIFlowML.
 
 - App: bots keep their own reasoning effort instead of sharing the app-wide setting (#3500). Thanks to @AIFlowML.
