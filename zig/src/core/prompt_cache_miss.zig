@@ -8,7 +8,6 @@ pub const Reason = enum {
     none,
     cold,
     too_short,
-    bypass,
     prompt_changed,
     reply_changed,
     image_changed,
