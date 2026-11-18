@@ -253,7 +253,7 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
         gb = .{ g, g, g };
     }
     e.setPipeline(switch (gate) {
-        .generated => if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
+        .generated => if (rows > 1) (if (c.tp > 1) x.k.kda_window_tp else x.k.kda_window) else if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
         .pre, .fused => |p| p,
     });
     bind(e, 0, .{proj});

@@ -37,6 +37,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
     b.step("tf-glm-index-speed", "GLM-5.3-Flash's decode indexer and sparse attention at long positions: GPU time a launch").dependOn(&b.addInstallArtifact(index, .{}).step);
+    const kda = b.addExecutable(.{ .name = "tf-glm-kda-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_kda_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-kda-speed", "GLM-5.3-Flash's fused KDA decode step: the window kernel against kda_rows bit for bit, GPU time").dependOn(&b.addInstallArtifact(kda, .{}).step);
 }
 
 /// tf-glm-sample-check and test-glm-sampling: the real GLM sampler against its host reference, no checkpoint.

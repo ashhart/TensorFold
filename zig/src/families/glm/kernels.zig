@@ -45,6 +45,8 @@ pub const Kernels = struct {
     hc_core: [4]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, the split, the expand in place
     kda_rows: mtl.Pipeline,
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
+    kda_window: mtl.Pipeline, // windows of 2+ rows: kda_rows' values, the rows' gates, convolutions and norms at once
+    kda_window_tp: mtl.Pipeline,
     router: [max_rows]mtl.Pipeline, // by window rows (RR = 1 .. 16)
     moe_route: mtl.Pipeline,
     shared_gateup: mtl.Pipeline, // the shared expert's kernels at one output a simdgroup: four times the threadgroups, the same sums
@@ -271,10 +273,10 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(m32_src);
     jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
-    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
+    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window });
     defer gpa.free(kda_src);
-    var kda_out: [6]mtl.Pipeline = undefined;
-    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
+    var kda_out: [8]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp", "glm_kda_window", "glm_kda_window_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
     var sparse_out: [3]mtl.Pipeline = undefined;
@@ -364,6 +366,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.kda_prep_tp = kda_out[3];
     k.kda_scan_tp = kda_out[4];
     k.kda_post_tp = kda_out[5];
+    k.kda_window = kda_out[6];
+    k.kda_window_tp = kda_out[7];
     k.sparse_nax = sparse_out[0];
     k.sparse_split = sparse_out[1];
     k.sparse_combine = sparse_out[2];
