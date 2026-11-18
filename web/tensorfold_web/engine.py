@@ -319,7 +319,9 @@ class Engine:
             if size > 1024**2:                       # only the tail: the file may be up to LOG_MAX_BYTES
                 f.seek(size - 1024**2)
                 f.readline()                         # from the next whole line
-            for line in f.read().split("\n")[:-1][-LOG_LINES:]:
+            replayed = f.read().split("\n")
+            buf = replayed.pop()
+            for line in replayed[-LOG_LINES:]:
                 say(_redrawn(line), earlier=True)
             say(f"[web] found the engine a previous TensorFold Web started (pid {child.pid}); it kept running")
         elif f is not None:
@@ -344,6 +346,7 @@ class Engine:
                 # POSIX O_APPEND permits truncation; review inherited offsets before supporting Windows engines.
                 if os.path.getsize(log) > LOG_MAX_BYTES:
                     os.truncate(log, 0)
+                    buf = ""
                     f.seek(0)
             time.sleep(0.2)
         if f is not None:
