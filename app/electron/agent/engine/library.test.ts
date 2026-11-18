@@ -85,7 +85,23 @@ try {
   await fs.writeFile(path.join(wrongGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 1024, num_hidden_layers: 24, vocab_size: 151936 } }))
   const servedGeometry = path.join(modelsDir, 'served-geometry')
   await checkpoint(servedGeometry)
-  await fs.writeFile(path.join(servedGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 2048, num_hidden_layers: 24, vocab_size: 248320, intermediate_size: 6144, linear_num_key_heads: 16, linear_num_value_heads: 16, linear_key_head_dim: 128, linear_value_head_dim: 128, linear_conv_kernel_dim: 6144, num_attention_heads: 8, num_key_value_heads: 2, head_dim: 256, full_attention_interval: 4 } }))
+  const servedConfig = {
+    model_type: 'qwen3_5',
+    quantization: { bits: 4, group_size: 64 },
+    max_position_embeddings: 32768,
+    text_config: {
+      hidden_size: 2048, num_hidden_layers: 24, vocab_size: 248320, intermediate_size: 6144,
+      linear_num_key_heads: 16, linear_num_value_heads: 16, linear_key_head_dim: 128, linear_value_head_dim: 128,
+      linear_conv_kernel_dim: 4, num_attention_heads: 8, num_key_value_heads: 2, head_dim: 256, full_attention_interval: 4,
+    },
+  }
+  await fs.writeFile(path.join(servedGeometry, 'config.json'), JSON.stringify(servedConfig))
+  const wrongConvolution = path.join(modelsDir, 'wrong-convolution')
+  await checkpoint(wrongConvolution)
+  await fs.writeFile(path.join(wrongConvolution, 'config.json'), JSON.stringify({
+    ...servedConfig,
+    text_config: { ...servedConfig.text_config, linear_conv_kernel_dim: 6144 },
+  }))
   const incomplete = path.join(modelsDir, 'incomplete')
   await checkpoint(incomplete)
   await fs.writeFile(path.join(incomplete, 'model.safetensors.index.json'), JSON.stringify({ weight_map: { a: 'model-00001-of-00002.safetensors', b: 'model-00002-of-00002.safetensors' } }))
@@ -111,6 +127,10 @@ try {
   assert.match(refused.reason!, /hidden size is 1024/)
   assert.match(refused.reason!, /UnsupportedQwenGeometry/)
   assert.equal(selected.models.find((model) => model.path === servedGeometry)?.loadable, true, 'the geometry the engine serves stays offered')
+  const refusedConvolution = selected.models.find((model) => model.path === wrongConvolution)!
+  assert.equal(refusedConvolution.complete, true)
+  assert.equal(refusedConvolution.loadable, false)
+  assert.match(refusedConvolution.reason!, /linear conv kernel dim is 6144/)
   assert.equal(selected.models.find((model) => model.path === foreign)?.complete, true)
   assert.match(selected.models.find((model) => model.path === incomplete)!.reason!, /missing.*shards/)
   assert.match(selected.models.find((model) => model.path === invalid)!.reason!, /safetensors/)
