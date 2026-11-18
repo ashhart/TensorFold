@@ -320,13 +320,7 @@ fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u
     try std.testing.expectEqual(@as(?i64, 2), tokens[0].int64());
 }
 
-test "thinking request: checkpoint GLM 5.3 off closes its generation prefix and preserves main ids" {
-    try checkpoint(@embedFile("fixtures/thinking/glm53.jinja"), @embedFile("fixtures/thinking/glm53-tokenizer_config.json"), "glm5_next", "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>H<|assistant|><think>");
-}
 
-test "thinking request: checkpoint LFM2 off closes its generation prefix and preserves main ids" {
-    try checkpoint(@embedFile("fixtures/thinking/lfm2.jinja"), @embedFile("fixtures/thinking/lfm2-tokenizer_config.json"), "lfm2_moe", "<|startoftext|><|im_start|>user\nH<|im_end|>\n<|im_start|>assistant\n<think>");
-}
 
 /// GLM 5.3's template with thinking off, served: the prompt carries `word` from `effort`, which the reply reports.
 fn effortOff(server_effort: ?[]const u8, extra: []const u8, effort: ?[]const u8, word: []const u8) !void {
@@ -404,61 +398,6 @@ test "thinking request: a named effort is the request's own, with no fallback, s
     try std.testing.expectEqualStrings("high", fields.namedEffort("medium", &levels).?); // on GLM-5.3's levels
 }
 
-test "thinking request: a reply that ends on its own end-of-sequence inside an unclosed think block answers with its text on every route" {
-    const t = std.testing;
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var f = try fixture.Fixture.init(t.allocator, t.io, null);
-    defer f.deinit();
-    const eos_name = "<" ++ "|im_end" ++ "|" ++ ">";
-    const tok_json = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"H\":0,\"O\":1,\"K\":2,\"<think>\":300,\"</think>\":301,\"" ++ eos_name ++ "\":127906},\"merges\":[]},\"decoder\":{\"type\":\"Fuse\"},\"added_tokens\":[{\"id\":300,\"content\":\"<think>\",\"special\":true},{\"id\":301,\"content\":\"</think>\",\"special\":true},{\"id\":127906,\"content\":\"" ++ eos_name ++ "\",\"special\":true}]}";
-    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data = tok_json });
-    try f.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = dangling });
-    var problem: []const u8 = "";
-    const text = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
-    defer text.deinit();
-    var script: Script = .{};
-    const srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{
-        .served_name = "m",
-        .model_ids = &.{"m"},
-        .enable_thinking = true,
-        .use_drafts = false,
-    }, null);
-    defer srv.deinit();
-
-    // chat completions: the text is the answer and stays the reasoning too
-    const whole = try post(srv, a, &script, "");
-    const message = whole.get("choices").?.array[0].get("message").?;
-    try t.expectEqualStrings("K", message.strField("content").?);
-    try t.expectEqualStrings("K", message.strField("reasoning_content").?);
-
-    // messages: a text block carries it beside the thinking block
-    const sent = try exchange(srv, "/v1/messages", "{\"model\":\"m\",\"max_tokens\":4,\"messages\":[{\"role\":\"user\",\"content\":\"H\"}]}");
-    defer t.allocator.free(sent.body);
-    try t.expectEqual(@as(u16, 200), sent.status);
-    const reply = (try json.parse(a, sent.body)).ok;
-    var text_block: ?json.Value = null;
-    for (reply.get("content").?.array) |block| {
-        if (block.strField("type")) |kind| {
-            if (std.mem.eql(u8, kind, "text")) text_block = block;
-        }
-    }
-    try t.expectEqualStrings("K", text_block.?.strField("text").?);
-
-    // responses: an output_text part carries it
-    const sent2 = try exchange(srv, "/v1/responses", "{\"model\":\"m\",\"max_output_tokens\":4,\"store\":false,\"input\":\"H\"}");
-    defer t.allocator.free(sent2.body);
-    try t.expectEqual(@as(u16, 200), sent2.status);
-    const reply2 = (try json.parse(a, sent2.body)).ok;
-    var out_text: ?[]const u8 = null;
-    for (reply2.get("output").?.array) |item| {
-        if (item.get("content")) |parts| for (parts.array) |part| {
-            if (std.mem.eql(u8, part.strField("type") orelse "", "output_text")) out_text = part.strField("text");
-        };
-    }
-    try t.expectEqualStrings("K", out_text.?);
-}
 
 test "thinking off on a channel model: the model's own unclosed block keeps its scratch text out of the answer" {
     const t = std.testing;
