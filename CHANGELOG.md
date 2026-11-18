@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `tensorfold device`: when the memory reserve leaves a known zero bytes for weights, a nonempty checkpoint is reported too large and the text report shows 0.0 GiB; unknown memory keeps the old fallback (#3773, fixes #3770). Thanks to @AIFlowML.
+
 - macOS: the native binary imports `_memcpy` from libSystem again, so the release link check passes; the saved device profile is decoded with checked decimal arithmetic and keeps its format (#3761, fixes #3760). Thanks to @AIFlowML.
 
 - Server: a reranker server also answers `/score`, TEI's `/rerank` with `texts` and Cohere's `/v2/rerank`, each translated onto the existing `/v1/rerank` path (#3203).
