@@ -543,5 +543,17 @@
     "<|im_end|>"
    ]
   ]
+ },
+ "ns_tool": {
+  "chunks": [
+   [
+    "<tool_call>",
+    "\n{\"name\": \"weather__get_weather\", \"arguments\": {\"city\": \"Rome\"}}\n",
+    "</tool_call>"
+   ],
+   [
+    "<|im_end|>"
+   ]
+  ]
  }
 }

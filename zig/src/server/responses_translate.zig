@@ -235,6 +235,34 @@ fn deferred(cx: *Cx, tool: Value) errors.Refused {
     return cx.fail(.request, "tool {s} sets defer_loading, which is not supported: send the tool without it", .{try pyrepr.repr(cx.a, tool.get("name"))});
 }
 
+/// Whether the declared tools hold a namespace: what makes the flat path pay for the namespace-only checks.
+fn hasNamespace(declared: ?Value) bool {
+    if (declared == null or declared.? != .array) return false;
+    for (declared.?.array) |tool| if (tool.typeIs("namespace")) return true;
+    return false;
+}
+
+/// Whether ``name`` is one of the namespace groups these tools declare.
+fn offeredGroup(declared: ?Value, name: []const u8) bool {
+    if (declared == null or declared.? != .array) return false;
+    for (declared.?.array) |tool| {
+        if (!tool.typeIs("namespace")) continue;
+        const group = tool.strField("name") orelse continue;
+        if (std.mem.eql(u8, group, name)) return true;
+    }
+    return false;
+}
+
+/// A raw function_call item's namespace as the group it came from: only a declared group's name answers for it.
+fn inputNamespaces(cx: *Cx, items: []const Value, declared: ?Value) errors.Refused!void {
+    for (items) |item| {
+        if (item != .object or !item.typeIs("function_call")) continue;
+        const ns = item.get("namespace") orelse continue; // absent or null keeps the name as it was sent
+        if (ns != .string) continue; // messages() gives that item its own refusal
+        if (!offeredGroup(declared, ns.string)) return cx.fail(.request, "namespace {s} is not among offered: send the name of a namespace tool", .{try pyrepr.repr(cx.a, ns)});
+    }
+}
+
 /// A flattened tool's name, refused by name when another tool carries it already.
 fn uniqueName(cx: *Cx, names: *std.ArrayList([]const u8), name: []const u8) errors.Refused!void {
     for (names.items) |taken| if (std.mem.eql(u8, taken, name)) return cx.fail(.request, "two tools are named {s}: each tool needs its own name", .{try pyrepr.repr(cx.a, Value{ .string = name })});
@@ -242,8 +270,8 @@ fn uniqueName(cx: *Cx, names: *std.ArrayList([]const u8), name: []const u8) erro
 }
 
 /// One function tool as the chat function that runs it; a namespace child is flattened as <ns>__<tool> with both notes.
-fn functionTool(cx: *Cx, names: *std.ArrayList([]const u8), out: *std.ArrayList(Value), tool: Value, ns_name: []const u8, ns_desc: []const u8) errors.Refused!void {
-    if (json.truthyField(tool, "defer_loading")) return deferred(cx, tool);
+fn functionTool(cx: *Cx, names: ?*std.ArrayList([]const u8), out: *std.ArrayList(Value), tool: Value, ns_name: []const u8, ns_desc: []const u8) errors.Refused!void {
+    if (names != null and json.truthyField(tool, "defer_loading")) return deferred(cx, tool);
     const name = tool.strField("name") orelse "";
     if (name.len == 0) return cx.refuse("a function tool needs a name");
     const function = try json.newObject(cx.a);
@@ -256,7 +284,7 @@ fn functionTool(cx: *Cx, names: *std.ArrayList([]const u8), out: *std.ArrayList(
         try function.put(cx.a, "name", .{ .string = flat });
         try function.put(cx.a, "description", .{ .string = if (own.len == 0) ns_desc else try std.fmt.allocPrint(cx.a, "{s}: {s}", .{ ns_desc, own }) });
     }
-    try uniqueName(cx, names, flat);
+    if (names) |taken| try uniqueName(cx, taken, flat);
     const t = try json.newObject(cx.a);
     try t.put(cx.a, "type", .{ .string = "function" });
     try t.put(cx.a, "function", .{ .object = function });
@@ -287,13 +315,14 @@ fn tools(cx: *Cx, raw: ?Value) errors.Refused!?[]Value {
     if (value != .array) return cx.refuse("tools must be a list");
     var out: std.ArrayList(Value) = .empty;
     var names: std.ArrayList([]const u8) = .empty; // every name the tools end up with, so none is given twice
+    const taken = if (hasNamespace(value)) &names else null; // a flat-only list is checked only for its own names
     for (value.array) |tool| {
         if (tool.typeIs("namespace")) {
             try namespaceTools(cx, &names, &out, tool);
             continue;
         }
         if (!tool.typeIs("function")) return cx.fail(.request, "tools of type {s} are not supported: this server runs function tools only", .{try pyrepr.repr(cx.a, kindOf(tool))});
-        try functionTool(cx, &names, &out, tool, "", "");
+        try functionTool(cx, taken, &out, tool, "", "");
     }
     return out.items;
 }
@@ -348,9 +377,10 @@ fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value, declared: ?Value) errors.
     if (choice == .string) for ([_][]const u8{ "none", "auto", "required" }) |s| if (std.mem.eql(u8, s, choice.string)) return .{ .choice = choice, .offered = offered };
     const kind = kindOf(choice);
     const k = if (kind != null and kind.? == .string) kind.?.string else "";
+    const namespaced = hasNamespace(declared); // only these requests read the namespace a selector carries
     if (std.mem.eql(u8, k, "function") and choice.strField("name") != null) {
         const given = choice.strField("name").?;
-        const found = try selectorName(cx.a, declared, given, choice.strField("namespace"));
+        const found = try selectorName(cx.a, declared, given, if (namespaced) choice.strField("namespace") else null);
         if (found) |name| if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, choice.get("name").?)});
         const resolved = found orelse given; // an unresolved name keeps its own spelling, which is the name tool_specs refuses it by
         const function = try json.newObject(cx.a);
@@ -372,8 +402,8 @@ fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value, declared: ?Value) errors.
         }
         var resolved: std.ArrayList([]const u8) = .empty;
         for (list) |t| {
-            const pick = t.strField("name") orelse return cx.refuse("allowed_tools may name function tools only");
-            const name = try selectorName(cx.a, declared, pick, t.strField("namespace")) orelse continue; // an entry no tool carries keeps nothing
+            const pick = t.strField("name") orelse if (namespaced) return cx.refuse("allowed_tools may name function tools only") else continue;
+            const name = try selectorName(cx.a, declared, pick, if (namespaced) t.strField("namespace") else null) orelse continue; // an entry no tool carries keeps nothing
             if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, t.get("name").?)});
             try resolved.append(cx.a, name);
         }
@@ -458,6 +488,7 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
         given = .{ .array = one };
     }
     if (given != .array or given.array.len == 0) return cx.refuse("input must be a string or a non-empty list of items");
+    try inputNamespaces(cx, given.array, body.get("tools"));
     const added = try messages(cx, given.array);
     const parent = body.field("previous_response_id");
     const earlier: []Value = if (parent) |p| try history.conversation(cx, p) else &.{};
