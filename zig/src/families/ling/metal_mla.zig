@@ -29,6 +29,8 @@ pub const Mla = struct {
     position: u32 = 0,
 
     pub fn init(rows: *Rows, heads: u32, capacity: u32) !Mla {
+        const buffer_mark = rows.owned.items.len;
+        errdefer rows.rollbackBuffers(buffer_mark);
         const library = try mtl.Library.fromSource(rows.device, @import("ling_sources").mla, mtl.CompileOptions.mlx());
         errdefer library.deinit();
         const rope_cache = try mtl.Pipeline.init(rows.device, library, "tf_ling_mla_rope_cache", false);
@@ -40,6 +42,18 @@ pub const Mla = struct {
         const r: usize = rows.max_rows;
         const cache = try rows.buffer(@as(usize, capacity) * 576 * 2);
         @memset(cache.slice(u16, capacity * 576), 0);
+        const positions = try rows.buffer(r * @sizeOf(kernels.MlaRow));
+        const angles = try rows.buffer(r * 64 * 4);
+        const qa = try rows.buffer(r * 256 * 2);
+        const qan = try rows.buffer(r * 256 * 2);
+        const q = try rows.buffer(r * heads * 192 * 2);
+        const kv = try rows.buffer(r * 576 * 2);
+        const gate = try rows.buffer(r * heads * 2);
+        const expanded = try rows.buffer(r * heads * 128 * 2);
+        const qlat = try rows.buffer(r * heads * 512 * 4);
+        const partial = try rows.buffer(r * heads * 16 * 514 * 4);
+        const olat = try rows.buffer(r * heads * 512 * 4);
+        const y = try rows.buffer(r * heads * 128 * 2);
         return .{
             .library = library,
             .rope_cache = rope_cache,
@@ -48,18 +62,18 @@ pub const Mla = struct {
             .cache = cache,
             .heads = heads,
             .capacity = capacity,
-            .positions = try rows.buffer(r * @sizeOf(kernels.MlaRow)),
-            .angles = try rows.buffer(r * 64 * 4),
-            .qa = try rows.buffer(r * 256 * 2),
-            .qan = try rows.buffer(r * 256 * 2),
-            .q = try rows.buffer(r * heads * 192 * 2),
-            .kv = try rows.buffer(r * 576 * 2),
-            .gate = try rows.buffer(r * heads * 2),
-            .expanded = try rows.buffer(r * heads * 128 * 2),
-            .qlat = try rows.buffer(r * heads * 512 * 4),
-            .partial = try rows.buffer(r * heads * 16 * 514 * 4),
-            .olat = try rows.buffer(r * heads * 512 * 4),
-            .y = try rows.buffer(r * heads * 128 * 2),
+            .positions = positions,
+            .angles = angles,
+            .qa = qa,
+            .qan = qan,
+            .q = q,
+            .kv = kv,
+            .gate = gate,
+            .expanded = expanded,
+            .qlat = qlat,
+            .partial = partial,
+            .olat = olat,
+            .y = y,
         };
     }
 

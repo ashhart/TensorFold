@@ -17,6 +17,7 @@ pub const Rows = struct {
     owned: std.ArrayList(mtl.Buffer) = .empty,
     weights: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     max_rows: u32,
+    fail_buffer_at: ?usize = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, max_rows: u32) !Rows {
         const library = try mtl.Library.fromBytes(device, @import("kimi_metallib").bytes);
@@ -34,10 +35,16 @@ pub const Rows = struct {
     }
 
     pub fn buffer(self: *Rows, bytes: usize) !mtl.Buffer {
+        if (self.fail_buffer_at) |at| if (self.owned.items.len >= at) return error.OutOfMemory;
         const b = try self.device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared);
         errdefer b.deinit();
         try self.owned.append(self.allocator, b);
         return b;
+    }
+
+    pub fn rollbackBuffers(self: *Rows, mark: usize) void {
+        for (self.owned.items[mark..]) |b| b.deinit();
+        self.owned.shrinkRetainingCapacity(mark);
     }
 
     fn finish(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {

@@ -24,6 +24,8 @@ pub const Forward = struct {
     position: u32 = 0,
 
     pub fn init(rows: *Rows, model: *ck.Checkpoint, capacity: u32) !Forward {
+        const buffer_mark = rows.owned.items.len;
+        errdefer rows.rollbackBuffers(buffer_mark);
         const c = model.config orelse return error.MissingConfig;
         if (c.quant != .bf16 or c.layers != 24 or c.hidden != 1536 or c.vocab != 157184 or c.group != 4 or
             c.kda_heads != 16 or c.kda_dim != 128 or c.mla_heads != 16 or c.q_lora != 256 or c.kv_lora != 512 or
@@ -46,19 +48,29 @@ pub const Forward = struct {
             initialized += 1;
         }
         const r: usize = rows.max_rows;
+        var moe = try Moe.init(rows, 1536, 512);
+        errdefer moe.deinit();
+        const x = try rows.buffer(r * 1536 * 2);
+        const normed = try rows.buffer(r * 1536 * 2);
+        const delta = try rows.buffer(r * 1536 * 2);
+        const gate = try rows.buffer(r * 4608 * 2);
+        const up = try rows.buffer(r * 4608 * 2);
+        const activation = try rows.buffer(r * 4608 * 2);
+        const logits = try rows.buffer(r * 157184 * 4);
+        const picks = try rows.buffer(23 * r * 8 * 4);
         return .{
             .rows = rows,
             .model = model,
             .attention = attention,
-            .moe = try Moe.init(rows, 1536, 512),
-            .x = try rows.buffer(r * 1536 * 2),
-            .normed = try rows.buffer(r * 1536 * 2),
-            .delta = try rows.buffer(r * 1536 * 2),
-            .gate = try rows.buffer(r * 4608 * 2),
-            .up = try rows.buffer(r * 4608 * 2),
-            .activation = try rows.buffer(r * 4608 * 2),
-            .logits = try rows.buffer(r * 157184 * 4),
-            .picks = try rows.buffer(23 * r * 8 * 4),
+            .moe = moe,
+            .x = x,
+            .normed = normed,
+            .delta = delta,
+            .gate = gate,
+            .up = up,
+            .activation = activation,
+            .logits = logits,
+            .picks = picks,
         };
     }
 
