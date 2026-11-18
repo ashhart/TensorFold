@@ -224,7 +224,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .first_masked = firstMaskedFn,
                 };
                 const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
-                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
+                return .{ .ptr = self, .warm_images = false, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
             /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.
