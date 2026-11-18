@@ -15,6 +15,7 @@ const kernels = @import("kernels.zig");
 const wide = @import("wide.zig");
 const Kernels = kernels.Kernels;
 const moe_route = @import("../../core/moe_route.zig");
+const tape = @import("prompt_tape.zig");
 const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
@@ -65,6 +66,7 @@ pub const Prompt = struct {
     m_out: Ref,
     sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
     sparse_nax: bool, // the sparse MLA attention on the tensor units (GLM_SPARSE_NAX=0: the row kernel)
+    tape: ?*tape.Tape, // a profile's routes and key lists, played back in place of computing them
     rows: u32, // a chunk's rows at most (the buffers' height)
     kda_rows: u32, // the rows a KDA block's planes hold (half a chunk)
 
@@ -107,6 +109,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
         }
     }.to;
     p.rows = rows;
+    p.tape = null;
     p.kda_rows = @max(rows / 2, 1);
     p.sparse_nax = sparseNax();
     p.streams = decode.*;
@@ -266,7 +269,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (ep) |t| {
         if (s & Class.exchange == 0) t.begin();
     } else if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
-    if (s & Class.route == 0) route(p, x, e, w, x_in, M);
+    if (!tape.playRoute(p.tape, x, e, p.wts, p.order, p.offsets, M)) {
+        if (s & Class.route == 0) route(p, x, e, w, x_in, M);
+        tape.keepRoute(p.tape, x, e, p.wts, p.order, p.offsets, M);
+    }
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
             gateUp(p, p.mm.mm_bf16, false, x, e, w, x_in, M, n);
@@ -472,7 +478,8 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     }
     var dense: u32 = 0;
     while (dense < M and pos + dense + 1 <= c.i_topk) dense += 1;
-    if (fwd.on(x, "mla_select")) {
+    const taped = tape.playKeys(p.tape, x, e, p.indices, M);
+    if (!taped and fwd.on(x, "mla_select")) {
         if (dense > 0) {
             e.setPipeline(x.k.dense_indices);
             bind(e, 0, .{p.indices});
@@ -485,6 +492,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             selectKeys(p, x, e, mi, p.qp.at((@as(usize, r0) * c.qrProj() + c.mla_heads * c.nope) * 2), p.iw.at(@as(usize, r0) * c.i_heads * 2), p.indices.at(@as(usize, r0) * width * 4), sb, pos + r0);
         }
     }
+    if (!taped) tape.keepKeys(p.tape, x, e, p.indices, M);
     if (fwd.on(x, "mla_attn")) {
         if (p.sparse_nax) {
             e.setPipeline(if (c.tp > 1) x.k.sparse_nax_tp else x.k.sparse_nax);
@@ -509,6 +517,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     std.debug.assert(x.sc == ss and M <= p.rows);
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
+    if (p.tape) |t| t.rewind();
     if (s & Class.ends == 0) fwd.embed(x, e, ids, M, pos);
     const plane = @as(usize, M) * c.hidden * 2; // a trace's capture points: the decode backbone's
     fwd.snap(x, e, ss.h, plane);
