@@ -47,6 +47,18 @@ pub fn pick(generation: Generation, m: c_int, lpc_log2: u5, bits: c_int, n: c_in
     return tile;
 }
 
+/// A variant of the stream tile (stream_variant.zig): `items` folds no row past an item's count.
+pub const Variant = enum { none, items };
+
+/// Maximum K (32 lanes * 32 codes) covered in one wave round before extra rounds amortize the fold.
+pub const single_round_k: c_int = 32 * 32;
+
+/// gfx1151's single-round plain routed 4-bit plans holding 3 or 4 rows skip dead-row folds.
+pub fn variant(generation: Generation, m: c_int, k: c_int, bits: c_int, routed: bool, plain: bool) Variant {
+    if (generation != .rdna3_5 or rowTile(m) != 2 or m > 4 or k < 1 or k > single_round_k) return .none;
+    return if (routed and plain and bits == 4) .items else .none;
+}
+
 test "the widest columns that fill the card, and RDNA3.5's narrowest at one and two rows" {
     // 4-bit, K = 2048 (32 lanes a column): 12352 and 248320 columns
     try std.testing.expectEqual(@as(usize, 1), pick(.rdna3, 1, 5, 4, 12352, 1, false).at);
@@ -79,4 +91,25 @@ test "the row tile takes 1, 2, then 4 rows a block" {
     try std.testing.expectEqual(@as(usize, 1), rowTile(2));
     try std.testing.expectEqual(@as(usize, 2), rowTile(3));
     try std.testing.expectEqual(@as(usize, 2), rowTile(16));
+}
+
+test "only RDNA3.5's single-round plain routed 4-bit plans of 3 or 4 rows take item_rows; the rest keep it off" {
+    const Caps = @import("../caps.zig").Caps;
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1152", "gfx1153", "gfx1200", "gfx1201" }) |name| {
+        const g = Caps.of(name).?.generation;
+        for (affine.bit_widths) |bits| for ([_]c_int{ 512, 640, 1024, 1056, 1856, 2048, 2688 }) |k| {
+            for (1..65) |rows| for ([_]bool{ false, true }) |routed| for ([_]bool{ false, true }) |plain| {
+                const m: c_int = @intCast(rows);
+                const want: Variant = if (g == .rdna3_5 and bits == 4 and routed and plain and (m == 3 or m == 4) and k <= single_round_k)
+                    .items
+                else
+                    .none;
+                try std.testing.expectEqual(want, variant(g, m, k, bits, routed, plain));
+            };
+        };
+    }
+}
+
+test {
+    _ = @import("stream_variant.zig");
 }
