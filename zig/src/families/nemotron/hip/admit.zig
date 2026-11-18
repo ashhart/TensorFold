@@ -155,7 +155,7 @@ fn indexNames(a: std.mem.Allocator, text: []const u8) !std.StringHashMapUnmanage
 /// The checkpoint's format and what it holds, refused unless the HIP engine reads all of it.
 pub fn checkpoint(a: std.mem.Allocator, f: Facts, problem: *[]const u8) Refused!Config {
     var why: config.Why = .{};
-    const c = config.parse(a, f.config, &why) catch |err| {
+    var c = config.parseWith(a, f.config, &why, .{ .bf16_embed = true }) catch |err| {
         if (why.len > 0) return refuse(a, problem, "{s}", .{why.text()});
         return refuse(a, problem, "config.json is not a Nemotron-H config the HIP engine reads ({t})", .{err});
     };
@@ -192,6 +192,8 @@ pub fn checkpoint(a: std.mem.Allocator, f: Facts, problem: *[]const u8) Refused!
         "model.safetensors.index.json is unreadable ({t})",
         .{err},
     );
+    // as MLX loads it, a table without scales is not quantized, whatever config.json lists for it
+    if (tensors.hasBf16Embed(have.contains(tensors.embed ++ ".weight"), have.contains(tensors.embed ++ ".scales"))) c.embed_bf16 = true;
     try names(a, &have, &c, false, "the checkpoint's index", problem);
     if (f.mtp) |list| {
         var head: std.StringHashMapUnmanaged(void) = .empty;
@@ -479,4 +481,85 @@ test "altered checkpoints are refused with a reason" {
         .{ .world = 3, .window = 4096, .room = 30 * gib },
         &.{"--tp 3"},
     );
+}
+
+/// The stock config with the raw quantization entries `raw` added to its block.
+fn entries(a: std.mem.Allocator, raw: []const u8) ![]const u8 {
+    return edit(a, stock_config, "\"group_size\": 64,", try std.fmt.allocPrint(a, "\"group_size\": 64, {s},", .{raw}));
+}
+
+/// The stock index without the embedding's scales and biases: a bf16 token table's tensors.
+fn bf16Index(a: std.mem.Allocator) ![]const u8 {
+    const biases = "\"backbone.embeddings.biases\": \"model-00001-of-00004.safetensors\",";
+    const scales = "\"backbone.embeddings.scales\": \"model-00001-of-00004.safetensors\",";
+    return edit(a, try edit(a, stock_index, biases, ""), scales, "");
+}
+
+test "a bf16 token table beside quantized projections is admitted, its bytes counted as stored" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    const ask: Ask = .{ .window = 4096, .room = 60 * gib };
+    const text = try entries(a, "\"backbone.embeddings\": false");
+    const mtp = try stockMtp(a);
+    const stock = try admit(a, .{ .config = stock_config, .index = stock_index, .mtp = mtp }, ask, &problem);
+    const v = try admit(a, .{ .config = text, .index = try bf16Index(a), .mtp = mtp }, ask, &problem);
+    try testing.expect(v.fits and v.mtp and v.config.embed_bf16);
+    const quantized = plan.affine(.{}, v.config.vocab, v.config.hidden);
+    try testing.expectEqual(stock.weights - quantized + v.config.vocab * v.config.hidden * 2, v.weights);
+    // as MLX loads it, no scales in the files is enough: config.json need not list the table
+    const unlisted = try admit(a, .{ .config = stock_config, .index = try bf16Index(a), .mtp = mtp }, ask, &problem);
+    try testing.expect(unlisted.config.embed_bf16);
+    try testing.expectEqual(v.weights, unlisted.weights);
+    // the same text still refuses where the token table is not the engine's to read bare
+    var why: config.Why = .{};
+    try testing.expectError(error.UnsupportedQuantization, config.parse(a, text, &why));
+    try testing.expect(std.mem.indexOf(u8, why.text(), "backbone.embeddings") != null);
+}
+
+test "with a bf16 token table, every other unquantized or unread tensor is still refused by name" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ask: Ask = .{ .window = 4096, .room = 60 * gib };
+    const bare = "\"backbone.embeddings\": false";
+    const index = try bf16Index(a);
+    // the table's own mismatches: scales left in the index, or none behind a quantized config
+    try expectRefused(a, .{ .config = try entries(a, bare), .index = stock_index }, ask, &.{
+        "backbone.embeddings.scales",
+        "does not read",
+    });
+    try expectRefused(a, .{ .config = stock_config, .index = try edit(a, index, "\"backbone.embeddings.weight\"", "\"x\"") }, ask, &.{
+        "backbone.embeddings.weight",
+    });
+    try expectRefused(a, .{ .config = try entries(a, "\"backbone.embeddings\": {}"), .index = index }, ask, &.{
+        "backbone.embeddings",
+        "unquantized",
+    });
+    // a bf16 head, projection or attention matrix is not the table
+    for ([_][]const u8{ "lm_head", "backbone.layers.1.mixer.shared_experts.up_proj", "backbone.layers.5.mixer.q_proj" }) |n| {
+        const text = try entries(a, try std.fmt.allocPrint(a, "{s}, \"{s}\": false", .{ bare, n }));
+        try expectRefused(a, .{ .config = text, .index = index }, ask, &.{ n, "unquantized" });
+    }
+    const o_proj = "backbone.layers.12.mixer.o_proj.scales";
+    try expectRefused(a, .{
+        .config = try entries(a, bare),
+        .index = try edit(a, index, "\"" ++ o_proj ++ "\"", "\"x\""),
+    }, ask, &.{ "backbone.layers.12.mixer.o_proj", "Living Weights" });
+    // other widths and group sizes
+    const three = try entries(a, bare ++ ", \"backbone.layers.4.mixer.in_proj\": {\"bits\": 3}");
+    try expectRefused(a, .{ .config = three, .index = index }, ask, &.{"backbone.layers.4.mixer.in_proj is 3-bit in groups of 64"});
+    const wide = try entries(a, bare ++ ", \"lm_head\": {\"bits\": 8, \"group_size\": 128}");
+    try expectRefused(a, .{ .config = wide, .index = index }, ask, &.{"lm_head is 8-bit in groups of 128"});
+    const grouped = try edit(a, try entries(a, bare), "\"group_size\": 64,", "\"group_size\": 32,");
+    try expectRefused(a, .{ .config = grouped, .index = index }, ask, &.{"groups of 32"});
+    // the MTP head inside the shards, and its file beside a model not stored 4-bit
+    const inside = try edit(a, index, "\"lm_head.weight\"", "\"lm_head.weight\": \"a\", \"mtp.layers.0.eh_proj.weight\"");
+    try expectRefused(a, .{ .config = try entries(a, bare), .index = inside }, ask, &.{
+        "mtp.layers.0.eh_proj.weight",
+        "inside the model's shards",
+    });
+    const eight = try edit(a, try entries(a, bare), "\"bits\": 4", "\"bits\": 8");
+    try expectRefused(a, .{ .config = eight, .index = index, .mtp = try stockMtp(a) }, ask, &.{ tensors.mtp_file, "8-bit" });
 }

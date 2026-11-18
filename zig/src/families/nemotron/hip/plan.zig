@@ -36,6 +36,12 @@ pub fn affine(w: Width, n: u64, k: u64) u64 {
     return n * k * w.bits / 8 + 4 * n * (k / w.group);
 }
 
+/// The token table's bytes: bf16 as stored when config.json says so, else an affine matrix at its width.
+pub fn embedBytes(c: *const Config) u64 {
+    const d: u64 = c.hidden;
+    return if (c.embed_bf16) c.vocab * d * 2 else affine(c.embed_width, c.vocab, d);
+}
+
 fn even(n: u64, world: u32) !u64 {
     if (world == 0 or n % world != 0) return error.UnevenSplit;
     return n / world;
@@ -93,7 +99,7 @@ fn mixer(c: *const Config, kind: config.Kind, ws: [4]Width, world: u32, mode: Mo
 pub fn weights(c: *const Config, world: u32, mode: Mode, head: Head) !Weights {
     var w: Weights = .{};
     const d: u64 = c.hidden;
-    w.replicated += affine(c.embed_width, c.vocab, d) + float(mode, d);
+    w.replicated += embedBytes(c) + float(mode, d);
     w.split += affine(c.head_width, try even(c.vocab, world), d);
     for (c.kinds[0..c.layers], c.widths[0..c.layers]) |kind, ws| {
         w.replicated += float(mode, d);
@@ -232,4 +238,40 @@ test "a token's keys and values, a stream's Mamba state, and the window a V620 l
     const most = window(30 * gib, w, 2 * gib, try tokenBytes(&c, 1, 2, true), try streamBytes(&c, 1, 2));
     try std.testing.expect(most >= 262144);
     try std.testing.expectEqual(@as(u64, 0), window(16 * gib, w, 2 * gib, 7168, 1 << 20));
+}
+
+/// The bytes a safetensors header gives its one tensor: the end of its `data_offsets`.
+fn headerBytes(a: std.mem.Allocator, image: []const u8) !u64 {
+    const len = std.mem.readInt(u64, image[0..8], .little);
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, image[8..][0..len], .{});
+    const offsets = doc.object.get("backbone.embeddings.weight").?.object.get("data_offsets").?.array.items;
+    return @intCast(offsets[1].integer - offsets[0].integer);
+}
+
+test "the plan counts a bf16 token table at the bytes its header gives, in both modes and on every rank" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try lightning();
+    c.vocab = 1032;
+    const table = try a.alloc(u8, c.vocab * c.hidden * 2);
+    @memset(table, 0x3f);
+    const image = try @import("core").checkpoint_fixture.image(a, &.{.{
+        .name = "backbone.embeddings.weight",
+        .dtype = "BF16",
+        .shape = &.{ c.vocab, c.hidden },
+        .bytes = table,
+    }});
+    const stored = try headerBytes(a, image);
+    try std.testing.expectEqual(@as(u64, 1032 * 2688 * 2), stored);
+    var bf = c;
+    bf.embed_bf16 = true;
+    try std.testing.expectEqual(stored, embedBytes(&bf));
+    try std.testing.expectEqual(affine(.{}, 1032, 2688), embedBytes(&c));
+    for ([_]Mode{ .stored, .device }) |mode| for ([_]u32{ 1, 2 }) |world| {
+        const with = try weights(&bf, world, mode, .{});
+        const without = try weights(&c, world, mode, .{});
+        try std.testing.expectEqual(stored - affine(.{}, 1032, 2688), with.device(1 % world) - without.device(1 % world));
+        try std.testing.expectEqual(with.total(world) - without.total(world), world * (stored - affine(.{}, 1032, 2688)));
+    };
 }

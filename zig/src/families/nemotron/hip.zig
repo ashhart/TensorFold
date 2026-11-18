@@ -6,6 +6,7 @@ pub const plan = @import("hip/plan.zig");
 pub const widths = @import("hip/widths.zig");
 pub const admit = @import("hip/admit.zig");
 pub const model = @import("hip/model.zig");
+pub const embedding = @import("hip/embedding.zig");
 pub const load = @import("hip/load.zig");
 pub const pages = @import("hip/pages.zig");
 /// The Mamba-2 mixer's and the MoE layer's interfaces, which their kernels fill.
@@ -30,6 +31,7 @@ test {
     _ = tensors;
     _ = plan;
     _ = widths;
+    _ = embedding;
     _ = admit;
     _ = model;
     _ = pages;
