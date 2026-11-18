@@ -1,4 +1,4 @@
-//! tf-glm-hc-rows: GLM's hyper-connection boundary (expand on six groups a slice, split on two) against one each; time.
+//! tf-glm-hc-rows: the boundary (expand parts, split on two) against one each, and the MoE-combining expand; time.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -17,7 +17,9 @@ fn toBf(v: f32) u16 {
     return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
-const Io = struct { xo: mtl.Buffer, br: mtl.Buffer, post: mtl.Buffer, comb: mtl.Buffer, fns: mtl.Buffer, scale: mtl.Buffer, base: mtl.Buffer, norm: mtl.Buffer, out: [2]struct { xn: mtl.Buffer, part: mtl.Buffer, normed: mtl.Buffer, post: mtl.Buffer, comb: mtl.Buffer } };
+const Io = struct { xo: mtl.Buffer, br: mtl.Buffer, ye: mtl.Buffer, wts: mtl.Buffer, post: mtl.Buffer, comb: mtl.Buffer, fns: mtl.Buffer, scale: mtl.Buffer, base: mtl.Buffer, norm: mtl.Buffer, out: [2]struct { xn: mtl.Buffer, part: mtl.Buffer, normed: mtl.Buffer, post: mtl.Buffer, comb: mtl.Buffer } };
+const TOPK = 8;
+const M = 16; // rows at most
 
 /// The reference split (tests/glm_hc_split_one.metal): one group a row, sg 0's Sinkhorn before the collapse.
 var split_one: mtl.Pipeline = undefined;
@@ -30,13 +32,13 @@ fn bindSplit(e: mtl.ComputeEncoder, io: *const Io, side: usize, expand: bool) vo
 }
 
 /// The split alone: the reference's one group a row (side 0) or core/hc.zig's (side 1).
-fn split(e: mtl.ComputeEncoder, _: usize, pipes: [6]mtl.Pipeline, io: *const Io, side: usize, rows: u32, expand: bool) void {
+fn split(e: mtl.ComputeEncoder, _: usize, pipes: hc.Pipes, io: *const Io, side: usize, rows: u32, expand: bool) void {
     e.setPipeline(if (side == 0) split_one else pipes[2]);
     bindSplit(e, io, side, expand);
     e.dispatchGroups(mtl.Size.of(rows, if (side == 0) 1 else hc.split_groups, 1), mtl.Size.of(1024, 1, 1));
 }
 
-fn one(e: mtl.ComputeEncoder, i: usize, pipes: [6]mtl.Pipeline, io: *const Io, side: usize, rows: u32, expand: bool, parts: bool) void {
+fn one(e: mtl.ComputeEncoder, i: usize, pipes: hc.Pipes, io: *const Io, side: usize, rows: u32, expand: bool, parts: bool) void {
     const o = io.out[side];
     if (side == 0) { // the reference: the expand on one group a slice, then the one-group split
         e.setPipeline(pipes[if (expand) 0 else 1]);
@@ -62,6 +64,26 @@ fn one(e: mtl.ComputeEncoder, i: usize, pipes: [6]mtl.Pipeline, io: *const Io, s
         .normed = R{ .buf = o.normed },
     }, parts);
     _ = o.post;
+}
+
+/// A MoE layer's branch: the combine kernel then the boundary (side 0), or the combining expand (side 1); parts.
+fn moeOne(e: mtl.ComputeEncoder, i: usize, k: *const glm.kernels.Kernels, io: *const Io, side: usize, rows: u32, parts: ?bool) void {
+    const o = io.out[side];
+    if (side == 0) {
+        e.setPipeline(k.combine_0);
+        inline for (.{ io.ye, io.ye, io.wts }, 0..) |b, j| e.setBuffer(b, 0, j);
+        e.setBytes(std.mem.asBytes(&[2]i32{ @intCast(rows), TOPK }), 3);
+        e.setBuffer(io.br, 0, 4);
+        e.dispatchThreads(mtl.Size.of(rows * D, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+    const b = .{ .x_old = R{ .buf = io.xo }, .branch = R{ .buf = io.br }, .post = R{ .buf = io.post }, .comb = R{ .buf = io.comb }, .fn_packed = (R{ .buf = io.fns }).at((i % pool_fn) * fn_bytes), .x_new = R{ .buf = o.xn }, .part = R{ .buf = o.part }, .scale = R{ .buf = io.scale }, .base = R{ .buf = io.base }, .norm = R{ .buf = io.norm }, .normed = R{ .buf = o.normed } };
+    if (side == 0) return hc.boundary(e, k.hc_core, glm.kernels.hc_shape, true, rows, 1e-6, b);
+    var m: struct { x_old: R, branch: R, post: R, comb: R, fn_packed: R, x_new: R, part: R, scale: R, base: R, norm: R, normed: R, wts: R } = undefined;
+    inline for (@typeInfo(@TypeOf(b)).@"struct".field_names) |n| @field(m, n) = @field(b, n);
+    m.branch = .{ .buf = io.ye };
+    m.wts = .{ .buf = io.wts };
+    if (parts) |p| return hc.boundaryWith(e, k.hc_core, glm.kernels.hc_shape, true, rows, 1e-6, m, p);
+    hc.boundary(e, k.hc_core, glm.kernels.hc_shape, true, rows, 1e-6, m);
 }
 
 fn run(q: mtl.Queue, comptime f: anytype, args: anytype, n: usize) !f64 {
@@ -96,10 +118,11 @@ pub fn main(init: std.process.Init) !void {
     const ref_lib = try mtl.Library.fromSource(device, ref_src, mtl.CompileOptions.mlx());
     split_one = try mtl.Pipeline.init(device, ref_lib, "tf_hc_split_one", false);
     const opts = mtl.ResourceOptions.shared;
-    const M = 16;
     var io: Io = undefined;
     io.xo = try device.buffer(M * F * 2, opts);
     io.br = try device.buffer(M * D * 2, opts);
+    io.ye = try device.buffer(M * (TOPK + 1) * D * 2, opts);
+    io.wts = try device.buffer(M * TOPK * 4, opts);
     io.post = try device.buffer(M * 4 * 4, opts);
     io.comb = try device.buffer(M * 16 * 4, opts);
     io.fns = try device.buffer(pool_fn * fn_bytes, opts);
@@ -159,5 +182,37 @@ pub fn main(init: std.process.Init) !void {
         const s1 = try time(queue, split, .{ k.hc_core, &io, 1, rows, expand });
         std.debug.print("  {d:2} rows{s}: reference {d:6.2} us, ours {d:6.2} us a boundary ({d:.2}x); the split alone {d:5.2} -> {d:5.2} us\n", .{ rows, if (expand) "" else " (first)", t0, t1, t0 / t1, s0, s1 });
     };
-    std.debug.print("{d} outputs equal over two draws\n", .{checked});
+    var moe_checked: usize = 0;
+    for (0..2) |draw| for ([_]u32{ 1, 2, 3, 4, 8, 16 }) |rows| { // draw 1: -0, zeros and large picks' rows among them
+        for (io.ye.slice(u16, M * (TOPK + 1) * D), 0..) |*v, i| v.* = if (draw == 1 and i % 61 == 0) 0x8000 else if (draw == 1 and i % 67 == 0) 0 else if (draw == 1 and i % 71 == 0) toBf(3e4) else toBf((r.float(f32) - 0.5) * 3);
+        for (io.wts.slice(f32, M * TOPK), 0..) |*v, i| v.* = if (draw == 1 and i % 13 == 0) 0 else r.float(f32) * 0.6;
+        for ([_]bool{ true, false }) |parts| for (0..2) |side| {
+            const o = io.out[side];
+            @memset(o.xn.slice(u16, M * F), 0x7fc1);
+            @memset(o.normed.slice(u16, M * D), 0x7fc1);
+            @memcpy(io.post.slice(f32, M * 4), &post0);
+            @memcpy(io.comb.slice(f32, M * 16), &comb0);
+            _ = try run(queue, moeOne, .{ k, &io, side, rows, parts }, 1);
+            @memcpy(outs[side][0][0 .. M * 4], io.post.slice(f32, M * 4));
+            @memcpy(&outs[side][1], io.comb.slice(f32, M * 16));
+            if (side == 1) try sameAfterMoe(&io, &outs, rows, draw, parts);
+        };
+        moe_checked += 2 * (rows * (F + D + 20) + rows * hc.partBytes(glm.kernels.hc_shape) / 4);
+        if (draw > 0) continue;
+        for (0..16) |_| _ = try run(queue, moeOne, .{ k, &io, 0, rows, null }, boundaries); // clocks up
+        const t0 = try time(queue, moeOne, .{ k, &io, 0, rows, null });
+        const t1 = try time(queue, moeOne, .{ k, &io, 1, rows, null });
+        std.debug.print("  {d:2} rows after MoE: combine and boundary {d:6.2} us, the combine in the expand {d:6.2} us\n", .{ rows, t0, t1 });
+    };
+    std.debug.print("{d} outputs equal over two draws; {d} with the MoE combine in the expand\n", .{ checked, moe_checked });
+}
+
+fn sameAfterMoe(io: *const Io, outs: anytype, rows: u32, draw: usize, parts: bool) !void {
+    const a = io.out[0];
+    const b = io.out[1];
+    const pb = rows * hc.partBytes(glm.kernels.hc_shape) / 4;
+    if (!std.mem.eql(f32, &outs[0][1], &outs[1][1]) or !std.mem.eql(f32, outs[0][0][0 .. M * 4], outs[1][0][0 .. M * 4]) or !std.mem.eql(u16, a.xn.slice(u16, rows * F), b.xn.slice(u16, rows * F)) or !std.mem.eql(u32, a.part.slice(u32, pb), b.part.slice(u32, pb)) or !std.mem.eql(u16, a.normed.slice(u16, rows * D), b.normed.slice(u16, rows * D))) {
+        std.debug.print("draw {d}, {d} rows, the MoE combine in the expand (parts {}): BITS DIFFER\n", .{ draw, rows, parts });
+        return error.BitsDiffer;
+    }
 }

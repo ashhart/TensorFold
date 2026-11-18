@@ -13,6 +13,7 @@ const wide = @import("wide.zig");
 const Ref = wts.Ref;
 /// The MoE block (moe.zig).
 pub const moe = @import("moe.zig").moe;
+const moeBlock = @import("moe.zig").block;
 
 pub const Ctx = struct {
     k: *const Kernels,
@@ -33,6 +34,7 @@ pub const Ctx = struct {
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
     inject: ?*const Inject = null, // a prompt pass's image rows over its placeholder embeddings
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
+    moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
 };
 
 /// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.
@@ -202,6 +204,9 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
+    const moe_branch = x.moe_branch; // the MoE block's combine in the expand (glm's combine kernel's bits)
+    x.moe_branch = false;
+    std.debug.assert(!moe_branch or (pending and hc != null and !hc_core.inPlace(sc.x[0], sc.x[1])));
     const h = hc orelse { // the last boundary: the pending branch written into the streams alone
         if (pending and on(x, "hc_expand") and hc_core.inPlace(sc.x[0], sc.x[1])) {
             hc_core.expandInPlace(e, k.hc_core, hc_shape, rows, sc.x[0], sc.branch, sc.post, sc.comb);
@@ -215,7 +220,7 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
         if (pending) x.xi = 1 - x.xi;
         return;
     };
-    if (on(x, "hc_mix")) hc_core.boundary(e, k.hc_core, hc_shape, pending, rows, x.c.eps, .{ .x_old = sc.x[x.xi], .branch = sc.branch, .post = sc.post, .comb = sc.comb, .fn_packed = h.fnp, .x_new = sc.x[1 - x.xi], .part = sc.mixes, .scale = h.scale, .base = h.base, .norm = norm.?, .normed = sc.normed });
+    if (on(x, "hc_mix")) hc_core.boundary(e, k.hc_core, hc_shape, pending, rows, x.c.eps, .{ .x_old = sc.x[x.xi], .branch = if (moe_branch) sc.ye else sc.branch, .post = sc.post, .comb = sc.comb, .fn_packed = h.fnp, .x_new = sc.x[1 - x.xi], .part = sc.mixes, .scale = h.scale, .base = h.base, .norm = norm.?, .normed = sc.normed, .wts = if (moe_branch) sc.wts else null });
     if (pending) x.xi = 1 - x.xi;
 }
 
@@ -518,7 +523,7 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
         snap(x, e, sc.normed, plane);
         switch (L.mlp) {
             .dense => |*d| if (k & Class.dense == 0) denseMlp(x, e, d, sc.normed, rows),
-            .moe => |*m| moe(x, e, m, sc.normed, rows),
+            .moe => |*m| x.moe_branch = moeBlock(x, e, m, sc.normed, rows, x.dump == null and li + 1 < c.run and k & Class.hc == 0 and on(x, "hc_mix")),
         }
         snap(x, e, sc.branch, plane);
         pending = true;
