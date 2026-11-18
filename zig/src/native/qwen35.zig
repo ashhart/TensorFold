@@ -50,12 +50,12 @@ fn pagesOn() !bool {
 fn chunkRows(_: std.mem.Allocator, window: usize, problem: *[]const u8) !usize {
     const settings = @import("sys").environment;
     comptime settings.registered("TF_QWEN35_CHUNK");
-    const chunk = settings.read(usize, "TF_QWEN35_CHUNK", 128) catch |err| switch (err) {
-        error.InvalidEnvironment => {
+    const chunk = settings.read(usize, "TF_QWEN35_CHUNK", 128) catch |err| {
+        if (err == error.InvalidEnvironment) {
             problem.* = "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128";
             return error.InvalidChunk;
-        },
-        else => return err,
+        }
+        return err;
     };
     if (chunk == 0 or chunk > window) {
         problem.* = "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128";
