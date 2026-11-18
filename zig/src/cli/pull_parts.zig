@@ -1,6 +1,7 @@
 //! Large files as fixed pieces on one shared queue; a finished piece leaves a marker, so a restart fetches the rest.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Auth = @import("pull_auth.zig").Auth;
 
 /// Files at least this large come down in pieces.
 pub const threshold: u64 = 64 << 20;
@@ -25,6 +26,7 @@ fn marker(a: Allocator, path: []const u8, i: u64) ![]const u8 {
 
 const Shared = struct {
     io: std.Io,
+    auth: Auth,
     files: []const File,
     handles: []const std.Io.File,
     todo: []const Piece,
@@ -35,7 +37,7 @@ const Shared = struct {
 };
 
 /// `files` as `bytes`-sized pieces over up to 16 connections; error.RangeUnsupported when a range gets the whole file.
-pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, progress: ?*std.Io.Writer) !void {
+pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, auth: Auth, progress: ?*std.Io.Writer) !void {
     const w = std.Io.Dir.cwd();
     const handles = try a.alloc(std.Io.File, files.len);
     var opened: usize = 0;
@@ -53,7 +55,7 @@ pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, progress
             left += todo.getLast().end - todo.getLast().first;
         }
     }
-    var s: Shared = .{ .io = io, .files = files, .handles = handles, .todo = todo.items };
+    var s: Shared = .{ .io = io, .auth = auth, .files = files, .handles = handles, .todo = todo.items };
     var failures: [workers]?anyerror = @splat(null);
     var threads: [workers]std.Thread = undefined;
     const n = @min(workers, todo.items.len);
@@ -108,7 +110,7 @@ fn get(s: *Shared, client: *std.http.Client, p: Piece) !void {
     var last: anyerror = error.ReadFailed;
     for (0..attempts) |_| {
         range(s, client, p, &done) catch |e| {
-            if (e == error.RangeUnsupported) return e;
+            if (e == error.RangeUnsupported or e == error.HubDenied) return e;
             last = e;
             continue;
         };
@@ -123,11 +125,10 @@ fn range(s: *Shared, client: *std.http.Client, p: Piece, done: *u64) !void {
     if (from >= p.end) return;
     var range_buf: [64]u8 = undefined;
     const headers = [_]std.http.Header{.{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ from, p.end - 1 }) }};
-    var req = try client.request(.GET, try std.Uri.parse(s.files[p.file].url), .{ .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
-    defer req.deinit();
-    try req.sendBodiless();
+    var req: std.http.Client.Request = undefined;
     var redirect_buf: [8 << 10]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
+    var response = try s.auth.send(client, &req, .GET, try std.Uri.parse(s.files[p.file].url), .{ .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &redirect_buf);
+    defer req.deinit();
     if (response.head.status != .partial_content or startOf(response.head) != from) return error.RangeUnsupported;
     var reader_buf: [64 << 10]u8 = undefined;
     var r = response.reader(&reader_buf);

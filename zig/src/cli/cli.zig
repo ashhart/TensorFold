@@ -16,6 +16,7 @@ const usage =
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
+    \\                (a gated or private REPO: set HF_TOKEN, or log in with `hf auth login`)
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
     \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
