@@ -68,7 +68,7 @@ pub const Format = enum {
     }
 };
 
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: ?f32 = null, steering: ?*const api.SpeechSteering = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: ?f32 = null, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -155,7 +155,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     if (srv.zonos) |state| {
         const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
         const made = try zonos.plan(state, cx, srv.text, sp, input, voice, raw);
-        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .conditions = made.conditions, .guidance = made.guidance, .speaker = made.speaker, .steering = made.steering, .sampling = sampling, .format = format, .stream = stream };
+        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .conditions = made.conditions, .guidance = made.guidance, .speaker = made.speaker, .steering = made.steering, .laci = made.laci, .sampling = sampling, .format = format, .stream = stream };
     }
     const refs = try voiceRefs(srv, cx, raw);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
@@ -254,6 +254,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .reference_audio = plan.reference_audio,
         .conditions = plan.conditions,
         .steering = plan.steering,
+        .laci = plan.laci,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();

@@ -76,7 +76,8 @@ pub fn build(gpa: std.mem.Allocator, ids: []const u32, speaker: Speaker, silence
     text[C] = bos;
     try rows.append(gpa, text);
     for (ids) |id| {
-        if (id + token_offset >= cfg.text_vocab) return error.BadTextToken;
+        // the padding row is no token; ids past it are the release's extra rows, which the engine checks
+        if (id + token_offset == cfg.text_vocab) return error.BadTextToken;
         text[C] = @intCast(id + token_offset);
         try rows.append(gpa, text);
     }

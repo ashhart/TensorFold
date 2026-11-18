@@ -11,6 +11,10 @@ pub const voices = @import("voices.zig");
 pub const request = @import("request.zig");
 pub const steering = @import("steering.zig");
 pub const steer_bundle = @import("steer_bundle.zig");
+pub const laci = @import("laci.zig");
+pub const laci_probe = @import("laci_probe.zig");
+pub const laci_run = @import("laci_run.zig");
+pub const short_text = @import("short_text.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
@@ -42,6 +46,10 @@ test {
     _ = voices;
     _ = steering;
     _ = steer_bundle;
+    _ = laci;
+    _ = @import("laci_detect.zig");
+    _ = laci_probe;
+    _ = short_text;
     _ = codec_weights;
     _ = quantizer;
 }

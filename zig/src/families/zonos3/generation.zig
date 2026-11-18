@@ -92,6 +92,11 @@ pub const Run = struct {
         return .{ .gpa = gpa, .logits = logits, .unconditional = unconditional, .scale = scale, .sampling = sampling, .max_frames = max_frames, .has_audio_prefix = has_audio_prefix };
     }
 
+    /// A regeneration (LACI): `kept` rows of the prompt's end were generated before, and count as the sampler's past.
+    pub fn keep(r: *Run, kept: []const [W]i32) !void {
+        for (kept) |row| try r.codes.append(r.gpa, row[0..C].*);
+    }
+
     pub fn deinit(r: *Run) void {
         r.rows.deinit(r.gpa);
         r.codes.deinit(r.gpa);
@@ -103,7 +108,7 @@ pub const Run = struct {
     pub fn sample(r: *Run) !bool {
         if (r.unconditional) |u| guide(@ptrCast(r.logits), u, r.scale);
         const generated = r.rows.items.len;
-        var row = try sampler.sample(r.gpa, r.logits, r.codes.items, generated, cfg.eoa_id, r.sampling);
+        var row = try sampler.sample(r.gpa, r.logits, r.codes.items, r.codes.items.len, cfg.eoa_id, r.sampling);
         coldStart(&row, generated, r.has_audio_prefix);
         try r.codes.append(r.gpa, row);
         var full: [W]i32 = undefined;

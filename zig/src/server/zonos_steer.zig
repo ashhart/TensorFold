@@ -25,15 +25,19 @@ pub const fields = struct {
 /// The ZONOS3 paths and decoders a server may be started with (Args.zonos).
 pub const Paths = struct {
     steer_bundle: ?[]const u8 = null,
+    laci_heads: ?[]const u8 = null,
+    short_text: ?[]const u8 = null,
 };
 
 pub const flags = [_]@import("cli.zig").Flag{
     .{ .name = "--steer-bundle", .path = true, .native = true },
+    .{ .name = "--laci-heads", .path = true, .native = true },
+    .{ .name = "--short-text", .path = true, .native = true },
 };
 
 /// Sets a ZONOS3 flag on `out` (the server's Args); false: not one of them.
 pub fn flag(out: anytype, name: []const u8, value: []const u8) bool {
-    if (std.mem.eql(u8, name, "--steer-bundle")) out.zonos.steer_bundle = value else return false;
+    if (std.mem.eql(u8, name, "--steer-bundle")) out.zonos.steer_bundle = value else if (std.mem.eql(u8, name, "--laci-heads")) out.zonos.laci_heads = value else if (std.mem.eql(u8, name, "--short-text")) out.zonos.short_text = value else return false;
     return true;
 }
 
@@ -187,11 +191,12 @@ test "without a bundle controls are refused, and a hold below 1; plain requests 
     try t.expect(std.mem.indexOf(u8, cx.message, "cannot be combined") != null);
 }
 
-test "--steer-bundle names the bundle file" {
+test "--steer-bundle and --laci-heads name their files" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const cli = @import("cli.zig");
     var u: cli.Usage = .{};
     try std.testing.expect((try cli.parse(arena.allocator(), &.{"m"}, &u)).zonos.steer_bundle == null);
     try std.testing.expectEqualStrings("b/bundle.json", (try cli.parse(arena.allocator(), &.{ "m", "--steer-bundle", "b/bundle.json" }, &u)).zonos.steer_bundle.?);
+    try std.testing.expectEqualStrings("heads", (try cli.parse(arena.allocator(), &.{ "m", "--laci-heads=heads" }, &u)).zonos.laci_heads.?);
 }

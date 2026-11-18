@@ -43,7 +43,9 @@ pub const Lane = struct { kv: [cfg.layers][2]u64, conv: [cfg.layers]u64, gstate:
 
 /// One lane's next row in a pass over several lanes, and where its logits go.
 pub const Steer = @import("../steering.zig").Steer;
-pub const Turn = struct { lane: usize, row: [W]i32, out: *[cfg.head_rows]f32, steer: []const Steer = &.{} };
+pub const Probed = @import("../laci_probe.zig").Probed;
+const probe_layers = @import("../laci_probe.zig").layers;
+pub const Turn = struct { lane: usize, row: [W]i32, out: *[cfg.head_rows]f32, steer: []const Steer = &.{}, probe: ?*Probed = null };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -63,6 +65,7 @@ pub const Engine = struct {
     gstate: [cfg.layers]u64, // GDN layers: fp32 [4][128][128]
     state: u64, // the conv and recurrent states in one block (zeroed per request)
     state_bytes: usize,
+    row_host: [][W]i32, // [R] a pass's rows with extra text ids set to the padding row
     lanes: std.ArrayList(Lane), // every stream's state; lanes[active] is stale while the fields above run it
     active: usize,
     // scratch (R = max_rows)
@@ -92,6 +95,9 @@ pub const Engine = struct {
     row_up: u64, // [D] a replaced row on its way in
     steer: u64, // [R][2][D]: a steered row of a bank source, then its delta
     unit: u64, // [2], each 1.0: the weights that make z3_combine a sum
+    probe_q: u64, // [R][attention layers][512]: probed rows' queries on their way out
+    mask_kv: [2]u64, // [max_ctx][128] each: the keys and values a masked head sees, closed up
+    mask_out: u64, // [512]: a row's attention over them
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, o: Options) !*Engine {
         try o.validate();
@@ -121,6 +127,8 @@ pub const Engine = struct {
             gpa.destroy(e.w);
         }
         errdefer e.freeState();
+        e.row_host = try gpa.alloc([W]i32, o.max_rows);
+        errdefer gpa.free(e.row_host);
         try e.allocState();
         try e.put(e.unit, std.mem.asBytes(&[2]f32{ 1, 1 }));
         try e.reset();
@@ -132,6 +140,7 @@ pub const Engine = struct {
         e.freeState();
         e.w.deinit();
         e.gpa.destroy(e.w);
+        e.gpa.free(e.row_host);
         e.k.unload();
         e.stream.deinit();
         e.ctx.deinit();
@@ -264,6 +273,9 @@ pub const Engine = struct {
         e.row_up = try e.alloc(D * 4);
         e.steer = try e.alloc(R * 2 * D * 4);
         e.unit = try e.alloc(2 * 4);
+        e.probe_q = try e.alloc(R * probe_layers * cfg.attn_inner * 4);
+        for (&e.mask_kv) |*m| m.* = try e.alloc(e.o.max_ctx * cfg.kv_width * 4);
+        e.mask_out = try e.alloc(cfg.attn_inner * 4);
     }
 
     fn buf(e: *Engine, ptr: u64) Buf {
@@ -299,7 +311,7 @@ pub const Engine = struct {
         if (probe != null and rows.len > e.o.max_rows) return error.ProbeNeedsOnePass;
         for (rows) |r| {
             for (r[0..cfg.codebooks]) |code| if (code < 0 or code >= cfg.audio_vocab) return error.BadFrameRow;
-            if (r[cfg.codebooks] < 0 or r[cfg.codebooks] >= e.w.text_rows) return error.BadFrameRow;
+            if (r[cfg.codebooks] < 0 or r[cfg.codebooks] >= e.w.textIds()) return error.BadFrameRow;
         }
         var at: usize = 0;
         while (at < rows.len) {
@@ -335,10 +347,37 @@ pub const Engine = struct {
             row.* = turn.row;
         }
         try e.pass(rows[0..turns.len], 0, &.{}, true, null, turns, &.{});
-        for (turns, 0..) |turn, b| try e.buf(e.logits + b * cfg.head_rows * 4).downloadAsync(0, std.mem.asBytes(turn.out), e.stream.handle);
+        for (turns, 0..) |turn, b| {
+            try e.buf(e.logits + b * cfg.head_rows * 4).downloadAsync(0, std.mem.asBytes(turn.out), e.stream.handle);
+            if (turn.probe) |p| try e.buf(e.probe_q + b * probe_layers * cfg.attn_inner * 4).downloadAsync(0, std.mem.asBytes(&p.q), e.stream.handle);
+        }
         try e.stream.synchronize();
         for (turns) |turn| e.lanes.items[turn.lane].position += 1;
         e.position = e.lanes.items[e.active].position;
+    }
+
+    /// ACI (lm._masked_heads): turn `b`'s head again over the keys it may see, closed up into one cache.
+    fn maskedHead(e: *Engine, l: *const Lane, li: usize, b: usize, m: @import("../laci_probe.zig").Mask, p: *const Probed) !void {
+        const row = cfg.kv_width * 4;
+        const after = p.text_start + p.text_len;
+        if (m.hi >= p.text_len or m.lo > m.hi or after > l.position) return error.BadProbeWindow;
+        const window = m.hi - m.lo + 1;
+        const tail = l.position + 1 - after; // the row's own key is in the cache already
+        for (e.mask_kv, l.kv[li]) |dst, src| {
+            if (p.text_start > 0) try e.buf(dst).copyFrom(0, src, p.text_start * row, e.stream.handle);
+            try e.buf(dst).copyFrom(p.text_start * row, src + (p.text_start + m.lo) * row, window * row, e.stream.handle);
+            try e.buf(dst).copyFrom((p.text_start + window) * row, src + after * row, tail * row, e.stream.handle);
+        }
+        const qb = e.q + b * cfg.attn_inner * 4;
+        try e.k.attention(e.stream, qb, e.mask_kv[0], e.mask_kv[1], e.gate + b * cfg.heads * 4, p.text_start + window + tail - 1, e.mask_out, 1);
+        const head = m.head * cfg.head_dim * 4;
+        try e.buf(e.y + b * cfg.attn_inner * 4).copyFrom(head, e.mask_out + head, cfg.head_dim * 4, e.stream.handle);
+    }
+
+    /// The keys of cache rows [start, start + out.len / 128) of attention layer `layer` on the lane in use.
+    pub fn keys(e: *Engine, layer: usize, start: usize, out: []f32) !void {
+        if (cfg.usesGdn(layer) or out.len % cfg.kv_width != 0 or start + out.len / cfg.kv_width > e.position) return error.NoSuchKeys;
+        try e.download(e.kv[layer][0] + start * cfg.kv_width * 4, std.mem.sliceAsBytes(out));
     }
 
     /// Bank source `source` of this pass takes its rows' deltas: source + delta, one fp32 add (lm.forward's source()).
@@ -361,8 +400,24 @@ pub const Engine = struct {
         const t = rows.len;
         const R = e.o.max_rows;
         const pos0 = e.position;
-        try e.put(e.rows, std.mem.sliceAsBytes(rows));
+        // an extra text id (a phoneme, start or pause token) embeds as the padding row; its fp32 row comes below
+        var extra = false;
+        for (rows) |r| extra = extra or r[cfg.codebooks] >= e.w.text_rows;
+        if (extra) {
+            for (e.row_host[0..t], rows) |*to, from| {
+                to.* = from;
+                if (from[cfg.codebooks] >= e.w.text_rows) to[cfg.codebooks] = cfg.text_vocab;
+            }
+            try e.put(e.rows, std.mem.sliceAsBytes(e.row_host[0..t]));
+        } else try e.put(e.rows, std.mem.sliceAsBytes(rows));
         try k.embed(s, e.rows, e.w.tables, cfg.audio_vocab, e.mixed, D, t);
+        if (extra) for (rows, 0..) |r, i| {
+            if (r[cfg.codebooks] < e.w.text_rows) continue;
+            var vec: [D]f32 = undefined;
+            e.w.extraRow(@intCast(r[cfg.codebooks]), &vec);
+            try e.put(e.row_up, std.mem.asBytes(&vec));
+            try e.buf(e.mixed).copyFrom(i * D * 4, e.row_up, D * 4, s.handle);
+        };
         if (probe) |p| try p.f(p.ctx, "emb_sum", e.mixed, t, D);
         for (replaced) |r| if (r.row >= first and r.row < first + t) {
             try e.put(e.row_up, std.mem.asBytes(&r.vec));
@@ -407,6 +462,10 @@ pub const Engine = struct {
                             const qb = e.q + b * cfg.attn_inner * 4;
                             try k.attnPrep(s, qb, e.kvraw + b * 2 * cfg.kv_width * 4, a.temp, l.position, l.kv[li][0], l.kv[li][1], cfg.rope_theta, 1);
                             try k.attention(s, qb, l.kv[li][0], l.kv[li][1], e.gate + b * cfg.heads * 4, l.position, e.y + b * cfg.attn_inner * 4, 1);
+                            if (turn.probe) |p| {
+                                try e.buf(e.probe_q + (b * probe_layers + li / cfg.gdn_period) * cfg.attn_inner * 4).copyFrom(0, qb, cfg.attn_inner * 4, s.handle);
+                                for (p.masks) |m| if (m.layer == li) try e.maskedHead(l, li, b, m, p);
+                            }
                         }
                     } else {
                         try k.attnPrep(s, e.q, e.kvraw, a.temp, pos0, e.kv[li][0], e.kv[li][1], cfg.rope_theta, t);

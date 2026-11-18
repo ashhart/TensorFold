@@ -79,6 +79,8 @@ pub fn addTo(
             \\pub const voices = r.voices;
             \\pub const steering = r.steering;
             \\pub const steer_bundle = r.steer_bundle;
+            \\pub const laci = r.laci;
+            \\pub const short_text = r.short_text;
             \\pub const temperature = r.temperature;
             \\pub const top_p = r.top_p;
             \\pub const top_k = r.top_k;

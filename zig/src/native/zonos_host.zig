@@ -70,26 +70,11 @@ pub fn budget(context: u32, max_frames: ?u32) !struct { frames: u32, prompt: u32
     return .{ .frames = frames, .prompt = context - frames };
 }
 
-/// What a request's prompt rows name: [reference prefix | speaker row] conditions, the text from BOS to EOS, silence.
-pub const Layout = struct {
-    condition_row: usize,
-    prefill: usize,
-
-    pub fn of(rows: []const [W]i32) !Layout {
-        var first: ?usize = null;
-        var last: ?usize = null;
-        for (rows, 0..) |row, i| {
-            if (row[C] == z3.prompt.bos and first == null) first = i;
-            if (row[C] == z3.prompt.eos) last = i;
-        }
-        const b = first orelse return error.BadPromptLayout;
-        const e = last orelse return error.BadPromptLayout;
-        if (b < cfg.conditions or e <= b) return error.BadPromptLayout;
-        return .{ .condition_row = b - cfg.conditions, .prefill = rows.len - 1 - e };
-    }
-};
+pub const Layout = @import("zonos_layout.zig").Layout;
+pub const chunkFrames = @import("zonos_layout.zig").chunkFrames;
 
 const Job = struct { id: api.Id, request: *const api.SpeechRequest, sink: api.Sink };
+const LaciRun = z3.laci_run.Run(z3.Replace);
 
 /// A request's place among those running: its lanes on the backbone and the decoder, and its generation so far.
 const Slot = struct {
@@ -106,6 +91,14 @@ const Slot = struct {
     steer: []z3.Steer = &.{}, // that delta by bank source
     spans: []z3.steering.Span = &.{},
     twin_steered: bool = false, // a speaker twin takes the deltas too; a controls twin is the prompt without them
+    laci: ?LaciRun = null, // a request under LACI: its attempts, in place of `run`
+    heads: []z3.laci.Head = &.{},
+    short: z3.short_text.Config = undefined, // a short text's cut settings, over the request's weights
+    kept: [1 + cfg.conditions]z3.Replace = undefined, // the replaced rows, which a regeneration's prompt takes again
+
+    fn steerFor(ctx: *anyopaque, frame: usize) []const z3.Steer {
+        return @as(*Slot, @ptrCast(@alignCast(ctx))).steerAt(frame);
+    }
 
     /// The deltas of the forward that takes generated row `frame`; none when the frame is not steered.
     fn steerAt(s: *Slot, frame: usize) []const z3.Steer {
@@ -128,15 +121,18 @@ const Guarded = struct {
         try g.h.e.lastLogits(out);
     }
 
+    pub fn reset(g: Guarded) !void {
+        try g.h.e.reset();
+    }
+
+    pub fn keys(g: Guarded, layer: usize, first: usize, out: []f32) !void {
+        try g.h.e.keys(layer, first, out);
+    }
+
     pub fn swap(g: Guarded) void {
         g.h.e.use(if (g.h.e.active == g.slot.index) g.slot.twin.? else g.slot.index);
     }
 };
-
-/// Frames a streamed chunk waits for after `spoken` generated frames went out: 1, 2, 4, 8, then 15 (a second).
-pub fn chunkFrames(spoken: usize) usize {
-    return @min(15, 1 + spoken);
-}
 
 /// A request's audio: streamed or whole, it decodes in the same growing chunks (cuBLAS rounds by a call's rows).
 const Audio = struct {
@@ -152,6 +148,8 @@ const Audio = struct {
         if (!finished and !r.stream) return;
         const all = try z3.speech.frames(h.gpa, s.prefill, rows, eos_frame);
         defer h.gpa.free(all);
+        // StreamDecoder: a reply that ends before its first generated frame is empty, the silence rows unspoken
+        if (finished and s.decoded == 0 and all.len <= s.prefill.len) return;
         const before = s.decoded;
         while (s.decoded < all.len) {
             const chunk = (s.prefill.len -| s.decoded) + chunkFrames(s.decoded -| s.prefill.len);
@@ -237,11 +235,13 @@ const Host = struct {
         for (r.conditions, 0..) |bucket, i| if (bucket > h.e.c.buckets[i]) return false;
         for (r.frames) |row| {
             for (row[0..C]) |code| if (code < 0 or code >= cfg.audio_vocab) return false;
-            if (row[C] < 0 or row[C] >= h.e.w.text_rows) return false;
+            if (row[C] < 0 or row[C] >= h.e.w.textIds()) return false;
         }
         const layout = Layout.of(r.frames) catch return false;
         if (r.cfg_gamma != 1 and layout.condition_row == 0 and r.reference_audio.len == 0) return false;
         if (r.steering) |st| if (!z3.steering.valid(st, r.cfg_gamma != 1)) return false;
+        // LACI runs one stream: no guidance twin of either kind
+        if (r.laci) |lc| if (!z3.laci.valid(lc, r.cfg_gamma != 1 or (r.steering != null and r.steering.?.guidance != 1))) return false;
         return true;
     }
 
@@ -350,6 +350,16 @@ const Host = struct {
             try h.start(slot, job);
             return null;
         }
+        if (slot.laci) |*lr| {
+            // a failed attempt's regeneration runs its prompt inside this turn
+            const got = try lr.step(Guarded{ .h = h, .slot = slot });
+            try slot.audio.row(got.rows, got.eos_frame, got.final);
+            if (got.final) return if (got.eos_frame != null) .stop else .length;
+            const next = got.turn orelse return null;
+            h.turns[n.*] = .{ .lane = slot.index, .row = next.row, .out = @ptrCast(lr.run.logits), .steer = next.steer, .probe = next.probe };
+            n.* += 1;
+            return null;
+        }
         const finished = try slot.run.sample();
         try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
         if (finished) return if (slot.run.eos_frame != null) .stop else .length;
@@ -433,12 +443,27 @@ const Host = struct {
         try h.e.reset();
         try h.codec.reset();
         slot.audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
-        slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
+        if (r.laci) |lc| {
+            slot.heads = try gpa.alloc(z3.laci.Head, lc.heads.len);
+            for (slot.heads, lc.heads) |*to, from| to.* = .{ .layer = from.layer, .head = from.head, .radius = from.radius };
+            slot.kept = replaced;
+            const text = layout.condition_row + cfg.conditions;
+            if (lc.short) |sh| {
+                slot.short = .{ .pause_marker = "", .max_words = 0, .max_ratio = .{ 0, 0 }, .lookback = sh.lookback, .min_voiced = sh.min_voiced, .max_frames = sh.max_frames, .max_retries = sh.max_retries, .threshold = sh.threshold, .weights = sh.weights, .fillers = &.{} };
+            }
+            const cut: ?z3.short_text.Cut = if (lc.short) |sh| z3.short_text.Cut.init(gpa, &slot.short, sh.filler_token) else null;
+            const setup: z3.laci_run.Setup = .{ .short = cut, .heads = .{ .heads = slot.heads, .frames_per_token = lc.frames_per_token }, .text_start = text, .text_len = rows.len - layout.prefill - text, .prefill = layout.prefill, .hold = !r.stream };
+            slot.laci = try LaciRun.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, slot.kept[0..n], setup, sampling, r.max_frames);
+            if (r.steering != null) slot.laci.?.steer = .{ .ctx = slot, .at = Slot.steerFor, .twin = false };
+        } else slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
         slot.started = true;
     }
 
     fn finish(h: *Host, slot: *Slot, job: Job, reason: api.Reason, message: []const u8) void {
-        if (slot.started) slot.run.deinit();
+        if (slot.laci) |*lr| lr.deinit() else if (slot.started) slot.run.deinit();
+        slot.laci = null;
+        h.gpa.free(slot.heads);
+        slot.heads = &.{};
         h.gpa.free(slot.cloned);
         h.gpa.free(slot.delta);
         h.gpa.free(slot.steer);
@@ -533,13 +558,17 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };
 }
 
+test {
+    _ = @import("zonos_layout.zig");
+}
+
 test "need: the weights, then state that grows with the context and with the frame budget" {
     const t = std.testing;
     const base = need(4096, 2000);
-    try t.expectEqual(@as(u64, 3_862_487_552), base);
+    try t.expectEqual(@as(u64, 3_866_946_048), base);
     try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
-    // two attention layers keep a key row and a value row a position
-    try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
+    // two attention layers keep a key row and a value row a position, and a masked head's scratch one of each
+    try t.expectEqual(@as(u64, (2 * 2 + 2) * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
 }
 
 test "budget: the release's frame budget where the context holds it, the rest for the prompt" {
@@ -552,25 +581,6 @@ test "budget: the release's frame budget where the context holds it, the rest fo
     try t.expectError(error.BadZonosContext, budget(32769, null));
     try t.expectError(error.BadZonosFrames, budget(4096, 4096));
     try t.expectError(error.BadZonosFrames, budget(4096, 5));
-}
-
-test "chunkFrames: a streamed reply's chunks double to a second" {
-    const t = std.testing;
-    var spoken: usize = 0;
-    for ([_]usize{ 1, 2, 4, 8, 15, 15 }) |want| {
-        try t.expectEqual(want, chunkFrames(spoken));
-        spoken += want;
-    }
-}
-
-test "Layout: the condition rows sit before the text and the silence rows after it" {
-    const t = std.testing;
-    var p = try z3.prompt.build(t.allocator, &.{ 9, 8 }, .embedding, @splat(1), 3);
-    defer p.deinit(t.allocator);
-    const l = try Layout.of(p.rows);
-    try t.expectEqual(p.condition_row, l.condition_row);
-    try t.expectEqual(@as(usize, 3), l.prefill);
-    try t.expectError(error.BadPromptLayout, Layout.of(p.rows[0..3]));
 }
 
 test "laneBytes: each request at once past the first adds a backbone lane and a decoder lane, no weights" {

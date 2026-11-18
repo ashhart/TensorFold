@@ -27,6 +27,23 @@ pub const SpeechRequest = struct {
     conditions: []const u32 = &.{},
     /// What the request's steering controls add to its generated frames; null: nothing.
     steering: ?*const SpeechSteering = null,
+    /// Generate under LACI: the reading of the text watched, a skip or a stall rolled back and regenerated.
+    laci: ?*const SpeechLaci = null,
+};
+
+/// The alignment heads of the request's language: attention heads whose attention over the text follows the speech.
+pub const SpeechLaci = struct {
+    heads: []const Head,
+    /// The pace prior, in generated frames a text token.
+    frames_per_token: f64,
+    /// A short text: the prompt holds a filler sentence after it, and the reply is cut where its reading starts.
+    short: ?Short = null,
+
+    /// `filler_token`: the filler's first text row (0 is BOS); the rest are the cut's settings and silence weights.
+    pub const Short = struct { filler_token: u32, lookback: u32, min_voiced: u32, max_frames: u32, max_retries: u32, threshold: i32, weights: []const i8 };
+
+    /// `radius`: the half-width of the head's window while a regeneration holds it to the text it failed on.
+    pub const Head = struct { layer: u32, head: u32, radius: i64 };
 };
 
 /// Deltas on a family's hidden sources, a row of the model's width for each of `sources` in every delta.
