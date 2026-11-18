@@ -319,7 +319,7 @@ pub const Generation = struct {
         }
         // An unclosed-think reply that ended on its own EOS still wrote an answer: also surface its text as content.
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
-        // Recovery only when reasoning was asked (thinking on, no tools, no grammar): the unclosed-think EOS reply's text becomes content.
+        // Recovery only when reasoning was asked: no tools, no grammar; the unclosed-think EOS text becomes content.
         const recovered = g.recover and native == null and g.thinking and reasons and reasoning != null and
             reply_text.pyStrip(content).len == 0 and
             g.endedOnEos(reason, raw, stopped) and
