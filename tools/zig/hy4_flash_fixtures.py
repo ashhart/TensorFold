@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Rebuild zig/src/families/hy4_flash/fixtures/header.txt from a Hy4-flash checkpoint's safetensors headers.
+"""Rebuild fixtures/header.txt (name, dtype, dims a tensor) from a Hy4-flash checkpoint's safetensors headers."""
 
-    python3 tools/zig/hy4_flash_fixtures.py CHECKPOINT_DIR > zig/src/families/hy4_flash/fixtures/header.txt
-
-One line a tensor: name, dtype, dims. Kept: layers 0, 1 and 2 (dense, sparse with Engram, sliding), experts 0 and
-the last of each layer, drafter layer 0, every tensor outside the layers, and the vision tower's first block.
-"""
+# python3 tools/zig/hy4_flash_fixtures.py CHECKPOINT_DIR > zig/src/families/hy4_flash/fixtures/header.txt
+# Kept: layers 0, 1 and 2, experts 0 and the last of each layer, drafter layer 0, tensors outside the layers, vision block 0.
 
 import glob
 import json
