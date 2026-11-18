@@ -65,6 +65,7 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
     try validate(c, rows);
     const h: c_int = @intCast(c.heads);
     if (wide) |w| {
+        const pdl = ks.pdl and rows < wide_rows; // a prompt chunk's chain launches plain: dependent, its first token comes later
         var a: cuda.Args = .{};
         a.add(h);
         a.add(c.p);
@@ -76,14 +77,14 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
         a.add(c.lower);
         for ([_]u64{ w.q, s.k, s.v, s.g, s.b }) |v| a.add(v);
         const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = @intCast(c.heads) };
-        try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 }, .pdl = ks.pdl }, stream, &a);
+        try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 }, .pdl = pdl }, stream, &a);
         var b: cuda.Args = .{};
         b.add(h);
         for ([_]u64{ c.state_in, w.q, s.k, s.v, s.g, s.b }) |v| b.add(v);
         b.add(@as(c_int, @intCast(rows)));
         b.add(w.y);
         b.add(s.state_out);
-        try cuda.launch.launch(ks.step, .{ .grid = .{ .x = @intCast(c.heads), .y = dv / 4 / 8 }, .block = .{ .x = 8 * 32 }, .pdl = ks.pdl }, stream, &b);
+        try cuda.launch.launch(ks.step, .{ .grid = .{ .x = @intCast(c.heads), .y = dv / 4 / 8 }, .block = .{ .x = 8 * 32 }, .pdl = pdl }, stream, &b);
         var o: cuda.Args = .{};
         o.add(h);
         o.add(w.y);
@@ -92,7 +93,7 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
         o.add(c.norm_w);
         o.add(c.eps);
         o.add(s.out);
-        return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv }, .pdl = ks.pdl }, stream, &o);
+        return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv }, .pdl = pdl }, stream, &o);
     }
     var a: cuda.Args = .{};
     a.add(h);
