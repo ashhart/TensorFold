@@ -73,6 +73,10 @@ const Ops = struct {
     pub fn body(o: Ops, s: *lanes.Stream, at: usize, rows: usize) Chunks {
         return .{ .n = s.prompt_len, .c = o.cache(s), .at = at, .rows = rows };
     }
+    /// A submitted chunk's pocket products into its cache's usage mask (forgetting on only).
+    pub fn landed(o: Ops, s: *lanes.Stream, rows: usize) !void {
+        try o.m.countUsage(o.cache(s), rows);
+    }
     /// This prompt's ids into the prompt buffer the chunks read (the queue landed first).
     pub fn load(o: Ops, s: *lanes.Stream) void {
         const ids = s.prompt();
@@ -94,6 +98,7 @@ const Ops = struct {
             _ = self.caches.remove(s);
         }
         const c = try @import("residency.zig").openCache(self, s, rows_needed);
+        if (self.usage_enabled and !s.untaught) c.usage = .{};
         o.load(s);
         s.cached = 0;
         var at: usize = 0;
@@ -111,6 +116,7 @@ const Ops = struct {
 
     pub fn finish(o: Ops, s: *lanes.Stream) !void {
         const c = o.cache(s);
+        s.pocket_usage = c.usage;
         if (o.m.trace and c.decide != lesson_route.none) try traceLessons(o.m, c);
     }
 };

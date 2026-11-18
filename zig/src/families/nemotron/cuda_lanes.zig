@@ -57,6 +57,7 @@ pub const Cuda = struct {
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
+    usage_enabled: bool = false,
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -82,7 +83,7 @@ pub const Cuda = struct {
     }
     pub fn backend(self: *Cuda) be.Backend {
         return .{ .ptr = self, .vtable = &.{
-            .prefill = prefillFn,
+            .prefill = @import("cuda_usage.zig").prefill,
             .first = firstFn,
             .queue = queueFn,
             .read = readFn,
@@ -111,7 +112,6 @@ pub const Cuda = struct {
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
         return .{ .bits = self.bits_dev + slot * words * 4, .words = words };
     }
-
     /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const self = of(ptr);
@@ -262,8 +262,7 @@ pub const Cuda = struct {
     // -- the vtable ---------------------------------------------------------------------------------------------
 
     /// A new sequence for the stream, its sampling, then its prompt in chunks; the head absorbs every row but the last.
-    fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-        const self = of(ptr);
+    pub fn prefillPlain(self: *Cuda, s: *lanes.Stream) anyerror!void {
         const e = self.e;
         const ids = s.prompt();
         if (ids.len == 0 or ids.len + s.max_new + state.max_rows > e.max_len) return error.PromptTooLong;
