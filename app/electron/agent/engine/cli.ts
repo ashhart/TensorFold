@@ -92,10 +92,28 @@ export function parseCapabilities(text: string): EngineCapabilities {
   }
 }
 
-// MLX affine quantization as the engine's format names spell it: mlx-q4g64, mlx-q6g32.
-export function formatName(config: { quantization?: { bits?: unknown; group_size?: unknown } | null } | null | undefined): string | null {
+interface CheckpointFormat {
+  model_type?: unknown
+  quantization?: { bits?: unknown; group_size?: unknown } | null
+  quantization_config?: unknown
+  compression_config?: unknown
+  dtype?: unknown
+  torch_dtype?: unknown
+  text_config?: CheckpointFormat | null
+}
+
+// Format names as advertised by the engine, such as mlx-q4g64 and bf16.
+export function formatName(config: CheckpointFormat | null | undefined): string | null {
   const q = config?.quantization
-  if (!q || typeof q !== 'object') return null
+  if (q == null) {
+    // The capabilities list also includes BF16 engines for embeddings and OCR.
+    if (config?.model_type !== 'spark2_5') return null
+    const tower = config?.text_config
+    if ([config, tower].some((part) => part?.quantization != null || part?.quantization_config != null || part?.compression_config != null)) return null
+    const dtype = tower?.dtype ?? tower?.torch_dtype ?? config?.dtype ?? config?.torch_dtype
+    return dtype === 'bfloat16' ? 'bf16' : null
+  }
+  if (typeof q !== 'object') return null
   const bits = Number(q.bits)
   const group = q.group_size == null ? 32 : Number(q.group_size)
   if (!Number.isInteger(bits) || !Number.isInteger(group)) return null
