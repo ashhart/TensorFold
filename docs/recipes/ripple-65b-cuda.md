@@ -40,11 +40,13 @@ tokens, so a thinking budget and logprobs are refused by name.
 
 ## EXL3 packs
 
-An ExLlamaV3 pack of the bf16 release (`quant_method` `exl3`, mul1 codebook, as exllamav3 1.6 writes it) loads too:
-every projection and the head run through main's `cuda.exl3.Dense` with bf16 inputs and outputs, in 128-row blocks
-for prompt chunks and decode rows alike, and the rest of the forward (glue, attention, caches, lanes) is the NVFP4
-release's. q, k and g stay three projections, written as three planar blocks. The embeddings, norms and
-`value_res_lambda` are read as the release's; a pack whose lambda is not a bf16 value is refused.
+One ExLlamaV3 pack of the bf16 release loads too: `ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw` at the revision
+below. It averages 5.0 bits a weight with an 8-bit head (`quant_method` `exl3`, mul1 codebook, exllamav3 1.6.6), and it
+is the pack measured against exllamav3; a pack at another bitrate is refused by name. Every projection and the head run
+through main's `cuda.exl3.Dense` with bf16 inputs and outputs, in 128-row blocks for prompt chunks and decode rows
+alike, and the rest of the forward (glue, attention, caches, lanes) is the NVFP4 release's. q, k and g stay three
+projections, written as three planar blocks. The embeddings, norms and `value_res_lambda` are read as the release's; a
+pack whose lambda is not a bf16 value is refused.
 
 ```sh
 hf download ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw --revision 1d260f752b753d2b17571de237029b5e2251db07 \
