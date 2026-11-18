@@ -118,15 +118,14 @@ pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys
 
 const WholeArgs = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
 
-/// A one-launch block: a (split 1, 4 columns), b (split 4, 4 columns), c (split 4, 8 columns), d (split 1, 1 column);
-/// e (split 1, 2 columns) and f (split 4, 4 columns) decode each word where it is used and read X 8 bytes at a time.
+/// A one-launch block by split and columns; e and f decode each word where it is used and read X 8 bytes at a time.
 pub const Kind = enum(u3) {
-    a,
-    b,
-    c,
-    d,
-    e,
-    f,
+    a, // split 1, 4 columns
+    b, // split 4, 4 columns
+    c, // split 4, 8 columns
+    d, // split 1, 1 column
+    e, // split 1, 2 columns
+    f, // split 4, 4 columns
 
     pub fn columns(k: Kind) u32 {
         return switch (k) {
