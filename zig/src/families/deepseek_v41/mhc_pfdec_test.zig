@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const env = @import("../../platform/environment.zig");
+const env = @import("sys").environment;
 const calls = @import("block_calls.zig");
 const block = @import("block.zig");
 const check = @import("calls_check.zig");
@@ -253,7 +253,7 @@ fn expectDeferred(a: std.mem.Allocator, off: []const Call, on: []const Call) !vo
     }
 }
 
-test "TF_DSV41_MHC_PFDEC reader: 0..64 rows; bad values refused by the validator by name, reader keeps a safe value" {
+test "TF_DSV41_MHC_PFDEC reader: 0..64 rows; bad values refused by the validator by name, and by the reader" {
     const Fake = struct {
         var v: ?[]const u8 = null;
         fn get(name: []const u8) ?[]const u8 {
@@ -262,17 +262,18 @@ test "TF_DSV41_MHC_PFDEC reader: 0..64 rows; bad values refused by the validator
     };
     const Bad = struct {
         raw: []const u8,
-        fn get(b: Bad, name: []const u8) ?[]const u8 {
+        pub fn get(b: @This(), name: []const u8) ?[]const u8 {
             return if (eq(name, "TF_DSV41_MHC_PFDEC")) b.raw else null;
         }
     };
     Fake.v = null;
     try testing.expectEqual(@as(i64, 0), try pk.mhcPfRows(&Fake.get));
-    for ([_][]const u8{ "0", "1", "17", " 64 " }, [_]i64{ 0, 1, 17, 64 }) |s, want| {
+    // blank reads as unset, as for every setting the shared validator holds
+    for ([_][]const u8{ "", "0", "1", "17", " 64 " }, [_]i64{ 0, 0, 1, 17, 64 }) |s, want| {
         Fake.v = s;
         try testing.expectEqual(want, try pk.mhcPfRows(&Fake.get));
     }
-    for ([_][]const u8{ "65", "-1", "on", "" }) |s| {
+    for ([_][]const u8{ "65", "-1", "on" }) |s| {
         const bad = Bad{ .raw = s };
         try testing.expectError(error.InvalidEnvironment, env.checkScope(.dsv41, bad));
         const why = try env.refusal(testing.allocator, bad, .{ .dsv41 = true });
@@ -280,7 +281,7 @@ test "TF_DSV41_MHC_PFDEC reader: 0..64 rows; bad values refused by the validator
         try testing.expect(why != null);
         try testing.expect(std.mem.startsWith(u8, why.?, "TF_DSV41_MHC_PFDEC="));
         Fake.v = s;
-        try testing.expectEqual(@as(i64, 0), try pk.mhcPfRows(&Fake.get));
+        try testing.expectError(error.InvalidEnvironment, pk.mhcPfRows(&Fake.get));
     }
 }
 
