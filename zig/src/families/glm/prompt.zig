@@ -439,7 +439,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
         fwd.rms(x, e, p.xp, w.q_norm, p.qr, M, c.q_lora, XP, c.q_lora, c.eps);
         qmm(p, e, p.qr, w.qr_proj, p.qp, M);
     }
-    if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
+    if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, null, M, pos);
     if (fwd.on(x, "mla_absorb") and w.absorbed != null) {
         wide.headsBatch(
             &p.mm.wide.?,
@@ -566,5 +566,5 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     } else qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);
     fwd.rms(x, e, p.m_x, L.in_norm, p.m_xn, M, D, D, D, c.eps);
     qmm(p, e, p.m_xn, L.attn.mla.x_proj, p.xp, M);
-    fwd.mlaCache(x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, p.xp, @intCast(std.mem.alignForward(usize, c.xProj(), 64)), p.iw, M, pos);
+    fwd.mlaCache(x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, p.xp, @intCast(std.mem.alignForward(usize, c.xProj(), 64)), p.iw, null, M, pos);
 }

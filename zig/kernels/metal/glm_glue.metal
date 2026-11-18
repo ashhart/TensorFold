@@ -127,16 +127,17 @@ kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bf
              sg);
 }
 
-// An MLA layer's cache writes in one launch, group y: 0 kv RMSNorm, 1 indexer key norm, 2 indexer weights.
+// An MLA layer's small launches after x_proj, group y: kv norm, key norm, index weights, query norm (their bits).
 struct GlmMlaNorms {
-  int x_stride, kv_at, ik_at, iw_at, kv_width, ik_width, iw_width;
-  float kv_eps, ik_eps, iw_scale;
+  int x_stride, kv_at, ik_at, iw_at, kv_width, ik_width, iw_width, q_width;
+  float kv_eps, ik_eps, iw_scale, q_eps;
 };
 
 kernel void glm_mla_norms(const device bfloat* xp [[buffer(0)]], const device bfloat* kv_w [[buffer(1)]],
                           device bfloat* keys [[buffer(2)]], const device bfloat* ik_w [[buffer(3)]],
                           const device bfloat* ik_b [[buffer(4)]], device bfloat* ik [[buffer(5)]],
                           device bfloat* iw [[buffer(6)]], constant GlmMlaNorms& a [[buffer(7)]],
+                          const device bfloat* q_w [[buffer(8)]], device bfloat* qr [[buffer(9)]],
                           uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]],
                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float sums[33];
@@ -147,6 +148,8 @@ kernel void glm_mla_norms(const device bfloat* xp [[buffer(0)]], const device bf
                 lane);
   } else if (tg.y == 1) {
     glm_ln_row(x + a.ik_at, ik_w, ik_b, ik + size_t(tg.x) * a.ik_width, a.ik_width, a.ik_eps, sums, t, lane, sg);
+  } else if (tg.y == 3) {
+    glm_rms_row(x, q_w, qr + size_t(tg.x) * a.q_width, uint(a.q_width), a.q_eps, sums, sums + 32, t, sg, lane);
   } else if (int(t) < a.iw_width) {
     iw[size_t(tg.x) * a.iw_width + t] = bfloat(float(x[a.iw_at + int(t)]) * a.iw_scale);
   }
