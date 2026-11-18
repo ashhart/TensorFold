@@ -42,7 +42,7 @@ fn lane(d: *const Driver) qmmf.Lane {
 
 fn prompt(d: *const Driver) Prompt {
     const f = function(d, 2);
-    return .{ .mod = .{ .d = d, .handle = null }, .fp4 = f, .fp8 = f, .fp4_f32 = f, .lean = f, .lean_f32 = f, .sms = 16, .bf16_serving = true, .bf16 = function(d, 3), .bf16_f32 = function(d, 4) };
+    return .{ .mod = .{ .d = d, .handle = null }, .fp4 = f, .fp8 = f, .fp4_f32 = f, .lean = f, .lean_f32 = f, .lean_swiglu = f, .sms = 16, .bf16_serving = true, .bf16 = function(d, 3), .bf16_f32 = function(d, 4) };
 }
 
 test "BF16 prompt port: threshold, family opt-in, cached switch and decode keep the lane" {
