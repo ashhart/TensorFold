@@ -50,8 +50,10 @@ pub fn block(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref,
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
     } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
+        const one = rows == 1 and x.fused_route; // the gate/up groups replay the select: the logits alone
+        if (s & Class.route == 0 and one and on(x, "r_router")) logits(x, e, w, x_in, rows);
+        if (s & Class.route == 0 and !one) route(x, e, w, x_in, rows);
+        both(x, e, w, x_in, rows, one); // the shared expert as the gathers' last slot: two launches fewer
         if (s & Class.combine != 0 or !on(x, "combine")) return false;
         if (leave) return true;
         e.setPipeline(k.combine_0);
@@ -93,13 +95,18 @@ fn parts(w: *const wts.Moe) wide.Moe {
     return .{ .gate = w.gate, .up = w.up, .down = w.down, .sh_gate_up = w.sh_gate_up, .sh_down = w.sh_down };
 }
 
+/// The router's fp32 logits (the core route's first launch).
+fn logits(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    moe_route.logits(e, if (rows == 1) x.k.route_logits_one else x.k.route_logits, route_shape, x_in, w.router, x.sc.logits_r, rows);
+}
+
 /// The router's fp32 logits and the route: picks, weights and the window's unique experts with their members.
 fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
     if (x.fused_route) {
-        if (on(x, "r_router")) moe_route.logits(e, if (rows == 1) k.route_logits_one else k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
+        if (on(x, "r_router")) logits(x, e, w, x_in, rows);
         if (!on(x, "r_topk")) return;
         if (x.ep) |ep| if (!c.byRows()) return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
         const rl = sc.rl;
@@ -159,8 +166,8 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     e.dispatchThreads(size(32 * rows, if (part == 1) D else D / 4, zs), size(32 * rows, 1, 1)); // the shared expert: an output a simdgroup
 }
 
-/// Routed experts and the shared one (slot topk: grid z past the routed ids, the kernels' last) into `act` and `ye`.
-fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+/// Routed and shared experts into `act` and `ye` (shared: slot topk); `one`: one row whose groups replay the select.
+fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, one: bool) void {
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
@@ -171,20 +178,25 @@ fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows
     const gu_two = rows <= 4;
     const rps: u32 = if (gu_two) 2 else 4;
     if (on(x, "e_gateup")) { // a profile's knock-outs leave out one launch of this path, never the path
-        e.setPipeline(if (gu_two) k.moe_gateup_0_one else k.moe_gateup_0);
+        e.setPipeline(if (one) k.moe_gateup_pick else if (gu_two) k.moe_gateup_0_one else k.moe_gateup_0);
         bind(e, 0, .{x_in});
         shape(e, 1, .{ rows, D });
-        bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
+        bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b });
+        bind(e, 11, if (one) .{ sc.logits_r, w.bias, sc.pick } else .{ sc.uids, sc.umem, sc.ucount });
         e.setValue(c.swiglu_limit, 14);
         bind(e, 15, .{sc.act});
+        if (one) bind(e, 16, .{sc.wts});
+        if (one) e.setValue(c.routed_scale, 17);
         e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
     }
     if (!on(x, "e_down")) return;
     const down_rps: u32 = if (rows == 1) 2 else 4;
-    e.setPipeline(if (rows == 1) k.moe_down_0_one else k.moe_down_0);
+    e.setPipeline(if (one) k.moe_down_pick else if (rows == 1) k.moe_down_0_one else k.moe_down_0);
     bind(e, 0, .{sc.act});
     shape(e, 1, .{ rows, c.topk + 1, N });
-    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, sc.uids, sc.umem, sc.ucount, sc.ye });
+    bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b });
+    bind(e, 8, if (one) .{ sc.pick, sc.none, sc.none } else .{ sc.uids, sc.umem, sc.ucount });
+    bind(e, 11, .{sc.ye});
     e.dispatchThreads(size(32 * rows, D / down_rps, zs), size(32 * rows, 1, 1));
 }
 
