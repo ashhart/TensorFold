@@ -1,4 +1,4 @@
-//! tf-glm-kda-speed: GLM's KDA decode step on synthetic weights, the window kernel against kda_rows bit for bit.
+//! tf-glm-kda-speed: GLM's KDA step on synthetic weights, the window kernel and kda_parts + kda_norm against kda_rows.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -7,7 +7,8 @@ const kernels = tf.glm.kernels;
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const a = std.heap.page_allocator;
-const reps = 16;
+const reps = 40; // launches a timing, each on its own state slot
+const slots = 40; // a round's 34 layers' states and more: past the caches
 const runs = 7;
 
 const H = 64;
@@ -48,10 +49,20 @@ const Rig = struct {
     y: mtl.Buffer,
     st_out: mtl.Buffer,
     cs_out: mtl.Buffer,
+    gate: mtl.Buffer, // kda_parts' gates (forward.zig: gu)
+    st_pool: mtl.Buffer, // timing: `slots` states in and out
+    out_pool: mtl.Buffer,
+    norm: mtl.Pipeline,
+    parts: mtl.Pipeline,
 };
 
-/// forward.zig's kdaStep for `rows` rows of the generated gate.
+/// forward.zig's kdaStep for `rows` rows of the generated gate (state slot `slot` when timed).
 fn encode(e: mtl.ComputeEncoder, r: *const Rig, pipe: mtl.Pipeline, rows: u32, heads: u32) void {
+    encodeAt(e, r, pipe, rows, heads, null);
+}
+
+fn encodeAt(e: mtl.ComputeEncoder, r: *const Rig, pipe: mtl.Pipeline, rows: u32, heads: u32, slot: ?usize) void {
+    const parts = pipe.id == r.parts.id;
     e.setPipeline(pipe);
     e.setBuffer(r.p, 0, 0);
     var shape = [2]i32{ @intCast(rows), @intCast(3 * heads * D + 2 * D + heads) };
@@ -63,7 +74,19 @@ fn encode(e: mtl.ComputeEncoder, r: *const Rig, pipe: mtl.Pipeline, rows: u32, h
     e.setBuffer(r.y, 0, 16);
     e.setBuffer(r.st_out, 0, 17);
     e.setBuffer(r.cs_out, 0, 18);
-    e.dispatchThreads(mtl.Size.of(32, 32, heads), mtl.Size.of(32, 32, 1));
+    if (parts) e.setBuffer(r.gate, 0, 13);
+    if (slot) |i| {
+        e.setBuffer(r.st_pool, (i % slots) * H * D * D * 4, 12);
+        e.setBuffer(r.out_pool, (i % slots) * H * D * D * 4, 17);
+    }
+    e.dispatchThreads(mtl.Size.of(32, 32, heads), mtl.Size.of(32, if (parts) 16 else 32, 1));
+    if (!parts) return;
+    e.setPipeline(r.norm);
+    e.setBuffer(r.y, 0, 0);
+    e.setBuffer(r.gate, 0, 1);
+    e.setBuffer(r.onw, 0, 2);
+    e.setValue(@as(f32, 1e-5), 3);
+    e.dispatchGroups(mtl.Size.of(heads / 8, rows, 1), mtl.Size.of(256, 1, 1));
 }
 
 fn submit(r: *const Rig, pipe: mtl.Pipeline, rows: u32, count: usize) !f64 {
@@ -73,7 +96,7 @@ fn submit(r: *const Rig, pipe: mtl.Pipeline, rows: u32, count: usize) !f64 {
 fn submitHeads(r: *const Rig, pipe: mtl.Pipeline, rows: u32, count: usize, heads: u32) !f64 {
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (0..count) |_| encode(e, r, pipe, rows, heads);
+    for (0..count) |i| encodeAt(e, r, pipe, rows, heads, if (count > 1) i else null);
     e.end();
     cb.commit();
     cb.wait();
@@ -118,7 +141,13 @@ pub fn main() !void {
         .y = try buf(device, MAX_ROWS * W * 2),
         .st_out = try buf(device, H * D * D * 4),
         .cs_out = try buf(device, (TAPS - 1) * 3 * W * 2),
+        .gate = try buf(device, MAX_ROWS * W * 2),
+        .st_pool = try buf(device, slots * H * D * D * 4),
+        .out_pool = try buf(device, slots * H * D * D * 4),
+        .norm = k.kda_norm,
+        .parts = k.kda_parts,
     };
+    fillF(r.st_pool, slots * H * D * D, rnd, -0.1, 0.1);
     fillBf(r.p, MAX_ROWS * PS, rnd, -2, 2);
     fillBf(r.cs, (TAPS - 1) * 3 * W, rnd, -2, 2);
     fillF(r.cw, TAPS * 3 * W, rnd, -0.5, 0.5);
@@ -143,10 +172,11 @@ pub fn main() !void {
         } else if (i % 89 == 0) {
             v.* = toBf(40);
         };
-        for (1..MAX_ROWS + 1) |rows_| for ([_]u32{ H, H / 2 }) |heads| { // all heads, and TP2's 32
+        for (1..MAX_ROWS + 1) |rows_| for ([_]u32{ H, H / 2, 0 }) |heads_| { // all heads, TP2's 32; 0: kda_parts
             const rows: u32 = @intCast(rows_);
+            const heads = if (heads_ == 0) H else heads_;
             const old_k = if (heads == H) k.kda_rows else k.kda_rows_tp;
-            const new_k = if (heads == H) k.kda_window else k.kda_window_tp;
+            const new_k = if (heads_ == 0) k.kda_parts else if (heads == H) k.kda_window else k.kda_window_tp;
             const outs = [_]mtl.Buffer{ r.y, r.st_out, r.cs_out };
             const lens = [_]usize{ rows * heads * D * 2, heads * D * D * 4, (TAPS - 1) * 3 * heads * D * 2 };
             var want: [3][]u8 = undefined;
@@ -162,16 +192,17 @@ pub fn main() !void {
             cases += 1;
             if (!same) {
                 failures += 1;
-                std.debug.print("DIFFER: draw {d}, {d} rows, {d} heads\n", .{ seed, rows, heads });
+                std.debug.print("DIFFER: draw {d}, {d} rows, {d} heads{s}\n", .{ seed, rows, heads, if (heads_ == 0) " (two groups a head)" else "" });
             }
         };
     }
-    std.debug.print("kda window: {d} of {d} cases give kda_rows' outputs, state and conv window\n", .{ cases - failures, cases });
+    std.debug.print("kda window and two groups a head: {d} of {d} cases give kda_rows' outputs, state and conv window\n", .{ cases - failures, cases });
     if (platform.c.getenv("GLM_KDA_TIMES") != null) _ = try submit(&r, k.kda_rows, 16, 400); // the GPU at its clocks
     if (platform.c.getenv("GLM_KDA_TIMES") != null) for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 }) |rows| {
         const t_old = try time(&r, k.kda_rows, rows);
         const t_new = try time(&r, k.kda_window, rows);
-        std.debug.print("{d:2} rows: kda_rows {d:6.1} us, window {d:6.1} us\n", .{ rows, t_old, t_new });
+        const t_parts = try time(&r, k.kda_parts, rows);
+        std.debug.print("{d:2} rows: kda_rows {d:6.1} us, window {d:6.1} us, two groups a head and the norm {d:6.1} us\n", .{ rows, t_old, t_new, t_parts });
     };
     if (failures > 0) std.process.exit(1);
 }

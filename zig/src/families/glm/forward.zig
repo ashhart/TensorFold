@@ -252,17 +252,25 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
         fb = .{ f, f, f };
         gb = .{ g, g, g };
     }
+    // An Ultra's GPU, 2+ rows: each head on two threadgroups (raw outputs, gates in gu), then each row's head normed
+    const parts = gate == .generated and x.k.kda_split and c.tp == 1 and rows > 1;
     e.setPipeline(switch (gate) {
-        .generated => if (rows > 1) (if (c.tp > 1) x.k.kda_window_tp else x.k.kda_window) else if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
+        .generated => if (parts) x.k.kda_parts else if (rows > 1) (if (c.tp > 1) x.k.kda_window_tp else x.k.kda_window) else if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
         .pre, .fused => |p| p,
     });
     bind(e, 0, .{proj});
     shape(e, 1, .{ rows, c.kdaProj() });
-    bind(e, 2, .{ L.cs[cur], w.conv_w, fb[0], fb[1], fb[2], gb[0], gb[1], gb[2], w.a, w.dt_bias, L.st[cur], w.o_norm });
+    bind(e, 2, .{ L.cs[cur], w.conv_w, fb[0], fb[1], fb[2], gb[0], gb[1], gb[2], w.a, w.dt_bias, L.st[cur], if (parts) x.sc.gu else w.o_norm });
     e.setValue(c.lower_bound, 14);
     e.setValue(c.eps, 15);
     bind(e, 16, .{ y, L.st[1 - cur], L.cs[1 - cur] });
-    e.dispatchThreads(size(32, 32, c.kda_heads), size(32, 32, 1));
+    e.dispatchThreads(size(32, 32, c.kda_heads), size(32, if (parts) 16 else 32, 1));
+    if (!parts) return;
+    std.debug.assert(c.kda_heads == 64);
+    e.setPipeline(x.k.kda_norm);
+    bind(e, 0, .{ y, x.sc.gu, w.o_norm });
+    e.setValue(c.eps, 3);
+    e.dispatchGroups(size(c.kda_heads / 8, rows, 1), size(256, 1, 1));
 }
 
 /// MLA layer `mi` (its index among MLA caches) for rows at positions pos.. on `x_in`, into `branch`.
