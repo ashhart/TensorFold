@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: settings files whose JSON root is an array or a scalar now fall back to defaults at startup instead of raising, and the original file is left untouched; a valid settings object still loads its known fields (#3808). Thanks to @AIFlowML.
+
 - Tests: the Desktop helper timing test drives the exact echo, typing and keypress deadlines with a fake clock instead of real process startup, while still checking that the timed-out helper exits and a fresh one starts (#3802). Thanks to @AIFlowML.
 
 - Docs: the native release guide's CUDA command builds all four required targets with the build's catalog, and both archive commands supply the pinned XGrammar checkout with `-Dxgrammar=DIR` so `libtfgrammar` is packaged (#3764, fixes #3763). Thanks to @AIFlowML.
