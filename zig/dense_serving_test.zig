@@ -51,6 +51,7 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // main's moved delta scan and MTP's retained-row tap argument stay; #4706 adds TF_QWEN_PDL glue (default off)
-    try std.testing.expectEqualStrings("2822d47ae041b6d7051e39209bd389cb5e4f01520efee64838c1c0e0e5428b75", &hash(out.items));
+    // The launch sequence includes the moved delta scan, MTP's retained-row tap, and TF_QWEN_PDL (default off).
+    // SenseNova Loop supplies norm add flags through the schedule.
+    try std.testing.expectEqualStrings("29de8240734f0c3f0ac6e938f9fc7268498e8a51b3542af14d70b5313cd909a9", &hash(out.items));
 }
