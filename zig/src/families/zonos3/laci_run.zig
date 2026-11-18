@@ -22,7 +22,13 @@ pub const Setup = struct {
     /// A whole decode: no row goes out before the result is final.
     hold: bool,
     short: ?short_text.Cut = null,
+    /// A duration target, and the replaced speaking-rate row a retake in another bucket rewrites from its table.
+    duration: ?laci.Duration = null,
+    rate_row: ?RateRow = null,
 };
+
+/// The prompt's speaking-rate row as replaced (`vec`), and the condition's table: a bucket's row at bucket * dim.
+pub const RateRow = struct { vec: *[cfg.dim]f32, table: []const f32 };
 
 /// The row the request's lane runs next, with its probe (the queries out, the heads to mask) and its deltas.
 pub const Turn = struct { row: [W]i32, probe: *probe_mod.Probed, steer: []const Steer };
@@ -83,7 +89,9 @@ pub fn Run(comptime Replace: type) type {
             }
             const scratch = try gpa.alloc(f32, 3 * setup.text_len);
             errdefer gpa.free(scratch);
-            const session = try laci.Session.init(gpa, setup.heads, .{}, rows[rows.len - setup.prefill ..], sampling.seed, max_frames, setup.hold, setup.short);
+            var session = try laci.Session.init(gpa, setup.heads, .{}, rows[rows.len - setup.prefill ..], sampling.seed, max_frames, setup.hold, setup.short);
+            errdefer session.deinit();
+            if (setup.duration) |d| try session.holdTo(d);
             return .{ .gpa = gpa, .session = session, .setup = setup, .probe = .{ .text_len = setup.text_len }, .run = run, .prompt = rows[0 .. rows.len - setup.prefill], .replaced = replaced, .sampling = sampling, .keys = keys, .probed = .{ .text_start = setup.text_start, .text_len = setup.text_len }, .scratch = scratch };
         }
 
@@ -127,6 +135,12 @@ pub fn Run(comptime Replace: type) type {
                 return .{ .rows = r.final(), .eos_frame = s.eosFrame(), .final = true, .row = row, .reading = reading, .center = center };
             };
             _ = s.drain(false);
+            // a retake in another speaking-rate bucket: its condition row as the prompt takes it
+            var rewritten = false;
+            if (cont.rate_bucket) |b| if (r.setup.rate_row) |rr| {
+                rewritten = !std.mem.eql(f32, rr.vec, rr.table[@as(usize, b) * cfg.dim ..][0..cfg.dim]);
+                @memcpy(rr.vec, rr.table[@as(usize, b) * cfg.dim ..][0..cfg.dim]);
+            };
             // the regeneration: the prompt and the kept rows prefilled again, under the attempt's seed
             r.again.clearRetainingCapacity();
             try r.again.appendSlice(r.gpa, r.prompt);
@@ -139,6 +153,8 @@ pub fn Run(comptime Replace: type) type {
             r.run = try generation.Run.begin(r.gpa, engine, r.again.items, r.replaced, &.{}, r.replaced, 1, sampling, cont.max_tokens);
             r.dead = false;
             try r.run.keep(s.stream.items[r.setup.prefill..cont.rows]);
+            // the text rows' keys follow the condition rows before them: read again after a new bucket
+            if (rewritten) for (&r.keys, 0..) |k, layer| try engine.keys((layer + 1) * cfg.gdn_period - 1, r.setup.text_start, k);
             r.history = cont.history_rows;
             r.steps = 0;
             r.probe = .{ .text_len = r.setup.text_len, .center = s.probeCenter() };

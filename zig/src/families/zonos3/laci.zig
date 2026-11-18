@@ -12,6 +12,7 @@ pub const Config = detect.Config;
 pub const Kind = detect.Kind;
 pub const Failure = detect.Failure;
 pub const Detector = detect.Detector;
+pub const pace = @import("laci_pace.zig");
 
 /// The ACI attention centre (arXiv 2404.19723): the cheapest monotone path's index, never back and at most one on.
 pub const AciCenter = struct {
@@ -74,8 +75,8 @@ pub const Heads = struct {
             h.* = .{ .layer = try int(u32, v.object.get("layer")), .head = try int(u32, v.object.get("head")), .radius = try int(i64, v.object.get("radius")) };
             if (h.head >= cfg.heads or h.layer >= cfg.layers or cfg.usesGdn(h.layer)) return error.LaciHeadsOfAnotherModel;
         }
-        const pace = root.object.get("frames_per_token") orelse return error.BadLaciHeads;
-        const fpt: f64 = switch (pace) {
+        const pace_v = root.object.get("frames_per_token") orelse return error.BadLaciHeads;
+        const fpt: f64 = switch (pace_v) {
             .float => |f| f,
             .integer => |n| @floatFromInt(n),
             else => return error.BadLaciHeads,
@@ -115,14 +116,24 @@ pub const Probe = struct {
 };
 
 /// A rolled-back request's regeneration: the prompt without its prefill rows, then stream rows [0, rows).
-pub const Continuation = struct { rows: usize, history_rows: usize, seed: ?u64, max_tokens: usize };
+pub const Continuation = struct {
+    rows: usize,
+    history_rows: usize,
+    seed: ?u64,
+    max_tokens: usize,
+    /// The speaking-rate bucket to regenerate in; null: the prompt's.
+    rate_bucket: ?u32 = null,
+};
+
+/// A request's duration target and the checkpoint's speaking-rate scale; `conditions`: the request's condition rows.
+pub const Duration = struct { target: pace.Target, rates: pace.Rates, conditions: [3]u32 };
 
 pub const End = enum { text_done, eos, max_tokens, short_text, short_text_forced };
 
 /// A failure as the session records it; `rollback_row` is where the regeneration resumed.
-pub const Recorded = struct { failure: Failure, rollback_row: usize, clamped: bool, retry_seed: ?u64, ignored: bool };
+pub const Recorded = struct { failure: Failure, rollback_row: usize, clamped: bool, retry_seed: ?u64, ignored: bool, retry_bucket: ?i64 = null };
 
-/// One request under LACI: its stream, detector, retries and ACI probation (LaciSession, without duration targets).
+/// One request under LACI: its stream, detector, retries, ACI probation and duration target (LaciSession).
 pub const Session = struct {
     a: Allocator,
     heads: Heads,
@@ -144,6 +155,8 @@ pub const Session = struct {
     failures: std.ArrayList(Recorded) = .empty,
     probation: ?struct { failure: Failure, aci: AciCenter } = null,
     pending: ?Failure = null,
+    /// A pending pace miss's duration ratio.
+    pending_ratio: ?f64 = null,
     text_done: bool = false,
     /// The current attempt's stream EOS row, once the model emitted EOS.
     eos_row: ?usize = null,
@@ -155,6 +168,11 @@ pub const Session = struct {
     short_retries: usize = 0,
     /// Spans that follow the reading: it sees every reading and rolls back with the stream.
     follower: ?*@import("span_follow.zig").Follower = null,
+    /// A duration target: its monitor, the current attempt's speaking-rate bucket and the retakes it made.
+    duration: ?Duration = null,
+    pace_monitor: ?pace.Monitor = null,
+    bucket: i64 = 0,
+    pace_retries: usize = 0,
 
     pub fn init(a: Allocator, heads: Heads, c: Config, prefill: []const [W]i32, seed: ?u64, max_tokens: usize, hold: bool, short: ?short_text.Cut) !Session {
         var s: Session = .{ .a = a, .heads = heads, .c = c, .n_prefill = prefill.len, .seed = seed, .max_tokens = max_tokens, .hold = hold, .attempt_start = prefill.len, .short = short };
@@ -162,7 +180,15 @@ pub const Session = struct {
         return s;
     }
 
+    /// Holds the take to `d`; call before the first step.
+    pub fn holdTo(s: *Session, d: Duration) !void {
+        s.duration = d;
+        s.pace_monitor = try pace.Monitor.init(s.a, d.target.frames, s.n_prefill, s.n_prefill, s.c);
+        s.bucket = d.conditions[d.rates.index];
+    }
+
     pub fn deinit(s: *Session) void {
+        if (s.pace_monitor) |*m| m.deinit();
         s.stream.deinit(s.a);
         if (s.detector) |*d| d.deinit();
         if (s.probation) |*p| p.aci.deinit();
@@ -220,6 +246,53 @@ pub const Session = struct {
             s.text_done = true;
             probe.stop = true;
         };
+        if (s.pace_monitor != null) try s.paceStep(probe, row, pos);
+    }
+
+    fn rateAdjustable(s: *const Session) bool {
+        return if (s.duration) |d| d.target.adjust_rate else false;
+    }
+
+    /// The pace monitor's reading: a stall like the detector's, a miss to retake in another bucket, or one recorded.
+    fn paceStep(s: *Session, probe: *Probe, row: usize, pos: usize) !void {
+        const det = &s.detector.?;
+        const m = &s.pace_monitor.?;
+        const seen = try m.observe(row, pos, probe.text_len, det.done_row != null, det.frontier) orelse return;
+        if (probe.stop) return;
+        switch (seen) {
+            .stall => |f| {
+                if (s.attempts < s.c.max_retries) {
+                    s.pending = f;
+                    s.pending_ratio = null;
+                    probe.stop = true;
+                } else try s.ignore(f);
+            },
+            .miss => |x| {
+                if (s.paceRetryBucket(x.ratio) != null) {
+                    s.pending = x.failure;
+                    s.pending_ratio = x.ratio;
+                    probe.stop = true;
+                    return;
+                }
+                const seen_kind = if (x.failure.kind == .pace_fast) &m.ignored_fast else &m.ignored_slow;
+                if (seen_kind.*) return;
+                seen_kind.* = true;
+                try s.failures.append(s.a, .{ .failure = x.failure, .rollback_row = x.failure.rollback_row, .clamped = false, .retry_seed = null, .ignored = true });
+            },
+        }
+    }
+
+    /// The speaking-rate bucket a pace miss would regenerate in; null when it is only recorded.
+    fn paceRetryBucket(s: *const Session, ratio: f64) ?i64 {
+        const d = s.duration orelse return null;
+        if (!d.target.adjust_rate or s.pace_retries >= pace.max_retries or s.attempts >= s.c.max_retries) return null;
+        return d.rates.retryBucket(s.bucket, ratio);
+    }
+
+    /// Whether a pace miss can still roll the whole attempt back (every generated row is then held).
+    fn paceOpen(s: *const Session) bool {
+        const m = s.pace_monitor orelse return false;
+        return s.rateAdjustable() and m.read_row == null and s.pace_retries < pace.max_retries and s.attempts < s.c.max_retries;
     }
 
     fn ignore(s: *Session, f: Failure) !void {
@@ -242,7 +315,9 @@ pub const Session = struct {
         if (s.end != null) return n;
         if (s.hold or s.short != null) return s.n_prefill;
         var row = n;
-        if (s.attempts < s.c.max_retries) {
+        if (s.paceOpen()) {
+            row = s.n_prefill;
+        } else if (s.attempts < s.c.max_retries) {
             // a truncation: EOS at a stream row from the EOS-bearing row's - (codebooks - 1) on
             const eos = s.eos_row orelse n -| (C - 1);
             row = @max(eos -| s.c.rollback_margin_frames, s.n_prefill);
@@ -290,11 +365,22 @@ pub const Session = struct {
             } else s.end = .{ .kind = .max_tokens, .row = null };
             return null;
         };
+        // the bucket a regeneration switches to, decided before the attempt counts
+        const is_pace = failure.kind == .pace_fast or failure.kind == .pace_slow;
+        var bucket: ?i64 = null;
+        if (is_pace) {
+            bucket = s.paceRetryBucket(s.pending_ratio.?);
+        } else if (failure.kind == .truncation and s.rateAdjustable() and s.bucket > s.duration.?.rates.first) bucket = s.bucket - 1;
         s.attempts += 1;
         const seed: ?u64 = if (s.seed) |x| x + 1000 * s.attempts else null;
-        try s.failures.append(s.a, .{ .failure = failure, .rollback_row = restart, .clamped = restart != failure.rollback_row, .retry_seed = seed, .ignored = false });
+        try s.failures.append(s.a, .{ .failure = failure, .rollback_row = restart, .clamped = restart != failure.rollback_row, .retry_seed = seed, .ignored = false, .retry_bucket = bucket });
         s.stream.shrinkRetainingCapacity(restart);
         try s.detector.?.truncate(restart);
+        if (s.pace_monitor) |*m| m.truncate(restart);
+        if (bucket) |b| {
+            s.bucket = b;
+            s.duration.?.conditions[s.duration.?.rates.index] = s.duration.?.rates.row(b);
+        }
         if (s.follower) |follower| follower.truncate(restart - s.n_prefill);
         if (s.short) |*cut| cut.truncate(restart - s.n_prefill);
         if (s.probation) |*p| p.aci.deinit();
@@ -302,12 +388,17 @@ pub const Session = struct {
         if (failure.kind == .short_run_on) {
             // a fresh take of a short text that ran into its filler
             s.short_retries += 1;
+        } else if (is_pace) {
+            // a fresh take in the bucket the measured duration asks for
+            s.pace_retries += 1;
         } else s.probation = .{ .failure = failure, .aci = try AciCenter.init(s.a, s.detector.?.lastPosBefore(restart), s.text_len) };
         s.pending = null;
+        s.pending_ratio = null;
         s.text_done = false;
         s.eos_row = null;
         s.attempt_start = restart;
-        return .{ .rows = restart, .history_rows = restart - s.n_prefill, .seed = seed, .max_tokens = s.max_tokens - (restart - s.n_prefill) };
+        const rate_bucket: ?u32 = if (s.duration) |d| d.conditions[d.rates.index] else null;
+        return .{ .rows = restart, .history_rows = restart - s.n_prefill, .seed = seed, .max_tokens = s.max_tokens - (restart - s.n_prefill), .rate_bucket = rate_bucket };
     }
 
     /// A run-on to regenerate as a fresh take while retries are left; an exhausted one is recorded and ignored.

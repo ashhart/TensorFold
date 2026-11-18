@@ -86,11 +86,15 @@
         <div><label for="short">Short texts</label><select id="short"><option value="">server default</option><option value="auto">auto</option><option value="off">off</option></select></div>
       </div>
       <div class="row">
+        <div><label for="duration">Hold to a duration (seconds, with LACI)</label><input id="duration" type="number" step="0.1" min="0.1" placeholder="blank: none"></div>
+        <label class="check"><input type="checkbox" id="fixed-rate">Only record a duration miss</label>
+      </div>
+      <div class="row">
         <label class="check"><input type="checkbox" id="laci">LACI (watch the reading, redo a skip or stall)</label>
         <label class="check"><input type="checkbox" id="start">Start immediately</label>
         <label class="check"><input type="checkbox" id="embedding">Voice by its embedding</label>
       </div>
-      <p class="note">The full-size decoder loads with its first request (several seconds). Guidance and LACI cannot be combined. Voice-shaping controls need "voice by its embedding".</p>
+      <p class="note">The full-size decoder loads with its first request (several seconds). Guidance and LACI cannot be combined. Voice-shaping controls need "voice by its embedding". A duration miss is retaken at another speaking rate; set a speaking rate above to let it go faster.</p>
     </details>
 
     <details>
@@ -285,6 +289,10 @@ function speechBody() {
   if ($('decoder').value) body.decoder = $('decoder').value;
   if ($('short').value) body.short_text = $('short').value;
   if ($('laci').checked) body.laci = true;
+  if (num('duration') !== null) {
+    body.laci = true; $('laci').checked = true; body.duration_seconds = num('duration');
+    if ($('fixed-rate').checked) body.duration_adjust_rate = false;
+  }
   if ($('start').checked) body.start_immediately = true;
   if ($('embedding').checked) body.speaker_mode = 'embedding';
   const whole = {}; const spans = [];
@@ -341,6 +349,7 @@ async function speak() {
       `temperature ${body.temperature}, top-p ${body.top_p}, top-k ${body.top_k}` + (body.seed !== undefined ? `, seed ${body.seed}` : '')];
     if (r.headers.get('X-Decoder')) parts.push('decoder ' + r.headers.get('X-Decoder'));
     if (body.laci) parts.push('LACI');
+    if (body.duration_seconds) parts.push(`held to ${body.duration_seconds} s`);
     if (controls.length) parts.push(controls.map(c => `${c.id} ${c.dose}${c.span ? ' on [' + c.span + ')' : ''}`).join(', '));
     addTake(parts.join(' · '), $('text').value, blob);
     say('status', '');

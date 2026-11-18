@@ -170,11 +170,13 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
     const t = (try read(a, io, trace_path)).object;
     const name = std.fs.path.stem(std.fs.path.stem(trace_path));
     if (t.get("mode")) |m| if (std.mem.eql(u8, m.string, "span_follow")) return replayFollow(gpa, a, t, name, try read(a, io, expected_path));
-    for ([_][]const u8{ "duration_target", "rates", "rate_deltas", "cfg", "ops" }) |unserved| if (t.get(unserved) != null) {
+    for ([_][]const u8{ "rate_deltas", "ops" }) |unserved| if (t.get(unserved) != null) {
         std.debug.print("RESULT zonos3 laci-replay SKIP {s}: the trace uses {s}, which is not ported\n", .{ name, unserved });
         return 0;
     };
-    var heads = try laci.Heads.parse(a, try std.json.Stringify.valueAlloc(a, t.get("heads_json").?, .{}));
+    // the heads inline, or a heads file by its path
+    const hj = t.get("heads_json").?;
+    var heads = try laci.Heads.parse(a, if (hj == .string) try std.Io.Dir.cwd().readFileAlloc(io, hj.string, a, .limited(1 << 20)) else try std.json.Stringify.valueAlloc(a, hj, .{}));
     if (t.get("frames_per_token")) |v| if (v != .null) {
         heads.frames_per_token = float(v);
     };
@@ -189,8 +191,29 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
     const prefill = try a.alloc([W]i32, n_prefill);
     @memset(prefill, @splat(-1));
     const hold = if (t.get("hold")) |v| v.bool else false;
-    var s = try laci.Session.init(gpa, heads, .{}, prefill, if (t.get("seed")) |v| @intCast(v.integer) else 0, usize_(t.get("max_tokens"), 4000), hold, short);
+    // the session's settings: LaciConfig's defaults, max_retries as the trace sets it
+    var settings: laci.Config = .{};
+    if (t.get("cfg")) |v| {
+        for (v.object.keys()) |key| if (!std.mem.eql(u8, key, "max_retries")) return error.TraceSetsAnotherSetting;
+        if (v.object.get("max_retries")) |x| settings.max_retries = @intCast(x.integer);
+    }
+    var s = try laci.Session.init(gpa, heads, settings, prefill, if (t.get("seed")) |v| (if (v == .null) null else @as(?u64, @intCast(v.integer))) else 0, usize_(t.get("max_tokens"), 4000), hold, short);
     defer s.deinit();
+    // a duration target on the checkpoint's speaking-rate scale (a number: frames, rates adjusted)
+    if (t.get("duration_target")) |d| if (d != .null) {
+        const target: laci.pace.Target = if (d == .object) .{ .frames = float(d.object.get("frames").?), .adjust_rate = if (d.object.get("adjust_rate")) |x| x.bool else true } else .{ .frames = float(d) };
+        const r = t.get("rates").?.object;
+        const list = r.get("edges").?.array.items;
+        const edges = try a.alloc(f64, list.len);
+        for (edges, list) |*e, v| e.* = float(v);
+        var conditions: [3]u32 = undefined;
+        for (&conditions, t.get("condition_values").?.array.items) |*c, v| c.* = @intCast(v.integer);
+        const rates: laci.pace.Rates = .{ .index = @intCast(r.get("index").?.integer), .edges = edges, .n_buckets = r.get("n_buckets").?.integer, .first = if (r.get("first")) |x| x.integer else 0 };
+        try s.holdTo(.{ .target = target, .rates = rates, .conditions = conditions });
+        if (t.get("bucket")) |b| if (b != .null) {
+            s.bucket = b.integer;
+        };
+    };
     // a follower the session feeds: its weights are read before each step, as the reference's harness reads them
     var follower: ?z3.span_follow.Follower = if (t.get("follower")) |v| try followerOf(gpa, a, v.object) else null;
     defer if (follower) |*f| f.deinit();
@@ -261,7 +284,9 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
         if (cont) |c| {
             try out.print(a, ", \"continuation\": {{\"n_rows\": {d}, \"history_rows\": {d}, \"seed\": ", .{ c.rows, c.history_rows });
             try optional(a, &out, if (c.seed) |x| @intCast(x) else null);
-            try out.print(a, ", \"max_tokens\": {d}, \"probe_mask\": ", .{c.max_tokens});
+            try out.print(a, ", \"max_tokens\": {d}, ", .{c.max_tokens});
+            if (s.duration) |d| try out.print(a, "\"condition_values\": [{d}, {d}, {d}], ", .{ d.conditions[0], d.conditions[1], d.conditions[2] });
+            try out.appendSlice(a, "\"probe_mask\": ");
             try mask(a, &out, heads, s.probeCenter());
             try out.appendSlice(a, "}}");
         } else try out.appendSlice(a, ", \"continuation\": null}");
@@ -282,10 +307,15 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
     for (s.failures.items, 0..) |f, i| {
         try out.print(a, "{s}{{\"kind\": \"{s}\", \"detect_row\": {d}, \"onset_row\": {d}, \"rollback_row\": {d}, \"clamped\": {}, \"bin\": {d}, \"frontier\": {d}, \"ignored\": {}, \"retry_seed\": ", .{ if (i == 0) "" else ", ", @tagName(f.failure.kind), f.failure.detect_row, f.failure.onset_row, f.rollback_row, f.clamped, f.failure.bin, f.failure.frontier, f.ignored });
         try optional(a, &out, if (f.retry_seed) |x| @intCast(x) else null);
+        if (s.duration != null) {
+            if (f.retry_bucket) |b| try out.print(a, ", \"retry_bucket\": {d}", .{b}) else try out.appendSlice(a, ", \"retry_bucket\": null");
+        }
         try out.append(a, '}');
     }
     first = true;
-    try out.appendSlice(a, "]}, \"stream\": [");
+    try out.appendSlice(a, "]");
+    if (s.duration != null) try out.print(a, ", \"pace_retries\": {d}, \"rate_bucket\": {d}", .{ s.pace_retries, s.bucket });
+    try out.appendSlice(a, "}, \"stream\": [");
     try tags(a, &out, s.stream.items[n_prefill..], &first);
     try out.appendSlice(a, "]}");
     const mine = try std.json.parseFromSliceLeaky(Value, a, out.items, .{});
@@ -372,9 +402,27 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
         short_config = try z3.short_text.Config.parse(a, try cwd.readFileAlloc(io, registry, a, .limited(1 << 22)));
         short = z3.short_text.Cut.init(gpa, &short_config, @intCast(v.integer));
     };
-    const setup: z3.laci_run.Setup = .{ .short = short, .heads = heads, .text_start = @intCast(want.get("text_start").?.integer), .text_len = @intCast(want.get("text_len").?.integer), .prefill = @intCast(cond.get("prefill_frames").?.integer), .hold = true };
+    var setup: z3.laci_run.Setup = .{ .short = short, .heads = heads, .text_start = @intCast(want.get("text_start").?.integer), .text_len = @intCast(want.get("text_len").?.integer), .prefill = @intCast(cond.get("prefill_frames").?.integer), .hold = true };
+    // a duration target: the session held to it, the speaking-rate row (just before the text) rewritten on a retake
+    const kept = try a.dupe(z3.Replace, replaced);
+    if (want.get("duration")) |d| {
+        const r = want.get("rates").?.object;
+        const list = r.get("edges").?.array.items;
+        const edges = try a.alloc(f64, list.len);
+        for (edges, list) |*x, v| x.* = if (v == .float) v.float else @floatFromInt(v.integer);
+        var conditions: [cfg.conditions]u32 = undefined;
+        for (&conditions, want.get("condition_values").?.array.items) |*x, v| x.* = @intCast(v.integer);
+        const index: usize = @intCast(r.get("index").?.integer);
+        const frames = d.object.get("frames").?;
+        setup.duration = .{ .target = .{ .frames = if (frames == .float) frames.float else @floatFromInt(frames.integer), .adjust_rate = d.object.get("adjust_rate").?.bool }, .rates = .{ .index = index, .edges = edges, .n_buckets = r.get("n_buckets").?.integer }, .conditions = conditions };
+        const rate_at = setup.text_start - cfg.conditions + index;
+        for (kept) |*k| if (k.row == rate_at) {
+            setup.rate_row = .{ .vec = &k.vec, .table = e.w.conditions[index] };
+        };
+        if (setup.rate_row == null) return error.NoSpeakingRateRowToRewrite;
+    }
     const t0 = nowNs(io);
-    var run = try z3.laci_run.Run(z3.Replace).begin(gpa, e, prompt, replaced, setup, .{ .temperature = 0, .seed = @intCast(want.get("seed").?.integer) }, max_frames);
+    var run = try z3.laci_run.Run(z3.Replace).begin(gpa, e, prompt, kept, setup, .{ .temperature = 0, .seed = @intCast(want.get("seed").?.integer) }, max_frames);
     defer run.deinit();
     if (steered) run.steer = .{ .ctx = &dumped, .at = Dumped.at, .twin = false };
     if (hook) |h| {
@@ -439,7 +487,13 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
     if (record_same) for (their_failures, s.failures.items) |v, f| {
         const o = v.object;
         record_same = record_same and std.mem.eql(u8, o.get("kind").?.string, @tagName(f.failure.kind)) and o.get("detect_row").?.integer == f.failure.detect_row and o.get("onset_row").?.integer == f.failure.onset_row and o.get("rollback_row").?.integer == f.rollback_row and o.get("bin").?.integer == f.failure.bin and o.get("frontier").?.integer == f.failure.frontier and o.get("ignored").?.bool == f.ignored;
+        // a duration target's retakes: the bucket each moved to
+        if (s.duration != null) {
+            const theirs = o.get("retry_bucket") orelse std.json.Value.null;
+            record_same = record_same and (if (f.retry_bucket) |b| theirs == .integer and theirs.integer == b else theirs == .null);
+        }
     };
+    if (s.duration != null) record_same = record_same and record.get("pace_retries").?.integer == s.pace_retries and record.get("rate_bucket").?.integer == s.bucket;
     const pass = !extra and k + 1 == attempts.len and positions_differ == 0 and masks_differ == 0 and rows_differ == 0 and record_same and worst < 1e-2;
     std.debug.print("RESULT zonos3 laci {s} attempts={d} reference_attempts={d} failures={d} end={s} final_rows={d} steps={d} positions_differ={d} masks_differ={d} rows_differ={d} worst_centroid_diff={e:.2} record_equal={} steered={} seconds={d:.3}\n", .{ if (pass) "PASS" else "FAIL", k + 1, attempts.len, s.failures.items.len, @tagName(s.end.?.kind), s.finalRows(), steps, positions_differ, masks_differ, rows_differ, worst, record_same, steered, seconds });
     return if (pass) 0 else 1;
