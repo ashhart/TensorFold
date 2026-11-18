@@ -101,6 +101,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     }) });
     b.step("tf-glm-moe-pick", "GLM-5.3-Flash's one-row experts with the route select replayed in the gate/up groups against the select launch, byte for byte, GPU time").dependOn(&b.addInstallArtifact(pick, .{}).step);
     b.step("tf-glm-kda-speed", "GLM-5.3-Flash's fused KDA decode step: the window kernel against kda_rows bit for bit, GPU time").dependOn(&b.addInstallArtifact(kda, .{}).step);
+    const mgroups = b.addExecutable(.{ .name = "tf-glm-mm-groups", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_mm_groups.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-mm-groups", "GLM-5.3-Flash's prompt experts and dense products in column groups against core/affine_mm.zig's, bit for bit, GPU time").dependOn(&b.addInstallArtifact(mgroups, .{}).step);
 }
 
 /// tf-glm-sample-check and test-glm-sampling: the real GLM sampler against its host reference, no checkpoint.
