@@ -11,7 +11,15 @@ Each trunk layer runs a two-stream manifold-constrained hyper-connection (`mHC`)
 - **Weights and formats:** BF16 safetensors (`26,249 MB` executed linear traffic/step) and AWQ W4A16 `g128` (`7,398 MB` executed linear traffic/step, lossless FP32 scale/zero metadata).
 - **Context length:** Static YaRN scaling enabled at `factor=2.0` (`262,144` base to `524,288` max context), plus `--rope-yarn` override.
 - **Vision inputs:** Supports the checkpoint's `model.visual.` tower through `--vision`.
-- **Prompt chunking and decoding:** Uses `2048`-row linear-attention prompt chunks on Apple M3 Ultra and M5 Ultra (via single-chain prompt planning on `wide_prompt`), Copy-Draft (`--no-drafts` disables drafting), and fused tail greedy argmax.
+- **Prompt chunking and decoding:** Uses `2048`-row linear-attention prompt chunks on Apple M3 Ultra and M5 Ultra (via single-chain prompt planning on `wide_prompt`), native Multi-Token Prediction (`MTP`) speculative drafting when `mtp.safetensors` is present beside the checkpoint or passed via `--drafter` (falling back to Copy-Draft when absent; `--no-drafts` disables drafting), and fused tail greedy argmax.
+
+## Multi-token speculative drafting (MTP)
+
+When `mtp.safetensors` is placed next to the checkpoint (from `sensenova/SenseNova-Loop-9B`, Apache-2.0) or passed with `--drafter <path>`, the engine attaches the native Metal MTP drafter (`TF_MTP_DRAFTS`, default `3` steps). Intermediate prompt chunks advance the drafter state via `keysOnly` attention absorb (skipping full-chunk query projections, MLP, and norm until the final kept token), and active streams share a single Metal command buffer per round via `draft_round` and `sn_mtp_batch`.
+
+- **`TF_MTP_DRAFTS`:** Draft depth per round (default `3`; clamped to `1` through the drafter's window less one).
+- **`TF_MTP_PLAIN_GUARD`:** `0` or `1` (default `1`); runs a plain-round fallback alongside MTP when verification rejects the drafted chain.
+- **`TF_MTP_BITS`:** `4` (default) or `16`; quantizes loaded `mtp.safetensors` projections (and a draft-only copy of `lm_head` when the target head is BF16) to AWQ 4-bit `g128` at boot, or keeps BF16 (`16`). Target verification always runs in full checkpoint precision, producing bit-identical `token_sha` outputs to `--no-drafts` at both `T=0` and seeded `T=1.0`.
 
 ## Launch
 
@@ -30,6 +38,10 @@ Measured against `sensenova/SenseNova-Loop-9B` (Apache-2.0, Hugging Face revisio
 
 - **BF16 vs Hugging Face PyTorch trace:** `embed_tokens cos=1.0000000`, `exec3_out cos=0.9999639`, `exec27_h_after_collapse cos=0.9998821`, `exec51_h_after_collapse cos=0.9999005`, `exec55_out cos=0.9998916`, `final_norm cos=0.9998723`, `logits_bf16 cos=0.9999594`, top-1 `4/4`, top-16 overlap `16/16`, `6/6` greedy generations exact (`4/4`, `4/4`, `42/42`, `64/64`, `64/64`, `64/64`).
 - **AWQ W4A16 g128 vs quantized PyTorch trace:** `embed_tokens cos=1.0000000`, `exec3_out cos=0.9999746`, `exec27_h_after_collapse cos=0.9999127`, `exec51_h_after_collapse cos=0.9998882`, `exec55_out cos=0.9999162`, `final_norm cos=0.9998916`, `logits_bf16 cos=0.9999633`, top-1 `4/4`, top-16 overlap `16/16`, `6/6` greedy generations exact (`4/4`, `42/42`, `22/22`, `64/64`, `96/96`, `64/64`).
+- **MTP head (`tf-sensenova-oracle --mtp-oracle`, including split `prompt_only` prefill and 2-stream batched `draftRound`):**
+  - `TF_MTP_BITS=16` on BF16: `absorb_out last cos=0.9999904 max_abs=0.06250`, `chain[0..2]` `cos=0.9999904`, `0.9999332`, `0.9999087`, greedy `20/20`, `22/22`, `22/22`.
+  - `TF_MTP_BITS=4` on BF16: `absorb_out last cos=0.9844645 max_abs=3.04688`, `chain[0..2]` `cos=0.9844645`, `0.9146141`, `0.8913979`, greedy `20/20`, `22/22`, `22/22`.
+  - `TF_MTP_BITS=4` on AWQ g128: `absorb_out last cos=0.9831613 max_abs=1.71875`, `chain[0..2]` `cos=0.9831613`, `0.9113104`, `0.8807949`, greedy `20/20`, `22/22`, `22/22`.
 
 ### Decode, concurrency, and cold prefill (Apple M5 Ultra)
 
@@ -44,6 +56,24 @@ Measured against `sensenova/SenseNova-Loop-9B` (Apache-2.0, Hugging Face revisio
 | `tools/bench_cache.py --require-cold` (`2,048` tok) | BF16 / AWQ | Raw token array, median `4` runs | — | `0.594s` (`3,445`) / `0.735s` (`2,786` tok/s) | `qualified: true` |
 | `tools/bench_cache.py --require-cold` (`8,192` tok) | BF16 / AWQ | Raw token array, median `4` runs | — | `2.345s` (`3,493`) / `2.885s` (`2,840` tok/s) | `qualified: true` |
 | `tools/bench_cache.py --require-cold` (`32,768` tok) | BF16 / AWQ | Raw token array, median `4` runs | — | `10.227s` (`3,204`) / `12.543s` (`2,613` tok/s) | `qualified: true` |
+
+### MTP vs `--no-drafts` on Apple M5 Ultra (`--parallel 4 --context 36864 --prompt-cache-gib 0`)
+
+With `mtp.safetensors` (`TF_MTP_BITS=4`, `TF_MTP_DRAFTS=3`, `TF_MTP_PLAIN_GUARD=1`), active memory once loaded is `29.6 GiB` in BF16 (vs `25.5 GiB` with `--no-drafts`) and `18.4 GiB` in AWQ g128 (vs `14.9 GiB` with `--no-drafts`).
+
+| Check | Format | Prompt / Mode | MTP (`tok/s`) | `--no-drafts` (`tok/s`) | Gain / Exactness |
+| --- | --- | --- | --- | --- | --- |
+| `tools/bench_openai.py` (`256` tok, `3` reps) | BF16 | `fibonacci-raw` `T=1.0` / `T=0` | `67.61` / `73.80` (`2.639` / `2.753` tok/chunk) | `29.02` / `29.15` | `2.33x` / `2.53x`, identical `token_sha` |
+| `tools/bench_openai.py` (`256` tok, `3` reps) | BF16 | `gpu-chat-no-think` `T=1.0` / `T=0` | `49.56` / `58.34` (`1.855` / `2.169` tok/chunk) | `29.05` / `29.10` | `1.71x` / `2.00x`, identical `token_sha` |
+| `tools/bench_openai.py` (`256` tok, `3` reps) | AWQ g128 | `fibonacci-raw` `T=1.0` / `T=0` | `114.23` / `117.73` (`2.667` / `2.783` tok/chunk) | `55.45` / `54.28` | `2.06x` / `2.17x`, identical `token_sha` |
+| `tools/bench_openai.py` (`256` tok, `3` reps) | AWQ g128 | `gpu-chat-no-think` `T=1.0` / `T=0` | `79.19` / `83.00` (`1.842` / `1.954` tok/chunk) | `55.44` / `54.28` | `1.43x` / `1.53x`, identical `token_sha` |
+| `tools/bench_concurrent.py` (`c=4`, `T=1.0` / `T=0`) | BF16 | `code` (`agg`, `per-stream`) | `176.6` (`48.9`) / `205.9` (`52.3`) | `—` / `109.6` (`27.6`) | `1.88x` (`T=0`), `alone 12/12`, `serial 4/4` & `1/1`, `unequal: 0` |
+| `tools/bench_concurrent.py` (`c=4`, `T=1.0` / `T=0`) | BF16 | `chat` (`agg`, `per-stream`) | `144.2` (`40.9`) / `171.6` (`44.0`) | `—` / `108.8` (`27.6`) | `1.58x` (`T=0`), `alone 12/12`, `serial 4/4` & `1/1`, `unequal: 0` |
+| `tools/bench_concurrent.py` (`c=4`, `T=1.0` / `T=0`) | AWQ g128 | `code` (`agg`, `per-stream`) | `321.5` (`88.2`) / `356.4` (`91.3`) | `—` / `200.6` (`51.0`) | `1.78x` (`T=0`), `alone 12/12`, `serial 4/4` & `1/1`, `unequal: 0` |
+| `tools/bench_concurrent.py` (`c=4`, `T=1.0` / `T=0`) | AWQ g128 | `chat` (`agg`, `per-stream`) | `251.7` (`67.0`) / `257.5` (`66.3`) | `—` / `198.8` (`51.0`) | `1.30x` (`T=0`), `alone 12/12`, `serial 4/4` & `1/1`, `unequal: 0` |
+| `tools/bench_cache.py --require-cold` (`2,048` tok) | BF16 / AWQ | First `ttft_s` (4-run median) | `0.627s` (`0.609s`) / `0.830s` (`0.769s`) | `0.605s` (`0.597s`) / `0.788s` (`0.755s`) | `qualified: true`, `cached_tokens: 0` |
+| `tools/bench_cache.py --require-cold` (`8,192` tok) | BF16 / AWQ | First `ttft_s` (4-run median) | `2.393s` (`2.377s`) / `2.976s` (`2.946s`) | `2.318s` (`2.337s`) / `2.957s` (`2.897s`) | `qualified: true`, `cached_tokens: 0` |
+| `tools/bench_cache.py --require-cold` (`32,768` tok) | BF16 / AWQ | First `ttft_s` (4-run median) | `10.615s` (`10.587s`) / `12.959s` (`12.934s`) | `10.246s` (`10.209s`) / `12.561s` (`12.553s`) | `qualified: true`, `cached_tokens: 0` |
 
 ### Metal kernel contracts
 
