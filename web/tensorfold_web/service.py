@@ -79,7 +79,7 @@ def _path_env() -> str:
 
 def plan(*, port: int = 8090, host: str = "127.0.0.1", token_file: Path | None = None) -> Plan:
     conf = settings_mod.config_dir()
-    token_file = token_file or conf / "web-token"
+    token_file = token_file.absolute() if token_file is not None else conf / "web-token"
     cmd = [*studio_command(), "--no-browser", "--token-file", str(token_file)]
     if port != 8090:
         cmd += ["--port", str(port)]
