@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: returning a parked ticket to Ready releases its previous assignee, so another Room seat can take it (#3469). Thanks to @AIFlowML.
+
 - App: the computer-use key table and request parser are tested on Linux with Swift Testing; the native checks stay on macOS (#3465). Thanks to @AIFlowML.
 
 - App: Kanban tickets have a Details action to read and edit their title, description, type, priority and effort, and archived tickets can be restored (#3464). Thanks to @AIFlowML.
