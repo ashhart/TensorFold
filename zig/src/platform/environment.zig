@@ -380,8 +380,7 @@ pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
 }
 
-/// ``TENSORFOLD_PARALLEL``'s effective text: the flag wins, else the environment's trimmed text,
-/// else null (the caller's default). Garbage is refused by name with the value escaped.
+/// TENSORFOLD_PARALLEL's text: the flag wins, else the trimmed setting, else null; bad values are refused by name.
 pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
     if (flag) |f| return f;
     _ = try checked("TENSORFOLD_PARALLEL", raw);
