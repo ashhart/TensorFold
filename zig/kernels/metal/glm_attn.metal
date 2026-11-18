@@ -9,21 +9,38 @@ inline void glm_join(thread frag<float>& c, thread const frag<float>& d) {
   c = (frag<float>(0.0f) + c) + d;
 }
 
-// S[64,n] = QK^T in 16-wide steps (heads 16 hg.., keys 32 kb..); halves: two 256-dim halves joined.
+// S[64,n] = QK^T in 16-wide steps (heads 16 hg.., keys 32 kb..), loads a step ahead; halves: two 256-dim halves joined.
 inline void glm_scores_at(const device bfloat* q, const device bfloat* keys, device bfloat* s, int n, bool halves,
                           int kb, int hg, uint lane) {
   const int col0 = kb * 32, row0 = hg * 16;
   const short2 home = frag_home(ushort(lane));
+  const bool inside = col0 + 32 <= n;
   frag<float> c0 = 0.0f, c1 = 0.0f, d0 = 0.0f, d1 = 0.0f;
+  frag<bfloat> a, b0, b1;
+  frag_get(a, q, 512, row0, 0, home);
+  if (inside) {
+    frag_get_t(b0, keys, 512, col0, 0, home);
+    frag_get_t(b1, keys, 512, col0 + 16, 0, home);
+  } else {
+    frag_get_t_in(b0, keys, 512, col0, 0, home, n, 512);
+    frag_get_t_in(b1, keys, 512, col0 + 16, 0, home, n, 512);
+  }
   for (int k0 = 0; k0 < 512; k0 += 16) {
-    frag<bfloat> a, b0, b1;
-    frag_get_in(a, q, 512, row0, k0, home, 64, 512);
-    frag_get_t_in(b0, keys, 512, col0, k0, home, n, 512);
-    frag_get_t_in(b1, keys, 512, col0 + 16, k0, home, n, 512);
+    const frag<bfloat> ca = a, cb0 = b0, cb1 = b1;
+    if (k0 + 16 < 512) {
+      frag_get(a, q, 512, row0, k0 + 16, home);
+      if (inside) {
+        frag_get_t(b0, keys, 512, col0, k0 + 16, home);
+        frag_get_t(b1, keys, 512, col0 + 16, k0 + 16, home);
+      } else {
+        frag_get_t_in(b0, keys, 512, col0, k0 + 16, home, n, 512);
+        frag_get_t_in(b1, keys, 512, col0 + 16, k0 + 16, home, n, 512);
+      }
+    }
     if (halves && k0 >= 256) {
-      mma_16x32<false, true>(d0, d1, a, b0, b1);
+      mma_16x32<false, true>(d0, d1, ca, cb0, cb1);
     } else {
-      mma_16x32<false, true>(c0, c1, a, b0, b1);
+      mma_16x32<false, true>(c0, c1, ca, cb0, cb1);
     }
   }
   if (halves) {
@@ -58,18 +75,33 @@ struct GlmAttnRows {
                 int(tg.y * sgs + g), lane);
 }
 
+// A values step's blocks at key k0: inside hi unchecked, else zeros past hi (the same values either way).
+inline void glm_values_load(thread frag<bfloat>& a, thread frag<bfloat>& b0, thread frag<bfloat>& b1,
+                            const device bfloat* p, const device bfloat* keys, int n, int hi, int k0, int row0, int col0,
+                            short2 home) {
+  if (k0 + 16 <= hi) {
+    frag_get(a, p, n, row0, k0, home);
+    frag_get(b0, keys, 512, k0, col0, home);
+    frag_get(b1, keys, 512, k0, col0 + 16, home);
+  } else {
+    frag_get_in(a, p, n, row0, k0, home, 64, hi);
+    frag_get_in(b0, keys, 512, k0, col0, home, hi, 512);
+    frag_get_in(b1, keys, 512, k0, col0 + 16, home, hi, 512);
+  }
+}
+
 // Keys [lo, hi) of O += P K in 16-wide steps: whole 256-key blocks, then the rest rounded up to 32 (zeros past hi).
 inline void glm_values_run(thread frag<float>& c0, thread frag<float>& c1, const device bfloat* p,
                            const device bfloat* keys, int n, int lo, int hi, int row0, int col0, short2 home) {
   const int len = hi - lo;
   const int steps = (len / 256) * 16 + ((len % 256) + 31) / 32 * 2;
+  if (steps == 0) return;
+  frag<bfloat> a, b0, b1;
+  glm_values_load(a, b0, b1, p, keys, n, hi, lo, row0, col0, home);
   for (int i = 0; i < steps; ++i) {
-    const int k0 = lo + 16 * i;
-    frag<bfloat> a, b0, b1;
-    frag_get_in(a, p, n, row0, k0, home, 64, hi);
-    frag_get_in(b0, keys, 512, k0, col0, home, hi, 512);
-    frag_get_in(b1, keys, 512, k0, col0 + 16, home, hi, 512);
-    mma_16x32<false, false>(c0, c1, a, b0, b1);
+    const frag<bfloat> ca = a, cb0 = b0, cb1 = b1;
+    if (i + 1 < steps) glm_values_load(a, b0, b1, p, keys, n, hi, lo + 16 * (i + 1), row0, col0, home);
+    mma_16x32<false, false>(c0, c1, ca, cb0, cb1);
   }
 }
 
