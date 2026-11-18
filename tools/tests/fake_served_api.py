@@ -130,6 +130,10 @@ def script(tokens: list[tuple], sizes: list[int], *, finish: str | None = "stop"
     return steps + ([DONE] if done else [])
 
 
+class FixtureHTTPServer(http.server.ThreadingHTTPServer):
+    request_queue_size = 128  # Allow the full concurrent batch to connect while handler threads start.
+
+
 class FakeEngine(http.server.BaseHTTPRequestHandler):
     """The reply hash depends on the messages and, when sampling, the seed; never on draft, cache, batch or stream."""
 
@@ -268,7 +272,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
 @contextlib.contextmanager
 def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True):
     """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
+    server = FixtureHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
     server.streams = server.leaked = server.lost = server.disconnects = 0
