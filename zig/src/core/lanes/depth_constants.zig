@@ -1,5 +1,6 @@
 //! Depth policy and shared draft prices supplied by a model.
 pub const Constants = struct {
+    fixed_draft_block: bool = false, // draft work is fixed across positive depths
     shared_step_ms: ?f64 = null, // a shared round's head step, when it differs from the lone price
 
     depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
