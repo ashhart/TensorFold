@@ -298,6 +298,8 @@ pub const Open = struct {
     model_type: []const u8,
     context: ?i64 = null,
     max_frames: ?u32 = null,
+    /// ZONOS3's audio decoders served (--decoders), comma-separated ids; null: every one the release holds.
+    decoders: ?[]const u8 = null,
     silence: speech_guard.Config = .{},
     /// Allocate an independent backbone state per speech lane; Metal Drama only.
     cfg_enabled: bool = false,

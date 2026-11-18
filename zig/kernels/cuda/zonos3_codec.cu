@@ -50,7 +50,7 @@ extern "C" __global__ void __launch_bounds__(256) zc_layernorm(const float* __re
 
 // Rows [q | k | v] (each D = heads * 64) at pos0 + row: q and k rotate in adjacent pairs; k and v go to the cache row.
 extern "C" __global__ void __launch_bounds__(32) zc_attn_prep(float* __restrict__ qkv, int D, int pos0,
-                                                              float* __restrict__ kc, float* __restrict__ vc) {
+                                                              float* __restrict__ kc, float* __restrict__ vc, int cap) {
   const int t = blockIdx.x, h = blockIdx.y, m = threadIdx.x;
   const float freq = expf((float)m * (-9.210340371976184f * 2.f / 64.f));
   const float phase = (float)(pos0 + t) * freq;
@@ -60,18 +60,18 @@ extern "C" __global__ void __launch_bounds__(32) zc_attn_prep(float* __restrict_
   q[0] = qr * c - qi * s;
   q[1] = qr * s + qi * c;
   const float kr = q[D], ki = q[D + 1];
-  const size_t at = (size_t)(pos0 + t) * D + h * 64 + 2 * m;
+  const size_t at = (size_t)((pos0 + t) % cap) * D + h * 64 + 2 * m;
   kc[at] = kr * c - ki * s;
   kc[at + 1] = kr * s + ki * c;
   vc[at] = q[2 * D];
   vc[at + 1] = q[2 * D + 1];
 }
 
-// Causal local attention of (row, head) at p = pos0 + row over cache rows max(0, p - ctx + 1) .. p, in a fixed order.
+// Causal local attention of (row, head) at p = pos0 + row over positions p - ctx + 1 .. p; position j is row j % cap.
 extern "C" __global__ void __launch_bounds__(128) zc_attention(const float* __restrict__ qkv, int D,
                                                                const float* __restrict__ kc,
                                                                const float* __restrict__ vc, int pos0, int ctx,
-                                                               float* __restrict__ out) {
+                                                               float* __restrict__ out, int cap) {
   __shared__ float part[32];
   __shared__ float acc[128][65];
   const int t = blockIdx.x, h = blockIdx.y;
@@ -83,7 +83,7 @@ extern "C" __global__ void __launch_bounds__(128) zc_attention(const float* __re
   for (int i = 0; i < 64; ++i) qv[i] = qr[i];
   float m = -INFINITY;
   for (int j = lo + threadIdx.x; j <= p; j += blockDim.x) {
-    const float* k = kc + (size_t)j * D + h * 64;
+    const float* k = kc + (size_t)(j % cap) * D + h * 64;
     float d = 0.f;
 #pragma unroll
     for (int i = 0; i < 64; ++i) d = fmaf(qv[i], k[i], d);
@@ -94,8 +94,8 @@ extern "C" __global__ void __launch_bounds__(128) zc_attention(const float* __re
 #pragma unroll
   for (int i = 0; i < 65; ++i) a[i] = 0.f;
   for (int j = lo + threadIdx.x; j <= p; j += blockDim.x) {
-    const float* k = kc + (size_t)j * D + h * 64;
-    const float* v = vc + (size_t)j * D + h * 64;
+    const float* k = kc + (size_t)(j % cap) * D + h * 64;
+    const float* v = vc + (size_t)(j % cap) * D + h * 64;
     float d = 0.f;
 #pragma unroll
     for (int i = 0; i < 64; ++i) d = fmaf(qv[i], k[i], d);

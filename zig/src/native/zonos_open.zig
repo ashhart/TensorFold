@@ -70,7 +70,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     Room.io = io;
     var refusal: zonos_host.Refusal = .{};
     const admit: zonos_host.Admit = .{ .ptr = &Room.gpa, .room = Room.room };
-    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .parallel = parallel, .admit = admit, .refusal = &refusal }) catch |e| {
+    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .parallel = parallel, .decoders = o.decoders, .admit = admit, .refusal = &refusal }) catch |e| {
         if (e == error.InsufficientDeviceMemory) {
             const text = "ZONOS3 Mini needs {d:.2} GiB of device memory at --context {d}; {d:.2} GiB is free for it after the reserve";
             problem.* = try std.fmt.allocPrint(a, text, .{ memory.toGib(refusal.need), window, memory.toGib(refusal.room) });

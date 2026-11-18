@@ -7,15 +7,17 @@ const cfg = z3.config;
 const need = host.need;
 const budget = host.budget;
 const laneBytes = host.laneBytes;
-const twinBytes = host.twinBytes;
+const twinBytes = host.sizes.twinBytes;
 
 test "need: the weights, then state that grows with the context and with the frame budget" {
     const t = std.testing;
-    const base = need(4096, 2000);
-    try t.expectEqual(@as(u64, 3_866_946_048), base);
-    try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
+    const base = need(4096, 2000, .keep2_plain);
+    try t.expectEqual(@as(u64, 3_125_611_008), base);
+    // the full-size decoder as the default: its head in place of KEEP-2's, and more layers' caches
+    try t.expect(need(4096, 2000, .full_mr) > base + 3_400_000_000);
+    try t.expect(need(8192, 2000, .keep2_plain) > base and need(4096, 1000, .keep2_plain) < base);
     // two attention layers keep a key row and a value row a position, and a masked head's scratch one of each
-    try t.expectEqual(@as(u64, (2 * 2 + 2) * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
+    try t.expectEqual(@as(u64, (2 * 2 + 2) * 4096 * cfg.kv_width * 4), need(8192, 2000, .keep2_plain) - base);
 }
 
 test "budget: the release's frame budget where the context holds it, the rest for the prompt" {
@@ -32,9 +34,9 @@ test "budget: the release's frame budget where the context holds it, the rest fo
 
 test "laneBytes: each request at once past the first adds a backbone lane and a decoder lane, no weights" {
     const t = std.testing;
-    try t.expectEqual(@as(u64, 1_236_862_976), laneBytes(4096, 2000));
-    try t.expectEqual(@as(u64, 10_913_792), laneBytes(4096, 2000) - z3.Codec.laneBytes(.{ .max_frames = 2000 }));
-    try t.expect(laneBytes(4096, 1000) < laneBytes(4096, 2000));
+    try t.expectEqual(@as(u64, 495_527_936), laneBytes(4096, 2000, .keep2_plain));
+    try t.expectEqual(@as(u64, 10_913_792), laneBytes(4096, 2000, .keep2_plain) - z3.Codec.laneBytes(.{ .max_frames = 2000 }));
+    try t.expect(laneBytes(4096, 1000, .keep2_plain) < laneBytes(4096, 2000, .keep2_plain));
 }
 
 test "twinBytes: a guided request's second stream is the caches and recurrent state again, no weights" {

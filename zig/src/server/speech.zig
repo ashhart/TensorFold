@@ -68,7 +68,7 @@ pub const Format = enum {
     }
 };
 
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: ?f32 = null, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: ?f32 = null, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, decoder: u8 = 0, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -88,6 +88,7 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0, .register_on = srv.config.redraw.register.on() };
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
     var plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, metadata, e);
+    if (sp.decoders.len > 0) metadata.decoder = sp.decoders[plan.decoder];
     metadata.cfg_gamma = if (srv.config.cfg) |options| drama_cfg.gamma(options, c.header("X-Cfg-Gamma")) orelse
         return fail(c, &cx, id, metadata, .request, "X-Cfg-Gamma must be a number from 1 (unguided) to 5") else null;
     // only chunked framing tells a client that a stream which ends early is incomplete
@@ -155,7 +156,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     if (srv.zonos) |state| {
         const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
         const made = try zonos.plan(state, cx, srv.text, sp, input, voice, raw);
-        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .conditions = made.conditions, .guidance = made.guidance, .speaker = made.speaker, .steering = made.steering, .laci = made.laci, .sampling = sampling, .format = format, .stream = stream };
+        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .reference_audio = made.reference_audio, .conditions = made.conditions, .guidance = made.guidance, .speaker = made.speaker, .steering = made.steering, .laci = made.laci, .decoder = made.decoder, .sampling = sampling, .format = format, .stream = stream };
     }
     const refs = try voiceRefs(srv, cx, raw);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
@@ -255,6 +256,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .conditions = plan.conditions,
         .steering = plan.steering,
         .laci = plan.laci,
+        .decoder = plan.decoder,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();

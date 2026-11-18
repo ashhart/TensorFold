@@ -32,7 +32,8 @@ pub const fields = struct {
     pub const mode = "speaker_mode";
     pub const embedding = "speaker_embedding";
     pub const start = "start_immediately";
-    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding, laci.field, short.field, start } ++ steer.fields.all;
+    pub const decoder = "decoder";
+    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding, laci.field, short.field, start, decoder } ++ steer.fields.all;
 };
 
 pub const State = struct {
@@ -64,7 +65,26 @@ pub const State = struct {
     }
 };
 
-pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null };
+pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, decoder: u8 = 0 };
+
+/// speech.resolve_decoder: the request's `decoder` among those served, as an index (0, the default, when null).
+pub fn decoderOf(cx: *errors.Cx, sp: api.SpeechInfo, raw: json.Value) errors.Refused!u8 {
+    const v = raw.field(fields.decoder) orelse return 0;
+    if (v == .null) return 0;
+    const id = v.str() orelse return cx.refuse(error_prefix ++ " decoder must be a string");
+    for (sp.decoders, 0..) |d, i| if (std.mem.eql(u8, d, id)) return @intCast(i);
+    return cx.fail(.request, "Unknown decoder '{s}'; this server serves: {s}.", .{ id, try std.mem.join(cx.a, ", ", sp.decoders) });
+}
+
+/// GET /v1/audio/decoders: the decoders a request may name, the default first.
+pub fn decoders(a: Allocator, sp: api.SpeechInfo) !json.Value {
+    const list = try a.alloc(json.Value, sp.decoders.len);
+    for (list, sp.decoders) |*v, id| v.* = .{ .string = id };
+    const object = try json.newObject(a);
+    try object.put(a, "decoders", .{ .array = list });
+    if (sp.decoders.len > 0) try object.put(a, "default", .{ .string = sp.decoders[0] });
+    return .{ .object = object };
+}
 
 const rate = 44100;
 /// A reference clip: at least half a second, and the first 60 s of it in whole frames of 2940 samples.
@@ -228,6 +248,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const guidance: f32 = if (raw.field(fields.guidance)) |v| @floatCast(number(v) orelse return cx.refuse(error_prefix ++ " speaker_cfg_scale must be a number")) else 1;
     if (!std.math.isFinite(guidance) or guidance < 0) return cx.refuse(error_prefix ++ " speaker_cfg_scale must be finite and not negative");
     const buckets = try conditions(st, cx, raw);
+    const decoder = try decoderOf(cx, sp, raw);
     const lang = textnorm.language(language orelse textnorm.default_language) orelse
         return cx.fail(.request, error_prefix ++ " unsupported language code {s}; supported: " ++ textnorm.codes, .{try pyrepr.repr(cx.a, .{ .string = language.? })});
     if (normalize == true and !textnorm.available(cx.a)) return cx.refuse(textnorm.missing());
@@ -307,7 +328,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const rows = built.rows.len + if (audio.len > 0) (audio.len + 2939) / 2940 + req.config.codebooks - 1 else 0;
     if (rows > sp.max_prompt_tokens)
         return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows, sp.max_prompt_tokens });
-    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering, .laci = watched };
+    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering, .laci = watched, .decoder = decoder };
 }
 
 pub fn listing(a: Allocator, st: *const State) !json.Value {

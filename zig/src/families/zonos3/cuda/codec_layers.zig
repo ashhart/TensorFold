@@ -16,13 +16,13 @@ pub fn convnext(k: *const kern.Kernels, s: cuda.Stream, sc: Scratch, b: wts.Bloc
     try k.addScaled(s, x, sc.o, 0, wts.width, rows);
 }
 
-/// x [rows][d] at positions pos0 on: x += scale * attention(norm(x)), then x += scale * ffn(norm(x)).
-pub fn layer(k: *const kern.Kernels, s: cuda.Stream, sc: Scratch, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
+/// x [rows][d] at pos0 on: x += scale * attention(norm(x)), then the ffn's; position p is K and V row p % cap.
+pub fn layer(k: *const kern.Kernels, s: cuda.Stream, sc: Scratch, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, cap: usize, x: u64, rows: usize, pos0: usize) !void {
     const d = shape.d;
     try k.layernorm(s, x, L.n1w, L.n1b, sc.n, d, 1e-5, rows);
     try k.linear(s, L.qkv, 0, sc.n, d, d, 3 * d, sc.big, 3 * d, rows);
-    try k.attnPrep(s, sc.big, d, pos0, kv[0], kv[1], rows);
-    try k.attention(s, sc.big, d, kv[0], kv[1], pos0, shape.ctx, sc.att, rows);
+    try k.attnPrep(s, sc.big, d, pos0, kv[0], kv[1], cap, rows);
+    try k.attention(s, sc.big, d, kv[0], kv[1], cap, pos0, shape.ctx, sc.att, rows);
     try k.linear(s, L.attn_out, 0, sc.att, d, d, d, sc.o, d, rows);
     try k.addScaled(s, x, sc.o, L.attn_scale, d, rows);
     try k.layernorm(s, x, L.n2w, L.n2b, sc.n, d, 1e-5, rows);

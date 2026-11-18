@@ -18,7 +18,7 @@ const usage =
     \\       zonos3-generate --speaker-check DUMP_DIR --speaker-encoder CKPT.pth
     \\       zonos3-generate --aligner-check DUMP_DIR --aligner WEB_ALIGNER_DIR
     \\       zonos3-generate --model LM_DIR --follow-check GEN_DIR --steer-bundle BUNDLE.json --laci-heads HEADS.json
-    \\       zonos3-generate --codec-check DUMP_DIR --generator GENERATOR.pt --head HEAD.pt
+    \\       zonos3-generate --codec-check DUMP_DIR --generator GENERATOR.pt --head HEAD.pt [--decoder keep2_plain|full_mr]
     \\       zonos3-generate --encoder-check DUMP_DIR --generator GENERATOR.pt
     \\       zonos3-generate --features-check DUMP_DIR
     \\       zonos3-generate --teacher-check DUMP_DIR --teacher TEACHER_DIR
@@ -224,7 +224,7 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
     return if (pass) 0 else 1;
 }
 
-fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []const u8, head: []const u8) !u8 {
+fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []const u8, head: []const u8, decoder_id: []const u8) !u8 {
     const path = try std.fs.path.join(gpa, &.{ dir, "codes.npy" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
@@ -244,7 +244,8 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
     const t_load = nowNs(io);
-    const codec = try z3.Codec.create(gpa, io, &driver, stream, generator, head, .{ .max_frames = codes.len, .pass_frames = codes.len });
+    const decoder = z3.codec.Decoder.of(decoder_id) orelse return error.NoSuchDecoder;
+    const codec = try z3.Codec.create(gpa, io, &driver, stream, generator, head, .{ .max_frames = codes.len, .pass_frames = codes.len, .decoder = decoder });
     defer codec.destroy();
     const Dec = struct {
         fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
@@ -252,7 +253,7 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
         }
     };
     var c: Check = .{ .gpa = gpa, .io = io, .ctx = codec, .get = Dec.get, .dir = dir };
-    std.debug.print("zonos3 codec check: {d} frames, {d} MiB of weights, loaded in {d:.1} s\n", .{ codes.len, codec.w.bytes >> 20, @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9 });
+    std.debug.print("zonos3 codec check: {d} frames, {d} bytes of weights, loaded in {d:.1} s\n", .{ codes.len, codec.w.bytes, @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9 });
     const probe: z3.codec.Probe = .{ .ctx = &c, .f = Check.probe };
     try codec.decode(codes, probe);
     const pcm = try codec.finish(gpa, probe);
@@ -329,7 +330,8 @@ fn speak(gpa: std.mem.Allocator, io: std.Io, a: Speak) !u8 {
     const t_load = nowNs(io);
     const e = try z3.Engine.create(gpa, io, rel.lm, .{ .max_ctx = @min(z3.config.max_seqlen, a.max_frames + 2048) });
     defer e.destroy();
-    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = a.max_frames + 64 });
+    const decoder = z3.codec.Decoder.of(rel.decoder) orelse return error.NoSuchDecoder;
+    const codec = try z3.Codec.create(gpa, io, &e.driver, e.stream, rel.generator, rel.head, .{ .max_frames = a.max_frames + 64, .decoder = decoder });
     defer codec.destroy();
     const load_s = @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9;
 
@@ -485,7 +487,7 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("{s}", .{usage});
             return 2;
         }
-        return codecCheck(gpa, io, dir, generator, head);
+        return codecCheck(gpa, io, dir, generator, head, sp.decoder orelse z3.release.default_decoder);
     }
     if (sp.checkpoint.len > 0) {
         if (i != argv.len or sp.text.len == 0 or (sp.embedding != null and sp.codes != null)) {

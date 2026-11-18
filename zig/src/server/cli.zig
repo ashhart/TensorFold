@@ -276,7 +276,6 @@ pub const Args = struct {
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
-
 pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
@@ -537,6 +536,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .model_type = model_type,
         .context = args.context,
         .max_frames = args.max_frames,
+        .decoders = args.zonos.decoders,
         .silence = args.silence,
         .lanes = parallel(args.parallel) orelse 8,
         .lanes_fixed = parallelFixed(args.parallel),

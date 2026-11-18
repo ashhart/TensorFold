@@ -29,6 +29,27 @@ pub const stages = [5]StageShape{
     .{ .in = 384, .d = 768, .ff = 3072, .ctx = 480, .out = 0, .layers = 2 },
 };
 
+/// The full-size head's layers a stage; the KEEP-2 head keeps two of each (`stages`).
+const full_layers = [5]usize{ 32, 12, 12, 12, 12 };
+
+/// The release's decoder heads: `keep2_plain` (the default, two layers a stage) and the full-size `full_mr`.
+pub const Decoder = enum {
+    keep2_plain,
+    full_mr,
+
+    /// A decoder by its id (its head's folder under autoencoder/heads); null: not one this engine runs.
+    pub fn of(id: []const u8) ?Decoder {
+        return std.meta.stringToEnum(Decoder, id);
+    }
+
+    pub fn layers(d: Decoder, stage: usize) usize {
+        return switch (d) {
+            .keep2_plain => stages[stage].layers,
+            .full_mr => full_layers[stage],
+        };
+    }
+};
+
 pub const Layer = struct { n1w: u64, n1b: u64, n2w: u64, n2b: u64, qkv: u64, attn_out: u64, ffn0: u64, ffn1: u64, attn_scale: u64, ffn_scale: u64 };
 pub const Stage = struct { in_proj: u64, out_proj: u64, layers: []Layer };
 pub const Block = struct { dw_w: u64, dw_b: u64, ln_w: u64, ln_b: u64, pw1_w: u64, pw1_b: u64, pw2_w: u64, pw2_b: u64 };
@@ -154,8 +175,8 @@ fn fmt(buf: []u8, comptime f: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, f, args) catch unreachable;
 }
 
-/// `generator`: autoencoder/generator.pt; `head`: a decoder's checkpoint (autoencoder/heads/<id>/step_*.pt).
-pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator: []const u8, head: []const u8) !*Weights {
+/// `generator`: autoencoder/generator.pt; `head`: `decoder`'s checkpoint (autoencoder/heads/<id>/step_*.pt).
+pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator: []const u8, head: []const u8, decoder: Decoder) !*Weights {
     const w = try gpa.create(Weights);
     errdefer gpa.destroy(w);
     w.* = undefined;
@@ -191,7 +212,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, generator
         const s = 2 * si;
         var count: usize = 0;
         while (h.tensors.contains(fmt(&nb, "trainable/stages.{d}.layers.{d}.qkv.weight", .{ s, count }))) count += 1;
-        if (count != shape.layers) return error.MissingTensor;
+        if (count != decoder.layers(si)) return error.HeadOfAnotherDecoder;
         st.layers = try gpa.alloc(Layer, count);
         st.in_proj = try l.one(&h, fmt(&nb, "trainable/stages.{d}.input_proj.weight", .{s}), &.{ shape.d, shape.in });
         st.out_proj = if (shape.out == 0) 0 else try l.one(&h, fmt(&nb, "trainable/stages.{d}.output_proj.weight", .{s}), &.{ shape.out, shape.d });

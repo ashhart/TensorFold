@@ -234,7 +234,7 @@ pub const Encoder = struct {
             try k.linear(s, st.in_proj, 0, x, shape.in, shape.in, shape.d, y, shape.d, rows);
             if (probe) |p| try p.at("lane.0.stage.{d}.in", .{si}, y, rows, shape.d);
             for (st.layers, 0..) |L, li| {
-                try layers.layer(k, s, e.sc, shape, L, e.kv, y, rows, 0);
+                try layers.layer(k, s, e.sc, shape, L, e.kv, rows, y, rows, 0);
                 if (probe) |p| try p.at("lane.0.stage.{d}.l{d}", .{ si, li }, y, rows, shape.d);
             }
             try k.linear(s, st.out_proj, 0, y, shape.d, shape.d, shape.out, x, shape.out, rows);
