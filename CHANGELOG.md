@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: add the heat-exchanger agent evaluation and its bounded Python execution helper (#3086).
+
 - Packaging: a Grafana dashboard for the engine's Prometheus metrics (TTFT and TPOT quantiles, decode rate, running and waiting requests, KV use, draft acceptance, prompt cache, memory and admission), with a host test that rejects unwritten metrics (#3141).
 
 - `tensorfold device` reports this machine's hardware, supported backends and formats, memory budget and cached models that fit; a saved device profile also supplies the help summary and certain pre-load refusals (#3107).
