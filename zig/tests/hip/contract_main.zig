@@ -42,6 +42,7 @@ const pos_k = @import("contract_vl_position.zig");
 const sparse_k = @import("contract_sparse_lanes.zig");
 const skew_k = @import("contract_wmma_skew.zig");
 const idx_k = @import("contract_idx_scores.zig");
+const items_k = @import("contract_stream_items.zig");
 
 const g = core.contract.gates;
 
@@ -369,6 +370,18 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&skews) |*x| x.deinit();
     if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
+    // the routed item-rows gate where picked (RDNA3.5), then each case's control: every item one row short
+    var items_rows: [2 * items_k.cases.len]items_k.StreamItems = undefined;
+    for (&items_rows, 0..) |*x, i| x.* = .init(a, &r, s, &l, i % items_k.cases.len);
+    defer for (&items_rows) |*x| x.deinit();
+    if (l.affine.variants.enabled) {
+        for (&items_rows, 0..) |*x, i| {
+            if (i >= items_k.cases.len) {
+                x.planted = .{ try ctl.function(items_k.control_symbols[0]), try ctl.function(items_k.control_symbols[1]) };
+            }
+            try kernels.append(a, x.kernel());
+        }
+    } else std.debug.print("N/A  hip affine_dot2_stream (item_rows): not picked off RDNA3.5\n", .{});
     const gdn_k = @import("contract_gdn.zig");
     // y and the state, then a control on each: one row short (the state), one key head (y)
     var gdn_prompts: [4]gdn_k.Prompt = undefined;

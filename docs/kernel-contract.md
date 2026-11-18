@@ -175,6 +175,11 @@ HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite resul
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
 registered at all six supported bit widths and groups of 32, 64 and 128, with no known finding.
 
+HIP's routed item-rows stream tile (`Routing.item_rows` on plain fp32-output `affine_dot2_stream`, 4-bit, 4 rows,
+enabled on RDNA3.5 for single-round `K <= 1024` plans), whose rows past an item's count leave the lane fold, replaces
+`item_rows = 0` byte for byte when the largest item holds 3 or 4 rows. Its controls run over items one row short and go
+red at gate 3.
+
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every

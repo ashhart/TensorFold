@@ -96,6 +96,8 @@ __device__ inline void stream_codes(const uint32_t (&w)[Dec::kWords], typename T
     }
 }
 
+template <class> struct StreamRound;
+
 // Epi::kPair: a lane's CB columns are CB / 2 gate columns and the same up columns; out is silu(gate) * up.
 template <class Dec, class Act, class T, class Epi, int R, int CB, bool WIDE>
 __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, int gshift, int bx, int by, int pair_cols,
@@ -268,6 +270,12 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 
 #pragma unroll
     for (int r = 0; r < R; ++r) {
+#if defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) || defined(__gfx1153__)
+        if constexpr (Dec::kBits == 4 && R == 4 && std::is_same_v<Epi, StreamRound<T>>) {
+            // a.m and row0 are the block's, so its lanes skip the fold of dead item rows together
+            if (a.route.item_rows != 0 && row0 + r >= a.m) continue;
+        }
+#endif
         float v[CB];
 #pragma unroll
         for (int c = 0; c < CB; ++c) {
