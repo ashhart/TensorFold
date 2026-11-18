@@ -49,8 +49,10 @@ These need no GPU, driver or checkpoint:
 
 ## Container
 
-The root [Dockerfile](../Dockerfile) installs a Linux release archive in an Ubuntu 24.04 image. The build stops unless
-the archive's checksum, the release signature over it and every unpacked file's checksum all match.
+The root [Dockerfile](../Dockerfile) installs a signed Linux release archive in a CUDA 13.0.2 / Ubuntu 24.04 image.
+The final stage adds pinned cuBLAS (including cuBLASLt) and NCCL runtime packages, not the CUDA compiler or development
+packages. Download and signature-verification tools stay in the separate fetch stage. The build stops unless the
+archive's checksum, the release signature over it and every unpacked file's checksum all match.
 It runs as the image's `ubuntu` user and keeps the Hugging Face cache in `/huggingface`, the directory to mount.
 
 ```sh
@@ -59,9 +61,11 @@ docker run --rm tensorfold
 docker run --rm tensorfold capabilities --json
 ```
 
-`--build-arg TENSORFOLD_VERSION=1.2.4` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
-archive from the build platform. To serve, the host needs NVIDIA driver R580 or newer and the NVIDIA Container Toolkit,
-which supplies `libcuda.so.1` to the container. Listen on all addresses inside the container:
+`--build-arg TENSORFOLD_VERSION=1.2.9` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
+archive from the build platform. The CUDA base is pinned by its multi-platform digest; cuBLAS and NCCL are pinned
+by package version for both architectures. To serve, the host still needs NVIDIA driver R580 or newer and the NVIDIA
+Container Toolkit, which supplies `libcuda.so.1` to the container. Do not install the host driver in the image.
+Listen on all addresses inside the container:
 
 ```sh
 docker run --rm --gpus all -p 8080:8080 \
@@ -70,8 +74,32 @@ docker run --rm --gpus all -p 8080:8080 \
 ```
 
 Add `--user "$(id -u):$(id -g)"` when your user ID is not 1000, so the server can write to the mounted cache.
-The image holds only the release archive. Features that need cuBLASLt, NCCL or the image decoders (see
-[optional shared libraries](../packaging/RUNTIME.md#optional-shared-libraries)) need an image that adds them.
+cuBLAS/cuBLASLt and NCCL are included for CUDA projections, vision towers and tensor-parallel ranks. Image/video/PDF
+decoders and RDMA providers remain separate [optional shared libraries](../packaging/RUNTIME.md#optional-shared-libraries).
+Their absence is reported by `capabilities --json`; a discoverable library is not proof of GPU or model qualification.
+
+### Published release images
+
+The [container workflow](../.github/workflows/container-release.yml) publishes
+`ghcr.io/ashhart/tensorfold:vX.Y.Z` when a stable `v1.x.y` GitHub release is **published**, not when a tag is pushed.
+It packages that release's signed archives; it does not rebuild the inference engine.
+There is no rolling `latest` tag, and a backfill refuses to replace an existing version tag.
+
+```sh
+docker pull ghcr.io/ashhart/tensorfold:v1.2.9
+docker run --rm ghcr.io/ashhart/tensorfold:v1.2.9 --version
+```
+
+The version tag names one manifest for Linux amd64 and arm64. Each image is built on its native GitHub-hosted Ubuntu
+runner and checked without a GPU: the expected version, loadable cuBLAS/cuBLASLt, NCCL and grammar libraries,
+an unprivileged user and a writable cache. Only checked builds are exported to GHCR by digest, with provenance and
+an SBOM; the version tag is published after both architectures pass. These checks do not validate GPU inference.
+
+Pull requests affecting container inputs run the same build and smoke checks without publishing.
+A manual run accepts a published stable release tag; publication is opt-in and restricted to `ashhart/TensorFold`.
+Forks can run build-only checks but cannot publish through this workflow.
+The upstream repository must allow Actions to write packages and make the GHCR package public after its first publish.
+
 
 ## Tests that run without a GPU
 
