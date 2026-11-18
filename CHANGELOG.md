@@ -4,8 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Tests: `zig build test-tokenizer-host` runs every tokenizer test, unfiltered, on the host without a GPU or shader compiler, and is part of the nightly Linux and macOS fast checks; before, CI reached only the tokenizer's two EOS policy tests (#3082).
 - `tensorfold device` reports this machine's hardware, supported backends and formats, memory budget and cached models that fit; a saved device profile also supplies the help summary and certain pre-load refusals (#3107).
+
+- Tests: `zig build test-tokenizer-host` runs every tokenizer test, unfiltered, on the host without a GPU or shader compiler, and is part of the nightly Linux and macOS fast checks; before, CI reached only the tokenizer's two EOS policy tests (#3082).
 
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
 
