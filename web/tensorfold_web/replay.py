@@ -136,6 +136,9 @@ class Replays:
                     self.current.update(turn=i, question=m["content"][:2000], live_text="", live_reasoning="")
                     rep = bench.stream_once(client, base + "/v1/chat/completions", headers, body, self._cancel,
                                             on_text=self._show)
+                    if rep.error == "cancelled":
+                        self.current["status"] = "cancelled"
+                        break
                     mm = bench.measure(rep)
                     outcome = "error" if rep.error else "length" if rep.finish == "length" else "done"
                     out += [{"role": "user", "content": m["content"], "turn": i},
