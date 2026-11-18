@@ -19,7 +19,7 @@ pub const Config = struct {
     stop_boost_delay: usize = 6,
 };
 
-pub const Kind = enum { skip, hallucination, truncation, short_run_on };
+pub const Kind = enum { skip, hallucination, truncation, short_run_on, pace_slow, pace_fast };
 
 pub const Failure = struct { kind: Kind, detect_row: usize, onset_row: usize, rollback_row: usize, bin: usize, frontier: usize };
 

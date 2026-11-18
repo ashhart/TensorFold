@@ -9,6 +9,27 @@ const Allocator = std.mem.Allocator;
 
 const prefix = "ZONOS3 request: ";
 pub const field = "laci";
+/// TensorFold's duration target (the reference servers' LaciTakeRequest.target_frames, in seconds) and its rate rule.
+pub const duration_field = "duration_seconds";
+pub const adjust_field = "duration_adjust_rate";
+
+/// A request's duration target: generated rows (15 a second) and whether a miss is retaken in another rate bucket.
+pub const Duration = struct { frames: f32, adjust_rate: bool };
+
+/// plan.check_laci with a duration target: a LACI request's length to hold, in seconds; null without one.
+pub fn duration(cx: *errors.Cx, raw: json.Value, watched: bool, max_frames: u32) errors.Refused!?Duration {
+    const v = raw.field(duration_field) orelse {
+        if (raw.field(adjust_field) != null) return cx.refuse(prefix ++ "duration_adjust_rate needs duration_seconds");
+        return null;
+    };
+    const seconds = v.float64() orelse return cx.refuse(prefix ++ "duration_seconds must be a number of seconds");
+    if (!watched) return cx.refuse(prefix ++ "A LACI duration target needs laci=true");
+    const most = @as(f64, @floatFromInt(max_frames)) / 15.0;
+    if (!(seconds > 0) or !(seconds <= most)) return cx.fail(.request, prefix ++ "duration_seconds must be above 0 and at most {d:.2} (the frame budget)", .{most});
+    var adjust = true;
+    if (raw.field(adjust_field)) |a| adjust = if (a == .bool) a.bool else return cx.refuse(prefix ++ "duration_adjust_rate must be a boolean");
+    return .{ .frames = @floatCast(seconds * 15.0), .adjust_rate = adjust };
+}
 
 /// The heads of each request language, in the languages' order: its speech code's file, else the folder's default.
 pub const Table = struct { heads: [textnorm.languages.len]*const api.SpeechLaci };

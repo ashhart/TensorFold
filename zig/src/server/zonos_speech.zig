@@ -33,7 +33,7 @@ pub const fields = struct {
     pub const embedding = "speaker_embedding";
     pub const start = "start_immediately";
     pub const decoder = "decoder";
-    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding, laci.field, short.field, start, decoder } ++ steer.fields.all;
+    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding, laci.field, laci.duration_field, laci.adjust_field, short.field, start, decoder } ++ steer.fields.all;
 };
 
 pub const State = struct {
@@ -65,7 +65,7 @@ pub const State = struct {
     }
 };
 
-pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, decoder: u8 = 0 };
+pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null, decoder: u8 = 0, duration: ?laci.Duration = null };
 
 /// speech.resolve_decoder: the request's `decoder` among those served, as an index (0, the default, when null).
 pub fn decoderOf(cx: *errors.Cx, sp: api.SpeechInfo, raw: json.Value) errors.Refused!u8 {
@@ -311,8 +311,10 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const opened = if (wants_start and !std.mem.startsWith(u8, spoken, tokens.start_marker)) try std.mem.concat(cx.a, u8, &.{ tokens.start_marker, spoken }) else spoken;
     // a short text runs under LACI with a pause and a filler sentence after it, cut where the filler starts
     const guided = guidance != 1 or controls_guided;
-    const brief = try short.plan(st.short, cx, raw, text, st.tokens, opened, lang.code, st.laci != null and !guided and raw.field(steer.fields.spans) == null);
+    // R17: a short text runs alone, unsteered by spans and with no duration target
+    const brief = try short.plan(st.short, cx, raw, text, st.tokens, opened, lang.code, st.laci != null and !guided and raw.field(steer.fields.spans) == null and raw.field(laci.duration_field) == null);
     var watched = try laci.plan(st.laci, cx, raw, lang, guided);
+    const held = try laci.duration(cx, raw, watched != null, sp.max_frames);
     if (brief) |sh| {
         const with = try cx.a.create(api.SpeechLaci);
         with.* = laci.of(st.laci.?, lang).*;
@@ -335,7 +337,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const rows = built.rows.len + if (audio.len > 0) (audio.len + 2939) / 2940 + req.config.codebooks - 1 else 0;
     if (rows > sp.max_prompt_tokens)
         return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows, sp.max_prompt_tokens });
-    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering, .laci = watched, .decoder = decoder };
+    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering, .laci = watched, .decoder = decoder, .duration = held };
 }
 
 pub fn listing(a: Allocator, st: *const State) !json.Value {

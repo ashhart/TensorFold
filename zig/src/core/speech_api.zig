@@ -35,6 +35,9 @@ pub const SpeechRequest = struct {
     edit: ?*const SpeechEdit = null,
     /// The audio decoder: an index into the info's `decoders`, 0 its default.
     decoder: u8 = 0,
+    /// Under LACI, the take's target length in generated rows (0: none), and whether a miss is retaken at another rate.
+    duration_frames: f32 = 0,
+    duration_adjust_rate: bool = true,
 };
 
 /// A speech edit's steps on the engine: the server plans the edit between them.

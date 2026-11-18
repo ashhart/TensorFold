@@ -85,7 +85,8 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 - **Forced aligner** (`cuda/aligner.zig`, `cuda/aligner_weights.zig`, `align_words.zig`): where each word of a
   transcript is spoken in a clip. See "The aligner".
 
-Refused or absent: clips in formats other than WAV, LACI's duration targets and extended speaking-rate buckets,
+Refused or absent: clips in formats other than WAV, extended speaking-rate buckets (their bundle block holds only
+for the earlier `lm/mect_60k` backbone's ten rate buckets, and the reference servers drop it for this checkpoint),
 accent adapters (the publisher has published none: its guide's adapters were trained on an earlier backbone in its
 private repository), Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
 the clip's transcript), Japanese and Mandarin, clips over 60 s, and the aligner's long-form routing (a clip over
@@ -244,8 +245,39 @@ code), and `"laci": true` on a request turns it on. Without the flag the field i
   refused. Steering controls work; a regeneration's kept rows are prompt rows, which are not steered, as in the
   reference.
 
-Not served: duration targets (the reference's studio plug-in that fits a take to a length by retrying in another
-speaking-rate bucket), and with them the extended speaking-rate buckets.
+### Duration targets
+
+`duration_seconds` (with `laci: true`) holds a take to a length: TensorFold's field for what the reference servers
+offer only to their plug-ins (`Host.synthesize_laci`, a `LaciTakeRequest`'s `target_frames`, used by the publisher's
+unpublished dubbing plug-in); there is no such field in the reference's HTTP API. The length is 15 generated rows a
+second, at most the frame budget. `duration_adjust_rate` (default true) lets a miss be retaken; false only records it.
+Short texts are off for such a request, as in the reference's plan.
+
+The session runs the reference's logic (`laci_pace.zig`, `zonos3.tts.laci`'s `PaceMonitor`, `RateBuckets`,
+`DurationTarget`): the take counts as read once the median of the last five readings reaches the last text token;
+read more than 10 % plus 3 rows early is `pace_fast`, not read 10 % plus 3 rows late is `pace_slow`, with the
+duration ratio estimated from the share read; a stall at the target pace is a `hallucination`. A miss rolls the
+take back to its first row and retakes it in the speaking-rate bucket the ratio asks for (at least one bucket away,
+at most two retakes), a truncation one bucket slower; the retake's speaking-rate condition row is rewritten from
+the checkpoint's table, and the probe reads the text's keys again since they follow the condition rows. Rows are
+held until the reading has reached the end. Two things follow from the reference's rules: with the speaking rate
+left unknown (the request sets no `condition_values`) the take's bucket is "unknown", above the scale's last, so a
+take that is too long cannot be retaken faster and the miss is only recorded; and a retake may move far
+(`duration_slower` below went from unknown to bucket 24, then 3). Extended buckets are not served (see above).
+
+Checked against the publisher's code:
+
+- **The session logic:** the fixture `pace_miss`, the publisher's own trace builders (`laci_traces()`, all but one
+  extended-scale trace) and 300 of its random traces (`_random_trace`, seeded 20261118; 139 with a duration target,
+  some with `max_retries` 1 or 3), their expected results made by running its `LaciSession`: all 318 replay to the
+  same rows, masks, continuations (with the condition rows) and records (with each retake's bucket).
+- **On the model** (`--laci-check`, the dumps from `rows --laci-heads` with the request's `duration_seconds`, which
+  the dump tool hands the reference's session as a `DurationTarget`): five greedy requests, a 4.5 s sentence held to
+  3.4 s (missed, recorded), 7.0 s (two retakes), 4.6 s (in time), 3.4 s without rate adjustment, and 3.2 s with the
+  speaking rate set (one retake, bucket 6 to 25, 3.5 s): every attempt's readings, masks and rows and the record
+  (attempts, failures, each retake's bucket, the final bucket) equal, at prompt passes of 64 and 7 rows.
+- **Served:** the five match the reference's audio at 69.7 to 71.7 dB, repeat byte for byte and stream the same
+  bytes (a streamed one is held until it can no longer be retaken).
 
 Checked against the publisher's code:
 
@@ -254,8 +286,8 @@ Checked against the publisher's code:
   that need nothing unserved pass (`clean`, `early_eos`, `skip`, `slow_two_bins` and three short-text ones):
   every drained row, mask change, continuation and the final record. With the span follower ported (see "Spans
   that follow the reading"), three more pass: `stall` and `stall_held` with the follower's weights at every step,
-  and `span_follow_scheduler`, 278 scripted readings, decisions and rollbacks. One is skipped: `pace_miss` needs a
-  duration target.
+  and `span_follow_scheduler`, 278 scripted readings, decisions and rollbacks; with duration targets, `pace_miss`
+  passes too: all eleven.
 - **On the model** (`zonos3-generate --model LM --laci-check D/gen_laci_X --laci-heads FILE`), greedy, eleven
   requests dumped with `rows --laci-heads` (each attempt's readings, masks and rows): two voice paths, three texts
   that might invite a failure, and six with strong steering doses, four of which the reference retried eight
@@ -786,7 +818,7 @@ python3 tools/zig/zonos3_test_page.py --upstream 127.0.0.1:8080 --port 8081
 
 - **Speak:** the server's voices or one cloned from an audio file (the browser makes a 16-bit mono WAV of its first
   60 s), the seed and sampling fields, the language and text normalization, condition values, speaker guidance, the
-  audio decoder, LACI, short texts, start immediately and the voice by its embedding. Pauses are typed as `<0.5s>`
+  audio decoder, LACI, a duration to hold the take to, short texts, start immediately and the voice by its embedding. Pauses are typed as `<0.5s>`
   and pronunciations as `[[phones]]`; the page sends the release's markers in their place. Steering controls go on
   the whole reply or on the text selected in the box, with the span placement (character rate or reading), the
   hold and controls guidance; a voice control switches the request to the voice by its embedding. A JSON box adds
@@ -988,8 +1020,8 @@ bf16-encoded references, clones as well from fp32 codes.
 - `core/speech_api.zig` gained `SpeechRequest.edit` (`SpeechEdit`: one step of a speech edit on the engine: a
   clip's codes, a fill's rows, edited codes' audio, words placed in a clip), re-exported by `core/engine_api.zig`.
   A request without it is as before.
-- `core/speech_api.zig`: `SpeechRequest.reference_rate` (the rate of a clip an edit's place step sends as uploaded;
-  0 is the family's rate).
+- `core/speech_api.zig`: `SpeechRequest.duration_frames` and `duration_adjust_rate` (a LACI request's duration
+  target), and `reference_rate` (the rate of a clip an edit's place step sends as uploaded; 0 is the family's rate).
 - `core/speech_api.zig`: `SpeechInfo.decoders` and `SpeechRequest.decoder` (an index into them, 0 the default);
   `core/engine_api.zig`: `Open.decoders` (`--decoders`). A family with one decoder leaves both empty and 0.
 - `core/speech_api.zig`: `SpeechSteering.follow` (each span's text positions, the gate's lead and lag, the heads
