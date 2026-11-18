@@ -220,7 +220,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_GREEDY_WIDE", .scope = .flashnext, .kind = .size, .forms = "a whole round width from 0 to the native size maximum (default 4)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default the shared round's rows; capped by them)" },
     .{ .name = "TF_FLASHNEXT_READOUT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
-    .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .flashnext, .kind = .size, .min = 1, .max = 16384, .forms = "whole prompt rows a pass, 1 to 16384 (default 1536)" },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .flashnext, .kind = .size, .min = 1, .max = 16384, .forms = "whole prompt rows a pass, 1 to 16384 (default 3072)" },
     .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .flashnext, .kind = .size, .max = 16384, .forms = "whole prompt rows a pass with no stream decoding, TF_FLASHNEXT_CHUNK to 16384 (unset: 8192 alone at --parallel 1, else off)" },
     .{ .name = "TF_FLASHNEXT_FACT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
