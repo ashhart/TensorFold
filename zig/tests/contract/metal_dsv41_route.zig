@@ -7,8 +7,8 @@ const g = contract.gates;
 const rig_ = @import("rig.zig");
 const sources = @import("kernel_sources");
 
-/// A registration: the variant, and the planted fault its kernel text carries (0: the kernel as served).
-pub const Variant = struct { kind: Kind = .backbone, ctl: u8 = 0 };
+/// A registration: the variant, its planted fault, `plan`: tf_dsv41_route_gate_plan on given logits (k 0, 12 groups).
+pub const Variant = struct { kind: Kind = .backbone, ctl: u8 = 0, plan: bool = false };
 
 pub const Kind = enum { backbone, drafter };
 
@@ -46,7 +46,12 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .out = .f32,
         .nan = .{ .stated = "a NaN logit or bias is never picked; a +inf logit is picked at a NaN weight and its row's other weights 0" },
         .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{}, .{} },
-        .served = if (v.kind == .backbone) &.{
+        .served = if (v.plan) &.{
+            .{ .rows = 4, .n = 384, .k = 6 },
+            .{ .rows = 1, .n = 384, .k = 6 },
+            .{ .rows = 6, .n = 384, .k = 6 },
+            .{ .rows = 16, .n = 384, .k = 6 },
+        } else if (v.kind == .backbone) &.{
             .{ .rows = 4, .n = 384, .k = 6 },
             .{ .rows = 1, .n = 384, .k = 6 },
             .{ .rows = 8, .n = 384, .k = 6 },
@@ -95,6 +100,8 @@ pub const Route = struct {
     image_r: rig_.Ref = undefined,
     picks: rig_.Ref = undefined,
     weights: rig_.Ref = undefined,
+    plan: [4]rig_.Ref = undefined,
+    sync: rig_.Ref = undefined,
     msg: [240]u8 = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Route {
@@ -105,7 +112,7 @@ pub const Route = struct {
         return .{
             .a = a,
             .rig = .{ .a = a, .device = device, .queue = queue },
-            .pipe = try rig_.pipeline(device, src, "tf_dsv41_route_select"),
+            .pipe = try rig_.pipeline(device, src, if (v.plan) "tf_dsv41_route_gate_plan" else "tf_dsv41_route_select"),
             .v = v,
             .name = name,
             .e = e,
@@ -209,6 +216,11 @@ pub const Route = struct {
         t.image_r = try t.rig.input(t.image);
         t.picks = try t.rig.scratch(t.count() * 4);
         t.weights = try t.rig.output(t.count() * 4);
+        if (t.v.plan) {
+            for (&t.plan, [4]usize{ 12 * t.count(), 4, 4 * t.count(), 4 * t.count() }) |*r, n| r.* = try t.rig.scratch(n);
+            const zero: [16]u8 = @splat(0);
+            t.sync = try t.rig.input(&zero); // the count of groups done: zero again after every launch
+        }
         return true;
     }
 
@@ -227,7 +239,14 @@ pub const Route = struct {
         }, 4);
         p.e.setBuffer(t.picks.buf, t.picks.off, 5);
         p.e.setBuffer(t.weights.buf, t.weights.off, 6);
-        p.e.dispatchGroups(mtl.Size.of(t.shape.rows, 1, 1), mtl.Size.of(32, 1, 1));
+        if (t.v.plan) {
+            for (t.plan, 7..) |r, i| p.e.setBuffer(r.buf, r.off, i);
+            p.e.setBuffer(t.x.buf, t.x.off, 11);
+            p.e.setBuffer(t.x.buf, t.x.off, 12);
+            p.e.setValue([2]u32{ 0, @intCast(t.shape.rows) }, 13);
+            p.e.setBuffer(t.sync.buf, t.sync.off, 14);
+            p.e.dispatchGroups(mtl.Size.of((t.e + 31) / 32, 1, 1), mtl.Size.of(1024, 1, 1));
+        } else p.e.dispatchGroups(mtl.Size.of(t.shape.rows, 1, 1), mtl.Size.of(32, 1, 1));
         try t.rig.finish(p);
         const picked = t.rig.bytes(t.picks, t.count() * 4);
         if (t.runs > 0 and !std.mem.eql(u8, t.previous, picked)) return error.RoutePicksNotRepeatable;
