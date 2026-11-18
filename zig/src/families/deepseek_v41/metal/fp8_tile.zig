@@ -77,8 +77,7 @@ pub fn fits(c: Call) bool {
 pub fn minRows(c: Call, launches: u32) u32 {
     const cols = c.n * launches;
     if (cols < 1024) return max_rows + 1; // the row kernel reads these weights faster at every row count
-    if (cols < 2048) return 7;
-    return if (c.k % 1024 == 0) 6 else 5; // wide K = 1280 and 2304 from 5 rows
+    return if (cols < 2048) 7 else 6;
 }
 
 /// Whether the decode forward runs a call here (by its rows and columns only); a row's bits are the same either way.
@@ -114,7 +113,8 @@ test "the tile's form covers every release shape within its tree" {
     }
     try std.testing.expect(!takes(.{ .k = 5120, .n = 1280, .rows = 6 }, 1) and takes(.{ .k = 5120, .n = 1280, .rows = 7 }, 1));
     try std.testing.expect(!takes(.{ .k = 5120, .n = 512, .rows = 16 }, 1) and fits(.{ .k = 5120, .n = 64, .rows = 1 }));
-    try std.testing.expect(takes(.{ .k = 1280, .n = 4096, .rows = 5 }, 1) and !takes(.{ .k = 4096, .n = 1024, .rows = 5 }, 8));
+    try std.testing.expect(takes(.{ .k = 1280, .n = 4096, .rows = 6 }, 1) and !takes(.{ .k = 1280, .n = 4096, .rows = 5 }, 1));
+    try std.testing.expect(!takes(.{ .k = 4096, .n = 1024, .rows = 5 }, 8));
     try std.testing.expect(!fits(.{ .k = 5120, .n = 64, .rows = 17 }));
     try std.testing.expect(!valid(.{ .k = 5120, .n = 64, .rows = 2 }, .{ .nj = 2, .sgs = 16 }));
 }
