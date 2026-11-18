@@ -16,7 +16,10 @@ pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_D {d}\n#define TF_ITERS {d}\n#define TF_HC_EPS_INT {d}\n{s}", .{ s.width, s.sinkhorn, s.eps_e9, ks.core_hc_boundary });
 }
 
-pub const names = [4][:0]const u8{ "tf_hc_expand_mix", "tf_hc_first_mix", "tf_hc_split", "tf_hc_expand_inplace" };
+pub const names = [6][:0]const u8{ "tf_hc_expand_mix", "tf_hc_first_mix", "tf_hc_split", "tf_hc_expand_inplace", "tf_hc_expand_mix_parts", "tf_hc_first_mix_parts" };
+
+/// Windows of up to 4 rows: the expand's parts on six groups a slice (same sums; M5 Ultra 1.1-1.35 us a boundary less).
+pub const parts_rows = 4;
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
     e.setBuffer(r.buf, r.off, i);
@@ -28,12 +31,17 @@ pub fn inPlace(x_old: anytype, x_new: anytype) bool {
 }
 
 /// `x_old` expanded to `x_new` (one buffer: in place then a first boundary read, same sums), mix sums to `part`, split.
-pub fn boundary(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype) void {
+pub fn boundary(e: mtl.ComputeEncoder, pipes: [6]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype) void {
+    boundaryWith(e, pipes, s, expand, rows, eps, b, rows <= parts_rows);
+}
+
+/// `boundary` with the expand's parts on six threadgroups a slice or on one (the same bits either way).
+pub fn boundaryWith(e: mtl.ComputeEncoder, pipes: [6]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype, parts: bool) void {
     const one = expand and inPlace(b.x_old, b.x_new);
     if (one) expandInPlace(e, pipes, s, rows, b.x_old, b.branch, b.post, b.comb);
-    e.setPipeline(pipes[if (expand and !one) 0 else 1]);
+    e.setPipeline(pipes[@as(usize, if (expand and !one) 0 else 1) + @as(usize, if (parts) 4 else 0)]);
     inline for (.{ b.x_old, b.branch, b.post, b.comb, b.fn_packed, b.x_new, b.part }, 0..) |r, i| bind(e, i, r);
-    e.dispatchGroups(mtl.Size.of(4 * s.width / 1024, rows, 1), mtl.Size.of(256, 1, 1));
+    e.dispatchGroups(mtl.Size.of(4 * s.width / 1024, rows, if (parts) 6 else 1), mtl.Size.of(256, 1, 1));
     e.setPipeline(pipes[2]);
     inline for (.{ if (expand) b.x_new else b.x_old, b.part }, 0..) |r, i| bind(e, i, r);
     bind(e, 2, b.scale);
@@ -45,7 +53,7 @@ pub fn boundary(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, expand:
 }
 
 /// A pending `branch` into the streams `x` in place (width / 4 threads a row, so width <= 4096).
-pub fn expandInPlace(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, rows: u32, x: anytype, branch: anytype, post: anytype, comb: anytype) void {
+pub fn expandInPlace(e: mtl.ComputeEncoder, pipes: [6]mtl.Pipeline, s: Shape, rows: u32, x: anytype, branch: anytype, post: anytype, comb: anytype) void {
     std.debug.assert(s.width <= 4096);
     e.setPipeline(pipes[3]);
     inline for (.{ x, branch, post, comb }, 0..) |r, i| bind(e, i, r);

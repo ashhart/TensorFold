@@ -42,7 +42,7 @@ pub const Kernels = struct {
     gemv_scores_le32: mtl.Pipeline,
     gemv_scores: mtl.Pipeline,
     hc_expand_10: mtl.Pipeline,
-    hc_core: [4]mtl.Pipeline, // core/hc.zig: the expand (or the first boundary's read) with partial sums, the split, the expand in place
+    hc_core: [6]mtl.Pipeline, // core/hc.zig's names: the expand (or first read) with partial sums, split, in place, parts apart
     kda_rows: mtl.Pipeline,
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     kda_window: mtl.Pipeline, // windows of 2+ rows: kda_rows' values, the rows' gates, convolutions and norms at once
