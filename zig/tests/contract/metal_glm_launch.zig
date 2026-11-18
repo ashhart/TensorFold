@@ -5,7 +5,7 @@ const contract = @import("contract");
 const bits = @import("metal_glm_bits.zig");
 const Launch = @import("metal_limits.zig").Launch;
 
-const groups = .{ @import("metal_glm_select.zig"), @import("metal_glm_kda.zig"), @import("metal_glm_attn.zig"), @import("metal_glm_hc.zig"), @import("metal_glm_experts.zig") };
+const groups = .{ @import("metal_glm_select.zig"), @import("metal_glm_kda.zig"), @import("metal_glm_attn.zig"), @import("metal_glm_hc.zig"), @import("metal_glm_experts.zig"), @import("metal_glm_route.zig") };
 /// Gate 5's text owners by registration prefix: every group, and the window softmax beside the attention.
 const launches = groups ++ .{@import("metal_glm_attn.zig").softmax};
 

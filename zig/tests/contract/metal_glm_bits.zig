@@ -180,6 +180,8 @@ pub const Suite = struct {
     pub fn add(s: *Suite, comptime C: type, case: C) !void {
         var x = case;
         errdefer x.deinit();
+        try s.items.ensureUnusedCapacity(s.a, 1);
+        try s.kernels.ensureUnusedCapacity(s.a, 1);
         const p = try s.a.create(Probe(C));
         p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .case = x };
         const destroy = struct {
@@ -189,8 +191,26 @@ pub const Suite = struct {
                 a.destroy(q);
             }
         }.f;
-        try s.items.append(s.a, .{ .ctx = p, .destroy = destroy });
-        try s.kernels.append(s.a, p.kernel());
+        s.items.appendAssumeCapacity(.{ .ctx = p, .destroy = destroy });
+        s.kernels.appendAssumeCapacity(p.kernel());
+    }
+    /// A test type of its own (created by the caller), freed with the suite.
+    pub fn own(s: *Suite, comptime T: type, p: *T) !void {
+        errdefer {
+            p.deinit();
+            s.a.destroy(p);
+        }
+        try s.items.ensureUnusedCapacity(s.a, 1);
+        try s.kernels.ensureUnusedCapacity(s.a, 1);
+        const destroy = struct {
+            fn f(ctx: *anyopaque, a: std.mem.Allocator) void {
+                const q: *T = @ptrCast(@alignCast(ctx));
+                q.deinit();
+                a.destroy(q);
+            }
+        }.f;
+        s.items.appendAssumeCapacity(.{ .ctx = p, .destroy = destroy });
+        s.kernels.appendAssumeCapacity(p.kernel());
     }
     /// The GLM loader's libraries, assembled once: every case compiles text the loader compiles.
     pub fn production(s: *Suite) !*Loader {

@@ -18,7 +18,7 @@ pub const main_hc = @embedFile("baselines/hc_boundary_main.metal.txt");
 
 /// A boundary's form: streams expanded into another buffer, expanded in place (a prompt chunk), or a first read.
 pub const Mode = enum { expand, in_place, first };
-pub const Fault = enum { none, parts_weights };
+pub const Fault = enum { none, parts_weights, split_post };
 
 /// Rows: the boundary's rows (to 4: the expand's parts on six groups a slice); n: the streams; k: the width.
 const served = [3][7]c.Shape{
@@ -47,7 +47,11 @@ pub const Case = struct {
         const own = try text(s.a);
         defer s.a.free(own);
         _ = try loader.require(own);
-        const body = if (fault == .parts_weights) try bits.edited(s.a, own, "void tf_hc_expand_mix_parts(", "size_t(og * 8 + int(sg))", "size_t((og + 1) % 6 * 8 + int(sg))") else try s.a.dupe(u8, own);
+        const body = switch (fault) {
+            .none => try s.a.dupe(u8, own),
+            .parts_weights => try bits.edited(s.a, own, "void tf_hc_expand_mix_parts(", "size_t(og * 8 + int(sg))", "size_t((og + 1) % 6 * 8 + int(sg))"),
+            .split_post => try bits.edited(s.a, own, "void tf_hc_split(", "simd_shuffle(mix, ushort(S + llane))", "simd_shuffle(mix, ushort(llane))"),
+        };
         defer s.a.free(body);
         var x: Case = .{ .a = s.a, .mode = mode, .fault = fault, .control = fault != .none, .pipes = undefined, .old = undefined };
         var made: usize = 0;
@@ -71,10 +75,10 @@ pub const Case = struct {
         for (x.old) |p| p.deinit();
     }
     pub fn name(mode: Mode, fault: Fault) []const u8 {
-        const names = [3][2][]const u8{
-            .{ "metal glm launch hc boundary expand", "control: metal glm launch hc boundary expand, a parts group reading the next group's mix weights" },
-            .{ "metal glm launch hc boundary in place", "control: metal glm launch hc boundary in place, a parts group reading the next group's mix weights" },
-            .{ "metal glm launch hc boundary first read", "control: metal glm launch hc boundary first read, a parts group reading the next group's mix weights" },
+        const names = [3][3][]const u8{
+            .{ "metal glm launch hc boundary expand", "control: metal glm launch hc boundary expand, a parts group reading the next group's mix weights", "control: metal glm launch hc boundary expand, the split's post from the pre mixes" },
+            .{ "metal glm launch hc boundary in place", "control: metal glm launch hc boundary in place, a parts group reading the next group's mix weights", "control: metal glm launch hc boundary in place, the split's post from the pre mixes" },
+            .{ "metal glm launch hc boundary first read", "control: metal glm launch hc boundary first read, a parts group reading the next group's mix weights", "control: metal glm launch hc boundary first read, the split's post from the pre mixes" },
         };
         return names[@backingInt(mode)][@backingInt(fault)];
     }

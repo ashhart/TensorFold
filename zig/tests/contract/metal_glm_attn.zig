@@ -21,7 +21,7 @@ pub const main_attn = @embedFile("baselines/glm_attn_main.metal.txt");
 /// Rows: the window's dense rows; n: the heads; k: the first row's keys (edges: the 256-key join, the 1,024-key split).
 const served = [_]c.Shape{ .{ .rows = 8, .n = H, .k = 400 }, .{ .rows = 1, .n = H, .k = 1 }, .{ .rows = 16, .n = H, .k = 1 }, .{ .rows = 3, .n = H, .k = 5 }, .{ .rows = 2, .n = H, .k = 31 }, .{ .rows = 4, .n = H, .k = 33 }, .{ .rows = 16, .n = H, .k = 240 }, .{ .rows = 2, .n = H, .k = 255 }, .{ .rows = 1, .n = H, .k = 256 }, .{ .rows = 3, .n = H, .k = 700 }, .{ .rows = 16, .n = H, .k = 1010 }, .{ .rows = 2, .n = H, .k = 1024 }, .{ .rows = 8, .n = H, .k = 1500 }, .{ .rows = 16, .n = H, .k = 2033 }, .{ .rows = 1, .n = H, .k = 2048 } };
 
-pub const Fault = enum { none, halves, softmax, split };
+pub const Fault = enum { none, halves, softmax, split, prefetch };
 
 /// The loader's latent attention library on this GPU (nax.h inlined for it).
 pub fn attnText(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
@@ -45,9 +45,9 @@ pub const Case = struct {
         defer s.a.free(attn);
         _ = try loader.require(attn);
         _ = try loader.require(softmax_rows_text);
-        const faults = [_][3][]const u8{ .{ "", "", "" }, .{ "void glm_latent_scores_rows(", "n, n < 256,", "n, n < 255," }, .{ "void glm_softmax_rows(", "a.n0 + int(tg.y)", "a.n0 + int(tg.y) + 1" }, .{ "void glm_latent_values_rows(", "n > 1024 ? 1024 : 0", "n > 1024 ? 512 : 0" } };
+        const faults = [_][3][]const u8{ .{ "", "", "" }, .{ "void glm_latent_scores_rows(", "n, n < 256,", "n, n < 255," }, .{ "void glm_softmax_rows(", "a.n0 + int(tg.y)", "a.n0 + int(tg.y) + 1" }, .{ "void glm_latent_values_rows(", "n > 1024 ? 1024 : 0", "n > 1024 ? 512 : 0" }, .{ "inline void glm_scores_at(", "mma_16x32<false, true>(c0, c1, ca, cb0, cb1);", "mma_16x32<false, true>(c0, c1, a, cb0, cb1);" } };
         const f = faults[@backingInt(fault)];
-        const own_attn = if (fault == .halves or fault == .split) try bits.edited(s.a, attn, f[0], f[1], f[2]) else try s.a.dupe(u8, attn);
+        const own_attn = if (fault == .halves or fault == .split or fault == .prefetch) try bits.edited(s.a, attn, f[0], f[1], f[2]) else try s.a.dupe(u8, attn);
         defer s.a.free(own_attn);
         const own_soft = if (fault == .softmax) try bits.edited(s.a, softmax_rows_text, f[0], f[1], f[2]) else try s.a.dupe(u8, softmax_rows_text);
         defer s.a.free(own_soft);
@@ -79,6 +79,7 @@ pub const Case = struct {
             .halves => "control: metal glm launch attn rows, the scores' two-half join from 255 keys",
             .softmax => "control: metal glm launch attn rows, each row's softmax one key long",
             .split => "control: metal glm launch attn rows, the values split at 512 keys",
+            .prefetch => "control: metal glm launch attn rows, a scores step multiplying the prefetched next query block",
         };
     }
     pub fn spec(x: *const Case) c.Spec {
