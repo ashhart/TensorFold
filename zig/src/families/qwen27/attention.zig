@@ -320,7 +320,6 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
-
         if (p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
         try span(p.qg, 2 * q_bytes);
         try span(p.key, kv_bytes);
@@ -416,7 +415,6 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention);
         errdefer timing.cancel();
         const e = timing.encoder;
-
         try scratch.check(plan);
         try binding.check(plan, caches);
         try spanAligned(q, q_bytes, 16);
@@ -578,7 +576,6 @@ test "cache and pack descriptors match native pointer and six-word ABI" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PackArgs));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(planning.KeepRow));
 }
-
 test "plan fingerprint changes for an ancestor mutation rather than only counts" {
     var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{ -1, 0, 0 }, .start = 63, .capacity = 512 }}, .{});
     defer plan.deinit();
@@ -586,7 +583,6 @@ test "plan fingerprint changes for an ancestor mutation rather than only counts"
     plan.paths[2 * planning.path_width + 1] = 1;
     try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
 }
-
 test "cache span includes padded head strides but no unused trailing padding" {
     const cache = Cache{ .keys = undefined, .values = undefined, .capacity = 8, .key_stride = 4096, .value_stride = 8192 };
     try std.testing.expectEqual(@as(usize, 28672), cacheBytes(cache, true, .{}));
@@ -594,7 +590,6 @@ test "cache span includes padded head strides but no unused trailing padding" {
     const contiguous = Cache{ .keys = undefined, .values = undefined, .capacity = 8 };
     try std.testing.expectEqual(@as(usize, 16384), cacheBytes(contiguous, true, .{}));
 }
-
 test "descriptor identity includes numeric geometry and limits still refuse new shaders" {
     var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{-1}, .start = 0, .capacity = 8 }}, .{});
     defer plan.deinit();

@@ -161,13 +161,11 @@ pub const Runner = struct {
         const taps = try Taps.init(m.device, m.frame.capacity, @intCast(m.config.hidden));
         return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity, .kv = kv };
     }
-
     /// Slot `slot` holds the pages of its first `rows` rows before a pass or a copy writes them (paged runners).
     pub fn cover(r: *Runner, slot: u32, rows: u32) !void {
         const k = r.kv orelse return;
         try k.pages.cover(slot, @min(rows, r.capacity));
     }
-
     /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
     fn trimSlot(r: *Runner, slot: u32) void {
         const k = r.kv orelse return;
