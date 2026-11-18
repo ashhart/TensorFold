@@ -5,10 +5,11 @@ const pull = @import("pull.zig");
 const ranged = @import("pull_parts.zig");
 const single = @import("pull_file.zig");
 const exlr8_pull = @import("pull_exlr8.zig");
+const TestClient = @import("pull_test_client.zig").Client;
 
 /// A fake hub on 127.0.0.1: revision and tree APIs, ranged resolve endpoints, a body cut once, a repo ignoring ranges.
 const FakeHub = struct {
-    allocator: Allocator = std.heap.page_allocator, // worker threads keep the client leak checker on its own thread
+    allocator: Allocator = std.heap.page_allocator, // the fake server owns its worker allocations
     server: std.Io.net.Server,
     io: std.Io,
     threaded: *std.Io.Threaded,
@@ -300,10 +301,13 @@ fn testEnv(a: Allocator, endpoint_url: []const u8) !std.process.Environ.Map {
 }
 
 test "pull downloads, verifies, retries a cut body, resumes and refuses a family Zig cannot serve" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch {
         return error.SkipZigTest;
     };
@@ -379,10 +383,13 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
 }
 
 test "large files come down as shared pieces, and whole files when the hub ignores ranges" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -411,10 +418,13 @@ test "large files come down as shared pieces, and whole files when the hub ignor
 }
 
 test "shared pieces fill every byte across files, restart only unmarked pieces and refuse a server without ranges" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -453,10 +463,13 @@ fn hexBytes(text: []const u8) ![32]u8 {
 }
 
 test "an EXLR8 node's whole files land in a relative directory, small files and LFS pieces alike" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -481,10 +494,13 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
 }
 
 test "security: a hub response cannot write beyond the manifest file size" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena.deinit();
     const a = arena.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake = try FakeHub.open();
     fake.start();
     defer fake.stopServer();
@@ -508,10 +524,13 @@ test "security: a hub response cannot write beyond the manifest file size" {
 }
 
 test "security: a shard in a folder inside the model folder lands inside the snapshot" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -530,10 +549,13 @@ test "security: a shard in a folder inside the model folder lands inside the sna
 }
 
 test "security: a hub tree path TensorFold reserves is refused, naming the path and why" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var fake_hub = FakeHub.open() catch return error.SkipZigTest;
     fake_hub.start();
     defer fake_hub.stopServer();
@@ -554,10 +576,13 @@ test "security: a hub tree path TensorFold reserves is refused, naming the path 
 }
 
 test "pull refuses cache mutation while rm holds the cache directory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var client_io: TestClient = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    var arena = std.heap.ArenaAllocator.init(client_io.allocator());
     defer arena.deinit();
     const a = arena.allocator();
-    const io = std.testing.io;
+    const io = client_io.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
