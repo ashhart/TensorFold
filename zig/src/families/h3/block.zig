@@ -8,19 +8,24 @@ const kernels = @import("h3_kernels");
 const Model = h3.Model;
 const Ref = h3.Ref;
 
+/// Threadgroups walk 2^swizzle row tiles under one weight tile before the next, so 64 row tiles (4,096 rows) read a
+/// weight tile while it is still cached; MLX's 2 read every weight 16 times a product at 2048 x 2048. Sums unchanged.
+const swizzle = 6;
+
 /// d (rows, n) = x (rows, k) w^T for w (n, k) in bf16.
 fn gemm(m: *const Model, enc: mtl.ComputeEncoder, x: mtl.Buffer, w: Ref, d: mtl.Buffer, n: usize, k: usize) void {
+    const band = 1 << swizzle;
     const tn = n / 128;
     const tm = (m.rows + 63) / 64;
     enc.setPipeline(if (m.rows % 64 == 0) m.pipeline(kernels.gemm_whole) else m.pipeline(kernels.gemm_ragged));
     enc.setBuffer(x, 0, 0);
     enc.setBuffer(w.buffer, w.offset, 1);
     var p: [16]i32 = @splat(0);
-    const values = [_]usize{ m.rows, n, k, k, k, n, tn, tm, 2, k / 256 };
+    const values = [_]usize{ m.rows, n, k, k, k, n, tn, tm, swizzle, k / 256 };
     for (values, 0..) |v, i| p[i] = @intCast(v);
     enc.setBytes(std.mem.asBytes(&p), 2);
     enc.setBuffer(d, 0, 3);
-    enc.dispatchThreads(mtl.Size.of(tn * 4 * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
+    enc.dispatchGroups(mtl.Size.of(tn * band, (tm + band - 1) / band, 1), mtl.Size.of(32, 4, 2));
 }
 
 /// The stream's modulated norm to bf16 rows in xn; with `gates` it first adds the branch in `y` gated by that part.
