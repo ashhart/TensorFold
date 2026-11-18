@@ -168,6 +168,7 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
 pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
+    gone.conn.id = id;
     var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
     // TENSORFOLD_REQUEST_JOURNAL: off, `observed` is `out` and the trace does nothing
     var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out };
