@@ -92,6 +92,7 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("models_input_types_test.zig");
+    _ = @import("models_id_test.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_batch_test.zig"); // uses a socketpair test

@@ -244,8 +244,10 @@ test "auth scopes HTTP: inference and read are separate grants and full keys kee
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
+    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1", "/v1/models/m", "/models/m/" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
         try expectStatus(try h.ask(a, "GET", path, key, ""), 200);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/other", "read-secret", ""), 404);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/m", "", ""), 401);
     for ([_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
         try expectStatus(try h.ask(a, "GET", path, "read-secret", ""), 200);
         try expectStatus(try h.ask(a, "GET", path, "infer-secret", ""), 403);
