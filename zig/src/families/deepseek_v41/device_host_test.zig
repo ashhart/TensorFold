@@ -60,4 +60,5 @@ test "slide admission: DeepSeek refuses before assets or checkpoint access" {
 
 test {
     _ = @import("env_startup_test.zig");
+    _ = @import("carveout_kv_test.zig");
 }
