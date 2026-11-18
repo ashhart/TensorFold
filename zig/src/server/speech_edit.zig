@@ -290,7 +290,7 @@ fn run(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, sp: api.SpeechIn
         if (std.mem.indexOf(u8, target, marker) != null) return cx.refuse(prefix ++ "target_text takes no start or pause markers: remove U+E002 and U+E003 to U+E00A");
     }
     if (raw.field("verify")) |v| if (v.truthy()) return cx.refuse(prefix ++ "verify needs speech recognition, which is not served: set verify to false");
-    if (raw.field("decoder")) |v| if (!std.mem.eql(u8, v.str() orelse "", req.release.default_decoder)) return cx.refuse(prefix ++ "the decoder served is " ++ req.release.default_decoder);
+    const decoder = try zonos.decoderOf(cx, sp, raw);
     const sampling = try speech_sampling.parseFrom(cx, raw, .{ .temperature = zonos.temperature, .top_p = zonos.top_p, .top_k = zonos.top_k }, zonos.max_top_k);
     const takes_n: usize = @intFromFloat(try ranged(cx, raw, "num_takes", 1, 1, 4, false));
     const lang = try editLanguage(cx, raw);
@@ -424,7 +424,7 @@ fn run(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, sp: api.SpeechIn
         errdefer srv.gpa.free(pcm);
         const decode: api.SpeechEdit = .{ .op = .decode, .codes = @constCast(spliced), .out = &out };
         result = .{};
-        if (!try step(srv, c, cx, &.{ .prompt = &.{}, .pcm = pcm, .result = &result, .seed = 0, .edit = &decode })) {
+        if (!try step(srv, c, cx, &.{ .prompt = &.{}, .pcm = pcm, .result = &result, .seed = 0, .edit = &decode, .decoder = decoder })) {
             srv.gpa.free(pcm);
             return null;
         }

@@ -142,7 +142,7 @@ pub fn encode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, root: []const
     defer ctx.deinit();
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
-    const dec = try z3.codec_weights.load(gpa, io, &driver, rel.generator, rel.head);
+    const dec = try z3.codec_weights.load(gpa, io, &driver, rel.generator, rel.head, .keep2_plain);
     defer {
         dec.deinit();
         gpa.destroy(dec);

@@ -96,6 +96,11 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
         const value = (if (srv.zonos) |state| @import("zonos_speech.zig").listing(a, state) else srv.voices.listing(a)) catch return;
         return sendValue(conn, a, 200, value);
     }
+    if (std.mem.eql(u8, route, "/v1/audio/decoders")) {
+        const sp = srv.info.speech orelse return unknown(conn, a);
+        if (srv.zonos == null) return unknown(conn, a);
+        return sendValue(conn, a, 200, @import("zonos_speech.zig").decoders(a, sp) catch return);
+    }
     if (std.mem.eql(u8, route, "/v1/audio/controls")) {
         const bundle = (if (srv.zonos) |state| state.bundle else null) orelse return unknown(conn, a);
         return sendValue(conn, a, 200, @import("zonos_steer.zig").document(a, bundle) catch return);

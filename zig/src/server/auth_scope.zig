@@ -56,7 +56,7 @@ fn validLabel(label: []const u8) bool {
     return true;
 }
 
-const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices", "/v1/audio/controls", "/api/tags", "/api/ps", "/api/version" };
+const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices", "/v1/audio/controls", "/v1/audio/decoders", "/api/tags", "/api/ps", "/api/version" };
 const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest", "/api/show" };
 const inferring = [_][]const u8{
     "/chat/completions",    "/v1/chat/completions", "/completions",           "/v1/completions",

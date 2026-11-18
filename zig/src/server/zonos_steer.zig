@@ -29,17 +29,19 @@ pub const Paths = struct {
     steer_bundle: ?[]const u8 = null,
     laci_heads: ?[]const u8 = null,
     short_text: ?[]const u8 = null,
+    decoders: ?[]const u8 = null, // comma-separated ids; null: every one the release holds
 };
 
 pub const flags = [_]@import("cli.zig").Flag{
     .{ .name = "--steer-bundle", .path = true, .native = true },
     .{ .name = "--laci-heads", .path = true, .native = true },
     .{ .name = "--short-text", .path = true, .native = true },
+    .{ .name = "--decoders", .native = true },
 };
 
 /// Sets a ZONOS3 flag on `out` (the server's Args); false: not one of them.
 pub fn flag(out: anytype, name: []const u8, value: []const u8) bool {
-    if (std.mem.eql(u8, name, "--steer-bundle")) out.zonos.steer_bundle = value else if (std.mem.eql(u8, name, "--laci-heads")) out.zonos.laci_heads = value else if (std.mem.eql(u8, name, "--short-text")) out.zonos.short_text = value else return false;
+    if (std.mem.eql(u8, name, "--steer-bundle")) out.zonos.steer_bundle = value else if (std.mem.eql(u8, name, "--laci-heads")) out.zonos.laci_heads = value else if (std.mem.eql(u8, name, "--short-text")) out.zonos.short_text = value else if (std.mem.eql(u8, name, "--decoders")) out.zonos.decoders = value else return false;
     return true;
 }
 

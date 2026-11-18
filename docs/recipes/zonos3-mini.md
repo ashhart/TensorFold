@@ -29,6 +29,7 @@ files read here).
 | `lm/zonos3_mini/tokenizer/superbpe8192.json` | the text tokenizer | `90322f910600027dee7fe63d400d1d9dc1035c167d560aadf0871e3661d08bf3` |
 | `autoencoder/generator.pt` (fp32) | the codec's quantizer, semantic head, resamplers, encoder | `75a587a3eda9ca3d345f0c305756a7ff8619b01685c261b08ae243c69c2caf9a` |
 | `autoencoder/heads/keep2_plain/step_0050000.pt` (fp32) | the codec decoder's stages and iSTFT head | `7432e335e717417961267f2242547ce389a796cdc296a8b8d5289658e3c28936` |
+| `autoencoder/heads/full_mr/step_0050000.pt` (fp32), `registries/codec_registry.json` | the full-size decoder, on request | `9d2e2340c74f763340535f84e5dda59b5eabea668360400f8fac6b641598a1e9` (the checkpoint) |
 | `autoencoder/teacher/model.safetensors` (bf16) | the encoder's SSL teacher | `a15182741d6ee3cd780b8b830f49fa6b7fcce383655d451970841b24114767a5` |
 | `registries/codec_registry_keep2_plain.json`, `registries/silence_frame_*.json` | the decoder's files, the silence frame | `5437b4159b2bdbc33d3c1a27a316df7ae361b06f5ce3c9822f585402bcb4351a` (the registry) |
 | `lm/zonos3_mini/text_rows/pause_tokens_s5000.pt` (fp32), `.json` | the phoneme, start and pause tokens' text rows and their ids | `35868b0ff855081f3340a1c96644cfe9bf21b42935d9ed991ddd59ea0375e621` |
@@ -51,7 +52,7 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   the ids left unmasked, at position `frame * 10 + codebook` under the request's seed. Temperature 0 is its greedy
   rule: the first maximum, ties to the lower id.
 - **Codec decoder** (`cuda/codec.zig`, `zonos3_codec.cu`): the `keep2_plain` decoder, the reference servers'
-  default: code tables, the semantic head, five causal transformer stages from 15 Hz to 240 Hz, the ConvNeXt head,
+  default, and on request the full-size `full_mr` (see "The two decoders"): code tables, the semantic head, five causal transformer stages from 15 Hz to 240 Hz, the ConvNeXt head,
   two centered iSTFTs, the FIR mixer and the 44,160 to 44,100 Hz resampler. It keeps its state between calls and
   hands out the samples no later frame can change.
 - **Prompt and output** (`prompt.zig`, `speech.zig`, `release.zig`, `voices.zig`): the training layout
@@ -84,7 +85,7 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 
 Refused or absent: clips in formats other than WAV, LACI's duration targets and extended speaking-rate buckets,
 accent adapters (the publisher has published none: its guide's adapters were trained on an earlier backbone in its
-private repository), the `full_mr` decoder, Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
+private repository), Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
 the clip's transcript), Japanese and Mandarin, clips over 60 s, and the aligner's long-form routing (a clip over
 30 s needs its word timings from the caller).
 
@@ -297,6 +298,38 @@ a start marker that is not first, an unclosed or empty group and a phone outside
   served, the three replies have the reference audio's sample counts and match it at 68.9, 76.2 and 67.0 dB.
   `start_immediately` gives the bytes of the typed marker.
 
+## The two decoders
+
+The release publishes two heads for the same codec: `keep2_plain`, the reference servers' default (two transformer
+layers a stage, 759,635,712 bytes on the device), and the full-size `full_mr` (32 layers in the 15 Hz stage and 12 in
+each of the others, 4,253,052,672 bytes); the publisher's guide says they differ only in layer counts, and its
+configs agree (`full_mr` adds `warm_blocks`, which only sets training's initial weights). A request names one with
+`decoder` (speech and edits; an id not served gets the reference's 400, "Unknown decoder 'x'; this server serves:
+..."), the reply says which in `X-Decoder`, and `GET /v1/audio/decoders` lists them, the default first.
+`--decoders full_mr,keep2_plain` restricts the set; the release's default stays the default when listed, else the
+first listed is. The default loads with the model; another loads on its first request, as the publisher's web engine
+does, admitted for its weights and a lane for every request at once (7,116,379,904 bytes for `full_mr` at
+`--parallel 4`, which the log shows admitted and held), and is refused with a 500 when the device has less free.
+
+- **The caches.** A stage's attention sees its last 150 to 480 positions, so its K and V caches are now rings of that
+  window plus a pass's rows (`Options.ring`: position p is row p mod the ring), where they used to hold the whole
+  request. `zc_attn_prep` and `zc_attention` take the ring's size; the loop over positions and every sum are as
+  before. For `keep2_plain` that took a request's state from 1,236,862,976 to 495,527,936 bytes, and made `full_mr`'s
+  thirty-odd extra layers cost about 0.1 GB a request rather than 5.1 GB.
+- **`keep2_plain` is unchanged:** against the previous build, served, at `--parallel 4`, the same replies are
+  byte-identical: 2.0 to 50.8 s, plain, under LACI, with a control span, each alone and all four at once, and
+  streamed (40 s reaches about 600 positions in the 15 Hz stage and 9,500 in the 240 Hz one, so every ring wraps).
+  The kernel contract checks both kernels through rings that wrap: 41 of 41 kernels pass gates 1 to 4 and every
+  planted control fails, and both kernels keep their recorded registers.
+- **`full_mr` against the publisher's code** (`zonos3-generate --codec-check D/codec_savannah_full --head
+  FULL_MR_HEAD --decoder full_mr`, the dump made with `zonos3_reference.py codec ... --decoder full_mr`): the 13
+  captures from the latent to the audio at cosine 1.0000000, the audio at 122.1 dB (`keep2_plain`: 115.9 dB).
+  Served, two greedy requests the reference generated and decoded with `full_mr` (4.8 s on a reference voice, and
+  17.5 s under LACI) match its audio at 64.7 and 66.5 dB, repeat byte for byte and stream the same bytes. An edit by
+  span decodes through it too.
+- **Speed:** decoding 11.4 s took 0.133 s with `keep2_plain` and 0.533 s with `full_mr` (86 and 21 times real time,
+  one pass); the backbone's frames cost the same for either.
+
 ## Spans that follow the reading
 
 `control_span_follow: "reading"` places a request's `control_spans` by where the model is in its text rather than
@@ -466,8 +499,8 @@ write and attention) run a lane at a time on that lane's state. The kernels are 
 computes a row from that row alone, so a request's arithmetic does not depend on what runs beside it.
 
 - **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
-  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,833,389,568 bytes at
-  `--parallel 1`, 7,543,978,496 at 4. A guided request's twin lane is still made by its slot's first guided request.
+  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,092,054,528 bytes at
+  `--parallel 1`, 4,578,638,336 at 4. A guided request's twin lane is still made by its slot's first guided request.
 - **Speed:** a frame of one request is about 226 small launches, 24 of them a lane's own, so the backbone's cost
   grows slowly with the lanes in a pass (1.1 ms for one row, 1.6 ms for four). Sampling on the host and the decoder
   do not share: the decoder's 0.19 s for a 17.8 s reply is real work, 78% of it in `zc_linear`, and is now the
@@ -545,6 +578,7 @@ done
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_embedding/input_ids.npy --dtype f32 --mode full -o D/lm_embedding
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_reference/input_ids.npy --dtype f32 --mode full -o D/lm_reference
 python tools/zig/zonos3_reference.py codec RELEASE/gguf/voices/English/Savannah_en-American_F_1.codes.npy D/codec_savannah
+python tools/zig/zonos3_reference.py codec RELEASE/gguf/voices/English/Savannah_en-American_F_1.codes.npy D/codec_savannah_full --decoder full_mr
 python ZONOS/tools/dump_golden.py codec-encoder --generator RELEASE/autoencoder/generator.pt \
     --audio RELEASE/gguf/voices/English/Cillian_en-Irish_M_1.wav -o D/enc_cillian
 python tools/zig/zonos3_reference.py encoder RELEASE/autoencoder/generator.pt D/enc_cillian/audio.npy D/enc_cillian_fp32
@@ -622,6 +656,7 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | SSL teacher | `--teacher-check D/teacher_cillian_fp32 --teacher RELEASE/autoencoder/teacher` | 18 captures of the fp32 run, 999 rows | worst row's cosine 0.9999252 |
 | Clip to codes, one lane | `--encode-check D/clip_cillian --checkpoint RELEASE` | the fp32 run's codes, 145 frames | 1,450 of 1,450 codes equal |
 | Clip to codes, four lanes | `--encode-check D/clip_cillian_47s --checkpoint RELEASE` | the fp32 run's codes, 710 frames | 7,100 of 7,100 codes equal |
+| The `full_mr` decoder | `--codec-check D/codec_savannah_full --generator G --head FULL_MR_HEAD --decoder full_mr` | 13 captures and the audio of 171 frames | cosine 1.0000000 everywhere; audio 122.1 dB |
 | Spans that follow the reading, six requests | `--model LM --follow-check D/gen_follow_X --steer-bundle BUNDLE --laci-heads FILE --max-rows N` | the span deltas, every reading after each rollback, every frame's weights, the frames | all equal at N = 64 and 7 in all six |
 | Speech edit, one span (1.0 to 1.6 s) | `--model LM --edit-check D/edit_span --edit-adapter A --max-rows N` | the reference's region, minimum length, prompt and 20 rows; the spliced codes | all equal at N = 64 and 7 |
 | Speech edit without the speaker row, no minimum length | the same with `D/edit_plain_row` | 20 rows | all equal at N = 64 and 7 |
@@ -779,13 +814,13 @@ The host works out what a load takes before it allocates anything and asks the p
 - **The load:** the pinned release's weights as the device holds them (2,531,483,136 bytes: the backbone's bf16 and
   the `keep2_plain` decoder's fp32), plus the backbone's and the decoder's state and workspaces, which their own
   allocation code counts without allocating (`Engine.stateBytes`, `Codec.stateBytes`). At the default
-  `--context 4096` and 2,000 frames that is 3,833,389,568 bytes (3.57 GiB), and the server's log shows the same
+  `--context 4096` and 2,000 frames that is 3,092,054,528 bytes (2.88 GiB), and the server's log shows the same
   number admitted and held after the load. A load that holds more than it was admitted for is an error.
 - **The clip encoder** loads with the first request that brings a clip and takes 5,643,510,688 bytes (5.26 GiB) of
   weights, state and workspaces, all of fixed size; the log again shows that number admitted and held.
 - **The edit adapter**, when the release folder holds it, is part of the load: its factors and shifted biases as
   the device holds them (counted from the file's index before anything is allocated) and the scratch its passes
-  take, 143,684,608 bytes in all at the default context. With it, four requests at once load at 7,687,663,104
+  take, 143,684,608 bytes in all at the default context. With it, four requests at once load at 4,722,322,944
   bytes, admitted and held alike.
 - **The aligner** loads with the first edit that needs word timings and is admitted for 2,383,462,404 bytes: its
   1,846,591,492 bytes of weights and 512 MiB for one forward's rows, which are allocated for the forward and freed
@@ -918,6 +953,8 @@ bf16-encoded references, clones as well from fp32 codes.
 - `core/speech_api.zig` gained `SpeechRequest.edit` (`SpeechEdit`: one step of a speech edit on the engine: a
   clip's codes, a fill's rows, edited codes' audio, words placed in a clip), re-exported by `core/engine_api.zig`.
   A request without it is as before.
+- `core/speech_api.zig`: `SpeechInfo.decoders` and `SpeechRequest.decoder` (an index into them, 0 the default);
+  `core/engine_api.zig`: `Open.decoders` (`--decoders`). A family with one decoder leaves both empty and 0.
 - `core/speech_api.zig`: `SpeechSteering.follow` (each span's text positions, the gate's lead and lag, the heads
   that read). A request without it is as before.
 - `core/torch_pth.zig` gained `readF32Strided`, which reads a tensor stored in any stride order (the speaker

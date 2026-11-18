@@ -31,6 +31,8 @@ pub const SpeechRequest = struct {
     laci: ?*const SpeechLaci = null,
     /// One step of a speech edit in place of a spoken reply; null: none.
     edit: ?*const SpeechEdit = null,
+    /// The audio decoder: an index into the info's `decoders`, 0 its default.
+    decoder: u8 = 0,
 };
 
 /// A speech edit's steps on the engine: the server plans the edit between them.
@@ -97,4 +99,6 @@ pub const SpeechInfo = struct {
     frame_length: u32,
     max_frames: u32,
     max_prompt_tokens: u32,
+    /// The audio decoders a request may name, the default first; empty: the family has one.
+    decoders: []const []const u8 = &.{},
 };
