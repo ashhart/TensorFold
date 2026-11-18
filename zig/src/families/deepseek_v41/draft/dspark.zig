@@ -217,9 +217,34 @@ fn rankedBefore(_: void, a: Ranked, b: Ranked) bool {
 
 /// A row's best `ids.len` by (value desc, id asc) as token ids (`id0`: first column), bounded selection, no full sort.
 pub fn candidates(scratch: Allocator, logits: []const f32, id0: u32, ids: []i32, vals: []f32) !void {
-    const k = @min(ids.len, logits.len);
-    const best = try scratch.alloc(Ranked, k);
+    const best = try scratch.alloc(Ranked, @min(ids.len, logits.len));
     defer scratch.free(best);
+    candidatesWith(best, logits, id0, ids, vals);
+}
+
+/// The most candidates a row keeps on `candidateRows`' threads (their lists live on the stack).
+pub const max_candidates = 256;
+
+/// `candidates` of `ids.len / k` rows of `logits` (row r at r * `v`), rows past the first on threads of their own.
+pub fn candidateRows(logits: []const f32, v: usize, k: usize, ids: []i32, vals: []f32) !void {
+    if (k == 0 or k > max_candidates) return error.Candidates;
+    const rows = ids.len / k;
+    var threads: [16]?std.Thread = @splat(null);
+    const Row = struct {
+        fn run(lg: []const f32, o: []i32, ov: []f32) void {
+            var best: [max_candidates]Ranked = undefined;
+            candidatesWith(best[0..@min(o.len, lg.len)], lg, 0, o, ov);
+        }
+    };
+    // a thread that cannot start leaves its row to this one
+    for (1..@min(rows, threads.len)) |r| threads[r] = std.Thread.spawn(.{ .stack_size = 64 << 10 }, Row.run, .{ logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k] }) catch null;
+    for (0..rows) |r| if (r >= threads.len or threads[r] == null) Row.run(logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k]);
+    for (threads) |t| if (t) |th| th.join();
+}
+
+/// `candidates` with the ranked list in `best` (`@min(ids.len, logits.len)` entries).
+fn candidatesWith(best: []Ranked, logits: []const f32, id0: u32, ids: []i32, vals: []f32) void {
+    const k = best.len;
     var n: usize = 0;
     var i: usize = 0;
     while (i < logits.len) {
@@ -241,6 +266,26 @@ pub fn candidates(scratch: Allocator, logits: []const f32, id0: u32, ids: []i32,
     }
     @memset(ids[k..], -1);
     @memset(vals[k..], -std.math.inf(f32));
+}
+
+test "candidates of several rows on threads == each row alone" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(4106);
+    const v = 3001;
+    const rows = 7;
+    const logits = try a.alloc(f32, rows * v);
+    defer a.free(logits);
+    for (logits, 0..) |*x, i| x.* = if ((i / v) % 2 == 0) @floatFromInt(prng.random().intRangeAtMost(i32, -9, 9)) else prng.random().floatNorm(f32);
+    var ids: [rows * 64]i32 = undefined;
+    var vals: [rows * 64]f32 = undefined;
+    try candidateRows(logits, v, 64, &ids, &vals);
+    for (0..rows) |r| {
+        var one: [64]i32 = undefined;
+        var ov: [64]f32 = undefined;
+        try candidates(a, logits[r * v ..][0..v], 0, &one, &ov);
+        try std.testing.expectEqualSlices(i32, &one, ids[r * 64 ..][0..64]);
+        try std.testing.expectEqualSlices(f32, &ov, vals[r * 64 ..][0..64]);
+    }
 }
 
 /// Value `v` of id `i` into the ranked list `best` holding `n` (full at best.len: only one ranked before its last).
