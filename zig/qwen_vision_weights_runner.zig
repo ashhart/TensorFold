@@ -8,7 +8,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     var failed: usize = 0;
     var skipped: usize = 0;
     for (builtin.test_functions, 1..) |test_fn, i| {
-        std.testing.allocator_instance = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
+        std.testing.allocator_instance = .init(std.heap.page_allocator, .{
+            .check_write_after_free = true,
+            .stack_trace_frames = if (builtin.os.tag == .macos) 0 else (std.heap.SafeAllocator.Options{}).stack_trace_frames,
+        });
         std.testing.io_instance = .init(std.testing.allocator, .{ .argv0 = .init(init.args), .environ = init.environ });
         std.testing.environ = init.environ;
         std.debug.print("{d}/{d} {s}...", .{ i, builtin.test_functions.len, test_fn.name });
