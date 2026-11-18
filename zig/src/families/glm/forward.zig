@@ -35,6 +35,7 @@ pub const Ctx = struct {
     inject: ?*const Inject = null, // a prompt pass's image rows over its placeholder embeddings
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
     moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
+    q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
 };
 
 /// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.
@@ -130,7 +131,7 @@ pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, plane: usize) void {
 
 pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
 /// glm_mla_norms' arguments: an x_proj row's offsets and widths of the three parts, their eps and the weights' scale.
-const MlaNorms = extern struct { x_stride: u32, kv_at: u32, ik_at: u32, iw_at: u32, kv_width: u32, ik_width: u32, iw_width: u32, kv_eps: f32, ik_eps: f32, iw_scale: f32 };
+const MlaNorms = extern struct { x_stride: u32, kv_at: u32, ik_at: u32, iw_at: u32, kv_width: u32, ik_width: u32, iw_width: u32, q_width: u32, kv_eps: f32, ik_eps: f32, iw_scale: f32, q_eps: f32 };
 /// The indexer weights' scale (exact: a power of two).
 const index_weight_scale: f32 = 1.0 / 64.0;
 const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
@@ -294,9 +295,11 @@ pub fn mlaKeys(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_i
     const sc = x.sc;
     var one: [1]Seg = undefined;
     if (on(x, "mla_proj")) qmv(x, e, x.k.qmv_x, x_in, w.x_proj, sc.xp, rows);
+    x.q_normed = on(x, "mla_proj") and on(x, "mla_cache"); // the queries' norm in the cache writes' launch
     if (on(x, "mla_cache")) for (segments(x, rows, pos, &one)) |g| {
         const y = withState(x, g);
-        mlaCache(&y, e, mi, w, x_in.at(@as(usize, g.row0) * c.hidden * 2), sc.xp.at(@as(usize, g.row0) * c.xProj() * 2), c.xProj(), sc.iw.at(@as(usize, g.row0) * c.i_heads * 2), g.rows, g.pos);
+        const qr = if (x.q_normed) sc.qr.at(@as(usize, g.row0) * c.q_lora * 2) else null;
+        mlaCache(&y, e, mi, w, x_in.at(@as(usize, g.row0) * c.hidden * 2), sc.xp.at(@as(usize, g.row0) * c.xProj() * 2), c.xProj(), sc.iw.at(@as(usize, g.row0) * c.i_heads * 2), qr, g.rows, g.pos);
     };
 }
 
@@ -307,9 +310,10 @@ pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, r
     const sc = x.sc;
     var one: [1]Seg = undefined;
     if (on(x, "mla_proj")) {
-        rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
+        if (!x.q_normed) rms(x, e, sc.xp, w.q_norm, sc.qr, rows, c.q_lora, c.xProj(), c.q_lora, c.eps);
         qmv(x, e, if (c.tp > 1) k.qmv_qr_tp else k.qmv_qr, sc.qr, w.qr_proj, sc.qp, rows);
     }
+    x.q_normed = false;
     if (on(x, "mla_absorb")) absorb(x, e, w, sc.qp, sc.ql, rows);
     for (segments(x, rows, pos, &one)) |g| attend(&withState(x, g), e, mi, g);
     if (on(x, "mla_unabs")) unabsorb(x, e, w, sc.att, sc.vals, rows);
@@ -341,13 +345,13 @@ fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
     if (dense < g.rows) attendSparse(x, e, mi, g, dense);
 }
 
-/// Rows' latent keys, indexer keys, gates to cache `mi` at pos..; indexer weights to `iw`; the blocks they complete.
-pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, xp: Ref, xp_stride: u32, iw: Ref, rows: u32, pos: u32) void {
+/// Rows' latent keys and indexer keys and gates to cache `mi` at pos.., weights to `iw` (`qr`: queries), the pools.
+pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, xp: Ref, xp_stride: u32, iw: Ref, qr: ?Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const k = x.k;
     const C = &x.s.mla[mi];
     const RANK = c.kv_lora;
-    mlaNorms(k, c, e, w, xp, xp_stride, C.keys.at(@as(usize, pos) * RANK * 2), C.ik.at(@as(usize, pos) * c.i_dim * 2), iw, rows);
+    mlaNorms(k, c, e, w, xp, xp_stride, C.keys.at(@as(usize, pos) * RANK * 2), C.ik.at(@as(usize, pos) * c.i_dim * 2), iw, qr, rows);
     const ig = if (rows == 1) k.igate_logits_one else k.igate_logits; // MLX's gemv_t sums, more threadgroups
     moe_route.logits(e, ig, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows);
     const first = pos / c.kpool;
@@ -360,13 +364,15 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     }
 }
 
-/// Rows' kv norm, indexer key norm and indexer weights from x_proj in one launch (glm_mla_norms), their kernels' bits.
-pub fn mlaNorms(k: *const Kernels, c: *const cfg.Config, e: mtl.ComputeEncoder, w: *const wts.Mla, xp: Ref, xp_stride: u32, keys: Ref, ik: Ref, iw: Ref, rows: u32) void {
+/// Rows' kv norm, key norm, index weights (and `qr`: query norm) from x_proj in one launch (glm_mla_norms), same bits.
+pub fn mlaNorms(k: *const Kernels, c: *const cfg.Config, e: mtl.ComputeEncoder, w: *const wts.Mla, xp: Ref, xp_stride: u32, keys: Ref, ik: Ref, iw: Ref, qr: ?Ref, rows: u32) void {
     const R = c.kv_lora;
     e.setPipeline(k.mla_norms);
     bind(e, 0, .{ xp, w.kv_norm, keys, w.k_norm_w, w.k_norm_b, ik, iw });
-    e.setValue(MlaNorms{ .x_stride = xp_stride, .kv_at = c.q_lora, .ik_at = c.q_lora + R, .iw_at = c.q_lora + R + c.i_dim, .kv_width = R, .ik_width = c.i_dim, .iw_width = c.i_heads, .kv_eps = c.eps, .ik_eps = 1e-6, .iw_scale = index_weight_scale }, 7);
-    e.dispatchGroups(size(rows, 3, 1), size(((R + 3) / 4 + 31) / 32 * 32, 1, 1)); // rms' threads (all three fit)
+    e.setValue(MlaNorms{ .x_stride = xp_stride, .kv_at = c.q_lora, .ik_at = c.q_lora + R, .iw_at = c.q_lora + R + c.i_dim, .kv_width = R, .ik_width = c.i_dim, .iw_width = c.i_heads, .q_width = c.q_lora, .kv_eps = c.eps, .ik_eps = 1e-6, .iw_scale = index_weight_scale, .q_eps = c.eps }, 7);
+    if (qr) |q| bind(e, 8, .{ w.q_norm, q });
+    const widest = if (qr != null) @max(R, c.q_lora) else R; // rms' threads for the widest row (all parts fit)
+    e.dispatchGroups(size(rows, if (qr != null) 4 else 3, 1), size(((widest + 3) / 4 + 31) / 32 * 32, 1, 1));
 }
 
 /// Every row's 64 heads of q_nope (`qp`, rows qrProj apart) into the latent: qvm on kv_b's key half, or embed_q's qmv.
