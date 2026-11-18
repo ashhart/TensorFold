@@ -56,6 +56,15 @@ const State = struct {
         try s.p.addBf16(s.routed, s.sy, s.out[0], s.rows * s.D);
     }
 
+    fn capture(s: *const State, stream: cuda.Stream) !cuda.graph.Exec {
+        try cuda.graph.beginCapture(stream, .thread_local);
+        const launched = s.launch(true);
+        var graph = try cuda.graph.endCapture(stream);
+        defer graph.deinit();
+        try launched;
+        return graph.instantiate();
+    }
+
     fn time(s: *const State, stream: cuda.Stream, start: cuda.Event, end: cuda.Event, fused: bool) !f64 {
         for (0..2) |_| try s.launch(fused);
         var ms: [5]f64 = undefined;
@@ -106,6 +115,19 @@ fn cell(gpu: Gpu, k: *const dsv41.Kernels, rows: usize, D: usize, slots: usize, 
         try check.sameBytes("ordered FMA and BF16 ties", got[8..16], std.mem.asBytes(&ties));
     }
     check.pass("combine-add rows {d} D {d} slots {d} {s}: {d:.3} -> {d:.3} ms BITEXACT", .{ rows, D, slots, if (ordered) "ordered" else "random", before, after });
+    var exec = try s.capture(stream);
+    defer exec.deinit();
+    for ([_]u8{ 0, 0x3f }) |byte| {
+        try sy.fill8(byte, stream.handle);
+        try s.launch(false);
+        try fused.fill8(0xa5, stream.handle);
+        try exec.launchOn(stream);
+        try stream.synchronize();
+        try plain.download(0, want);
+        try fused.download(0, got);
+        try check.sameBytes("combine-add graph vs fresh eager reference", got, want);
+    }
+    check.pass("combine-add graph rows {d} D {d} slots {d} {s}: 2 replays BITEXACT", .{ rows, D, slots, if (ordered) "ordered" else "random" });
 }
 
 pub fn run(gpu: Gpu, k: *const dsv41.Kernels) !void {
@@ -116,4 +138,5 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels) !void {
         };
     }
     check.pass("combine-add: 36 cells, ordered FMA, BF16 ties and offset guards", .{});
+    check.pass("combine-add graph: 36 captures, 72 replays with changed shared input", .{});
 }
