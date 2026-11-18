@@ -23,6 +23,17 @@ def config_dir() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "tensorfold-web"
 
 
+def engine_root(url: str) -> str:
+    """Accept an OpenAI API base URL while keeping the server's reverse-proxy prefix."""
+
+    with contextlib.suppress(ValueError):
+        parts = urlsplit(url)
+        path = parts.path.rstrip("/")
+        if parts.scheme in ("http", "https") and parts.netloc and path.endswith("/v1"):
+            return parts._replace(path=path.removesuffix("/v1")).geturl()
+    return url.rstrip("/")
+
+
 @dataclass
 class Settings:
     engine_url: str = DEFAULT_ENGINE
