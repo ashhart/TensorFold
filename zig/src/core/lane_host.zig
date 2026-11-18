@@ -23,7 +23,6 @@ const Engine = api.Engine;
 const Info = api.Info;
 const Reason = api.Reason;
 const Stats = api.Stats;
-
 pub const Rounds = rounds.Rounds;
 pub const Proposers = rounds.Proposers;
 const rounds = @import("lane_rounds.zig");
@@ -38,8 +37,7 @@ pub const LaneHost = struct {
     core: *lanes.Engine,
     info_: Info,
     min_match: i64 = 4,
-    /// A family's own copy proposer for each request (null: lanes.SuffixLookup at `min_match`)
-    proposers: ?Proposers = null,
+    proposers: ?Proposers = null, // a family's own copy proposer (null: lanes.SuffixLookup at `min_match`)
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
     queued: std.ArrayList(*Job) = .empty,
@@ -48,15 +46,13 @@ pub const LaneHost = struct {
     cancels: std.ArrayList(Id) = .empty,
     closing: bool = false,
     stale: bool = false, // the learner's last step: a put-back has not reached the device, so replies are refused
-    /// `halt`'s reason: what is left finishes failed with it (null: a stop cancels what is left)
-    halt_reason: ?[]const u8 = null,
+    halt_reason: ?[]const u8 = null, // what is left finishes failed with it; null: a stop cancels what is left
     thread: ?std.Thread = null,
     decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_tokens: std.ArrayList(u32) = .empty,
-    /// A Metal engine's keepalive target, set by the family that owns the queue; null keeps the ticker off.
-    keepalive_target: ?api.keepalive.Target = null,
+    keepalive_target: ?api.keepalive.Target = null, // set by the family that owns the queue; null keeps the ticker off
     live_generated: u64 = 0,
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
@@ -322,6 +318,9 @@ pub const LaneHost = struct {
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
+        if (job.started and job.delivered > 0 and job.request.max_tokens > 0 and
+            !job.request.background and !job.request.untaught and (reason == .stop or reason == .length))
+            if (job.request.usage) |u| u.done(u.ctx, job.stream.pocket_usage);
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
         if (job.started) {
             if (s.grammar) |g| g.deinit(h.gpa);

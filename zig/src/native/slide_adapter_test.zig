@@ -6,13 +6,16 @@ const refusal = @import("slide_adapter.zig").refusal;
 const Fixture = struct {
     pub const Example = api.Example;
     pub const Learner = struct {
+        reuse_deleted: bool = false,
         pub const Progress = struct { phase: enum { read, fit, values, check, done }, at: usize, of: usize, loss: f32 };
         pub const Placed = api.Neuron;
         pub fn init(_: std.mem.Allocator, _: std.Io, _: void) @This() {
             return .{};
         }
         pub fn deinit(_: *@This()) void {}
-        pub fn begin(_: *@This(), _: anytype) !void {}
+        pub fn begin(l: *@This(), lesson: anytype) !void {
+            l.reuse_deleted = lesson.reuse_deleted;
+        }
         pub fn abort(_: *@This()) void {}
         pub fn progress(_: *@This()) ?Progress {
             return .{ .phase = .read, .at = 0, .of = 100, .loss = 0 };
@@ -126,6 +129,9 @@ test "pocket audit adapter: one prompt per step, no lesson begin step abort or a
     try std.testing.expect(!complete and seen.failed);
     try std.testing.expect(a.learner.lessons == 17 and a.learner.begins == 0 and a.learner.steps == 0 and a.learner.aborts == 0);
     try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .save = true }, sink));
+    try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .against = &.{.{ .ids = &.{ 1, 2 }, .start = 1, .decide = 0 }} }, sink));
+    try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .reuse_deleted = true }, sink));
+    try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .shrink = .next }, sink));
 }
 
 test "pocket audit adapter: a failed partial measurement never completes; unsupported has no side effects" {
@@ -169,4 +175,28 @@ test "slide refusal: a shard the index places in a folder is refused at startup,
     });
     const why = (try refusal(NoLinks, a, io, dir, "a copy")) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.mem.indexOf(u8, why, "sub/b.safetensors") != null);
+}
+
+test "lesson adapter: silent-slot reuse is explicit on the native learn request and resets for the next lesson" {
+    var a = Adapter(Fixture).init(std.testing.allocator, std.testing.io, {});
+    defer a.deinit();
+    var seen: Seen = .{};
+    const hook = a.hook();
+    try hook.begin(hook.ctx, &.{ .reuse_deleted = true }, .{ .ctx = &seen, .event = Seen.on });
+    try std.testing.expect(a.learner.reuse_deleted);
+    try hook.begin(hook.ctx, &.{}, .{ .ctx = &seen, .event = Seen.on });
+    try std.testing.expect(!a.learner.reuse_deleted);
+}
+
+test "lesson adapter: usage capability requires an audited whole pocket learner" {
+    const cap = @import("slide_adapter.zig").pocketUsage;
+    const Fake = struct {
+        pub const Audit = struct {};
+        whole: bool,
+        method: enum { pocket, other },
+    };
+    try std.testing.expect(cap(Fake{ .whole = true, .method = .pocket }));
+    try std.testing.expect(!cap(Fake{ .whole = false, .method = .pocket }));
+    try std.testing.expect(!cap(Fake{ .whole = true, .method = .other }));
+    try std.testing.expect(!cap(struct {}{}));
 }
