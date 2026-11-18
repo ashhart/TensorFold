@@ -170,6 +170,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
+    if (try @import("metal_glm_launch.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
     if (std.mem.startsWith(u8, d.name, "flint ") or std.mem.startsWith(u8, d.name, "moe_route ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
