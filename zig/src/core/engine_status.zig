@@ -36,6 +36,7 @@ pub const Status = struct {
     /// Requests that gave a lane up to a later one; null when the engine does not count them.
     preemptions: ?u64 = null,
     warming: bool = false,
+    engine_stalls_total: ?u64 = null, // null when the lane sentinel is disabled
     /// Live streams written to the caller's buffer: tokens each holds.
     streams: usize = 0,
     /// Generated tokens held by live streams, excluding their prompts.

@@ -254,6 +254,7 @@ test {
         _ = @import("benchmark_receipt_test.zig");
         _ = @import("benchmark_group_test.zig");
         _ = @import("benchmark_stop_test.zig");
+        _ = @import("lane_stall_exit_test.zig");
         _ = @import("benchmark_sse_test.zig");
         _ = @import("benchmark_stream_test.zig");
         _ = @import("benchmark_server_test.zig");
@@ -306,6 +307,7 @@ test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
     _ = @import("cors_test.zig");
+    _ = @import("lane_stall_test.zig");
     _ = @import("deepseek_fixture_test.zig");
     _ = @import("uocr_chat_test.zig");
 }

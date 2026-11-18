@@ -501,6 +501,11 @@ test "metrics count interior states in retained occupancy as well as restored to
     }
 }
 
+/// --stall-seconds' episode count, only while the sentinel is on: a stalled engine's scrape still carries it.
+pub fn renderStalls(w: *std.Io.Writer, status: api.Status) !void {
+    if (status.engine_stalls_total) |n| try gauge(w, "engine_stalls_total", "counter", "Engine rounds that stayed open past --stall-seconds.", n);
+}
+
 /// Admission's families, only when a flag turned it on; the reasons are fixed, so no request value becomes a label.
 pub fn renderAdmission(w: *std.Io.Writer, snap: @import("request_admission.zig").Snapshot) !void {
     try gauge(w, "admission_inflight", "gauge", "Model requests holding an admission reservation.", snap.inflight);
