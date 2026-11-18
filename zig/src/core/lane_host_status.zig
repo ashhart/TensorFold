@@ -11,6 +11,10 @@ const window_ns: i96 = 2 * std.time.ns_per_s;
 /// Engine.status: the counts, copied from the engine thread's published snapshot without the host's lock (issue 3200).
 pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
+    if (h.stall.unhealthy.load(.acquire)) {
+        out.* = .{ .healthy = false, .engine_stalls_total = h.stall.count() };
+        return;
+    }
     var s: Snapshot = undefined;
     var n: usize = 0;
     var now: i96 = undefined;
@@ -44,6 +48,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         if (stable) break;
     }
     out.* = .{
+        .engine_stalls_total = h.stall.count(),
         .healthy = !h.closing.load(.acquire) and !h.stale.load(.acquire) and (if (h.health) |source| source.read(source.ctx) else true),
         .running = @intCast(s.running),
         .waiting = @intCast(s.waiting),

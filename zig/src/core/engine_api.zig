@@ -7,6 +7,7 @@ pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
+pub const stall = @import("lane_stall.zig");
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
 /// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
@@ -17,7 +18,6 @@ pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
 pub const execution_witness = @import("engine_witness.zig");
-
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
 pub const Audio = lanes.stream.Audio;
@@ -410,6 +410,7 @@ pub const Engine = struct {
         encode_voice: ?*const fn (ctx: *anyopaque, gpa: Allocator, wav: []const u8) EncodeVoiceError![][10]i32 = null,
         /// Folded Memory Weights v3 synchronous op on the engine thread; null when not attached.
         memory_op: ?*const fn (ctx: *anyopaque, op: *const MemoryOp) MemoryResult = null,
+        configure_stall: ?*const fn (*anyopaque, stall.Config) anyerror!void = null, // --stall-seconds, once after open; null: refused
     };
 
     pub fn info(e: Engine) Info {
