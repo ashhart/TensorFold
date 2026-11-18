@@ -186,6 +186,23 @@ test "miss reasons: the field is diagnostics only — every lookup's marks and r
     try std.testing.expectEqual(l1.miss.?.shared_len, l2.miss.?.shared_len);
 }
 
+test "miss reasons: a hit ignores an older, shorter removed prefix on the same path" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 61);
+    defer gpa.free(prompt);
+    const p1 = try plan(arena.allocator(), &store, prompt);
+    _ = f.pass(&store, prompt, p1); // a state at 8 resumes this prompt
+    store.ring.note(prompt[0..4], 4, .evicted); // an older, shorter removed prefix
+    const l = try store.lookup(arena.allocator(), prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(miss.Reason.none, l.miss.?.reason);
+    try std.testing.expectEqual(@as(u32, 8), l.miss.?.resumed_len);
+    try std.testing.expectEqual(@as(u32, 0), l.miss.?.lost);
+}
+
 fn plan(a: std.mem.Allocator, s: *pc.Store, prompt: []const u32) !pc.Plan {
     return s.begin(a, prompt, 0, &.{}, &.{}, null, &.{});
 }
