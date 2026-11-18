@@ -10,8 +10,25 @@ const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 const pops = hip.plan_ops;
 
-/// Rows a stream's window holds at most: the pending token and the drafts (every width reproduces one-token steps).
-pub const max_window = 4;
+/// Rows a stream's window holds by default: the pending token and three drafts.
+pub const default_window = 4;
+
+/// Rows a lone stream's window holds at most when `--mtp-drafts` opts in past three.
+pub const max_window = 16;
+
+/// Shared round row ceiling up to eight streams (above eight, `planRows` keeps `streams * default_window`).
+pub const shared_cap_rows = 32;
+
+/// Window rows for a policy's `--mtp-drafts`: four up to three drafts (exact baseline), else `asked + 1` up to sixteen.
+pub fn windowFor(asked: u8) usize {
+    return if (asked <= 3) default_window else @min(max_window, @as(usize, asked) + 1);
+}
+
+/// Plan rows for `streams` and `window`: at least `streams * default_window`, and up to `shared_cap_rows` past four.
+pub fn planRows(streams: usize, window: usize) usize {
+    if (window <= default_window) return streams * window;
+    return @max(streams * default_window, @min(streams * window, shared_cap_rows));
+}
 
 /// Shortest span the attention walk covers; spans double from here (a row's bits do not depend on the span).
 pub const min_span = 128;
@@ -266,4 +283,18 @@ test "security: a round refuses a token at or past the vocabulary before its pla
     var p: Plan = .{ .host = undefined, .dev = undefined, .rows = 4, .slots = 1, .pool = 0, .pages = 0, .vocab = 8 };
     const win: Window = .{ .s = undefined, .pos = 0, .tokens = &.{ 7, 8 } };
     try std.testing.expectError(error.TokenOutsideVocabulary, p.send(&.{win}, 4096, undefined));
+}
+
+test "windowFor holds four up to three drafts and tracks --mtp-drafts up to 16; planRows keeps shared floor" {
+    for (0..4) |n| try std.testing.expectEqual(@as(usize, 4), windowFor(@intCast(n)));
+    for (4..16) |n| try std.testing.expectEqual(n + 1, windowFor(@intCast(n)));
+    try std.testing.expectEqual(@as(usize, 16), windowFor(16));
+    try std.testing.expectEqual(@as(usize, 16), windowFor(255));
+    for ([_]usize{ 1, 2, 4, 8, 16 }) |s| try std.testing.expectEqual(4 * s, planRows(s, 4));
+    try std.testing.expectEqual(@as(usize, 16), planRows(1, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(2, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(4, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(8, 8));
+    try std.testing.expectEqual(@as(usize, 64), planRows(16, 8));
+    try std.testing.expectEqual(@as(usize, 64), planRows(16, 16));
 }
