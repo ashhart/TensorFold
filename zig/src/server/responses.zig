@@ -563,7 +563,7 @@ test "a call delta that names no id takes the chat run's id at its index, and on
     const key: ids.Key = .of(ids.test_key_text);
     const chat = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}")).ok;
     var cx: Cx = .{ .a = a };
-    var reply: Reply = .{ .srv = undefined, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = chat } };
+    var reply: Reply = .{ .srv = undefined, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .owner = null, .call_ids = .{ .key = &key, .body = chat } };
     try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok, null);
     var calls: ids.Calls = .{ .key = &key, .body = chat };
     try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
@@ -577,7 +577,7 @@ test "Server recovery: Responses grows reasoning, text and interleaved call argu
     var cx: Cx = .{ .a = a };
     var srv: Server = undefined;
     const key: ids.Key = .of(ids.test_key_text);
-    var r: Reply = .{ .srv = &srv, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = .null } };
+    var r: Reply = .{ .srv = &srv, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .owner = null, .call_ids = .{ .key = &key, .body = .null } };
     const chunk = "abcdefgh";
     for ([_][]const u8{ "reasoning", "message" }) |kind| {
         for (0..3000) |_| try r.write(kind, chunk, null);
