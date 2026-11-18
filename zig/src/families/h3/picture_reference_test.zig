@@ -1,6 +1,6 @@
 //! MiniMax-H3-Image's edit reference rules (picture_reference.zig): sizes, crops, grids, layers, weights, rows.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const r = @import("picture_reference.zig");
 const vae = @import("picture_vae.zig");
 const testing = std.testing;
