@@ -19,7 +19,9 @@ pub fn main(init: std.process.Init) !void {
     defer model.deinit();
     var rows = try Rows.init(init.gpa, device, count);
     defer rows.deinit();
+    const init_mark = rows.owned.items.len;
     var forward = try Forward.init(&rows, &model, 64);
+    const init_buffers = rows.owned.items.len - init_mark;
     defer forward.deinit();
     const logits = try forward.run(ids);
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[2], .data = std.mem.sliceAsBytes(logits) });
@@ -39,12 +41,28 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(logits[157184..]), std.mem.sliceAsBytes(resumed_logits));
     for (1..count) |t| @memcpy(split_logits[t * 157184 ..][0..157184], try split.run(ids[t .. t + 1]));
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(logits), std.mem.sliceAsBytes(split_logits));
-    for (&forward.attention, &split.attention) |*whole, *part| switch (whole.*) {
+    try sameState(&forward, &split, count);
+    try sameState(&forward, &resumed, count);
+    const mark = rows.owned.items.len;
+    rows.fail_buffer_at = mark + init_buffers - 1;
+    try std.testing.expectError(error.OutOfMemory, Forward.init(&rows, &model, 64));
+    try std.testing.expectEqual(mark, rows.owned.items.len);
+    rows.fail_buffer_at = mark + 2;
+    try std.testing.expectError(error.OutOfMemory, @import("ling_mla").Mla.init(&rows, 16, 64));
+    try std.testing.expectEqual(mark, rows.owned.items.len);
+    rows.fail_buffer_at = null;
+    std.debug.print("Ling init failures: Forward late-buffer and MLA early-buffer errors rolled back owned buffers\n", .{});
+
+    std.debug.print("Ling full forward whole/chunk/resume: logits/KDAstate/conv/MLAcache exact; truncated snapshot rejected\n", .{});
+}
+
+fn sameState(whole: *Forward, other: *Forward, count: u32) !void {
+    try std.testing.expectEqual(whole.position, other.position);
+    for (&whole.attention, &other.attention) |*attention, *part| switch (attention.*) {
         .kda => |*k| {
             try std.testing.expectEqualSlices(u8, k.state.contents()[0 .. 16 * 128 * 128 * 4], part.kda.state.contents()[0 .. 16 * 128 * 128 * 4]);
             try std.testing.expectEqualSlices(u8, k.conv.contents()[0 .. 9 * 2048 * 2], part.kda.conv.contents()[0 .. 9 * 2048 * 2]);
         },
         .mla => |*m| try std.testing.expectEqualSlices(u8, m.cache.contents()[0 .. count * 576 * 2], part.mla.cache.contents()[0 .. count * 576 * 2]),
     };
-    std.debug.print("Ling full forward whole/chunk/resume: logits/KDAstate/conv/MLAcache exact; truncated snapshot rejected\n", .{});
 }
