@@ -1,4 +1,5 @@
 """Review the exact preview ZIP, source bindings, PE/CUDA structures, legal inputs and readable content before upload."""
+from collections import Counter
 import hashlib
 import json
 import os
@@ -207,6 +208,33 @@ def resolve_encoded_findings(findings, frames, policy):
             unresolved.append(finding)
     return unresolved, resolved
 
+def finding_summary(findings, native_catalog, frames):
+    """Report controlled categories without finding text, offsets, digests or untrusted paths."""
+    roles = {"bin/tensorfold.exe": "server", "bin/tf_cublaslt_bridge.dll": "bridge",
+             "bin/cublasLt64_13.dll": "cuBLASLt", "lib/tfgrammar.dll": "grammar",
+             "BUILD-PROVENANCE.json": "provenance", "SOURCE.json": "source-manifest",
+             "WINDOWS-RUNTIMES.json": "runtime-manifest", "SHA256SUMS": "file-checksums"}
+    counts = Counter()
+    for finding in findings:
+        origin = finding["origin"]
+        filename = origin.partition(":")[0].partition("-base64-")[0]
+        role = roles.get(filename, "source-fatbin" if filename in native_catalog else "package-metadata")
+        if "-base64-" in origin:
+            representation = "base64-decoded"
+        elif ":" in origin:
+            representation = "cuda-decoded"
+        elif any(frame["origin"] == origin and frame["offset"] <= finding["offset"]
+                 and finding["offset"] + finding.get("match_bytes", 1) <= frame["offset"] + frame["bytes"]
+                 for frame in frames):
+            representation = "verified-compressed-frame"
+        else:
+            representation = "raw"
+        counts[(role, representation, finding["category"], finding["encoding"])] += 1
+    return [{"role": role, "representation": representation, "category": category,
+             "encoding": encoding, "count": count}
+            for (role, representation, category, encoding), count in sorted(counts.items())]
+
+
 def qualify(repo, work, archive, gitleaks, context, public_sidecars=()):
     policy = load(HERE / "artifact-policy.json")
     audit = work / "artifact-review-private"
@@ -390,6 +418,8 @@ def qualify(repo, work, archive, gitleaks, context, public_sidecars=()):
     unresolved, dispositions = resolve_encoded_findings(context_report["findings"], compressed_ranges, policy)
     (audit / "encoded-match-dispositions.json").write_text(json.dumps(dispositions, indent=2) + "\n")
     if unresolved:
+        summary = finding_summary(unresolved, set(native_inputs.values()), compressed_ranges)
+        print(json.dumps({"status": "ARTIFACT_REVIEW_REFUSED", "findings": summary}), flush=True)
         raise ValueError("unresolved contextual finding")
     secret_receipt = secret_scan(gitleaks, audit / "readable-spans.txt", audit)
     if sidecar_snapshot != [
