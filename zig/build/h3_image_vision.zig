@@ -20,7 +20,7 @@ fn tower(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.
 /// The tool: the tower module, picture_prompt's Qwen copy rule reading that module as its `picture`, the writer.
 fn tool(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const vl = tower(b, target, optimize);
-    const copy = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/qwen_copy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "picture", .module = vl }} });
+    const copy = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/qwen_copy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = vl }} });
     const fixture = b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target, .optimize = optimize });
     return b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_vision.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = vl.import_table.get("metal").? }, .{ .name = "qwen_vl", .module = vl }, .{ .name = "h3_qwen_copy", .module = copy }, .{ .name = "checkpoint_fixture", .module = fixture } } });
 }

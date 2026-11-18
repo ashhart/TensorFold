@@ -1,6 +1,6 @@
 //! MiniMax-H3-Image's Qwen copy of a reference: its size, the processor's size for it, and its LANCZOS pixels.
 const std = @import("std");
-const picture = @import("picture");
+const picture = @import("core").picture;
 
 /// The Qwen copy of a reference: its short edge exactly this, both sides multiples of `qwen_factor`.
 pub const qwen_edge = 1024;
