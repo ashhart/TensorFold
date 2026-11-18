@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: the OpenAI connection probe now uses the shared stream reader, so partial text followed by an error or early EOF fails the check instead of passing; the reader handles LF, CRLF and bare CR, including a CRLF split across chunks, and complete streams still pass the text-or-reasoning check (#3826, fixes #3823). Thanks to @AIFlowML.
+
 - Web: `POST /api/conversations` now keeps a validated `pinned` and `folder` supplied at creation, so the response, later reads and folder counts agree; requests that omit those fields keep the old response shape (#3825, fixes #3822). Thanks to @AIFlowML.
 
 - Web: cleaning up Bench runs now drops a finished comparison only once none of its runs remain, so two passes can remove one a single pass kept; age-filtered cleanup considers only comparisons touched by that pass, and a full cleanup also clears a comparison left with no runs (#3820, fixes #3818). Thanks to @AIFlowML.
