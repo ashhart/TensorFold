@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { mock } from 'node:test'
 import {
   COMPUTER_HELPER_TIMEOUT_MS,
   ComputerHelper,
@@ -127,9 +128,22 @@ async function main() {
     // type gets a timeout that grows with the text; other calls keep the base timeout.
     assert.equal(typeTimeoutMs('abcd', 100), 120)
     assert.equal(typeTimeoutMs(''), COMPUTER_HELPER_TIMEOUT_MS)
-    const delayed = make(await wrapper(root, 'delayed', { FAKE_HELPER_DELAY_MS: '400' }), { timeoutMs: 250 })
-    assert.equal((await delayed.type({ text: 'x'.repeat(200) })).typed, 200)
-    await assert.rejects(delayed.key({ keys: 'a' }), isCode('timeout'))
+    const delayed = make(await wrapper(root, 'delayed', { FAKE_HELPER_DELAY_MS: '5000' }), { timeoutMs: 250 })
+    const deadlines = [
+      { name: 'type', ms: 1250, request: () => delayed.type({ text: 'x'.repeat(200) }) },
+      { name: 'key', ms: 250, request: () => delayed.key({ keys: 'a' }) },
+    ]
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      for (const { name, ms, request } of deadlines) {
+        const outcome = request().then(() => undefined, (error: unknown) => error)
+        mock.timers.tick(ms - 1)
+        assert.equal(delayed.running, true, `${name} should stay live before its deadline`)
+        mock.timers.tick(1)
+        assert.equal(delayed.running, false, `${name} should time out at its deadline`)
+        assert.ok(isCode('timeout')(await outcome), `${name} should reject with a timeout`)
+      }
+    } finally { mock.timers.reset() }
 
     // A crash rejects everything in flight; the next call restarts the helper.
     const crashRecord = path.join(root, 'crash.jsonl')
