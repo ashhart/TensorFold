@@ -165,11 +165,17 @@ inline uint sel_floor(const device float* s, uint np, uint t, threadgroup atomic
   const uint floor_key = sel_floor(s, np, t, hist, sh);
   const uint nw = min(SPAN / 32, (np + 31) / 32 - w0);
   device uint* out = bits + size_t(row) * words;
-  for (uint wi = sg; wi < nw; wi += MT / 32) {
-    const uint i = (w0 + wi) * 32 + lane;
-    const bool ge = i < np && sel_key(s[min(i, np - 1)]) >= floor_key;
+  constexpr uint WPS = SPAN / 32 / (MT / 32); // words a simdgroup marks, every load issued before the first compare
+  float v[WPS];
+  for (uint m = 0; m < WPS; m++) {
+    const uint wi = sg + m * (MT / 32), i = (w0 + wi) * 32 + lane;
+    v[m] = wi < nw && i < np ? s[i] : 0.0f;
+  }
+  for (uint m = 0; m < WPS; m++) {
+    const uint wi = sg + m * (MT / 32), i = (w0 + wi) * 32 + lane;
+    const bool ge = wi < nw && i < np && sel_key(v[m]) >= floor_key;
     const uint word = uint(ulong(simd_vote::vote_t(simd_ballot(ge))));
-    if (lane == 0) out[w0 + wi] = word;
+    if (lane == 0 && wi < nw) out[w0 + wi] = word;
   }
 }
 
@@ -188,10 +194,13 @@ inline uint sel_floor(const device float* s, uint np, uint t, threadgroup atomic
   if (g.top >= np) { // every block, in order
     for (uint i = t; i < 4 * np; i += T2) out[i] = int(i);
   } else if (np <= CAP) { // the whole row as candidates
-    for (uint i = t; i < np; i += T2) {
-      ckey[i] = sel_key(s[i]);
-      cblock[i] = ushort(i);
-    }
+    float v[CAP / T2];
+    for (uint m = 0; m < CAP / T2; m++) v[m] = t + m * T2 < np ? s[t + m * T2] : 0.0f;
+    for (uint m = 0; m < CAP / T2; m++)
+      if (t + m * T2 < np) {
+        ckey[t + m * T2] = sel_key(v[m]);
+        cblock[t + m * T2] = ushort(t + m * T2);
+      }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     sel_core(sh, CandKeys{ckey, cblock}, np, g.top, out, t);
   } else {
@@ -207,7 +216,10 @@ inline uint sel_floor(const device float* s, uint np, uint t, threadgroup atomic
       for (uint w = wa; w < wb; w++)
         for (uint m = ge[w]; m != 0; m &= m - 1) cblock[at++] = ushort(32 * w + ctz(m));
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      for (uint c = t; c < n; c += T2) ckey[c] = sel_key(s[cblock[c]]);
+      float v[CAP / T2];
+      for (uint m = 0; m < CAP / T2; m++) v[m] = t + m * T2 < n ? s[cblock[t + m * T2]] : 0.0f;
+      for (uint m = 0; m < CAP / T2; m++)
+        if (t + m * T2 < n) ckey[t + m * T2] = sel_key(v[m]);
       threadgroup_barrier(mem_flags::mem_threadgroup);
       sel_core(sh, CandKeys{ckey, cblock}, n, g.top, out, t);
     } else {
