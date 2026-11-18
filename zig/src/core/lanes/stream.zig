@@ -23,7 +23,6 @@ pub const Reason = enum {
         return if (r == .none) "" else @tagName(r);
     }
 };
-
 pub const Mode = enum { pipe, drain, verify, exit };
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
@@ -50,7 +49,6 @@ fn cycleAt(head: []const u32, tail: []const u32, n: usize) ?u32 {
     }
     return null;
 }
-
 /// Return the first token index in a candidate batch that would fire the guard.
 pub fn loopCut(s: *const Stream, tokens: []const u32) ?usize {
     if (!s.loop_guard or !s.think_open or s.think_end < 0 or s.loop_period != null) return null;
@@ -61,7 +59,6 @@ pub fn loopCut(s: *const Stream, tokens: []const u32) ?usize {
     }
     return null;
 }
-
 /// Return the detected period at the end of committed tokens, or null.
 pub fn detectLoop(emitted: []const u32) ?u32 {
     return cycleAt(emitted, &.{}, emitted.len);
