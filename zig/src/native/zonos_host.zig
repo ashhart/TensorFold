@@ -126,7 +126,7 @@ pub fn chunkFrames(spoken: usize) usize {
     return @min(15, 1 + spoken);
 }
 
-/// A request's audio as its rows arrive: streamed requests decode in growing chunks, the rest once at the end.
+/// A request's audio: streamed or whole, it decodes in the same growing chunks (cuBLAS rounds by a call's rows).
 const Audio = struct {
     h: *Host,
     job: Job,
@@ -140,10 +140,15 @@ const Audio = struct {
         if (!finished and !r.stream) return;
         const all = try z3.speech.frames(h.gpa, s.prefill, rows, eos_frame);
         defer h.gpa.free(all);
-        const waiting = (s.prefill.len -| s.decoded) + chunkFrames(s.decoded -| s.prefill.len);
-        if (!finished and all.len - s.decoded < waiting) return;
-        try h.codec.decode(all[s.decoded..], null);
-        s.decoded = all.len;
+        const before = s.decoded;
+        while (s.decoded < all.len) {
+            const chunk = (s.prefill.len -| s.decoded) + chunkFrames(s.decoded -| s.prefill.len);
+            if (!finished and all.len - s.decoded < chunk) break;
+            const n = @min(chunk, all.len - s.decoded);
+            try h.codec.decode(all[s.decoded..][0..n], null);
+            s.decoded += n;
+        }
+        if (s.decoded == before and !finished) return;
         const pcm = try h.codec.emit(h.gpa, finished, null);
         defer h.gpa.free(pcm);
         if (pcm.len > r.pcm.len - s.samples) return error.AudioOverflow;
@@ -497,7 +502,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
 test "need: the weights, then state that grows with the context and with the frame budget" {
     const t = std.testing;
     const base = need(4096, 2000);
-    try t.expectEqual(@as(u64, 3_828_406_528), base);
+    try t.expectEqual(@as(u64, 3_861_963_008), base);
     try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
     // two attention layers keep a key row and a value row a position
     try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);

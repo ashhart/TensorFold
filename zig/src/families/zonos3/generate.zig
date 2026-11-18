@@ -240,7 +240,7 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
     try codec.decode(codes, probe);
     const pcm = try codec.finish(gpa, probe);
     gpa.free(pcm);
-    // the same frames in uneven chunks, the settled samples taken after each, then timed whole
+    // the same frames in uneven chunks, the settled samples taken after each; then the same chunks, taken at the end
     try codec.reset();
     var settled: std.ArrayList(f32) = .empty;
     defer settled.deinit(gpa);
@@ -256,15 +256,33 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
     }
     const chunked = settled.items;
     try codec.reset();
+    at = 0;
+    step = 1;
+    while (at < codes.len) : (step = step * 2 + 1) {
+        const n = @min(step, codes.len - at);
+        try codec.decode(codes[at..][0..n], null);
+        at += n;
+    }
+    const again = try codec.finish(gpa, null);
+    defer gpa.free(again);
+    const same = std.mem.eql(u8, std.mem.sliceAsBytes(chunked), std.mem.sliceAsBytes(again));
+    // timed whole: cuBLAS rounds by the rows of a call, so one pass matches the chunks to rounding, not to the bit
+    try codec.reset();
     const t0 = nowNs(io);
     try codec.decode(codes, null);
     const whole = try codec.finish(gpa, null);
     defer gpa.free(whole);
     const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
-    const same = std.mem.eql(u8, std.mem.sliceAsBytes(chunked), std.mem.sliceAsBytes(whole));
+    var signal: f64 = 0;
+    var noise: f64 = 0;
+    for (whole, chunked) |x, y| {
+        signal += @as(f64, x) * x;
+        noise += (@as(f64, x) - y) * (@as(f64, x) - y);
+    }
+    const chunk_snr_db = if (noise == 0) std.math.inf(f64) else 10 * @log10(signal / noise);
     const audio_s = @as(f64, @floatFromInt(whole.len)) / z3.codec.sample_rate;
-    const pass = c.fails == 0 and c.n > 0 and c.missing == 0 and same;
-    std.debug.print("RESULT zonos3 codec {s} probes={d} low={d} missing={d} worst_row_cos={d:.7} audio_snr_db={d:.1} chunked_equals_whole={} audio_s={d:.2} decode_s={d:.3} x_realtime={d:.1}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, c.audio_snr_db, same, audio_s, seconds, audio_s / seconds });
+    const pass = c.fails == 0 and c.n > 0 and c.missing == 0 and same and whole.len == chunked.len and chunk_snr_db >= 100;
+    std.debug.print("RESULT zonos3 codec {s} probes={d} low={d} missing={d} worst_row_cos={d:.7} audio_snr_db={d:.1} chunks_repeat={} chunked_to_whole_snr_db={d:.1} audio_s={d:.2} decode_s={d:.3} x_realtime={d:.1}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, c.audio_snr_db, same, chunk_snr_db, audio_s, seconds, audio_s / seconds });
     return if (pass) 0 else 1;
 }
 

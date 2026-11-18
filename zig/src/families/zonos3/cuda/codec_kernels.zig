@@ -1,6 +1,7 @@
 //! The codec decoder's launches: zonos3_codec.cu by symbol.
 const std = @import("std");
 const cuda = @import("cuda");
+const Blas = @import("blas.zig").Blas;
 
 const names = .{
     "zc_linear", "zc_layernorm", "zc_attn_prep", "zc_attention", "zc_add_scaled", "zc_gelu", "zc_patch_up",
@@ -14,12 +15,17 @@ const n_fns = @typeInfo(F).@"enum".field_names.len;
 pub const Kernels = struct {
     mod: cuda.Module,
     fns: [n_fns]cuda.Function,
+    /// Set by the decoder: `linear` is then cuBLAS's GEMM, and `ones` holds a 1.0 for each row of a pass.
+    blas: ?*const Blas,
+    ones: u64,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
         k.mod = try cuda.Module.load(d, cuda.kernels.zonos3_codec);
         errdefer k.mod.unload();
+        k.blas = null;
+        k.ones = 0;
         inline for (names, 0..) |name, j| k.fns[j] = try k.mod.function(name);
         return k;
     }
@@ -42,6 +48,12 @@ pub const Kernels = struct {
 
     /// y [rows, n] = x [rows, kdim] W^T (+ bias when not 0), all fp32.
     pub fn linear(k: *const Kernels, s: cuda.Stream, w: u64, bias: u64, x: u64, xs: usize, kdim: usize, n: usize, y: u64, ys: usize, rows: usize) !void {
+        if (k.blas) |b| {
+            // column-major: y^T [n, rows] = (W^T [kdim, n])^T x^T [kdim, rows], then + bias [n, 1] ones [1, rows]
+            try b.gemm(s, .t, .n, n, rows, kdim, 1.0, w, kdim, 0, x, xs, 0, 0.0, y, ys, 0, 1, .f32, .f32);
+            if (bias != 0) try b.gemm(s, .n, .n, n, rows, 1, 1.0, bias, n, 0, k.ones, 1, 0, 1.0, y, ys, 0, 1, .f32, .f32);
+            return;
+        }
         var a: cuda.Args = .{};
         a.add(w);
         a.add(x);

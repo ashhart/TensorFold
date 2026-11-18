@@ -44,7 +44,9 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 - **Codec decoder** (`cuda/codec.zig`, `zonos3_codec.cu`): the `keep2_plain` decoder, the reference servers'
   default: code tables, the semantic head, five causal transformer stages from 15 Hz to 240 Hz, the ConvNeXt head,
   two centered iSTFTs, the FIR mixer and the 44,160 to 44,100 Hz resampler. It keeps its state between calls and
-  hands out the samples no later frame can change.
+  hands out the samples no later frame can change. Its linear layers are cuBLAS's fp32 GEMM (CUDA 13's
+  `libcublas`, opened when the decoder loads; without it the load fails and says so), a bias added by a second,
+  rank-one GEMM. See "The decoder's GEMM" under "Precision".
 - **Prompt and output** (`prompt.zig`, `speech.zig`, `release.zig`, `voices.zig`): the training layout
   `[reference prefix | speaker row] [condition rows] text [silence]`, the undelayed frames to decode, the decoder's
   -3 dB headroom and the soft limiter above -1 dBFS.
@@ -132,21 +134,20 @@ write and attention) run a lane at a time on that lane's state. The kernels are 
 computes a row from that row alone, so a request's arithmetic does not depend on what runs beside it.
 
 - **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
-  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,828,406,528 bytes at
-  `--parallel 1`, 7,538,995,456 at 4. A guided request's twin lane is still made by its slot's first guided request.
+  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,861,963,008 bytes at
+  `--parallel 1`, 7,572,551,936 at 4. A guided request's twin lane is still made by its slot's first guided request.
 - **Speed:** a frame of one request is about 226 small launches, 24 of them a lane's own, so the backbone's cost
   grows slowly with the lanes in a pass (1.1 ms for one row, 1.6 ms for four). Sampling on the host and the decoder
-  do not share: the decoder's 0.19 s for a 17.8 s reply is real work, 78% of it in `zc_linear`, and is now the
-  larger part of four requests at once.
+  do not share. The decoder's linear layers took 78% of its 0.19 s for a 17.8 s reply while a kernel of ours
+  (`zc_linear`) ran them a row at a time; with cuBLAS's GEMM that reply's whole time fell from 0.61 s to 0.48 s.
 - **A clip is encoded in its request's first turn**, about half a second in which the other requests wait.
 - A request past N is refused with 503, as the second one was before.
 
 Checked on the RTX 5090 at `--parallel 4`: eight kinds of request (a long passage, a short one, guided, streamed,
 a condition value with normalized text, a cloned clip, a guided clone, a guided stream) were each asked alone, then
 four at once in three mixes; all twelve replies equalled the same request's reply alone, byte for byte. Four copies
-of the 17.8 s passage at once took 1.71 s, 41.6 times real time in total against 29.1 alone, each reply the solo
-bytes. Alone, a guided request of 3.87 s took 0.17 s where its two passes a frame took 0.23 s before they shared
-one. Of six at once, four were spoken and two got 503.
+of the 17.8 s passage at once took 1.17 s, 60.9 times real time in total against 37.3 alone, each reply the solo
+bytes. Alone, a guided request of 3.87 s took 0.14 s. Of six at once, four were spoken and two got 503.
 
 ## Precision
 
@@ -154,8 +155,24 @@ one. Of six at once, four were spoken and two got 503.
 - Every activation, cache and state is fp32, and every sum is fp32. No int8, fp8 or bf16 activations.
 - Each row kernel takes prompt rows and decode rows alike, with one fixed reduction order a row, so a row's bits do
   not depend on how the rows before it were chunked. The codec's kernels are written the same way per row and per
-  sample.
+  sample; the decoder's linear layers are the exception, below.
 - All four kernel images build with the glue flags (`--fmad=false`, IEEE division and square root).
+
+### The decoder's GEMM
+
+The decoder's linear layers run through cuBLAS (`cublasGemmStridedBatchedEx`, fp32 in, fp32 compute, fp32 out), as
+Drama's decoder does. The clip encoder and the quantizer keep `zc_linear`, so a clip's codes are unchanged. What
+this costs in exactness, measured on the RTX 5090 with CUDA 13.3's library:
+
+- **cuBLAS chooses its order of sums by the shape of a call**, so a row's bits depend on how many rows are decoded
+  with it. The served route therefore decodes every request in one schedule, streamed or whole: chunks of 1, 2, 4, 8
+  and then 15 frames. A streamed reply and a whole reply make the same calls and give the same bytes, and so does a
+  request beside others, since each decodes on its own lane.
+- **Against the earlier kernel** the 17.8 s sampled reply differs in 338 of 784,980 16-bit samples, each by one
+  step (97 dB). Against the publisher's decoder the decoder check gives 115.3 dB where the kernel gave 115.9
+  ("The port's side").
+- **Another cuBLAS release may round differently.** Replies are byte-stable on one install, not promised across
+  installs.
 
 ### The arithmetic reference
 
@@ -226,10 +243,10 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | Greedy frames, speaker guidance 1.5, reference voice | `--model LM --frames-check D/gen_guided_reference --max-rows N` | the reference's 77 frames | 77 of 77 identical at N = 1, 7, 64 and 256 |
 | Greedy frames, speaker guidance 1.5, embedding voice | `--model LM --frames-check D/gen_guided_embedding --max-rows N` | the reference's 81 frames | 81 of 81 identical at N = 1, 7, 64 and 256 |
 | Greedy frames, speaker guidance 2 with condition buckets 3, unknown, 25 | `--model LM --frames-check D/gen_guided_conditions --max-rows N` | the reference's 62 frames | 62 of 62 identical at N = 1, 7, 64 and 256 |
-| Codec decoder | `--codec-check D/codec_savannah --generator G --head H` | 13 captures and the audio of 171 frames, CPU fp32 | cosine 1.0000000; audio SNR 115.9 dB |
-| Codec in chunks | the same run | frames fed 1, 3, 7, 15, ... at a time, the settled samples taken after each | bit-identical to one pass |
-| Text to audio, embedding voice | `--checkpoint RELEASE --text "..." --voice-embedding E --temperature 0 --reference D/gen_greedy_embedding` | the reference's prompt rows, frames and CPU audio | rows equal, 78 of 78 frames, 205,800 of 205,800 samples, audio SNR 111.7 dB |
-| Text to audio, reference voice | the same with `--voice-codes C` and `D/gen_greedy_reference` | as above | rows equal, 80 of 80 frames, 211,680 of 211,680 samples, audio SNR 117.5 dB |
+| Codec decoder | `--codec-check D/codec_savannah --generator G --head H` | 13 captures and the audio of 171 frames, CPU fp32 | cosine 1.0000000; audio SNR 115.3 dB |
+| Codec in chunks | the same run | frames fed 1, 3, 7, 15, ... at a time, the settled samples taken after each or all at the end | the two bit-identical; 116.2 dB SNR to one pass of all the frames |
+| Text to audio, embedding voice | `--checkpoint RELEASE --text "..." --voice-embedding E --temperature 0 --reference D/gen_greedy_embedding` | the reference's prompt rows, frames and CPU audio | rows equal, 78 of 78 frames, 205,800 of 205,800 samples, audio SNR 114.0 dB |
+| Text to audio, reference voice | the same with `--voice-codes C` and `D/gen_greedy_reference` | as above | rows equal, 80 of 80 frames, 211,680 of 211,680 samples, audio SNR 113.3 dB |
 | Teacher's features | `--features-check D/enc_cillian` | the reference's 999 feature rows of a 20 s lane | cosine 1.0000000; largest difference 2.4e-7 |
 | Encoder, acoustic branch | `--encoder-check D/enc_cillian_fp32 --generator G` | 101 captures of the fp32 run, 145 frames | every row's cosine 1.000000 |
 | SSL teacher | `--teacher-check D/teacher_cillian_fp32 --teacher RELEASE/autoencoder/teacher` | 18 captures of the fp32 run, 999 rows | worst row's cosine 0.9999252 |
@@ -271,12 +288,12 @@ warm-up request:
 
 | Measure | Value |
 | --- | --- |
-| The 17.8 s sampled reply, whole (three runs) | 0.61 s (29 times real time) |
-| The same reply streamed (three runs) | first response byte at 0.04 s, done at 0.62 s, bytes equal to the whole reply |
-| Device memory in use after it | 3.57 GiB (2.36 GiB of it weights) |
-| Device memory once a clip has been cloned | 8.82 GiB (the clip encoder adds 4.43 GiB of weights) |
-| The first request with a clip (9.7 s), which loads the encoder | 9.0 s |
-| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 0.92 s, 1.31 to 1.32 s |
+| The 17.8 s sampled reply, whole (three runs) | 0.47 to 0.48 s (37 times real time) |
+| The same reply streamed (three runs) | first response byte at 0.04 s, done at 0.47 to 0.48 s, bytes equal to the whole reply |
+| Device memory in use after it | 3.60 GiB (2.36 GiB of it weights) |
+| Device memory once a clip has been cloned | 8.85 GiB (the clip encoder adds 4.43 GiB of weights) |
+| The first request with a clip (9.7 s), which loads the encoder | 9.2 s |
+| Later requests with a clip: a 9.7 s mono clip, a 15.4 s stereo 48 kHz clip | 0.89 s, 1.27 s |
 | A second and a third request while one runs | 503 each |
 | An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes`, a `ref_audio` that is no WAV or is under half a second | 400 with the reason |
 
@@ -342,18 +359,20 @@ The host works out what a load takes before it allocates anything and asks the p
 - **The load:** the pinned release's weights as the device holds them (2,531,483,136 bytes: the backbone's bf16 and
   the `keep2_plain` decoder's fp32), plus the backbone's and the decoder's state and workspaces, which their own
   allocation code counts without allocating (`Engine.stateBytes`, `Codec.stateBytes`). At the default
-  `--context 4096` and 2,000 frames that is 3,828,406,528 bytes (3.57 GiB), and the server's log shows the same
+  `--context 4096` and 2,000 frames that is 3,861,963,008 bytes (3.60 GiB), 33,554,432 of them the workspace
+  cuBLAS is given. What cuBLAS allocates for itself is outside this count: `nvidia-smi` showed the process about
+  64 MiB larger than with the earlier kernel, and the server's log shows the same
   number admitted and held after the load. A load that holds more than it was admitted for is an error.
 - **The clip encoder** loads with the first request that brings a clip and takes 5,643,510,688 bytes (5.26 GiB) of
   weights, state and workspaces, all of fixed size; the log again shows that number admitted and held.
 
 Checked on the served build with `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`: at 3 the server refuses to start ("ZONOS3 Mini
-needs 3.57 GiB of device memory at --context 4096; 3.00 GiB is free for it after the reserve"); at 5 it starts, a
+needs 3.60 GiB of device memory at --context 4096; 3.00 GiB is free for it after the reserve"); at 5 it starts, a
 cloning request is refused (HTTP 500, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less
 than that is free"), and the same seeded request before and after that refusal returns the same bytes. The two
 weight sizes are constants for this release and are not derived from the files; another checkpoint would need its
-own. These counts are the engine's buffers: `nvidia-smi` showed the process at 4,264 MiB after the load, the CUDA
-context and kernel images included.
+own. These counts are the engine's buffers: `nvidia-smi` showed the process at 4,360 MiB after the load, the CUDA
+context, the kernel images and what cuBLAS allocates for itself included.
 
 ### Kernel contract
 
@@ -451,3 +470,5 @@ bf16-encoded references, clones as well from fp32 codes.
   model detection and the tokenizer loader each gained a branch for a release folder, which has no `config.json`
   and is recognised by `lm/zonos3_mini/params.json`.
 - `native/`: `zonos3` in the CUDA open dispatch, the capabilities list and the rank refusals.
+- `platform/optional_libraries.zig`: the cuBLAS entry's note names the ZONOS3 decoder beside Drama's GEMMs. The
+  cuBLAS wrapper itself is a copy in the family's folder (`zonos3/cuda/blas.zig`); Drama's is untouched.
