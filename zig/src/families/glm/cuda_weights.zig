@@ -541,6 +541,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     defer core.checkpoint.cache.close(&ck);
     var head_ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "lm_head.");
     defer core.checkpoint.cache.close(&head_ck);
+    try @import("cuda_dfloat11.zig").attach(gpa, io, dir, &c, &.{ &ck, &head_ck });
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
     defer L.staging.deinit();
@@ -576,6 +577,7 @@ test {
     _ = @import("cuda_proj.zig");
     _ = @import("cuda_fp8pb.zig");
     _ = @import("cuda_mxfp8.zig");
+    _ = @import("cuda_dfloat11.zig");
     _ = @import("cuda_load_ahead.zig");
     _ = @import("cuda_load_pack.zig");
 }
