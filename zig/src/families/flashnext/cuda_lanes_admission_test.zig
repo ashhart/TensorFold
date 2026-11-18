@@ -112,6 +112,7 @@ pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype
             rig.init(a);
             defer rig.deinit();
             const be = rig.self.backend();
+            try std.testing.expectEqual(false, be.warm_images);
             try std.testing.expectError(error.Yielded, be.vtable.prefill(be.ptr, &s));
             try std.testing.expect(waiting.asked == 1 and waiting.kept == 0); // it stands where it opened: nothing new
             try std.testing.expectEqual(@as(?usize, 0), rig.self.lanes.getPtr(&s).?.filled); // and no chunk ran
