@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const hp = @import("h3_prompt");
 const tokenizer = @import("tokenizer");
-const fixture = @import("checkpoint_fixture");
+const fixture = @import("core").checkpoint_fixture;
 const bf16_round = @import("bf16_round");
 const check = @import("h3_image_prompt_check.zig");
 
