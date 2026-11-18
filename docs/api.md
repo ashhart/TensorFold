@@ -760,9 +760,13 @@ is refused, not lost. Dropped leading whitespace is accepted, because Qwen's and
 The response's `content` holds only the continuation, and usage counts the message's text as prompt tokens. The
 server decodes the continued prompt like any chat prompt, with drafts, sampling and the prompt cache, so the reply has
 the tokens any request with the same prompt ids and settings gets. A grammar from structured output or a required
-tool call constrains the continuation from its first token. A reply cannot continue inside a reasoning block. With
-thinking on, including a thinking template's default, the request gets HTTP 400 naming
-`chat_template_kwargs: {"enable_thinking": false}`.
+tool call constrains the continuation from its first token. A reply cannot continue inside a reasoning block. A
+request that turns thinking on itself, with `chat_template_kwargs.enable_thinking: true`, an on
+`chat_template_kwargs.thinking` or top-level `thinking`, or a `reasoning_effort` other than `none`, gets HTTP 400
+naming `chat_template_kwargs: {"enable_thinking": false}`. When thinking would be on only by the server's default, as
+`--thinking` and a thinking template's own default have it, the continued request runs with thinking off, the way an
+explicit `enable_thinking: false` runs. It gets the same prompt, history and next-turn prompt, and its reply is all
+content with no reasoning split.
 
 ## Structured output
 
@@ -1690,10 +1694,10 @@ is an explicit off, which returns HTTP 400 when the template cannot honor it (se
 `/v1/messages` submits.
 A request whose last message is the assistant's continues that message instead of opening a new turn, as Messages'
 prefill does. The reply's `content` holds only the continuation, and `usage.input_tokens` and `count_tokens` count
-the prefilled text as input. The prefill's text cannot end in whitespace or hold `tool_use` blocks, and thinking must
-be off, which it is without a `thinking` field or with `{"type": "disabled"}`. Each of these gets HTTP 400 by name,
-as does a template that does not keep the text; see
-[continuing a final assistant message](#continuing-a-final-assistant-message).
+the prefilled text as input. Without a `thinking` field, or with `{"type": "disabled"}`, the continuation runs with
+thinking off on any template. The prefill's text cannot end in whitespace or hold `tool_use` blocks, and a request
+whose `thinking` is enabled or adaptive cannot continue it. Each of these gets HTTP 400 by name, as does a template
+that does not keep the text; see [continuing a final assistant message](#continuing-a-final-assistant-message).
 Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
