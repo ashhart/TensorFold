@@ -257,8 +257,7 @@ inline void tf_dsv41_w4(uint word, float x256, thread float (&w)[4]) {
   w[0] = float(a.x) * x256, w[1] = float(b.x) * x256, w[2] = float(a.y) * x256, w[3] = float(b.y) * x256;
 }
 
-// tf_dsv41_fp8_whole with each word decoded where it is used and X read 8 bytes at a time: fewer live registers,
-// the same chains (k in order from zero) and the same tree. Rows past R repeat row R - 1 and are never written.
+// tf_dsv41_fp8_whole decoding each word at its use, X 8 bytes a time: same chains and tree; rows past R repeat R - 1.
 template <uint RT, uint NB, uint CL, typename T>
 [[kernel, max_total_threads_per_threadgroup(1024)]] void tf_dsv41_fp8_lean(
     const device uchar* X0 [[buffer(0)]], const device uchar* W0 [[buffer(1)]],
