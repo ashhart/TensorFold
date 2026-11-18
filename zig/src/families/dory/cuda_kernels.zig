@@ -119,7 +119,7 @@ test "BF16 prompt port: Dory observes the threshold, cached switch and decode pa
     const prompt_fn = Mock.function(&d, 2);
     var k: Kernels = undefined;
     k.lane = .{ .mod = .{ .d = &d, .handle = null }, .fns = @splat(@splat(lane_fn)), .f32_fns = @splat(@splat(lane_fn)), .reduce = @splat(lane_fn), .half = @splat(@splat(@splat(lane_fn))), .clusters = false };
-    k.prompt = .{ .mod = .{ .d = &d, .handle = null }, .fp4 = prompt_fn, .fp8 = prompt_fn, .fp4_f32 = prompt_fn, .lean = prompt_fn, .lean_f32 = prompt_fn, .sms = 16, .bf16_serving = true, .bf16 = Mock.function(&d, 3), .bf16_f32 = Mock.function(&d, 4) };
+    k.prompt = .{ .mod = .{ .d = &d, .handle = null }, .fp4 = prompt_fn, .fp8 = prompt_fn, .fp4_f32 = prompt_fn, .lean = prompt_fn, .lean_f32 = prompt_fn, .lean_swiglu = prompt_fn, .sms = 16, .bf16_serving = true, .bf16 = Mock.function(&d, 3), .bf16_f32 = Mock.function(&d, 4) };
     const linear = k.linear();
     const w: cuda.qmmf.Weight = .{ .mode = .bf16, .codes = 0x2000, .scales = 0, .n = 48, .k = 5120, .npad = 128 };
     for ([_]usize{ 1023, 1024, 2048 }) |rows| {
