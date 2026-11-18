@@ -27,14 +27,17 @@ pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scor
     e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(2 * H, 1, 1));
 }
 
-/// `rows` rows (keys n0, n0 + 1, ..) each as attendDense leaves it, in three launches for all of them.
-pub fn attendRows(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scores: Ref, probs: Ref, out: Ref, n0: u32, rows: u32) void {
+/// glm_attn.metal's GlmAttnRows: the first row's keys, the rows' strides, the queries' scale (the scores kernel's).
+const RowArgs = extern struct { n0: i32, q_stride: i32, s_stride: i32, o_stride: i32, q_scale: f32 };
+
+/// `rows` rows (keys n0, n0 + 1, ..) as attendDense leaves them on `q` times `q_scale` (a power of two), 3 launches.
+pub fn attendRows(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, q_scale: f32, scores: Ref, probs: Ref, out: Ref, n0: u32, rows: u32) void {
     const k = x.k;
     const H = x.c.mla_heads;
     const lat: i32 = @intCast(H * x.c.kv_lora); // a row's latent queries and outputs
     const plane: i32 = @intCast(H * x.c.i_topk); // and its scores
     const n_max = n0 + rows - 1;
-    const args = [4]i32{ @intCast(n0), lat, plane, lat };
+    const args = RowArgs{ .n0 = @intCast(n0), .q_stride = lat, .s_stride = plane, .o_stride = lat, .q_scale = q_scale };
     e.setPipeline(k.latent_scores_rows);
     bind(e, 0, .{ q, keys, scores });
     e.setBytes(std.mem.asBytes(&args), 3);
