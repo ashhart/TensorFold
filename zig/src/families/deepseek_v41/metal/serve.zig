@@ -7,6 +7,7 @@ const dspark = @import("dspark.zig");
 const prompt = @import("prompt.zig");
 const target_ = @import("target.zig");
 const pass_ = @import("pass.zig");
+const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
 
@@ -44,6 +45,8 @@ pub const Options = struct {
     steps: bool = false,
     /// --decode-share (serve_lanes.Model.decode_share)
     decode_share: ?f64 = null,
+    /// greedy windows' next passes queued behind them (the lanes' speculative pass, on unless TF_DSV41_SPEC_DRAFT=0)
+    early: bool = true,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -58,6 +61,7 @@ pub const Metal = struct {
     /// the idle ticker's target: the weights' residency set (the target's buffers joined it), on a queue of its own
     warm: ?mtl.keepalive.Target = null,
     ad: pass_.Pass = undefined,
+    early: ?*early_.Early = null,
     prep: Prep = undefined,
 
     const Prep = struct { io: std.Io, cfg: @import("vision.zig").Config };
@@ -71,7 +75,11 @@ pub const Metal = struct {
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {
             m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab) });
+            errdefer m.dp.?.deinit();
             m.ad = .{ .x = m.dp.?, .t = m.t };
+            if (opt.early) m.early = try early_.Early.init(a, m.dp.?);
+            m.ad.early = m.early;
+            m.t.behind = m.ad.behind();
         };
         try m.holdWarm();
         return m;
@@ -108,6 +116,7 @@ pub const Metal = struct {
             .target = targetFn,
             .pass = passFn,
             .calibrate = calibrate,
+            .spec_default = m.early != null,
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
             .keepalive = m.keepalive(),
@@ -171,6 +180,12 @@ pub const Metal = struct {
 
     fn close(ctx: *anyopaque) void {
         const m = self(ctx);
+        if (m.early) |e| {
+            var buf: [160]u8 = undefined;
+            std.log.info("dsv41 metal: {s}", .{e.describe(&buf)});
+            e.deinit();
+        }
+        m.t.behind = null;
         if (m.warm) |w| w.queue.deinit();
         if (m.dp) |p| p.deinit();
         m.t.deinit();
