@@ -69,7 +69,60 @@ struct RouteArgs {
   float scale;
 };
 
-// 512 threads: each row's top-k (simd_max, then simd_min: ties to the lower id), weights, groups and pick lists.
+// Row r's first n picks by sigmoid + bias in every lane: the largest score (simd_max), its lowest id (simd_min).
+inline void tf_route_picks(const device float* LOGITS, const device float* BIAS, int r, uint lane, int n, thread int* pick,
+                           thread float* w) {
+  float c[PER], sc[PER];
+  for (int j = 0; j < PER; j++) {
+    const int id = j * 32 + int(lane);
+    if (id < TF_E) {
+      sc[j] = tf_sigmoid_precise(LOGITS[r * TF_E + id]);
+      c[j] = sc[j] + BIAS[id];
+    } else {
+      sc[j] = 0.0f; c[j] = -INFINITY;
+    }
+  }
+  for (int k = 0; k < TF_TOPK; k++) {
+    if (k >= n) continue;
+    float best = -INFINITY, bsc = 0.0f;
+    int bid = TF_E;
+    for (int j = 0; j < PER; j++) {
+      const int id = j * 32 + int(lane);
+      if (id < TF_E && (c[j] > best || (c[j] == best && id < bid))) { best = c[j]; bid = id; bsc = sc[j]; }
+    }
+    const float top = simd_max(best); // no lane's best is NaN: a NaN score never passes the compares
+    bid = simd_min(best == top ? bid : TF_E);
+    bsc = simd_shuffle(bsc, ushort(bid % 32));
+    pick[k] = bid;
+    w[k] = bid < TF_E ? bsc : 0.0f;
+    for (int j = 0; j < PER; j++)
+      if (j * 32 + int(lane) == bid) c[j] = -INFINITY;
+  }
+}
+
+// The picks' weights: normalized in pick order, then scaled.
+inline void tf_route_weights(thread const float* w, float scale, device float* out) {
+  float total = w[0];
+  for (int k = 1; k < TF_TOPK; k++) total = total + w[k];
+  for (int k = 0; k < TF_TOPK; k++) out[k] = (w[k] / total) * scale;
+}
+
+// A one-row MoE kernel's pick u, the select's picks replayed; `write`: lane 0 writes the picks and weights too.
+inline int tf_route_pick_at(const device float* LOGITS, const device float* BIAS, int u, uint lane, bool write,
+                            device int* PICK, device float* WTS, float scale) {
+  int p[TF_TOPK];
+  float w[TF_TOPK];
+  tf_route_picks(LOGITS, BIAS, 0, lane, write ? TF_TOPK : u + 1, p, w);
+  if (write && lane == 0) {
+    for (int k = 0; k < TF_TOPK; k++) PICK[k] = p[k];
+    tf_route_weights(w, scale, WTS);
+  }
+  int e = p[0];
+  for (int k = 1; k < TF_TOPK; k++) e = k == u ? p[k] : e;
+  return e;
+}
+
+// 512 threads: each row's top-k by sigmoid + bias (tf_route_picks), weights, then this Mac's groups and pick lists.
 [[kernel]] void tf_route_select(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                 constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                 device float* WTS [[buffer(4)]], device int* LIDS [[buffer(5)]],
@@ -87,40 +140,16 @@ struct RouteArgs {
     const int r = int(g);
     for (int id = int(lane); id < TF_E; id += 32) slot[r][id] = 0xff;
     simdgroup_barrier(mem_flags::mem_threadgroup);
-    float c[PER], sc[PER];
-    for (int j = 0; j < PER; j++) {
-      const int id = j * 32 + int(lane);
-      if (id < TF_E) {
-        sc[j] = tf_sigmoid_precise(LOGITS[r * TF_E + id]);
-        c[j] = sc[j] + BIAS[id];
-      } else {
-        sc[j] = 0.0f; c[j] = -INFINITY;
-      }
-    }
+    int p[TF_TOPK];
     float w[TF_TOPK];
-    for (int k = 0; k < TF_TOPK; k++) {
-      float best = -INFINITY, bsc = 0.0f;
-      int bid = TF_E;
-      for (int j = 0; j < PER; j++) {
-        const int id = j * 32 + int(lane);
-        if (id < TF_E && (c[j] > best || (c[j] == best && id < bid))) { best = c[j]; bid = id; bsc = sc[j]; }
-      }
-      const float top = simd_max(best); // no lane's best is NaN: a NaN score never passes the compares
-      bid = simd_min(best == top ? bid : TF_E);
-      bsc = simd_shuffle(bsc, ushort(bid % 32));
-      w[k] = bid < TF_E ? bsc : 0.0f;
-      for (int j = 0; j < PER; j++)
-        if (j * 32 + int(lane) == bid) c[j] = -INFINITY;
-      if (lane == 0) {
-        picks[r * TF_TOPK + k] = bid;
-        PICK[r * TF_TOPK + k] = bid;
-        if (bid < TF_E) slot[r][bid] = uchar(k);
-      }
-    }
+    tf_route_picks(LOGITS, BIAS, r, lane, TF_TOPK, p, w);
     if (lane == 0) {
-      float total = w[0];
-      for (int k = 1; k < TF_TOPK; k++) total = total + w[k];
-      for (int k = 0; k < TF_TOPK; k++) WTS[r * TF_TOPK + k] = (w[k] / total) * a.scale;
+      for (int k = 0; k < TF_TOPK; k++) {
+        picks[r * TF_TOPK + k] = p[k];
+        PICK[r * TF_TOPK + k] = p[k];
+        if (p[k] < TF_E) slot[r][p[k]] = uchar(k);
+      }
+      tf_route_weights(w, a.scale, WTS + r * TF_TOPK);
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
