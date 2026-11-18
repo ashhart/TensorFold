@@ -1,7 +1,33 @@
 //! A lane host's lone driver: the backend's own loop runs a lone stream until a foreground request or a cancel waits.
+const lanes = @import("lanes");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
 const Job = LaneHost.Job;
+
+/// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
+pub const Lone = struct {
+    ctx: *anyopaque,
+    sampled: bool = false, // it drives sampled streams too
+    plain: bool = false, // it drives streams with drafts off too
+    logprobs: bool = false, // it gives each token its logprob row too
+    structures: bool = false, // it masks each window's rows by the stream's grammar too
+    images: bool = true, // it takes image requests too (false: they stay in the lane core)
+    // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
+    min_budget: u32 = 0,
+    resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
+    /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
+    run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
+};
+
+/// What a lone driver tells the host between rounds: tokens landed; and asks: hand the stream over now?
+pub const LoneHooks = struct {
+    ctx: *anyopaque,
+    committed: *const fn (ctx: *anyopaque) void,
+    yield: *const fn (ctx: *anyopaque) bool,
+    resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
+    // After a completed nonfinal prompt call, true transfers the unfinished pass to the shared fill queue.
+    prefill_yield: ?*const fn (ctx: *anyopaque) bool = null,
+};
 
 /// An idle driver takes a lone drafted request; plain, sampled, with logprobs, a budget or a grammar when supported.
 pub fn fits(h: *LaneHost, job: *Job) bool {
@@ -15,7 +41,7 @@ fn takes(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     const lone = h.lone orelse return false;
     const think = lone.min_budget > 0 and (r.think_budget == 0 or r.think_budget > lone.min_budget);
-    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
+    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or r.audios.len > 0 or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
 }
 
 /// After a round: the lane core's last live stream goes back to the driver when nothing else waits or is due.

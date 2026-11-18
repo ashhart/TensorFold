@@ -159,6 +159,8 @@ server reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 31B on Metal, wit
 user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
+The native CUDA server reads audio for Nemotron 3.5 Transcribe: `input_audio` and `audio_url` (data URL) parts with
+16 kHz mono WAV in user messages ([recipe](recipes/nemotron-3.5-transcribe.md#audio-in-a-request)).
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Model capabilities
@@ -1384,7 +1386,8 @@ adds `reasoning`: `default_enabled`, `default_effort` when the template consumes
 
 Every native entry ends with `input_types`, the content part types the model takes: `["text"]`, plus `"image"` when
 it was started with `--vision` (`image_url` parts), plus `"video"` when its checkpoint reads video and this server
-loads the `libtfvideo` runtime (`video_url` parts), for example `["text", "image", "video"]`. The server decides it
+loads the `libtfvideo` runtime (`video_url` parts), plus `"audio"` when the engine has an audio encoder
+(`input_audio` and `audio_url` parts), for example `["text", "image", "video"]`. The server decides it
 once at startup, and requests are refused by the same fact: a `video_url` part to an entry without `"video"` gets
 HTTP 400 (`invalid_request_error`), never a 500. Without `libtfvideo` the startup log says so once.
 

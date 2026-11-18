@@ -133,3 +133,11 @@ test "model discovery input types: a video the decoder library cannot open is a 
     try t.expect(std.mem.startsWith(u8, cx.message, "video 1: this server takes no video input: "));
     try t.expect(std.mem.indexOf(u8, cx.message, sys.optional_libraries.spec(.video).names[0]) != null);
 }
+
+test "input_types lists audio after text and image when the engine has an audio encoder" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const types = (try @import("input_types.zig").Inputs.value(.{ .image = true, .audio = true }, arena.allocator())).array;
+    try t.expectEqual(@as(usize, 3), types.len);
+    for ([_][]const u8{ "text", "image", "audio" }, types) |want, got| try t.expectEqualStrings(want, got.string);
+}
