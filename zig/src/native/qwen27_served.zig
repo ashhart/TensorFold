@@ -299,8 +299,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         if (err == error.MissingMtpFile) why.* = try std.fmt.allocPrint(a, "--mtp-drafts: Qwen3.8-27B's MTP head is read from {s} beside the checkpoint, and {s} has none", .{ q.gpu_weights.mtp_file, dir });
         return err;
     };
-    var with = o;
-    // the tower before the slots: their room and the cache's budget count it as taken
+    var with = o; // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
     const h = try attach(gpa, io, model, null, with, a, why);
@@ -379,8 +378,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
-    h.trace = null;
-    // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
+    h.trace = null; // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in pages; Fit charged each its window
     h.runner = try if (try q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
@@ -423,13 +421,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
-    h.warm = .{ .queue = model.queue };
-    // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
+    h.warm = .{ .queue = model.queue }; // ready slots wired before the cache budget reads the footprint
     const residency = tf.startup_receipt.span(.residency);
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     residency.end();
-    errdefer q.residency.drop(h);
-    // Decide before cache sizing and the worker starts, with ready state wired and future buffers reserved.
+    errdefer q.residency.drop(h); // decided before cache sizing and the worker starts
     const ane = tf.startup_receipt.span(.optional_ane);
     if (model.share_pending) {
         const before = cache_fit.footprint();
@@ -439,8 +435,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         };
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
-    ane.end();
-    // Slot 0's history rewind, wired before cache sizing: even a cache with two full-context copies may evict it.
+    ane.end(); // slot 0's history rewind: even two full copies may evict it
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
