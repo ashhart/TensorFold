@@ -31,7 +31,7 @@ const usage =
     \\  exchanges          embedding, Engram and mHC exchanges at worlds 1-4 as threads on this GPU (no fixture)
     \\  mhc-probe [windows]  the 16-row mHC boundary under cache states, buffer layouts and a cross-stream dependency
     \\  x3gm3-bench [rows,..] [reps]  x3gm v3 against v2 at the served prefill shapes: bits and time (synthetic data)
-    \\  combine-add        routed combine plus shared add: byte equality, rounding edges, bounds and time
+    \\  combine-add        routed combine plus shared add: eager/graph bytes, rounding, bounds and time
     \\  x3ld-epi [rows,..] [reps]  TF_DSV41_X3LD_EPI: fused x3ld + epilogues against the four launches (bits, time)
     \\  mhc-alloc [windows]  the 16-row mHC boundary's time with buffers per cuMemAlloc / arena / VMM (TF_DSV41_ARENA)
     \\  stream-rb <aot dir> [--reps N]  _stream_rb2 / _rb4 against _stream (Triton AOT set): bits and time (synthetic)
