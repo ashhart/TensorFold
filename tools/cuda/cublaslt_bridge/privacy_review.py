@@ -47,7 +47,9 @@ class Scanner:
             raise ValueError("private context must contain no plaintext identifiers")
         self.deny = set(values)
         self.context_sha256 = hashlib.sha256(Path(context_file).read_bytes()).hexdigest()
-        self.allowed = {(row["category"], row["sha256"]) for row in policy["public_readable_values"]}
+        self.allowed = {(row["legal_file"], row["category"], row["sha256"])
+                        for row in policy["public_readable_values"]}
+        self.legal_origins = {row[0] for row in self.allowed}
         self.audit = audit
         self.corpus = (audit / "readable-spans.txt").open("w", encoding="utf-8", newline="\n")
         self.findings = []
@@ -61,7 +63,8 @@ class Scanner:
             raise ValueError("readable span exceeds inspection bound")
         self.counts["spans"] += 1
         value_hash = hashlib.sha256(value.encode()).hexdigest()
-        if value_hash in self.seen:
+        dedup_key = (value_hash, origin, encoding) if origin in self.legal_origins else value_hash
+        if dedup_key in self.seen:
             first = WORD.findall(value[:1024])[:2]
             border = list(preceding) + first
             if any(word_hash(" ".join(border[i:i + width])) in self.deny
@@ -69,7 +72,7 @@ class Scanner:
                 self.findings.append({"category": "private-context", "origin": origin,
                                       "offset": offset, "encoding": encoding, "span_sha256": value_hash})
             return
-        self.seen.add(value_hash)
+        self.seen.add(dedup_key)
         self.counts["unique_spans"] += 1
         self.counts["text_bytes"] += len(value.encode())
         if self.counts["text_bytes"] > 2 << 30:
@@ -85,7 +88,7 @@ class Scanner:
         for category, rule in RULES.items():
             for hit in rule.finditer(value):
                 digest = hashlib.sha256(hit.group().encode()).hexdigest()
-                if (category, digest) not in self.allowed:
+                if encoding != "ascii" or (origin, category, digest) not in self.allowed:
                     self.findings.append({"category": category, "origin": origin,
                                           "offset": offset + hit.start(), "encoding": encoding,
                                           "match_sha256": digest, "match_bytes": len(hit.group().encode(encoding))})

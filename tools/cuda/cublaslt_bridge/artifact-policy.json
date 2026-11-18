@@ -9,6 +9,20 @@
     "provenance": "Official public CUDA redistributable, exact archive and member hashes"
   },
   "public_readable_values": [],
+  "reviewed_project_contacts": [
+    {
+      "legal_file": "LICENSES/Kimi-K3.txt",
+      "legal_lf_sha256": "282b09c71615dee175f49c620d1874162f508baea9d666a6ba686ace870952a7",
+      "sha256": "b55211f743424b360a5f5d782b137b5cff5cb4766490796258825e57a6117f05",
+      "source": "https://huggingface.co/moonshotai/Kimi-K3/blob/f831ab66814297da540d832a5235f8e904f29d06/LICENSE"
+    },
+    {
+      "legal_file": "LICENSES/Kimi-K3.1-Pro.txt",
+      "legal_lf_sha256": "3e74581d3af80d62af968dfe3822378f26c5e144413ea6927d034925581c246c",
+      "sha256": "b55211f743424b360a5f5d782b137b5cff5cb4766490796258825e57a6117f05",
+      "source": "https://huggingface.co/moonshotai/Kimi-K3.1-Pro/blob/d9e99b0792a5e93b78ea9bea62a68167e36ddd9e/LICENSE"
+    }
+  ],
   "system_imports": [
     "KERNEL32.dll",
     "NTDLL.dll",

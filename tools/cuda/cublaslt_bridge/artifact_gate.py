@@ -208,6 +208,22 @@ def resolve_encoded_findings(findings, frames, policy):
             unresolved.append(finding)
     return unresolved, resolved
 
+def reviewed_project_contacts(package, records):
+    """Bind published contact approvals to the checked license and accepted line endings."""
+    verified = []
+    for row in records:
+        license_file = package / row["legal_file"]
+        text = license_file.read_bytes().replace(b"\r\n", b"\n")
+        if hashlib.sha256(text).hexdigest() != row["legal_lf_sha256"]:
+            raise ValueError("reviewed project license changed")
+        values = [hashlib.sha256(hit.group().encode()).hexdigest()
+                  for hit in RULES["email"].finditer(text.decode("utf-8"))]
+        if values.count(row["sha256"]) != 1:
+            raise ValueError("reviewed project license contact changed")
+        verified.append({**row, "category": "email", "legal_sha256": digest(license_file)})
+    return verified
+
+
 def finding_summary(findings, native_catalog, frames):
     """Report controlled categories without finding text, offsets, digests or untrusted paths."""
     roles = {"bin/tensorfold.exe": "server", "bin/tf_cublaslt_bridge.dll": "bridge",
@@ -312,7 +328,8 @@ def qualify(repo, work, archive, gitleaks, context, public_sidecars=()):
     if tool["executable_sha256"] != digest(gitleaks) or tool["sha256"] != input_lock["gitleaks"]["sha256"]:
         raise ValueError("secret scanner does not match its pinned archive")
     # Each public attribution is limited to its exact value in a verified shipped legal input.
-    intended = []
+    intended = reviewed_project_contacts(package, policy["reviewed_project_contacts"])
+    policy["public_readable_values"].extend(intended)
     for row in load(work / "runtime-legal-inputs.private.json"):
         path = package / row["path"]
         if digest(path) != row["sha256"]:

@@ -133,6 +133,24 @@ class RefusalControls(unittest.TestCase):
             self.assertIn("wide", origins)
             self.assertTrue(any(name.startswith("encoded-base64-") for name in origins))
 
+    def test_public_license_contact_is_scoped_to_its_verified_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = root / "context.json"
+            context.write_text(json.dumps({"schema": 1, "normalization": "casefold-alnum-v1",
+                                           "sha256": [word_hash("fixture private identifier")]}))
+            value = b"Public license contact <legal@example.invalid>."
+            origin = "LICENSES/public-fixture.txt"
+            policy = {"public_readable_values": [{"category": "email", "legal_file": origin,
+                         "sha256": hashlib.sha256(b"legal@example.invalid").hexdigest()}]}
+            scanner = Scanner(context, policy, root)
+            scanner.scan(value, origin)
+            scanner.scan(value, "unrelated-file")
+            scanner.scan(value, origin + "-base64-00")
+            findings = scanner.close()["findings"]
+            self.assertIn("unrelated-file", {row["origin"] for row in findings})
+            self.assertNotIn(origin, {row["origin"] for row in findings})
+
     def test_nested_base64_gzip_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
