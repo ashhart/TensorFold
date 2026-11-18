@@ -352,7 +352,7 @@ pub const Pass = struct {
         const base = try sa.alloc(f32, l.rows * k);
         const hid = try sa.alloc(f32, n * D);
         const mk = x.markov();
-        for (0..l.rows) |r| try host.dspark.candidates(sa, logits[r * V ..][0..V], 0, cand[r * k ..][0..k], base[r * k ..][0..k]);
+        try host.dspark.candidateRows(logits, V, k, cand, base);
         for (l.asks, out, 0..) |a, *o, j| {
             if (o.drafts.len != n or o.conf.len != n) return error.BadOutput;
             const cd = cand[j * n * k ..][0 .. n * k];
