@@ -348,6 +348,7 @@ template <int RP, bool ONE>
   }
 }
 
+template [[host_name("tf_dsv41_xp_down_one")]] [[kernel]] decltype(tf_dsv41_xp_down<1, true>) tf_dsv41_xp_down<1, true>;
 // Kimi's down of rows r0..r0+rn of a slot (act by pair position), one weight decode for all rows.
 template <uint RP>
 inline void ds_down_pass(device const bfloat* act, device bfloat* out, constant XpArgs& a,
