@@ -72,6 +72,72 @@ const t1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3 };
 const salt_a: u64 = 0xa11ce;
 const salt_b: u64 = 0xb0b;
 
+test "cache salt isolation: A keeps, B and an unsalted request miss, A resumes exactly, high-bit words never alias" {
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    var host = api.LaneHost.init(gpa, io, &core, .{ .lanes = 2 });
+    host.cache = &store;
+    try host.start();
+    defer host.stop();
+    const secret = @import("ids.zig").Key.of("cache isolation test");
+    const one = cache_salt.withKey(&secret, true, 0, @as([32]u8, @splat(1)));
+    const two = cache_salt.withKey(&secret, true, 0, @as([32]u8, @splat(2)));
+    var kept = try run(host.engine(), 1, &t1, 8, 6, one);
+    defer kept.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 0), kept.cached);
+    var other = try run(host.engine(), 2, &t1, 8, 6, two);
+    defer other.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 0), other.cached);
+    var own = try run(host.engine(), 3, &t1, 8, 6, one);
+    defer own.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 8), own.cached);
+    var plain = try run(host.engine(), 4, &t1, 8, 6, 0);
+    defer plain.tokens.deinit(gpa);
+    try std.testing.expectEqual(@as(?u32, 0), plain.cached);
+    for ([_][]const u32{ other.tokens.items, own.tokens.items, plain.tokens.items }) |ids|
+        try std.testing.expectEqualSlices(u32, kept.tokens.items, ids);
+    const own_key = try cache_salt.salted(gpa, &t1, one);
+    defer gpa.free(own_key);
+    for (0..api.cache_salt_key.words) |i| {
+        var image = t1;
+        image[i] |= 0x8000_0000;
+        if (i == 0) {
+            if (cache_salt.salted(gpa, &image, one)) |key| {
+                defer gpa.free(key);
+                std.debug.print("high-bit first cache-key word was accepted\n", .{});
+                return error.TestUnexpectedResult;
+            } else |err| try std.testing.expectEqual(@as(anyerror, error.UnsupportedCacheSaltPrefix), @as(anyerror, err));
+        } else {
+            const key = try cache_salt.salted(gpa, &image, one);
+            defer gpa.free(key);
+            try std.testing.expect(!std.mem.eql(u32, own_key, key));
+            try std.testing.expectEqual(@as(u32, 0x8000_0000), own_key[i] ^ key[i]);
+        }
+    }
+}
+
+test "cache salt isolation: a masked high-bit prefix is a request refusal and unsalted input stays unchanged" {
+    var k: Keys = .{};
+    var text: Text = .{};
+    const srv = try server.Server.init(gpa, io, k.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const image = [_]u32{ 0x8000_0005, 1, 2, 3, 4 };
+    try std.testing.expectError(error.Refused, cache_salt.key(srv, &cx, &image, salt_a));
+    try std.testing.expectEqual(errors.Kind.request, cx.kind);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "high-bit") != null);
+    try std.testing.expectEqualSlices(u32, &image, try cache_salt.key(srv, &cx, &image, 0));
+}
+
 test "two salts never resume each other's states, the same salt resumes as an unsalted turn does, tokens unchanged" {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -264,7 +330,7 @@ test "the routes: no salt sends today's key, a salt keys the request, the per-ke
     try std.testing.expectEqualSlices(u32, a1.key, a2.key); // the same salt, the same key
     try std.testing.expect(!std.mem.eql(u32, a1.key[0..4], b.key[0..4]));
     try std.testing.expectEqualSlices(u8, "pt", &.{ @as(u8, @truncate(a1.key[4])), @as(u8, @truncate(a1.key[5])) });
-    for (a1.key[0..4]) |w| try std.testing.expect(w & 0x8000_0000 != 0);
+    try std.testing.expect(a1.key[0] & 0x8000_0000 != 0); // one marker still excludes the whole key from disk
     // --cache-salt-per-key: two API keys' requests keyed apart; one key's requests together; off, no key change
     const d1: [32]u8 = @splat(1);
     const d2: [32]u8 = @splat(2);

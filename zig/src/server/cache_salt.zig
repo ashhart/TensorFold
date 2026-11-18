@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const Server = @import("server.zig").Server;
 const Key = @import("ids.zig").Key;
 const Cx = errors.Cx;
+const salt_key = @import("engine_api").cache_salt_key;
 
 /// The longest salt a request may send.
 pub const most = 1024;
@@ -47,12 +48,15 @@ pub fn key(srv: *const Server, cx: *Cx, base: []const u32, salt: u64) errors.Ref
     if (salt == 0) return base;
     // only a host that says its whole cache goes by the key takes a salt (one with a family's own store may not)
     if (!srv.info.cache_salt) return cx.fail(.request, "cache_salt is not supported by backend '{s}': its prompt cache does not key requests by salt", .{srv.backendName()});
-    return salted(cx.a, base, salt);
+    return salted(cx.a, base, salt) catch |err| switch (err) {
+        error.UnsupportedCacheSaltPrefix => return cx.fail(.request, "cache_salt cannot mask a high-bit first cache-key word", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 }
 
-/// The salted copy (core/cache_salt_key.zig): high-bit words masked by the salt, which disk never keeps.
-pub fn salted(a: std.mem.Allocator, base: []const u32, salt: u64) std.mem.Allocator.Error![]const u32 {
-    return @import("engine_api").cache_salt_key.salted(a, base, salt);
+/// The salted copy: its first word marks it as RAM-only; later masked words retain every input bit.
+pub fn salted(a: std.mem.Allocator, base: []const u32, salt: u64) salt_key.Error![]const u32 {
+    return salt_key.salted(a, base, salt);
 }
 
 test "salts: absent is 0, a string hashes under the server's key, a malformed one is refused; keys mix in per key" {
