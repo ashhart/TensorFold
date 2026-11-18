@@ -252,6 +252,13 @@ pub fn env(name: [*:0]const u8) ?[]const u8 {
     return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
 }
 
+/// `depthSettings` for a pass of `block` drafts: the cost depth's default cap is the block when it is past 5.
+pub fn depthSettingsFor(get: *const fn ([*:0]const u8) ?[]const u8, block: usize) !depth.Settings {
+    var s = try depthSettings(get);
+    if (s.mode == .cost and trimmed(get("TF_DSV41_DRAFT_DEPTH")) == null) s.cap = @max(s.cap, @min(block, 15));
+    return s;
+}
+
 /// TF_DSV41_DRAFT_PLAIN_STREAMS as depthSettings reads it (set and non-blank).
 pub fn plainStreamsSet() bool {
     return trimmed(env("TF_DSV41_DRAFT_PLAIN_STREAMS")) != null;
