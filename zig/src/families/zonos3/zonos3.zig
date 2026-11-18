@@ -9,6 +9,8 @@ pub const features = @import("features.zig");
 pub const release = @import("release.zig");
 pub const voices = @import("voices.zig");
 pub const request = @import("request.zig");
+pub const steering = @import("steering.zig");
+pub const steer_bundle = @import("steer_bundle.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
@@ -24,6 +26,7 @@ pub const Options = engine.Options;
 pub const Probe = engine.Probe;
 pub const Replace = engine.Replace;
 pub const Turn = engine.Turn;
+pub const Steer = steering.Steer;
 pub const Sampling = sampler.Sampling;
 pub const Codec = codec.Codec;
 
@@ -37,6 +40,8 @@ test {
     _ = features;
     _ = release;
     _ = voices;
+    _ = steering;
+    _ = steer_bundle;
     _ = codec_weights;
     _ = quantizer;
 }

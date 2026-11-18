@@ -3,6 +3,8 @@ pub const config = @import("config.zig");
 pub const prompt = @import("prompt.zig");
 pub const release = @import("release.zig");
 pub const voices = @import("voices.zig");
+pub const steering = @import("steering.zig");
+pub const steer_bundle = @import("steer_bundle.zig");
 
 /// The release's sampling defaults (registries/generation.json).
 pub const temperature: f32 = 0.75;
@@ -17,4 +19,6 @@ test {
     _ = prompt;
     _ = release;
     _ = voices;
+    _ = steering;
+    _ = steer_bundle;
 }

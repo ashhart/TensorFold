@@ -51,7 +51,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .path = true, .native = true },
     .{ .name = "--voices", .path = true, .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ [_]Flag{
+} ++ @import("zonos_steer.zig").flags ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -180,6 +180,7 @@ pub const Args = struct {
     chat_template: ?[]const u8 = null,
     voices: ?[]const u8 = null,
     default_voice: []const u8 = "default",
+    zonos: @import("zonos_steer.zig").Paths = .{},
     alias: []const []const u8 = &.{},
     name_priority: []const []const u8 = &.{},
     api_key: []const []const u8 = &.{},
@@ -280,7 +281,6 @@ pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
 }
-
 pub fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{ Usage, OutOfMemory } {
     u.message = try std.fmt.allocPrint(a, fmt, args);
     return error.Usage;
@@ -423,7 +423,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
-    if (@import("voice_cli.zig").apply(&out.voice, name)) return;
+    if (@import("voice_cli.zig").apply(&out.voice, name) or @import("zonos_steer.zig").flag(out, name, v)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {

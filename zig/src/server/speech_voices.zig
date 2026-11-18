@@ -7,7 +7,8 @@ pub fn open(srv: *server.Server, gpa: std.mem.Allocator, io: std.Io, config: ser
     srv.voices = .{ .gpa = gpa, .io = io, .dir = config.voice.dir };
     const catalog = config.voice.dir != null or config.voice.inline_voices or config.voice.manage;
     if (srv.info.speech == null and catalog) return error.VoicesRequireSpeech;
-    if (srv.info.speech != null) srv.zonos = try @import("zonos_speech.zig").load(srv.arena.allocator(), io, config.model_dir, config.voice.default);
+    if (config.zonos.steer_bundle != null and srv.info.speech == null) return error.SteerBundleNeedsZonos;
+    if (srv.info.speech != null) srv.zonos = try @import("zonos_speech.zig").load(srv.arena.allocator(), io, config.model_dir, config.voice.default, config.zonos.steer_bundle);
     if (srv.zonos != null) {
         if (catalog) return error.VoicesAreDrama3s; // a catalog ZONOS3 would never read
         return;

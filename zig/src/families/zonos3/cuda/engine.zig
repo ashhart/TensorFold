@@ -42,7 +42,8 @@ pub const Probe = struct {
 pub const Lane = struct { kv: [cfg.layers][2]u64, conv: [cfg.layers]u64, gstate: [cfg.layers]u64, state: u64, position: usize = 0 };
 
 /// One lane's next row in a pass over several lanes, and where its logits go.
-pub const Turn = struct { lane: usize, row: [W]i32, out: *[cfg.head_rows]f32 };
+pub const Steer = @import("../steering.zig").Steer;
+pub const Turn = struct { lane: usize, row: [W]i32, out: *[cfg.head_rows]f32, steer: []const Steer = &.{} };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -89,6 +90,8 @@ pub const Engine = struct {
     comb: u64, // [R][256]
     logits: u64, // [R][head_rows]
     row_up: u64, // [D] a replaced row on its way in
+    steer: u64, // [R][2][D]: a steered row of a bank source, then its delta
+    unit: u64, // [2], each 1.0: the weights that make z3_combine a sum
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, o: Options) !*Engine {
         try o.validate();
@@ -119,6 +122,7 @@ pub const Engine = struct {
         }
         errdefer e.freeState();
         try e.allocState();
+        try e.put(e.unit, std.mem.asBytes(&[2]f32{ 1, 1 }));
         try e.reset();
         return e;
     }
@@ -258,6 +262,8 @@ pub const Engine = struct {
         e.comb = try e.alloc(R * cfg.moe_latent * 4);
         e.logits = try e.alloc(R * cfg.head_rows * 4);
         e.row_up = try e.alloc(D * 4);
+        e.steer = try e.alloc(R * 2 * D * 4);
+        e.unit = try e.alloc(2 * 4);
     }
 
     fn buf(e: *Engine, ptr: u64) Buf {
@@ -298,9 +304,18 @@ pub const Engine = struct {
         var at: usize = 0;
         while (at < rows.len) {
             const t = @min(e.o.max_rows, rows.len - at);
-            try e.pass(rows[at..][0..t], at, replaced, at + t == rows.len, probe, null);
+            try e.pass(rows[at..][0..t], at, replaced, at + t == rows.len, probe, null, &.{});
             at += t;
         }
+    }
+
+    /// One generated row on the lane in use with `steer` added to its bank sources (synth: a decode step's deltas).
+    pub fn runSteered(e: *Engine, row: [W]i32, steer: []const Steer) !void {
+        if (e.position + 1 > e.o.max_ctx) return error.ContextFull;
+        for (row[0..cfg.codebooks]) |code| if (code < 0 or code >= cfg.audio_vocab) return error.BadFrameRow;
+        if (row[cfg.codebooks] < 0 or row[cfg.codebooks] >= e.w.text_rows) return error.BadFrameRow;
+        for (steer) |st| if (st.source >= cfg.sources) return error.NoSuchSource;
+        try e.pass(&.{row}, 0, &.{}, true, null, null, steer);
     }
 
     /// One row of each of `turns`' lanes in one pass; each lane moves a position and its logits go to its `out`.
@@ -316,17 +331,31 @@ pub const Engine = struct {
             if (e.lanes.items[turn.lane].position + 1 > e.o.max_ctx) return error.ContextFull;
             for (turn.row[0..cfg.codebooks]) |code| if (code < 0 or code >= cfg.audio_vocab) return error.BadFrameRow;
             if (turn.row[cfg.codebooks] < 0 or turn.row[cfg.codebooks] >= e.w.text_rows) return error.BadFrameRow;
+            for (turn.steer) |st| if (st.source >= cfg.sources) return error.NoSuchSource;
             row.* = turn.row;
         }
-        try e.pass(rows[0..turns.len], 0, &.{}, true, null, turns);
+        try e.pass(rows[0..turns.len], 0, &.{}, true, null, turns, &.{});
         for (turns, 0..) |turn, b| try e.buf(e.logits + b * cfg.head_rows * 4).downloadAsync(0, std.mem.asBytes(turn.out), e.stream.handle);
         try e.stream.synchronize();
         for (turns) |turn| e.lanes.items[turn.lane].position += 1;
         e.position = e.lanes.items[e.active].position;
     }
 
-    /// `many`: a row of each of those turns' lanes at the lane's own position; else rows in a row on the lane in use.
-    fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe, many: ?[]const Turn) !void {
+    /// Bank source `source` of this pass takes its rows' deltas: source + delta, one fp32 add (lm.forward's source()).
+    fn steerSource(e: *Engine, source: usize, many: ?[]const Turn, lone: []const Steer) !void {
+        const n = if (many) |turns| turns.len else 1;
+        for (0..n) |b| for (if (many) |turns| turns[b].steer else lone) |st| {
+            if (st.source != source) continue;
+            const row = e.slot(source) + b * D * 4;
+            const pair = e.steer + b * 2 * D * 4;
+            try e.buf(pair).copyFrom(0, row, D * 4, e.stream.handle);
+            try e.put(pair + D * 4, std.mem.asBytes(st.delta));
+            try e.k.combine(e.stream, pair, e.unit, D, row, 1);
+        };
+    }
+
+    /// `many`: a row of each turn's lane at its position; else rows on the lane in use (one, when `lone` steers).
+    fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe, many: ?[]const Turn, lone: []const Steer) !void {
         const k = &e.k;
         const s = e.stream;
         const t = rows.len;
@@ -342,6 +371,7 @@ pub const Engine = struct {
         if (probe) |p| try p.f(p.ctx, "emb_cond", e.mixed, t, D);
         try k.rmsnorm(s, e.mixed, D, 0, e.slot(0), D, D, cfg.eps, t);
         if (probe) |p| try p.f(p.ctx, "emb_norm", e.slot(0), t, D);
+        try e.steerSource(0, many, lone);
         const q = e.w.queries;
         for (&e.w.layers, 0..) |*L, li| {
             const attn_out = e.slot(2 * li + 1);
@@ -386,6 +416,7 @@ pub const Engine = struct {
                 },
             }
             if (probe) |p| try p.at("attn_out_{d}", li, attn_out, t, D);
+            try e.steerSource(2 * li + 1, many, lone);
             try k.attnres(s, e.bank, 2 * li + 2, R, q + (2 * li + 1) * D * 2, e.mixed, D, cfg.eps, t);
             if (probe) |p| try p.at("attnres_ffn_{d}", li, e.mixed, t, D);
             try k.rmsnorm(s, e.mixed, D, L.ffn_norm, e.xn, D, D, cfg.eps, t);
@@ -413,6 +444,7 @@ pub const Engine = struct {
                 },
             }
             if (probe) |p| try p.at("ffn_out_{d}", li, ffn_out, t, D);
+            try e.steerSource(2 * li + 2, many, lone);
         }
         try k.attnres(s, e.bank, cfg.sources, R, q + (cfg.sources - 1) * D * 2, e.mixed, D, cfg.eps, t);
         if (probe) |p| try p.f(p.ctx, "attnres_final", e.mixed, t, D);

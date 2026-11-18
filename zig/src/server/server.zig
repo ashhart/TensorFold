@@ -45,6 +45,7 @@ pub const Config = struct {
     model_dir: []const u8 = "",
     /// --voices, --default-voice, --request-voices and --manage-voices; the last two off keep the startup catalog.
     voice: @import("voice_cli.zig").Config = .{},
+    zonos: @import("zonos_steer.zig").Paths = .{}, // --steer-bundle and the other ZONOS3 paths
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.

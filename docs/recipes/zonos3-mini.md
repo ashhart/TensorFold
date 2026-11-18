@@ -13,6 +13,7 @@ records, numeric contract tests and a planted control each; the quality suite ha
 | --- | --- | --- |
 | Checkpoint | `huggingface.co/Zyphra/ZONOS3-Mini` (Apache-2.0) | revision `d2d142a86b1e6aeb4252679673c86ecd86177bf8` |
 | Reference code | `github.com/Zyphra/ZONOS3-Mini` (MIT) | commit `96d9e0ec1e39083ed336ac78f24e3dbc93721c0f` |
+| Steering bundle | the reference repo's `assets/steering/studio_bundle_mect60k_x10.json` and the 14 set folders it names (MIT) | the same commit |
 | Reference environment | Python 3.12.3, torch 2.9.1+cu128, torchaudio 2.9.1+cu128, transformers 4.57.3 | the repo's `constraints.txt` |
 
 Nothing is converted: the server reads the release folder as published.
@@ -60,9 +61,12 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   default voices by their reference codes; a caller's own voice as `ref_audio` (a WAV file in base64, encoded by the
   engine) or as `speaker_reference_codes`; WAV or PCM, whole or streamed in chunks of 1, 2, 4, 8 and then 15 frames.
   The clip encoder's weights load on the first request that brings a clip.
+- **Steering** (`steering.zig`, `steer_bundle.zig`, `server/zonos_steer.zig`): with `--steer-bundle`, a request's
+  `controls` and `control_spans`. See "Steering controls".
 
-Refused or absent: clips in formats other than WAV, steering controls and their guidance (`controls_cfg_scale`),
-LACI, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts, the `full_mr` decoder,
+Refused or absent: clips in formats other than WAV, spans placed by the reading position
+(`control_span_follow: "reading"`), an embedding made from a clip (the release's speaker encoder), LACI and its
+extended speaking-rate buckets, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts, the `full_mr` decoder,
 Metal.
 
 ## Text normalization
@@ -113,7 +117,7 @@ Both are the reference's (`zonos3.tts.plan`, `zonos3.speaker_cfg`), under its fi
   the first guided request after asking the pool for that room, and kept.
 - **Speed:** a guided request runs the backbone twice a frame.
 
-`controls_cfg_scale`, the guidance on steering controls, needs the steering bundle, which is not served.
+`controls_cfg_scale`, the guidance on steering controls, is under "Steering controls".
 
 Checked on the RTX 5090, served, with the Savannah voice sent as `speaker_reference_codes` at temperature 0: the
 replies to the four requests above have the reference audio's sample counts and match it at 64.8 dB (unguided, the
@@ -122,6 +126,71 @@ to noise, the reference decoding on the CPU. Sampled: a guided request repeats b
 bytes, also with a cloned clip; scale 1 gives the unguided bytes; `condition_values` give the bytes of the buckets
 they resolve to, and all-unknown buckets the bytes of a request that names none. One 13-word sentence in the
 `rupert` voice lasted 6.53 s at `speaking_rate` 8, 4.40 s with none and 2.47 s at 25.
+
+## Steering controls
+
+The reference steers a voice with direction vectors (`zonos3.tts.steering`, `zonos3.tts.directions`): emotion axes,
+speaking styles, accents, voice qualities, word emphasis. They come as a steering bundle, a JSON file naming
+direction sets, which the publisher keeps in its code repository, not in the checkpoint. `tensorfold-native serve
+RELEASE --steer-bundle FILE` loads the bundle and its sets (a `manifest.json` and one float32 `.npy` vector a
+direction, beside the file); `GET /v1/audio/controls` lists the directions, and without the flag it is 404 and the
+fields below are refused. The pinned bundle has 65 directions in 14 sets.
+
+- **`controls`**: `{"<set>.<direction>": dose}`. A direction is one of two kinds:
+  - **Hidden** (1,024 values; `mood.valence`, `delivery.whisper`, `emphasis_nv_nodur.emphasis`): dose times the
+    vector is added to one source of the Full AttnRes bank on every generated frame, before the later sublayers
+    and the head read it. The pinned bundle's hidden sets steer sources 15 and 19 (the outputs of layer 7's attention and layer 9's
+    GDN, counting layers from 0).
+  - **Speaker embedding** (192 values; `identity.age`, `texture.deep`, `accents_en.british`): the doses' vectors
+    are summed onto the speaker embedding, which is then scaled back to its norm. These need a voice by its
+    embedding (below) and are refused otherwise.
+- **`speaker_mode: "embedding"`** speaks a release voice by its speaker embedding (the prompt's speaker row) in
+  place of its reference codes; `speaker_embedding` (192 numbers) gives a caller's own. An embedding from a clip is
+  not served: that needs the release's speaker encoder.
+- **Steer then hold** (`steer_hold`, `steer_onset_seconds`, `steer_ramp_seconds`; defaults from the bundle's
+  `steer_release`: 4 s, 1 s, 0.35): the request's hidden controls are added at full dose for the onset, ramp
+  linearly to `steer_hold` times the dose, and stay there. The bundle exempts `delivery.tempo` and
+  `delivery.whisper`, which stay constant; `steer_hold: 1` keeps every control constant.
+- **`control_spans`**: `[{"start": c0, "end": c1, "controls": {...}}]` adds hidden controls while characters
+  [c0, c1) of the text as sent are spoken. Frames are placed by character position at `control_span_rate` frames
+  a character (1 when left out), stretched by the bundle's `timing` tables of the controls that change the pace,
+  with ramps of 3 frames at both edges. Spans may not overlap. `control_span_follow: "reading"`, which places
+  spans by the model's reading position, needs the alignment heads and is refused.
+- **`controls_cfg_scale`**: guidance on the hidden controls through a twin stream that runs the same prompt
+  without them, mixed as speaker guidance is. It takes effect with an embedding voice and a request-level hidden
+  control, as in the reference, and cannot be combined with `speaker_cfg_scale`: a request has one twin. A
+  speaker-guidance twin does take the request's deltas.
+
+How it runs: the server resolves a request's controls on the host into at most three deltas (constant, released,
+and a row a span), each a row of 1,024 for every source the bundle steers. Each frame's delta is computed on the
+host in the reference's own order of fp32 steps and added on the device to that row of the bank source by
+`z3_combine` (the row and the delta weighed 1 and 1: one fp32 add), which the kernel contract now also checks at
+that shape. Prompt rows are never steered, and neither is the first generated frame's forward, as in the reference.
+
+Checked against the publisher's code with its bundle, greedy, five requests (`requests` writes them; `rows
+--steer-bundle` dumps each frame's delta beside the frames):
+
+- **The host's arithmetic** (`zonos3-generate --steer-check D/gen_steer_X --steer-bundle BUNDLE`, no GPU): every
+  frame's delta and the moved speaker embedding equal the reference's bit for bit in all five. The embedding's
+  norm follows torch's CPU sum for 192 values (eight running sums of squares, added left to right), found by
+  matching 44 vectors; a different torch build may sum otherwise.
+- **The frames** (`--frames-check`, the dumped deltas added): identical to the reference's at `--max-rows` 1, 7, 64
+  and 256 in all five (the table under "The port's side").
+- **Served**, at `--parallel 4`, the same five requests through `/v1/audio/speech`: each reply has the reference
+  audio's sample count and matches it at 69.6 dB (released hidden controls), 72.9 dB (speaker-embedding controls),
+  71.8 dB (spans on two sources with a pace control), 69.8 dB (controls guidance 1.5) and 62.9 dB (a reference
+  voice with speaker guidance 1.5), the reference decoding on the CPU.
+- **Sampled, served:** a steered request repeats byte for byte and streams the same bytes, with a reference voice,
+  an embedding voice and controls guidance alike; a dose of 0 and `controls_cfg_scale: 1` give the bytes of a
+  request without them; four requests at once (steered, controls-guided, plain, and speaker-guided with a
+  speaker-embedding control) each gave the bytes they give alone.
+- **Speed:** steering costs about 1%: the long passage ran at 37.3 times real time plain and 36.9 steered on a
+  reference voice, and at 38.9 and 38.4 on an embedding voice (a steered frame adds a row copy, an upload and one
+  small launch for each steered source). With controls guidance 1.5 it ran at 33.1, the cost of the second stream.
+- **Memory:** 524,544 bytes more at load, the pairs of rows `z3_combine` reads.
+
+Not measured: what the controls do to the voice. No listening test or classifier was run; the checks above say the
+port adds what the reference adds.
 
 ## Requests at once
 
@@ -134,8 +203,8 @@ write and attention) run a lane at a time on that lane's state. The kernels are 
 computes a row from that row alone, so a request's arithmetic does not depend on what runs beside it.
 
 - **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
-  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,861,963,008 bytes at
-  `--parallel 1`, 7,572,551,936 at 4. A guided request's twin lane is still made by its slot's first guided request.
+  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,862,487,552 bytes at
+  `--parallel 1`, 7,573,076,480 at 4. A guided request's twin lane is still made by its slot's first guided request.
 - **Speed:** a frame of one request is about 226 small launches, 24 of them a lane's own, so the backbone's cost
   grows slowly with the lanes in a pass (1.1 ms for one row, 1.6 ms for four). Sampling on the host and the decoder
   do not share. The decoder's linear layers took 78% of its 0.19 s for a 17.8 s reply while a kernel of ours
@@ -209,6 +278,10 @@ python tools/zig/zonos3_reference.py rows LM D/requests/conditions.json D/gen_co
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_reference.json D/gen_guided_reference --device cpu
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_embedding.json D/gen_guided_embedding --device cpu
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_conditions.json D/gen_guided_conditions --device cpu
+for X in hidden raw spans guided reference; do
+  python tools/zig/zonos3_reference.py rows LM D/requests/steer_$X.json D/gen_steer_$X --device cpu \
+      --steer-bundle ZONOS/assets/steering/studio_bundle_mect60k_x10.json
+done
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_embedding/input_ids.npy --dtype f32 --mode full -o D/lm_embedding
 python ZONOS/tools/dump_golden.py lm LM --input-ids D/gen_greedy_reference/input_ids.npy --dtype f32 --mode full -o D/lm_reference
 python tools/zig/zonos3_reference.py codec RELEASE/gguf/voices/English/Savannah_en-American_F_1.codes.npy D/codec_savannah
@@ -243,6 +316,12 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | Greedy frames, speaker guidance 1.5, reference voice | `--model LM --frames-check D/gen_guided_reference --max-rows N` | the reference's 77 frames | 77 of 77 identical at N = 1, 7, 64 and 256 |
 | Greedy frames, speaker guidance 1.5, embedding voice | `--model LM --frames-check D/gen_guided_embedding --max-rows N` | the reference's 81 frames | 81 of 81 identical at N = 1, 7, 64 and 256 |
 | Greedy frames, speaker guidance 2 with condition buckets 3, unknown, 25 | `--model LM --frames-check D/gen_guided_conditions --max-rows N` | the reference's 62 frames | 62 of 62 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, steered: hidden controls that release (`mood.valence` 2, `delivery.whisper` 1, onset 1 s) | `--model LM --frames-check D/gen_steer_hidden --max-rows N` | the reference's 75 frames, its deltas added | 75 of 75 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, steered: speaker-embedding controls (`identity.age` 1.5, `texture.deep` 1) | `--model LM --frames-check D/gen_steer_raw --max-rows N` | the reference's 81 frames | 81 of 81 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, steered: two spans, `delivery.tempo` 1 and `mandarin_hidden.cmn` 0.5 | `--model LM --frames-check D/gen_steer_spans --max-rows N` | the reference's 70 frames, its deltas added | 70 of 70 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, steered: controls guidance 1.5 (`mood.arousal` 1, `identity.age` -1) | `--model LM --frames-check D/gen_steer_guided --max-rows N` | the reference's 80 frames, its deltas added | 80 of 80 identical at N = 1, 7, 64 and 256 |
+| Greedy frames, steered: a reference voice, `mood.dominance` 1.5, speaker guidance 1.5, hold 1 | `--model LM --frames-check D/gen_steer_reference --max-rows N` | the reference's 83 frames, its deltas added | 83 of 83 identical at N = 1, 7, 64 and 256 |
+| Steering resolved on the host | `--steer-check D/gen_steer_X --steer-bundle BUNDLE`, the five dumps above | each frame's delta and the moved speaker embedding | bit-identical in all five |
 | Codec decoder | `--codec-check D/codec_savannah --generator G --head H` | 13 captures and the audio of 171 frames, CPU fp32 | cosine 1.0000000; audio SNR 115.3 dB |
 | Codec in chunks | the same run | frames fed 1, 3, 7, 15, ... at a time, the settled samples taken after each or all at the end | the two bit-identical; 116.2 dB SNR to one pass of all the frames |
 | Text to audio, embedding voice | `--checkpoint RELEASE --text "..." --voice-embedding E --temperature 0 --reference D/gen_greedy_embedding` | the reference's prompt rows, frames and CPU audio | rows equal, 78 of 78 frames, 205,800 of 205,800 samples, audio SNR 114.0 dB |
@@ -359,7 +438,7 @@ The host works out what a load takes before it allocates anything and asks the p
 - **The load:** the pinned release's weights as the device holds them (2,531,483,136 bytes: the backbone's bf16 and
   the `keep2_plain` decoder's fp32), plus the backbone's and the decoder's state and workspaces, which their own
   allocation code counts without allocating (`Engine.stateBytes`, `Codec.stateBytes`). At the default
-  `--context 4096` and 2,000 frames that is 3,861,963,008 bytes (3.60 GiB), 33,554,432 of them the workspace
+  `--context 4096` and 2,000 frames that is 3,862,487,552 bytes (3.60 GiB), 33,554,432 of them the workspace
   cuBLAS is given. What cuBLAS allocates for itself is outside this count: `nvidia-smi` showed the process about
   64 MiB larger than with the earlier kernel, and the server's log shows the same
   number admitted and held after the load. A load that holds more than it was admitted for is an error.
@@ -469,6 +548,11 @@ bf16-encoded references, clones as well from fp32 codes.
 - `server/`: voices load through `speech_voices.zig`; the speech route, the sampling parser, the voices listing,
   model detection and the tokenizer loader each gained a branch for a release folder, which has no `config.json`
   and is recognised by `lm/zonos3_mini/params.json`.
+- `core/speech_api.zig` also gained `SpeechRequest.conditions` and `steering` (`SpeechSteering`: deltas on a
+  family's hidden sources, re-exported by `core/engine_api.zig`).
+- `server/`: the `--steer-bundle` flag (`cli.zig`, `serve.zig`, `server.zig`, `speech_voices.zig`), the
+  `GET /v1/audio/controls` route (`routes.zig`) and its place among the listing routes a read key may open
+  (`auth_scope.zig`); `build/server.zig` passes the family's steering modules to the server.
 - `native/`: `zonos3` in the CUDA open dispatch, the capabilities list and the rank refusals.
 - `platform/optional_libraries.zig`: the cuBLAS entry's note names the ZONOS3 decoder beside Drama's GEMMs. The
   cuBLAS wrapper itself is a copy in the family's folder (`zonos3/cuda/blas.zig`); Drama's is untouched.

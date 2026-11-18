@@ -2,6 +2,7 @@
 const std = @import("std");
 const cfg = @import("config.zig");
 const sampler = @import("sampler.zig");
+const Steer = @import("steering.zig").Steer;
 
 const C = cfg.codebooks;
 const W = cfg.frame_width;
@@ -61,6 +62,15 @@ pub const Run = struct {
     codes: std.ArrayList([C]i32) = .empty,
     eos_frame: ?usize = null,
     countdown: usize = 0,
+    /// A steered request's deltas by generated frame, and whether its twin takes them too (a speaker twin does).
+    steer: ?Steering = null,
+
+    pub const Steering = struct {
+        ctx: *anyopaque,
+        /// The deltas of the forward that takes generated row `frame` (1 on); none: that frame is not steered.
+        at: *const fn (ctx: *anyopaque, frame: usize) []const Steer,
+        twin: bool,
+    };
 
     /// Runs the prompt (and the twin's, when it has rows) and holds the first frame's logits.
     pub fn begin(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32, replaced: anytype, twin: []const [W]i32, twin_replaced: anytype, scale: f32, sampling: sampler.Sampling, max_frames: usize) !Run {
@@ -121,14 +131,23 @@ pub const Run = struct {
     /// Runs the row `sample` appended, on the request's lane and its twin's, for the next frame's logits.
     pub fn advance(r: *Run, engine: anytype) !void {
         const last = r.rows.items[r.rows.items.len - 1 ..];
-        try engine.run(last, &.{}, null);
+        const steer: []const Steer = if (r.steer) |s| s.at(s.ctx, r.rows.items.len) else &.{};
+        try step(engine, last, steer);
         try engine.lastLogits(@ptrCast(r.logits));
         if (r.unconditional) |u| {
             engine.swap();
             defer engine.swap();
-            try engine.run(last, &.{}, null);
+            try step(engine, last, if (r.steer != null and r.steer.?.twin) steer else &.{});
             try engine.lastLogits(u);
         }
+    }
+
+    fn step(engine: anytype, last: []const [W]i32, steer: []const Steer) !void {
+        const T = @TypeOf(engine);
+        const steers = @hasDecl(if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T, "runSteered");
+        if (steers and steer.len != 0) return engine.runSteered(last[0], steer);
+        if (steer.len != 0) return error.EngineDoesNotSteer;
+        try engine.run(last, &.{}, null);
     }
 
     /// The row `sample` appended: what a pass over several requests' lanes runs for this one.
