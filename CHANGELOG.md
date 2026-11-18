@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: confirming an `ultrathink` effort change now applies it (#3502). Thanks to @AIFlowML.
+
 - App: bots keep their own reasoning effort instead of sharing the app-wide setting (#3500). Thanks to @AIFlowML.
 
 - App: the Parallel search tests no longer depend on the system's DNS (#3489). Thanks to @AIFlowML.
