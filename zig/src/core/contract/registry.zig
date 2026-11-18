@@ -575,12 +575,10 @@ pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
 pub const landed_cuda = joins.landed_cuda;
-test {
-    _ = learning;
-}
 pub const all_cuda = joins.all_cuda;
 pub const dsv41_pending = joins.dsv41_pending;
 test {
+    _ = learning;
     _ = @import("qwen4_cuda_receipts_test.zig");
     _ = @import("moss_image_cuda_records.zig");
     _ = @import("glm_kv_pending.zig");
