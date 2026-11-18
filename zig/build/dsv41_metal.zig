@@ -55,7 +55,7 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));
     run.has_side_effects = true; // a device run: never cached
     step.dependOn(&run.step);
-    // the served tiny model: serve_test.zig, whose test block brings in steps_serve_test.zig (prompts in steps)
+    // the served tiny model: serve_test.zig, whose test block brings in steps_test.zig (prompts in steps)
     const serve = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/serve_test.zig"),
         .target = b.graph.host,
