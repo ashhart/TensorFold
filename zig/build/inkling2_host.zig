@@ -5,6 +5,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true });
     const dir = "zig/src/core/";
     m.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path(dir ++ "tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    m.addImport("safetensors", b.createModule(.{ .root_source_file = b.path(dir ++ "safetensors.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     return m;
 }
