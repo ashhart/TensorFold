@@ -175,3 +175,19 @@ test "CUDA and the Intel GPU engine refuse any width but 4/64 by name; other con
     try cfg.fourOnlyText(a, modelopt, "CUDA");
     try cfg.fourOnlyText(a, "{\"model_type\": \"llama\"}", "CUDA");
 }
+
+test "a bf16 token table (false) is read only where a backend allows it, by its own name" {
+    const block = "\"quantization\": {\"group_size\": 64, \"bits\": 6, \"backbone.embeddings\": false}";
+    try expectRefused(block, error.UnsupportedQuantization, &.{ "backbone.embeddings", "unquantized" });
+    const text = try withQuantization(block);
+    defer std.testing.allocator.free(text);
+    var why: Why = .{};
+    const c = try cfg.parseWith(std.testing.allocator, text, &why, .{ .bf16_embed = true });
+    try std.testing.expect(c.embed_bf16);
+    try std.testing.expectEqual(Width{ .bits = 6 }, c.widthOf(0, "in_proj"));
+    // only the token table: a head or a projection stored bf16 is refused with the same allowance
+    const head = try withQuantization("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": false}");
+    defer std.testing.allocator.free(head);
+    try std.testing.expectError(error.UnsupportedQuantization, cfg.parseWith(std.testing.allocator, head, &why, .{ .bf16_embed = true }));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "lm_head") != null);
+}

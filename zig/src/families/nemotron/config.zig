@@ -109,6 +109,7 @@ pub const Config = struct {
     ck: bool = false, // --precision checkpoint: e4m3 rows into the FP8 layers, NVFP4 rows into the experts
     widths: [max_layers][4]Width = @splat(@splat(.{})), // each layer's matrices (members(kind) order) at their widths
     embed_width: Width = .{},
+    embed_bf16: bool = false, // the token table is stored bf16 (config.json's `false` for it), read by HIP only
     head_width: Width = .{},
 
     /// MoE layer `i`'s routed experts and width.
@@ -219,12 +220,17 @@ pub const Config = struct {
 
     /// `dir`/config.json.
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
+        return readWith(gpa, io, dir, .{});
+    }
+
+    /// `dir`/config.json, also reading what `allow` names.
+    pub fn readWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, allow: Allow) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 25)); // ModelOpt names each module
         defer gpa.free(text);
         var why: Why = .{};
-        return parse(gpa, text, &why) catch |e| {
+        return parseWith(gpa, text, &why, allow) catch |e| {
             if (why.len > 0) std.log.err("{s}: {s}", .{ path, why.text() });
             return e;
         };
@@ -303,7 +309,7 @@ fn width(o: std.json.ObjectMap, key: []const u8, default: usize) usize {
 }
 
 /// The checkpoint's width and each per-module entry's (oQ quants); a width no kernel reads is refused by its module.
-fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
+fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why, allow: Allow) !void {
     const q = quantBlock(o) orelse {
         why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
         return error.UnsupportedQuantization;
@@ -334,7 +340,7 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
     c.head_width = global;
     c.widths = @splat(@splat(global));
     var it = q.iterator();
-    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c, global, e.key_ptr.*, e.value_ptr.*, why);
+    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c, global, e.key_ptr.*, e.value_ptr.*, why, allow);
 }
 
 /// What the native Nemotron kernels read, for the refusals that name a width.
@@ -347,7 +353,11 @@ fn readable(bits: usize, group: usize) ?Width {
 }
 
 /// A per-module entry as nn.quantize reads it: true, a dict at a readable width, or false for a lesson's matrix.
-fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *Why) !void {
+fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *Why, allow: Allow) !void {
+    if (allow.bf16_embed and v == .bool and !v.bool and isEmbed(path)) {
+        c.embed_bf16 = true;
+        return;
+    }
     const slot = target(c, path) orelse return; // a module the engine does not read as a quantized matrix
     slot.* = switch (v) {
         .bool => |on| if (on) global else if (learned(path)) Width{} else return unquantized(path, why), // split to 4/64
@@ -364,6 +374,15 @@ fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *
         .null => return unquantized(path, why),
         else => return,
     };
+}
+
+/// What a backend's loader reads beyond MLX affine matrices (`bf16_embed`: unquantized token table).
+pub const Allow = struct { bf16_embed: bool = false };
+
+/// Whether `path` names the token embedding (with or without "language_model.").
+fn isEmbed(path: []const u8) bool {
+    const bare = if (std.mem.startsWith(u8, path, "language_model.")) path["language_model.".len..] else path;
+    return std.mem.eql(u8, bare, "backbone.embeddings");
 }
 
 fn unquantized(path: []const u8, why: *Why) error{UnsupportedQuantization} {
@@ -396,6 +415,11 @@ fn learned(path: []const u8) bool {
 
 /// config.json's text; a refusal's reason goes to `why`.
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
+    return parseWith(allocator, text, why, .{});
+}
+
+/// `parse`, also reading what `allow` names.
+pub fn parseWith(allocator: std.mem.Allocator, text: []const u8, why: *Why, allow: Allow) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -465,7 +489,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     };
     c.salm = salm;
     // the published bf16 weights, read per tensor as the ModelOpt loader reads a bf16 projection
-    if (salm) c.format = .modelopt else try quantization(&c, root, why);
+    if (salm) c.format = .modelopt else try quantization(&c, root, why, allow);
     return c;
 }
 
@@ -592,8 +616,5 @@ pub const lightning =
 
 test {
     _ = @import("config_test.zig");
-}
-
-test {
     _ = @import("config_bolt_test.zig");
 }

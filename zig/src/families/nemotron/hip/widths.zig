@@ -18,7 +18,7 @@ pub fn served(w: Width) bool {
 
 /// The width of the matrix `key` (a projection's name before `.weight`), or null for a name no entry covers.
 pub fn of(c: *const Config, key: []const u8) ?Width {
-    if (std.mem.eql(u8, key, tensors.embed)) return c.embed_width;
+    if (std.mem.eql(u8, key, tensors.embed)) return if (c.embed_bf16) null else c.embed_width;
     if (std.mem.eql(u8, key, tensors.lm_head)) return c.head_width;
     const stem = "backbone.layers.";
     if (!std.mem.startsWith(u8, key, stem)) return null;
@@ -34,7 +34,7 @@ pub fn of(c: *const Config, key: []const u8) ?Width {
 
 /// The first matrix at a width the launches do not read (its name written into `buf`), else null.
 pub fn unserved(c: *const Config, buf: []u8) ?config.Named {
-    if (!served(c.embed_width)) return .{ .name = tensors.embed, .width = c.embed_width };
+    if (!c.embed_bf16 and !served(c.embed_width)) return .{ .name = tensors.embed, .width = c.embed_width };
     for (0..c.layers) |i| for (config.members(c.kinds[i]), 0..) |m, j| if (!served(c.widths[i][j])) {
         const name = std.fmt.bufPrint(buf, "backbone.layers.{d}.mixer.{s}", .{ i, m }) catch m;
         return .{ .name = name, .width = c.widths[i][j] };
@@ -43,10 +43,10 @@ pub fn unserved(c: *const Config, buf: []u8) ?config.Named {
     return null;
 }
 
-/// A short label of the widths a checkpoint holds, as `mlx-q4g64` or `mlx-q4g64+q5g64+q8g64` for a mix.
+/// A short label of the widths held, as `mlx-q4g64`, `mlx-q4g64+q5g64+q8g64` for a mix, `+bf16-embed` for a bf16 table.
 pub fn label(c: *const Config, buf: []u8) []const u8 {
     var seen: [9]bool = @splat(false);
-    seen[@min(c.embed_width.bits, 8)] = true;
+    if (!c.embed_bf16) seen[@min(c.embed_width.bits, 8)] = true;
     seen[@min(c.head_width.bits, 8)] = true;
     for (0..c.layers) |i| for (0..config.members(c.kinds[i]).len) |j| {
         seen[@min(c.widths[i][j].bits, 8)] = true;
@@ -57,6 +57,7 @@ pub fn label(c: *const Config, buf: []u8) []const u8 {
         w.print("{s}q{d}g64", .{ if (first) "mlx-" else "+", bits }) catch break;
         first = false;
     };
+    if (c.embed_bf16) w.writeAll("+bf16-embed") catch {};
     return w.buffered();
 }
 
@@ -120,4 +121,14 @@ test "a width the launches do not read is named, the first one found" {
     const n = unserved(&c, &buf).?;
     try testing.expectEqualStrings("backbone.layers.5.mixer.q_proj", n.name);
     try testing.expectEqual(@as(u8, 3), n.width.bits);
+}
+
+test "a bf16 token table has no width: its matrix is unnamed, never unserved, and its label says so" {
+    var c = try parsed(testing.allocator, @embedFile("../fixtures/config.json"));
+    c.embed_bf16 = true;
+    c.embed_width = .{ .bits = 3 };
+    var buf: [96]u8 = undefined;
+    try testing.expectEqual(@as(?Width, null), of(&c, "backbone.embeddings"));
+    try testing.expectEqual(@as(?config.Named, null), unserved(&c, &buf));
+    try testing.expectEqualStrings("mlx-q4g64+bf16-embed", label(&c, &buf));
 }

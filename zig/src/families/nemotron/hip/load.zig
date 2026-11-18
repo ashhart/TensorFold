@@ -6,6 +6,7 @@ const config = @import("../config.zig");
 const draft_ids = @import("../draft_ids.zig");
 const tensors = @import("tensors.zig");
 const widths = @import("widths.zig");
+const embedding = @import("embedding.zig");
 const model = @import("model.zig");
 
 const quant = core.quant;
@@ -284,10 +285,16 @@ fn loadMtp(gpa: Allocator, io: std.Io, l: *Loader, dir: []const u8, c: *const co
     return out;
 }
 
+/// The token table as BF16 when decided (`c.embed_bf16`), else as a quantized projection.
+fn readEmbed(a: Allocator, t: *const Tables, c: *const config.Config) !Host {
+    if (c.embed_bf16) return embedding.read(a, t, c);
+    return quant.read(a, t, tensors.embed);
+}
+
 /// What a load takes: the rank, and whether rank 0 reads the MTP head.
 pub const Options = struct { world: usize = 1, rank: usize = 0, mtp: bool = true, act: model.Kind = .bf16 };
 
-/// One rank's weights from the model folder `dir` (admitted before): blocks by kind, the head, the MTP head on rank 0.
+/// One rank's weights from `dir` using an already-admitted config `c`.
 pub fn load(
     gpa: Allocator,
     io: std.Io,
@@ -296,10 +303,29 @@ pub fn load(
     c: *const config.Config,
     o: Options,
 ) !Weights {
+    var cfg = c.*;
+    return loadInto(gpa, io, r, dir, &cfg, true, o);
+}
+
+/// One rank's weights from `dir`, checking unlisted BF16 embeddings when `admitted` is false.
+pub fn loadInto(
+    gpa: Allocator,
+    io: std.Io,
+    r: *const hip.Runtime,
+    dir: []const u8,
+    c: *config.Config,
+    admitted: bool,
+    o: Options,
+) !Weights {
     var w: Weights = .{ .gpa = gpa };
     errdefer w.deinit();
     var ck = try Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
+    if (!admitted and !c.embed_bf16 and
+        tensors.hasBf16Embed(ck.has(tensors.embed ++ ".weight"), ck.has(tensors.embed ++ ".scales")))
+    {
+        c.embed_bf16 = true;
+    }
     const tables: Tables = .{ .ck = &ck, .c = c, .w = .{ .bits = @intCast(c.bits), .group = @intCast(c.group_size) } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -326,7 +352,7 @@ pub fn load(
     }
     _ = arena.reset(.retain_capacity);
     const head = try l.proj(tensors.lm_head);
-    const embed = try l.proj(tensors.embed);
+    const embed = try readEmbed(l.a, l.t, c);
     if (embed.rows() != c.vocab) return error.UnexpectedTensor; // an id below the vocabulary must name a row
     w.model = .{
         .dims = dims,
@@ -369,4 +395,37 @@ test "the loader's table reads each matrix at config.json's width for it, the he
     try std.testing.expectError(error.UnsupportedQuantization, t.width("backbone.layers.1.mixer.gate"));
     const head: Tables = .{ .ck = undefined, .w = four };
     try std.testing.expectEqual(four, try head.width("layers.1.mixer.switch_mlp.fc1"));
+}
+
+test "Config.readWith admits backbone.embeddings false on disk while Config.read and parseWith reject invalid heads; readEmbed reads bf16 once decided" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const stock = @embedFile("../fixtures/config.json");
+    const bf16_text = try std.mem.replaceOwned(u8, a, stock, "\"group_size\": 64,", "\"group_size\": 64, \"backbone.embeddings\": false,");
+    const bad_head = try std.mem.replaceOwned(u8, a, stock, "\"group_size\": 64,", "\"group_size\": 64, \"lm_head\": false,");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = bf16_text });
+    const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var why: config.Why = .{};
+    try std.testing.expectError(error.UnsupportedQuantization, config.parse(a, bf16_text, &why));
+    const ok = try config.Config.readWith(a, std.testing.io, dir_path, .{ .bf16_embed = true });
+    try std.testing.expect(ok.embed_bf16);
+    try std.testing.expectError(error.UnsupportedQuantization, config.parseWith(a, bad_head, &why, .{ .bf16_embed = true }));
+
+    var cfg_unlisted = try config.parse(a, stock, &why);
+    cfg_unlisted.vocab = 4;
+    cfg_unlisted.hidden = 8;
+    const raw_bf16: [4 * 8]u16 = @splat(0x3F80);
+    const entry: core.checkpoint_fixture.Entry = .{ .name = tensors.embed ++ ".weight", .dtype = "BF16", .shape = &.{ 4, 8 }, .bytes = std.mem.sliceAsBytes(&raw_bf16) };
+    try core.checkpoint_fixture.write(a, std.testing.io, tmp.dir, "model.safetensors", &.{entry});
+    var ck: Checkpoint = .{ .gpa = a, .io = std.testing.io };
+    defer ck.close();
+    try ck.add(dir_path, "model.safetensors");
+    cfg_unlisted.embed_bf16 = tensors.hasBf16Embed(ck.has(tensors.embed ++ ".weight"), ck.has(tensors.embed ++ ".scales"));
+    try std.testing.expect(cfg_unlisted.embed_bf16);
+    const tables: Tables = .{ .ck = &ck, .c = &cfg_unlisted, .w = .{ .bits = 4, .group = 64 } };
+    const embed = try readEmbed(a, &tables, &cfg_unlisted);
+    try std.testing.expectEqual(core.checkpoint.DType.bf16, embed.dense.weight.dtype);
 }
