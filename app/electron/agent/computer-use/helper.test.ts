@@ -115,11 +115,17 @@ async function main() {
 
     // A timeout rejects that call, ends the stuck helper, and the next call starts a new one.
     const slowRecord = path.join(root, 'slow.jsonl')
-    const slowHelper = make(await wrapper(root, 'slow', { FAKE_HELPER_RECORD: slowRecord }), { timeoutMs: 500 })
+    const slowHelper = make(await wrapper(root, 'slow', { FAKE_HELPER_RECORD: slowRecord }))
     const firstPid = (await slowHelper.request<{ pid: number }>('pid')).pid
-    const started = Date.now()
-    await assert.rejects(slowHelper.request('echo', { delayMs: 5_000 }), isCode('timeout'))
-    assert.ok(Date.now() - started < 2_000, 'the timeout fires on time')
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      const outcome = slowHelper.request('echo', { delayMs: 5_000 }, 500).then(() => undefined, (error: unknown) => error)
+      mock.timers.tick(499)
+      assert.equal(slowHelper.pid, firstPid, 'the helper stays live before the echo deadline')
+      mock.timers.tick(1)
+      assert.equal(slowHelper.running, false, 'the echo deadline retires the helper')
+      assert.ok(isCode('timeout')(await outcome), 'the echo rejects with a timeout')
+    } finally { mock.timers.reset() }
     await waitFor(() => !alive(firstPid))
     const secondPid = (await slowHelper.request<{ pid: number }>('pid')).pid
     assert.notEqual(secondPid, firstPid)
