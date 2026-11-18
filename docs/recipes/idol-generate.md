@@ -15,7 +15,7 @@ See [Idol on Metal](idol.md) for the checkpoint, encoders and decoders.
 Each model is loaded when its stage starts and freed when it ends. The input is the picture `preprocess` returns, as
 float32 `pixels` [3, 1024, 1024] or `image` [1024, 1024, 3] that `idol_case.py dino` or `vae` writes (either name in the
 other layout is refused), or a raw photo preprocessed natively ([Background removal and
-preprocessing](idol.md#background-removal-and-preprocessing)).
+preprocessing](idol-birefnet.md#background-removal-and-preprocessing)).
 
 ```sh
 zig build tf-idol-generate -Dcpu=apple_m1
