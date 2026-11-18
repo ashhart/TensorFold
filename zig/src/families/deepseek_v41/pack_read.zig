@@ -12,11 +12,14 @@ pub const Reader = struct {
     file: union(enum) { direct: direct.File, buffered: Io.File },
     scratch: direct.Buffer = &.{},
 
+    /// Direct only when `enabled` and the file system took O_DIRECT; otherwise one buffered read per call, as before.
     pub fn open(gpa: std.mem.Allocator, io: Io, path: [:0]const u8, enabled: bool) !Reader {
-        return .{ .gpa = gpa, .io = io, .file = if (enabled)
-            .{ .direct = try direct.File.open(path) }
-        else
-            .{ .buffered = try Io.Dir.cwd().openFile(io, path, .{}) } };
+        if (enabled) {
+            var f = try direct.File.open(path);
+            if (f.direct) return .{ .gpa = gpa, .io = io, .file = .{ .direct = f } };
+            f.close();
+        }
+        return .{ .gpa = gpa, .io = io, .file = .{ .buffered = try Io.Dir.cwd().openFile(io, path, .{}) } };
     }
 
     pub fn close(r: *Reader) void {

@@ -103,8 +103,14 @@ test "DeepSeek pack reads: bounded scratch, repeated offsets, allocation refusal
     var refused = try reads.Reader.open(failing.allocator(), io, z, true);
     defer refused.close();
     @memset(out[0..2], 0xad);
-    try t.expectError(error.OutOfMemory, refused.read(out[0..2], 0));
-    try t.expectEqualSlices(u8, &.{ 0xad, 0xad }, out[0..2]);
+    if (refused.file == .direct) {
+        try t.expectError(error.OutOfMemory, refused.read(out[0..2], 0));
+        try t.expectEqualSlices(u8, &.{ 0xad, 0xad }, out[0..2]);
+    } else {
+        try refused.read(out[0..2], 0); // O_DIRECT refused at open (macOS too): buffered, no scratch to refuse
+        try t.expectEqualSlices(u8, bytes[0..2], out[0..2]);
+        try t.expectEqual(@as(usize, 0), refused.scratch.len);
+    }
     var ordinary = try reads.Reader.open(failing.allocator(), io, z, false);
     defer ordinary.close();
     try ordinary.read(out[0..2], 1);
