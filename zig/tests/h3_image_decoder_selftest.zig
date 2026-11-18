@@ -96,6 +96,8 @@ pub fn run(gpa: std.mem.Allocator, a: std.mem.Allocator) !bool {
     for ([_]Case{ .{ .rows = 6, .cols = 10, .batch = 1, .deep = true }, .{ .rows = 20, .cols = 28, .batch = 3, .deep = false } }) |c| {
         ok = try case(a, d, model, &config, c) and ok;
     }
+    // 100 x 100 cells are 64 tiles, one full pass; 128 x 128 (a 2048 picture) are 121, a full pass and a ragged one
+    for ([_]usize{ 100, 128 }) |cells| ok = try batches(a, d, &config, cells) and ok;
     try timing(a, d, &config);
     std.debug.print("selftest: {s}\n", .{if (ok) "pass" else "FAIL"});
     return ok;
@@ -226,6 +228,20 @@ fn assemble(a: std.mem.Allocator, t: host.Tiles, tiles: []const f32, len: usize)
         try assembly.place(at.r, at.c, tiles[k * pixels ..][0..pixels]);
     }
     return out;
+}
+
+/// A square latent of `cells` decoded through `checked` blocks in passes of the decoder's most and of 16 tiles: the same bits.
+fn batches(a: std.mem.Allocator, d: *dec.Decoder, config: *const vae.Config, cells: usize) !bool {
+    const latent = try synthetic(a, cells, cells);
+    const tiles = (try host.tiles(a, config, cells, cells)).total();
+    const len = 3 * cells * cells * side * side;
+    const most = try a.alloc(f32, len);
+    const sixteen = try a.alloc(f32, len);
+    _ = try d.decode(a, config, latent, cells, cells, checked, dec.most_batch, most);
+    _ = try d.decode(a, config, latent, cells, cells, checked, 16, sixteen);
+    const same = std.mem.eql(u32, @ptrCast(most), @ptrCast(sixteen));
+    std.debug.print("{d} x {d} cells, {d} tiles: passes of {d} {s} passes of 16\n", .{ cells, cells, tiles, dec.most_batch, if (same) "bit-identical to" else "DIFFERENT from" });
+    return same;
 }
 
 /// All 24 blocks chained, the GPU from the latent in one pass and the reference beside it.

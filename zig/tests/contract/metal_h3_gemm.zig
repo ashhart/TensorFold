@@ -90,7 +90,7 @@ pub const Product = struct {
         return switch (f) {
             .whole => .{ .name = name(f), .accum = .f32, .depth = bf16Depth, .out = .bf16, .replaces = "MLX's 64x128 gemm_nax (whole)", .tiles = .{ .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 4096, .n = inner, .k = hidden }, .{ .rows = 4096, .n = 3 * inner, .k = hidden }, .{ .rows = 4096, .n = hidden, .k = mlp } } },
             .ragged => .{ .name = name(f), .accum = .f32, .depth = bf16Depth, .out = .bf16, .replaces = "MLX's 64x128 gemm_nax (ragged)", .tiles = .{ .{ .size = 64 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 4096 + 24, .n = inner, .k = hidden }, .{ .rows = 4096 + 24, .n = hidden, .k = inner } } },
-            .int8 => .{ .name = name(f), .accum = .f32, .depth = int8Depth, .ops = 1, .out = .bf16, .served = &.{.{ .rows = 64 + 24, .n = 2 * mlp, .k = hidden }}, .sums = .{ .why = "each K block's int8 products summed exactly in int32, the blocks folded in fp32 at their scales" } },
+            .int8 => .{ .name = name(f), .accum = .f32, .depth = int8Depth, .ops = 1, .out = .bf16, .served = &.{ .{ .rows = 4096 + 24, .n = 2 * mlp, .k = hidden }, .{ .rows = 4096, .n = 2 * mlp, .k = hidden } }, .sums = .{ .why = "each K block's int8 products summed exactly in int32, the blocks folded in fp32 at their scales" } },
         };
     }
 
@@ -337,9 +337,9 @@ pub const Quantize = struct {
         return 0;
     }
 
-    /// Rows: rows; n: groups a row; k: a group's values. Served: the activations a row, fc1's weights per 256.
+    /// Rows: rows; n: groups a row; k: a group's values. Served: a 2048 picture's activations a row, fc1's weights per 256.
     pub fn spec() c.Spec {
-        return .{ .name = label, .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = "a group holding NaN or an infinity takes a non-finite scale; its values are unspecified" }, .tiles = .{ .{ .size = 64 }, .{}, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 64 + 24, .n = 1, .k = hidden }, .{ .rows = 64, .n = hidden / block, .k = block } } };
+        return .{ .name = label, .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = "a group holding NaN or an infinity takes a non-finite scale; its values are unspecified" }, .tiles = .{ .{ .size = 64 }, .{}, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 4096 + 24, .n = 1, .k = hidden }, .{ .rows = 2 * mlp, .n = hidden / block, .k = block } } };
     }
 
     fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, lib: mtl.Library) !Quantize {
