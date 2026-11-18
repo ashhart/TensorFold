@@ -4,7 +4,7 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3 };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel };
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -38,6 +38,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
+    .{ .name = "TENSORFOLD_PARALLEL", .scope = .common, .kind = .parallel, .trim = " \t", .min = 1, .max = 4096, .forms = "a whole number from 1 to 4096, or auto (up to 8 lanes; the --parallel flag wins when present)" },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .scope = .common, .kind = .percent, .trim = " \t", .forms = "a whole percentage from 0 to 100" },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "whole milliseconds from 0 to 4294967295 (0 disables waiting)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
@@ -259,6 +260,13 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         for (r.words, 0..) |v, i| if (std.mem.eql(u8, text, v)) return i;
         return error.InvalidEnvironment;
     }
+    // "auto" travels as 0: the caller reads it back through `parallel`, never the raw number
+    if (r.kind == .parallel) {
+        if (std.ascii.eqlIgnoreCase(text, "auto")) return 0;
+        const n = std.fmt.parseInt(u64, text, 10) catch return error.InvalidEnvironment;
+        if (n < r.min or n > r.max) return error.InvalidEnvironment;
+        return n;
+    }
     if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
     // a path travels as 0, its text read by `path`; the file itself is its reader's to check
     if (r.kind == .path) return if (for (text) |ch| {
@@ -390,6 +398,15 @@ fn masked(r: Rule, environment: anytype) bool {
 pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     if (flag) |n| return n;
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
+}
+
+/// ``TENSORFOLD_PARALLEL``'s effective text: the flag wins, else the environment's trimmed text,
+/// else null (the caller's default). Garbage is refused by name with the value escaped.
+pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
+    if (flag) |f| return f;
+    _ = try checked("TENSORFOLD_PARALLEL", raw);
+    const text = std.mem.trim(u8, raw orelse return null, rule("TENSORFOLD_PARALLEL").trim);
+    return if (text.len == 0) null else text;
 }
 
 pub const Flags = struct {

@@ -245,6 +245,8 @@ pub const Args = struct {
     slide_drift_gate: bool = false,
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
+    /// --parallel was on the command line: TENSORFOLD_PARALLEL then stays out of the way (main applies the env default).
+    parallel_named: bool = false,
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -288,7 +290,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     var out: Args = .{};
     var repeated: Repeated = .{};
     var disk_named = false;
-    var disk_legacy: ?[]const u8 = null; var parallel_named = false; // --parallel on the line: the env var then stays out of the way
+    var disk_legacy: ?[]const u8 = null;
     var model: ?[]const u8 = null;
     var tcp_flag: ?[]const u8 = null;
     var i: usize = 0;
@@ -320,12 +322,11 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
             if (disk_named) return fail(u, a, "argument {s}: not allowed with --prompt-cache-disk", .{name});
             disk_legacy = name;
         }
-        if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name else if (std.mem.eql(u8, name, "--parallel")) parallel_named = true;
+        if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name;
         try one(a, &out, &repeated, flag, value, u);
     }
     if (out.unix_socket != null) if (builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{}) else if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
-    if (!parallel_named) if (std.c.getenv("TENSORFOLD_PARALLEL")) |raw| try envParallel(u, a, raw, &out);
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
     out.silence.validate() catch |err|
@@ -365,7 +366,9 @@ fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!voi
     if (spills(out) and out.learn and !out.learn_conversations) return fail(u, a, "--spill-gib writes evicted states to the conversation store, which --learn's shared prefixes do not use: use --prompt-cache-disk DIR without --learn-dir, add --learn-conversations, or serve without --learn", .{});
 }
 
-fn spills(args: Args) bool { return (args.spill_gib orelse 0) > 0; }
+fn spills(args: Args) bool {
+    return (args.spill_gib orelse 0) > 0;
+}
 
 pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
@@ -488,7 +491,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) {
+        out.parallel = v;
+        out.parallel_named = true;
+    } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -515,17 +521,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
 }
 
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
-// ``TENSORFOLD_PARALLEL``: the same forms as ``--parallel``; blank keeps the default; garbage is refused by name.
-fn envParallel(u: *Usage, a: Allocator, raw: [*:0]const u8, out: *Args) error{ Usage, OutOfMemory }!void {
-    const text = std.mem.trim(u8, std.mem.span(raw), " \t");
-    if (text.len == 0) return;
-    if (parallel(text) == null) return fail(u, a, "environment variable TENSORFOLD_PARALLEL: expected a whole number 1 through 4096 or 'auto', got '{s}'", .{std.mem.span(raw)});
-    out.parallel = text;
-}
-
 pub fn parallel(text: []const u8) ?u32 {
-    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto")) return 8;
-    const n = std.fmt.parseInt(i64, std.mem.trim(u8, text, " "), 10) catch return null;
+    const t = std.mem.trim(u8, text, " ");
+    if (std.ascii.eqlIgnoreCase(t, "auto")) return 8;
+    const n = std.fmt.parseInt(i64, t, 10) catch return null;
     return @intCast(@max(1, @min(n, 4096)));
 }
 

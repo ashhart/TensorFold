@@ -158,6 +158,11 @@ const valid = [_]Case{
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TENSORFOLD_PARALLEL", .raw = "4", .n = 4 },
+    .{ .name = "TENSORFOLD_PARALLEL", .raw = " 8\t", .n = 8 },
+    .{ .name = "TENSORFOLD_PARALLEL", .raw = "4096", .n = 4096 },
+    .{ .name = "TENSORFOLD_PARALLEL", .raw = "auto", .n = 0 },
+    .{ .name = "TENSORFOLD_PARALLEL", .raw = "AUTO", .n = 0 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -382,4 +387,20 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+}
+
+test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank keeps the default, garbage is refused" {
+    try t.expectEqualStrings("4", (try e.parallel("4", "8")).?);
+    try t.expectEqualStrings("auto", (try e.parallel("auto", "8")).?);
+    try t.expectEqualStrings("8", (try e.parallel(null, " 8 ")).?);
+    try t.expectEqualStrings("Auto", (try e.parallel(null, "Auto")).?); // the text passes through; cli.parallel matches it without case
+    try t.expect((try e.parallel(null, null)) == null);
+    try t.expect((try e.parallel(null, " \t")) == null);
+    for ([_][]const u8{ "0", "4097", "typo", "-1", "8\nwrong" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parallel(null, raw));
+        const why = (try e.refusal(a, Env{ .name = "TENSORFOLD_PARALLEL", .raw = raw }, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TENSORFOLD_PARALLEL") != null);
+        try t.expect(std.mem.indexOf(u8, why, "or auto") != null);
+    }
 }
