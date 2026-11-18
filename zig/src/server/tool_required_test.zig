@@ -533,3 +533,65 @@ test "auto tools: a strict tool gets the optional-call grammar, other auto reque
         try std.testing.expectEqualStrings("sequence", (try value(g, required.structure.?.text)).get("format").?.strField("type").?);
     };
 }
+
+fn thinkRun(want: []const u32, r: api.Request, seed: u64) !struct { tokens: []u32, stop: bool } {
+    var seq: lanes.grammar.Sequence = .{ .want = want, .stop = 96, .gpa = a };
+    defer seq.log.deinit(a);
+    var constraint: lanes.grammar.Constraint = .init(seq.rules(), 4, 98);
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 0, .hidden_rows = true, .streams_exact = true, .batch_rows = 8, .max_streams = 2, .draft_streams = true }, 8, 7);
+    defer cfg.deinit(a);
+    var fake: lanes.fake.Fake = .{ .gpa = a };
+    defer fake.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var engine = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try lanes.Stream.init(a, .{ .id = "think", .prompt = &.{ 3, 1, 4, 1 }, .max_new = r.max_tokens, .sampling = .{ .seed = seed, .temperature = 1 }, .drafts = false, .grammar = &constraint, .think_budget = r.think_budget, .think_close = r.think_close, .think_end = if (r.think_end) |e| e else -1, .think_open = true });
+    defer s.deinit(a);
+    try engine.addStream(&s);
+    while (engine.activeCount() > 0) try engine.step();
+    return .{ .tokens = try a.dupe(u32, s.emitted()), .stop = s.reason == .stop };
+}
+
+test "required tools: with thinking on, a required or named call closes a think block that never ends and leaves room for the call" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    var stub: Stub = .{};
+    var compile: Compile = .{};
+    var compiler = compile.compiler();
+    const close = [_]u32{ 97, 98 };
+    for ([_]bool{ false, true }) |response| for ([_][]const u8{ "\"required\"", "named", "\"auto\"" }) |kind| {
+        var text: Text = .{};
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        defer srv.deinit();
+        srv.info.structures = @import("qwen27_masks").supported;
+        srv.grammars = &compiler;
+        var cx: errors.Cx = .{ .a = g };
+        const named = std.mem.eql(u8, kind, "named");
+        const choice = if (!named) kind else if (response) "{\"type\":\"function\",\"name\":\"now\"}" else "{\"type\":\"function\",\"function\":{\"name\":\"now\"}}";
+        const input = try openai.chatInput(srv, &cx, try body(&cx, response, choice));
+        const required = if (input.fields.get("tool_call_required")) |v| v.truthy() else false;
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 300 };
+        try srv.checkFeatures(&cx, input.fields, true, false, &.{1}, input.tools, &request);
+        @import("tool_think.zig").apply(&request, required, &close, 98);
+        try std.testing.expectEqual(!std.mem.eql(u8, kind, "\"auto\""), required);
+        if (!required) {
+            try std.testing.expect(request.think_budget == 0 and request.think_end == null);
+            continue;
+        }
+        try std.testing.expectEqual(@as(u32, 300 - 256), request.think_budget);
+        const want = try Text.encode(undefined, g, try @import("tool_required_witness.zig").text(g, try value(g, request.structure.?.text)), false);
+        for ([_]u64{ 1235, 1236 }) |seed| {
+            const before = try thinkRun(want, .{ .prompt = request.prompt, .max_tokens = request.max_tokens }, seed);
+            defer a.free(before.tokens);
+            try std.testing.expect(!before.stop and before.tokens.len == 300);
+            const ran = try thinkRun(want, request, seed);
+            defer a.free(ran.tokens);
+            const end = std.mem.indexOfScalar(u32, ran.tokens, 98).?;
+            try std.testing.expect(ran.stop and end == 300 - 256);
+            const result = try parse.parse(g, try Text.decode(undefined, g, ran.tokens[end + 1 ..]), input.tools, 1);
+            try std.testing.expectEqual(@as(usize, 1), result.calls.?.len);
+            try std.testing.expectEqualStrings(if (named) "now" else "lookup", result.calls.?[0].get("function").?.strField("name").?);
+        }
+    };
+}
