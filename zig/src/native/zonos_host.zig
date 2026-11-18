@@ -169,6 +169,7 @@ const Host = struct {
     wake: std.Io.Condition = .init,
     worker: ?std.Thread = null,
     slots: []Slot,
+    turns: []z3.Turn, // the rows the requests in progress run next, one pass for all: two a slot at most
     closing: bool = false,
     failed: bool = false,
 
@@ -281,12 +282,26 @@ const Host = struct {
                 continue;
             }
             h.unlock();
-            for (h.slots) |*slot| h.turn(slot, current);
+            var n: usize = 0;
+            for (h.slots) |*slot| h.turn(slot, current, &n);
+            h.advance(h.turns[0..n]);
         }
     }
 
-    /// One slot's turn: a new request's prompt, or one more frame of a running one; its end goes to its sink.
-    fn turn(h: *Host, slot: *Slot, current: bool) void {
+    /// The rows the turns left to run, every request's lane and twin lane in one pass.
+    fn advance(h: *Host, turns: []const z3.Turn) void {
+        h.e.runLanes(turns) catch |err| {
+            h.lock();
+            h.failed = true;
+            h.unlock();
+            h.e.stream.synchronize() catch {};
+            // every request in progress shared the pass
+            for (h.slots) |*slot| if (slot.started) if (slot.job) |job| h.finish(slot, job, .failed, @errorName(err));
+        };
+    }
+
+    /// One slot's turn: a new request's prompt, or a running one's next frame, whose row joins `turns[n.*..]`.
+    fn turn(h: *Host, slot: *Slot, current: bool, n: *usize) void {
         h.lock();
         const job = slot.job orelse return h.unlock();
         const dead = h.failed or !current;
@@ -296,7 +311,7 @@ const Host = struct {
         if (stop) return h.finish(slot, job, .cancelled, "");
         h.e.use(slot.index);
         h.codec.use(slot.index);
-        const reason = h.step(slot, job) catch |err| switch (err) {
+        const reason = h.step(slot, job, n) catch |err| switch (err) {
             // refused before anything ran on the device: the engine is as it was
             error.ClipEncoderNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "cloning from a clip needs 5.26 GiB of device memory for its encoder, and less than that is free"),
             error.GuidanceNeedsMoreDeviceMemory => return h.finish(slot, job, .failed, "speaker guidance needs device memory for a second stream's state, and less than that is free"),
@@ -312,18 +327,22 @@ const Host = struct {
     }
 
     /// The request's prompt rows on its first turn, then a frame a turn; its reason once its last frame is spoken.
-    fn step(h: *Host, slot: *Slot, job: Job) !?api.Reason {
+    fn step(h: *Host, slot: *Slot, job: Job, n: *usize) !?api.Reason {
         if (!slot.started) {
             try h.start(slot, job);
             return null;
         }
         const finished = try slot.run.sample();
         try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
-        if (!finished) {
-            try slot.run.advance(Guarded{ .h = h, .slot = slot });
-            return null;
+        if (finished) return if (slot.run.eos_frame != null) .stop else .length;
+        const row = slot.run.lastRow();
+        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits) };
+        n.* += 1;
+        if (slot.run.unconditional) |out| {
+            h.turns[n.*] = .{ .lane = slot.twin.?, .row = row, .out = out };
+            n.* += 1;
         }
-        return if (slot.run.eos_frame != null) .stop else .length;
+        return null;
     }
 
     /// A request's first turn: its clip encoded, its lanes zeroed, its prompt rows (and its twin's) run.
@@ -418,6 +437,7 @@ const Host = struct {
         h.e.destroy();
         h.rel.deinit();
         h.gpa.free(h.dir);
+        h.gpa.free(h.turns);
         h.gpa.free(h.slots);
         h.gpa.destroy(h);
     }
@@ -444,6 +464,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     const slots = try gpa.alloc(Slot, o.parallel);
     errdefer gpa.free(slots);
     for (slots, 0..) |*slot, i| slot.* = .{ .index = i };
+    const turns = try gpa.alloc(z3.Turn, 2 * o.parallel);
+    errdefer gpa.free(turns);
     const kept = try gpa.dupe(u8, dir);
     errdefer gpa.free(kept);
     h.* = .{
@@ -454,6 +476,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         .e = e,
         .codec = codec,
         .slots = slots,
+        .turns = turns,
         .admit = o.admit,
         .info_ = .{
             .name = "ZONOS3 Mini",

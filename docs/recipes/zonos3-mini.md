@@ -125,23 +125,28 @@ they resolve to, and all-unknown buckets the bytes of a request that names none.
 
 `--parallel N` (1 to 16; 1 without the flag) serves N requests at once. Each has its own lane: a set of the
 backbone's caches and recurrent state, and a set of the decoder's. One worker gives every request in progress a turn,
-a frame each: its lanes are put in use, the frame is sampled, decoded when its audio is due, and run. The kernels and
-the single-stream passes are the ones already checked, so a request's arithmetic does not depend on what runs beside
-it; the workspaces are shared, and each pass writes what it reads.
+a frame each: the frame is sampled and decoded when its audio is due. The rows the turns leave then run in one pass
+(`Engine.runLanes`), a row a lane, a guided request's twin among them: the launches that read no lane's state take
+all the rows at once, and the four that do (the GDN layers' convolution and recurrence, the attention layers' cache
+write and attention) run a lane at a time on that lane's state. The kernels are the ones already checked, and each
+computes a row from that row alone, so a request's arithmetic does not depend on what runs beside it.
 
 - **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
   (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,828,406,528 bytes at
   `--parallel 1`, 7,538,995,456 at 4. A guided request's twin lane is still made by its slot's first guided request.
-- **Speed:** the requests share one stream of single-row passes, so the total stays what one request gets alone and
-  each of N gets about a share of it. Nothing is batched across requests yet.
+- **Speed:** a frame of one request is about 226 small launches, 24 of them a lane's own, so the backbone's cost
+  grows slowly with the lanes in a pass (1.1 ms for one row, 1.6 ms for four). Sampling on the host and the decoder
+  do not share: the decoder's 0.19 s for a 17.8 s reply is real work, 78% of it in `zc_linear`, and is now the
+  larger part of four requests at once.
 - **A clip is encoded in its request's first turn**, about half a second in which the other requests wait.
 - A request past N is refused with 503, as the second one was before.
 
 Checked on the RTX 5090 at `--parallel 4`: eight kinds of request (a long passage, a short one, guided, streamed,
 a condition value with normalized text, a cloned clip, a guided clone, a guided stream) were each asked alone, then
 four at once in three mixes; all twelve replies equalled the same request's reply alone, byte for byte. Four copies
-of the 17.8 s passage at once took 2.42 s, 29.4 times real time in total against 29.1 alone, each reply the solo
-bytes. Of six at once, four were spoken and two got 503.
+of the 17.8 s passage at once took 1.71 s, 41.6 times real time in total against 29.1 alone, each reply the solo
+bytes. Alone, a guided request of 3.87 s took 0.17 s where its two passes a frame took 0.23 s before they shared
+one. Of six at once, four were spoken and two got 503.
 
 ## Precision
 
