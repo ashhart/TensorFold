@@ -320,8 +320,6 @@ fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u
     try std.testing.expectEqual(@as(?i64, 2), tokens[0].int64());
 }
 
-
-
 /// GLM 5.3's template with thinking off, served: the prompt carries `word` from `effort`, which the reply reports.
 fn effortOff(server_effort: ?[]const u8, extra: []const u8, effort: ?[]const u8, word: []const u8) !void {
     const t = std.testing;
@@ -397,7 +395,6 @@ test "thinking request: a named effort is the request's own, with no fallback, s
     try std.testing.expectEqualStrings("high", fields.namedEffort("high", &levels).?);
     try std.testing.expectEqualStrings("high", fields.namedEffort("medium", &levels).?); // on GLM-5.3's levels
 }
-
 
 test "thinking off on a channel model: the model's own unclosed block keeps its scratch text out of the answer" {
     const t = std.testing;
