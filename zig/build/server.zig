@@ -134,6 +134,7 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-cuda-pool-report-host", "CUDA sizing device report and counted profile without devices").dependOn(&pool_after_warmup.step);
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
+    b.step("test-serve-drafter-host", "Serve drafter selection without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"serve drafter:"} })).step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);

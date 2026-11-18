@@ -9,6 +9,8 @@ pub const cuda = [_]R{
     .{ .launch = .{ .name = "qwen35_mhc leave", .symbol = "qwen35_mhc_leave", .image = "qwen35_mhc", .threads = 256 }, .usage = registry.none },
 };
 pub const cuda_134 = [_]O{
+    // Target tap with an optional residual when the final mHC step leaves the merged row in H.
+    .{ .name = "qwen35 tf_q35_tap", .usage = .{ .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 26, .static = 0, .bound = 256 }, .{ .regs = 26, .static = 0, .bound = 256 }, .{ .regs = 26, .static = 0, .bound = 256 }, .{ .regs = 26, .static = 0, .bound = 256 } } },
     .{ .name = "qwen35_mhc enter", .usage = .{ .{ .regs = 18, .static = 0 }, .{ .regs = 18, .static = 0 }, .{ .regs = 18, .static = 0 }, .{ .regs = 17, .static = 0 }, .{ .regs = 17, .static = 0 } } },
     .{ .name = "qwen35_mhc route", .usage = .{ .{ .regs = 40, .static = 1068 }, .{ .regs = 40, .static = 1068 }, .{ .regs = 40, .static = 1068 }, .{ .regs = 39, .static = 1068 }, .{ .regs = 39, .static = 1068 } } },
     .{ .name = "qwen35_mhc merge", .usage = .{ .{ .regs = 28, .static = 0 }, .{ .regs = 29, .static = 0 }, .{ .regs = 29, .static = 0 }, .{ .regs = 28, .static = 0 }, .{ .regs = 28, .static = 0 } } },

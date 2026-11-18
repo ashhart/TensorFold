@@ -166,6 +166,7 @@ test "MTP coupled: batched shared rounds match serial drafts and couple mixed sa
         try rig.d.drafter().absorb(&absorbs);
         try rig.d.drafter().hold(&holds);
         if (use_batch) try t.expectEqual(@as(u64, 6), rig.d.batch_passes);
+        try t.expectEqual(@as(u64, if (use_batch) 3 else 0), rig.d.shared_passes);
         for (&streams, 0..) |*s, i| try rig.d.drafter().held(&.{s}, &.{&wide_held[bi][i]});
     }
     try t.expectEqual(wide_held[0], wide_held[1]);

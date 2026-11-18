@@ -123,6 +123,8 @@ pub const Weights = struct {
     arena_at: usize = 0,
     fc_e: Proj, // fc's halves: the embedding's inputs, then the hidden state's
     fc_h: Proj,
+    main_norm: ?u64 = null,
+    raw: struct { norm_e: bool = false, norm_h: bool = false, norm: bool = false, main: bool = false, input: bool = false, post: bool = false } = .{},
     norm_e: u64,
     norm_h: u64,
     input_norm: u64,
@@ -192,6 +194,7 @@ pub fn stageBytes(g: geometry.Geometry) !usize {
 
 /// Peak device bytes needed while loading the MTP weights. The arena and staging buffer coexist.
 pub fn allocationPlan(gpa: std.mem.Allocator, io: std.Io, g: geometry.Geometry, dir: []const u8) !AllocationPlan {
+    if (g.loop != null) return @import("cuda_mtp_dense.zig").allocationPlan(gpa, io, g, dir);
     const resident = try total(g);
     const staging = try stageBytes(g);
     if (hasFile(io, dir)) {
@@ -226,14 +229,14 @@ fn hasIndexedScales(ck: *const core.Checkpoint, g: geometry.Geometry) bool {
     return false;
 }
 
-/// Indexed dense MTP is supported only when every required tensor is BF16 and has the expected shape.
-fn validateDenseBf16(ck: *core.Checkpoint, g: geometry.Geometry) !void {
+pub const DenseTensor = struct { name: []const u8, shape: [2]usize, rank: usize, split_fc: bool = false };
+
+pub fn denseTensors(g: geometry.Geometry) [15]DenseTensor {
     const hidden = g.hidden;
     const aw = g.attnWidth();
     const kvw = g.kv_heads * head_dim;
-    const Tensor = struct { name: []const u8, shape: [2]usize, rank: usize };
-    const expected = [_]Tensor{
-        .{ .name = "mtp.fc.weight", .shape = .{ hidden, 2 * hidden }, .rank = 2 },
+    return .{
+        .{ .name = "mtp.fc.weight", .shape = .{ hidden, 2 * hidden }, .rank = 2, .split_fc = true },
         .{ .name = "mtp.pre_fc_norm_embedding.weight", .shape = .{ hidden, 0 }, .rank = 1 },
         .{ .name = "mtp.pre_fc_norm_hidden.weight", .shape = .{ hidden, 0 }, .rank = 1 },
         .{ .name = "mtp.norm.weight", .shape = .{ hidden, 0 }, .rank = 1 },
@@ -249,11 +252,16 @@ fn validateDenseBf16(ck: *core.Checkpoint, g: geometry.Geometry) !void {
         .{ .name = "mtp.layers.0.mlp.up_proj.weight", .shape = .{ g.intermediate, hidden }, .rank = 2 },
         .{ .name = "mtp.layers.0.mlp.down_proj.weight", .shape = .{ hidden, g.intermediate }, .rank = 2 },
     };
-    for (expected) |tensor| _ = try ck.expect(tensor.name, .bf16, tensor.shape[0..tensor.rank]);
+}
+
+/// Indexed dense MTP is supported only when every required tensor is BF16 and has the expected shape.
+fn validateDenseBf16(ck: *core.Checkpoint, g: geometry.Geometry) !void {
+    for (denseTensors(g)) |tensor| _ = try ck.expect(tensor.name, .bf16, tensor.shape[0..tensor.rank]);
 }
 
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !Weights {
     const g = e.g;
+    if (g.loop != null) return @import("cuda_mtp_dense.zig").load(gpa, io, e, dir);
     if (hasFile(io, dir)) {
         _ = try sourceForTarget(g, true, false, false);
     } else {

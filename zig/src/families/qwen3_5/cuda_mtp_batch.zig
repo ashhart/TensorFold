@@ -65,11 +65,11 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     const aw = g.attnWidth();
     const kw = d.kvWidth();
     try e.embed(d.ids, d.emb, rows, 0);
-    try d.norm(d.emb, 0, w.norm_e, d.en, rows);
-    try d.norm(d.hin, 0, w.norm_h, d.hn, rows);
+    try d.normWeight(d.emb, 0, w.norm_e, w.raw.norm_e, d.en, rows);
+    try d.normWeight(d.hin, 0, w.norm_h, w.raw.norm_h, d.hn, rows);
     try d.proj(w.fc_e, d.en, d.h, rows);
     try d.proj(w.fc_h, d.hn, d.r, rows);
-    try d.norm(d.h, d.r, w.input_norm, d.x, rows);
+    try d.normWeight(d.h, d.r, w.input_norm, w.raw.input, d.x, rows);
     try d.projQkv(rows);
     for (segs) |s| { // rope positions run from each segment's first slot
         const p0: c_longlong = @intCast(s.p0);
@@ -78,9 +78,9 @@ fn layerRows(d: *Mtp, segs: []const Seg, rows: usize) !void {
     }
     try e.run(d.fns.attn_rows, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.tab, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(g.kv_heads)), d.att });
     try d.proj(w.o, d.att, d.r, rows);
-    try d.norm(d.h, d.r, w.post_norm, d.x, rows);
+    try d.normWeight(d.h, d.r, w.post_norm, w.raw.post, d.x, rows);
     try d.mlp(d.x, d.r, rows);
-    try d.norm(d.h, d.r, w.norm, d.x, rows);
+    try d.normWeight(d.h, d.r, w.norm, w.raw.norm, d.x, rows);
 }
 
 /// Each segment's keys and values from the pass into its context's ring, at its slots.
@@ -159,7 +159,7 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         at += n;
     }
     const s = segs[0..items.len];
-    try d.norm(d.taps_in, 0, e.final_norm, d.hin, at); // the target's final norm: the rows the head read
+    try d.tapNorm(at);
     try upload(d, ids[0..at], tab[0..at], 0);
     try layerRows(d, s, at);
     try ringPut(d, s);
@@ -176,6 +176,7 @@ fn absorbPass(d: *Mtp, items: []const dr.Absorb) !void {
         try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(seg.ctx.held_dev.ptr, d.tok + r * 4, 4, e.stream.handle), "cuMemcpyDtoDAsync");
         seg.ctx.held_n = 1;
     }
+    if (s[0].ctx != s[s.len - 1].ctx) d.shared_passes += 1;
     d.batch_passes += 1;
 }
 
@@ -255,6 +256,7 @@ fn holdPass(d: *Mtp, group: []const Chain, k: usize, stage_slot: usize) !void {
         try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(c.ctx.held_dev.ptr + k * 4, d.tok + r * 4, 4, e.stream.handle), "cuMemcpyDtoDAsync");
         c.ctx.held_n = k + 1;
     }
+    if (s[0].ctx != s[s.len - 1].ctx) d.shared_passes += 1;
     d.batch_passes += 1;
 }
 

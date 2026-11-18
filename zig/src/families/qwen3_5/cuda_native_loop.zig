@@ -8,8 +8,9 @@ pub const formats: []const []const u8 = &.{"bf16"};
 pub const default_context = native.default_context;
 pub const max_segments = native.max_segments;
 pub const prompt_rows = native.prompt_rows;
-pub const takes_drafter = false;
-pub const drafter_refusal = "--drafter: SenseNova Loop on CUDA supports plain decoding only";
+pub const takes_drafter = true;
+pub const openDrafter = native.openDrafter;
+pub const finishDrafterOpen = native.finishDrafterOpen;
 pub const explains_open = true;
 pub const Options = native.Options;
 pub const contextCeiling = native.contextCeiling;
@@ -39,12 +40,11 @@ pub const explain = native.explain;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, options: Options) !native.Loaded {
     if (options.loops) |count| if (count < 1 or count > 4) return error.BadLoops;
-    if (options.drafter != null) return error.SenseNovaDrafter;
     if (options.vision != null) return error.SenseNovaVision;
     if (options.slide) return error.SenseNovaLearning;
     if (options.tp != 1 or options.rank != 0) return error.SenseNovaRanks;
     var plain = options;
-    plain.drafts = false;
+    plain.drafts = options.drafts and options.drafter != null;
     var loaded = try native.open(gpa, io, ctx, dir, kernels, plain);
     loaded.facts.copy_drafts = false;
     loaded.facts.context_copies = false;

@@ -144,7 +144,7 @@ fn absorbRoleSource(d: *Mtp, ctx: *Ctx, tap_ring: ?u64, normalized: ?Normalized,
                 for (rs[fi..][0..rows], 0..) |r, i| tr.rows[i] = @intCast(r);
                 try e.run(d.ring_fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ring, tap_ring_rows, @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(g.hidden)), d.taps_in });
             } else try e.run(d.ring_fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ring, tap_ring_rows, @as(c_longlong, @intCast(start)), @as(c_int, @intCast(g.hidden)), d.taps_in });
-            try d.norm(d.taps_in, 0, e.final_norm, d.hin, rows); // the target's final norm: the rows the head read
+            try d.tapNorm(rows);
         }
         try d.layerModeWithInput(ctx, d.ids + id_at * 4, rows, start, .ring, propose_chunk, input_h);
         start += rows;

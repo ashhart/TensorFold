@@ -86,6 +86,7 @@ pub const Mtp = struct {
     staged: cuda.HostBuffer, // pinned: ids, ancestors and async batch slots up; token results down
     tab: u64, // a batched pass's RingRow table (cuda_mtp_batch.zig)
     batch: bool = true,
+    shared_passes: u64 = 0, // completed MTP passes spanning distinct stream contexts
     batch_passes: u64 = 0, // batched passes run, for the GPU check
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
     /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
@@ -129,6 +130,7 @@ pub const Mtp = struct {
             d.depth = try platform.environment.read(u32, "TF_MTP_DRAFTS", types.default_depth);
         }
         d.trees = try platform.environment.read(bool, "TF_MTP_TREES", false);
+        if (e.g.loop != null) d.trees = false;
         if (d.depth == 0) return error.MtpDepthZero;
         d.depth = @min(d.depth, max_drafts);
         d.batch = try platform.environment.read(bool, "TF_MTP_BATCH", true);
@@ -343,8 +345,19 @@ pub const Mtp = struct {
 
     /// out = norm(h + r) with w; h takes the sum (r 0: no residual).
     pub fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
+        return d.normWeight(h, r, w, false, out, rows);
+    }
+
+    pub fn normWeight(d: *Mtp, h: u64, r: u64, w: u64, raw: bool, out: u64, rows: usize) !void {
         const e = d.e;
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
+        try e.run(if (raw) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
+    }
+
+    /// Normalize a tapped target row with the draft's main norm, or the target's final norm.
+    pub fn tapNorm(d: *Mtp, rows: usize) !void {
+        if (d.w.main_norm) |w| return d.normWeight(d.taps_in, 0, w, d.w.raw.main, d.hin, rows);
+        const e = d.e;
+        try d.normWeight(d.taps_in, 0, e.final_norm, e.g.loop != null and e.g.bf16, d.hin, rows);
     }
 
     /// q or k heads normed and roped from `src` into `out`, with the target's rope (its YaRN table when it has one).
@@ -378,11 +391,11 @@ pub const Mtp = struct {
         // a tree pass's rows are sibling lanes at one depth, so they share pos0; chained or absorbed rows step by one
         const step: c_int = @intFromBool(pass == .ring);
         try e.embed(ids, d.emb, rows, 0);
-        try d.norm(d.emb, 0, w.norm_e, d.en, rows);
-        try d.norm(hin, 0, w.norm_h, d.hn, rows);
+        try d.normWeight(d.emb, 0, w.norm_e, w.raw.norm_e, d.en, rows);
+        try d.normWeight(hin, 0, w.norm_h, w.raw.norm_h, d.hn, rows);
         try d.proj(w.fc_e, d.en, d.h, rows);
         try d.proj(w.fc_h, d.hn, d.r, rows);
-        try d.norm(d.h, d.r, w.input_norm, d.x, rows);
+        try d.normWeight(d.h, d.r, w.input_norm, w.raw.input, d.x, rows);
         if (!propose) {
             // Prompt cuts that cannot feed a proposal need only build the ring's keys and values.
             try @import("cuda_mtp_absorb.zig").projKv(d, rows);
@@ -402,9 +415,9 @@ pub const Mtp = struct {
             .tree => |anc| try e.run(d.fns.attn_tree, .{ rows, g.q_heads, 1 }, .{ 32, 1, 1 }, .{ d.q, d.qraw, @as(c_int, @intCast(2 * aw)), d.kb, d.vb, d.lane_k, d.lane_v, anc, @as(c_int, anc_stride), d.ringK(ctx), d.ringV(ctx), heads, kvh, cap, begin, @as(c_longlong, @intCast(ctx.end)), d.att }),
         }
         try d.proj(w.o, d.att, d.r, rows);
-        try d.norm(d.h, d.r, w.post_norm, d.x, rows);
+        try d.normWeight(d.h, d.r, w.post_norm, w.raw.post, d.x, rows);
         try d.mlp(d.x, d.r, rows);
-        try d.norm(d.h, d.r, w.norm, d.x, rows);
+        try d.normWeight(d.h, d.r, w.norm, w.raw.norm, d.x, rows);
         if (pass == .ring) try d.putRing(ctx, rows, p0);
     }
 

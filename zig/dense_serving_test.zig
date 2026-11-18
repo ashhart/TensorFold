@@ -52,5 +52,5 @@ test "dense serving: owned launches and projections retain their reviewed argume
         };
     }
     // The scan, retained-row MTP tap, opt-in TF_QWEN_PDL glue, and schedule-driven norm and mHC launches are pinned.
-    try std.testing.expectEqualStrings("194b2a2b7597b12289250bb9100950c4c2c962f0a2487945511060c9ef7d1b29", &hash(out.items));
+    try std.testing.expectEqualStrings("220e1dc23798398215c734f86232e044f1521485a68486406f867dfd0020077f", &hash(out.items));
 }

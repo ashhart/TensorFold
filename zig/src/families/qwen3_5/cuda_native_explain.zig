@@ -28,6 +28,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         else => sm110_modes.explain(err),
     };
     return switch (err) {
+        error.SenseNovaDrafter, error.NoLoopMtpFile, error.LoopTapInsideMhc => decide.explain(err),
         error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.MtpDoesNotFit => "the MTP drafter's resident weights, conversion staging, scratch, and calibration context exceed the remaining CUDA budget; free device memory or lower --context",
         error.MtpMemorySizeOverflow => "the MTP drafter's CUDA allocation estimate overflowed; this checkpoint geometry cannot be admitted safely",

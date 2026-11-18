@@ -360,8 +360,7 @@ pub const Engine = struct {
     }
     /// The same allocation plan for a tap count known before `setTaps` mutates the engine.
     pub fn streamBytesWithTaps(e: *const Engine, cap: usize, taps: usize) usize {
-        const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapRows() * taps * e.g.hidden * 2 + c.pendBytes(e.g);
+        return e.g.stateBytes() + caches.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapRows() * taps * e.g.hidden * 2 + caches.pendBytes(e.g);
     }
     /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
     pub fn tapBytes(e: *const Engine) usize {
@@ -370,10 +369,12 @@ pub const Engine = struct {
     pub const tapRows = S.tapRows;
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
-        if (e.g.loop != null and taps.len > 0) return error.SenseNovaDrafter;
         if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
         if (taps.len > e.taps.len) return error.TooManyTaps;
-        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
+        for (taps) |t| {
+            if (t >= e.g.layers) return error.BadTap;
+            if (e.g.loop != null) try @import("loop_schedule.zig").validateTap(e.steps, t);
+        }
         @memcpy(e.taps[0..taps.len], taps);
         e.n_taps = taps.len;
     }
@@ -397,7 +398,6 @@ pub const Engine = struct {
         const cfg: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
-
     /// A glue kernel with a qwen_pdl::enter() prologue: dependent as cuda_pdl.zig decides, plain otherwise.
     pub fn runPdl(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });

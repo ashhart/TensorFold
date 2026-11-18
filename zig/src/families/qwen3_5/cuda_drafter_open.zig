@@ -45,9 +45,19 @@ fn selectDrafterDirectory(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, d
     return selectDrafter(draft_config.declared(gpa, io, dir), mtp_weights.hasHead(gpa, io, dir), depth);
 }
 
+/// Loop admits only its BF16 MTP head, at either accepted drafter-bits setting.
+pub fn loopRoute(declared: bool, bits: u8) !void {
+    if (declared) return error.SenseNovaDrafter;
+    if (bits != 0 and bits != 4) return error.DrafterBitsUnsupported;
+}
+
 /// --drafter's directory over engine `p`: DFlash2 by config, else a checkpoint with a usable MTP head.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.e.g.loop != null) {
+        try loopRoute(draft_config.declared(gpa, io, dir), bits);
+        return openMtp(gpa, io, p, dir, bits);
+    }
     const kind = try selectDrafterDirectory(gpa, io, dir, l.mtp_drafts);
     return switch (kind) {
         .dflash => openDFlash(gpa, io, p, dir, bits),
@@ -73,18 +83,24 @@ fn openDFlash(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8
 
 /// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p`, its ring the window.
 fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
-    if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (bits != 4 and !(l.e.g.loop != null and bits == 0)) return error.DrafterBitsUnsupported;
     if (l.e.g.exl3 and l.e.g.moe()) return error.Exl3DrafterUnsupported; // a dense checkpoint drafts as an MLX one
     if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
     const calibration_cache_bytes = try native.cacheBytesWithTaps(l.e, l.e.window_rows, l.page_test, 1);
     const d = try Mtp.initConfigured(gpa, io, l.e, dir, l.capacity, l.mtp_drafts, calibration_cache_bytes, l.room);
     errdefer d.deinit();
-    try l.e.setTaps(d.taps());
+    try installMtpTap(d);
     cost_adapter.identify(l, dir, .mtp);
     try l.timeWindows(d, null);
     l.mtp = d;
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeMtp, .reserve = reserveMtp };
+}
+
+fn installMtpTap(d: *Mtp) !void {
+    try d.e.setTaps(d.taps());
+    // The host priced the target before attaching a drafter. Each whole-window cache also owns this tap ring.
+    d.stream_bytes = try std.math.add(usize, d.stream_bytes, d.e.tapBytes());
 }
 
 fn reserveMtp(p: *anyopaque, streams: u32) anyerror!void {
@@ -183,7 +199,7 @@ fn appendFixtureTensor(a: std.mem.Allocator, json: *std.ArrayList(u8), first: bo
     offset.* = end;
 }
 
-fn denseMtpFixture(a: std.mem.Allocator) !struct { header: []u8, payload: usize } {
+fn denseMtpFixture(a: std.mem.Allocator, intermediate: usize) !struct { header: []u8, payload: usize } {
     const tensors = [_]FixtureTensor{
         .{ .name = "mtp.fc.weight", .rows = 256, .columns = 512 },
         .{ .name = "mtp.pre_fc_norm_embedding.weight", .rows = 256 },
@@ -197,9 +213,9 @@ fn denseMtpFixture(a: std.mem.Allocator) !struct { header: []u8, payload: usize 
         .{ .name = "mtp.layers.0.self_attn.k_proj.weight", .rows = 256, .columns = 256 },
         .{ .name = "mtp.layers.0.self_attn.v_proj.weight", .rows = 256, .columns = 256 },
         .{ .name = "mtp.layers.0.self_attn.o_proj.weight", .rows = 256, .columns = 512 },
-        .{ .name = "mtp.layers.0.mlp.gate_proj.weight", .rows = 128, .columns = 256 },
-        .{ .name = "mtp.layers.0.mlp.up_proj.weight", .rows = 128, .columns = 256 },
-        .{ .name = "mtp.layers.0.mlp.down_proj.weight", .rows = 256, .columns = 128 },
+        .{ .name = "mtp.layers.0.mlp.gate_proj.weight", .rows = intermediate, .columns = 256 },
+        .{ .name = "mtp.layers.0.mlp.up_proj.weight", .rows = intermediate, .columns = 256 },
+        .{ .name = "mtp.layers.0.mlp.down_proj.weight", .rows = 256, .columns = intermediate },
     };
     var json: std.ArrayList(u8) = .empty;
     errdefer json.deinit(a);
@@ -253,7 +269,7 @@ test "MTP drafter selection: directory distinguishes compatible dense MTP, DFlas
     const dense_path = try std.fs.path.join(a, &.{ root, "dense" });
     defer a.free(dense_path);
     try dense_dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"qwen3_5_text\"}" });
-    const fixture = try denseMtpFixture(a);
+    const fixture = try denseMtpFixture(a, g.intermediate);
     defer a.free(fixture.header);
     try writeSafetensors(dense_dir, "model.safetensors", fixture.header, fixture.payload);
     _ = try mtp_weights.allocationPlan(a, io, g, dense_path);
@@ -304,4 +320,78 @@ test "MTP drafter selection: dense MTP explicitly refuses the standalone affine-
     file.close(io);
     try std.testing.expectEqual(DrafterKind.mtp, try selectDrafterDirectory(a, io, path, null));
     try std.testing.expectError(error.UnsupportedMtpWeightFormat, mtp_weights.allocationPlan(a, io, fixtureGeometry(), path));
+}
+
+test "MTP drafter selection: Loop admission prices BF16 shards, FC halves, padded MLP and optional main norm" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var g = fixtureGeometry();
+    g.loop = .{ .start = 0, .end = 0, .count = 1, .mhc = null };
+    g.intermediate = 64; // Gate and up occupy 128 packed rows each.
+    try std.testing.expectError(error.NoLoopMtpFile, mtp_weights.allocationPlan(a, io, g, root));
+    try tmp.dir.createDir(io, "mtp", .default_dir);
+    const path = try std.fs.path.join(a, &.{ root, "mtp" });
+    defer a.free(path);
+    const fixture = try denseMtpFixture(a, g.intermediate);
+    defer a.free(fixture.header);
+    try writeSafetensors(tmp.dir, "mtp/head.safetensors", fixture.header, fixture.payload);
+    const expected: mtp_weights.AllocationPlan = .{
+        .resident = 2 * (2 * 256 * 256 + 1024 * 256 + 2 * 256 * 256 + 256 * 512 +
+            2 * 128 * 256 + 256 * 64) + 7 * 512,
+        .staging = 1024 * 256 * 2,
+    };
+    try std.testing.expectEqual(expected, try mtp_weights.allocationPlan(a, io, g, path));
+    const main = "{\"mtp.main_norm.weight\":{\"dtype\":\"F32\",\"shape\":[256],\"data_offsets\":[0,1024]}}";
+    try writeSafetensors(tmp.dir, "mtp/norm.safetensors", main, 1024);
+    const with_norm = try mtp_weights.allocationPlan(a, io, g, root);
+    try std.testing.expectEqual(expected.resident + 512, with_norm.resident);
+    try std.testing.expectEqual(expected.staging, with_norm.staging);
+    try writeSafetensors(tmp.dir, "mtp/duplicate.safetensors", main, 1024);
+    try std.testing.expectError(error.DuplicateTensor, mtp_weights.allocationPlan(a, io, g, root));
+    // A root head wins over shards even when that head is incomplete or incompatible.
+    try writeSafetensors(tmp.dir, "mtp.safetensors", main, 1024);
+    try std.testing.expectError(error.MissingTensor, mtp_weights.allocationPlan(a, io, g, root));
+    var bad_geometry = g;
+    bad_geometry.hidden = 128;
+    try writeSafetensors(tmp.dir, "mtp.safetensors", fixture.header, fixture.payload);
+    try std.testing.expectError(error.UnexpectedTensor, mtp_weights.allocationPlan(a, io, bad_geometry, root));
+    try std.testing.expectEqual(expected, try mtp_weights.allocationPlan(a, io, g, root));
+}
+
+test "MTP drafter selection: whole windows and paged runs count the target tap exactly once" {
+    const E = @import("cuda_engine.zig").Engine;
+    var e: E = undefined;
+    e.g = fixtureGeometry();
+    e.g.hidden = 4096;
+    e.scratch_rows = 4096;
+    e.kv8 = false;
+    e.n_taps = 0;
+    var d: Mtp = undefined;
+    d.e = &e;
+    d.tap = .{0};
+    d.capacity = 512;
+    d.depth = 3;
+    d.step_ms = 0;
+    d.trees = false;
+    d.n_costs = 0;
+    try d.initializeMemorySizes();
+    const before = try native.cacheBytes(&e, d.capacity, 0);
+    try installMtpTap(&d);
+    const own = 2 * d.capacity * d.kvWidth() * 2 + 2 * e.g.hidden * 2 + Mtp.max_chain_tokens * 4;
+    try std.testing.expectEqual(@as(usize, 48 << 20), e.tapBytes());
+    try std.testing.expectEqual(own + e.tapBytes(), d.stream_bytes);
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer target.deinit();
+    var wrapped = try lanes.drafted.Drafted.init(std.testing.allocator, target.backend(), d.drafter());
+    defer wrapped.deinit();
+    const reported = try wrapped.streamBytes(before);
+    try std.testing.expectEqual(try native.cacheBytes(&e, d.capacity, 0) + own, reported);
+
+    var l: Lanes = .{ .gpa = std.testing.allocator, .io = std.testing.io, .e = &e, .capacity = d.capacity, .target = undefined, .page_tokens = 256, .mtp = &d };
+    const expected = @import("cuda_pages.zig").layout(&e, d.capacity, l.page_tokens, d.areaBytes(), 0);
+    try std.testing.expectEqual(expected, native.pagedLayout(&l, reported - before).?);
 }

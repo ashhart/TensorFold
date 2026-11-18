@@ -33,7 +33,7 @@ const Seg = extern struct {
     plog: u64 = 0,
 };
 
-pub const Kind = enum { full, mtp_suffix, full_truncated_control, mtp_boundary_control };
+pub const Kind = enum { full, merged, mtp_suffix, full_truncated_control, mtp_boundary_control };
 
 fn depth(_: c.Shape) usize {
     return 0;
@@ -41,6 +41,7 @@ fn depth(_: c.Shape) usize {
 
 pub fn spec(kind: Kind) c.Spec {
     const name: []const u8 = switch (kind) {
+        .merged => "cuda qwen35 tap merged pre-norm row on mHC exit",
         .full => "cuda qwen35 tap full capture (DFlash2/shared taps)",
         .mtp_suffix => "cuda qwen35 tap filtered MTP suffix including position 6143",
         .full_truncated_control => "control qwen35 tap incorrectly truncating shared capture",
@@ -105,11 +106,15 @@ pub const Case = struct {
             self.h[i] = c.toBf16(@as(f32, @floatFromInt(@as(i32, @intCast(i % 19)) - 9)) / 8);
             self.r[i] = c.toBf16(@as(f32, @floatFromInt(@as(i32, @intCast(i % 13)) - 6)) / 16);
         }
+        if (self.kind == .merged) {
+            self.h[0] = 0x8000; // negative zero and a NaN payload survive the direct BF16 copy
+            self.h[1] = 0x7fc1;
+        }
         self.tap = try self.rig.output(tap_rows * hidden * 2);
         self.expected = try a.alloc(u8, tap_rows * hidden * 2);
         @memset(self.expected, 0xff);
         const expected_keep = switch (self.kind) {
-            .full => 0,
+            .full, .merged => 0,
             .mtp_suffix => retained,
             .full_truncated_control => 0,
             .mtp_boundary_control => retained,
@@ -122,7 +127,7 @@ pub const Case = struct {
             const slot = pos % tap_rows;
             for (0..hidden) |col| {
                 const at = row * hidden + col;
-                const sum = core.bf16_round.bits(c.fromBf16(self.h[at]) + c.fromBf16(self.r[at]));
+                const sum = if (self.kind == .merged) self.h[at] else core.bf16_round.bits(c.fromBf16(self.h[at]) + c.fromBf16(self.r[at]));
                 std.mem.writeInt(u16, self.expected[(slot * hidden + col) * 2 ..][0..2], sum, .little);
             }
         }
@@ -144,14 +149,14 @@ pub const Case = struct {
 
     pub fn run(self: *Case) !void {
         const keep: c_int = switch (self.kind) {
-            .full => 0,
+            .full, .merged => 0,
             .mtp_suffix => retained,
             .full_truncated_control => retained,
             .mtp_boundary_control => retained - 1,
         };
         var args: cuda.Args = .{};
         args.add(self.hdev);
-        args.add(self.rdev);
+        args.add(if (self.kind == .merged) @as(u64, 0) else self.rdev);
         args.add(self.segs);
         args.add(self.rowseg);
         args.add(@as(c_int, 0)); // tap index
@@ -188,7 +193,7 @@ pub const Case = struct {
 
 pub const Group = struct {
     a: std.mem.Allocator,
-    cases: [4]Case = undefined,
+    cases: [std.enums.values(Kind).len]Case = undefined,
     used: usize = 0,
 
     pub fn create(a: std.mem.Allocator, gpu: check_.Gpu, s: cuda.Stream, mod: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !*Group {

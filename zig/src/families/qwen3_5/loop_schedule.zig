@@ -11,6 +11,18 @@ pub const Step = struct {
     leave: bool = false,
 };
 
+/// A tap needs a single execution that leaves a materialized hidden row.
+pub fn validateTap(steps: []const Step, layer: usize) !void {
+    var match: ?Step = null;
+    for (steps) |s| {
+        if (s.layer != layer) continue;
+        if (match != null) return error.LoopTapRepeated;
+        match = s;
+    }
+    const step = match orelse return error.BadTap;
+    if (step.inside and !step.leave) return error.LoopTapInsideMhc;
+}
+
 pub const Schedule = struct {
     steps: [max_steps]Step = undefined,
     len: usize = 0,

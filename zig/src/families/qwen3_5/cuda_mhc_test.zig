@@ -8,6 +8,7 @@ const Fake = struct {
     g: struct { hidden: usize } = .{ .hidden = 4096 },
     h: u64 = 100,
     r: u64 = 200,
+    fns: struct { tap: cuda.Function = undefined } = .{},
     mhc: mhc.Runtime = .{},
     calls: usize = 0,
     ids: [6]usize = undefined,
@@ -56,4 +57,31 @@ test "SenseNova mHC: checked launches pass pointers, row count and parameters" {
     try t.expectEqualSlices(u64, &.{ 300, 200, 400, 500, 4096, 600 }, e.values[4][0..6]);
     try t.expectEqualSlices(u64, &.{ 300, 100, 4096, 600 }, e.values[5][0..4]);
     for (e.grids) |grid| try t.expectEqual(@as(usize, 7), grid);
+}
+
+test "SenseNova mHC: a final exit taps the same merged row the target normalizes" {
+    const schedule = @import("loop_schedule.zig");
+    const steps = try schedule.build(&.{ true, false, true, false }, .{
+        .start = 0,
+        .end = 2,
+        .count = 2,
+        .mhc = .{ .start = 2, .end = 4, .streams = 2, .iterations = 20, .fixed_identity = false, .pre_scale = 1 },
+    });
+    var e: Fake = .{};
+    e.fns.tap = function(1);
+    e.mhc.leave = function(2);
+    var pending = false;
+    for (steps.slice(), 0..) |step, i| {
+        const d = schedule.decide(step, pending);
+        pending = d.pending;
+        if (i == 0 or d.leave) {
+            if (d.leave) try mhc.leave(&e, 1, 0);
+            try @import("cuda_forward.zig").captureTap(&e, 1, 0, pending, 0, 0, 0, 0);
+        }
+    }
+    try t.expectEqualSlices(usize, &.{ 1, 2, 1 }, e.ids[0..e.calls]);
+    try t.expectEqual(e.r, e.values[0][1]);
+    try t.expectEqual(e.values[1][1], e.values[2][0]); // leave's output is the tap's hidden input.
+    try t.expect(!pending);
+    try t.expectEqual(@as(u64, 0), e.values[2][1]);
 }

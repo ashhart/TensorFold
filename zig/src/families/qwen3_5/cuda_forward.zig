@@ -196,11 +196,15 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         pending = d.pending;
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             const keep_rows = promptTapKeepRows(prompt, total, e.mtp_prompt.mode, shape.tap_from);
-            try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), keep_rows, t_params });
+            try captureTap(e, total, ti, pending, t_segs, t_rows, keep_rows, t_params);
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
     if (shape.part == .whole) try finish(e, total, heads, shape.hidden, shape.rows, pending);
+}
+
+pub fn captureTap(e: anytype, total: usize, ti: usize, pending: bool, segs: u64, rowseg: u64, keep_rows: c_int, params: u64) !void {
+    try e.run(e.fns.tap, .{ total, (e.g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, if (pending) e.r else @as(u64, 0), segs, rowseg, @as(c_int, @intCast(ti)), @as(c_int, @intCast(e.g.hidden)), keep_rows, params });
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.

@@ -1,7 +1,7 @@
 // qwen35.cu's row-wise kernels: the tap ring's residuals and the MLP activation.
 #pragma once
 
-// Write bf16(h + r) into the tap ring at each row's position, bounded by keep_rows during prefill.
+// Tap ring at each row's position, bounded by keep_rows in prefill: H if the residual is merged, else bf16(H + R).
 extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                               const Seg* __restrict__ segs, const int* __restrict__ rowseg, int tap, int D,
                                                               int keep_rows,
@@ -15,7 +15,12 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16
     __nv_bfloat16* out = reinterpret_cast<__nv_bfloat16*>(sg.tap) + ((size_t)(pos % sg.tap_rows) * sg.taps + tap) * D;
     const int i = (blockIdx.y * blockDim.x + threadIdx.x) * 8;
     if (i >= D) return;
-    const uint4 hw = *reinterpret_cast<const uint4*>(H + m * D + i), rw = *reinterpret_cast<const uint4*>(R + m * D + i);
+    const uint4 hw = *reinterpret_cast<const uint4*>(H + m * D + i);
+    if (R == nullptr) {
+        *reinterpret_cast<uint4*>(out + i) = hw;
+        return;
+    }
+    const uint4 rw = *reinterpret_cast<const uint4*>(R + m * D + i);
     const __nv_bfloat16* hb = reinterpret_cast<const __nv_bfloat16*>(&hw);
     const __nv_bfloat16* rb = reinterpret_cast<const __nv_bfloat16*>(&rw);
     uint4 ow;
