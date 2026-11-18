@@ -143,6 +143,7 @@ pub const Kind = enum(u3) {
 };
 
 const kinds = @typeInfo(Kind).@"enum".field_names.len;
+
 /// The block a call launches with alone (`encodeWhole` counts its batch's launches as columns).
 pub fn kindOf(c: Call) Kind {
     return kindFor(c, 1);
