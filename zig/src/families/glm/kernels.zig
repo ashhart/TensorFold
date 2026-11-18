@@ -14,7 +14,7 @@ pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .top
 pub const igate_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 128, .topk = 8, .out_bf16 = true };
 
 /// The hyper-connection boundary's shape (config.zig refuses other checkpoints).
-pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000 };
+pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000, .topk = route_shape.topk };
 
 pub const max_rows = 16;
 
@@ -42,7 +42,7 @@ pub const Kernels = struct {
     gemv_scores_le32: mtl.Pipeline,
     gemv_scores: mtl.Pipeline,
     hc_expand_10: mtl.Pipeline,
-    hc_core: [6]mtl.Pipeline, // core/hc.zig's names: the expand (or first read) with partial sums, split, in place, parts apart
+    hc_core: hc.Pipes, // core/hc.zig's names: the expand (or first read) with partial sums, split, in place, parts apart, MoE
     kda_rows: mtl.Pipeline,
     kda_rows_tp: mtl.Pipeline, // TP2: the fused step over one Mac's 32 heads
     kda_window: mtl.Pipeline, // windows of 2+ rows: kda_rows' values, the rows' gates, convolutions and norms at once
