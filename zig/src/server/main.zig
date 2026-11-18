@@ -172,8 +172,8 @@ pub fn main(init: std.process.Init) !u8 {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
     };
-    if (std.mem.eql(u8, model_type, "sensenova_loop")) {
-        if (args.drafter) |name| if (!std.mem.eql(u8, name, "none")) return fail("--drafter: SenseNova Loop supports plain decoding only");
+    if (std.mem.eql(u8, model_type, "sensenova_loop") and std.mem.eql(u8, backend, "cuda")) {
+        if (args.drafter) |name| if (!std.mem.eql(u8, name, "none")) return fail("--drafter: SenseNova Loop on CUDA supports plain decoding only");
         args.no_drafts = true;
     }
     const draft = try drafter.select(a, io, init.environ_map, dir, args.drafter, args.no_drafts, backend, &problem) orelse return fail(problem);
