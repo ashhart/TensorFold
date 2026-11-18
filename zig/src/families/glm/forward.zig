@@ -329,11 +329,10 @@ fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
     const lat = @as(usize, H) * RANK * 2; // a row's latent queries
     var dense: u32 = 0;
     while (dense < g.rows and g.pos + dense + 1 <= c.i_topk) dense += 1;
-    if (on(x, "mla_absorb") and dense > 0) scale(x, e, sc.ql.at(g.row0 * lat), sc.qls.at(g.row0 * lat), dense * H, RANK, RANK, RANK, 1.0 / 16.0);
     if (!on(x, "mla_attn")) return;
     const plane = @as(usize, H) * c.i_topk * 2;
     const r: usize = g.row0;
-    if (dense > 0) attendRows(x, e, x.s.mla[mi].keys, sc.qls.at(r * lat), sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(r * lat), g.pos + 1, dense);
+    if (dense > 0) attendRows(x, e, x.s.mla[mi].keys, sc.ql.at(r * lat), 1.0 / 16.0, sc.scores.at(r * plane), sc.probs.at(r * plane), sc.att.at(r * lat), g.pos + 1, dense);
     if (dense < g.rows) attendSparse(x, e, mi, g, dense);
 }
 
