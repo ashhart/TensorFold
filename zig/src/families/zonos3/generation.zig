@@ -64,6 +64,23 @@ pub const Run = struct {
     countdown: usize = 0,
     /// A steered request's deltas by generated frame, and whether its twin takes them too (a speaker twin does).
     steer: ?Steering = null,
+    /// An edit fill: the engine's adapter runs every row, and the frames end at the span-end id.
+    edit: ?Edit = null,
+
+    pub const Edit = struct { end: [C]f32, min_frames: usize };
+
+    /// Makes the run an edit fill right after `begin`, whose prompt the engine ran with `adapt` set.
+    pub fn asEdit(r: *Run, engine: anytype, min_frames: usize) !void {
+        if (r.unconditional != null) return error.EditTakesNoTwin;
+        r.edit = .{ .end = undefined, .min_frames = min_frames };
+        try endOf(engine, &r.edit.?.end);
+    }
+
+    fn endOf(engine: anytype, out: *[C]f32) !void {
+        const T = @TypeOf(engine);
+        if (!@hasDecl(if (@typeInfo(T) == .pointer) @typeInfo(T).pointer.child else T, "lastEnd")) return error.EngineDoesNotEdit;
+        try engine.lastEnd(out);
+    }
 
     pub const Steering = struct {
         ctx: *anyopaque,
@@ -108,7 +125,9 @@ pub const Run = struct {
     pub fn sample(r: *Run) !bool {
         if (r.unconditional) |u| guide(@ptrCast(r.logits), u, r.scale);
         const generated = r.rows.items.len;
-        var row = try sampler.sample(r.gpa, r.logits, r.codes.items, r.codes.items.len, cfg.eoa_id, r.sampling);
+        const span: ?sampler.SpanEnd = if (r.edit) |*ed| .{ .logits = &ed.end, .generated = generated, .min_frames = ed.min_frames } else null;
+        const stop: i32 = if (span != null) cfg.span_end_id else cfg.eoa_id;
+        var row = try sampler.sampleSpan(r.gpa, r.logits, r.codes.items, r.codes.items.len, stop, span, r.sampling);
         coldStart(&row, generated, r.has_audio_prefix);
         try r.codes.append(r.gpa, row);
         var full: [W]i32 = undefined;
@@ -118,7 +137,7 @@ pub const Run = struct {
         var finished = r.rows.items.len >= r.max_frames;
         if (r.eos_frame == null) {
             var last: ?usize = null;
-            for (row, 0..) |code, cb| if (code == cfg.eoa_id) {
+            for (row, 0..) |code, cb| if (code == stop) {
                 last = cb;
             };
             if (last) |cb| {
@@ -139,6 +158,7 @@ pub const Run = struct {
         const steer: []const Steer = if (r.steer) |s| s.at(s.ctx, r.rows.items.len) else &.{};
         try step(engine, last, steer);
         try engine.lastLogits(@ptrCast(r.logits));
+        if (r.edit) |*ed| try endOf(engine, &ed.end);
         if (r.unconditional) |u| {
             engine.swap();
             defer engine.swap();

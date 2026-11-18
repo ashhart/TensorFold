@@ -48,6 +48,19 @@ pub const State = struct {
     tokens: ?tokens.Spec = null,
     /// --short-text: what makes a text short and where its take is cut; null: no text is treated as short.
     short: ?*const short.Config = null,
+    /// The release folder holds the speech-edit adapter: /v1/audio/edit is served.
+    editing: bool = false,
+    /// The release folder holds the forced aligner (web/aligner): edits may read a clip's words from its transcript.
+    aligning: bool = false,
+    /// The release's speaker encoder, when its checkpoint is in the folder: a clip's embedding for the speaker row.
+    speaker: ?*anyopaque = null,
+
+    /// A clip's speaker embedding, on this thread's cores; null without the encoder.
+    pub fn embed(st: *const State, audio: []const f32) !?[req.config.speaker_dim]f32 {
+        if (!@hasDecl(req, "speaker")) return null;
+        const encoder: *const req.speaker.Encoder = @ptrCast(@alignCast(st.speaker orelse return null));
+        return try encoder.embed(std.heap.c_allocator, audio, null);
+    }
 };
 
 pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null };
@@ -63,7 +76,7 @@ pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8
     var rel = try req.release.open(a, io, dir, null);
     defer rel.deinit();
     const st = try a.create(State);
-    st.* = .{ .config = try req.config.Config.load(a, io, rel.lm), .voices = try req.voices.load(a, io, dir, req.reference_frames), .silence = rel.silence, .default = null };
+    st.* = .{ .config = try req.config.Config.load(a, io, rel.lm), .voices = try req.voices.load(a, io, dir, req.reference_frames), .silence = rel.silence, .default = null, .editing = rel.edit_adapter.len != 0, .aligning = rel.aligner.len != 0 };
     const named = !std.mem.eql(u8, default_voice, "default");
     st.default = req.voices.find(st.voices, if (named) default_voice else "savannah");
     if (st.default == null) {
@@ -75,6 +88,7 @@ pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8
         bundle.* = try req.steer_bundle.load(a, io, path);
         st.bundle = bundle;
     }
+    if (@hasDecl(req, "speaker") and rel.speaker_encoder.len != 0) st.speaker = try req.speaker.load(std.heap.c_allocator, io, rel.speaker_encoder);
     if (laci_heads) |path| st.laci = try laci.load(a, io, path);
     st.tokens = try tokens.Spec.load(a, io, rel.lm);
     if (short_text) |path| st.short = try short.load(a, io, path);
@@ -101,29 +115,35 @@ fn referenceCodes(cx: *errors.Cx, value: json.Value) errors.Refused![]const [req
 
 /// `ref_audio` (a base64 WAV, or a data: URL of one) to mono 44.1 kHz as the release prepares a clip, cut to 60 s.
 fn referenceAudio(cx: *errors.Cx, value: json.Value) errors.Refused![]const f32 {
-    const text = value.str() orelse return cx.refuse(error_prefix ++ " ref_audio must be a base64 string holding a WAV file");
-    const payload = if (std.mem.startsWith(u8, text, "data:")) text[(std.mem.indexOfScalar(u8, text, ',') orelse return cx.refuse(error_prefix ++ " ref_audio is a data URL without a payload")) + 1 ..] else text;
+    return clipAudio(cx, value, fields.clip, true);
+}
+
+/// A clip field (a base64 WAV, or a data: URL of one) to mono 44.1 kHz as the release prepares one; `cut`: to 60 s.
+pub fn clipAudio(cx: *errors.Cx, value: json.Value, comptime name: []const u8, cut: bool) errors.Refused![]const f32 {
+    const what = error_prefix ++ " " ++ name;
+    const text = value.str() orelse return cx.refuse(what ++ " must be a base64 string holding a WAV file");
+    const payload = if (std.mem.startsWith(u8, text, "data:")) text[(std.mem.indexOfScalar(u8, text, ',') orelse return cx.refuse(what ++ " is a data URL without a payload")) + 1 ..] else text;
     const decoder = std.base64.standard.Decoder;
-    const size = decoder.calcSizeForSlice(payload) catch return cx.refuse(error_prefix ++ " ref_audio is not valid base64");
+    const size = decoder.calcSizeForSlice(payload) catch return cx.refuse(what ++ " is not valid base64");
     const bytes = try cx.a.alloc(u8, size);
-    decoder.decode(bytes, payload) catch return cx.refuse(error_prefix ++ " ref_audio is not valid base64");
+    decoder.decode(bytes, payload) catch return cx.refuse(what ++ " is not valid base64");
     const wav = @import("core").wav;
     const clip = wav.parse(cx.a, bytes) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
-        else => cx.refuse(error_prefix ++ " ref_audio must be a WAV file: PCM of 8, 16, 24 or 32 bits, or 32-bit float"),
+        else => cx.refuse(what ++ " must be a WAV file: PCM of 8, 16, 24 or 32 bits, or 32-bit float"),
     };
-    if (clip.rate < 8000 or clip.rate > 192000 or clip.rate % 50 != 0) return cx.refuse(error_prefix ++ " ref_audio's sample rate must be a multiple of 50 Hz from 8000 to 192000");
+    if (clip.rate < 8000 or clip.rate > 192000 or clip.rate % 50 != 0) return cx.refuse(what ++ "'s sample rate must be a multiple of 50 Hz from 8000 to 192000");
     const audio = try wav.resample(cx.a, clip.samples, clip.rate, rate);
-    if (audio.len < min_clip) return cx.refuse(error_prefix ++ " ref_audio must be at least half a second long");
+    if (audio.len < min_clip) return cx.refuse(what ++ " must be at least half a second long");
     var peak: f32 = 0;
     for (audio) |x| {
-        if (!std.math.isFinite(x)) return cx.refuse(error_prefix ++ " ref_audio holds samples that are not finite");
+        if (!std.math.isFinite(x)) return cx.refuse(what ++ " holds samples that are not finite");
         peak = @max(peak, @abs(x));
     }
     if (peak > 1) for (audio) |*x| {
         x.* /= peak;
     };
-    return audio[0..@min(audio.len, max_clip)];
+    return if (cut) audio[0..@min(audio.len, max_clip)] else audio;
 }
 
 fn number(v: json.Value) ?f64 {
@@ -158,7 +178,7 @@ fn conditionEntries(cx: *errors.Cx, what: []const u8, raw: ?json.Value) errors.R
 }
 
 /// plan.resolve_condition_buckets: an id wins over a raw value, a row left out is unknown; empty: every row is.
-fn conditions(st: *const State, cx: *errors.Cx, raw: json.Value) errors.Refused![]const u32 {
+pub fn conditions(st: *const State, cx: *errors.Cx, raw: json.Value) errors.Refused![]const u32 {
     const ids = try conditionEntries(cx, fields.buckets, raw.field(fields.buckets));
     const values = try conditionEntries(cx, fields.values, raw.field(fields.values));
     const out = try cx.a.alloc(u32, ids.len);
@@ -220,8 +240,8 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         if (sent != null) return cx.refuse(error_prefix ++ " speaker_embedding needs speaker_mode \"embedding\"");
         break :blk false;
     } else sent != null;
-    if (by_embedding and (own != null or clip != null))
-        return cx.refuse(error_prefix ++ " speaker_mode \"embedding\" takes a voice name or speaker_embedding; a clip's embedding needs the release's speaker encoder, which is not served");
+    if (by_embedding and own != null) return cx.refuse(error_prefix ++ " speaker_mode \"embedding\" takes a voice name, speaker_embedding or ref_audio; codes carry no embedding");
+    if (by_embedding and clip != null and sent != null) return cx.refuse(error_prefix ++ " send ref_audio or speaker_embedding, not both");
     var vector: [req.config.speaker_dim]f32 = undefined;
     if (sent) |value| {
         const message = error_prefix ++ " speaker_embedding must be 192 finite numbers";
@@ -232,7 +252,13 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
             if (!std.math.isFinite(x.*)) return cx.refuse(message);
         }
     }
-    const audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
+    var audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
+    if (by_embedding and clip != null) {
+        // the clip's embedding fills the speaker row; its codes are not a prefix
+        vector = (st.embed(audio) catch return cx.other("the speaker encoder failed on this clip")) orelse
+            return cx.refuse(error_prefix ++ " a clip's embedding needs the release's speaker encoder (speaker_encoders/), which this folder lacks");
+        audio = &.{};
+    }
     const reference: []const [req.config.codebooks]i32 = if (clip != null or sent != null) &.{} else if (own) |value| try referenceCodes(cx, value) else blk: {
         const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice) orelse if (stockVoice(voice)) st.default else null;
         const v = chosen orelse {
@@ -267,7 +293,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const said = if (brief) |sh| sh.text else opened;
     const ids = try tokens.payload(cx, text, st.tokens, said);
     const silence_frames: usize = if (std.mem.startsWith(u8, said, tokens.start_marker)) 0 else req.silence_frames;
-    const speaker: req.prompt.Speaker = if (clip != null) .none else if (by_embedding) .embedding else .{ .reference = reference };
+    const speaker: req.prompt.Speaker = if (by_embedding) .embedding else if (clip != null) .none else .{ .reference = reference };
     const built = req.prompt.build(cx.a, ids, speaker, st.silence, silence_frames) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(error_prefix ++ " the text has nothing to speak"),

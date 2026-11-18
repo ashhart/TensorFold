@@ -12,6 +12,7 @@ the commands. Every subcommand writes float32 / int32 .npy files under OUT, name
     teacher  TEACHER_DIR FEATS.npy OUT the SSL teacher in fp32 on one lane's feature rows
     quantize GENERATOR ACOUSTIC.npy SSL.npy OUT  the quantizer in fp32 on those two runs' rows: the lane's codes
     clip     GENERATOR TEACHER_DIR AUDIO.npy OUT [--seconds S]  a whole clip's codes in fp32, lane by lane
+Speech edits, the speaker encoder and the aligner are dumped by zonos3_reference_edit.py.
 
 The backbone's per-layer dump and the encoder's bf16 production dump come from the publisher's tool unchanged:
     tools/dump_golden.py lm LM_DIR --input-ids OUT/input_ids.npy --dtype f32 --mode full -o DIR

@@ -32,6 +32,7 @@ pub const codebook_size = 4096;
 pub const eoa_id = 4096;
 pub const audio_pad_id = 4097;
 pub const audio_vocab = codebook_size + 2;
+pub const span_end_id = audio_pad_id + 1; // an edit fill's end, a row the speech-edit adapter adds
 pub const frame_width = codebooks + 1;
 pub const text_vocab = 8196; // SuperBPE 8192 + 4; also the text column's padding row
 pub const head_rows = codebooks * audio_vocab; // 40980

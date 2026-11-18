@@ -36,6 +36,9 @@ pub const Weights = struct {
     extra: []f32 = &.{},
     /// The ten audio tables' padding rows summed in codebook order: a text row's embedding beside its text row.
     pad_sum: [D]f32 = @splat(0),
+    /// The first edit-marker text id and how many follow; none without the speech-edit adapter.
+    markers: usize = 0,
+    marker_count: usize = 0,
 
     pub fn deinit(w: *Weights) void {
         for (w.bufs.items) |*b| b.free();
@@ -49,6 +52,17 @@ pub const Weights = struct {
     /// A text row whose id is an extra one: the padding rows' sum plus its row, the embedding sum's last add.
     pub fn extraRow(w: *const Weights, id: usize, out: *[D]f32) void {
         for (out, w.pad_sum, w.extra[(id - w.text_rows) * D ..][0..D]) |*o, pad, x| o.* = pad + x;
+    }
+
+    /// The edit adapter's marker rows, after the extra ones: a prompt's j-th masked span is id markers + j.
+    pub fn addMarkers(w: *Weights, rows: []const f32) !void {
+        const all = try w.gpa.alloc(f32, w.extra.len + rows.len);
+        @memcpy(all[0..w.extra.len], w.extra);
+        @memcpy(all[w.extra.len..], rows);
+        w.markers = w.text_rows + w.extra.len / D;
+        w.marker_count = rows.len / D;
+        w.gpa.free(w.extra);
+        w.extra = all;
     }
 
     /// Text ids this model takes: its table's rows, then the extra ones.
@@ -133,6 +147,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     w.speaker_w = &.{};
     w.speaker_b = &.{};
     w.conditions = @splat(&.{});
+    w.extra = &.{};
+    w.markers = 0;
+    w.marker_count = 0;
     errdefer w.deinit();
     var l: Loader = .{ .gpa = gpa, .d = d, .a = &archive, .w = w };
     var nb: [160]u8 = undefined;
