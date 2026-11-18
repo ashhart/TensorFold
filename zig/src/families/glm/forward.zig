@@ -396,7 +396,7 @@ fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: 
     const sc = x.sc;
     const n = g.rows - first;
     const r: usize = g.row0 + first; // the first sparse row's place in the window
-    selectKeys(x, e, mi, sc.qp.at((r * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(r * c.i_heads * 2), sc.sscore, sc.indices, n, g.pos + first);
+    if (on(x, "mla_select")) selectKeys(x, e, mi, sc.qp.at((r * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(r * c.i_heads * 2), sc.sscore, sc.indices, n, g.pos + first);
     const ql = sc.ql.at(r * c.mla_heads * c.kv_lora * 2);
     const att = sc.att.at(r * c.mla_heads * c.kv_lora * 2);
     if (c.tp > 1) return attendIndexed(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
