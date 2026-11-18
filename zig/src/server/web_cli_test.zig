@@ -56,7 +56,11 @@ fn check(c: Case) !void {
     const target_bin = if (c.remote_bin) try std.fs.path.join(a, &.{ root, "other bin" }) else bin;
     const source = try std.fs.path.join(a, &.{ root, "app-source" });
     try tmp.dir.writeFile(io, .{ .sub_path = "app-source", .data = app_script, .flags = .{ .permissions = .fromMode(0o700) } });
-    if (c.installed) try tmp.dir.writeFile(io, .{ .sub_path = "bin/tensorfold-web", .data = app_script, .flags = .{ .permissions = .fromMode(0o700) } });
+    if (c.installed) try tmp.dir.writeFile(io, .{
+        .sub_path = if (c.remote_bin) "other bin/tensorfold-web" else "bin/tensorfold-web",
+        .data = app_script,
+        .flags = .{ .permissions = .fromMode(0o700) },
+    });
     if (c.uv) try tmp.dir.writeFile(io, .{ .sub_path = "bin/uv", .data = uv_script, .flags = .{ .permissions = .fromMode(0o700) } });
     var env: std.process.Environ.Map = .init(a);
     defer env.deinit();
@@ -90,8 +94,15 @@ fn check(c: Case) !void {
         if (!c.launches) try t.expect(std.mem.indexOf(u8, out.written(), "uv tool install \"" ++ spec ++ "\"") != null);
     } else try t.expectEqualStrings("", out.written());
     const uv_log = tmp.dir.readFileAlloc(io, "uv.log", a, .limited(4096)) catch "";
-    const expected_uv = if (!c.installs) "" else if (c.remote_bin or c.missing_after_install) "tool\ninstall\n" ++ spec ++ "\ntool\ndir\n--bin\n" else "tool\ninstall\n" ++ spec ++ "\n";
-    try t.expectEqualStrings(expected_uv, uv_log);
+    const query_tool_dir = "tool\ndir\n--bin\n";
+    var expected_uv: std.Io.Writer.Allocating = .init(a);
+    defer expected_uv.deinit();
+    if (c.uv and (!c.installed or c.remote_bin)) try expected_uv.writer.writeAll(query_tool_dir);
+    if (c.installs) {
+        try expected_uv.writer.writeAll("tool\ninstall\n" ++ spec ++ "\n");
+        if (c.remote_bin or c.missing_after_install) try expected_uv.writer.writeAll(query_tool_dir);
+    }
+    try t.expectEqualStrings(expected_uv.written(), uv_log);
     const launched = tmp.dir.readFileAlloc(io, "launch.log", a, .limited(4096)) catch "";
     try t.expectEqualStrings(if (c.launches) "/example path/tensorfold\n--port\n9090\ntwo words\n$(untouched);*\n\n" else "", launched);
     try t.expectEqualStrings("wrong-binary", env.get("TENSORFOLD_BIN").?);
@@ -143,4 +154,9 @@ test "web: failed install never launches" {
 
 test "web: missing executable after successful install does not retry" {
     try check(.{ .missing_after_install = true, .asks = true, .installs = true });
+}
+
+test "web: existing uv tool outside PATH launches without prompting or installing" {
+    try check(.{ .installed = true, .remote_bin = true, .interactive = false, .no_prompt = true, .expected = 0, .launches = true });
+    try check(.{ .installed = true, .remote_bin = true, .answer = "yes\n", .expected = 0, .launches = true });
 }
