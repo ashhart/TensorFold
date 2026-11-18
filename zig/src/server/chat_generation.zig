@@ -331,7 +331,7 @@ pub const Generation = struct {
         // No tools either: the route parses a reply's content for call envelopes, so the text never becomes a call.
         const recovered = g.recover and native == null and g.thinking and reasons and reasoning != null and
             reply_text.pyStrip(content).len == 0 and
-            std.mem.eql(u8, reason, "stop") and g.stops.matched(raw) == null and
+            g.endedOnEos(reason, raw, stopped) and
             !g.required and m.stats.grammar == null and
             (g.calls == null or !g.calls.?.streamed) and
             neverClosed(text, g.srv.markers, close_at) and !try g.callIn(reasoning.?);
