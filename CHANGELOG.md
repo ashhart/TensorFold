@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: an oversized scroll delta is refused as a bad request instead of stopping the computer-use helper (#3470). Thanks to @AIFlowML.
+
 - App: returning a parked ticket to Ready releases its previous assignee, so another Room seat can take it (#3469). Thanks to @AIFlowML.
 
 - App: the computer-use key table and request parser are tested on Linux with Swift Testing; the native checks stay on macOS (#3465). Thanks to @AIFlowML.
