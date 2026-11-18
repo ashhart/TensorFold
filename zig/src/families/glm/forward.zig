@@ -127,6 +127,10 @@ pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, plane: usize) void {
 }
 
 pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
+/// glm_mla_norms' arguments: an x_proj row's offsets and widths of the three parts, their eps and the weights' scale.
+const MlaNorms = extern struct { x_stride: u32, kv_at: u32, ik_at: u32, iw_at: u32, kv_width: u32, ik_width: u32, iw_width: u32, kv_eps: f32, ik_eps: f32, iw_scale: f32 };
+/// The indexer weights' scale (exact: a power of two).
+const index_weight_scale: f32 = 1.0 / 64.0;
 const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
 
@@ -313,7 +317,7 @@ pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, r
 /// Rows' indexer weights from their x_proj outputs (a row `xp_stride` apart), into `iw`.
 pub fn indexWeights(x: *const Ctx, e: mtl.ComputeEncoder, xp: Ref, xp_stride: u32, iw: Ref, rows: u32) void {
     const c = x.c;
-    scale(x, e, xp.at((c.q_lora + c.kv_lora + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, 1.0 / 64.0);
+    scale(x, e, xp.at((c.q_lora + c.kv_lora + c.i_dim) * 2), iw, rows, c.i_heads, xp_stride, c.i_heads, index_weight_scale);
 }
 
 /// One stream's rows over its own cache: rows whose keys all fit index_topk attend every key (MLX's unfused attention).
@@ -339,14 +343,9 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     const k = x.k;
     const C = &x.s.mla[mi];
     const RANK = c.kv_lora;
-    rms(x, e, xp.at(c.q_lora * 2), w.kv_norm, C.keys.at(@as(usize, pos) * RANK * 2), rows, RANK, xp_stride, RANK, c.eps);
-    e.setPipeline(k.layer_norm);
-    bind(e, 0, .{ xp.at((c.q_lora + RANK) * 2), w.k_norm_w, w.k_norm_b, C.ik.at(@as(usize, pos) * c.i_dim * 2) });
-    e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(xp_stride), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
-    e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
+    mlaNorms(k, c, e, w, xp, xp_stride, C.keys.at(@as(usize, pos) * RANK * 2), C.ik.at(@as(usize, pos) * c.i_dim * 2), iw, rows);
     const ig = if (rows == 1) k.igate_logits_one else k.igate_logits; // MLX's gemv_t sums, more threadgroups
     moe_route.logits(e, ig, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows);
-    indexWeights(x, e, xp, xp_stride, iw, rows);
     const first = pos / c.kpool;
     const last = (pos + rows) / c.kpool;
     if (last > first) {
@@ -355,6 +354,15 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
         e.setValue([2]u32{ first, last - first }, 4);
         e.dispatchThreads(size(c.i_dim, last - first, 1), size(c.i_dim, 1, 1));
     }
+}
+
+/// Rows' kv norm, indexer key norm and indexer weights from x_proj in one launch (glm_mla_norms), their kernels' bits.
+pub fn mlaNorms(k: *const Kernels, c: *const cfg.Config, e: mtl.ComputeEncoder, w: *const wts.Mla, xp: Ref, xp_stride: u32, keys: Ref, ik: Ref, iw: Ref, rows: u32) void {
+    const R = c.kv_lora;
+    e.setPipeline(k.mla_norms);
+    bind(e, 0, .{ xp, w.kv_norm, keys, w.k_norm_w, w.k_norm_b, ik, iw });
+    e.setValue(MlaNorms{ .x_stride = xp_stride, .kv_at = c.q_lora, .ik_at = c.q_lora + R, .iw_at = c.q_lora + R + c.i_dim, .kv_width = R, .ik_width = c.i_dim, .iw_width = c.i_heads, .kv_eps = c.eps, .ik_eps = 1e-6, .iw_scale = index_weight_scale }, 7);
+    e.dispatchGroups(size(rows, 3, 1), size(((R + 3) / 4 + 31) / 32 * 32, 1, 1)); // rms' threads (all three fit)
 }
 
 /// Every row's 64 heads of q_nope (`qp`, rows qrProj apart) into the latent: qvm on kv_b's key half, or embed_q's qmv.
