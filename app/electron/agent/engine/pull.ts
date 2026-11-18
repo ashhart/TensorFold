@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import type { PullProgress } from '../types'
 import { repoCachedBytes, type EngineBinary } from './paths'
 
@@ -30,6 +31,7 @@ export interface PullHandle {
 }
 
 const KEEP_LINES = 40
+const MAX_LINE_CHARS = 64 * 1024
 
 // Cache bytes are measured, not guessed from the advertised model size. A resumed download's
 // existing bytes establish the baseline and never count as this session's transfer speed.
@@ -118,18 +120,31 @@ export function startPull(opts: PullOptions): PullHandle {
     const spec = step.revision ? `${step.repo}@${step.revision}` : step.repo
     const proc = spawn(opts.binary.command, [...opts.binary.args, 'pull', spec], { env: opts.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     child = proc
-    const onText = (chunk: Buffer) => {
-      for (const raw of chunk.toString('utf8').split(/\r?\n/)) {
-        const line = raw.trimEnd()
-        if (!line.trim()) continue
-        lines.push(line.trim())
+    const onLines = (records: string[]) => {
+      let changed = false
+      for (const raw of records) {
+        const line = raw.trim().slice(-MAX_LINE_CHARS)
+        if (!line) continue
+        lines.push(line)
         if (lines.length > KEEP_LINES) lines.shift()
-        state.lastLine = line.trim()
+        state.lastLine = line
+        changed = true
       }
-      emit()
+      if (changed) emit()
     }
-    proc.stdout?.on('data', onText)
-    proc.stderr?.on('data', onText)
+    const capture = (stream: Readable | null) => {
+      if (!stream) return
+      let pending = ''
+      stream.setEncoding('utf8')
+      stream.on('data', (chunk: string) => {
+        const records = (pending + chunk).split('\n')
+        pending = records.pop()!.slice(-MAX_LINE_CHARS)
+        onLines(records)
+      })
+      stream.once('end', () => onLines([pending]))
+    }
+    capture(proc.stdout)
+    capture(proc.stderr)
     proc.once('error', (error) => reject(new Error(`Could not start tensorfold-native pull: ${error.message}`)))
     proc.once('close', (code, signal) => {
       child = null
