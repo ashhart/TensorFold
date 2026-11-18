@@ -20,7 +20,7 @@ pub const Dims = struct {
     }
 };
 
-/// `plain`: the same tensor stored unquantized (BF16 at these dims), as the BF16 release and transformers' exports keep it.
+/// `plain`: the same tensor unquantized (BF16 at these dims), as the BF16 release and transformers' exports keep it.
 pub const Expected = struct { part: Part, format: Format, dims: Dims, checked: bool = true, plain: ?Dims = null };
 
 fn vec(part: Part, format: Format, a: u64) Expected {
@@ -125,7 +125,7 @@ fn engram(c: *const config.Config, rest: []const u8) ?Expected {
     const g = c.engram;
     const heads: u64 = @as(u64, g.max_ngram - 1) * g.heads; // every n-gram size has `heads` hash heads
     if (eq(rest, "multi_head_embedding.embedding.weight")) {
-        // Tencent's own releases keep BF16 rows under engram_fp8_embedding; the reference rounds them to fp8 as it runs
+        // Tencent's releases keep BF16 rows under engram_fp8_embedding; the reference rounds them as it runs
         var e = mat(.engram, if (g.fp8) .e4m3 else .bf16, 0, g.dim);
         e.plain = e.dims;
         return e;
