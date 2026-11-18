@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: Kanban tickets have a Details action to read and edit their title, description, type, priority and effort, and archived tickets can be restored (#3464). Thanks to @AIFlowML.
+
 - App: Room health shows each Room's worktree path and its Git branch (#3463). Thanks to @AIFlowML.
 
 - App: MCP servers bundled inside macOS apps can load their own frameworks; the bundle stays read-only and other app bundles stay out of reach (#3423). Thanks to @AIFlowML.
