@@ -2,6 +2,7 @@
 pub const config = @import("config.zig");
 pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");
+pub const hc = @import("../../core/hc.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const mtp = @import("mtp.zig");
