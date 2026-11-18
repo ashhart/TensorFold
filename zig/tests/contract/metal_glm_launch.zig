@@ -5,7 +5,9 @@ const contract = @import("contract");
 const bits = @import("metal_glm_bits.zig");
 const Launch = @import("metal_limits.zig").Launch;
 
-const groups = .{ @import("metal_glm_select.zig"), @import("metal_glm_kda.zig") };
+const groups = .{ @import("metal_glm_select.zig"), @import("metal_glm_kda.zig"), @import("metal_glm_attn.zig"), @import("metal_glm_hc.zig"), @import("metal_glm_experts.zig") };
+/// Gate 5's text owners by registration prefix: every group, and the window softmax beside the attention.
+const launches = groups ++ .{@import("metal_glm_attn.zig").softmax};
 
 pub const Suite = struct {
     inner: bits.Suite,
@@ -20,10 +22,10 @@ pub const Suite = struct {
     }
 };
 
-/// Gate 5 for a `glm launch ` registration: the library the loader builds for it, here and before the M5 alike.
+/// Gate 5 for a `glm launch ` registration: the library the loader builds for it here, and its pre-M5 form.
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: contract.limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
     if (!std.mem.startsWith(u8, d.name, "glm launch ")) return null;
-    inline for (groups) |grp| if (std.mem.startsWith(u8, d.name, grp.prefix)) {
+    inline for (launches) |grp| if (std.mem.startsWith(u8, d.name, grp.prefix)) {
         if (!assemble) return @as(Launch, undefined);
         const texts = try grp.limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = texts.here, .pre_m5 = texts.pre_m5 };
