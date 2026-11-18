@@ -4,6 +4,7 @@ const pc = @import("prompt_cache.zig");
 const miss = @import("prompt_cache_miss.zig");
 const fake = @import("prompt_cache_fake.zig");
 const engine_status = @import("engine_status.zig");
+const Image = @import("lanes").stream.Image;
 
 const gpa = std.testing.allocator;
 
@@ -11,6 +12,10 @@ fn tokens(n: usize, seed: u32) []u32 {
     const t = gpa.alloc(u32, n) catch unreachable;
     for (t, 0..) |*x, i| x.* = seed + @as(u32, @intCast(i));
     return t;
+}
+
+fn img(hash: u64) Image {
+    return .{ .pixels = &.{}, .gh = 2, .gw = 2, .at = 4, .tokens = 1, .hash = hash };
 }
 
 test "miss reasons: the names table matches the enum, in order" {
@@ -201,6 +206,82 @@ test "miss reasons: a hit ignores an older, shorter removed prefix on the same p
     try std.testing.expectEqual(miss.Reason.none, l.miss.?.reason);
     try std.testing.expectEqual(@as(u32, 8), l.miss.?.resumed_len);
     try std.testing.expectEqual(@as(u32, 0), l.miss.?.lost);
+}
+
+test "miss reasons: a kept state off the grid says off_grid" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 71);
+    defer gpa.free(prompt);
+    f.at = 3;
+    _ = store.keep(prompt, 3, null, &.{}, &.{}); // a state off the 4-token grid
+    const l = try store.lookup(arena.allocator(), prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(miss.Reason.off_grid, l.miss.?.reason);
+}
+
+test "miss reasons: a kept state between the request's marks says between_marks" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 73);
+    defer gpa.free(prompt);
+    f.at = 3;
+    _ = store.keep(prompt, 3, null, &.{}, &.{}); // 3 is not one of the request's starts
+    const starts = [_]u32{ 4, 8 };
+    const l = try store.lookupUser(arena.allocator(), prompt, 12, 0, 0, 0, &.{}, &starts, &.{});
+    try std.testing.expectEqual(miss.Reason.between_marks, l.miss.?.reason);
+}
+
+test "miss reasons: a different image identity says image_changed" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 79);
+    defer gpa.free(prompt);
+    f.at = 8;
+    const kept = [_]Image{img(7)};
+    const other = [_]Image{img(8)};
+    _ = store.keepBornImages(prompt, 12, 8, null, &.{}, &.{}, &kept);
+    const l = try store.lookupUserImages(arena.allocator(), prompt, 12, 0, 0, 0, &.{}, &.{}, &.{}, &other);
+    try std.testing.expectEqual(miss.Reason.image_changed, l.miss.?.reason);
+}
+
+test "miss reasons: a different pre-image frame says frame_changed" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 83);
+    defer gpa.free(prompt);
+    f.at = 8;
+    const image = [_]Image{img(7)};
+    _ = store.keepBornFrame(prompt, 12, 8, null, &.{}, &.{}, &image, 1);
+    const l = try store.lookupUserFrame(arena.allocator(), prompt, 12, 0, 0, 0, &.{}, &.{}, &.{}, &image, 2);
+    try std.testing.expectEqual(miss.Reason.frame_changed, l.miss.?.reason);
+}
+
+test "miss reasons: an expired kept state says expired" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var f: fake.Fake = .{ .gpa = gpa };
+    var store = pc.Store.init(gpa, f.snapshots(), .{ .planned = true, .grid = 4, .tail = true, .min_prompt = 0, .min_gap = 2, .lookahead = 1 }, 1024);
+    defer store.deinit();
+    const prompt = tokens(12, 89);
+    defer gpa.free(prompt);
+    f.at = 8;
+    _ = store.keep(prompt, 8, null, &.{}, &.{});
+    const saved = store.entries.items[0].saved;
+    store.expired(saved); // hidden from lookups at once, still in by_position for derive
+    const l = try store.lookup(arena.allocator(), prompt, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(miss.Reason.expired, l.miss.?.reason);
 }
 
 fn plan(a: std.mem.Allocator, s: *pc.Store, prompt: []const u32) !pc.Plan {
