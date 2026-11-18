@@ -770,21 +770,33 @@ no CUDA graphs and the sampler runs on the host; none of this is tuned.
 
 ### A test page
 
-`tools/zig/zonos3_test_page.py` serves a small browser page (`zonos3_test_page.html`) and passes its three routes
-(`/v1/voices`, `/v1/models`, `/v1/audio/speech`) through to the model's port, so the page and the API share an
-origin. It uses the standard library only.
+`tools/zig/zonos3_test_page.py` serves a small browser page (`zonos3_test_page.html`) and passes its routes
+(`/v1/voices`, `/v1/models`, `/v1/audio/controls`, `/v1/audio/decoders`, `/v1/audio/speech`, `/v1/audio/edit`,
+`/v1/audio/edit/align`, and the `X-Decoder` and `X-Finish-Reason` headers) through to the model's port, so the page
+and the API share an origin. It uses the standard library only.
 
 ```sh
 tensorfold-native serve RELEASE --parallel 1 --port 8080
 python3 tools/zig/zonos3_test_page.py --upstream 127.0.0.1:8080 --port 8081
 ```
 
-The page lists the server's voices, speaks text with the seed and sampling fields, keeps each take with its player
-and timing, and clones a voice from an audio file: the browser decodes the file, makes a 16-bit mono WAV of its
-first 60 s and sends it as `ref_audio` with each request. It adds no authentication; it binds 127.0.0.1 unless
-`--bind` says otherwise. Checked with curl through the pass-through (the page, the voice list, a spoken reply, a
-cloned reply, a refusal's message passed back, other paths 404); the page's script was parsed but not driven in a
-browser by an automated test.
+- **Speak:** the server's voices or one cloned from an audio file (the browser makes a 16-bit mono WAV of its first
+  60 s), the seed and sampling fields, the language and text normalization, condition values, speaker guidance, the
+  audio decoder, LACI, short texts, start immediately and the voice by its embedding. Pauses are typed as `<0.5s>`
+  and pronunciations as `[[phones]]`; the page sends the release's markers in their place. Steering controls go on
+  the whole reply or on the text selected in the box, with the span placement (character rate or reading), the
+  hold and controls guidance; a voice control switches the request to the voice by its embedding. A JSON box adds
+  any other field. Each take keeps its player, timing and settings.
+- **Edit a recording:** a file, or a take ("edit this"), with what it says and what it should say, or the seconds to
+  replace; takes, seed and decoder; "find the words' times" shows the aligner's timings. Each edited take is listed
+  with its seed (read from the reply's text, as a JSON number would round a 64-bit seed) and the regions replaced.
+
+It adds no authentication; it binds 127.0.0.1 unless `--bind` says otherwise. Checked by driving it in headless
+Chromium against the served build: the lists filled (29 voices, 2 decoders, 65 controls, 44 languages); a plain
+reply; a reply with a pronunciation group, a pause, a speaking rate, `full_mr`, LACI, a whole-reply control and a
+span on a word after both markers sent as typed (the span's positions counted on the text sent, and found to cover
+that word); "find the words' times"; an edit of a take; no console errors; no sideways scrolling at 390 px, light
+or dark.
 
 ### Repo checks
 
