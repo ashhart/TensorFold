@@ -147,6 +147,23 @@ def main() -> int:
         ],
     })
 
+    # the namespaced-tools server: one level of namespaces, whole and streamed, on its own step
+    ns_tools = [{"type": "namespace", "name": "weather", "description": "weather tools",
+                 "tools": [{"type": "function", "name": "get_weather"}]}]
+    steps.append({
+        "kind": "serve",
+        "args": [],
+        "env": {},
+        "cases": [
+            {"group": "responses", "name": "namespace-tools",
+             "raws": raw_bytes([corpus.post("/v1/responses", {"input": "x @script=ns_tool", "tools": ns_tools})]), "opts": {}},
+            {"group": "responses", "name": "namespace-tools-stream",
+             "raws": raw_bytes([corpus.post("/v1/responses",
+                                            {"input": "x @script=ns_tool", "stream": True, "tools": ns_tools})]), "opts": {}},
+        ],
+        "then": [{"kind": "terminate"}],
+    })
+
     # The responses group's id-following requests stay templates; the id comes from an earlier reply, resolved here.
     doc = {"steps": steps}
     (GOLDEN / "cases.json").write_text(json.dumps(doc))
