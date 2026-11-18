@@ -165,6 +165,8 @@ pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 pub const glm_kda_window = @embedFile("glm_kda_window.metal");
 /// And on two threadgroups a head (their value columns), then each head's norm: kda_rows' values (Ultra-class GPUs).
 pub const glm_kda_parts = @embedFile("glm_kda_parts.metal");
+/// The router's logits for a one-row window, appended to core/moe_route.metal at GLM's two shapes.
+pub const glm_route_one = @embedFile("glm_route_one.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
 pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
