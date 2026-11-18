@@ -32,6 +32,8 @@ const Chain = struct {
     slot: u32,
     start: u64,
     rows: u32,
+    /// its pass's chain runs on the GPU (a greedy window)
+    gpu: bool,
     taps: mtl.Buffer,
     cb: mtl.CommandBuffer,
     /// the window's first rows the lanes asked ingested: the chain's own ingest when its picks accepted as many
@@ -123,11 +125,11 @@ pub const Early = struct {
         defer pool.pop();
         const cb = x.queue.commandBuffer();
         // a buffer never committed never runs: the rings stay as they are
-        e.encode(cb, logits, logits_off, taps, n, skew, if (keyed) g.sampling.? else null) catch return;
+        e.encode(cb, logits, logits_off, taps, g.start, n, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
         e.stats.skewed += @intFromBool(skew);
         e.stats.keyed += @intFromBool(keyed);
-        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .taps = taps, .cb = cb.retain() };
+        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .gpu = x.mk != null, .taps = taps, .cb = cb.retain() };
         e.stats.queued += 1;
     }
 
@@ -139,6 +141,8 @@ pub const Early = struct {
         const ids = e.state.slice(u32, R);
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
         if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
+        // the GPU chain's draws for the next ask: its first draft's position is the accept's (pos_base + accepted)
+        if (x.mk) |*m| m.o.asks()[0] = dspark.askOf(host.dspark.Params.of(g.sampling, 0));
         const all = e.plans.slice(i32, @as(usize, R) * Plan.ints);
         for (0..n) |acc| {
             const m = all[acc * Plan.ints ..][0..Plan.ints];
@@ -156,24 +160,26 @@ pub const Early = struct {
     }
 
     /// The chain's encoders: picks (keyed by `smp`) and acceptance, every window row's ingest (serial), the pass.
-    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, n: u32, skew: bool, smp: ?lanes.Sampling) !void {
+    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, start: u64, n: u32, skew: bool, smp: ?lanes.Sampling) !void {
         const x = e.x;
         const se = cb.compute(.serial);
         e.picks.encode(se, .{ .buf = logits, .off = logits_off }, .{ .buf = e.state, .off = picks_at }, .{ .buf = e.state, .off = bases_at }, n, x.c.vocab, smp);
         se.setPipeline(e.picks.accept);
-        se.setValue([3]u32{ n, Plan.ints, @intFromBool(skew) }, 0);
+        const pos_base = start + 2;
+        se.setValue([5]u32{ n, Plan.ints, @intFromBool(skew), @truncate(pos_base), @truncate(pos_base >> 32) }, 0);
         se.setBuffer(e.state, tokens_at, 1);
         se.setBuffer(e.state, picks_at, 2);
         se.setBuffer(e.plans, 0, 3);
         se.setBuffer(x.plan.buf, 0, 4);
         se.setBuffer(x.b.ids.buf, x.b.ids.off, 5);
         se.setBuffer(e.state, result_at, 6);
+        if (x.mk) |*m| se.setBuffer(m.o.buf, @import("markov.zig").Out.asks_at + 8, 7) else se.setBuffer(e.state, result_at + 8, 7);
         se.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(threads, 1, 1));
         const ok = x.encodeIngest(se, .{ .buf = taps, .rows = n }, n);
         se.end();
         try ok;
         const ce = cb.compute(.concurrent);
-        const l: dspark.Launch = .{ .rows = x.c.dspark_block, .asks = &.{} };
+        const l: dspark.Launch = .{ .rows = x.c.dspark_block, .asks = &.{}, .gpu = x.mk != null };
         const done = x.encodeAll(ce, &l);
         ce.end();
         try done;
@@ -211,7 +217,7 @@ pub const Early = struct {
         const m = ch.deferred.?;
         if (got.acc + 1 == m and got.bonus == ask.anchor) {
             e.keep(ch, m);
-            const l: dspark.Launch = .{ .rows = e.x.c.dspark_block, .asks = (&ask)[0..1] };
+            const l: dspark.Launch = .{ .rows = e.x.c.dspark_block, .asks = (&ask)[0..1], .gpu = ch.gpu };
             try e.x.finish(&l, out);
             e.stats.used += 1;
             return;

@@ -44,5 +44,9 @@ pub const hc = @embedFile("hc.metal");
 pub const glue_tmp = @embedFile("glue_tmp.metal");
 /// DeepSeek-V4.1 drafts behind a verify window: its greedy picks, the drafts they accept, the drafter's staging.
 pub const early = @embedFile("early.metal");
+/// DeepSeek-V4.1's DSpark Markov chain over the whole vocabulary on the GPU (greedy drafts and confidences).
+pub const markov = @embedFile("markov.metal");
+/// DeepSeek-V4.1's keyed draws on the GPU (the host sampler's keys and Gumbel noise), prepended to early and markov.
+pub const keyed = @embedFile("keyed.metal");
 /// DeepSeek V4.1's vision tower: epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge.
 pub const vision = @embedFile("vision.metal");

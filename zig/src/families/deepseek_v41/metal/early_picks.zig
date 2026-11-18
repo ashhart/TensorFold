@@ -16,7 +16,7 @@ pub const Picks = struct {
     accept: mtl.Pipeline,
 
     pub fn init(device: mtl.Device) !Picks {
-        const lib = try mtl.Library.fromSource(device, sources.dsv41.early, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, sources.dsv41.keyed ++ sources.dsv41.early, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const pick = try mtl.Pipeline.init(device, lib, "tf_dsv41_early_pick", false);
         errdefer pick.deinit();
