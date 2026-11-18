@@ -435,8 +435,14 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
     e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
     const sel = SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() };
+    if (most > select_cap and most <= select_marks) { // between them glm_index_select's one group a row is quicker
+        e.setPipeline(k.index_select);
+        bind(e, 0, .{ scores, indices });
+        e.setValue(sel, 2);
+        return e.dispatchGroups(size(n, 1, 1), size(1024, 1, 1));
+    }
     const words = st.selectWords(x.s.cap, c.kpool);
-    if (most > select_cap) { // past CAP blocks: each span's blocks at or above the row's sampled floor (glm_select.metal)
+    if (most > select_cap) { // past `select_marks` blocks: each span's blocks at or above the row's sampled floor
         e.setPipeline(k.select_mark);
         bind(e, 0, .{ scores, x.sc.bits });
         e.setValue(sel, 2);
@@ -453,6 +459,7 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
 
 /// glm_select.metal's CAP (the merge's candidates; shorter rows select whole) and SPAN (a mark group's blocks).
 const select_cap = 3072;
+const select_marks = 8192; // blocks (32,768 tokens) past which marking and merging beat one group a row (M5 Ultra)
 const select_span = 4096;
 const select_threads = 512; // a merge group's threads (T2)
 
