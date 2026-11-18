@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: downloader diagnostics are assembled per stream with split UTF-8 intact and an unterminated final line flushed before the exit is handled; a bounded tail keeps long diagnostics usable (#3793, fixes #3792). Thanks to @AIFlowML.
+
 - Desktop: the Hub check and local model library recognize Spark's declared BF16 dtype when a config has no quantization or compression field, while still comparing the detected format with the active engine's capabilities (#3791, fixes #3789). Thanks to @AIFlowML.
 
 - Tests: the loopback conformance fixture sets its listen backlog explicitly so a concurrent burst does not lose connections while handler threads start; the same token-equality checks still run (#3784, fixes #3782). Thanks to @AIFlowML.
