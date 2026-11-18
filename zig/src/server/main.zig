@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
     if (try engines.environment(a, args)) |why| return fail(why);
     // TENSORFOLD_PARALLEL names the default lanes once the environment check passed; the flag wins.
-    if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").getenv("TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
+    if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").environment.Process.get(.{}, "TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
     const receipt = @import("core").startup_receipt;
     receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
     defer receipt.disable();
