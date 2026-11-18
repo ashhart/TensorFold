@@ -2,20 +2,45 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Defines: TF_D (stream width, multiple of 1024), TF_ITERS (Sinkhorn iterations), TF_HC_EPS_INT (split's eps in 1e-9).
+// Defines: TF_D (stream width, 1024s), TF_ITERS, TF_HC_EPS_INT (split's eps in 1e-9), TF_HC_TOPK (a MoE's picks).
 constant constexpr int S = 4, F = S * TF_D, MIX = (2 + S) * S, SLICES = F / 1024, PARTS = MIX + 1;
 
 #pragma clang fp contract(off)
 inline float hc_sq_acc(float acc, float v) { return v * v + acc; }
 inline float hc_add_nc(float a, float b) { return a + b; }
+inline float hc_mul_add(float acc, float a, float b) { return a * b + acc; }
 #pragma clang fp contract(on)
 
+// A thread's 4 branch columns: BRANCH's, or (MOE) glm's combine of a MoE's rows BRANCH [rows, topk + 1, D] by W.
+template <bool MOE>
+inline void hc_branch4(const device bfloat* BRANCH, const device float* W, int r, int d, thread float* b) {
+  if (!MOE) {
+    for (int i = 0; i < 4; i++) b[i] = float(BRANCH[size_t(r) * TF_D + d + i]);
+    return;
+  }
+  const device bfloat4* y = (const device bfloat4*)(BRANCH + size_t(r) * (TF_HC_TOPK + 1) * TF_D + d);
+  const bfloat4 y0 = y[0];
+  float acc[4];
+  for (int i = 0; i < 4; i++) acc[i] = W[r * TF_HC_TOPK] * float(y0[i]);
+  for (int k = 1; k < TF_HC_TOPK; k++) {
+    const bfloat4 yk = y[k * (TF_D / 4)];
+    const float w = W[r * TF_HC_TOPK + k];
+    for (int i = 0; i < 4; i++) acc[i] = hc_mul_add(acc[i], w, float(yk[i]));
+  }
+  const bfloat4 ys = y[TF_HC_TOPK * (TF_D / 4)];
+  for (int i = 0; i < 4; i++) {
+    const bfloat v = bfloat(acc[i]) + ys[i];
+    b[i] = float(v);
+  }
+}
+
 // (SLICES, rows) of 256: slice j's thread t expands 1024 j + 4 t..; squares + 24 mixes into PART [rows, SLICES, 25].
-template <bool EXPAND>
+template <bool EXPAND, bool MOE = false>
 [[kernel]] void tf_hc_expand_mix(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                              const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                              const device uint4* FNP [[buffer(4)]], device bfloat* XNEW [[buffer(5)]],
-                             device float* PART [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
+                             device float* PART [[buffer(6)]], const device float* W [[buffer(7)]],
+                             uint2 tg [[threadgroup_position_in_grid]],
                              uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                              uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float red[8][PARTS];
@@ -24,12 +49,17 @@ template <bool EXPAND>
   const device bfloat* xo = XOLD + size_t(r) * F;
   float vals[4];
   float ss = 0.0f;
+  float br[4];
+  if (EXPAND) {
+    const int f0 = 1024 * j + 4 * int(t), s0 = f0 / TF_D; // a thread's 4 columns: one stream's
+    hc_branch4<MOE>(BRANCH, W, r, f0 - s0 * TF_D, br);
+  }
   for (int tn = 0; tn < 4; tn++) {
     const int f = 1024 * j + 4 * int(t) + tn;
     float v;
     if (EXPAND) {
       const int s = f / TF_D, d = f - s * TF_D;
-      const float y = POST[r * S + s] * float(BRANCH[size_t(r) * TF_D + d]);
+      const float y = POST[r * S + s] * br[tn];
       const device float* c = COMB + r * S * S;
       float mm = c[0 * S + s] * float(xo[0 * TF_D + d]);
       mm = fma(c[1 * S + s], float(xo[1 * TF_D + d]), mm);
@@ -78,13 +108,15 @@ template <bool EXPAND>
 
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
+template [[host_name("tf_hc_expand_mix_moe")]] [[kernel]] decltype(tf_hc_expand_mix<true, true>) tf_hc_expand_mix<true, true>;
 
 // tf_hc_expand_mix's parts on MIX / 4 groups a slice (z: 4 mixes; z 0 also squares, streams): the same sums, order.
-template <bool EXPAND>
+template <bool EXPAND, bool MOE = false>
 [[kernel]] void tf_hc_expand_mix_parts(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                                    const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                                    const device uint4* FNP [[buffer(4)]], device bfloat* XNEW [[buffer(5)]],
-                                   device float* PART [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
+                                   device float* PART [[buffer(6)]], const device float* W [[buffer(7)]],
+                                   uint3 tg [[threadgroup_position_in_grid]],
                                    uint3 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                                    uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float red[8][5];
@@ -93,12 +125,17 @@ template <bool EXPAND>
   const device bfloat* xo = XOLD + size_t(r) * F;
   float vals[4];
   float ss = 0.0f;
+  float br[4];
+  if (EXPAND) {
+    const int f0 = 1024 * j + 4 * int(t), s0 = f0 / TF_D; // a thread's 4 columns: one stream's
+    hc_branch4<MOE>(BRANCH, W, r, f0 - s0 * TF_D, br);
+  }
   for (int tn = 0; tn < 4; tn++) {
     const int f = 1024 * j + 4 * int(t) + tn;
     float v;
     if (EXPAND) {
       const int s = f / TF_D, d = f - s * TF_D;
-      const float y = POST[r * S + s] * float(BRANCH[size_t(r) * TF_D + d]);
+      const float y = POST[r * S + s] * br[tn];
       const device float* c = COMB + r * S * S;
       float mm = c[0 * S + s] * float(xo[0 * TF_D + d]);
       mm = fma(c[1 * S + s], float(xo[1 * TF_D + d]), mm);
@@ -148,6 +185,7 @@ template <bool EXPAND>
 
 template [[host_name("tf_hc_expand_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<true>) tf_hc_expand_mix_parts<true>;
 template [[host_name("tf_hc_first_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<false>) tf_hc_expand_mix_parts<false>;
+template [[host_name("tf_hc_expand_mix_parts_moe")]] [[kernel]] decltype(tf_hc_expand_mix_parts<true, true>) tf_hc_expand_mix_parts<true, true>;
 
 // In-place pending branch to the streams (one prompt buffer): TF_D / 4 a row, 4 stream columns each, read before write.
 [[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],

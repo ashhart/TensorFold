@@ -21,6 +21,11 @@ comptime {
 
 /// MoE block (shared expert, route, routed experts, combine); expert parallel: our experts, sent, the peer's received.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    _ = block(x, e, w, x_in, rows, false);
+}
+
+/// The block; `leave`: on the generated kernels' path the next boundary's expand takes the combine (true if it did).
+pub fn block(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, leave: bool) bool {
     std.debug.assert(rows <= st.max_rows);
     const c = x.c;
     const k = x.k;
@@ -34,7 +39,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.sendRows(e, sc.yp, sc.wts, rows); // with its begin
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.combine == 0) ep.receiveRows(e, sc.ys, sc.branch, rows);
-        return;
+        return false;
     };
     if (x.ep) |ep| {
         if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
@@ -47,13 +52,14 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0) {
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
-        if (s & Class.combine != 0 or !on(x, "combine")) return;
+        if (s & Class.combine != 0 or !on(x, "combine")) return false;
+        if (leave) return true;
         e.setPipeline(k.combine_0);
         bind(e, 0, .{ sc.ye, sc.ye, sc.wts });
         shape(e, 3, .{ rows, top });
         bind(e, 4, .{sc.branch});
         e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
-        return;
+        return false;
     } else if (x.k.wide != null and wide.moeOne(parts(w)) and s & (Class.shared | Class.routed) == 0 and
         on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down"))
     {
@@ -74,12 +80,13 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
     }
-    if (s & Class.combine != 0 or !on(x, "combine")) return;
+    if (s & Class.combine != 0 or !on(x, "combine")) return false;
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ sc.ys, sc.ye, sc.wts });
     shape(e, 3, .{ rows, top });
     bind(e, 4, .{sc.branch});
     e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+    return false;
 }
 
 fn parts(w: *const wts.Moe) wide.Moe {
