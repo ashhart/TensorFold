@@ -1,4 +1,4 @@
-//! Hy4-flash family host checks: config. No CUDA, no Metal, no GPU.
+//! Hy4-flash family host checks: config, layer plan, weight map and refusals. No CUDA, no Metal, no GPU.
 const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
@@ -7,6 +7,6 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         .target = target,
     });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
-    b.step("test-hy4-flash-host", "Hy4-flash family package: config and its refusals").dependOn(&run.step);
+    b.step("test-hy4-flash-host", "Hy4-flash family package: config, layer plan, weight map and refusals").dependOn(&run.step);
     test_step.dependOn(&run.step);
 }
