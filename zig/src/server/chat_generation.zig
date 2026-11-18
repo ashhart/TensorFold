@@ -317,13 +317,9 @@ pub const Generation = struct {
             content = h.content;
             reasoning = h.reasoning;
         }
-        // A reply that ended on its own end-of-sequence inside a think block it never closed still
-        // wrote an answer: give its text to the content too, so no route returns an empty reply.
+        // An unclosed-think reply that ended on its own EOS still wrote an answer: also surface its text as content.
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
-        // A reply that ended on its own end-of-sequence inside a think block it never closed still
-        // wrote an answer: give its text to the content too, so no route returns an empty reply.
-        // Only a reply that was asked to reason: a client that turned thinking off gets no scratch text.
-        // No tools either: the route parses a reply's content for call envelopes, so the text never becomes a call.
+        // Recovery only when reasoning was asked (thinking on, no tools, no grammar): the unclosed-think EOS reply's text becomes content.
         const recovered = g.recover and native == null and g.thinking and reasons and reasoning != null and
             reply_text.pyStrip(content).len == 0 and
             g.endedOnEos(reason, raw, stopped) and
