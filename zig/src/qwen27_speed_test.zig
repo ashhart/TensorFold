@@ -41,11 +41,11 @@ test "qwen27 speed: secondary tap chunks preserve source indices, guards, tails 
 test "qwen27 speed: prompt parts fit the actual fused or unfused attention plan" {
     var parents: [2048]i32 = undefined;
     for (&parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
-    for ([_]bool{ true, false }) |tensor| for ([_]bool{ true, false }) |fuse| {
-        const geometry = planning.Geometry{ .shared_prefix = tensor, .fuse_chain = fuse };
+    for ([_]bool{ true, false }) |tensor| for ([_]bool{ true, false }) |fuse| for ([_]bool{ false, true }) |wide| {
+        const geometry = planning.Geometry{ .shared_prefix = tensor, .fuse_chain = fuse, .wide_prompt = wide };
         for ([_]u32{ 16, 128, 129, 512, 2048 }) |requested| {
             const part = geometry.promptRows(requested);
-            const want = @min(requested, @as(u32, if (fuse) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
+            const want = @min(requested, @as(u32, if (fuse and (tensor or wide)) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
             try std.testing.expectEqual(want, part);
             for ([_]u32{ 128, 129, 512, 2051 }) |length| {
                 var at: u32 = 0;

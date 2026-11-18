@@ -6,10 +6,10 @@ pub fn requested(generation: u32, routed: bool, value: ?[]const u8) u32 {
     return requestedModel(generation, routed, false, value);
 }
 
-/// SenseNova-Loop opens 2,048-row prompt chunks from M3 (gen 15); Qwen3.5 keeps 512 below M5 until re-measured.
+/// SenseNova-Loop opens 2,048-row prompt chunks from M3 (gen 15); Qwen3.5 keeps 2,048 on gen 17 and 512 elsewhere.
 pub fn requestedModel(generation: u32, routed: bool, looped: bool, value: ?[]const u8) u32 {
-    const min_wide: u32 = if (looped) 15 else 17;
-    const default: u32 = if (routed) 1024 else if (generation >= min_wide) 2048 else 512;
+    const wide = if (looped) generation >= 15 else generation == 17;
+    const default: u32 = if (routed) 1024 else if (wide) 2048 else 512;
     return override(value) orelse default;
 }
 
