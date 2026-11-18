@@ -183,7 +183,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     p.input.id = id;
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
-    var asked: cancel_ids.Entry = .{};
+    var asked: cancel_ids.Entry = .{ .owner = gone.conn.key_digest };
     const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);

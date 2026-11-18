@@ -160,7 +160,7 @@ fn warm(s: *Session, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Reques
         .refused => |r| return refuse(s, out.stream_id, Problem.fromPayload(r.status, r.payload)),
         .prepared => |p| {
             s.srv.release(p.preparing, p.request);
-            const final = responses.warmup(s.srv, a, cx, body, t, out.sink(), p.prompt_len, opts);
+            const final = responses.warmup(s.srv, a, cx, body, t, out.sink(), p.prompt_len, opts, s.conn.key_digest);
             return .{ .status = if (final == null and s.gone and !out.sent) 0 else 200, .final = final, .added = t.added };
         },
     }
@@ -236,7 +236,7 @@ const SocketHistory = struct {
             return copy;
         }
         if (h.store_flag) {
-            const stored: store_mod.History = .{ .store = &h.session.srv.store, .io = h.session.srv.io };
+            const stored: store_mod.History = .{ .store = &h.session.srv.store, .io = h.session.srv.io, .owner = h.session.conn.key_digest };
             if (stored.lookup(cx, rid.string)) |messages| {
                 h.earlier = messages;
                 return messages;
