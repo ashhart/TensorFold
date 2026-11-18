@@ -176,50 +176,41 @@ inline float4 hc_col4(float4 v) {
   return v + simd_shuffle_xor(v, ushort(2));
 }
 
-// 1024 a row: slice sums in order, mixes by 1/norm, then the split (pre, post, Sinkhorn), streams collapsed, normed.
+// A row's slice sums for parts 0..24 in order (lane l: part l), the mixes by 1/norm on lanes 0..23: the split's values.
+inline float hc_mix_lane(const device float* PART, int r, uint lane, float eps) {
+  float a = 0.0f;
+  if (lane < (uint)PARTS) {
+    const device float* p = PART + size_t(r) * SLICES * PARTS + lane;
+    a = p[0];
+    for (int j = 1; j < SLICES; j++) a += p[j * PARTS];
+  }
+  const float sq = simd_shuffle(a, ushort(MIX));
+  return a * metal::precise::rsqrt(sq / float(F) + eps);
+}
+
+// (rows, 2) of 1024: group 0 collapses by pre and norms (one barrier), group 1 post and the comb; one group's bits.
 [[kernel]] void tf_hc_split(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                         const constant float* SCALE [[buffer(2)]], const device float* BASEV [[buffer(3)]],
                         const device bfloat* NORMW [[buffer(4)]], const constant float* EPS [[buffer(5)]],
                         device bfloat* NORMED [[buffer(6)]], device float* POST_OUT [[buffer(7)]],
-                        device float* COMB_OUT [[buffer(8)]], uint tg [[threadgroup_position_in_grid]],
-                        uint t [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                        device float* COMB_OUT [[buffer(8)]], uint2 tg [[threadgroup_position_in_grid]],
+                        uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                         uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr float HC_EPS = TF_HC_EPS_INT * 1e-9;
-  const int r = int(tg);
-  threadgroup float tot[PARTS];
-  threadgroup float mixes[MIX];
-  threadgroup float red[32];
-  threadgroup float pre_s[S];
-  threadgroup float inv_s[1];
-  device const bfloat* xs = X + size_t(r) * F;
-  float xv[4][S]; // this thread's 4 columns of the streams, loaded while the mixes and the Sinkhorn run
-  for (int i = 0; i < 4; ++i) {
-    for (int s = 0; s < S; ++s) xv[i][s] = float(xs[s * TF_D + int(t) * 4 + i]);
-  }
-  if (int(t) < PARTS) {
-    const device float* p = PART + size_t(r) * SLICES * PARTS + t;
-    float a = p[0];
-    for (int j = 1; j < SLICES; j++) a += p[j * PARTS];
-    tot[t] = a;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (int(t) < MIX) mixes[t] = tot[t] * metal::precise::rsqrt(tot[MIX] / float(F) + EPS[0]);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
+  const uint t = tpos.x;
+  const int r = int(tg.x);
+  const uint llane = metal::min(lane, (uint)(S - 1));
+  if (tg.y == 1) { // post and the Sinkhorn comb
+    if (sg != 0) return;
     constexpr int BASE_OFF = 2 * S;
-    const float pre_scale = SCALE[0], post_scale = SCALE[1], comb_scale = SCALE[2];
+    const float mix = hc_mix_lane(PART, r, lane, EPS[0]);
+    const float post_scale = SCALE[1], comb_scale = SCALE[2];
     const float active = (lane < (uint)S) ? 1.0f : 0.0f;
-    const uint llane = metal::min(lane, (uint)(S - 1));
-    const float pre_z = mixes[llane] * pre_scale + BASEV[llane];
-    const float post_z = mixes[S + llane] * post_scale + BASEV[S + llane];
-    const float pre_v = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + HC_EPS;
+    const float post_z = simd_shuffle(mix, ushort(S + llane)) * post_scale + BASEV[S + llane];
     const float post_v = 2.0f / (1.0f + metal::fast::exp(-post_z));
-    if (lane < (uint)S) {
-      pre_s[lane] = pre_v;
-      POST_OUT[r * S + lane] = post_v;
-    }
-    const float4 m4 = float4(mixes[BASE_OFF + llane * S], mixes[BASE_OFF + llane * S + 1], mixes[BASE_OFF + llane * S + 2],
-                             mixes[BASE_OFF + llane * S + 3]);
+    if (lane < (uint)S) POST_OUT[r * S + lane] = post_v;
+    const float4 m4 = float4(simd_shuffle(mix, ushort(BASE_OFF + llane * S)), simd_shuffle(mix, ushort(BASE_OFF + llane * S + 1)),
+                             simd_shuffle(mix, ushort(BASE_OFF + llane * S + 2)), simd_shuffle(mix, ushort(BASE_OFF + llane * S + 3)));
     float4 v = (m4 * comb_scale + *(const device float4*)(BASEV + BASE_OFF + llane * S)) * active;
     const float row_max = metal::max(metal::max(v.x, v.y), metal::max(v.z, v.w));
     const float4 e = metal::fast::exp(v - row_max) * active;
@@ -232,9 +223,24 @@ inline float4 hc_col4(float4 v) {
       rr *= col_inv;
     }
     if (lane < (uint)S) *(device float4*)(COMB_OUT + r * S * S + lane * S) = rr;
+    return;
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float p0 = pre_s[0], p1 = pre_s[1], p2 = pre_s[2], p3 = pre_s[3];
+  threadgroup float red[32];
+  device const bfloat* xs = X + size_t(r) * F;
+  float xv[4][S]; // this thread's 4 columns of the streams, loaded while the mixes run
+  for (int i = 0; i < 4; ++i) {
+    for (int s = 0; s < S; ++s) xv[i][s] = float(xs[s * TF_D + int(t) * 4 + i]);
+  }
+  float p0, p1, p2, p3;
+  { // every simdgroup its own pre (lanes 0..3), the one-group split's sums
+    const float mix = hc_mix_lane(PART, r, lane, EPS[0]);
+    const float pre_z = mix * SCALE[0] + BASEV[llane];
+    const float pre_v = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + HC_EPS;
+    p0 = simd_shuffle(pre_v, ushort(0));
+    p1 = simd_shuffle(pre_v, ushort(1));
+    p2 = simd_shuffle(pre_v, ushort(2));
+    p3 = simd_shuffle(pre_v, ushort(3));
+  }
   float xc[4];
   float acc = 0.0f;
   for (int i = 0; i < 4; ++i) {
@@ -243,17 +249,11 @@ inline float4 hc_col4(float4 v) {
     acc = hc_sq_acc(acc, xc[i]);
   }
   acc = simd_sum(acc);
-  if (sg == 0) red[lane] = 0.0f;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (lane == 0) red[sg] = acc;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    const float a = simd_sum(red[lane]);
-    if (lane == 0) inv_s[0] = metal::precise::rsqrt(a / float(TF_D) + EPS[0]);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float inv = metal::precise::rsqrt(simd_sum(red[lane]) / float(TF_D) + EPS[0]); // every simdgroup the same
   for (int i = 0; i < 4; ++i) {
     const int d = int(t) * 4 + i;
-    NORMED[size_t(r) * TF_D + d] = NORMW[d] * bfloat(xc[i] * inv_s[0]);
+    NORMED[size_t(r) * TF_D + d] = NORMW[d] * bfloat(xc[i] * inv);
   }
 }
