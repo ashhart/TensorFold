@@ -265,21 +265,30 @@ pub const Metal = struct {
         try b.picked(first, rows, out);
     }
 
-    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
-    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
-        const metric = mtl.pass_metrics.phase(.sampling);
-        defer metric.end();
+    fn encodeArgmaxRange(b: *const Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = b.runner.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
         var at = first;
         while (at < first + rows) : (at += contract.max_rows) {
             const n = @min(first + rows - at, contract.max_rows);
             try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
         }
+    }
+
+    fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
+        const b = self(ptr);
+        try b.encodeArgmaxRange(e, 0, b.rows);
+    }
+
+    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
+    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
+        const metric = mtl.pass_metrics.phase(.sampling);
+        defer metric.end();
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = b.runner.model.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        try b.encodeArgmaxRange(e, first, rows);
         e.end();
         cb.commit();
         cb.wait();
@@ -466,18 +475,23 @@ pub const Metal = struct {
         b.rows = total;
         if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
         const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
+        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
+        var greedy = false;
+        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
+        const tail_argmax = r.model.config.looped and !fused and greedy and r.reduce == null;
         std.debug.assert(r.tail == null);
-        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
+        if (fused) {
+            r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
+        } else if (tail_argmax) {
+            r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
+        }
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
-        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
-        var greedy = false;
-        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
             if (w.stream.sampling != null or w.masks.len > 0) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks) else try b.picked(first, rows, o.sampled);

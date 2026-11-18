@@ -40,16 +40,32 @@ fn linears(w: q.gpu_weights.Weights, c: Class, out: []Linear) []Linear {
             },
             .head => unreachable,
         };
-        if (x) |v| {
+        if (x) |v| if (v.n > 0) {
             out[n] = v;
             n += 1;
-        }
+        };
     }
     return out[0..n];
 }
 
 /// Weight bytes a call reads (codes, bf16 scales and biases), and its n*k by code width.
-fn bytes(l: Linear, by_bits: *[9]usize) usize {
+fn bytes(l: Linear, by_bits: *[17]usize) usize {
+    if (comptime @hasField(Linear, "sn")) {
+        if (l.sn) |s| {
+            var sum: usize = 0;
+            for (s.runs) |run| switch (run.mat) {
+                .bf16 => |m| {
+                    by_bits[16] += @as(usize, m.n) * m.k;
+                    sum += @as(usize, m.n) * m.k * 2;
+                },
+                .awq => |m| {
+                    by_bits[4] += @as(usize, m.n) * m.k;
+                    sum += m.w.length() + m.sb.length();
+                },
+            };
+            return sum;
+        }
+    }
     if (l.runs.len > 0) {
         var sum: usize = 0;
         for (l.runs) |r| sum += bytes(r.linear, by_bits);
@@ -111,7 +127,8 @@ pub fn main(init: std.process.Init) !void {
         var total_bytes: usize = 0;
         for (std.enums.values(Class)) |c| {
             const ls = linears(m.weights, c, &store);
-            var by_bits: [9]usize = @splat(0);
+            if (ls.len == 0) continue;
+            var by_bits: [17]usize = @splat(0);
             var b: usize = 0;
             for (ls) |l| b += bytes(l, &by_bits);
             _ = try time(m, c, ls, rows, 1); // pipelines and clocks
