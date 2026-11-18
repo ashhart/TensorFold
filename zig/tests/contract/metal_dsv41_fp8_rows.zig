@@ -12,8 +12,7 @@ const g = contract.gates;
 const fp8 = tf.dsv41_metal.fp8_rows;
 const base = "dsv41_fp8_rows ";
 
-/// What a registration varies: the output, the split, one launch a row, the real fixture, a planted fault, and a
-/// one-launch block kind run in place of the two launches (its own split).
+/// What a registration varies: output, split, a launch a row, the fixture, a planted fault, a one-launch block kind.
 pub const Variant = struct { out: fp8.Out = .f32, split: u32 = 1, solo: bool = false, fixture: bool = false, ctl: u8 = 0, kind: ?fp8.Kind = null };
 
 const real = [_]c.Shape{
