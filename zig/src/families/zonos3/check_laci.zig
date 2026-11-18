@@ -87,6 +87,81 @@ fn same(mine: Value, theirs: Value, path: *std.ArrayList(u8), a: std.mem.Allocat
     }
 }
 
+fn numbers(a: std.mem.Allocator, out: *Out, comptime T: type, xs: []const T) !void {
+    for (xs, 0..) |x, i| try out.print(a, "{s}{e}", .{ if (i == 0) "" else ", ", @as(f64, x) });
+}
+
+/// test_ggml_laci_replay._follower: ranges, deltas and the gate's settings of a trace.
+fn followerOf(gpa: std.mem.Allocator, a: std.mem.Allocator, j: std.json.ObjectMap) !z3.span_follow.Follower {
+    const list = j.get("ranges").?.array.items;
+    const ranges = try a.alloc([2]u32, list.len);
+    for (ranges, list) |*r, v| r.* = .{ @intCast(v.array.items[0].integer), @intCast(v.array.items[1].integer) };
+    var c: z3.span_follow.Config = .{};
+    if (j.get("cfg")) |v| {
+        if (v.object.get("lead")) |x| c.lead = float(x);
+        if (v.object.get("lag")) |x| c.lag = float(x);
+        if (v.object.get("smooth")) |x| c.smooth = @intCast(x.integer);
+        if (v.object.get("ramp")) |x| c.ramp = @intCast(x.integer);
+    }
+    return z3.span_follow.Follower.init(gpa, ranges, c);
+}
+
+/// test_ggml_laci_replay.run_span_follow: a follower's scripted readings, decisions and rollbacks, each result kept.
+fn replayFollow(gpa: std.mem.Allocator, a: std.mem.Allocator, t: std.json.ObjectMap, name: []const u8, expected: Value) !u8 {
+    var f = try followerOf(gpa, a, t);
+    defer f.deinit();
+    const origin = usize_(t.get("origin"), 0);
+    const rows = t.get("deltas").?.array.items;
+    const width = rows[0].array.items.len;
+    const deltas = try a.alloc(f32, rows.len * width);
+    for (rows, 0..) |r, k| for (r.array.items, 0..) |v, i| {
+        deltas[k * width + i] = @floatCast(float(v));
+    };
+    const w = try a.alloc(f32, rows.len);
+    const sum = try a.alloc(f32, width);
+    var out: Out = .empty;
+    try out.appendSlice(a, "{\"results\": [");
+    for (t.get("ops").?.array.items, 0..) |op, i| {
+        const args = op.array.items;
+        const what = args[0].string;
+        if (i != 0) try out.appendSlice(a, ", ");
+        if (std.mem.eql(u8, what, "observe") or std.mem.eql(u8, what, "on_step")) {
+            const at: usize = @intCast(args[1].integer);
+            try f.observe(if (what[1] == 'n') origin + at else at, @intCast(args[2].integer));
+            try out.print(a, "{e}", .{f.best});
+        } else if (std.mem.eql(u8, what, "weights")) {
+            try f.decide(@intCast(args[1].integer), f.scratch);
+            try out.append(a, '[');
+            try numbers(a, &out, f64, f.scratch);
+            try out.append(a, ']');
+        } else if (std.mem.eql(u8, what, "delta")) {
+            // span_follow.delta: the weights in fp32 times each span's row, summed in span order; null when none is on
+            try f.weights(@intCast(args[1].integer), w);
+            var any = false;
+            for (w, 0..) |x, k| {
+                any = any or x > 0;
+                for (sum, deltas[k * width ..][0..width]) |*o, d| o.* = if (k == 0) x * d else o.* + x * d;
+            }
+            if (any) {
+                try out.append(a, '[');
+                try numbers(a, &out, f32, sum);
+                try out.append(a, ']');
+            } else try out.appendSlice(a, "null");
+        } else if (std.mem.eql(u8, what, "truncate")) {
+            f.truncate(@intCast(args[1].integer));
+            try out.print(a, "{e}", .{f.best});
+        } else if (std.mem.eql(u8, what, "position")) {
+            try out.print(a, "{e}", .{f.best});
+        } else return error.UnknownFollowOp;
+    }
+    try out.appendSlice(a, "]}");
+    const mine = try std.json.parseFromSliceLeaky(Value, a, out.items, .{});
+    var path: std.ArrayList(u8) = .empty;
+    const pass = try same(mine, expected, &path, a);
+    std.debug.print("RESULT zonos3 laci-replay {s} {s} ops={d}{s}{s}\n", .{ if (pass) "PASS" else "FAIL", name, t.get("ops").?.array.items.len, if (pass) "" else " first difference at ", if (pass) "" else path.items });
+    return if (pass) 0 else 1;
+}
+
 /// test_ggml_laci_replay.run_laci over TRACE, compared with EXPECTED; `registry`: registries/short_text.json.
 pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expected_path: []const u8, registry: []const u8) !u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -94,7 +169,8 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
     const a = arena.allocator();
     const t = (try read(a, io, trace_path)).object;
     const name = std.fs.path.stem(std.fs.path.stem(trace_path));
-    for ([_][]const u8{ "duration_target", "rates", "rate_deltas", "follower", "cfg", "ops" }) |unserved| if (t.get(unserved) != null) {
+    if (t.get("mode")) |m| if (std.mem.eql(u8, m.string, "span_follow")) return replayFollow(gpa, a, t, name, try read(a, io, expected_path));
+    for ([_][]const u8{ "duration_target", "rates", "rate_deltas", "cfg", "ops" }) |unserved| if (t.get(unserved) != null) {
         std.debug.print("RESULT zonos3 laci-replay SKIP {s}: the trace uses {s}, which is not ported\n", .{ name, unserved });
         return 0;
     };
@@ -115,6 +191,10 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
     const hold = if (t.get("hold")) |v| v.bool else false;
     var s = try laci.Session.init(gpa, heads, .{}, prefill, if (t.get("seed")) |v| @intCast(v.integer) else 0, usize_(t.get("max_tokens"), 4000), hold, short);
     defer s.deinit();
+    // a follower the session feeds: its weights are read before each step, as the reference's harness reads them
+    var follower: ?z3.span_follow.Follower = if (t.get("follower")) |v| try followerOf(gpa, a, v.object) else null;
+    defer if (follower) |*f| f.deinit();
+    if (follower) |*f| s.follower = f;
     const lone = [1]Value{.{ .object = t }};
     const attempts: []const Value = if (t.get("attempts")) |v| v.array.items else &lone;
     const C = usize_(t.get("n_codebooks"), 10);
@@ -142,7 +222,14 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
         var steps_run: usize = 0;
         var stop_step: ?usize = null;
         var boost_step: ?usize = null;
+        var fweights: Out = .empty;
         for (at.get("steps").?.array.items, 1..) |pair, step| {
+            if (follower) |*f| {
+                try f.decide(s.attempt_start + step - s.n_prefill, f.scratch);
+                try fweights.appendSlice(a, if (step == 1) "[" else ", [");
+                try numbers(a, &fweights, f64, f.scratch);
+                try fweights.append(a, ']');
+            }
             const before = probe.center;
             try s.onStep(&probe, step, @intCast(pair.array.items[0].integer), float(pair.array.items[1]));
             steps_run = step;
@@ -169,6 +256,7 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, trace_path: []const u8, expect
         try optional(a, &out, stop_step);
         try out.print(a, ", \"drained\": [{s}], \"boost_step\": ", .{drained.items});
         try optional(a, &out, boost_step);
+        if (follower != null) try out.print(a, ", \"follower_weights\": [{s}]", .{fweights.items});
         const cont = try s.finishAttempt();
         if (cont) |c| {
             try out.print(a, ", \"continuation\": {{\"n_rows\": {d}, \"history_rows\": {d}, \"seed\": ", .{ c.rows, c.history_rows });
@@ -253,7 +341,7 @@ pub const Dumped = struct {
         return true;
     }
 
-    pub fn at(ctx: *anyopaque, frame: usize) []const z3.Steer {
+    pub fn at(ctx: *anyopaque, frame: usize) anyerror![]const z3.Steer {
         const d: *Dumped = @ptrCast(@alignCast(ctx));
         if (frame >= d.active.len or !d.active[frame]) return &.{};
         d.count += 1;
@@ -263,7 +351,9 @@ pub const Dumped = struct {
 };
 
 /// GEN_DIR's request again under LACI, greedy: every attempt's readings, rows and record against laci.json.
-pub fn engine(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, prompt: []const [W]i32, replaced: []const z3.Replace, heads_path: []const u8, registry: []const u8, max_frames: usize) !u8 {
+pub const Hook = struct { steer: z3.generation.Run.Steering, follower: *z3.span_follow.Follower };
+
+pub fn engine(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, prompt: []const [W]i32, replaced: []const z3.Replace, heads_path: []const u8, registry: []const u8, max_frames: usize, hook: ?Hook) !u8 {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -287,6 +377,10 @@ pub fn engine(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
     var run = try z3.laci_run.Run(z3.Replace).begin(gpa, e, prompt, replaced, setup, .{ .temperature = 0, .seed = @intCast(want.get("seed").?.integer) }, max_frames);
     defer run.deinit();
     if (steered) run.steer = .{ .ctx = &dumped, .at = Dumped.at, .twin = false };
+    if (hook) |h| {
+        run.steer = h.steer;
+        run.session.follower = h.follower;
+    }
     const attempts = want.get("attempts").?.array.items;
     var out: [cfg.head_rows]f32 = undefined;
     var k: usize = 0; // the attempt, and the step and row in it

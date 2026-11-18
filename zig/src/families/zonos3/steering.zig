@@ -36,6 +36,11 @@ pub const Plan = struct {
 
     /// synth.steer_fn: frame `frame`'s delta into `out` in the reference's fp32 steps (`sum`: scratch); false: none.
     pub fn at(p: *const Plan, frame: usize, out: []f32, sum: []f32) bool {
+        return p.weighed(frame, out, sum, null);
+    }
+
+    /// As `at`; `follow`, when given, holds each span's weight for the frame (a span follower's) in place of its own.
+    pub fn weighed(p: *const Plan, frame: usize, out: []f32, sum: []f32, follow: ?[]const f32) bool {
         std.debug.assert(out.len == p.sources.len * D and sum.len == out.len);
         var have = false;
         if (p.released.len != 0) {
@@ -52,11 +57,11 @@ pub const Plan = struct {
         // steering.schedule_delta: every span's row weighed and summed in the schedule's order, when one is in reach
         const f: f32 = @floatFromInt(frame);
         var reach = false;
-        for (p.spans) |s| reach = reach or spanWeight(s, f) > 0;
+        for (p.spans, 0..) |s, k| reach = reach or (if (follow) |w| w[k] else spanWeight(s, f)) > 0;
         if (!reach) return have;
         const spans = if (have) sum else out;
         for (p.spans, 0..) |s, k| {
-            const w = spanWeight(s, f);
+            const w = if (follow) |ws| ws[k] else spanWeight(s, f);
             for (spans, s.delta) |*o, x| o.* = if (k == 0) w * x else o.* + w * x;
         }
         if (have) for (out, sum) |*o, x| {
@@ -75,6 +80,12 @@ pub fn valid(st: anytype, speaker_guided: bool) bool {
     if ((st.constant.len != 0 and st.constant.len != width) or (st.released.len != 0 and st.released.len != width)) return false;
     for (st.constant) |x| if (!std.math.isFinite(x)) return false;
     for (st.released) |x| if (!std.math.isFinite(x)) return false;
+    if (st.follow) |f| {
+        if (f.ranges.len != st.spans.len or f.heads.len == 0 or f.heads.len > cfg.heads * cfg.layers) return false;
+        if (!std.math.isFinite(f.lead) or !std.math.isFinite(f.lag) or f.lead < 0 or f.lead > 8 or f.lag < -4 or f.lag > 8) return false;
+        for (f.ranges) |r| if (r[0] > r[1]) return false;
+        for (f.heads) |h| if (h.head >= cfg.heads or h.layer >= cfg.layers or cfg.usesGdn(h.layer)) return false;
+    }
     for (st.spans) |s| {
         if (s.delta.len != width or !std.math.isFinite(s.start) or !std.math.isFinite(s.end) or !std.math.isFinite(s.ramp)) return false;
         for (s.delta) |x| if (!std.math.isFinite(x)) return false;
@@ -147,10 +158,24 @@ test "a frame's delta: the constant controls, the released ones at the frame's w
     try t.expectEqual(@as(f32, 2.0 / 3.0) * 8, out[0]);
     try t.expect(!p.at(15, out, sum));
     // a request's steering as a host checks it
-    const Sent = struct { sources: []const u32, constant: []const f32 = &.{}, released: []const f32 = &.{}, hold: f64 = 1, spans: []const Span = &.{}, guidance: f32 = 1 };
+    const Head = struct { layer: u32, head: u32, radius: i64 };
+    const Follow = struct { ranges: []const [2]u32, lead: f64 = 1, lag: f64 = 0, heads: []const Head };
+    const Sent = struct { sources: []const u32, constant: []const f32 = &.{}, released: []const f32 = &.{}, hold: f64 = 1, spans: []const Span = &.{}, guidance: f32 = 1, follow: ?Follow = null };
     try t.expect(valid(Sent{ .sources = &.{ 15, 19 }, .constant = constant }, true));
     try t.expect(!valid(Sent{ .sources = &.{ 15, 19 }, .constant = constant, .guidance = 1.5 }, true));
     try t.expect(!valid(Sent{ .sources = &.{ 15, 23 }, .constant = constant }, false));
     try t.expect(!valid(Sent{ .sources = &.{15}, .constant = constant }, false));
     try t.expect(!valid(Sent{ .sources = &.{ 15, 19 }, .spans = &.{.{ .start = 0, .end = 1, .ramp = 3, .delta = span[0..D] }} }, false));
+    // a follower's ranges, one a span, and heads of attention layers
+    const spans = [_]Span{.{ .start = 0, .end = 1, .ramp = 3, .delta = span }};
+    const heads = [_]Head{.{ .layer = 3, .head = 2, .radius = 4 }};
+    try t.expect(valid(Sent{ .sources = &.{ 15, 19 }, .spans = &spans, .follow = .{ .ranges = &.{.{ 1, 3 }}, .heads = &heads } }, false));
+    try t.expect(!valid(Sent{ .sources = &.{ 15, 19 }, .spans = &spans, .follow = .{ .ranges = &.{}, .heads = &heads } }, false));
+    try t.expect(!valid(Sent{ .sources = &.{ 15, 19 }, .spans = &spans, .follow = .{ .ranges = &.{.{ 1, 3 }}, .heads = &.{.{ .layer = 0, .head = 2, .radius = 4 }} } }, false));
+    try t.expect(!valid(Sent{ .sources = &.{ 15, 19 }, .spans = &spans, .follow = .{ .ranges = &.{.{ 1, 3 }}, .lead = 9, .heads = &heads } }, false));
+    // the follower's weights in place of the spans' own: the span at a third
+    p.spans = &spans;
+    try t.expect(p.weighed(1, out, sum, &.{1.0 / 3.0}));
+    try t.expectEqual(@as(f32, 1.0 / 3.0) * 8, out[0]);
+    try t.expect(!p.weighed(1, out, sum, &.{0}));
 }

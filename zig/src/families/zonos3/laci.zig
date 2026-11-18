@@ -153,6 +153,8 @@ pub const Session = struct {
     /// A short text's cut; null: an ordinary request.
     short: ?short_text.Cut = null,
     short_retries: usize = 0,
+    /// Spans that follow the reading: it sees every reading and rolls back with the stream.
+    follower: ?*@import("span_follow.zig").Follower = null,
 
     pub fn init(a: Allocator, heads: Heads, c: Config, prefill: []const [W]i32, seed: ?u64, max_tokens: usize, hold: bool, short: ?short_text.Cut) !Session {
         var s: Session = .{ .a = a, .heads = heads, .c = c, .n_prefill = prefill.len, .seed = seed, .max_tokens = max_tokens, .hold = hold, .attempt_start = prefill.len, .short = short };
@@ -184,6 +186,7 @@ pub const Session = struct {
     /// One decode step of the current attempt: the reading position `pos` and centroid `m`.
     pub fn onStep(s: *Session, probe: *Probe, step: usize, pos: usize, m: f64) !void {
         const row = s.attempt_start + step;
+        if (s.follower) |f| try f.observe(row - s.n_prefill, pos);
         if (s.detector == null) {
             s.text_len = probe.text_len;
             s.detector = try Detector.init(s.a, probe.text_len, s.heads.frames_per_token, s.c, s.n_prefill);
@@ -292,6 +295,7 @@ pub const Session = struct {
         try s.failures.append(s.a, .{ .failure = failure, .rollback_row = restart, .clamped = restart != failure.rollback_row, .retry_seed = seed, .ignored = false });
         s.stream.shrinkRetainingCapacity(restart);
         try s.detector.?.truncate(restart);
+        if (s.follower) |follower| follower.truncate(restart - s.n_prefill);
         if (s.short) |*cut| cut.truncate(restart - s.n_prefill);
         if (s.probation) |*p| p.aci.deinit();
         s.probation = null;

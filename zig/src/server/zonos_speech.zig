@@ -11,6 +11,7 @@ const steer = @import("zonos_steer.zig");
 const laci = @import("zonos_laci.zig");
 const tokens = @import("zonos_tokens.zig");
 const short = @import("zonos_short.zig");
+const reading = @import("zonos_reading.zig");
 const Allocator = std.mem.Allocator;
 
 pub const error_prefix = "ZONOS3 request:";
@@ -291,6 +292,10 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         watched = with;
     }
     const said = if (brief) |sh| sh.text else opened;
+    // spans that follow the reading: their tokens in the text the prompt spells, read by the language's heads
+    if (steered.follow) |f| if (st.laci) |table| if (steered.steering) |s| {
+        s.follow = .{ .ranges = try reading.ranges(cx, text, input, said, f.chars), .lead = f.lead, .lag = f.lag, .heads = laci.of(table, lang).heads };
+    };
     const ids = try tokens.payload(cx, text, st.tokens, said);
     const silence_frames: usize = if (std.mem.startsWith(u8, said, tokens.start_marker)) 0 else req.silence_frames;
     const speaker: req.prompt.Speaker = if (by_embedding) .embedding else if (clip != null) .none else .{ .reference = reference };

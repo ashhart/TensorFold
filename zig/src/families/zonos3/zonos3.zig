@@ -14,6 +14,7 @@ pub const steer_bundle = @import("steer_bundle.zig");
 pub const laci = @import("laci.zig");
 pub const laci_probe = @import("laci_probe.zig");
 pub const laci_run = @import("laci_run.zig");
+pub const span_follow = @import("span_follow.zig");
 pub const short_text = @import("short_text.zig");
 pub const edit = @import("edit.zig");
 pub const edit_plan = @import("edit_plan.zig");
@@ -60,6 +61,7 @@ test {
     _ = edit;
     _ = edit_plan;
     _ = @import("difflib.zig");
+    _ = span_follow;
     _ = align_words;
     _ = @import("speaker_blocks.zig");
     _ = codec_weights;

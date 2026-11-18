@@ -82,6 +82,11 @@ pub const SpeechSteering = struct {
     spans: []const Span = &.{},
     /// Guidance on the deltas through a twin stream without them; 1: off.
     guidance: f32 = 1,
+    /// The spans follow the model's reading position instead of the character rate; null: the rate.
+    follow: ?Follow = null,
+
+    /// Each span's text positions [a, b) (0 is BOS), the gate's lead and lag in tokens, and the heads that read.
+    pub const Follow = struct { ranges: []const [2]u32, lead: f64, lag: f64, heads: []const SpeechLaci.Head };
 
     /// Full weight on frames [start, end), a linear ramp of `ramp` frames on both sides.
     pub const Span = struct { start: f32, end: f32, ramp: f32, delta: []const f32 };

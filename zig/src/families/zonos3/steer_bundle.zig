@@ -221,6 +221,8 @@ pub const Resolved = struct {
     /// The speaker embedding after the raw controls; null when none moved it.
     embedding: ?[E]f32 = null,
     plan: steering.Plan = .{},
+    /// Each kept span's characters [start, end), in the plan's span order: what reading-position spans follow.
+    span_chars: []const [2]usize = &.{},
 };
 
 pub const Error = error{ OutOfMemory, Refused };
@@ -344,12 +346,15 @@ pub fn resolve(a: Allocator, b: *const Bundle, r: Request, message: *[]const u8)
         f.* = frame_at[c] + if (inside) rate * b.durationFactor(spans[next].controls) else rate;
     }
     var rows: std.ArrayList(steering.Span) = .empty;
+    var chars: std.ArrayList([2]usize) = .empty;
     for (spans) |s| {
         const vec = try hiddenVector(a, b, s.controls, .all);
         if (vec.len == 0) continue;
         try rows.append(a, .{ .start = @floatCast(roundHalfEven(frame_at[@intCast(s.start)])), .end = @floatCast(roundHalfEven(frame_at[@intCast(s.end)])), .ramp = ramp_frames, .delta = vec });
+        try chars.append(a, .{ @intCast(s.start), @intCast(s.end) });
     }
     out.plan.spans = rows.items;
+    out.span_chars = chars.items;
     return out;
 }
 
