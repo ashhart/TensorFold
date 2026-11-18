@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the Desktop power test runs the real power module with a fake process handle and a mock clock, checking owned shutdown, the restart backoff boundary and saved errors without looking up or stopping unrelated host processes (#3804). Thanks to @AIFlowML.
+
 - Desktop: deleting an unloaded checkpoint refreshes the engine snapshot so the open Models view drops its old Downloads row; the browser demo removes that row from its backing snapshot too (#3798, fixes #3796). Thanks to @AIFlowML.
 
 - Desktop: Cancel is honored at the final download byte update, before verification; a cancelled download is not registered as a model and its bytes stay cached for a later retry (#3795, fixes #3794). Thanks to @AIFlowML.
