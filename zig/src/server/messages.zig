@@ -200,6 +200,40 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
     return .{ .array = out.items };
 }
 
+/// Only reorder a complete bijection between one assistant's calls and its immediately following results.
+pub fn orderParallelResults(a: std.mem.Allocator, messages: []Value) !void {
+    for (messages, 0..) |message, i| {
+        if (!std.mem.eql(u8, message.strField("role") orelse "", "assistant")) continue;
+        const calls = message.get("tool_calls") orelse continue;
+        if (calls != .array or calls.array.len < 2) continue;
+        const start = i + 1;
+        var end = start;
+        while (end < messages.len and std.mem.eql(u8, messages[end].strField("role") orelse "", "tool")) end += 1;
+        if (end - start != calls.array.len) continue;
+        try orderResultRun(a, calls.array, messages[start..end]);
+    }
+}
+
+fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value) !void {
+    var positions: std.StringHashMapUnmanaged(usize) = .empty;
+    defer positions.deinit(a);
+    for (calls, 0..) |call, index| {
+        const id = call.strField("id") orelse return;
+        if (id.len == 0) return;
+        const entry = try positions.getOrPut(a, id);
+        if (entry.found_existing) return;
+        entry.value_ptr.* = index;
+    }
+    const ordered = try a.alloc(Value, results.len);
+    defer a.free(ordered);
+    for (results) |result| {
+        const id = result.strField("tool_call_id") orelse return;
+        const entry = positions.fetchRemove(id) orelse return;
+        ordered[entry.value] = result;
+    }
+    @memcpy(results, ordered);
+}
+
 /// ``_normalize_tool_call_arguments``: call arguments as objects for templates; bad ones under ``_invalid_arguments``.
 pub fn toolArguments(cx: *Cx, messages: Value) errors.Refused!Value {
     if (messages != .array) return messages;
