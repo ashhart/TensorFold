@@ -4,9 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on CUDA: combine the routed experts with the shared expert in one pass, preserving the FMA order and BF16 rounding while removing an intermediate FP32 buffer pass (#3827).
-
 - Tools: add the heat-exchanger agent evaluation and its bounded Python execution helper (#3086).
+
+- DeepSeek-V4.1 on CUDA: combine the routed experts with the shared expert in one pass, preserving the FMA order and BF16 rounding while removing an intermediate FP32 buffer pass (#3827).
 
 - Packaging: a Grafana dashboard for the engine's Prometheus metrics (TTFT and TPOT quantiles, decode rate, running and waiting requests, KV use, draft acceptance, prompt cache, memory and admission), with a host test that rejects unwritten metrics (#3141).
 
