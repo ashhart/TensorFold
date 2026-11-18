@@ -236,13 +236,14 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
     return runWith(x, q, m, b, .{ .ctx = undefined });
 }
 
-/// A forward's side work: each Engram layer's rows written just before the command buffer that reads them.
+/// A forward's side work: Engram rows written just before the buffer that reads them, work queued after the last.
 pub const Hooks = struct {
     ctx: *anyopaque,
     rows: ?*const fn (ctx: *anyopaque, li: usize) anyerror!void = null,
+    then: ?*const fn (ctx: *anyopaque) void = null,
 };
 
-/// `run` with `h`'s Engram rows.
+/// `run` with `h`'s Engram rows and queued work.
 pub fn runWith(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
@@ -275,6 +276,7 @@ pub fn runWith(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks) 
         if (hi == m.layers.len) break;
         lo = hi;
     }
+    if (h.then) |f| f(h.ctx);
     cbs[n - 1].wait();
     q.roundEnd();
     if (t0) |t| round_prof.end(t, x.rows, cbs[0], cbs[n - 1]);

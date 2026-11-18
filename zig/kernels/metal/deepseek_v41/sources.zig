@@ -42,5 +42,7 @@ pub const route = @embedFile("route.metal");
 pub const hc = @embedFile("hc.metal");
 /// DeepSeek-V4.1's phase-1 glue (deepseek_v41/glue_tmp.metal): the reference bits of the registered glue kernels.
 pub const glue_tmp = @embedFile("glue_tmp.metal");
+/// DeepSeek-V4.1 drafts behind a verify window: its greedy picks, the drafts they accept, the drafter's staging.
+pub const early = @embedFile("early.metal");
 /// DeepSeek V4.1's vision tower: epilogues, RoPE, attention, SwiGLU, the aligner's unshuffle and the stream merge.
 pub const vision = @embedFile("vision.metal");
