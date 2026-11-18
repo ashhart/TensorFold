@@ -6,8 +6,7 @@ pub const max_ngram = 3;
 pub const heads_per_ngram = 8;
 pub const heads = (max_ngram - 1) * heads_per_ngram;
 
-/// Odd multipliers a layer mixes its n-gram with: NumPy's default_rng(seed + 10007 layer_id) bounded by the
-/// compressed vocabulary (92,620 in the release), drawn once by tools/hy4_flash/engram_hashes.py.
+/// A layer's odd n-gram multipliers: NumPy's default_rng(seed + 10007 layer_id) draw (engram_hashes.py).
 pub const Multipliers = struct { layer_id: u32, m: [max_ngram]u64 };
 
 pub const release = [_]Multipliers{
@@ -22,9 +21,7 @@ pub fn multipliers(layer_id: u32) ?[max_ngram]u64 {
     return null;
 }
 
-/// One position's hash ids. `compressed[j]` is the lookup table's id of the token j back (0: this one), the pad
-/// token's id where the n-gram reaches past the start or the token is past the table; `moduli` are the heads'
-/// prime table sizes, n-gram-major.
+/// A position's hash ids from the table ids of its token and the two before it (pad where none).
 pub fn hash(compressed: [max_ngram]u32, m: [max_ngram]u64, moduli: []const u32, out: []u32) void {
     var mixed: [max_ngram]u64 = undefined;
     for (compressed, m, 0..) |c, k, j| mixed[j] = @as(u64, c) * k;

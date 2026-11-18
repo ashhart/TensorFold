@@ -1,4 +1,4 @@
-//! Host-only Hy4-flash family package: config, layer plan, weight map, Engram hashes, refusals, chat template and tokenizer. No GPU.
+//! Host-only Hy4-flash family package: config, layer plan, weight map, Engram hashes, prompts and tokenizer. No GPU.
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
