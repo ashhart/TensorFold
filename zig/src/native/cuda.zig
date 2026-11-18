@@ -150,7 +150,7 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant, .warm_images = h.inner.warm_images };
     }
 };
 const refusals = @import("cuda_refusal.zig");
