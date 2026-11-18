@@ -52,6 +52,8 @@ pub const Input = struct {
     image_bytes: images.ByteLimits = .{},
     /// With a known window, the reply may fill all the room the prompt leaves; max_tokens otherwise.
     fill_room: bool = false,
+    /// The reply continues the final assistant message (continue_final_message, or a Messages prefill): prefill.zig.
+    prefill: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).

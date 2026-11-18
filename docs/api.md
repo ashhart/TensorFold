@@ -459,6 +459,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `stream_options.tensorfold_token_stream_version` | Opt in to version 1's exact incremental token IDs and semantic anchors on chat or completions streams | Native |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
+| `continue_final_message` | True: the reply continues the final assistant message instead of opening a turn, with `add_generation_prompt` false or unset beside it; see [Continuing a final assistant message](#continuing-a-final-assistant-message) | Native |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
@@ -739,6 +740,29 @@ offered name its written part starts. The template's own rendered call gives tha
 only tool the template offers. Each fix depends only on the tokens before it, so drafted, serial and concurrent
 decoding write the same call. The MLX engine fixes tokens inside its rounds; CUDA stops the engine at a fix and
 decodes on from the reply. The model writes the arguments; a malformed call returns as content.
+
+### Continuing a final assistant message
+
+`/v1/chat/completions` continues the conversation's final message instead of opening a new turn when the request
+sends `"continue_final_message": true`, the field vLLM uses. A client can start the reply this way, with `{` to force
+JSON or with the first words of an answer. The last message must be the assistant's and carry no tool calls. vLLM's
+clients send `add_generation_prompt: false` beside the flag, and the server accepts it; `add_generation_prompt: true`
+gets HTTP 400. Without the flag, or with it false, a trailing assistant message renders as before and a new turn
+follows it. `/v1/messages` continues a trailing assistant message without any flag, as described under
+[Anthropic Messages](#anthropic-messages).
+
+The server renders the conversation without a generation prompt and keeps it up to the end of the final message's
+own text. It drops what the template writes after a finished turn, such as the end-of-turn token and newlines. A
+second render with a marker after the message's text shows where the template writes it. When the template rewrites
+the text, drops it or writes request text after it, the request gets HTTP 400. A trailing space that a template trims
+is refused, not lost. Dropped leading whitespace is accepted, because Qwen's and GLM-5.3's templates strip it.
+
+The response's `content` holds only the continuation, and usage counts the message's text as prompt tokens. The
+server decodes the continued prompt like any chat prompt, with drafts, sampling and the prompt cache, so the reply has
+the tokens any request with the same prompt ids and settings gets. A grammar from structured output or a required
+tool call constrains the continuation from its first token. A reply cannot continue inside a reasoning block. With
+thinking on, including a thinking template's default, the request gets HTTP 400 naming
+`chat_template_kwargs: {"enable_thinking": false}`.
 
 ## Structured output
 
@@ -1663,7 +1687,14 @@ models answer image blocks with HTTP 400. Thinking is off unless enabled or adap
 renders thinking off as before and is never refused for it. Only a `thinking: {"type": "disabled"}` the client sends
 is an explicit off, which returns HTTP 400 when the template cannot honor it (see [Reasoning](#reasoning));
 `/v1/messages/count_tokens` gives the same refusal for the same body, and otherwise counts the prompt
-`/v1/messages` submits. Thinking round-trips as plaintext with an empty signature;
+`/v1/messages` submits.
+A request whose last message is the assistant's continues that message instead of opening a new turn, as Messages'
+prefill does. The reply's `content` holds only the continuation, and `usage.input_tokens` and `count_tokens` count
+the prefilled text as input. The prefill's text cannot end in whitespace or hold `tool_use` blocks, and thinking must
+be off, which it is without a `thinking` field or with `{"type": "disabled"}`. Each of these gets HTTP 400 by name,
+as does a template that does not keep the text; see
+[continuing a final assistant message](#continuing-a-final-assistant-message).
+Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.

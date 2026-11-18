@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "158"
+    ]
+   ],
+   "body": "{\"type\": \"error\", \"error\": {\"type\": \"invalid_request_error\", \"message\": \"a final assistant message with tool calls cannot be continued: send its text alone\"}}",
+   "interim": ""
+  }
+ ]
+}

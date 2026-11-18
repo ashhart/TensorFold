@@ -55,7 +55,9 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
     const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
     const explicit_off = client_thinking and !(thinking.enable orelse true);
-    const ids_ = prompt.renderRequest(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true, explicit_off) catch |e| switch (e) {
+    const prefill = chat.get("continue_final_message") != null; // a prefill counts the prompt that continues it
+    const effort = srv.effortFor(thinking.effort);
+    const ids_ = (if (prefill) @import("prefill.zig").ids(srv, cx, msgs, tools, on, effort) else prompt.renderRequest(srv, cx, msgs, tools, on, effort, true, explicit_off)) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
         else => |x| return x,
     };
