@@ -311,6 +311,7 @@ fn strMethod(rt: *Rt, s: v.Str, name: []const u8, pos: []const Value, kw: []cons
         }
         return .{ .str = out.str() };
     }
+    if (eq(u8, name, "format")) return @import("str_format.zig").format(rt, s, pos, kw.len);
     return rt.fail("str.{s}() is not supported", .{name});
 }
 
