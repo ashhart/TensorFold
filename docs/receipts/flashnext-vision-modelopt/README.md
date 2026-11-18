@@ -4,12 +4,12 @@ The CUDA vision tower's reader takes every linear's weight as stored bf16, so `-
 
 ## Source and environment
 
-- Branch `ac207000030b969a259143ac32bf2eac6b5e29e7` (head), cut from main `077998f7d9b14adebec3a2acc2caa47ff7ae6ec7` (its tip of 2026-11-16T15:26:10Z).
+- Branch `ac207000030b969a259143ac32bf2eac6b5e29e7` (head), cut from main `077998f7d9b14adebec3a2acc2caa47ff7ae6ec7` (its tip of 2026-11-16T15:26:10Z). The pull request's current head carries the same change on main `8cbef9777b9a05dfaff99d5aa9c2ce52fe2b00f8`: its code commit `d46832d66` has the five source files of `ac2070000` byte for byte (`zig/src/vision/qwen_cuda_dequant.zig`, `qwen_cuda_weights.zig`, `qwen_cuda_weights_logs.zig`, `qwen_cuda_weights_quant_test.zig`, `qwen_cuda_weights_test.zig`), `zig/src/vision` is unchanged between the two mains, and only the documentation around the change moved. No GPU run is claimed on the current head: every figure below was measured on `ac2070000`.
 - Images: `tensorfold-qwen38:vis-m-077998f7` (main) and `tensorfold-qwen38:vis-b-ac207000` (this branch), each built from a `git archive` of its own commit, blob by blob against its own `git ls-tree` manifest, with `zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Doptimize=fast fatbins install native`, the kernels embedded (`tf.kernels=embedded`).
 - One NVIDIA GB10 (sm_121) machine, one fresh server an arm through the serving recipe: `CHECKPOINT=nvfp4`, `KV_DTYPE=bf16`, `--parallel 8 --context 32768`, `--vision` only where the leg says so.
 - Checkpoint nvidia/Qwen3.8-Flash-Next-FP4-Local at b9ce18a6887e18c089fdea8509a33e63429a3300: 499 vision tensors in 1 shard. Of its two-dimensional weights 1 (the position embedding) take the unchanged stored-bf16 path, 54 are MXFP8 and 56 are NVFP4; the snapshot's dtype census is BF16/bias=166; BF16/weight=57; F32/weight_scale_2=56; F8_E4M3/weight=54; F8_E4M3/weight_scale=56; U8/weight=56; U8/weight_scale=54.
 - The checkpoint's own `config.json` gives the tower depth 27, hidden 1152, intermediate 4304, out_hidden 2560, patch 16 and spatial merge 2: two attention linears a block and two MLP linears a block plus the merger's two make the census's 54 MXFP8 and 56 NVFP4 weights.
-- The floating-point tower leg uses azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound at 1464274120d36a4d8fcaa934552334a7d83ce0fd: 333 vision tensors, every one floating point (BF16/bias=166; BF16/weight=167), so main serves it with no decode at all.
+- The floating-point tower leg uses azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound at 1464274120d36a4d8fcaa934552334a7d83ce0fd: 333 vision tensors, every one floating point (BF16/bias=166; BF16/weight=167). Neither image served it: both refused the checkpoint's `config.json` before reading any weight (`exactness.md`), so this leg has no result on this engine.
 
 ## The load pair
 
@@ -47,7 +47,7 @@ The three contracts with vision on: drafted equals `"draft": false` on 8 prompts
 ## What this window does not establish
 
 - It does not prove the decode is the format's exact decode: that is the host tests' job, which compare every tensor the reader hands the sink against binary64 references byte for byte.
-- It does not compare the FP4 tower's replies with a floating-point twin of the same checkpoint: the snapshot stores the tower quantised, so no such twin exists. The int4 leg is a different checkpoint (its own language model too), and is reported as what it is: main and this branch reply identically on a floating-point tower.
+- It does not compare the FP4 tower's replies with a floating-point twin of the same checkpoint: the snapshot stores the tower quantised, so no such twin exists. The int4 checkpoint's tower is floating point, but both configurations were refused before loading, so no reply from a floating-point tower was compared between main and this branch; that equality is not claimed.
 - It is one machine, one boot an arm, one image; it says nothing about Metal, HIP, the Python engine, or two ranks.
 
 ## Restore
