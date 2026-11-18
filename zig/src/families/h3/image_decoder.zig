@@ -1,6 +1,6 @@
 //! MiniMax-H3-Image's image decoder on the host: the tensors it reads, a tile's sequence and rotary table, unpatchify.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const rounding = @import("bf16_round");
 const vae = @import("picture_vae.zig");
 const geometry = @import("geometry.zig");
