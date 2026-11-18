@@ -44,6 +44,7 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
@@ -75,6 +76,7 @@ test {
     _ = weights;
     _ = @import("weights_test.zig");
     _ = @import("geometry_test.zig");
+    _ = sn_mtp;
 }
 
 pub const residency = @import("residency.zig");

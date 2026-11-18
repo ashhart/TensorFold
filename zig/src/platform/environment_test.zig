@@ -109,6 +109,10 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_DRAFTS", .raw = "3", .n = 3 },
+    .{ .name = "TF_MTP_PLAIN_GUARD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_BITS", .raw = "4", .n = 4 },
+    .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
@@ -167,7 +171,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "XPU_A8_BITS", "16" },               .{ "TF_SLIDE_POCKET_KEY", "AUTO" },
         .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },  .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },
         .{ "TF_DSPINE_WINDOW", "0" },           .{ "TF_DSPINE_WINDOW", "15" },
-        .{ "TF_DSPINE_WINDOW", "8193" },
+        .{ "TF_DSPINE_WINDOW", "8193" },        .{ "TF_MTP_BITS", "8" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
