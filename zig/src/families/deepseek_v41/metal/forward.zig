@@ -109,6 +109,12 @@ pub const Piece = struct { ids: []const u32, lookback: []const u32 };
 
 /// `prepare` for several slots' rows, pieces one after another in row order.
 pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !void {
+    const l = try prepareIds(b, c, pieces, lk) orelse return;
+    for (0..c.engram_layers.len) |li| try fillRows(b, c, pieces, l, li);
+}
+
+/// The launch's ids, checked, pieces one after another in row order; the Engram lookup its rows need (null: none).
+pub fn prepareIds(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: ?Lookup) !?Lookup {
     var n: usize = 0;
     for (pieces) |pc| {
         if (pc.ids.len == 0) return error.BadRows;
@@ -122,17 +128,26 @@ pub fn prepareSegs(b: *const Bufs, c: *const Config, pieces: []const Piece, lk: 
         @memcpy(all[at..][0..pc.ids.len], pc.ids);
         at += pc.ids.len;
     }
-    if (c.engram_layers.len == 0) return;
-    const l = lk orelse return error.EngramLookupMissing;
+    if (c.engram_layers.len == 0) return null;
+    return lk orelse error.EngramLookupMissing;
+}
+
+/// Engram layer index `li`'s rows of the pieces into rows[li] (a source's reads in flight are waited for).
+pub fn fillRows(b: *const Bufs, c: *const Config, pieces: []const Piece, l: Lookup, li: usize) !void {
     const K = c.hashCols() * c.engram_head_dim;
-    for (c.engram_layers.items(), 0..) |id, li| {
-        const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
-        var r0: usize = 0;
-        for (pieces) |pc| {
-            try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, id, 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
-            r0 += pc.ids.len;
-        }
+    var n: usize = 0;
+    for (pieces) |pc| n += pc.ids.len;
+    const out: []u16 = @alignCast(std.mem.bytesAsSlice(u16, b.bytes(b.rows[li], 2 * n * K)));
+    var r0: usize = 0;
+    for (pieces) |pc| {
+        try l.host.windowRows(l.a, l.source, pc.ids, pc.lookback, c.engram_layers.items()[li], 0, 1, c.engram_head_dim, out[r0 * K ..][0 .. pc.ids.len * K]);
+        r0 += pc.ids.len;
     }
+}
+
+/// Starts reading every Engram layer's rows of the pieces from the source (no source: nothing to start).
+pub fn prefetchRows(pieces: []const Piece, l: Lookup) void {
+    for (pieces) |pc| l.host.prefetch(l.a, l.source, pc.ids, pc.lookback, 0, 1);
 }
 
 /// The tokens' embedding rows into all four streams of streams[0], and the one-hot pre mix.
@@ -218,6 +233,17 @@ pub fn chunkEnd(lo: usize, n: usize) usize {
 
 /// The decode forward in about `buffers` command buffers, each committed once encoded; waits for the last.
 pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
+    return runWith(x, q, m, b, .{ .ctx = undefined });
+}
+
+/// A forward's side work: each Engram layer's rows written just before the command buffer that reads them.
+pub const Hooks = struct {
+    ctx: *anyopaque,
+    rows: ?*const fn (ctx: *anyopaque, li: usize) anyerror!void = null,
+};
+
+/// `run` with `h`'s Engram rows.
+pub fn runWith(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs, h: Hooks) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
@@ -230,6 +256,10 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
         if (n == max_buffers) return error.TooManyBuffers;
+        if (h.rows) |f| for (x.c.engram_layers.items(), 0..) |id, li| if (id >= lo and id < hi) f(h.ctx, li) catch |err| {
+            if (n > 0) cbs[n - 1].wait();
+            return err;
+        };
         const cb = q.commandBuffer();
         const e = cb.compute(.concurrent);
         segs.declare(x, e);

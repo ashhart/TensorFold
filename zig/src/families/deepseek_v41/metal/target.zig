@@ -458,6 +458,19 @@ pub const Target = struct {
             r0 += n;
         }
         t.stats.launches += 1;
+        // each slot's next window starts with the pick after the drafts its picks accept: its Engram reads start now
+        if (t.env.lookup) |l| for (group, choices) |g, out| t.prefetchNext(l, g, out);
+    }
+
+    /// Starts reading the Engram rows of the slot's next pending row (a guess: a cut commit only wastes the reads).
+    fn prefetchNext(t: *const Target, l: forward.Lookup, g: iface.Segment, out: []const u32) void {
+        if (t.env.c.engram_layers.len == 0) return;
+        var acc: usize = 0;
+        while (acc + 1 < g.tokens.len and g.tokens[acc + 1] == out[acc]) acc += 1;
+        const hist = t.slots[g.slot].hist.items;
+        const at: usize = @intCast(g.start + acc + 1);
+        const look = t.env.c.engram_max_ngram - 1;
+        forward.prefetchRows(&.{.{ .ids = out[acc..][0..1], .lookback = hist[at -| look..at] }}, l);
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
@@ -489,13 +502,28 @@ pub const Target = struct {
             segs[i] = .{ .slot = g.kv, .p0 = g.start, .r0 = r0, .n = n };
             r0 += n;
         }
-        try forward.prepareSegs(&t.b, c, pieces[0..runs.len], e.lookup);
+        // the Engram rows' reads start now; each layer's rows land as its command buffer comes up (Hook.rows)
+        const look_up = try forward.prepareIds(&t.b, c, pieces[0..runs.len], e.lookup);
+        if (look_up) |l| forward.prefetchRows(pieces[0..runs.len], l);
         try e.s.writeSpans(c, spans[0..runs.len]);
         const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..runs.len] };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        try forward.run(&x, e.queue, e.model, &t.b);
+        var hook: Hook = .{ .t = t, .pieces = pieces[0..runs.len], .look_up = look_up };
+        try forward.runWith(&x, e.queue, e.model, &t.b, .{ .ctx = &hook, .rows = if (look_up != null) Hook.rows else null });
     }
+
+    /// A launch's hook: each Engram layer's rows before the command buffer that reads them.
+    const Hook = struct {
+        t: *Target,
+        pieces: []const forward.Piece,
+        look_up: ?forward.Lookup,
+
+        fn rows(ctx: *anyopaque, li: usize) anyerror!void {
+            const h: *Hook = @ptrCast(@alignCast(ctx));
+            try forward.fillRows(&h.t.b, h.t.env.c, h.pieces, h.look_up.?, li);
+        }
+    };
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.
     fn keep(ptr: *anyopaque, slot: u32, path: []const u32) anyerror!void {
