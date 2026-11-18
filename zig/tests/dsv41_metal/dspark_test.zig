@@ -226,6 +226,38 @@ test "dsv41 metal dspark: R rows ingested in one launch equal the same rows one 
     try testing.expectEqual(@as(usize, 0), bad);
 }
 
+test "dsv41 metal dspark: a window ingested before its commit and cut by it leaves the rings and drafts of the kept rows" {
+    const a = testing.allocator;
+    const ds = try Ds.init(a, testing.io, limit, 68, 2);
+    defer ds.deinit();
+    var bad: usize = 0;
+    for ([_]u32{ 0, 1, 2, 3 }) |kept| {
+        const at: u64 = 400 + 9 * kept;
+        for ([_]u32{ 0, 1 }) |slot| {
+            ds.pass.reset(slot);
+            try ds.ingest(slot, at - 200, 200, 90);
+        }
+        // slot 0: the window's five rows land first; the commit keeps the first kept + 1 (its ingest again, or none)
+        try ds.ingest(0, at, 5, 91);
+        if (kept % 2 == 0) try ds.ingest(0, at, kept + 1, 91);
+        // slot 1: only the kept rows, ever
+        try ds.ingest(1, at, kept + 1, 91);
+        const p = at + kept + 1;
+        const o0 = try proposeOne(a, ds, Ds.ask(0, 11, p, null));
+        defer o0.deinit(a);
+        const o1 = try proposeOne(a, ds, Ds.ask(1, 11, p, null));
+        defer o1.deinit(a);
+        var differ = o0.diff(o1);
+        for (0..ds.w.stages.len) |s| for (ringBytes(ds, 0, s), ringBytes(ds, 1, s)) |x, y| {
+            differ += @intFromBool(x != y);
+        };
+        std.debug.print("{s} dsv41 metal dspark cut window: {d} of 5 rows kept ({s}): {d} values differ (rings, drafts)\n", .{ if (differ == 0) "PASS" else "FAIL", kept + 1, if (kept % 2 == 0) "ingested again" else "the pass alone", differ });
+        bad += differ;
+    }
+    try testing.expect(ds.pass.undo.restored > 0);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
 fn sampled(p: u64) host.dspark.Params {
     return .{ .seed = 0x5eed + p, .pos0 = p + 1, .top_k = 40, .sampled = true, .temperature = 0.9, .top_p = 0.95, .min_p = 0.01 };
 }
