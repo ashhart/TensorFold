@@ -346,7 +346,7 @@ pub const Rule = struct {
         @memset(ones, 1);
         const head: alloc.HeadCost = .{ .step_ms = r.sharedStepMs(), .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = r.row_cost.leastRows(whos.len, sampled) };
         const all_counts = if (paired) |p|
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, p.fixed, r.row_cost.capRows(streams, sampled, @max(streams, r.batch_rows)), .{ .plain_ms = p.plain, .step_ms = r.sharedStepMs(), .extra_step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .row_ms = p.row, .least_rows = r.row_cost.leastRows(streams, sampled) })
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, if (r.k.fixed_draft_block) p.plain else p.fixed, r.row_cost.capRows(streams, sampled, @max(streams, r.batch_rows)), .{ .plain_ms = p.plain, .block_ms = if (r.k.fixed_draft_block) p.fixed + p.head - p.plain else 0, .step_ms = if (r.k.fixed_draft_block) 0 else r.sharedStepMs(), .extra_step_ms = if (r.k.fixed_draft_block) 0 else r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .row_ms = p.row, .least_rows = r.row_cost.leastRows(streams, sampled) })
         else if (r.draft_step_ms != 0)
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = head.least_rows })
         else
@@ -391,8 +391,16 @@ pub const Rule = struct {
     pub fn sharedPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
         if (streams < 2 or !r.plain_guard or r.confidence_floor != null) return null;
         const head = if (r.nearest(streams, sampled)) |o| o.head else 0;
-        var price = r.shared_price.price(streams, sampled, r.fixedMs(streams, sampled), head, r.row_cost.extraMs(streams, sampled)) orelse return null;
-        if (r.k.learn_rows) price.fixed = price.plain;
+        const row = r.row_cost.extraMs(streams, sampled);
+        var price = (if (r.k.fixed_draft_block)
+            r.shared_price.blockPrice(streams, sampled, r.fixedMs(streams, sampled), head, row)
+        else
+            r.shared_price.price(streams, sampled, row)) orelse return null;
+        if (r.k.learn_rows) {
+            price.fixed = price.plain;
+            price.row = row;
+        }
+        if (!r.k.fixed_draft_block) price.head = head;
         return price;
     }
 
@@ -415,7 +423,7 @@ pub const Rule = struct {
     pub fn observeSharedPrice(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64, plain: bool, calibration: bool) !void {
         if (streams > 1 and r.plain_guard and r.confidence_floor == null) {
             const residual = if (r.shared_costs.get(@intCast(rows))) |forward| ms - forward - head_ms else std.math.nan(f64);
-            try r.shared_price.observeHead(r.gpa, streams, rows, residual, head_ms, sampled, plain, calibration);
+            try r.shared_price.observeHead(r.gpa, streams, rows, residual, head_ms, sampled, plain, calibration, r.k.fixed_draft_block);
         }
     }
 
@@ -503,6 +511,7 @@ test {
     _ = @import("shared_head_price_test.zig");
     _ = @import("shared_price_learning_test.zig");
     _ = @import("shared_price_8_test.zig");
+    _ = @import("shared_price_modes_test.zig");
 }
 
 test {

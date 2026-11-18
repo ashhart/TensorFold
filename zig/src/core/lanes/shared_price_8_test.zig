@@ -38,7 +38,7 @@ fn check(e: *Engine, plans: *[8]win.Plan, streams: *[8]Stream) !void {
 
 test "shared combined prices: eight streams keep 7.5 drafts across calibration of a fixed block cost" {
     for ([_]bool{ false, true }) |sampled| {
-        var cfg = try Config.init(a, .{ .exact_width = 64, .mtp = true, .drafts = 15, .draft_probabilities = true, .allocate_shared_drafts = true, .draft_streams = true, .mtp_step_ms = 1, .copy_drafts = false, .plain_guard = true, .hidden_rows = true, .batch_rows = 128, .window_costs = &costs }, 64, 63);
+        var cfg = try Config.init(a, .{ .fixed_draft_block = true, .exact_width = 64, .mtp = true, .drafts = 15, .draft_probabilities = true, .allocate_shared_drafts = true, .draft_streams = true, .mtp_step_ms = 1, .copy_drafts = false, .plain_guard = true, .hidden_rows = true, .batch_rows = 128, .window_costs = &costs }, 64, 63);
         defer cfg.deinit(a);
         var target: fake.Fake = .{ .gpa = a };
         defer target.deinit();

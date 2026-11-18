@@ -61,7 +61,7 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
             try t.expect(e.rule.sharedPrice(2, sampled) != null);
             const p = e.rule.sharedPrice(2, sampled).?;
             try t.expectApproxEqAbs(@as(f64, 2), p.plain, 1e-9);
-            try t.expectApproxEqAbs(@as(f64, 0), p.row, 1e-9);
+            try t.expectApproxEqAbs(row_ms, p.row, 1e-9);
         }
         if (row_ms > 5 and round == 129) try t.expectEqual(@as(usize, 2), target.last_rows);
     }
@@ -119,22 +119,22 @@ test "shared prices: missing and stale trials obey exact independent count and m
     }
 }
 
-test "shared prices: drafted work cannot update the intercept or invent a row slope" {
+test "shared prices: drafted work at plain width cannot update the intercept; two-point fit separates rows" {
     var p: prices.Prices = .{};
     defer p.deinit(a);
     try p.observe(a, 4, 4, 50, false, false, false);
-    try t.expect(p.price(4, false, 6, 0, 0) == null);
+    try t.expect(p.price(4, false, 0) == null);
     try p.observe(a, 4, 4, 2, false, true, false);
     try p.observe(a, 4, 8, 10, false, false, false);
-    const v = p.price(4, false, 6, 0, 99).?;
+    const v = p.price(4, false, 99).?;
     try t.expectEqual(@as(f64, 2), v.plain);
-    try t.expectEqual(@as(f64, 10), v.fixed);
-    try t.expectEqual(@as(f64, 99), v.row);
-    try t.expect(p.price(4, true, 6, 0, 0) == null);
-    try t.expect(p.price(2, false, 6, 0, 0) == null);
+    try t.expectEqual(@as(f64, 2), v.fixed);
+    try t.expectEqual(@as(f64, 2), v.row);
+    try t.expect(p.price(4, true, 0) == null);
+    try t.expect(p.price(2, false, 0) == null);
 }
 
-test "shared prices: the round observer retains fixed draft overhead separately from plain" {
+test "shared prices: the round observer subtracts modeled heads before fitting rows" {
     var table: @import("table.zig").Table = .{};
     defer table.deinit(a);
     for (1..9) |n| try table.put(a, @intCast(n), 10);
@@ -142,8 +142,7 @@ test "shared prices: the round observer retains fixed draft overhead separately 
     defer r.deinit();
     try r.observeShared(4, 4, 12, false, 0, true, false);
     try r.observeShared(4, 8, 32, false, 12, false, false);
-    try t.expectEqual(@as(f64, 0), r.sharedPrice(4, false).?.row);
-    try t.expect(r.sharedPrice(4, false).?.fixed > r.sharedPrice(4, false).?.plain);
+    try t.expectEqual(@as(f64, 2), r.sharedPrice(4, false).?.row);
     try r.observeShared(4, 4, 100, false, 12, false, false);
     try t.expectEqual(@as(f64, 2), r.sharedPrice(4, false).?.plain);
 }

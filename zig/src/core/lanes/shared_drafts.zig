@@ -59,7 +59,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
     }
     const paired = e.rule.sharedPrice(live, sampled);
     const counts = if (paired) |p|
-        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, p.fixed + p.head, e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(live, sampled) })
+        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, if (e.rule.k.fixed_draft_block) p.plain else p.fixed, e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .block_ms = if (e.rule.k.fixed_draft_block) p.fixed + p.head - p.plain else 0, .step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.mtp_step_ms, .extra_step_ms = if (e.rule.k.fixed_draft_block) 0 else e.cfg.draft_step_ms, .batched = e.cfg.draft_streams and alloc.pricedBatched(), .heads = neural, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(live, sampled) })
     else
         try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled), .least_rows = e.rule.row_cost.leastRows(live, sampled) });
     for (heads, out) |i, *budget| {
