@@ -12,6 +12,7 @@ const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
 const tree_ = @import("tree.zig");
 const steps = @import("prompt_steps.zig");
+const picks = @import("picks.zig");
 const vision = @import("vision.zig");
 const vw = @import("vision_weights.zig");
 const vt = @import("vision_tower.zig");
@@ -76,14 +77,13 @@ pub const Target = struct {
     tree: tree_.Tree = .{},
     /// the ViT and aligner, when the environment has a tower
     tower: ?vt.Tower = null,
-    /// a sampled pick's float64 logits and its ids 0 .. vocab - 1, kept between picks
+    /// sampled picks' float64 logits (picks.rows rows) and the ids 0 .. vocab - 1, kept between picks
     pick_vals: []f64 = &.{},
     pick_ids: []u64 = &.{},
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
-        _ = try prompt.check(c);
         const t = try a.create(Target);
         errdefer a.destroy(t);
         t.* = .{ .a = a, .env = env, .opt = opt, .b = undefined, .pr = undefined, .slots = &.{}, .cache = .{ .a = a, .cap = opt.cache_bytes } };
@@ -91,7 +91,7 @@ pub const Target = struct {
         errdefer t.b.deinit();
         t.pr = try prompt.Prompt.init(env.device, c, opt.prompt, opt.limit);
         errdefer t.pr.deinit();
-        t.pick_vals = try a.alloc(f64, c.vocab);
+        t.pick_vals = try a.alloc(f64, picks.rows * @as(usize, c.vocab));
         errdefer a.free(t.pick_vals);
         t.pick_ids = try a.alloc(u64, c.vocab);
         errdefer a.free(t.pick_ids);
@@ -445,7 +445,10 @@ pub const Target = struct {
         for (group, choices) |g, out| {
             const s = &t.slots[g.slot];
             const n = g.tokens.len;
-            for (0..n) |r| out[r] = try pick.choose(t, lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            const keyed = if (g.sampling) |smp| smp.temperature > 0 and n > 1 else false;
+            if (keyed) try picks.keyed(lg[r0 * V ..][0 .. n * V], g.draws, g.sampling.?, t.pick_vals, t.pick_ids, out[0..n]) else {
+                for (0..n) |r| out[r] = try pick.choose(t, lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            }
             s.base = g.start;
             s.rows = @intCast(n);
             s.open = true;
