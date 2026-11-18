@@ -484,3 +484,4 @@ at its 4,120 activation and 28,672 weight rows; each with its launch limits. On 
 M5 Ultra all four pass gates 1 to 4. The contract found that the quantizer dropped NaN, since `max` ignores it: a NaN
 activation took a finite scale and became an ordinary value. A group holding NaN now takes a NaN scale; finite inputs
 keep their bytes.
+

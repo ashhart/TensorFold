@@ -1,5 +1,5 @@
-//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), a picture's fc1 on int8
-//! operands (int32 sums), routed attention in bf16.
+//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), routed attention in bf16. A
+//! picture's fc1 (the released layout) runs on int8 operands (int32 sums); a clip's stays bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
@@ -46,9 +46,10 @@ pub fn quantize(m: *const Model, enc: mtl.ComputeEncoder, x: Ref, rows: usize, k
     enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// m.wide = xn fc1^T for block `index`: xn in int8 a row, fc1's int8 rows per 256 values of K.
-fn fc1(m: *const Model, enc: mtl.ComputeEncoder, index: usize) void {
+/// m.wide = xn fc1^T for block `index`. A picture's: xn in int8 a row, fc1's int8 rows per 256 values of K; a clip's in bf16.
+fn fc1(m: *const Model, enc: mtl.ComputeEncoder, w: Ref, index: usize) void {
     const n = 2 * m.mlp;
+    if (!m.base) return gemm(m, enc, m.xn, w, m.wide, n, m.hidden);
     quantize(m, enc, .{ .buffer = m.xn }, m.rows, m.hidden, m.hidden, .{ .buffer = m.xq }, .{ .buffer = m.xs });
     enc.barrier();
     // the scales' slots are past product's own; an encoder keeps them across its pipeline change
@@ -153,7 +154,7 @@ pub fn run(m: *Model, pass: *h3.Pass, index: usize) void {
     norm(m, enc.*, b.norm2, b.tables, h3.gate_a, b.tables, h3.scale_m, h3.shift_m);
     m.lap(pass, "norms");
     // the first projection's rows are [value | gate] ([gate | value] in the released layout), one product
-    fc1(m, enc.*, index);
+    fc1(m, enc.*, b.fc1, index);
     enc.barrier();
     enc.setPipeline(m.pipeline("h3_swiglu"));
     enc.setBuffer(m.wide, 0, 0);
@@ -319,4 +320,55 @@ test "h3 gemm: int8 fc1 operands give their exact dequantized product to bf16 ro
         try std.testing.expect(@abs(bf(out[r * n + c]) - exact) <= @abs(exact) * 0x1p-8 + size * sx[r] * 1e-6);
     };
     for (out[rows * n ..]) |v| try std.testing.expectEqual(@as(u16, 0xffff), v);
+}
+
+test "h3 gemm: a clip's fc1 stays bf16, bit for bit main's MLX product, whole and ragged" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (!device.tensorUnits()) return error.SkipZigTest;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const a = std.testing.allocator;
+    const text = try @import("source.zig").library(a, 56, 18432, 288, "");
+    defer a.free(text);
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    // a clip's model: no int8 fc1 bound (xq, xs, fc1_q and fc1_s stay unset), so a picture's path would fault
+    var m: Model = undefined;
+    inline for (kernels.names, 0..) |name, i| m.pipelines[i] = try mtl.Pipeline.init(device, lib, name, false);
+    defer for (m.pipelines) |p| p.deinit();
+    m.base = false;
+    m.mlp = 128;
+    m.hidden = 2 * fc1_group;
+    const n = 2 * m.mlp;
+    const k = m.hidden;
+    var prng = std.Random.DefaultPrng.init(87);
+    for ([_]usize{ 64 * 3, 64 * 3 + 24 }) |rows| {
+        m.rows = rows;
+        const shared = mtl.ResourceOptions.shared;
+        m.xn = try device.buffer(rows * k * 2, shared);
+        defer m.xn.deinit();
+        const w = try device.buffer(n * k * 2, shared);
+        defer w.deinit();
+        for ([_][]u16{ m.xn.slice(u16, rows * k), w.slice(u16, n * k) }) |values| {
+            for (values) |*v| v.* = 0x3f80 | (prng.random().int(u16) & 0x807f);
+        }
+        const old = try device.buffer(rows * n * 2, shared);
+        defer old.deinit();
+        m.wide = try device.buffer(rows * n * 2, shared);
+        defer m.wide.deinit();
+        const mlx = try mtl.Pipeline.init(device, lib, if (rows % 64 == 0) kernels.gemm_whole else kernels.gemm_ragged, false);
+        defer mlx.deinit();
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.concurrent);
+        product(enc, mlx, 2, m.xn, .{ .buffer = w }, old, rows, n, k, 256);
+        fc1(&m, enc, .{ .buffer = w }, 0);
+        enc.end();
+        cb.commit();
+        cb.wait();
+        try std.testing.expect(cb.failure() == null);
+        try std.testing.expectEqualSlices(u16, old.slice(u16, rows * n), m.wide.slice(u16, rows * n));
+    }
 }
