@@ -530,3 +530,34 @@ test "dsv41 metal serve: (k) drafts behind the verify (kept, or dropped when the
     try testing.expect(rounds_same);
     try testing.expect(st_on.used > 0 and st_on.dropped == 0 and st_sk.skewed > 0 and st_sk.dropped >= st_sk.skewed);
 }
+
+test "dsv41 metal serve: (h) sampled drafts behind the verify (keyed picks on the GPU, kept or dropped) == serial, same rounds" {
+    const p0 = try ids(170, 32);
+    defer gpa.free(p0);
+    const p1 = try ids(230, 33);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 4321, .temperature = 0.9, .top_k = 0, .top_p = 1.0 };
+    const whole: api.Sampling = .{ .seed = 1 << 62 | 77, .temperature = 1.0, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 48, .sampling = hot }, .{ .prompt = p1, .max = 48, .sampling = whole } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    var off: [2][]u32 = undefined;
+    const r_off = try served(&asks, false, 0, &off, null);
+    defer freeAll(&off);
+    var on: [2][]u32 = undefined;
+    var st_on: pkg.early.Stats = .{};
+    const r_on = try served(&asks, true, 0, &on, &st_on);
+    defer freeAll(&on);
+    var sk: [2][]u32 = undefined;
+    var st_sk: pkg.early.Stats = .{};
+    const r_sk = try served(&asks, true, 2, &sk, &st_sk);
+    defer freeAll(&sk);
+    const bad = [3]usize{ same(&want, &off), same(&want, &on), same(&want, &sk) };
+    const rounds_same = std.meta.eql(r_off, r_on) and std.meta.eql(r_off, r_sk);
+    say(bad[0] + bad[1] + bad[2] == 0 and rounds_same, "(h) sampled behind the verify off / on / parted vs serial: {d} / {d} / {d} differ; windows {d} / {d} / {d}, drafted rows {d} / {d} / {d}", .{ bad[0], bad[1], bad[2], r_off.windows, r_on.windows, r_sk.windows, r_off.drafted, r_on.drafted, r_sk.drafted });
+    say(st_on.keyed > 0 and st_on.used > 0, "(h) chains: {d} queued ({d} keyed), {d} used, {d} dropped; parted: {d} swapped, {d} dropped", .{ st_on.queued, st_on.keyed, st_on.used, st_on.dropped, st_sk.skewed, st_sk.dropped });
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
+    try testing.expect(rounds_same);
+    try testing.expect(st_on.keyed == st_on.queued and st_on.used > 0 and st_on.dropped == 0 and st_sk.skewed > 0 and st_sk.dropped >= st_sk.skewed);
+}
