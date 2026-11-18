@@ -28,7 +28,7 @@ pub const Which = enum { rmsnorm, layernorm };
 pub fn normSpec(which: Which) c.Spec {
     return switch (which) {
         // the backbone's norms at its width, the prompt's rows a pass
-        .rmsnorm => .{ .name = "cuda zonos3 z3_rmsnorm (fp32 rows, bf16 gamma)", .accum = .f32, .depth = normDepth, .ops = 8, .out = .f32, .tiles = .{ .{}, .{}, .{ .size = 256 } }, .served = &.{ .{ .rows = 1, .n = 1024, .k = 1024 }, .{ .rows = 64, .n = 1024, .k = 1024 } } },
+        .rmsnorm => .{ .name = "cuda zonos3 z3_rmsnorm (fp32 rows, bf16 gamma)", .accum = .f32, .depth = normDepth, .ops = 8, .out = .f32, .tiles = .{ .{}, .{}, .{ .size = 256 } }, .served = &.{ .{ .rows = 1, .n = 1024, .k = 1024 }, .{ .rows = 64, .n = 1024, .k = 1024 }, .{ .rows = 300, .n = 1024, .k = 1024 } } },
         // the codec's stages (768, 1280), the teacher (1024) and its features (160)
         .layernorm => .{ .name = "cuda zonos3_codec zc_layernorm (fp32 rows)", .accum = .f32, .depth = normDepth, .ops = 10, .out = .f32, .tiles = .{ .{}, .{}, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 300, .n = 1280, .k = 1280 }, .{ .rows = 999, .n = 1024, .k = 1024 }, .{ .rows = 999, .n = 160, .k = 160 }, .{ .rows = 1024, .n = 768, .k = 768 } } },
     };
@@ -141,10 +141,10 @@ pub const Weights = enum { bf16, f32 };
 
 pub fn linearSpec(weights: Weights) c.Spec {
     return switch (weights) {
-        // the backbone's projections: a GDN layer's, the dense feed-forward's two, an expert's, the head's
-        .bf16 => .{ .name = "cuda zonos3 z3_linear (fp32 rows, bf16 weights)", .accum = .f32, .depth = linearDepth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &.{ .{ .rows = 1, .n = 2056, .k = 1024 }, .{ .rows = 64, .n = 1024, .k = 2048 }, .{ .rows = 2, .n = 3072, .k = 256 }, .{ .rows = 1, .n = 40980, .k = 1024 }, .{ .rows = 16, .n = 1024, .k = 4096 } } },
-        // the codec's: a stage's attention and feed-forward, the encoder's first projection, an iSTFT branch
-        .f32 => .{ .name = "cuda zonos3_codec zc_linear (fp32 rows and weights)", .accum = .f32, .depth = linearDepth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 32 } }, .served = &.{ .{ .rows = 16, .n = 2304, .k = 768 }, .{ .rows = 8, .n = 1280, .k = 5120 }, .{ .rows = 8, .n = 768, .k = 5888 }, .{ .rows = 8, .n = 2208, .k = 2210 } } },
+        // the backbone's projections: GDN, dense feed-forward, an expert's, the head's, the edit adapter's factors
+        .bf16 => .{ .name = "cuda zonos3 z3_linear (fp32 rows, bf16 weights)", .accum = .f32, .depth = linearDepth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &.{ .{ .rows = 1, .n = 2056, .k = 1024 }, .{ .rows = 64, .n = 1024, .k = 2048 }, .{ .rows = 2, .n = 3072, .k = 256 }, .{ .rows = 1, .n = 40980, .k = 1024 }, .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 1, .n = 64, .k = 1024 }, .{ .rows = 1, .n = 40980, .k = 64 }, .{ .rows = 2, .n = 3072, .k = 16 }, .{ .rows = 2, .n = 16, .k = 256 } } },
+        // the codec's: a stage's attention and feed-forward, the encoder's first, an iSTFT branch, the aligner's
+        .f32 => .{ .name = "cuda zonos3_codec zc_linear (fp32 rows and weights)", .accum = .f32, .depth = linearDepth, .out = .f32, .tiles = .{ .{}, .{ .size = 8 }, .{ .size = 32 } }, .served = &.{ .{ .rows = 16, .n = 2304, .k = 768 }, .{ .rows = 8, .n = 1280, .k = 5120 }, .{ .rows = 8, .n = 768, .k = 5888 }, .{ .rows = 8, .n = 2208, .k = 2210 }, .{ .rows = 300, .n = 1024, .k = 512 }, .{ .rows = 600, .n = 256, .k = 1280 } } },
     };
 }
 

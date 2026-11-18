@@ -14,6 +14,9 @@ const usage =
     \\usage: zonos3-generate --model LM_DIR --check DUMP_DIR [--max-rows 64] [--max-ctx 4096]
     \\       zonos3-generate --model LM_DIR --frames-check GEN_DIR [--max-frames 2000]
     \\       zonos3-generate --steer-check GEN_DIR --steer-bundle BUNDLE.json
+    \\       zonos3-generate --model LM_DIR --edit-check EDIT_DIR --edit-adapter ADAPTER.pt
+    \\       zonos3-generate --speaker-check DUMP_DIR --speaker-encoder CKPT.pth
+    \\       zonos3-generate --aligner-check DUMP_DIR --aligner WEB_ALIGNER_DIR
     \\       zonos3-generate --codec-check DUMP_DIR --generator GENERATOR.pt --head HEAD.pt
     \\       zonos3-generate --encoder-check DUMP_DIR --generator GENERATOR.pt
     \\       zonos3-generate --features-check DUMP_DIR
@@ -123,7 +126,7 @@ fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
 }
 
 /// A branch of the dump (`input_ids`, or the guidance twin `twin_ids`); the twin's sidecar holds the guidance scale.
-fn loadBranch(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, comptime stem: []const u8, rows: *[][W]i32, replaced: *std.ArrayList(z3.Replace)) !f32 {
+pub fn loadBranch(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, comptime stem: []const u8, rows: *[][W]i32, replaced: *std.ArrayList(z3.Replace)) !f32 {
     const ids_path = try std.fs.path.join(gpa, &.{ dir, stem ++ ".npy" });
     defer gpa.free(ids_path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, ids_path, gpa, .limited(1 << 28));
@@ -432,6 +435,11 @@ pub fn main(init: std.process.Init) !u8 {
     var check: ?[]const u8 = null;
     var frames_check: ?[]const u8 = null;
     var steer_check: ?[]const u8 = null;
+    var edit_check: ?[]const u8 = null;
+    var speaker_check: ?[]const u8 = null;
+    var aligner_check: ?[]const u8 = null;
+    var aligner_dir: []const u8 = "";
+    var speaker_encoder: []const u8 = "";
     var steer_bundle: []const u8 = "";
     var laci_replay: ?[]const u8 = null;
     var laci_check: ?[]const u8 = null;
@@ -453,7 +461,7 @@ pub fn main(init: std.process.Init) !u8 {
     while (i + 1 < argv.len) : (i += 2) {
         const k = argv[i];
         const v = argv[i + 1];
-        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--steer-check")) steer_check = v else if (std.mem.eql(u8, k, "--steer-bundle")) steer_bundle = v else if (std.mem.eql(u8, k, "--laci-replay")) laci_replay = v else if (std.mem.eql(u8, k, "--laci-check")) laci_check = v else if (std.mem.eql(u8, k, "--laci-heads")) laci_heads = v else if (std.mem.eql(u8, k, "--expected")) expected = v else if (std.mem.eql(u8, k, "--short-text-registry")) registry = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--features-check")) features_check = v else if (std.mem.eql(u8, k, "--teacher-check")) teacher_check = v else if (std.mem.eql(u8, k, "--teacher")) teacher_dir = v else if (std.mem.eql(u8, k, "--encode-check")) encode_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
+        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--aligner-check")) aligner_check = v else if (std.mem.eql(u8, k, "--aligner")) aligner_dir = v else if (std.mem.eql(u8, k, "--speaker-check")) speaker_check = v else if (std.mem.eql(u8, k, "--speaker-encoder")) speaker_encoder = v else if (std.mem.eql(u8, k, "--edit-check")) edit_check = v else if (std.mem.eql(u8, k, "--edit-adapter")) opts.adapter = v else if (std.mem.eql(u8, k, "--steer-check")) steer_check = v else if (std.mem.eql(u8, k, "--steer-bundle")) steer_bundle = v else if (std.mem.eql(u8, k, "--laci-replay")) laci_replay = v else if (std.mem.eql(u8, k, "--laci-check")) laci_check = v else if (std.mem.eql(u8, k, "--laci-heads")) laci_heads = v else if (std.mem.eql(u8, k, "--expected")) expected = v else if (std.mem.eql(u8, k, "--short-text-registry")) registry = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--features-check")) features_check = v else if (std.mem.eql(u8, k, "--teacher-check")) teacher_check = v else if (std.mem.eql(u8, k, "--teacher")) teacher_dir = v else if (std.mem.eql(u8, k, "--encode-check")) encode_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
@@ -484,6 +492,14 @@ pub fn main(init: std.process.Init) !u8 {
         }
         sp.max_frames = max_frames;
         return speak(gpa, io, sp);
+    }
+    if (aligner_check) |clip| return if (i == argv.len and aligner_dir.len > 0) @import("check_aligner.zig").run(gpa, io, clip, aligner_dir) else 2;
+    if (speaker_check) |clip| return if (i == argv.len and speaker_encoder.len > 0) @import("check_speaker.zig").run(gpa, io, clip, speaker_encoder) else 2;
+    if (edit_check) |edits| {
+        if (model.len == 0 or i != argv.len or opts.adapter.len == 0) return 2;
+        const e = try z3.Engine.create(gpa, io, model, opts);
+        defer e.destroy();
+        return @import("check_edit.zig").fills(gpa, io, e, edits);
     }
     const dir = check orelse frames_check orelse laci_check orelse {
         std.debug.print("{s}", .{usage});

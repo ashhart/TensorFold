@@ -1,8 +1,8 @@
 # ZONOS3 Mini on CUDA
 
 `zig/src/families/zonos3` runs Zyphra's ZONOS3 Mini text-to-speech model on the CUDA runtime, from the files the
-publisher released, and serves it on `POST /v1/audio/speech`. This page records what is ported, where every source
-came from, and how each part was checked, so the checks can be rerun.
+publisher released, and serves it on `POST /v1/audio/speech` (speech edits on `POST /v1/audio/edit`). This page
+records what is ported, where every source came from, and how each part was checked, so the checks can be rerun.
 
 Status: one branch, proposed in #3615 and open as draft pull request #3720. All 40 kernels have their limits
 records, numeric contract tests and a planted control each; the quality suite has not been run on this build.
@@ -11,14 +11,16 @@ records, numeric contract tests and a planted control each; the quality suite ha
 
 | What | Where | Pin |
 | --- | --- | --- |
-| Checkpoint | `huggingface.co/Zyphra/ZONOS3-Mini` (Apache-2.0) | revision `d2d142a86b1e6aeb4252679673c86ecd86177bf8` |
+| Checkpoint | `huggingface.co/Zyphra/ZONOS3-Mini` (Apache-2.0) | revision `2921b8821772b0bd10a04456863d21abf9d2f283` |
 | Reference code | `github.com/Zyphra/ZONOS3-Mini` (MIT) | commit `96d9e0ec1e39083ed336ac78f24e3dbc93721c0f` |
 | Short-text registry | the reference repo's `model/src/zonos3/registries/short_text.json` (MIT) | the same commit |
 | LACI alignment heads | the reference repo's `assets/laci_heads/*.json` (MIT) | the same commit |
 | Steering bundle | the reference repo's `assets/steering/studio_bundle_mect60k_x10.json` and the 14 set folders it names (MIT) | the same commit |
 | Reference environment | Python 3.12.3, torch 2.9.1+cu128, torchaudio 2.9.1+cu128, transformers 4.57.3 | the repo's `constraints.txt` |
 
-Nothing is converted: the server reads the release folder as published.
+Nothing is converted: the server reads the release folder as published. The revision moved from
+`d2d142a86b1e6aeb4252679673c86ecd86177bf8` when the publisher added the speech-edit adapter (its one change to the
+files read here).
 
 | File in the release | Read by | sha256 |
 | --- | --- | --- |
@@ -30,6 +32,9 @@ Nothing is converted: the server reads the release folder as published.
 | `autoencoder/teacher/model.safetensors` (bf16) | the encoder's SSL teacher | `a15182741d6ee3cd780b8b830f49fa6b7fcce383655d451970841b24114767a5` |
 | `registries/codec_registry_keep2_plain.json`, `registries/silence_frame_*.json` | the decoder's files, the silence frame | `5437b4159b2bdbc33d3c1a27a316df7ae361b06f5ce3c9822f585402bcb4351a` (the registry) |
 | `lm/zonos3_mini/text_rows/pause_tokens_s5000.pt` (fp32), `.json` | the phoneme, start and pause tokens' text rows and their ids | `35868b0ff855081f3340a1c96644cfe9bf21b42935d9ed991ddd59ea0375e621` |
+| `lm/zonos3_mini/edit_lora/z3m_omni3b_edit_lora.pt` (fp32 holding bf16 and f16 values) | the speech-edit adapter | `60c1f2c452ed3895a820f035433ab113226e11a34e11da52bb48cb42a86ae978` |
+| `speaker_encoders/ownmect_s2/ckpt_0037.pth` (fp32), `registries/speaker_encoder_registry.json` | the speaker encoder | `3cef65631f3161cbd8eacc6ea40e59a237c79656d85c7232dcbe0c8d07cae88f` (the checkpoint) |
+| `web/aligner/manifest.json` and `shard-000.bin` to `shard-008.bin` (8-bit matrices, fp32 heads) | the forced aligner | `fe68218a5a785cd64a08d0a1fa367685f6749a6e71fe3cf9a1dd7f39303ea2b7` (the manifest), `efa75cb1b8f8a0a2699282536e1dc3b5348e9554100ec82aac011baba37367cc` (the nine shards in order) |
 | `gguf/voices/<language>/*.codes.npy`, `*.embedding.npy` | the default voices | |
 
 The `.pth` files are torch.save archives; `zig/src/core/torch_pth.zig` reads them without Python (stored zip
@@ -71,9 +76,19 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
 - **Phoneme, start and pause tokens** (`cuda/weights.zig`, `server/zonos_tokens.zig`) and **short texts**
   (`short_text.zig`, `server/zonos_short.zig`, with `--short-text`). See the sections of those names.
 
+- **Speech editing** (`edit.zig`, `edit_plan.zig`, `cuda/adapter.zig`, `server/speech_edit.zig`,
+  `native/zonos_edit.zig`): `POST /v1/audio/edit` and `/v1/audio/edit/align`, when the release folder holds the
+  edit adapter. See "Speech editing".
+- **Speaker encoder** (`speaker.zig`, `speaker_blocks.zig`): a clip's 192-d embedding, on the host's cores. See
+  "The speaker encoder".
+- **Forced aligner** (`cuda/aligner.zig`, `cuda/aligner_weights.zig`, `align_words.zig`): where each word of a
+  transcript is spoken in a clip. See "The aligner".
+
 Refused or absent: clips in formats other than WAV, spans placed by the reading position
-(`control_span_follow: "reading"`), an embedding made from a clip (the release's speaker encoder), LACI's duration
-targets and extended speaking-rate buckets, speech editing, accent adapters, the `full_mr` decoder, Metal.
+(`control_span_follow: "reading"`), LACI's duration targets and extended speaking-rate buckets, accent adapters, the
+`full_mr` decoder, Metal. Of speech editing: speech recognition (`/v2/edit/transcribe`, `verify`, an edit without
+the clip's transcript), Japanese and Mandarin, clips over 60 s, and the aligner's long-form routing (a clip over
+30 s needs its word timings from the caller).
 
 ## Text normalization
 
@@ -308,6 +323,101 @@ sample counts (70.7, 63.8 and 64.2 dB). Sampled and served, a short text repeats
 bytes and gives other bytes than with `short_text` off; four requests at once, two of them short, each gave the
 bytes they give alone.
 
+## Speech editing
+
+`POST /v1/audio/edit` re-says part of a recorded clip: the regions that change are generated again by the backbone,
+with the rest of the clip as context, and spliced into the clip's own codec frames. It is the release's `/v2/edit`
+(`zonos3.tts.edit_runtime`, `zonos3.tts.edit`, `zonos3.tts.edit_align`), served when the release folder holds
+`lm/zonos3_mini/edit_lora/z3m_omni3b_edit_lora.pt`; without that file the route answers 400 and nothing else
+changes.
+
+- **The adapter** is a LoRA on the release backbone (`zonos-accent-lora/3`): rank-64 factors on 59 linear layers,
+  rank-16 factors on each expert's two matrices in ten layers, a shift of ten routers' balancing biases, and the
+  rows of a vocabulary one id larger: a span-end audio id (4098) in every codebook's table and head block, and three
+  edit-marker text rows. Every fill runs on it at strength 1 and every other request never reads it.
+- **On the device** the factors are the bf16 the file's values are (all 158 factor tensors are bf16 values stored
+  in fp32; a value that is not is refused, not rounded). A shifted layer is three launches of kernels the backbone
+  already has: `z3_linear` for the down product, `z3_linear` for the up product, `z3_combine` to add the shift to
+  the layer's own rows. An expert's factors are picked by the router's picks as its weights are. The span-end rows
+  are f16 values, which bf16 does not hold, so they stay in fp32 on the host: a prompt row that holds the span-end
+  code is summed there in `z3_embed`'s order and replaces the device's row, and the ten span-end logits of a frame
+  are the host's dot products with the row the head read.
+- **A fill** is one request: the prompt is `[speaker row] [condition rows] text` and then the clip around its
+  masked spans, a marker row a span, the unmasked context ended by end-of-audio, each fill made so far ended by
+  span-end, and the marker of the span to fill. It is sampled over codes and span-end only, the span-end masked in
+  codebook `c` until row `min_frames + c`, and it ends ten rows after the first span-end row. Its frames before that
+  row are the fill.
+- **Other requests beside it:** rows on the adapter run in a pass of their own, so a spoken reply generated while
+  an edit fills is the reply it is alone (checked below).
+
+The request takes the release's fields: `audio_base64` (a WAV file), `target_text`, and either `spans` (up to
+three `[start, end]` in seconds) or `original_text`, from which the regions are the words that differ. With
+`original_text` the server places the words with the aligner (clips up to 30 s), or takes `original_words` from the
+caller. `margin_seconds`, `max_span_seconds`, `min_fill_ratio`, `max_context_seconds`, `context_seconds`,
+`num_takes` (1 to 4), `seed`, the sampling fields, `condition_buckets` and `condition_values`, `controls`,
+`region_controls` and the steer-then-hold fields, `language` and `text_normalization` mean what they mean there. A
+clip longer than `max_context_seconds` (16) is edited on windows: each region with `context_seconds` (4) of words
+on both sides, cut halfway between words. The reply is the release's JSON: `spans`, `contexts`, `words`,
+`expected_seconds` and `takes`, each take a 16-bit 44.1 kHz WAV in base64 with its `edited_regions`,
+`fill_seconds` and `stopped`.
+
+What differs from the release:
+
+- **`speaker_embedding`** may also be 192 numbers, which fill the speaker row in place of the clip's own embedding.
+- **No speech recognition:** `/v2/edit/transcribe` is not served, `verify` is refused, and an edit that reads the
+  clip's words needs `original_text`.
+- **Languages:** en_us, en_gb, fr_fr, de, es, it, pt_br and ko. The release also edits ja and cmn, cutting their
+  text into words with ICU, which this port does not have; both are refused.
+- **Lengths:** a clip of at most 60 s (the clip encoder's limit; the release takes 150 s), and an edited clip of at
+  most the server's frame budget. The aligner places words in clips of at most 30 s and transcripts of at most
+  1,022 bytes; past that the release routes by voice activity and recognized anchors, and this port asks for
+  `original_words`.
+- **Sampling:** `top_k` is the route's name for the release's `topk`, and the draws are TensorFold's keyed sampler,
+  as for speech, so a sampled edit is not the reference's sample. Without `seed`, takes follow from the clip's
+  length and the target text, so the same request gives the same edit.
+- **Clips at other rates** are resampled to 44.1 kHz first, and the speaker encoder and the aligner hear that
+  resampled to 16 kHz; the release resamples the upload to 16 kHz directly.
+
+`POST /v1/audio/edit/align` (`{audio_base64, text}`) answers the text's words with their place in the clip, in the
+form `original_words` takes.
+
+### The speaker encoder
+
+The release's speaker encoder (`zonos3.models.mect_speaker`: MECT-B2, 11.2 million weights, the registry's
+`ownmect_s2`) gives a clip's 192-d embedding. An edit puts it in the speaker row unless `speaker_embedding` is
+`false`, and `/v1/audio/speech` with `speaker_mode: "embedding"` and `ref_audio` now speaks in the clip's voice by
+its embedding (it was refused before).
+
+It runs in fp32 on the host's cores, not on the device (`speaker.zig`, `speaker_blocks.zig`): 16 kHz audio (the
+teacher's resampler), 80 Kaldi log-mel bins with a Hamming window, each bin less its mean, a 3 x 3 convolution,
+fourteen blocks of grouped 3 x 3 and 1 x 1 convolutions with a transformer layer over the frames (a soft mixture of
+four experts), the four stages' rows weighed and pooled by attentive statistics, and a linear layer. The 1 x 1
+convolutions are most of the work and run sixteen positions at a time over up to sixteen threads. It reads at
+most the clip's first 60 s, as the release does.
+
+### The aligner
+
+The release's aligner is FuseAlign: a 12-layer transformer of width 1,024 over the clip's audio patches (16 ms
+each) and the transcript's bytes, behind a frozen 12-layer text encoder (Dia's), with two heads that score every
+millisecond as each word's start and end and a third that gives the word's presence. A word under 0.1 presence is
+not placed and takes an equal share of the gap around it.
+
+- **The weights** are the release's `web/aligner` folder, the publisher's export for its in-browser engine: the
+  two transformers' matrices in 8 bits with a scale for every 32 values (GGUF's `q8_0`), the heads in fp32. The
+  publisher's fp32 checkpoint is in a repository that is not public, so the 8-bit export is what is published and
+  what is served, dequantized as the export defines it (the int8 value times its block's scale) into fp32 on the
+  device: 1,846,591,492 bytes.
+- **The arithmetic** follows the publisher's engines for this export (`servers/web/src/aligner`, which mirrors
+  their ggml code): fp32 rows throughout, the text encoder's RoPE tables and its output rounded to bf16. The
+  publisher's Python package runs the text encoder in bf16 instead; the check below is against that package.
+- **No new kernel:** the linears are cuBLAS's GEMM (the decoder's handle) or, where a row's inputs overlap the
+  next row's (the audio patches, the transposed convolutions as two phases, the kernel-5 convolution), `zc_linear`;
+  the norms are `z3_rmsnorm` without a weight, each weight folded into the matrices that read its rows; the gated
+  feed-forward is `z3_mul_silu`; the joint attention is the teacher's `zt_attention` with a zero relative table.
+  RoPE is applied on the host (the queries and keys make a round trip a layer), and so is the text encoder's
+  attention, whose heads are 128 wide where the kernel's are 64.
+- **It loads** with the first edit that needs it and is admitted for its weights and 512 MiB of a forward's rows.
+
 ## Requests at once
 
 `--parallel N` (1 to 16; 1 without the flag) serves N requests at once. Each has its own lane: a set of the
@@ -416,6 +526,37 @@ python tools/zig/zonos3_reference.py clip RELEASE/autoencoder/generator.pt RELEA
 python tools/zig/zonos3_reference.py clip RELEASE/autoencoder/generator.pt RELEASE/autoencoder/teacher D/enc_cillian/audio.npy D/clip_cillian_47s --seconds 47.3
 ```
 
+Speech edits, the speaker encoder and the aligner have their own tool, `tools/zig/zonos3_reference_edit.py`, run in
+the same environment (the reference repo's `third_party/fusealign-multilingual` is the aligner's package). With
+`A=LM/edit_lora/z3m_omni3b_edit_lora.pt`, `S` the steering bundle, `H` the LACI heads folder and
+`P=LM/text_rows/pause_tokens_s5000.pt`:
+
+```sh
+python tools/zig/zonos3_reference_edit.py edit-cases RELEASE D/gen_greedy_embedding D/gen_laci_long D/edit-cases
+for X in edit_span edit_sampled edit_plain_row edit_three edit_words edit_windows edit_window_spans; do
+  python tools/zig/zonos3_reference_edit.py edit LM A D/edit-cases/$X.json D/$X --steer-bundle S --laci-heads H --text-rows P
+done
+python tools/zig/zonos3_reference_edit.py clips D/gen_greedy_embedding D/gen_laci_long D/served
+for N in short long; do
+  python tools/zig/zonos3_reference.py clip RELEASE/autoencoder/generator.pt RELEASE/autoencoder/teacher D/served/${N}_audio.npy D/served/${N}_clip
+  python tools/zig/zonos3_reference_edit.py speaker RELEASE/speaker_encoders/ownmect_s2/ckpt_0037.pth D/served/${N}_audio.npy D/served/speaker_$N
+  python tools/zig/zonos3_reference_edit.py aligner RELEASE/web/aligner D/served/${N}_audio.npy D/served/${N}_tokens.json D/served/align_$N
+done
+python tools/zig/zonos3_reference_edit.py served-cases RELEASE D/served
+for X in s_span s_plain s_three s_words s_windows s_window_spans v_span v_windows a_span a_words a_windows; do
+  python tools/zig/zonos3_reference_edit.py edit LM A D/served/$X.json D/served/ref_$X --steer-bundle S --laci-heads H --text-rows P
+done
+```
+
+`edit` runs the publisher's own `EditRuntime` on its reference backbone, grown to the adapter's vocabulary, with
+the adapter on every fill; the clip's codes and embedding are handed to it, so it needs no encoder. The seven
+`edit_*` cases edit the frames the reference generated (4.47 s and 17.33 s of them), with word timings spread by
+letter count: they exercise the plan, not the aligner. The eleven served cases edit the two clips as a server
+receives them: the reference's audio of the same two requests as 16-bit WAVs (4.67 s and 17.53 s), their codes
+from `clip`. `aligner` loads the release's `web/aligner` weights into the publisher's `fusealign_hub` modules (the
+8-bit matrices dequantized) and runs the package in fp32 on the CPU, its text encoder in bf16 as the package runs
+it there.
+
 The encoder's clip is the release's own `Cillian_en-Irish_M_1.wav` (9.67 s, one lane); the 47.3 s clip is that
 audio repeated, which takes four lanes. `clip` follows the publisher's lane layout; its production tool reports the
 same four pieces for the 47.3 s clip (300 frames, then 150, 150 and 110 after 150 of context each).
@@ -454,8 +595,25 @@ Savannah voice, once by her speaker embedding (a 30-row prompt) and once by her 
 | SSL teacher | `--teacher-check D/teacher_cillian_fp32 --teacher RELEASE/autoencoder/teacher` | 18 captures of the fp32 run, 999 rows | worst row's cosine 0.9999252 |
 | Clip to codes, one lane | `--encode-check D/clip_cillian --checkpoint RELEASE` | the fp32 run's codes, 145 frames | 1,450 of 1,450 codes equal |
 | Clip to codes, four lanes | `--encode-check D/clip_cillian_47s --checkpoint RELEASE` | the fp32 run's codes, 710 frames | 7,100 of 7,100 codes equal |
+| Speech edit, one span (1.0 to 1.6 s) | `--model LM --edit-check D/edit_span --edit-adapter A --max-rows N` | the reference's region, minimum length, prompt and 20 rows; the spliced codes | all equal at N = 64 and 7 |
+| Speech edit without the speaker row, no minimum length | the same with `D/edit_plain_row` | 20 rows | all equal at N = 64 and 7 |
+| Speech edit, three spans with `controls`, `region_controls` (a hidden and a speaker-embedding control), an onset and a speaking rate | the same with `D/edit_three` | three fills of 18, 18 and 16 rows, the later prompts holding the earlier fills | all equal at N = 64 and 7 |
+| Speech edit by word diff ("brown fox" to "small grey cat", "rests" to "sleeps") | the same with `D/edit_words` | two regions from the diff, two fills of 71 and 20 rows | all equal at N = 64 and 7 |
+| Speech edit on windows, a 17.3 s clip, by word diff | the same with `D/edit_windows` | two windows, their texts, two fills of 18 rows | all equal at N = 64 and 7 |
+| Speech edit on windows, explicit spans, 2 s of context | the same with `D/edit_window_spans` | two windows, two fills of 21 and 22 rows | all equal at N = 64 and 7 |
+| Speech edit, sampled | the same with `D/edit_sampled` | the region, minimum length, prompt and splice (the reference's rows carry the replay on) | the plan and the prompt equal; the rows are not compared |
+| Speaker encoder, 4.67 s | `--speaker-check D/served/speaker_short --speaker-encoder CKPT` | the filterbank, the first convolution, the four stages, the pooled rows and the embedding | every row's cosine 1.0000000; the embedding within 4.0e-6; 0.43 s |
+| Speaker encoder, 17.53 s | the same with `D/served/speaker_long` | as above | every row's cosine 1.0000000; the embedding within 4.1e-6; 1.23 s |
+| Aligner, 4.67 s and 16 words | `--aligner-check D/served/align_short --aligner RELEASE/web/aligner` | each word's start and end from `fusealign_hub` on the same weights | 15 of 16 words identical, the other 1 ms off; the joint rows' cosine 0.999997, the text rows' 0.9989; 0.06 s |
+| Aligner, 17.53 s and 64 words | the same with `D/served/align_long` | as above | 61 of 64 words identical, the others 1 ms off; the joint rows' cosine 0.999994, the text rows' 0.9958; 0.36 s |
 
-`G` is `RELEASE/autoencoder/generator.pt` and `H` the `keep2_plain` head checkpoint. A capture passes when its worst
+`G` is `RELEASE/autoencoder/generator.pt` and `H` the `keep2_plain` head checkpoint; `A` is the edit adapter and
+`CKPT` is `RELEASE/speaker_encoders/ownmect_s2/ckpt_0037.pth`. An edit check plans the edit from the dump's request
+(regions, windows, expected and minimum lengths), lays out each fill's prompt after the reference's text rows,
+generates the fill greedily on the adapter with the earlier fills it made itself, and splices; "all equal" is the
+plan, every prompt row, every generated row and every spliced frame. The aligner's check passes when no word is
+more than 20 ms from the reference's; the publisher's package runs its text encoder in bf16 and the port in fp32,
+which is what the text rows' cosine shows. A capture passes when its worst
 row's cosine against the reference is at least 0.9999. The backbone's "equal prompt rows" also covers the tokenizer:
 the port's SuperBPE ids for the test sentence equal the reference's.
 
@@ -499,6 +657,33 @@ warm-up request:
 | A second and a third request while one runs | 503 each |
 | An unknown voice, `top_k` above 4,096, malformed `speaker_reference_codes`, a `ref_audio` that is no WAV or is under half a second | 400 with the reason |
 
+**Speech edits.** `tensorfold-native serve RELEASE --parallel 4` with the steering bundle; each of the eleven
+served cases was sent to `/v1/audio/edit` three times and compared with the reference's run of it
+(`D/served/ref_X`): the regions, the windows, the expected lengths, each fill's length and whether it stopped, and
+the take's audio against the reference's CPU audio.
+
+| Case | What it edits | Fills (frames) | Audio | Time |
+| --- | --- | --- | --- | --- |
+| `s_span` | one span of the 4.67 s clip, a given embedding | 9 | 205,800 of 205,800 samples, 63.6 dB | 0.56 s |
+| `s_plain` | the same without the speaker row | 10 | 208,740 of 208,740, 62.6 dB | 0.56 s |
+| `s_three` | three spans, `controls` and `region_controls`, a speaking rate | 7, 6, 5 | 191,100 of 191,100, 65.4 dB | 0.63 s |
+| `s_words` | a word diff over the caller's `original_words` | 41, 7 | 285,180 of 285,180, 59.9 dB | 0.66 s |
+| `s_windows` | the 17.53 s clip on two windows, by word diff | 8, 7 | 773,220 of 773,220, 63.5 dB | 1.36 s |
+| `s_window_spans` | the same clip, two spans, 2 s of context | 14, 13 | 790,860 of 790,860, 63.4 dB | 1.37 s |
+| `v_span` | one span, the clip's own embedding from the speaker encoder | 9 | 205,800 of 205,800, 64.3 dB | 0.96 to 1.01 s |
+| `v_windows` | two windows, the clip's own embedding | 7, 8 | 773,220 of 773,220, 63.8 dB | 2.53 to 2.54 s |
+| `a_span` | one span, `original_text` alone: the server aligns it | 7 | 205,800 of 205,800, 65.0 dB | 1.03 to 1.05 s |
+| `a_words` | a word diff from `original_text` alone | 19, 9 | 220,500 of 220,500, 66.0 dB | 1.10 to 1.19 s |
+| `a_windows` | the 17.53 s clip on two windows from `original_text` alone | 9, 8 | 776,160 of 776,160, 64.2 dB | 3.03 to 3.08 s |
+
+In all eleven the regions, windows, expected lengths, fill lengths and stops equal the reference's. In the three
+`a_` cases the reference was given the word timings its own aligner run found, and the server's words are within
+1.0 ms of them. The times are the second and third request of each case; the first edit after a start also loads
+the clip encoder (8.7 s) and the first to align loads the aligner (about 1.3 s more). An edit's time is mostly
+outside the backbone: the clip's encoding, its speaker embedding (0.43 s for 4.67 s of audio, 1.23 s for 17.53 s,
+4.6 s for 60 s) and the decode of the whole edited clip; in the standalone tool the fills of a whole edit take
+0.04 to 0.16 s.
+
 The standalone tool measured the parts: the decoder alone turns 11.4 s of codes into audio in 0.13 s; a 9.7 s clip
 encodes in 0.75 s and a 47.3 s clip in 5.1 s (the acoustic branch 0.48 s and the teacher 0.26 s a lane). There are
 no CUDA graphs and the sampler runs on the host; none of this is tuned.
@@ -535,6 +720,11 @@ workflow runs them (`-Dfixed-cpu`, its test timeouts) and passed:
 - The family's host tests alone (`zig build test-zonos-host`), with Drama's and the CUDA host suite
   (`test-drama-host test-cuda-host`).
 
+The same steps were run again with speech editing, the speaker encoder and the aligner in the tree, and all passed
+(the lean check again 221 problems on both sides, 0 new). That change adds a field to the speech request Drama 3 is
+served through and a reader to `core/torch_pth.zig`; Drama's host tests pass, and its A/B on the M5 Ultra below was
+not repeated for it.
+
 They ran under umask 022: with 0002 one unrelated test (`serve --config`, which refuses a group-writable file)
 fails. In the first run of `test-host-a` one real-clock test of the rank bring-up (`two ranks settle on the real
 clock and agree on one plan and view`) failed while other jobs shared the CPU; the step passed when run again alone.
@@ -567,6 +757,16 @@ The host works out what a load takes before it allocates anything and asks the p
   number admitted and held after the load. A load that holds more than it was admitted for is an error.
 - **The clip encoder** loads with the first request that brings a clip and takes 5,643,510,688 bytes (5.26 GiB) of
   weights, state and workspaces, all of fixed size; the log again shows that number admitted and held.
+- **The edit adapter**, when the release folder holds it, is part of the load: its factors and shifted biases as
+  the device holds them (counted from the file's index before anything is allocated) and the scratch its passes
+  take, 143,684,608 bytes in all at the default context. With it, four requests at once load at 7,721,219,584
+  bytes, admitted and held alike.
+- **The aligner** loads with the first edit that needs word timings and is admitted for 2,383,462,404 bytes: its
+  1,846,591,492 bytes of weights and 512 MiB for one forward's rows, which are allocated for the forward and freed
+  after it. Its count is not checked after the load as the clip encoder's is.
+- **The speaker encoder** holds no device memory: its 45 MB of weights and a forward's maps, reused from layer to
+  layer, are host memory. Its check's process peaked at 1.49 GB resident on a 60.3 s clip, the reference's dumps it
+  compares with included.
 
 Checked on the served build with `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`: at 3 the server refuses to start ("ZONOS3 Mini
 needs 3.60 GiB of device memory at --context 4096; 3.00 GiB is free for it after the reserve"); at 5 it starts, a
@@ -619,6 +819,18 @@ On an RTX 5090 (driver 615.71.09, images from nvcc 13.0.88, the runner built for
 `tf-cuda-test kernel-contract zonos3` ended with
 
     (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6395 ms, limits 8 ms
+
+Speech editing, the speaker encoder and the aligner add no kernel. The edit adapter and the aligner launch nine
+of the 40 at shapes they were not served at before, and those shapes joined the kernels' served lists: `z3_linear`
+at an adapter's down product (1,024 to 64), its up product onto the head (64 to 40,980) and an expert's factors
+(256 to 16 to 3,072, picked); `z3_combine` adding a shift at the head's width, the dense feed-forward's and an
+expert's; `z3_rmsnorm`, `z3_mul_silu`, `ze_add` and `zt_attention` over the aligner's joint sequence; `zc_linear`
+over the aligner's audio patches and its kernel-5 convolution; `zc_gelu` over a refinement head's rows. The
+aligner calls `zc_linear` with rows that overlap (a row starts 256 values after the last and reads 512), which the
+contract's inputs do not: its test rows do not overlap. The launches' thread counts and largest shared memory are
+within the records, so gate 5's records stand. With the shapes added, the same command on the same card ended with
+
+    (filtered) SUMMARY 41 kernels: 41 pass gates 1-4, 0 fail, 0 known findings; 41 controls: 41 red as planted, 0 missed; 0 limit problems; gates 6903 ms, limits 5 ms
 
 The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates and 15 of limits,
 while other builds shared the machine's CPU), made on the earlier base `9489c3817` and not repeated since, ended with
@@ -677,5 +889,12 @@ bf16-encoded references, clones as well from fp32 codes.
   `GET /v1/audio/controls` route (`routes.zig`) and its place among the listing routes a read key may open
   (`auth_scope.zig`); `build/server.zig` passes the family's steering modules to the server.
 - `native/`: `zonos3` in the CUDA open dispatch, the capabilities list and the rank refusals.
+- `core/speech_api.zig` gained `SpeechRequest.edit` (`SpeechEdit`: one step of a speech edit on the engine: a
+  clip's codes, a fill's rows, edited codes' audio, words placed in a clip), re-exported by `core/engine_api.zig`.
+  A request without it is as before.
+- `core/torch_pth.zig` gained `readF32Strided`, which reads a tensor stored in any stride order (the speaker
+  encoder's checkpoint holds 13 channels-last convolution weights). The existing readers are unchanged.
+- `server/`: `speech_edit.zig` and its two routes (`routes.zig`), their place among the routes an inference key may
+  call (`auth_scope.zig`); `build/server.zig` passes the family's edit, alignment and speaker modules to the server.
 - `platform/optional_libraries.zig`: the cuBLAS entry's note names the ZONOS3 decoder beside Drama's GEMMs. The
   cuBLAS wrapper itself is a copy in the family's folder (`zonos3/cuda/blas.zig`); Drama's is untouched.

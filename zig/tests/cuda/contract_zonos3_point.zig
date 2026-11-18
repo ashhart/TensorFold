@@ -39,20 +39,20 @@ fn info(kind: Kind) Info {
 fn infoOf(comptime kind: Kind) Info {
     return switch (kind) {
         // the dense feed-forward's hidden rows, and an expert's for each of a row's two picks
-        .mul_silu => .{ .symbol = "z3_mul_silu", .image = .backbone, .name = "cuda zonos3 z3_mul_silu", .fault = "reads its gate one value late", .served = &.{ sh(64, 2048), sh(1, 2048), sh(2, 1536), sh(128, 1536) } },
-        .combine => .{ .symbol = "z3_combine", .image = .backbone, .name = "cuda zonos3 z3_combine", .fault = "weighs each pick with the other pick's weight", .served = &.{ sh(64, 256), sh(1, 256), sh(1, 1024) } },
+        .mul_silu => .{ .symbol = "z3_mul_silu", .image = .backbone, .name = "cuda zonos3 z3_mul_silu", .fault = "reads its gate one value late", .served = &.{ sh(64, 2048), sh(1, 2048), sh(2, 1536), sh(128, 1536), sh(300, 4096) } },
+        .combine => .{ .symbol = "z3_combine", .image = .backbone, .name = "cuda zonos3 z3_combine", .fault = "weighs each pick with the other pick's weight", .served = &.{ sh(64, 256), sh(1, 256), sh(1, 1024), sh(1, 40980), sh(64, 4096), sh(128, 3072) } },
         .softcap => .{ .symbol = "z3_softcap", .image = .backbone, .name = "cuda zonos3 z3_softcap (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(8, 40980), sh(1, 40980), sh(64, 40980) } },
         // a stage's attention and feed-forward residuals with their layer scale, and the ConvNeXt block's plain one
         .add_scaled => .{ .symbol = "zc_add_scaled", .image = .codec, .name = "cuda zonos3_codec zc_add_scaled (in place, layer scale)", .fault = "launched without its scale", .in_place = true, .served = &.{ sh(16, 768), sh(300, 1280), sh(1, 768) } },
         .add_plain => .{ .symbol = "zc_add_scaled", .image = .codec, .name = "cuda zonos3_codec zc_add_scaled (in place, no scale)", .fault = "launched one column short", .in_place = true, .served = &.{ sh(16, 768), sh(300, 768) } },
-        .gelu => .{ .symbol = "zc_gelu", .image = .codec, .name = "cuda zonos3_codec zc_gelu (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(16, 2048), sh(300, 5120), sh(1, 3072) } },
+        .gelu => .{ .symbol = "zc_gelu", .image = .codec, .name = "cuda zonos3_codec zc_gelu (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(16, 2048), sh(300, 5120), sh(1, 3072), sh(4800, 256) } },
         // rows are the doubled ones, n half the stage's output width
         .patch_up => .{ .symbol = "zc_patch_up", .image = .codec, .name = "cuda zonos3_codec zc_patch_up", .fault = "launched one row short", .served = &.{ sh(16, 384), sh(600, 640), sh(2, 384) } },
         .gather => .{ .symbol = "zc_gather", .image = .codec, .name = "cuda zonos3_codec zc_gather", .fault = "reads the next codebook's column", .served = &.{ sh(16, 768), sh(1, 768), sh(300, 768) } },
         // n is both halves: 369 and 1,105 bins
         .spec => .{ .symbol = "zc_spec", .image = .codec, .name = "cuda zonos3_codec zc_spec (in place)", .fault = "launched one row short", .in_place = true, .served = &.{ sh(16, 738), sh(16, 2210), sh(1, 738) } },
         .snake => .{ .symbol = "ze_snake", .image = .encoder, .name = "cuda zonos3_encoder ze_snake", .fault = "launched one value short", .served = &.{ sh(64, 64), sh(2944, 64), sh(368, 128), sh(1, 256) } },
-        .add => .{ .symbol = "ze_add", .image = .encoder, .name = "cuda zonos3_encoder ze_add (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(64, 64), sh(2944, 64), sh(368, 128) } },
+        .add => .{ .symbol = "ze_add", .image = .encoder, .name = "cuda zonos3_encoder ze_add (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(64, 64), sh(2944, 64), sh(368, 128), sh(300, 1024) } },
         .sub => .{ .symbol = "ze_sub", .image = .encoder, .name = "cuda zonos3_encoder ze_sub (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(16, 1024), sh(300, 1024), sh(1, 1024) } },
         // k is the patch: 23 front-end frames a row, then 2 a stage
         .patch_down => .{ .symbol = "ze_patch_down", .image = .encoder, .name = "cuda zonos3_encoder ze_patch_down", .fault = "launched one row short", .served = &.{ .{ .rows = 16, .n = 5888, .k = 23 }, .{ .rows = 8, .n = 768, .k = 2 }, .{ .rows = 150, .n = 1280, .k = 2 }, .{ .rows = 1, .n = 768, .k = 2 } } },

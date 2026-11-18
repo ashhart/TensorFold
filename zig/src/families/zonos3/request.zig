@@ -7,6 +7,9 @@ pub const steering = @import("steering.zig");
 pub const steer_bundle = @import("steer_bundle.zig");
 pub const laci = @import("laci.zig");
 pub const short_text = @import("short_text.zig");
+pub const edit = @import("edit.zig");
+pub const edit_plan = @import("edit_plan.zig");
+pub const align_words = @import("align_words.zig");
 
 /// The release's sampling defaults (registries/generation.json).
 pub const temperature: f32 = 0.75;

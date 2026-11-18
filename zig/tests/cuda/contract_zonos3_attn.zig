@@ -30,7 +30,7 @@ pub fn attentionSpec(which: Which, fault: bool) c.Spec {
     return switch (which) {
         .backbone => .{ .name = if (fault) "control: zonos3 z3_attention seeing one key fewer" else "cuda zonos3 z3_attention", .accum = .f32, .depth = backboneDepth, .out = .f32, .served = &.{ .{ .rows = 64, .n = 512, .k = 256 }, .{ .rows = 1, .n = 512, .k = 4096 }, .{ .rows = 1, .n = 512, .k = 1 }, .{ .rows = 7, .n = 512, .k = 300 } } },
         .codec => .{ .name = if (fault) "control: zonos3 zc_attention seeing one key fewer" else "cuda zonos3_codec zc_attention", .accum = .f32, .depth = codecDepth, .out = .f32, .served = &.{ .{ .rows = 16, .n = 768, .k = 300 }, .{ .rows = 8, .n = 1280, .k = 150 }, .{ .rows = 1, .n = 768, .k = 480 } } },
-        .teacher => .{ .name = if (fault) "control: zonos3 zt_attention seeing one key fewer" else "cuda zonos3_teacher zt_attention", .accum = .f32, .depth = teacherDepth, .out = .f32, .served = &.{ .{ .rows = 64, .n = 1024, .k = 64 }, .{ .rows = 1, .n = 1024, .k = 64 }, .{ .rows = 200, .n = 1024, .k = 64 } } },
+        .teacher => .{ .name = if (fault) "control: zonos3 zt_attention seeing one key fewer" else "cuda zonos3_teacher zt_attention", .accum = .f32, .depth = teacherDepth, .out = .f32, .served = &.{ .{ .rows = 64, .n = 1024, .k = 64 }, .{ .rows = 1, .n = 1024, .k = 64 }, .{ .rows = 200, .n = 1024, .k = 64 }, .{ .rows = 600, .n = 1024, .k = 64 } } },
     };
 }
 

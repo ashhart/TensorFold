@@ -15,7 +15,14 @@ pub const laci = @import("laci.zig");
 pub const laci_probe = @import("laci_probe.zig");
 pub const laci_run = @import("laci_run.zig");
 pub const short_text = @import("short_text.zig");
+pub const edit = @import("edit.zig");
+pub const edit_plan = @import("edit_plan.zig");
+pub const speaker = @import("speaker.zig");
+pub const align_words = @import("align_words.zig");
+pub const aligner = @import("cuda/aligner.zig");
+pub const blas = @import("cuda/blas.zig");
 pub const weights = @import("cuda/weights.zig");
+pub const adapter = @import("cuda/adapter.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
 pub const codec = @import("cuda/codec.zig");
@@ -50,6 +57,11 @@ test {
     _ = @import("laci_detect.zig");
     _ = laci_probe;
     _ = short_text;
+    _ = edit;
+    _ = edit_plan;
+    _ = @import("difflib.zig");
+    _ = align_words;
+    _ = @import("speaker_blocks.zig");
     _ = codec_weights;
     _ = quantizer;
 }

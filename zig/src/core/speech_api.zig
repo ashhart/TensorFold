@@ -29,6 +29,29 @@ pub const SpeechRequest = struct {
     steering: ?*const SpeechSteering = null,
     /// Generate under LACI: the reading of the text watched, a skip or a stall rolled back and regenerated.
     laci: ?*const SpeechLaci = null,
+    /// One step of a speech edit in place of a spoken reply; null: none.
+    edit: ?*const SpeechEdit = null,
+};
+
+/// A speech edit's steps on the engine: the server plans the edit between them.
+pub const SpeechEdit = struct {
+    op: Op,
+    /// encode: room for the clip's codes, a frame a row. decode: the codes to speak.
+    codes: [][10]i32 = &.{},
+    /// fill: room for the rows the fill generates, the finishing row included.
+    rows: [][11]i32 = &.{},
+    /// fill: rows the span-end id stays masked for.
+    min_frames: u32 = 0,
+    /// place: the transcript's words that hold a letter or digit, and room for what is found of each.
+    words: []const []const u8 = &.{},
+    spans_ms: [][2]u32 = &.{},
+    presence: []f32 = &.{},
+    out: *Out,
+
+    /// encode: `reference_audio` to codes. fill: `frames` to rows. decode: `codes` to `pcm`. place: `words` timed.
+    pub const Op = enum { encode, fill, decode, place };
+    /// `frames`: codes written (encode). `rows`: rows written, and the aligned span-end frame, -1 without one (fill).
+    pub const Out = struct { frames: usize = 0, rows: usize = 0, end_frame: i64 = -1 };
 };
 
 /// The alignment heads of the request's language: attention heads whose attention over the text follows the speech.
