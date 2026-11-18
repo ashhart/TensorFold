@@ -14,17 +14,13 @@ kernel void glm_cast_f32(const device bfloat* x [[buffer(0)]], device float* y [
   if (i < n) y[i] = float(x[i]);
 }
 
-// MLX's rms_single_row on strided rows: thread t squares 4t..4t+3, simd_sum, a 32-slot simd_sum, precise rsqrt.
-kernel void glm_rms(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
-                    device bfloat* y [[buffer(2)]], constant GlmRows& a [[buffer(3)]],
-                    uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
-                    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float sg_sums[32];
-  threadgroup float inv_rms[1];
-  const uint width = uint(a.width), lo = 4 * t;
-  const device bfloat* src = x + size_t(row) * a.x_stride + lo;
-  device bfloat* dst = y + size_t(row) * a.y_stride + lo;
-  const device bfloat* gain = w + lo;
+// MLX's rms_single_row on a row: thread t squares 4t..4t+3, simd_sum, a 32-slot simd_sum, precise rsqrt.
+inline void glm_rms_row(const device bfloat* src, const device bfloat* gain, device bfloat* dst, uint width, float eps,
+                        threadgroup float* sg_sums, threadgroup float* inv_rms, uint t, uint sg, uint lane) {
+  const uint lo = 4 * t;
+  src += lo;
+  dst += lo;
+  gain += lo;
   const bool whole = lo + 4 <= width;
   float v[4];
   float sq = 0.0f;
@@ -46,7 +42,7 @@ kernel void glm_rms(const device bfloat* x [[buffer(0)]], const device bfloat* w
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (sg == 0) {
     const float all = simd_sum(sg_sums[lane]);
-    if (lane == 0) inv_rms[0] = metal::precise::rsqrt(all / float(width) + a.eps);
+    if (lane == 0) inv_rms[0] = metal::precise::rsqrt(all / float(width) + eps);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (whole) {
@@ -55,6 +51,16 @@ kernel void glm_rms(const device bfloat* x [[buffer(0)]], const device bfloat* w
     for (int j = 0; j < 4; ++j)
       if (lo + j < width) dst[j] = gain[j] * static_cast<bfloat>(v[j] * inv_rms[0]);
   }
+}
+
+kernel void glm_rms(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
+                    device bfloat* y [[buffer(2)]], constant GlmRows& a [[buffer(3)]],
+                    uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+                    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float sg_sums[32];
+  threadgroup float inv_rms[1];
+  glm_rms_row(x + size_t(row) * a.x_stride, w, y + size_t(row) * a.y_stride, uint(a.width), a.eps, sg_sums, inv_rms, t,
+              sg, lane);
 }
 
 // MLX's layer_norm_single_row (8 values a thread, 32 threads a row): the indexer's key norm with weight and bias.
@@ -67,18 +73,14 @@ inline float glm_tg_sum(float x, threadgroup float* xs, uint lane, uint sg) {
   return simd_sum(x);
 }
 
-kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
-                           const device bfloat* b [[buffer(2)]], device bfloat* y [[buffer(3)]],
-                           constant GlmRows& a [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
-                           uint lid [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                           uint sg [[simdgroup_index_in_threadgroup]]) {
+// A row of `axis`: threads past axis / 8 add zeros, so a larger group (glm_mla_norms') leaves the same bits.
+inline void glm_ln_row(const device bfloat* x, const device bfloat* w, const device bfloat* b, device bfloat* y, int axis,
+                       float eps, threadgroup float* local_buffer, uint lid, uint lane, uint sg) {
   constexpr int N_READS = 8;
   float thread_x[N_READS] = {0};
-  threadgroup float local_buffer[32];
   if (sg == 0) local_buffer[lane] = 0;
-  const int axis = a.width;
-  const device bfloat* xr = x + size_t(row) * a.x_stride + lid * N_READS;
-  device bfloat* out = y + size_t(row) * a.y_stride + lid * N_READS;
+  const device bfloat* xr = x + lid * N_READS;
+  device bfloat* out = y + lid * N_READS;
   const device bfloat* wr = w + lid * N_READS;
   const device bfloat* br = b + lid * N_READS;
   const bool safe = int(lid) * N_READS + N_READS <= axis;
@@ -101,7 +103,7 @@ kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bf
     normalizer += thread_x[i] * thread_x[i];
   }
   normalizer = glm_tg_sum(normalizer, local_buffer, lane, sg);
-  normalizer = metal::precise::rsqrt(normalizer / axis + a.eps);
+  normalizer = metal::precise::rsqrt(normalizer / axis + eps);
   if (safe) {
     for (int i = 0; i < N_READS; i++) {
       thread_x[i] *= normalizer;
@@ -112,6 +114,41 @@ kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bf
       thread_x[i] *= normalizer;
       out[i] = wr[i] * static_cast<bfloat>(thread_x[i]) + br[i];
     }
+  }
+}
+
+kernel void glm_layer_norm(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
+                           const device bfloat* b [[buffer(2)]], device bfloat* y [[buffer(3)]],
+                           constant GlmRows& a [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
+                           uint lid [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                           uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float local_buffer[32];
+  glm_ln_row(x + size_t(row) * a.x_stride, w, b, y + size_t(row) * a.y_stride, a.width, a.eps, local_buffer, lid, lane,
+             sg);
+}
+
+// An MLA layer's cache writes in one launch, group y: 0 kv RMSNorm, 1 indexer key norm, 2 indexer weights.
+struct GlmMlaNorms {
+  int x_stride, kv_at, ik_at, iw_at, kv_width, ik_width, iw_width;
+  float kv_eps, ik_eps, iw_scale;
+};
+
+kernel void glm_mla_norms(const device bfloat* xp [[buffer(0)]], const device bfloat* kv_w [[buffer(1)]],
+                          device bfloat* keys [[buffer(2)]], const device bfloat* ik_w [[buffer(3)]],
+                          const device bfloat* ik_b [[buffer(4)]], device bfloat* ik [[buffer(5)]],
+                          device bfloat* iw [[buffer(6)]], constant GlmMlaNorms& a [[buffer(7)]],
+                          uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]],
+                          uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float sums[33];
+  const uint t = tp.x;
+  const device bfloat* x = xp + size_t(tg.x) * a.x_stride;
+  if (tg.y == 0) {
+    glm_rms_row(x + a.kv_at, kv_w, keys + size_t(tg.x) * a.kv_width, uint(a.kv_width), a.kv_eps, sums, sums + 32, t, sg,
+                lane);
+  } else if (tg.y == 1) {
+    glm_ln_row(x + a.ik_at, ik_w, ik_b, ik + size_t(tg.x) * a.ik_width, a.ik_width, a.ik_eps, sums, t, lane, sg);
+  } else if (int(t) < a.iw_width) {
+    iw[size_t(tg.x) * a.iw_width + t] = bfloat(float(x[a.iw_at + int(t)]) * a.iw_scale);
   }
 }
 

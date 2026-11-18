@@ -71,6 +71,7 @@ pub const Kernels = struct {
     absorb: mtl.Pipeline,
     unabsorb: mtl.Pipeline,
     scale: mtl.Pipeline,
+    mla_norms: mtl.Pipeline, // an MLA layer's latent key norm, indexer key norm and indexer weights in one launch
     pool: mtl.Pipeline,
     stream_mean: mtl.Pipeline,
     add: mtl.Pipeline,
@@ -179,6 +180,7 @@ const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
     .{ .name = "glm_exp_f32", .field = "exp_f32" },       .{ .name = "glm_streams", .field = "streams" },
     .{ .name = "glm_copy_u32", .field = "copy_u32" },     .{ .name = "glm_route_rows", .field = "route_rows" },
     .{ .name = "glm_act2", .field = "act2" },             .{ .name = "glm_dense_indices", .field = "dense_indices" },
+    .{ .name = "glm_mla_norms", .field = "mla_norms" },
 };
 
 const Job = struct {
