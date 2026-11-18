@@ -150,7 +150,7 @@ pub const Prefix = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(x.gpa);
         for (plan.marks) |m| {
-            const g = m - m % engine.max_rows;
+            const g = m - m % engine.grid_rows;
             if (g > plan.from and (out.items.len == 0 or out.items[out.items.len - 1] != g)) try out.append(x.gpa, g);
         }
         return out.toOwnedSlice(x.gpa);
