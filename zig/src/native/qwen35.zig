@@ -47,6 +47,32 @@ fn pagesOn() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN35_METAL_KV_PAGES", false);
 }
 
+fn chunkRows(a: std.mem.Allocator, window: usize, problem: *[]const u8) !usize {
+    const settings = @import("sys").environment;
+    comptime settings.registered("TF_QWEN35_CHUNK");
+    const chunk = settings.read(usize, "TF_QWEN35_CHUNK", 128) catch |err| switch (err) {
+        error.InvalidEnvironment => {
+            const raw = @import("sys").getenv("TF_QWEN35_CHUNK") orelse "";
+            problem.* = try settings.describe(a, "TF_QWEN35_CHUNK", raw);
+            return error.InvalidChunk;
+        },
+        else => return err,
+    };
+    if (chunk == 0 or chunk > window) {
+        problem.* = "TF_QWEN35_CHUNK: a whole number 1 to the model's context window; unset for the shipped 128";
+        return error.InvalidChunk;
+    }
+    return chunk;
+}
+
+test "TF_QWEN35_CHUNK is parsed through platform/environment.zig" {
+    const settings = @import("sys").environment;
+    try std.testing.expectEqual(@as(?u64, null), try settings.parse("TF_QWEN35_CHUNK", null));
+    try std.testing.expectEqual(@as(?u64, 512), try settings.parse("TF_QWEN35_CHUNK", "512"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_QWEN35_CHUNK", "0"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_QWEN35_CHUNK", "4k"));
+}
+
 /// The pool beside the model under the load limit: kv_pool's plan of the streams and pages, made now; why not, or null.
 fn planPages(a: std.mem.Allocator, metal: *q.backend.Metal, device: mtl.Device, o: api.Open, window: u64) !?[]const u8 {
     const kv = q.state.kv;
@@ -69,10 +95,25 @@ fn gib(bytes: u64) f64 {
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .metal = true })) |why| {
+        problem.* = why;
+        return null;
+    }
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
         return null;
     }
+    const cfg = q.Config.read(a, io, o.dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot read this checkpoint ({s})", .{@errorName(err)});
+        return null;
+    };
+    const window: i64 = o.context orelse @intCast(cfg.context);
+    if (window < 1 or window > cfg.context) {
+        problem.* = "--context must fit the Qwen checkpoint's positive context window";
+        return null;
+    }
+    const chunk = chunkRows(a, @intCast(@max(window, 1)), problem) catch |_| return null;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = q.Model.load(gpa, io, o.dir) catch |err| {
@@ -80,18 +121,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     errdefer model.deinit();
-    const window: i64 = o.context orelse @intCast(model.config.context);
-    if (window < 1 or window > model.config.context) {
-        model.deinit();
-        problem.* = "--context must fit the Qwen checkpoint's positive context window";
-        return null;
-    }
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
-    const chunk = 128;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     // TF_QWEN35_METAL_KV_PAGES: the page plan sets the streams; otherwise each stream's whole cache is admitted at load
