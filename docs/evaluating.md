@@ -93,9 +93,10 @@ an unprivileged user and a writable cache. Only checked builds are exported to G
 an SBOM; the version tag is published after both architectures pass. These checks do not validate GPU inference.
 
 Pull requests affecting container inputs run the same build and smoke checks without publishing.
-A manual run accepts a published stable release tag; publication is opt-in and restricted to `ashhart/TensorFold`.
-Forks can run build-only checks but cannot publish through this workflow.
-The upstream repository must allow Actions to write packages and make the GHCR package public after its first publish.
+A manual run accepts a published stable release tag; publication is opt-in and targets the running repository's own
+GHCR namespace. Forks can use this manual path to validate publication without writing to upstream's package.
+Automatic release publication is restricted to `ashhart/TensorFold`; pull requests never publish.
+The publishing repository must allow Actions to write packages and make the GHCR package public after its first publish.
 
 
 ## Tests that run without a GPU

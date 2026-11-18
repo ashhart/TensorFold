@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish to GHCR (upstream repository only)
+        description: Publish to this repository's GHCR namespace
         default: false
         type: boolean
 
@@ -61,7 +61,7 @@ jobs:
             "$RUNNER_TEMP/release.json"
           revision=$(gh api "repos/ashhart/TensorFold/commits/$TAG" --jq .sha)
           publish=false
-          if [ "$GITHUB_REPOSITORY" = ashhart/TensorFold ] && [ "$REQUEST_PUBLISH" = true ]; then
+          if [ "$REQUEST_PUBLISH" = true ]; then
             publish=true
           fi
           {
