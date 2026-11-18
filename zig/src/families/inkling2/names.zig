@@ -1,10 +1,10 @@
 //! Inkling 2 Small's weight map: each tensor the config implies, with dtype and shape, checked against headers.
 const std = @import("std");
+const st = @import("safetensors");
 const config = @import("config.zig");
-const header = @import("header.zig");
 const plan = @import("plan.zig");
 
-const Dtype = header.Dtype;
+const Dtype = st.DType;
 const Text = config.Text;
 
 /// A dimension the map does not derive from the config: any size is accepted there.
@@ -167,17 +167,26 @@ pub fn all(c: *const config.Config, prec: []const plan.Precision, file: File, si
 }
 
 /// Each layer's expert precision from its w13 tensor: packed U8 is NVFP4, FP8 is MXFP8, anything else is refused.
-pub fn precisions(entries: []const header.Entry, layers: u32, out: []plan.Precision) !void {
+pub fn precisions(entries: st.Header, layers: u32, out: []plan.Precision) !void {
     if (out.len < layers) return error.PrecisionCount;
     for (0..layers) |i| {
         var buf: [96]u8 = undefined;
         const name = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
-        const hit = for (entries) |e| (if (std.mem.eql(u8, e.name, name)) break e) else return error.NoExperts;
+        const hit = entries.get(name) orelse return error.NoExperts;
         out[i] = switch (hit.dtype) {
             .u8 => .nvfp4,
             .f8_e4m3 => .mxfp8,
             else => return error.ExpertFormat,
         };
+    }
+}
+
+/// Every tensor of `from` added to `into`, for a checkpoint held in several files; a name in both is refused.
+pub fn merge(arena: std.mem.Allocator, into: *st.Header, from: st.Header) !void {
+    for (from.keys(), from.values()) |name, entry| {
+        const slot = try into.getOrPut(arena, name);
+        if (slot.found_existing) return error.DuplicateName;
+        slot.value_ptr.* = entry;
     }
 }
 
@@ -193,37 +202,40 @@ pub const Report = struct {
     }
 };
 
-const Found = struct { entry: header.Entry, seen: bool };
-
 const Checker = struct {
     arena: std.mem.Allocator,
-    found: *std.StringHashMapUnmanaged(Found),
+    entries: st.Header,
+    seen: []bool,
     report: *Report,
 
     pub fn put(k: *Checker, name: []const u8, dtype: Dtype, dims: []const u64) !void {
         k.report.expected += 1;
-        const hit = k.found.getPtr(name) orelse return k.report.missing.append(k.arena, try k.arena.dupe(u8, name));
-        if (hit.seen) return error.DuplicateName;
-        hit.seen = true;
-        const e = hit.entry;
+        const at = k.entries.getIndex(name) orelse return k.report.missing.append(k.arena, try k.arena.dupe(u8, name));
+        if (k.seen[at]) return error.DuplicateName;
+        k.seen[at] = true;
+        const e = k.entries.values()[at];
         var same = e.dtype == dtype and e.rank == dims.len;
-        if (same) for (dims, e.shape()) |want, got| {
+        if (same) for (dims, e.shape[0..e.rank]) |want, got| {
             if (want != any and want != got) same = false;
         };
         if (!same) try k.report.wrong.append(k.arena, try k.arena.dupe(u8, name));
     }
 };
 
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
 /// `entries` against the map of `file`; expert precisions come from the entries themselves (lists live in `arena`).
-pub fn check(arena: std.mem.Allocator, c: *const config.Config, entries: []const header.Entry, file: File) !Report {
+pub fn check(arena: std.mem.Allocator, c: *const config.Config, entries: st.Header, file: File) !Report {
     var prec: [config.max_layers]plan.Precision = undefined;
     if (file == .model) try precisions(entries, c.text.layers, &prec);
-    var found: std.StringHashMapUnmanaged(Found) = .empty;
-    try found.ensureTotalCapacity(arena, @intCast(entries.len));
-    for (entries) |e| if (found.fetchPutAssumeCapacity(e.name, .{ .entry = e, .seen = false }) != null) return error.DuplicateName;
+    const seen = try arena.alloc(bool, entries.count());
+    @memset(seen, false);
     var r: Report = .{};
-    var k: Checker = .{ .arena = arena, .found = &found, .report = &r };
+    var k: Checker = .{ .arena = arena, .entries = entries, .seen = seen, .report = &r };
     try all(c, &prec, file, &k);
-    for (entries) |e| if (!found.get(e.name).?.seen) try r.unknown.append(arena, e.name);
+    for (entries.keys(), seen) |name, was| if (!was) try r.unknown.append(arena, name);
+    std.mem.sort([]const u8, r.unknown.items, {}, lessThan);
     return r;
 }
