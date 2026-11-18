@@ -26,6 +26,7 @@ pub const Registration = struct {
     ctx: *anyopaque,
     hook: api.Learner,
     conversations: bool,
+    pocket_usage: bool = false,
     free: *const fn (*anyopaque, Allocator) void,
 
     pub fn deinit(r: Registration, a: Allocator) void {
@@ -38,7 +39,7 @@ pub fn init(comptime F: type, a: Allocator, io: std.Io, model: anytype, dir: []c
     const Slide = adapter.Adapter(F.slide);
     const s = try a.create(Slide);
     s.* = Slide.init(a, io, F.learnModel(model, dir));
-    return .{ .ctx = s, .hook = s.hook(), .conversations = s.learner.readsConversations(), .free = struct {
+    return .{ .ctx = s, .hook = s.hook(), .conversations = s.learner.readsConversations(), .pocket_usage = adapter.pocketUsage(s.learner), .free = struct {
         fn drop(ptr: *anyopaque, gpa: Allocator) void {
             const x: *Slide = @ptrCast(@alignCast(ptr));
             x.deinit();

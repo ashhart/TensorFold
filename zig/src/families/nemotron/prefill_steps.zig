@@ -27,6 +27,7 @@ pub fn chunk(b: anytype, ops: anytype, s: *Stream, at: usize, next: *usize) !usi
     if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
     try ops.grow(s, at + rows);
     try flight.submit(b, s, ops.body(s, at, rows));
+    try ops.landed(s, rows);
     const end = at + rows;
     s.fill_at.store(@intCast(at), .monotonic); // landed tokens only: the newest chunk is still queued on the GPU
     if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));

@@ -88,11 +88,11 @@ pub const Config = struct {
     compact_at: ?CompactAt = null,
     /// Tokens of the recent tail kept whole. Null uses min(20000, a quarter of the window).
     compact_keep: ?u32 = null,
-    /// Directory of the stored note, or null when notes are not stored.
-    compact_memory: ?[]const u8 = null,
+    compact_memory: ?[]const u8 = null, // Directory of the stored note, or null when notes are not stored.
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
     slide_drift_gate: bool = false,
+    slide_forget: bool = false, // opt-in least-used unpinned eviction when a new lesson finds a full pocket
     slide_take_out_check: bool = false, // TF_SLIDE_TAKE_OUT_CHECK=1 with --slide, read once at start
     slide_forget_fail: u32 = 0, // a fact a delete fails to check, to test its put-back (0: none; test-hook builds)
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
