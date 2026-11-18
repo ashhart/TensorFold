@@ -251,8 +251,100 @@ template <uint RT, uint NB, uint CL, typename T>
   }
 }
 
+// Four weights of a word on the fast path: tf_dsv41_w16's values for its bytes 0..3.
+inline void tf_dsv41_w4(uint word, float x256, thread float (&w)[4]) {
+  const half2 a = tf_dsv41_h2(word), b = tf_dsv41_h2(word >> 8);
+  w[0] = float(a.x) * x256, w[1] = float(b.x) * x256, w[2] = float(a.y) * x256, w[3] = float(b.y) * x256;
+}
+
+// tf_dsv41_fp8_whole with each word decoded where it is used and X read 8 bytes at a time: fewer live registers,
+// the same chains (k in order from zero) and the same tree. Rows past R repeat row R - 1 and are never written.
+template <uint RT, uint NB, uint CL, typename T>
+[[kernel, max_total_threads_per_threadgroup(1024)]] void tf_dsv41_fp8_lean(
+    const device uchar* X0 [[buffer(0)]], const device uchar* W0 [[buffer(1)]],
+    const device uchar* S0 [[buffer(2)]], device uchar* Y0 [[buffer(3)]],
+    constant TfDsv41Fp8WArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint tile [[simdgroup_index_in_threadgroup]],
+    uint nsg [[simdgroups_per_threadgroup]]) {
+  constexpr uint BW = CL * NB;
+  threadgroup float roots[32 * BW * RT];
+  const device uint4* X = (const device uint4*)(X0 + long(tg.y) * a.xs);
+  const device uint4* W = (const device uint4*)(W0 + long(tg.y) * a.ws);
+  const device uchar* S = S0 + long(tg.y) * a.ss;
+  device T* Y = (device T*)(Y0 + long(tg.y) * a.ys);
+  const uint GL = 32 / CL;
+  const uint c = lane / GL, gl = lane % GL;
+  const uint g = tile * GL + gl;
+  const uint blk = tg.x;
+  float acc[NB][RT];
+  for (uint nb = 0; nb < NB; ++nb)
+    for (uint r = 0; r < RT; ++r) acc[nb][r] = 0.0f;
+  const uint gs = min(g, a.groups - 1);
+  uint4 raw[NB][2];
+  uint code[NB];
+  for (uint nb = 0; nb < NB; ++nb) {
+    const uint n = blk * BW + c * NB + nb;
+    raw[nb][0] = W[ulong(n) * (a.K / 16) + 2 * gs];
+    raw[nb][1] = W[ulong(n) * (a.K / 16) + 2 * gs + 1];
+    code[nb] = S[ulong(n / 32) * a.groups + gs];
+  }
+  // the fast path when no code of the lane is NaN and no scale is past 2^120, else tf_dsv41_w16 (the same values)
+  bool fast = true;
+  float x256[NB];
+  for (uint nb = 0; nb < NB; ++nb) {
+    const uint4 m0 = (raw[nb][0] & 0x7F7F7F7Fu) + 0x01010101u, m1 = (raw[nb][1] & 0x7F7F7F7Fu) + 0x01010101u;
+    fast = fast && code[nb] <= 247u && !any(((m0 | m1) & 0x80808080u) != 0u);
+    x256[nb] = tf_dsv41_scale(code[nb]).x256;
+  }
+  if (g < a.groups && fast) {
+    const device uint2* X2 = (const device uint2*)X;
+    for (uint h = 0; h < 2; ++h)
+      for (uint q = 0; q < 4; ++q) {
+        float w[NB][4];
+        for (uint nb = 0; nb < NB; ++nb) tf_dsv41_w4(raw[nb][h][q], x256[nb], w[nb]);
+        for (uint r = 0; r < RT; ++r) {
+          const uint2 xq = X2[ulong(min(r, a.R - 1)) * (a.K / 4) + 8 * g + 4 * h + q];
+          const float x[4] = {tf_dsv41_bf16(xq.x & 0xFFFFu), tf_dsv41_bf16(xq.x >> 16), tf_dsv41_bf16(xq.y & 0xFFFFu),
+                              tf_dsv41_bf16(xq.y >> 16)};
+          for (uint i = 0; i < 4; ++i)
+            for (uint nb = 0; nb < NB; ++nb) acc[nb][r] = tf_dsv41_step(acc[nb][r], x[i], w[nb][i]);
+        }
+      }
+  } else if (g < a.groups) {
+    for (uint h = 0; h < 2; ++h) {
+      float w[NB][16];
+      for (uint nb = 0; nb < NB; ++nb) tf_dsv41_w16(raw[nb][h], tf_dsv41_scale(code[nb]), w[nb]);
+      for (uint r = 0; r < RT; ++r) {
+        if (r >= a.R) break;
+        const ulong at = ulong(r) * (a.K / 8) + 4 * g + 2 * h;
+        float x[16];
+        tf_dsv41_x16(X[at], X[at + 1], x);
+        for (uint i = 0; i < 16; ++i)
+          for (uint nb = 0; nb < NB; ++nb) acc[nb][r] = tf_dsv41_step(acc[nb][r], x[i], w[nb][i]);
+      }
+    }
+  }
+  for (uint nb = 0; nb < NB; ++nb) {
+    for (uint r = 0; r < RT; ++r) {
+      float v = acc[nb][r];
+      for (uint m = 1; m < GL; m *= 2) v += simd_shuffle_xor(v, m);
+      if (gl == 0) roots[(tile * BW + c * NB + nb) * RT + r] = v;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint o = tile; o < BW * RT; o += nsg) {
+    const uint col = o / RT, r = o % RT;
+    if (r >= a.R) continue;
+    float v = lane < a.tiles ? roots[(lane * BW + col) * RT + r] : 0.0f;
+    for (uint m = 1; m < 32; m *= 2) v += simd_shuffle_xor(v, m);
+    if (lane == 0) Y[ulong(r) * a.N + blk * BW + col] = T(v);
+  }
+}
+
 #define TF_WHOLE(RT, NB, CL, T, NAME) \
   template [[host_name(NAME)]] [[kernel]] decltype(tf_dsv41_fp8_whole<RT, NB, CL, T>) tf_dsv41_fp8_whole<RT, NB, CL, T>;
+#define TF_LEAN(RT, NB, CL, T, NAME) \
+  template [[host_name(NAME)]] [[kernel]] decltype(tf_dsv41_fp8_lean<RT, NB, CL, T>) tf_dsv41_fp8_lean<RT, NB, CL, T>;
 #define TF_WHOLE_TIER(RT) \
   TF_WHOLE(RT, 4, 1, float, "tf_dsv41_fp8_wa_r" #RT "_f32") \
   TF_WHOLE(RT, 4, 1, bfloat, "tf_dsv41_fp8_wa_r" #RT "_bf16") \
@@ -261,7 +353,11 @@ template <uint RT, uint NB, uint CL, typename T>
   TF_WHOLE(RT, 2, 4, float, "tf_dsv41_fp8_wc_r" #RT "_f32") \
   TF_WHOLE(RT, 2, 4, bfloat, "tf_dsv41_fp8_wc_r" #RT "_bf16") \
   TF_WHOLE(RT, 1, 1, float, "tf_dsv41_fp8_wd_r" #RT "_f32") \
-  TF_WHOLE(RT, 1, 1, bfloat, "tf_dsv41_fp8_wd_r" #RT "_bf16")
+  TF_WHOLE(RT, 1, 1, bfloat, "tf_dsv41_fp8_wd_r" #RT "_bf16") \
+  TF_LEAN(RT, 2, 1, float, "tf_dsv41_fp8_we_r" #RT "_f32") \
+  TF_LEAN(RT, 2, 1, bfloat, "tf_dsv41_fp8_we_r" #RT "_bf16") \
+  TF_LEAN(RT, 1, 4, float, "tf_dsv41_fp8_wf_r" #RT "_f32") \
+  TF_LEAN(RT, 1, 4, bfloat, "tf_dsv41_fp8_wf_r" #RT "_bf16")
 TF_WHOLE_TIER(1)
 TF_WHOLE_TIER(2)
 TF_WHOLE_TIER(3)
