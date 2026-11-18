@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Write a relocatable ZIP with fixed metadata from a privacy-checked release stage."""
+import hashlib
 from pathlib import Path
 import shutil
 import stat
@@ -7,7 +8,28 @@ import sys
 import zipfile
 
 
+def write_checksums(stage):
+    manifest = stage / "SHA256SUMS"
+    rows = []
+    for path in sorted(stage.rglob("*")):
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError("nonregular ZIP input")
+        if path == manifest:
+            continue
+        name = path.relative_to(stage).as_posix()
+        if "\r" in name or "\n" in name:
+            raise ValueError("checksum filename contains a line break")
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        rows.append(f"{digest}  ./{name}\n")
+    manifest.write_text("".join(rows), encoding="utf-8", newline="\n")
+
+
 def archive(stage, output):
+    write_checksums(stage)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
         for path in [stage, *sorted(stage.rglob("*"))]:
             mode = path.lstat().st_mode

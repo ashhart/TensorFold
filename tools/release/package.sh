@@ -84,12 +84,12 @@ echo 'TF_PACKAGE_PHASE=tree-check'
 sha() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
-# Hash every shipped file; keep relative paths so checks survive relocation.
-(cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
 if [ "$extension" = zip ]; then
     echo 'TF_PACKAGE_PHASE=archive-create'
     python3 "$(dirname "$0")/zip_stage.py" "$stage" "$staging/$name.zip"
 else
+    # The ZIP writer generates its own canonical checksum inventory.
+    (cd "$stage"; find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do sha "$file"; done) > "$stage/SHA256SUMS"
     if tar --version 2>/dev/null | grep -q bsdtar; then owner="--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; else owner="--owner=0 --group=0 --numeric-owner"; fi
     # shellcheck disable=SC2086
     COPYFILE_DISABLE=1 tar $owner -czf "$staging/$name.tar.gz" -C "$staging" "$name"

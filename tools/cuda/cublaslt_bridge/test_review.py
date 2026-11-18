@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -219,6 +220,20 @@ class RefusalControls(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "archive member"):
                         unpack(archive, destination)
+
+    def test_windows_zip_has_the_same_inventory_on_every_host(self):
+        packager = Path(__file__).resolve().parents[2] / "release/zip_stage.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "package"
+            stage.mkdir()
+            (stage / "NOTICE").write_bytes(b"Windows CRLF fixture\r\n")
+            expected = hashlib.sha256(b"Windows CRLF fixture\r\n").hexdigest()
+            (stage / "SHA256SUMS").write_bytes(f"{expected} *./NOTICE\n".encode())
+            archive = root / "fixture.zip"
+            subprocess.run([sys.executable, str(packager), str(stage), str(archive)], check=True)
+            with zipfile.ZipFile(archive) as package:
+                self.assertEqual(package.read("package/SHA256SUMS"), f"{expected}  ./NOTICE\n".encode())
 
     def test_clean_source_binding_refuses_a_new_untracked_input(self):
         with tempfile.TemporaryDirectory() as directory:
