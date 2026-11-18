@@ -1,0 +1,486 @@
+{
+  "fixture:2:plain": {
+    "response": {
+      "model": "fixture-model",
+      "choices": [
+        {
+          "index": 0,
+          "text": "fixture only",
+          "finish_reason": "length"
+        }
+      ],
+      "tensorfold": {
+        "token_ids": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "drafts": false
+      },
+      "usage": {
+        "completion_tokens": 8
+      },
+      "speculative": {
+        "drafted": 0
+      }
+    },
+    "top2": [
+      {
+        "ids": [
+          10,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 2
+      },
+      {
+        "ids": [
+          11,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 3
+      },
+      {
+        "ids": [
+          12,
+          99
+        ],
+        "logits": [
+          16.0,
+          15.9375
+        ],
+        "position": 4
+      },
+      {
+        "ids": [
+          13,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 5
+      },
+      {
+        "ids": [
+          14,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 6
+      },
+      {
+        "ids": [
+          15,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 7
+      },
+      {
+        "ids": [
+          16,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 8
+      },
+      {
+        "ids": [
+          17,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 9
+      }
+    ]
+  },
+  "fixture:2:1": {
+    "response": {
+      "model": "fixture-model",
+      "choices": [
+        {
+          "index": 0,
+          "text": "fixture only",
+          "finish_reason": "length"
+        }
+      ],
+      "tensorfold": {
+        "token_ids": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "drafts": true
+      },
+      "usage": {
+        "completion_tokens": 8
+      },
+      "speculative": {
+        "drafted": 7
+      }
+    },
+    "top2": [
+      {
+        "ids": [
+          10,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 2
+      },
+      {
+        "ids": [
+          11,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 3
+      },
+      {
+        "ids": [
+          12,
+          99
+        ],
+        "logits": [
+          16.0,
+          15.9375
+        ],
+        "position": 4
+      },
+      {
+        "ids": [
+          13,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 5
+      },
+      {
+        "ids": [
+          14,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 6
+      },
+      {
+        "ids": [
+          15,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 7
+      },
+      {
+        "ids": [
+          16,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 8
+      },
+      {
+        "ids": [
+          17,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 9
+      }
+    ]
+  },
+  "fixture:2:4": {
+    "response": {
+      "model": "fixture-model",
+      "choices": [
+        {
+          "index": 0,
+          "text": "fixture only",
+          "finish_reason": "length"
+        }
+      ],
+      "tensorfold": {
+        "token_ids": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "drafts": true
+      },
+      "usage": {
+        "completion_tokens": 8
+      },
+      "speculative": {
+        "drafted": 7
+      }
+    },
+    "top2": [
+      {
+        "ids": [
+          10,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 2
+      },
+      {
+        "ids": [
+          11,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 3
+      },
+      {
+        "ids": [
+          12,
+          99
+        ],
+        "logits": [
+          16.0,
+          15.9375
+        ],
+        "position": 4
+      },
+      {
+        "ids": [
+          13,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 5
+      },
+      {
+        "ids": [
+          14,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 6
+      },
+      {
+        "ids": [
+          15,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 7
+      },
+      {
+        "ids": [
+          16,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 8
+      },
+      {
+        "ids": [
+          17,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 9
+      }
+    ]
+  },
+  "fixture:2:8": {
+    "response": {
+      "model": "fixture-model",
+      "choices": [
+        {
+          "index": 0,
+          "text": "fixture only",
+          "finish_reason": "length"
+        }
+      ],
+      "tensorfold": {
+        "token_ids": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "drafts": true
+      },
+      "usage": {
+        "completion_tokens": 8
+      },
+      "speculative": {
+        "drafted": 7
+      }
+    },
+    "top2": [
+      {
+        "ids": [
+          10,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 2
+      },
+      {
+        "ids": [
+          11,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 3
+      },
+      {
+        "ids": [
+          12,
+          99
+        ],
+        "logits": [
+          16.0,
+          15.9375
+        ],
+        "position": 4
+      },
+      {
+        "ids": [
+          13,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 5
+      },
+      {
+        "ids": [
+          14,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 6
+      },
+      {
+        "ids": [
+          15,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 7
+      },
+      {
+        "ids": [
+          16,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 8
+      },
+      {
+        "ids": [
+          17,
+          99
+        ],
+        "logits": [
+          16.0,
+          14.0
+        ],
+        "position": 9
+      }
+    ]
+  }
+}
