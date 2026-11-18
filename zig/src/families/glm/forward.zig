@@ -344,7 +344,8 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     bind(e, 0, .{ xp.at((c.q_lora + RANK) * 2), w.k_norm_w, w.k_norm_b, C.ik.at(@as(usize, pos) * c.i_dim * 2) });
     e.setValue(Rows{ .rows = @intCast(rows), .width = @intCast(c.i_dim), .x_stride = @intCast(xp_stride), .y_stride = @intCast(c.i_dim), .eps = 1e-6 }, 4);
     e.dispatchGroups(size(rows, 1, 1), size(32, 1, 1));
-    moe_route.logits(e, k.igate_logits, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows); // MLX's gemv_t sums, more threadgroups
+    const ig = if (rows == 1) k.igate_logits_one else k.igate_logits; // MLX's gemv_t sums, more threadgroups
+    moe_route.logits(e, ig, @import("kernels.zig").igate_shape, x_in, w.igate, C.ig.at(@as(usize, pos) * c.i_dim * 2), rows);
     indexWeights(x, e, xp, xp_stride, iw, rows);
     const first = pos / c.kpool;
     const last = (pos + rows) / c.kpool;
