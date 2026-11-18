@@ -198,6 +198,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Web: the packaged stand-in reports the current native version after a native release bump, and Web CI now runs when `build.zig.zon` changes with a build check that the committed packaged version is fresh (#3745, fixes #3739). Thanks to @AIFlowML.
 
+- GLM-5.3-Flash on CUDA: the decode kernels and qmmf's decode linears launch as dependent launches, each waiting for the kernel before it to finish before it reads, so a decode token's kernels lose most of their launch gaps; tokens are unchanged, and `TF_GLM_PDL=0` launches them plain (#3776, carrying #3673; #3652). Thanks to @laudney.
+
 ## 1.2.10
 
 - Server: `background: true` on `POST /v1/responses` answers at once with a queued response and generates the reply after the POST returns; `GET /v1/responses/{id}` polls it and `POST /v1/responses/{id}/cancel` or `DELETE` stops it, at most 64 are queued or running per server (16 per key, 256 MiB of copied requests) before a create answers 429, and `stream: true` with `background` is refused (#3220).
