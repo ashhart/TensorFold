@@ -152,10 +152,20 @@ pub const Select = struct {
     fn launch(self: *Select, dst: u64, count_extra: i32) !void {
         const s = self.shape;
         const cptr = @as(i64, @intCast(s.k));
-        try self.l.fn_idx_select(@ptrFromInt(self.sc), cptr, @ptrFromInt(self.cp), @ptrFromInt(self.ep),
-            @ptrFromInt(dst), @intCast(self.key_stride), @ptrFromInt(dst + s.rows * self.key_stride * 4),
-            @ptrFromInt(dst + (s.rows * self.key_stride + s.rows) * 4), @intCast(s.rows),
-            @intCast(self.top + @as(usize, @intFromBool(count_extra != 0))), @intCast(s.n), self.rig.s.handle);
+        try self.l.fn_idx_select(
+            @ptrFromInt(self.sc),
+            cptr,
+            @ptrFromInt(self.cp),
+            @ptrFromInt(self.ep),
+            @ptrFromInt(dst),
+            @intCast(self.key_stride),
+            @ptrFromInt(dst + s.rows * self.key_stride * 4),
+            @ptrFromInt(dst + (s.rows * self.key_stride + s.rows) * 4),
+            @intCast(s.rows),
+            @intCast(self.top + @as(usize, @intFromBool(count_extra != 0))),
+            @intCast(s.n),
+            self.rig.s.handle,
+        );
     }
 
     /// The fault is real: the control launches top+1 while an ordinary entry launches top.

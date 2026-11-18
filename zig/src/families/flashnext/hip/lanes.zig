@@ -350,8 +350,7 @@ pub const Fx = struct {
         fill.next = taken;
         const live = fill.next < fill.count and to == fill.stops[fill.next];
         if (live) fill.next += 1;
-        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks,
-            .live = if (live) to else null, .last = last, .from = fill.from, .kept0 = fill.kept0 };
+        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks, .live = if (live) to else null, .last = last, .from = fill.from, .kept0 = fill.kept0 };
         if (!last or f.link != null) states.settle(f); // the other ranks take each keep in step order
         if (!last) return false;
         try hip.raw.copy(lane.streams, 0, out.streams.ptr + (rows - 1) * row_bytes, row_bytes, e.stream.handle);
