@@ -8,7 +8,10 @@ their first / (last token of any stream - first token of any stream). Medians ov
 ``--mixed``: request i takes prompt i % 2 and seed seed + i // 2; also reports the steady aggregate, over the time
 every stream is live (tokens split by the characters each stream delivered inside that window).
 ``--alone``: runs every request alone first and checks each concurrent reply's token-id hash (``token_sha256``)
-against it; ``--serial`` checks the alone runs against ``"draft": false``. ``--no-seed``: sampled requests carry
+against it; ``--serial`` checks the alone runs against ``"draft": false``. Both counts are a report, not a gate:
+the cell names them ``vacuous`` when they compared nothing (``alone``: a rep in which no two streams decoded at once,
+so the server served them one at a time; ``serial``: the drafted runs accepted no draft, or the plain ones drafted,
+or the server reports no draft counters). ``--no-seed``: sampled requests carry
 no seed (mlx_lm's server batches only those), for measuring a standard; no hash checks then. Run a standard with its
 prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive as one text piece. Tokens come from
 the reply's usage. A request that fails to connect or errors counts in ``failed``; one whose text came in fewer than
@@ -182,6 +185,32 @@ POOLED = ("aggregate_prompt_ttft_tps", "aggregate_prefill_tps", "itl_mean_ms", "
           "chunk_tpot_estimate_ms", "round_gap_p50_ms", "round_gap_p95_ms", "tokens_per_chunk")
 
 
+def overlapped(runs: list[dict]) -> bool | None:
+    """True when two streams decoded at once (one's first token before another's last); None under two streams."""
+    spans = sorted((r["first"], r["last"]) for r in runs if r.get("first") is not None and r.get("last") is not None)
+    return any(b[0] < a[1] for a, b in zip(spans, spans[1:])) if len(spans) > 1 else None
+
+
+def draft_count(run: dict, key: str) -> int | None:
+    """A run's speculative count, None when the server reported none."""
+    value = (run.get("speculative") or {}).get(key)
+    return value if type(value) is int and value >= 0 else None
+
+
+def serial_evidence(alone: dict) -> dict:
+    """Drafts the alone runs accepted and the ``"draft": false`` runs drafted; ``vacuous`` says why that proves none."""
+    accepted = [draft_count(r, "accepted") for r in alone.values()]
+    plain = [draft_count(r.get("serial_run") or {}, "drafted") for r in alone.values()]
+    out = {"accepted": sum(v or 0 for v in accepted), "plain_drafted": sum(v or 0 for v in plain)}
+    if None in accepted or None in plain:
+        out["vacuous"] = "the server reported no draft counters for some runs"
+    elif not out["accepted"]:
+        out["vacuous"] = "the drafted runs accepted no draft"
+    elif out["plain_drafted"]:
+        out["vacuous"] = f"the \"draft\": false runs drafted {out['plain_drafted']} tokens"
+    return out
+
+
 def median(values) -> float | None:
     """The median of the values that are not None, rounded to 3 places; None when there are none."""
     got = [v for v in values if v is not None]
@@ -306,6 +335,7 @@ def main() -> None:
                     rep["client_intervals"] = [{"start": r["sent"], "first": r.get("first"),
                                                 "last": r.get("last"), "end": r.get("completed"),
                                                 **bench_timing.request(r)} for r in runs]
+                    rep["overlapped"] = overlapped(runs)
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)
                         rep["equal_alone"] = [token_equal(alone[(r["prompt"], r["seed"])], r) for r in runs]
@@ -340,10 +370,13 @@ def main() -> None:
                     checks = [v for r in reps for v in r["equal_alone"]]
                     cell["alone"] = {"equal": checks.count(True), "unequal": checks.count(False),
                                      "failed": checks.count(None)}
+                    apart = sum(r["overlapped"] is False for r in reps)
+                    if apart:
+                        cell["alone"]["vacuous"] = f"{apart} of {len(reps)} reps had no two streams decoding at once"
                 if args.serial:
                     checks = [v.get("serial_equal") for v in alone.values()]
                     cell["serial"] = {"equal": checks.count(True), "unequal": checks.count(False),
-                                      "failed": checks.count(None)}
+                                      "failed": checks.count(None), **serial_evidence(alone)}
                 errors = sorted({e for r in reps for e in r["errors"]})
                 if errors:
                     cell["errors"] = errors[:3]
