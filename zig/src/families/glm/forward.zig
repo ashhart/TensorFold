@@ -434,11 +434,27 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
     e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
     e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
-    e.setPipeline(k.index_select);
+    const sel = SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() };
+    const words = st.selectWords(x.s.cap, c.kpool);
+    if (most > select_cap) { // past CAP blocks: each span's blocks at or above the row's sampled floor (glm_select.metal)
+        e.setPipeline(k.select_mark);
+        bind(e, 0, .{ scores, x.sc.bits });
+        e.setValue(sel, 2);
+        e.setValue(words, 3);
+        e.dispatchGroups(size((most + select_span - 1) / select_span, n, 1), size(256, 1, 1));
+    }
+    e.setPipeline(k.select_merge); // the selection among them, glm_index_select's bytes
     bind(e, 0, .{ scores, indices });
-    e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() }, 2);
-    e.dispatchGroups(size(n, 1, 1), size(1024, 1, 1));
+    e.setValue(sel, 2);
+    e.setValue(words, 3);
+    bind(e, 4, .{x.sc.bits});
+    e.dispatchGroups(size(n, 1, 1), size(select_threads, 1, 1));
 }
+
+/// glm_select.metal's CAP (the merge's candidates; shorter rows select whole) and SPAN (a mark group's blocks).
+const select_cap = 3072;
+const select_span = 4096;
+const select_threads = 512; // a merge group's threads (T2)
 
 /// The sparse kernel for `n` rows' 64 heads over their listed keys (`key_length` keys written so far).
 pub fn attendIndexed(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, indices: Ref, out: Ref, n: u32, key_length: u32) void {
