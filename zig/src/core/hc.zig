@@ -49,8 +49,11 @@ pub fn boundaryWith(e: mtl.ComputeEncoder, pipes: [6]mtl.Pipeline, s: Shape, exp
     bind(e, 4, b.norm);
     e.setValue(eps, 5);
     inline for (.{ b.normed, b.post, b.comb }, 6..) |r, i| bind(e, i, r);
-    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
+    e.dispatchGroups(mtl.Size.of(rows, split_groups, 1), mtl.Size.of(1024, 1, 1));
 }
+
+/// The split's threadgroups a row: the collapse and norm, and post with the Sinkhorn comb beside it (the same bits).
+pub const split_groups = 2;
 
 /// A pending `branch` into the streams `x` in place (width / 4 threads a row, so width <= 4096).
 pub fn expandInPlace(e: mtl.ComputeEncoder, pipes: [6]mtl.Pipeline, s: Shape, rows: u32, x: anytype, branch: anytype, post: anytype, comb: anytype) void {
