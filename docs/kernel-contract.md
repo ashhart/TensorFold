@@ -426,7 +426,10 @@ ties, NaNs, signed zeros and -inf biases. `glm_mla_norms` (three roles, and four
 it loads them, against main's `glm_scale` first. The boundary that combines a MoE block's picks (`tf_hc_expand_mix_moe`,
 and its parts to 2 rows) keeps main's combine then expand, and a one-row MoE layer whose gate/up groups replay the
 select keeps main's select then the one-row gathers (its picks held to the 16 experts given weights by -inf biases
-elsewhere). Gate 1 plants NaN and both infinities and requires the predecessor's bytes, NaN payloads included; these
+elsewhere). A prompt chunk's routed experts and deep dense products in column groups (`glm_gather_glu_32`/`_64`,
+`glm_gather_scatter_32`/`_64`, `glm_mm_grouped`) keep `core/affine_mm.metal`'s one-launch gathers and `tf_affine_mm` at
+both gather heights, with a partial last column group in the dense entry. Gate 1 plants NaN and both infinities and
+requires the predecessor's bytes, NaN payloads included; these
 entries compare and keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source
 fault red at `shapes`, and its launches are in `glm_launch_records.zig`.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's

@@ -32,6 +32,12 @@ pub const records = [_]M{
     .{ .name = "glm launch picks glm tf_route_select", .threads = 512, .tg_memory = 5312, .m1 = 896, .m2 = 896 },
     .{ .name = "glm launch picks step5 tf_route_select", .threads = 512, .tg_memory = 6336, .m1 = 832, .m2 = 832 },
     .{ .name = "glm launch mla norms glm_mla_norms", .threads = 384, .tg_memory = 144, .m1 = 928, .m2 = 928 },
+    // a prompt chunk's experts and dense products in column groups (nax.h: no M1/M2 build ahead of time)
+    .{ .name = "glm launch prompt experts glm_gather_glu_32", .threads = 128, .tg_memory = 9728, .offline = false },
+    .{ .name = "glm launch prompt experts glm_gather_glu_64", .threads = 128, .tg_memory = 9728, .offline = false },
+    .{ .name = "glm launch prompt experts glm_gather_scatter_32", .threads = 128, .tg_memory = 9728, .offline = false },
+    .{ .name = "glm launch prompt experts glm_gather_scatter_64", .threads = 128, .tg_memory = 9728, .offline = false },
+    .{ .name = "glm launch prompt dense glm_mm_grouped", .threads = 128, .tg_memory = 9728, .offline = false },
 };
 
 test "the GLM launches fit every Apple family" {
