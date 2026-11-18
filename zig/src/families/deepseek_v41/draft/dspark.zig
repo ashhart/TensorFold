@@ -254,8 +254,8 @@ pub fn candidateRows(logits: []const f32, v: usize, k: usize, ids: []i32, vals: 
             candidatesWith(best[0..@min(o.len, lg.len)], lg, 0, o, ov);
         }
     };
-    // a thread that cannot start leaves its row to this one
-    for (1..@min(rows, threads.len)) |r| threads[r] = std.Thread.spawn(.{ .stack_size = 64 << 10 }, Row.run, .{ logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k] }) catch null;
+    // Room for process TLS; a failed spawn leaves its row to this thread.
+    for (1..@min(rows, threads.len)) |r| threads[r] = std.Thread.spawn(.{ .stack_size = 1 << 20 }, Row.run, .{ logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k] }) catch null;
     for (0..rows) |r| if (r >= threads.len or threads[r] == null) Row.run(logits[r * v ..][0..v], ids[r * k ..][0..k], vals[r * k ..][0..k]);
     for (threads) |t| if (t) |th| th.join();
 }
