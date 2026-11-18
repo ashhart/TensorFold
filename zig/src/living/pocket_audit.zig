@@ -11,7 +11,7 @@ pub fn Audit(comptime H: type) type {
         pocket: P,
 
         pub fn init(l: anytype) !Self {
-            try l.auditTrainer();
+            try ready(l);
             var p = P.init(l.gpa);
             errdefer p.deinit();
             try loading.load(&p, whole.Hooks(H){ .b = l.b, .gpa = l.gpa, .io = l.io });
@@ -52,4 +52,14 @@ pub fn Audit(comptime H: type) type {
             }
         }
     };
+}
+
+/// Prepare the trainer only while every write is resolved; no lesson is opened.
+pub fn ready(l: anytype) !void {
+    const L = @TypeOf(l.*);
+    if (comptime L.Audit == void) return error.AuditUnsupported;
+    if (l.phase != .idle) return error.AuditBusy;
+    if (!l.whole or l.method != .pocket) return error.AuditUnsupported;
+    if (whole.stale(l)) return error.AuditUnresolved;
+    try l.ready();
 }

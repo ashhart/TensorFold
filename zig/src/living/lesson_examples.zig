@@ -9,6 +9,7 @@ pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject:
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
     train: []const Example = &.{},
+    reuse_deleted: bool = false, // opt-in capacity policy may reuse silent, unowned interior neurons
     against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, one learned beside each plain one
     held: []const Example = &.{},
@@ -171,4 +172,9 @@ test "a learner without taps reads a prompt in a conversation only when its pass
     try std.testing.expectEqual(@as(usize, 1), tapped.train.len); // an answer is read by passes whole
     try std.testing.expectEqual(@as(usize, 2), tapped.asked.len);
     try std.testing.expectEqual(@as(usize, 1), tapped.unasked.len);
+}
+
+/// The learner exposes its host and pocket type, so capability checks stay beside example planning.
+pub fn ofLearner(l: anytype) bool {
+    return readsConversations(@TypeOf(l.*).Host.Trainer, @TypeOf(l.pockets) != void and l.whole and l.method == .pocket);
 }
