@@ -280,9 +280,25 @@ def main():
                       "source_commit": source_revision, "archive_sha256": report["archive_sha256"]}))
 
 
+def review_failure_sites(error):
+    """Identify reviewed source locations without logging exception text or runner paths."""
+    modules = {"artifact_gate.py", "build_preview.py", "cuda_review.py", "pe_review.py", "privacy_review.py"}
+    sites = []
+    trace = error.__traceback__
+    while trace is not None:
+        path = Path(trace.tb_frame.f_code.co_filename)
+        if path.name in modules and path.resolve().parent == HERE:
+            sites.append({"module": path.name, "line": trace.tb_lineno})
+        trace = trace.tb_next
+    return sites
+
+
 if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(json.dumps({"status": "FAILED", "stage": STAGE, "category": type(error).__name__, "uploads": 0}), file=sys.stderr)
+        failure = {"status": "FAILED", "stage": STAGE, "category": type(error).__name__, "uploads": 0}
+        if STAGE == "artifact-review":
+            failure["review_sites"] = review_failure_sites(error)
+        print(json.dumps(failure), file=sys.stderr)
         raise SystemExit(1)
