@@ -41,7 +41,19 @@ fn alone(a: std.mem.Allocator, f: *ff.Fwd, slots: []pkg.kv.Slot, parts: []const 
     }
 }
 
-/// All parts' rows in one launch; the taps are read back from each slot.
+/// The decode path's Engram rows: a layer's rows filled just before the command buffer that reads them.
+const Hook = struct {
+    f: *ff.Fwd,
+    pieces: []const fwd.Piece,
+    l: fwd.Lookup,
+
+    fn rows(ctx: *anyopaque, li: usize) anyerror!void {
+        const h: *Hook = @ptrCast(@alignCast(ctx));
+        try fwd.fillRows(&h.f.b, &h.f.r.c, h.pieces, h.l, li);
+    }
+};
+
+/// All parts' rows in one launch as the target runs a window (Engram rows per buffer); taps read back from each slot.
 fn together(f: *ff.Fwd, slots: []pkg.kv.Slot, parts: []const Part, logits: []f32, taps: []u16) !void {
     const r = f.r;
     const c = &r.c;
@@ -58,11 +70,13 @@ fn together(f: *ff.Fwd, slots: []pkg.kv.Slot, parts: []const Part, logits: []f32
         r0 += @intCast(pt.n);
     }
     const k = parts.len;
-    try fwd.prepareSegs(&f.b, c, pieces[0..k], f.lookup());
+    const l = try fwd.prepareIds(&f.b, c, pieces[0..k], f.lookup()) orelse return error.NoEngram;
+    fwd.prefetchRows(pieces[0..k], l);
     try r.s.writeSpans(c, spans[0..k]);
     var x = r.ctx(&slots[0], parts[0].p0, r0);
     x.segs = segs[0..k];
-    try finish(r, f, &x, r0);
+    var hook: Hook = .{ .f = f, .pieces = pieces[0..k], .l = l };
+    try fwd.runWith(&x, r.queue, f.model(), &f.b, .{ .ctx = &hook, .rows = Hook.rows });
     @memcpy(logits[0 .. r0 * V], f.b.logitsOf(c, r0));
     var at: usize = 0;
     for (parts, slots) |pt, *sl| {
