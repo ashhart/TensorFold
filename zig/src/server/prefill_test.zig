@@ -204,8 +204,12 @@ test "assistant prefill: refusals name why the final message cannot be continued
         .{ .path = "/v1/chat/completions", .body = "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]," ++ flag ++ "," ++ off, .message = prefill.not_assistant },
         .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag ++ ",\"add_generation_prompt\":true," ++ off, .message = prefill.with_generation },
         .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ ",\"continue_final_message\":\"yes\"," ++ off, .message = "continue_final_message must be a boolean" },
-        .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag, .message = prefill.thinking_on }, // the server's default
+        // the request itself turns thinking on: a switch, DeepSeek's form, the top-level toggle or a named effort
+        .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag ++ ",\"chat_template_kwargs\":{\"enable_thinking\":true}", .message = prefill.thinking_on },
+        .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag ++ ",\"chat_template_kwargs\":{\"thinking\":{\"type\":\"enabled\"}}", .message = prefill.thinking_on },
         .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag ++ ",\"thinking\":true", .message = prefill.thinking_on },
+        .{ .path = "/v1/chat/completions", .body = "\"messages\":" ++ turns ++ "," ++ flag ++ ",\"reasoning_effort\":\"high\"", .message = prefill.thinking_on },
+        .{ .path = "/v1/messages", .body = "\"messages\":" ++ turns ++ ",\"thinking\":{\"type\":\"adaptive\"}", .message = prefill.thinking_on },
         .{ .path = "/v1/chat/completions", .body = "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"look\",\"arguments\":\"{}\"}}]}]," ++ flag ++ "," ++ off ++ "," ++ chat_tool, .message = prefill.calls },
         // Qwen3.8's template trims the message: its trailing space would be lost, so the reply cannot continue it
         .{ .path = "/v1/chat/completions", .body = "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Sure: \"}]," ++ flag ++ "," ++ off, .message = prefill.rewritten },
@@ -247,21 +251,55 @@ test "assistant prefill: the prompt cache keeps the history before the continued
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var script: Script = .{ .cache = true };
-    var s = try Served.init(a, templates[0].source, templates[0].config, templates[0].kind, &script);
-    defer s.deinit();
-    script.reply = try s.srv.text.encode(a, continuation, false);
-    var cx: errors.Cx = .{ .a = a };
-    const user = try messages(a, "[{\"role\":\"user\",\"content\":\"Hi\"}]");
-    const history = try prompt.renderIds(s.srv, &cx, user, &.{}, false, null, false);
-    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":16,\"messages\":{s},\"continue_final_message\":true,{s}}}", .{ turns, off });
-    const status, _ = try s.post(a, "/v1/chat/completions", body);
-    try t.expectEqual(@as(u16, 200), status);
-    try t.expectEqual(@as(u32, @intCast(history.len)), script.history[0]);
-    try t.expectEqual(@as(usize, 2), script.count);
-    // the warm pass renders the next turn's shared prompt: the continued message and the reply as one assistant turn
-    const next = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure: {" ++ continuation ++ "<|im_end|>\n<|im_start|>user\n";
-    try t.expectEqualStrings(next, try s.srv.text.decode(a, script.seen(1)));
+    // an explicit off and the server's default (thinking on, which a continued request does not take) cache alike
+    for ([_][]const u8{ "," ++ off, "" }) |extra| {
+        var script: Script = .{ .cache = true };
+        var s = try Served.init(a, templates[0].source, templates[0].config, templates[0].kind, &script);
+        defer s.deinit();
+        script.reply = try s.srv.text.encode(a, continuation, false);
+        var cx: errors.Cx = .{ .a = a };
+        const user = try messages(a, "[{\"role\":\"user\",\"content\":\"Hi\"}]");
+        const history = try prompt.renderIds(s.srv, &cx, user, &.{}, false, null, false);
+        const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":16,\"messages\":{s},\"continue_final_message\":true{s}}}", .{ turns, extra });
+        const status, _ = try s.post(a, "/v1/chat/completions", body);
+        try t.expectEqual(@as(u16, 200), status);
+        try t.expectEqualStrings(templates[0].cut, try s.srv.text.decode(a, script.seen(0)));
+        try t.expectEqual(@as(u32, @intCast(history.len)), script.history[0]);
+        try t.expectEqual(@as(usize, 2), script.count);
+        // the warm pass renders the next turn's shared prompt: the continued message and the reply as one turn
+        const next = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure: {" ++ continuation ++ "<|im_end|>\n<|im_start|>user\n";
+        try t.expectEqualStrings(next, try s.srv.text.decode(a, script.seen(1)));
+    }
+}
+
+test "assistant prefill: a server's default thinking leaves a continued request thinking off, its reply all content" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (templates) |tmpl| {
+        var script: Script = .{};
+        var s = try Served.init(a, tmpl.source, tmpl.config, tmpl.kind, &script);
+        defer s.deinit();
+        try t.expect(s.srv.config.enable_thinking); // the server's default: replies think unless a request turns it off
+        script.reply = try s.srv.text.encode(a, continuation, false);
+        var cx: errors.Cx = .{ .a = a };
+        const ids = try prefill.ids(s.srv, &cx, try messages(a, turns), &.{}, false, null);
+        // a thinking reply would read the continuation as reasoning: it has no close marker
+        const chat_status, const chat = try s.post(a, "/v1/chat/completions", try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":16,\"messages\":{s},\"continue_final_message\":true}}", .{turns}));
+        try t.expectEqual(@as(u16, 200), chat_status);
+        try t.expectEqualSlices(u32, ids, script.seen(0));
+        const message = chat.get("choices").?.array[0].get("message").?;
+        try t.expectEqualStrings(continuation, message.strField("content").?);
+        try t.expect(message.get("reasoning_content") == null);
+        try t.expect(!chat.get("tensorfold").?.get("enable_thinking").?.bool);
+        const status, const reply = try s.post(a, "/v1/messages", try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":16,\"messages\":{s}}}", .{turns}));
+        try t.expectEqual(@as(u16, 200), status);
+        try t.expectEqualSlices(u32, ids, script.seen(1));
+        const content = reply.get("content").?.array;
+        try t.expectEqual(@as(usize, 1), content.len);
+        try t.expectEqualStrings("text", content[0].strField("type").?);
+        try t.expectEqualStrings(continuation, content[0].strField("text").?);
+    }
 }
 
 test "assistant prefill: DeepSeek-V4's encoder is cut after the message's text, its plain thinking-off prompt and the text" {
