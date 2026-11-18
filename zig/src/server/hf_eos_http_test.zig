@@ -249,8 +249,7 @@ fn answerOnly(streaming: bool, reasoning: bool, asked: ?bool, harmony: bool) !vo
     }
     const split = reasoning and thinking;
     const answer = if (harmony) "<|channel|>analysis<|message|>plan<|channel|>final<|message|>OK" else "OK";
-    // the reply ends at its end token in a block that never closed, so its reasoning is also its answer (#3687)
-    try std.testing.expectEqualStrings(answer, content.items);
+    try std.testing.expectEqualStrings(if (split) "" else answer, content.items);
     try std.testing.expectEqualStrings(if (split) answer else "", thought.items);
     const value = final orelse return error.MissingFinalReply;
     try std.testing.expectEqual(thinking, value.get("tensorfold").?.get("enable_thinking").?.bool);

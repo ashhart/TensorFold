@@ -1,8 +1,5 @@
 # Community benchmarks
 
-`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
-`--publish` optionally submits it for review at tensorfold.dev; [Publishing](#publishing) says which receipts it accepts today.
-
 Run repeatable code and chat workloads on a model you have already downloaded:
 
 ```sh
@@ -23,14 +20,6 @@ An engine that decodes greedily only refuses the sampled cells, so it cannot com
 Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed native runs record `python_version` as `"none"`. An attached manifest may attest the same value; an unattested attached run records `"unknown"`. Beside each receipt, `RUN_ID.drafts.json` (for `--output FILE.json`, `FILE.drafts.json`) keeps what the server reported for each attempt: its verify rounds, the tokens a drafter proposed and the tokens the target accepted, with their totals (null, and the run says so, when a sum would pass 64 bits) and whether the run passed a drafter. The board's receipt has no field for these counts, so they are never uploaded; they are how a local run shows that its drafter ran, since equal timings do not. When a drafter was passed and the server drafted no tokens, the run says so.
 
 [The Grill](https://github.com/plotarmordev/thegrill) is a separate third-party tool that reports whether a serving change measured faster, slower or inconclusive.
-
-Managed receipts can also include `hardware.form_factor`: `Mac mini`, `Mac Studio`, `MacBook Pro`,
-`MacBook Air`, `iMac` or `Mac Pro`. On macOS a fixed lookup of documented Apple silicon products derives
-this coarse family on the device; the product identifier itself is never recorded. An unlisted product,
-a failed probe, Linux or Windows leaves the value unknown. Unknown values omit the optional field,
-preserving existing receipt bytes; readers also accept explicit null. Both community-v1 and community-v2
-receipts without the field remain valid. Attached runs use only an optional family attested in the server's
-manifest, never the client's product family. The benchmark board's display is a separate change.
 
 ## Commands
 

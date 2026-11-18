@@ -24,7 +24,7 @@ pub const Text = struct {
     markers: @import("reply_text.zig").Markers = @import("reply_text.zig").think_markers,
     close_token: bool = true, // false: the close marker is not a token, so the text's spelling is what closes
 
-    pub fn text(t: *@This()) model_text.Text {
+    fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .token_bytes = tokenBytes } };
     }
 
@@ -91,11 +91,11 @@ pub const Text = struct {
 };
 
 /// Answers `reply` in fixed token chunks.
-pub const Script = struct {
+const Script = struct {
     reply: []const u32,
     stride: ?usize = null,
 
-    pub fn engine(e: *@This()) api.Engine {
+    fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
@@ -134,7 +134,7 @@ pub const Got = struct {
     body: []u8 = &.{},
     events: std.ArrayList([]u8) = .empty,
 
-    pub fn out(g: *Got) openai.Out {
+    fn out(g: *Got) openai.Out {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
@@ -193,7 +193,7 @@ pub fn sendText(reply: []const u32, thinking: bool, body: []const u8, settings: 
     return got;
 }
 
-pub fn tokensOf(comptime s: []const u8) [s.len]u32 {
+fn tokensOf(comptime s: []const u8) [s.len]u32 {
     var out: [s.len]u32 = undefined;
     for (s, &out) |c, *o| o.* = c;
     return out;

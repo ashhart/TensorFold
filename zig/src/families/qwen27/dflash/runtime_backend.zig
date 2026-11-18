@@ -5,7 +5,7 @@ const core = @import("core");
 const op = @import("operators.zig");
 const cfg = @import("config.zig");
 const ck = @import("../checkpoint.zig");
-pub const Target = @import("runtime_target.zig").Target;
+const Target = @import("../model.zig").Model;
 const callbacks = @import("runtime_callbacks.zig");
 pub const Head = @import("runtime_head.zig").Head;
 pub const Frame = @import("runtime_frame.zig").Frame;
@@ -54,7 +54,7 @@ const first_part_ops = 6;
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
-    target: Target,
+    target: *Target,
     checkpoint: *core.checkpoint_metal.Checkpoint,
     config: cfg.Config,
     primitives: core.draft_ops.Ops,
@@ -73,10 +73,7 @@ pub const Backend = struct {
     prepared: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
-    pub fn init(a: std.mem.Allocator, target: *@import("../model.zig").Model, checkpoint: *core.checkpoint_metal.Checkpoint, c: cfg.Config) !Backend {
-        return initBound(a, Target.qwen(target), checkpoint, c);
-    }
-    pub fn initBound(a: std.mem.Allocator, target: Target, checkpoint: *core.checkpoint_metal.Checkpoint, c: cfg.Config) !Backend {
+    pub fn init(a: std.mem.Allocator, target: *Target, checkpoint: *core.checkpoint_metal.Checkpoint, c: cfg.Config) !Backend {
         try c.check();
         const primitives = try core.draft_ops.Ops.init(target.device);
         errdefer primitives.deinit();

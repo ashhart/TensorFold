@@ -30,9 +30,6 @@ pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families = cuda_families.families;
-/// `tensorfold device`: the SMs this build's kernels are for, and every GPU the driver lists (cuda_device.zig).
-pub const kernel_sms = cuda_device.kernel_sms;
-pub const listGpus = cuda_device.list;
 const gib: f64 = 1 << 30;
 const cuda_device = @import("cuda_device.zig");
 pub const chip = cuda_device.chip;
@@ -108,8 +105,8 @@ pub const Host = struct {
         }
     }
     /// The round loop and the lane host over the family's backend, its thread started.
-    pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, warm_quiet: u64) !void {
-        return @import("cuda_startup_phase.zig").serve(h, io, facts, rows, info, explain, warm_quiet, .{
+    pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
+        return @import("cuda_startup_phase.zig").serve(h, io, facts, rows, info, explain, .{
             .bound = &bound,
             .backend = backend,
             .initThread = initThread,
@@ -475,7 +472,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .slide_conversations = conversations,
         .readouts = readouts,
         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
-    }), .{ .ctx = loaded.ctx, .text = F.explain }, snaps.warmQuiet(F));
+    }), .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
@@ -486,10 +483,37 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 }
 const toGib = family_memory.toGib;
 
-const familyInfo = @import("cuda_family_info.zig").familyInfo;
+/// The Info `openWith` serves: the host's fields, then what the family declares (its reasoning block).
+fn familyInfo(comptime F: type, host: api.Info) api.Info {
+    var info = host;
+    info.reasoning = reasoning(F);
+    return info;
+}
 
+/// The family's Info.reasoning: false when it declares `pub const reasoning = false` (no reasoning block).
+fn reasoning(comptime F: type) bool {
+    return if (@hasDecl(F, "reasoning")) F.reasoning else true;
+}
+
+test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; only dots.mocr does" {
+    try std.testing.expect(reasoning(struct {}));
+    try std.testing.expect(!reasoning(struct {
+        pub const reasoning = false;
+    }));
+    inline for (registry) |F| try std.testing.expectEqual(!std.mem.eql(u8, F.model_type, "dots_ocr"), reasoning(F));
+}
+
+test "the Info openWith serves carries each family's reasoning declaration over the host's" {
+    const Plain = struct {
+        pub const reasoning = false;
+    };
+    try std.testing.expect(!familyInfo(Plain, .{ .reasoning = true }).reasoning);
+    try std.testing.expect(familyInfo(struct {}, .{ .reasoning = false }).reasoning);
+    const kept = familyInfo(Plain, .{ .lanes = 6, .context_window = 8192, .startup = "plan" });
+    try std.testing.expect(kept.lanes == 6 and kept.context_window == 8192 and std.mem.eql(u8, kept.startup, "plan"));
+    inline for (registry) |F| try std.testing.expectEqual(reasoning(F), familyInfo(F, .{ .reasoning = !reasoning(F) }).reasoning);
+}
 test {
-    _ = @import("cuda_family_info.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;

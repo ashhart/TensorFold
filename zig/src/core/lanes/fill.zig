@@ -23,7 +23,7 @@ pub fn freeProposals(gpa: Allocator, proposals: []Proposal) void {
     gpa.free(proposals);
 }
 
-/// Distinct continuations of the last n context tokens (n from `longest` down to `shortest`), most recent match first.
+/// Distinct continuations of the context's last n tokens (n from `longest` down to `shortest`), most recent match first.
 pub fn suffixCandidates(gpa: Allocator, context: []const u32, longest: usize, shortest: usize, span: usize, most: usize) ![]Proposal {
     var out: std.ArrayList(Proposal) = .empty;
     errdefer {
@@ -51,7 +51,7 @@ fn seen(have: []const Proposal, next: []const u32) bool {
     return false;
 }
 
-/// The head's chain the branches graft onto: its drafts level by level and the head's other best tokens at each level.
+/// The head's chain the branches graft onto: its drafts (level by level) and the head's other best tokens at each level.
 pub const Trunk = struct { tokens: []const u32 = &.{}, others: []const [3]u32 = &.{} };
 
 /// Proposals grafted onto the trunk, heaviest first, leaving it past its end or at a token the head ranked there.

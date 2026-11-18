@@ -23,7 +23,7 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
     return copy;
 }
 
-/// normalize_messages: merge leading system/developer text; add a user turn after tools if a template needs one.
+/// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
     return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
 }
@@ -173,7 +173,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         try first.put(cx.a, "content", .{ .string = joined.items });
         try out.insert(cx.a, 0, .{ .object = first });
     }
-    // A turn in <|im_start|> is no query; a template adds a placeholder only to user-less chats after last tool run.
+    // A template that demands a user query (it raises "No user query found") refuses a conversation whose user turn became tool results; by the template's test a user turn wholly inside a <|im_start|> block is no query, so only a conversation without one gains a placeholder user turn after its last tool run.
     if (needs_user_after_tool) {
         var has_query = false;
         var last_tool: ?usize = null;

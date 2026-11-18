@@ -137,8 +137,7 @@ const FakeHub = struct {
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
         const method = parts.next() orelse return false;
         if (std.mem.eql(u8, method, "HEAD")) {
-            // The hub’s link is already the storage link, so no redirect is needed.
-            fake.sendAll(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
+            fake.sendAll(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); // no redirect: the hub's link is the storage link
             return true;
         }
         if (!std.mem.eql(u8, method, "GET")) return false;
@@ -543,23 +542,4 @@ test "security: a hub tree path TensorFold reserves is refused, naming the path 
     // the planted name is not linked into the snapshot
     const planted = try std.fs.path.join(a, &.{ root, "models--Org--Reserved/snapshots/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5/.tensorfold-save-pending" });
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, planted, .{}));
-}
-
-test "pull refuses cache mutation while rm holds the cache directory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
-    const env = try testEnv(a, "http://127.0.0.1:1");
-    const lease = try @import("sys").folder_lock.hold(a, root, true);
-    defer lease.release();
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err.writer, &env, root, "Org/Flash"));
-    try std.testing.expect(std.mem.indexOf(u8, err.written(), "cache") != null);
-    try std.testing.expect(std.mem.indexOf(u8, err.written(), "Busy") != null);
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash" }), .{}));
 }

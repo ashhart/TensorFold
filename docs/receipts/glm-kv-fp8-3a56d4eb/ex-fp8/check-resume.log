@@ -1,6 +1,0 @@
-first: prompt 6594 cached 0 tokens 64 6.78 s sha256 41d52328d12b
-repeated: prompt 6594 cached 6144 tokens 64 2.333 s sha256 41d52328d12b same_as_first True
-draft_false: prompt 6594 cached 6144 tokens 64 3.353 s sha256 41d52328d12b same_as_first True
-concurrent: prompt 6594 cached 6144 tokens 64 3.47 s sha256 41d52328d12b same_as_first True
-concurrent: prompt 6594 cached 6144 tokens 64 3.528 s sha256 41d52328d12b same_as_first True
-exit 0

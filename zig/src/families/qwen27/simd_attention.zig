@@ -65,13 +65,6 @@ pub fn grouped(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_h
     return std.mem.concat(a, u8, &.{ try std.fmt.bufPrint(&defines, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ group, kv_heads }), body });
 }
 
-/// `grouped` with Q27_JOIN: pack_b, the tail and the merges take a plan's pairs (Attention.initJoin, Plan.pair).
-pub fn joined(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32, paged: bool) ![]u8 {
-    const body = try grouped(a, units, prompt, group, kv_heads, paged);
-    defer a.free(body);
-    return std.mem.concat(a, u8, &.{ "#define Q27_JOIN 1\n", body });
-}
-
 /// The attention source with the tail kernel's result indexing in the simdgroup-matrix layout; the caller frees it.
 pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
     const begin = std.mem.indexOf(u8, source, "kernel void q27_attn_tail(") orelse return error.AttentionSource;

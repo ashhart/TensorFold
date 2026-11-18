@@ -429,7 +429,7 @@ pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, dai
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
 
-/// Flash Next engine over `dump`'s kernels/packs. `cache_gib`: null = 70% of RAM, cap 16 GiB; `why`: over-cap reason.
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8) !*Host {
     return openConfigured(gpa, io, dir, dump, window, speed_up, cache_gib, over_cap, learn, vision, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null, why));
 }

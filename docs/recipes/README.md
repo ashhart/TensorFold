@@ -14,7 +14,6 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
-| Qwen3-Embedding | [Native Metal](qwen3-embedding-metal.md), [HIP](qwen3-embedding-hip.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
 | Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |
@@ -41,7 +40,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. This is a build target list, not
 per-card model qualification. Nemotron MLX 4-bit has been checked on GB10, RTX 3090 and RTX PRO 6000.
 The A100 (sm_80) has [kernel-check evidence](../../CHANGELOG.md#1012) from #846, but no served checkpoint on record;
-it is not model-qualified. See [qualified models](../supported-models.md#qualified-models) for the measured scope.
+it is not model-qualified. See [qualified models](../../README.md#qualified-models) for the measured scope.
 `tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin. On macOS, a
 Flash Next (`qwen4_exp`) checkpoint instead prints its startup and cold pack budgets.
 

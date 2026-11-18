@@ -24,7 +24,6 @@ EXCLUDED = (
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "test-host is a native Linux CI aggregate")
 class HostTestGraphTests(unittest.TestCase):
-    ASSIGN = '        if (shardFor(name) == 0) shard_a.dependOn(step) else shard_b.dependOn(step);'
     def setUp(self):
         self.zig = os.environ.get("ZIG") or shutil.which("zig")
         if not self.zig:
@@ -51,12 +50,6 @@ pub fn build(b: *std.Build) void {
     def assert_failed_with(self, result, message):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(message, result.stdout + result.stderr)
-
-    def patch_policy(self, old, new):
-        policy = self.root / "host_tests.zig"
-        source = policy.read_text()
-        self.assertIn(old, source)
-        policy.write_text(source.replace(old, new, 1))
 
     def test_new_named_host_test_is_included_after_the_collector_is_declared(self):
         result = self.build('    b.step("test-new-host", "new host test").dependOn(&b.addFail("new host test reached").step);')
@@ -102,37 +95,6 @@ pub fn build(b: *std.Build) void {
         result = self.build(args=["--help", "-Dtarget=x86_64-windows-gnu"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("test-host", result.stdout)
-
-    def test_new_named_host_test_is_in_exactly_one_shard(self):
-        extra = '    b.step("test-new-host", "new host test").dependOn(&b.addFail("new host test reached").step);'
-        a = self.build(extra=extra, args=["test-host-a", "--summary", "all"])
-        b = self.build(extra=extra, args=["test-host-b", "--summary", "all"])
-        out = a.stdout + a.stderr + b.stdout + b.stderr
-        self.assertEqual(len([r for r in (a, b) if "new host test reached" in r.stdout + r.stderr]), 1, out)
-        self.assertEqual(sum(r.returncode != 0 for r in (a, b)), 1, out)
-
-    def test_a_check_in_both_shards_is_rejected(self):
-        self.patch_policy(self.ASSIGN, "        shard_a.dependOn(step);\n        shard_b.dependOn(step);")
-        extra = '    b.step("test-doubled", "doubled").dependOn(&b.addFail("doubled reached").step);'
-        result = self.build(extra=extra)
-        self.assert_failed_with(result, "check test-doubled is in both shards")
-        self.assertNotIn("doubled reached", result.stdout + result.stderr)
-
-    def test_a_check_in_neither_shard_is_rejected(self):
-        self.patch_policy(self.ASSIGN, "        // deliberately unassigned")
-        extra = '    b.step("test-orphan", "orphan").dependOn(&b.addFail("orphan reached").step);'
-        result = self.build(extra=extra)
-        self.assert_failed_with(result, "check test-orphan is in neither shard")
-        self.assertNotIn("orphan reached", result.stdout + result.stderr)
-
-    def test_test_host_runs_the_union_of_both_shards(self):
-        extra = (
-            '    b.step("test-cuda-host", "pinned to shard a").dependOn(&b.addFail("shard a reached").step);\n'
-            '    b.step("test-golden", "pinned to shard b").dependOn(&b.addFail("shard b reached").step);'
-        )
-        result = self.build(extra=extra)
-        self.assert_failed_with(result, "shard a reached")
-        self.assertIn("shard b reached", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "Otwarto element zarysu rozmowy.",
   "Quoted message opened.": "Otwarto cytowaną wiadomość.",
-  "Search match opened.": "Otwarto wynik wyszukiwania.",
-  "Conversation unavailable": "Rozmowa niedostępna",
-  "This conversation was archived or deleted, or it has not loaded yet.": "Ta rozmowa została zarchiwizowana lub usunięta albo nie została jeszcze wczytana.",
-  "Back to Home": "Wróć na stronę główną"
+  "Search match opened.": "Otwarto wynik wyszukiwania."
 }

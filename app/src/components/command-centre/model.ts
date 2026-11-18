@@ -13,7 +13,6 @@ import type {
   Room,
   Settings,
   Thread,
-  Ticket,
   TokenUsageSnapshot,
 } from '../../lib/types'
 
@@ -310,22 +309,6 @@ export function limitMissionRows<T>(rows: T[], limit: number): { visible: T[]; h
 /** The Approvals panel only stays pinned while there is something waiting on the user (Task #62). */
 export function approvalsShouldStick(pendingCount: number): boolean {
   return pendingCount > 0
-}
-
-/**
- * The thread an [Open] button on a ticket-review approval row may open: the
- * ticket's thread, but only when that thread is actually loaded in the store.
- * A ticket keeps its threadId after its thread is archived, deleted, or is
- * still mirroring from a remote host, and opening the bare id then renders a
- * blank Thread view (ThreadView returns null for a missing thread, #3387).
- * Extracted so the semantics are testable directly.
- */
-export function ticketReviewThreadId(
-  ticket: { threadId?: Ticket['threadId'] },
-  threads: ReadonlyArray<Pick<Thread, 'id'>>,
-): string | null {
-  if (!ticket.threadId) return null
-  return threads.some((thread) => thread.id === ticket.threadId) ? ticket.threadId : null
 }
 
 /**

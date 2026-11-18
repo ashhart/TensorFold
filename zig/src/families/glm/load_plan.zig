@@ -80,14 +80,8 @@ pub fn expertBytes(l: anytype, i: usize) !usize {
     const every = i == c.layers;
     const m: usize = if (every) c.moe_inter else c.inter[1] - c.inter[0];
     const lo: usize = if (every) 0 else c.own[0];
-    const per = try projBytes(l, i, lo, "gate_proj", m, D) + try projBytes(l, i, lo, "up_proj", m, D) + try projBytes(l, i, lo, "down_proj", D, m);
+    const per = affine.bytes(m, D, try l.widths.expert(i, lo, "gate_proj")) + affine.bytes(m, D, try l.widths.expert(i, lo, "up_proj")) + affine.bytes(D, m, try l.widths.expert(i, lo, "down_proj"));
     return (if (every) c.experts else c.own[1] - c.own[0]) * per + 9 * 256;
-}
-
-/// An expert's `proj` [n, k]: the FP8 checkpoint's codes and scales, else its affine width's.
-fn projBytes(l: anytype, i: usize, e: usize, proj: []const u8, n: usize, k: usize) !usize {
-    if (@import("fp8.zig").isExpert(l, i, e, proj)) return affine.fp8Bytes(n, k);
-    return affine.bytes(n, k, try l.widths.expert(i, e, proj));
 }
 
 /// A stack's bytes: its rows, padded to `pad` a run (a part each once widths differ), at the costliest bytes a row.

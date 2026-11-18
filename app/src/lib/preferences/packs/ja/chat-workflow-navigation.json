@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "アウトライン項目を開きました。",
   "Quoted message opened.": "引用元のメッセージを開きました。",
-  "Search match opened.": "検索結果を開きました。",
-  "Conversation unavailable": "会話を利用できません",
-  "This conversation was archived or deleted, or it has not loaded yet.": "この会話はアーカイブまたは削除されたか、まだ読み込まれていません。",
-  "Back to Home": "ホームに戻る"
+  "Search match opened.": "検索結果を開きました。"
 }

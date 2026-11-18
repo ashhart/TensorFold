@@ -381,9 +381,6 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var h3_list: std.ArrayList(*h3_k.H3) = .empty;
     defer for (h3_list.items) |x| x.deinit();
-    var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
-    defer qwen3_heads.deinit();
-    try qwen3_heads.collect(a, device, queue, &kernels, o.only);
     var llama_set = llama_k.Set{};
     defer llama_set.deinit(a);
     try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
@@ -418,9 +415,6 @@ pub fn main(init: std.process.Init) !u8 {
     var moe: Moe = .{};
     defer moe.deinit(a);
     try moe.collect(a, device, queue, o, &kernels);
-    var row_wide: @import("metal_row_wide.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
-    defer row_wide.deinit();
-    try row_wide.collect(o.only);
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
@@ -473,24 +467,14 @@ pub fn main(init: std.process.Init) !u8 {
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
     const flash_grouped = @import("metal_flashnext_grouped.zig");
-    var grouped_probes: [4]flash_grouped.Probe = undefined;
+    var grouped_probes: [2]flash_grouped.Probe = undefined;
     var grouped_made: usize = 0;
     defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
-    for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, flash_grouped.Probe.name(control, indexed))) continue;
-        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed };
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
         grouped_made += 1;
         try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
-    };
-    const flash_prompt_index = @import("metal_flashnext_prompt_index.zig");
-    var prompt_index_probes: [2]flash_prompt_index.Probe = undefined;
-    var prompt_index_made: usize = 0;
-    defer for (prompt_index_probes[0..prompt_index_made]) |*probe| probe.deinit();
-    for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, flash_prompt_index.Probe.name(control))) continue;
-        prompt_index_probes[prompt_index_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
-        prompt_index_made += 1;
-        try kernels.append(a, prompt_index_probes[prompt_index_made - 1].kernel());
     }
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);

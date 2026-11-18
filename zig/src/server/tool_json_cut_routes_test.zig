@@ -125,7 +125,7 @@ const Wire = struct {
 };
 
 /// `body` posted to `path` (/v1/messages or /v1/responses), its status and payload as written.
-pub fn capture(a: Allocator, srv: *server.Server, path: []const u8, body: []const u8) !struct { status: u16, body: []const u8 } {
+fn capture(a: Allocator, srv: *server.Server, path: []const u8, body: []const u8) !struct { status: u16, body: []const u8 } {
     var wire: Wire = .{ .a = a };
     var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
     var c: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = path, .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };

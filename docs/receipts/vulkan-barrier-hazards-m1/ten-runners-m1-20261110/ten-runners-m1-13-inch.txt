@@ -1,0 +1,15 @@
+ten Vulkan contract runners and stage probes, one pass, at the top of the stack (9c4a94f78)
+device: the Apple M1 (G13G B1) of a 13-inch MacBook Pro under Linux, kernel 7.3.0-2-20261110.1-lab-ARCH
+ICD: honeykrisp 9323171c12 pinned; binaries aarch64-linux-gnu builds of this head, sealed in SHA256SUMS
+run 2026-11-10T17:41:54Z to 17:55:15Z, all ten exit 0
+
+RESULT attention-contract elapsed_ms=6521 on "Apple M1 (G13G B1)": passed=15 total=15
+RESULT contract-pointwise elapsed_ms=86 on "Apple M1 (G13G B1)": passed=16 known=1 total=17
+RESULT datamove on "Apple M1 (G13G B1)": kernels=7 passed=7 failed=0 controls=0 known=0
+RESULT stage1 elapsed_ms=7151 on "Apple M1 (G13G B1)": passed=25 total=25
+RESULT stage2 elapsed_ms=39 on "Apple M1 (G13G B1)": passed=9 total=9
+RESULT stage3 elapsed_ms=187 on "Apple M1 (G13G B1)": passed=4 total=4
+RESULT stage4 elapsed_ms=193 on "Apple M1 (G13G B1)": passed=6 total=6
+RESULT stage5 elapsed_ms=81 on "Apple M1 (G13G B1)": passed=7 total=7
+SUMMARY vulkan greedy contract on "Apple M1 (G13G B1)": 1 kernel, 1 pass gates 1-4, 0 fail; 1 control: 1 red as planted, 0 missed
+SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 9 controls: 9 caught, 0 missed; 0 limit failures; gates 46351 ms

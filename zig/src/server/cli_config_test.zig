@@ -218,7 +218,7 @@ test "serve --config: a file parses as its flags typed by hand, and the command 
     }
     // a value the flag refuses is refused in the flag's own words, with the file's line
     try f.refused("model = \"m\"\n\nport = 99999\n", 3, "argument --port: invalid port: '99999'");
-    try f.refused("backend = \"vulkan\"\n", 1, "argument --backend: invalid choice: 'vulkan'");
+    try f.refused("backend = \"metal\"\n", 1, "argument --backend: invalid choice: 'metal'");
     try f.refused("port = 1\ntemperature = \"warm\"\n", 2, "argument --temperature: invalid float value: 'warm'");
     try f.refused("alias = [\"a\"]\nallowed-host = [\"ok.example\",\n  \"bad host:1\"]\n", 2, "argument --allowed-host: expected a hostname or bracketed IP without a port: 'bad host:1'");
     try f.refused("compact-at = 1.5\n", 1, "argument --compact-at: expected auto or a fraction in (0, 1]: '1.5'");
@@ -332,22 +332,4 @@ test "serve --config: parse refuses the flag itself and capabilities lists it" {
     var out: std.Io.Writer.Allocating = .init(a);
     try cli.capabilities(&out.writer, .{ .version = "test" });
     try t.expect(std.mem.indexOf(u8, out.written(), "\"--config\": {}") != null);
-}
-
-test "serve --config: CORS list overrides and file-line limits" {
-    var f: Fixture = .{};
-    defer f.deinit();
-    const a = f.arena.allocator();
-    const merged = try f.merged("cors-origin = [\"https://file.invalid\"]\n", &.{ "m", "--cors-origin", "https://cli.invalid" });
-    const got = try cli.parse(a, merged, &f.u);
-    try t.expectEqual(@as(usize, 1), got.cors_origin.len);
-    try t.expectEqualStrings("https://cli.invalid", got.cors_origin[0]);
-    var text: std.ArrayList(u8) = .empty;
-    try text.appendSlice(a, "cors-origin = [");
-    for (0..65) |i| {
-        if (i > 0) try text.appendSlice(a, ", ");
-        try text.appendSlice(a, "\"https://ui.invalid\"");
-    }
-    try text.appendSlice(a, "]\n");
-    try f.refused(text.items, 1, "at most 64 --cors-origin entries are allowed");
 }

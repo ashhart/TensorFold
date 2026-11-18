@@ -68,7 +68,6 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
-    @import("zig/build/tokenizer_host.zig").steps(b);
     @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
     @import("zig/build/cache_replay.zig").steps(b);
@@ -103,7 +102,6 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
     server_build.webHostTests(b, test_step);
     server_build.ollamaHostTests(b, test_step);
-    server_build.launchHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
@@ -202,7 +200,6 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
-    @import("zig/build/device.zig").steps(b, test_step);
     @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
@@ -226,7 +223,10 @@ pub fn build(b: *std.Build) void {
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
     const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
     const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true
-    if (with_vulkan) vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
+    if (with_vulkan) {
+        vulkan_build.steps(b, target, optimize, test_step, vulkan_options);
+        @import("zig/build/vulkan_model.zig").steps(b, target, optimize, test_step, vulkan_options, build_options);
+    }
     exlr8_build.hostTests(b, target, test_step);
     xpu_build.steps(b, target, optimize, build_options);
     video_build.steps(b, target, test_step);

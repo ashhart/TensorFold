@@ -2,7 +2,6 @@
 const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
-const reply_code = @import("reply_code.zig");
 const reply_text = @import("reply_text.zig");
 const tool_closers = @import("tool_closers.zig");
 const tool_dsml = @import("tool_dsml.zig");
@@ -54,49 +53,55 @@ fn allSpace(s: []const u8) bool {
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
 pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
-    var kept: std.ArrayList(Envelope) = .empty;
+    var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
-    var code: reply_code.Scanner = .{};
-    var closers: tool_closers.Closers = .{ .text = text };
-    var no_tc = false;
-    var no_gemma = false;
-    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
-        if (code.check(text, s, true) == .skip) {
-            pos = code.skip_end;
+    var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
+    while (findCI(text, "<tool_call>", pos)) |s| {
+        if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
+        if (dsml) |outer| if (outer.at < s) {
+            pos = tool_dsml.blockEnd(text, outer) orelse break;
             continue;
-        }
-        const env: ?Envelope = blk: {
-            if (tool_dsml.openedBy(text[s..])) |sp| {
-                const e = tool_dsml.blockEnd(text, .{ .at = s, .spelling = sp });
-                const end = e orelse text.len;
-                break :blk .{ .start = s, .end = end, .payload = text[s..end], .complete = e != null };
-            }
-            if (!no_tc and std.ascii.startsWithIgnoreCase(text[s..], "<tool_call>")) {
-                if (findCI(text, "</tool_call>", s + 11)) |e| {
-                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) };
-                }
-                no_tc = true;
-            }
-            if (!no_gemma and std.mem.startsWith(u8, text[s..], "<|tool_call>")) {
-                if (find(text, "<tool_call|>", s + 12)) |e| {
-                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) };
-                }
-                no_gemma = true;
-            }
-            var j = s + 1;
-            if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) break :blk null;
-            j += 1;
-            while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
-            if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) break :blk null;
-            const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse break :blk null;
-            break :blk .{ .start = s, .end = e + j - s + 12, .payload = strip(text[j + 11 .. e]) };
         };
-        if (env) |item| {
-            try kept.append(a, item);
-            pos = item.end;
-            code.jumpTo(pos);
-        } else pos = s + 1;
+        const e = findCI(text, "</tool_call>", s + 11) orelse break;
+        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) });
+        pos = e + 12;
     }
+    pos = 0;
+    var closers: tool_closers.Closers = .{ .text = text };
+    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
+        pos = s + 1;
+        var j = s + 1;
+        if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) continue;
+        j += 1;
+        while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
+        if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) continue;
+        const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse continue;
+        const end = e + j - s + 12; // ``</NAME:tool_call>``
+        try found.append(a, .{ .start = s, .end = end, .payload = strip(text[j + 11 .. e]) });
+        pos = end;
+    }
+    pos = 0;
+    while (find(text, "<|tool_call>", pos)) |s| {
+        const e = find(text, "<tool_call|>", s + 12) orelse break;
+        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) });
+        pos = e + 12;
+    }
+    pos = 0;
+    while (tool_dsml.findOpen(text, pos)) |o| {
+        const e = tool_dsml.blockEnd(text, o);
+        const end = e orelse text.len;
+        try found.append(a, .{ .start = o.at, .end = end, .payload = text[o.at..end], .complete = e != null });
+        pos = end;
+    }
+    std.mem.sort(Envelope, found.items, {}, struct {
+        fn less(_: void, x: Envelope, y: Envelope) bool {
+            if (x.start != y.start) return x.start < y.start;
+            if (x.end != y.end) return x.end < y.end;
+            return std.mem.order(u8, x.payload, y.payload) == .lt;
+        }
+    }.less);
+    var kept: std.ArrayList(Envelope) = .empty;
+    for (found.items) |env| if (kept.items.len == 0 or env.start >= kept.items[kept.items.len - 1].end) try kept.append(a, env);
     return kept.items;
 }
 
@@ -200,25 +205,14 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
 /// Where the reply's open call starts: the opener ``envelopes`` leaves without a closer, so one appended pairs with it.
 pub fn openCall(text: []const u8) ?usize {
     var pos: usize = 0;
-    var code: reply_code.Scanner = .{};
     var dsml = tool_dsml.findOpen(text, 0); // as in ``envelopes``
     return while (findCI(text, "<tool_call>", pos)) |s| {
         if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
         if (dsml) |outer| if (outer.at < s) {
-            if (code.check(text, outer.at, true) == .skip) {
-                pos = code.skip_end;
-                continue;
-            }
             pos = tool_dsml.blockEnd(text, outer) orelse return null;
-            code.jumpTo(pos);
             continue;
         };
-        if (code.check(text, s, true) == .skip) {
-            pos = code.skip_end;
-            continue;
-        }
         pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
-        code.jumpTo(pos);
     } else null;
 }
 

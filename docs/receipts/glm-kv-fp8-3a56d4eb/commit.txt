@@ -1,7 +1,0 @@
-tested commit: 3a56d4eb922467685ca73f7487bb5cacd35b63a3
-tree: 9cdfd2c7c31deeef58a8a4475fd06a35ae12159f
-later main, not rebuilt: 964174ea05879e6dde1de1198a3aae3ef8b46a3b (3a56d4eb92..: CHANGELOG.md zig/kernels/metal/deepseek_v41/fp8_mma.metal zig/src/core/contract/dsv41_fp8_mma_records.zig )
-build (git archive of the commit, empty .zig-cache): zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 && zig build native -Dnvcc=/usr/local/cuda/bin/nvcc -Dtp-nvcc=/usr/local/cuda/bin/nvcc
-Zig 0.17.0; nvcc release 13.5, V13.5.37; driver 580.178.04 (CUDA 13.0); NCCL 2.30.7
-tensorfold-native sha256 (the same file on both ranks): 6f3b114dc675e868d365277c8946a6f32defac11a8f0a987e63f11e3e8408325
-checkpoint: nvidia/GLM-5.3-Flash-FP4-Local at 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5

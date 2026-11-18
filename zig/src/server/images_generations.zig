@@ -1,4 +1,4 @@
-//! POST /v1/images/generations: up to four serial pictures, returned only after their finished events.
+//! POST /v1/images/generations: one picture as base64 PNG, written only after the engine's finished event.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -28,7 +28,6 @@ const max_steps: u32 = 200;
 const default_side: u16 = 1024;
 const default_steps: u32 = 50;
 const default_guidance: f32 = 3;
-/// The seed of a request that names none, as on main: picture i uses it plus i, so `n: 1` is unchanged.
 const default_seed: u64 = 42;
 
 /// The body fields this route answers; `quality` and every other key are refused by name.
@@ -42,8 +41,7 @@ const Plan = struct {
     height: u16,
     steps: u32,
     guidance: f32,
-    seeds: [4]u64,
-    count: u8,
+    seed: u64,
 };
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
@@ -57,16 +55,11 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const received = clock.nowNs(srv.io);
     var png: std.ArrayList(u8) = .empty;
     defer png.deinit(srv.gpa);
+    var result: api.ImageResult = .{};
     const raw = http_body.readJson(c, &cx) catch |e| return refused(c, a, &cx, id, e);
     const plan = prepare(srv, &cx, cap, raw) catch |e| return refused(c, a, &cx, id, e);
-    const data = a.alloc(Value, plan.count) catch |e| return refused(c, a, &cx, id, e);
-    for (data, 0..) |*item, index| {
-        png.clearRetainingCapacity();
-        var result: api.ImageResult = .{};
-        generate(srv, c, &cx, plan, plan.seeds[index], &result, &png) catch |e| return refused(c, a, &cx, id, e);
-        item.* = picture(a, plan.seeds[index], &result, png.items) catch |e| return refused(c, a, &cx, id, e);
-    }
-    reply(srv, c, &cx, received, &plan, data) catch |e| return refused(c, a, &cx, id, e);
+    generate(srv, c, &cx, plan, &result, &png) catch |e| return refused(c, a, &cx, id, e);
+    reply(srv, c, &cx, received, &plan, &result, png.items) catch |e| return refused(c, a, &cx, id, e);
 }
 
 fn listed(names: []const []const u8, key: []const u8) bool {
@@ -118,8 +111,10 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
         return cx.fail(.request, "model {s} is not served here: send {s}", .{ try pyrepr.repr(cx.a, .{ .string = model }), srv.config.served_name });
-    const count = if (raw.get("n")) |v| v.int64() orelse return cx.refuse("n must be from 1 to 4") else 1;
-    if (count < 1 or count > 4) return cx.refuse("n must be from 1 to 4");
+    if (raw.get("n")) |v| {
+        const count = v.int64() orelse return cx.refuse("n must be 1: this model serves one picture a request");
+        if (count != 1) return cx.refuse("n must be 1: this model serves one picture a request");
+    }
     var width: u16 = default_side;
     var height: u16 = default_side;
     const most = @min(max_side, cap.max_side);
@@ -143,13 +138,11 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
         else => return cx.fail(.request, "negative_prompt must be a string", .{}),
     } else "";
     if (!std.unicode.utf8ValidateSlice(negative)) return cx.refuse("negative_prompt must be valid UTF-8 text");
-    var seed: ?u64 = null;
+    var seed: u64 = default_seed;
     if (raw.get("seed")) |v| {
-        const message = "seed must be an integer from 0 through 18446744073709551615";
-        if (v != .int) return cx.refuse(message);
-        seed = std.fmt.parseInt(u64, v.int, 10) catch return cx.refuse(message);
-        if (seed.? > std.math.maxInt(u64) - @as(u64, @intCast(count - 1)))
-            return cx.refuse("seed plus n - 1 must fit in an unsigned 64-bit integer");
+        const given = v.int64() orelse return cx.refuse("seed must be an integer");
+        if (given < 0) return cx.refuse("seed must be a non-negative integer");
+        seed = @intCast(given);
     }
     var steps: u32 = default_steps;
     if (raw.get("steps")) |v| {
@@ -178,16 +171,11 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     const negative_ids = if (excluded.len == 0) &[_]u32{} else try encode(cx, srv, excluded);
     if (negative_ids.len > cap.max_prompt_tokens)
         return cx.fail(.request, "a prompt of {d} tokens exceeds the maximum allowed length of {d} tokens", .{ negative_ids.len, cap.max_prompt_tokens });
-    var seeds: [4]u64 = @splat(0);
-    for (seeds[0..@intCast(count)], 0..) |*value, index| {
-        value.* = (seed orelse default_seed) + @as(u64, @intCast(index));
-    }
-    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count) };
+    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seed = seed };
 }
 
 /// Submits once and waits for ``finished``; nothing has been written to the connection when it returns.
-fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
-    if (c.peerGone()) return cx.fail(.capacity, "the client left before the picture was ready", .{});
+fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
     const request: api.ImageRequest = .{
         .prompt = plan.prompt,
         .negative = plan.negative,
@@ -195,7 +183,7 @@ fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api
         .height = plan.height,
         .steps = plan.steps,
         .guidance = plan.guidance,
-        .seed = seed,
+        .seed = plan.seed,
         .result = result,
         .png = png,
         .alloc = srv.gpa,
@@ -206,7 +194,7 @@ fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api
     if (srv.keepalive) |k| k.begin();
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submitImage(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
-        error.Busy => @import("refusals.zig").count(srv, .engine_busy, cx.fail(.capacity, "the engine is busy; retry shortly", .{})),
+        error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.capacity, "the scheduler is closed", .{}),
         error.InvalidRequest => cx.fail(.request, "the engine refused this image request's prompt, size or steps", .{}),
         error.Unsupported => cx.fail(.capacity, "this model does not serve images", .{}),
@@ -225,25 +213,21 @@ fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api
     if (result.reason == .cancelled) return cx.fail(.capacity, "the image generation was cancelled", .{});
 }
 
-/// One finished picture copied into the response arena before the next picture reuses its PNG buffer.
-fn picture(a: Allocator, seed: u64, result: *const api.ImageResult, png: []const u8) !Value {
+/// The images reply: `created`, and the one picture as base64 PNG from the request's own arena.
+fn reply(srv: *Server, c: *Conn, cx: *Cx, received: i96, plan: *const Plan, result: *const api.ImageResult, png: []const u8) !void {
+    const a = cx.a;
     const kept = png[0..@min(result.bytes, png.len)];
     const b64 = try a.alloc(u8, std.base64.standard.Encoder.calcSize(kept.len));
     const encoded = std.base64.standard.Encoder.encode(b64, kept);
     const item = try json.newObject(a);
     try item.put(a, "b64_json", .{ .string = encoded });
-    try item.put(a, "seed", try json.intValue(a, seed));
-    return .{ .object = item };
-}
-
-/// All requested pictures in index order; a failed sequence has never written a partial success reply.
-fn reply(srv: *Server, c: *Conn, cx: *Cx, received: i96, plan: *const Plan, data: []Value) !void {
-    const a = cx.a;
+    const data = try a.alloc(Value, 1);
+    data[0] = .{ .object = item };
     const out = try json.newObject(a);
     try out.put(a, "created", try json.intValue(a, std.Io.Clock.real.now(srv.io).toSeconds()));
     try out.put(a, "data", .{ .array = data });
     routes.sendValue(c, a, 200, .{ .object = out });
-    log.line("images prompt={d} negative={d} count={d} seconds={d:.2}", .{ plan.prompt.len, plan.negative.len, plan.count, clock.seconds(clock.nowNs(srv.io) - received) });
+    log.line("images prompt={d} negative={d} png={d} finish={s} seconds={d:.2}", .{ plan.prompt.len, plan.negative.len, kept.len, @tagName(result.reason), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
 /// The API's error shape at the refusal's status, logged first; a capacity refusal also carries Retry-After.

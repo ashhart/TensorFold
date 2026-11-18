@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "개요 항목을 열었습니다.",
   "Quoted message opened.": "인용한 메시지를 열었습니다.",
-  "Search match opened.": "검색 결과를 열었습니다.",
-  "Conversation unavailable": "대화를 사용할 수 없습니다",
-  "This conversation was archived or deleted, or it has not loaded yet.": "이 대화는 보관되거나 삭제되었거나, 아직 로드되지 않았습니다.",
-  "Back to Home": "홈으로 돌아가기"
+  "Search match opened.": "검색 결과를 열었습니다."
 }

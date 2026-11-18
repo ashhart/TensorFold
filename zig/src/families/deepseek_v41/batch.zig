@@ -225,11 +225,7 @@ pub const Batch = struct {
         pt.mark(.send);
         // every slot's pages for its positions, the changed table rows up before the launches
         const k = f.kv.?;
-        var needs: [16]@import("pool_growth.zig").Need = undefined;
-        for (mix, needs[0..mix.len]) |m, *need| {
-            need.* = .{ .slot = k.slots[m.slot], .end = m.start + m.rows };
-        }
-        try @import("forward_prefill.zig").reservePages(f, needs[0..mix.len]);
+        for (mix) |m| try k.slots[m.slot].ensure(m.start + m.rows);
         try k.dev.syncTables();
         pt.mark(.tables);
         const s = b.settings;

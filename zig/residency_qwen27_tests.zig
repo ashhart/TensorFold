@@ -217,7 +217,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 model.ane = &share;
                 h.draft = &draft;
                 draft_model.graph.config = draftGeometry();
-                draft_model.backend.target = @import("src/families/qwen27/dflash/runtime_backend.zig").Target.qwen(&model);
+                draft_model.backend.target = &model;
                 draft_model.checkpoint.shards = .empty;
                 try draft_model.checkpoint.shards.append(a, .{ .buffer = try owned.take(), .bytes = 64 });
                 draft_model.pending = try device.buffer(@as(usize, draftGeometry().window) * draftGeometry().tapWidth() * 2, 0);
@@ -333,7 +333,7 @@ test "residency owner Qwen27: parked context constructor unwinds each failed buf
             var target: model_mod.Model = undefined;
             target.device = record.device();
             var draft: runtime.Model = undefined;
-            draft.backend.target = @import("src/families/qwen27/dflash/runtime_backend.zig").Target.qwen(&target);
+            draft.backend.target = &target;
             draft.backend.residency = owner.follow();
             draft.graph.config = draftGeometry();
             if (point < 3) {

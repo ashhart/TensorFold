@@ -30,8 +30,6 @@ pub const Ctx = struct {
     steps: u64 = 0,
     /// The stack where the render began; frames differ too much in size for a count of levels to bound it.
     base: usize = 0,
-    /// Where each request message's own output began (template.zig `renderMarked`); null: not recorded.
-    marks: ?*Marks = null,
 
     /// One more statement list or loop-filter test: a step of the render, taken only while the stack has room.
     fn enter(c: *Ctx) Error!void {
@@ -48,8 +46,6 @@ pub const Ctx = struct {
     }
 };
 
-pub const Marks = @import("marks.zig").Marks;
-
 const acc_min = 4096;
 
 fn accumulator(s: v.Str) ?*v.Buffer {
@@ -61,12 +57,6 @@ fn accumulator(s: v.Str) ?*v.Buffer {
 }
 
 fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
-    const s = try joinText(c, l, r);
-    if (c.marks) |m| try m.joined(l, r, s);
-    return s;
-}
-
-fn joinText(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
     const owned = accumulator(l);
     if (l.s.len < acc_min and owned == null) {
@@ -141,18 +131,14 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
     for (body) |st| switch (st) {
         .output => |pieces| for (pieces) |pc| switch (pc) {
             .text => |t| try c.out.literal(c.rt.a, t),
-            .expr => |e| try emit(c, try v.asStr(&c.rt, try eval(c, act, e))),
+            .expr => |e| try c.out.append(c.rt.a, try v.asStr(&c.rt, try eval(c, act, e))),
         },
         .for_ => |f| try execFor(c, act, f),
         .if_ => |n| {
             const flow = try execIf(c, act, n);
             if (flow != .normal) return flow;
         },
-        .assign => |as| {
-            const x = try eval(c, act, as.value);
-            if (c.marks) |m| m.bind(c.out, x);
-            try assign(c, act, as.target, x);
-        },
+        .assign => |as| try assign(c, act, as.target, try eval(c, act, as.value)),
         .block_set => |b| {
             const inner = try enter(c, act, b.frame);
             var text = Value{ .str = try capture(c, inner, b.body) };
@@ -164,17 +150,11 @@ fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
             mv.* = .{ .node = m, .closure = act, .name = m.name.id };
             (try slotOf(c, act, m.name.frame, m.name.slot)).* = .{ .macro = mv };
         },
-        .scoped => |sc| try emit(c, try capture(c, try enter(c, act, sc.frame), sc.body)),
+        .scoped => |sc| try c.out.append(c.rt.a, try capture(c, try enter(c, act, sc.frame), sc.body)),
         .break_ => return .brk,
         .continue_ => return .cont,
     };
     return .normal;
-}
-
-fn emit(c: *Ctx, s: v.Str) Error!void {
-    const base = c.out.text.items.len;
-    try c.out.append(c.rt.a, s);
-    if (c.marks) |m| try m.carry(c.out, s, base);
 }
 
 fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!v.Str {
@@ -183,7 +163,6 @@ fn capture(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!v.Str {
     c.out = &buf;
     defer c.out = saved;
     _ = try exec(c, act, body);
-    if (c.marks) |m| try m.close(&buf, buf.str());
     return buf.str();
 }
 
@@ -213,12 +192,7 @@ fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
         const body = try enter(c, act, f.body_frame);
         if (f.uses_loop) body.slots[f.loop_name.slot] = .{ .loop = loop };
         try assign(c, body, f.target, item);
-        const at = c.out.text.items.len;
-        var saved: Marks.Saved = undefined;
-        if (c.marks) |m| saved = m.begin(c.out);
-        const flow = try exec(c, body, f.body);
-        if (c.marks) |m| try m.end(saved, c.out, at, item);
-        switch (flow) {
+        switch (try exec(c, body, f.body)) {
             .brk => break,
             .cont => continue,
             .normal => completed = true,
@@ -266,10 +240,6 @@ pub fn call(c: *Ctx, callee: Value, pos: []const Value, kw: []const Kw) Error!Va
 
 /// Jinja2's Macro.__call__: positions first, keywords only for the rest, then defaults in the macro's frame.
 fn callMacro(c: *Ctx, m: *const v.Macro, pos: []const Value, kw: []const Kw) Error!Value {
-    if (c.marks) |mk| {
-        for (pos) |x| mk.bind(c.out, x);
-        for (kw) |k| mk.bind(c.out, k.value); // keyword arguments bind as positional ones do
-    }
     const node: *const ast.Macro = @ptrCast(@alignCast(m.node));
     const params = node.params;
     if (pos.len > params.len) return c.rt.fail("macro '{s}' takes not more than {d} argument(s)", .{ m.name, params.len });

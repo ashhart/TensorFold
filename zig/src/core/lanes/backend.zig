@@ -117,7 +117,7 @@ pub const Backend = struct {
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).
         unspeculate: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
-        /// Each held draft's chance, or false; also marks s.draft_chances_cut at the first unmeasured chance.
+        /// Each held draft's chance of landing, for heads that give them; false when it has none.
         probabilities: ?*const fn (ptr: *anyopaque, s: *Stream, out: []f64) anyerror!bool = null,
         /// A tree head's held drafts as host tokens and parents (gpa-owned), read where Python reads them.
         tree: ?*const fn (ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?Held = null,

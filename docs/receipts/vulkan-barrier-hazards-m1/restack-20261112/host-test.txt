@@ -1,0 +1,117 @@
+zig build vulkan-host-test -Dvulkan=true -Dtarget=aarch64-linux-gnu --summary all at 240216fe, exit 0
+
+vulkan-host-test
++- run test w
+HOST gate old-reference drift seed=0x57ac max_ratio=9.935229379695693e-1 (not a GPU diagnosis)
+HOST gate g census (exact seed): min_positive_g=2.7173428e-2 subnormal_or_zero_g=0/16
+HOST decode first-element replay seed=0x57a8 skipped-raw=8.92e2 corrected=-2.5375e1 want=-2.5331368373663025e1 bound=9.896255501441861e-2
+failed command: ./.zig-cache/o/b4aec43e209dc57d6d921c4ce3ecea1d/test --cache-dir=./.zig-cache --seed=0x5538b8ed --listen=-
+
+vulkan-host-test
++- run test w
+Vulkan weights admission: Spec.hidden: expected 2048, found 2049
+Vulkan weights admission: Spec.vocab: expected 248320, found 248321
+Vulkan weights admission: Spec.n_layers: expected 24, found 25
+Vulkan weights admission: Spec.intermediate: expected 6144, found 6145
+Vulkan weights admission: Spec.heads: expected 8, found 9
+Vulkan weights admission: Spec.kv_heads: expected 2, found 3
+Vulkan weights admission: Spec.head_dim: expected 256, found 257
+Vulkan weights admission: Spec.key_heads: expected 16, found 17
+Vulkan weights admission: Spec.value_heads: expected 16, found 17
+Vulkan weights admission: Spec.key_dim: expected 128, found 129
+Vulkan weights admission: Spec.value_dim: expected 128, found 129
+Vulkan weights admission: Spec.conv: expected 4, found 5
+Vulkan weights admission: Spec.rotary_dim: expected 64, found 65
+Vulkan weights admission: Spec.bits: expected 4, found 5
+Vulkan weights admission: Spec.group: expected 64, found 65
+Vulkan weights admission: Spec.experts: expected 0, found 1
+failed command: ./.zig-cache/o/f97af39d930da3fcb5d576bf9ee659e2/test --cache-dir=./.zig-cache --seed=0x5538b8ed --listen=-
+
+Build Summary: 86/86 steps succeeded; 180/182 tests passed (2 skipped)
+vulkan-host-test success
++- run test 81 pass (81 total) 11ms MaxRSS:10M
+|  +- compile test debug native success 3s MaxRSS:421M
+|     +- translate-c cached 26ms MaxRSS:28M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test cached
+|  +- compile test debug native cached 19ms MaxRSS:30M
++- run test cached
+|  +- compile test debug native cached 40ms MaxRSS:29M
++- run test cached
+|  +- compile test debug native cached 22ms MaxRSS:29M
++- run test cached
+|  +- compile test debug native cached 17ms MaxRSS:30M
+|     +- translate-c cached 18ms MaxRSS:29M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test 11 pass (11 total) 79ms MaxRSS:10M
+|  +- compile test debug native success 3s MaxRSS:349M
++- run test 9 pass (9 total) 338ms MaxRSS:21M
+|  +- compile test debug native success 3s MaxRSS:340M
+|     +- translate-c cached 26ms MaxRSS:28M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test cached
+|  +- compile test debug native cached 29ms MaxRSS:30M
++- run test success 7ms MaxRSS:10M
+|  +- compile test debug native success 2s MaxRSS:324M
+|     +- WriteFile stage1_shaders.zig cached
+|     |  +- run glslang (qmm_bf16.spv) cached
+|     |  +- run glslang (qmm_q4_vec4.spv) cached
+|     |  +- run glslang (qmm_q4_tile.spv) cached
+|     |  +- run glslang (qmm_q4_tile_rows.spv) cached
+|     |  +- run glslang (qmm_q4_tile_f32.spv) cached
+|     |  +- run glslang (dequant_bf16.spv) cached
+|     |  +- run glslang (gather_u32.spv) cached
+|     |  +- run glslang (gather_u16.spv) cached
+|     |  +- run glslang (cast_bf16_f32.spv) cached
+|     |  +- run glslang (cast_f32_bf16.spv) cached
+|     |  +- run glslang (copy_u32.spv) cached
+|     |  +- run glslang (copy_u16.spv) cached
+|     |  +- run glslang (copy_f32_bf16.spv) cached
+|     |  +- run glslang (qmm_f32.spv) cached
+|     +- translate-c cached 19ms MaxRSS:28M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test 17 pass (17 total) 69ms MaxRSS:10M
+|  +- compile test debug native success 3s MaxRSS:347M
+|     +- WriteFile sdpa_decode_native.comp cached
++- run test 9 pass (9 total) 57ms MaxRSS:10M
+|  +- compile test debug native success 2s MaxRSS:351M
+|     +- translate-c cached 27ms MaxRSS:27M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test 4 pass (4 total) 12ms MaxRSS:10M
+|  +- compile test debug native success 2s MaxRSS:350M
+|     +- translate-c cached 27ms MaxRSS:28M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test cached
+|  +- compile test debug native cached 14ms MaxRSS:30M
+|     +- translate-c cached 17ms MaxRSS:29M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test cached
+|  +- compile test debug native cached 20ms MaxRSS:29M
+|     +- WriteFile norm_bf16.spv cached
+|     |  +- run glslang (norm_bf16.spv) cached
+|     |  +- run glslang (add_bf16.spv) cached
+|     |  +- run glslang (add_preserve_bf16.spv) cached
+|     |  +- run glslang (swiglu_bf16.spv) cached
+|     |  +- run glslang (norm_f32.spv) cached
+|     |  +- run glslang (norm_f32_in.spv) cached
+|     |  +- run glslang (norm_bf16_in.spv) cached
+|     |  +- run glslang (add_f32.spv) cached
+|     |  +- run glslang (add_wide_bf16.spv) cached
+|     |  +- run glslang (add_bf16_f32.spv) cached
+|     |  +- run glslang (swiglu_f32.spv) cached
+|     +- translate-c cached 24ms MaxRSS:28M
+|     |  +- WriteFile vulkan_c.h cached
+|     +- WriteFile gated_delta_decode.comp cached
++- run test 49 pass, 2 skip (51 total) 205ms MaxRSS:10M
+   +- compile test debug native success 5s MaxRSS:500M
+      +- translate-c cached 16ms MaxRSS:28M
+      |  +- WriteFile vulkan_c.h cached
+      +- WriteFile gated_delta_decode.comp cached
+

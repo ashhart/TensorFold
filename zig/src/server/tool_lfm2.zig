@@ -21,19 +21,7 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
     var pos: usize = 0;
     var end = text.len;
     var rewrote = false;
-    var code: @import("reply_code.zig").Scanner = .{};
     while (true) {
-        switch (code.check(text, at, finished)) {
-            .skip => |to| {
-                at = reply_text.findTag(text, to, open) orelse break;
-                continue;
-            },
-            .pending => {
-                end = at;
-                break;
-            },
-            .outside => {},
-        }
         const e = reply_text.findTag(text, at + open.len, close) orelse {
             if (!finished) { // the stream's parser resumes where it stopped: it must meet the calls so far as DSML
                 end = at;
@@ -54,7 +42,6 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
             pos = e + close.len;
             rewrote = true;
         }
-        code.jumpTo(e + close.len);
         at = reply_text.findTag(text, e + close.len, open) orelse break;
     }
     if (!rewrote) return text[0..end];

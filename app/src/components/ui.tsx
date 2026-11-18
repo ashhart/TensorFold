@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../lib/icons'
@@ -61,23 +61,14 @@ export function Menu({
   align = 'start',
   width = 240,
   placement = 'auto',
-  open: controlledOpen,
-  onOpenChange,
 }: {
   trigger: (open: boolean) => React.ReactNode
   children: (close: () => void) => React.ReactNode
   align?: 'start' | 'end'
   width?: number
   placement?: 'auto' | 'bottom' | 'top'
-  open?: boolean
-  onOpenChange?: (open: boolean) => void
 }) {
-  const [internalOpen, setInternalOpen] = useState(false)
-  const open = controlledOpen ?? internalOpen
-  const setOpen = useCallback((value: boolean) => {
-    setInternalOpen(value)
-    onOpenChange?.(value)
-  }, [onOpenChange])
+  const [open, setOpen] = useState(false)
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -98,7 +89,7 @@ export function Menu({
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onEsc)
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onEsc) }
-  }, [open, setOpen])
+  }, [open])
   // Position the menu in a portal with fixed (viewport) coordinates derived from the
   // trigger rect, so it is never clipped or scroll-trapped by an ancestor's overflow
   // (e.g. the sidebar's scrolling project list) — the cause of menus colliding with the
@@ -141,7 +132,7 @@ export function Menu({
   }, [open, placement, width, align])
   return (
     <div ref={ref} className="relative no-drag">
-      <div onClick={() => setOpen(!open)}>{trigger(open)}</div>
+      <div onClick={() => setOpen((o) => !o)}>{trigger(open)}</div>
       {open && createPortal(
         <div
           ref={menuRef}

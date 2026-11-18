@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Server unit tests (module with engine seam, tokenizer, template), then engine seam's own. ZIG overrides the compiler.
+# The server's unit tests (its module with the engine seam, tokenizer and template), then the engine seam's own. ZIG overrides the compiler.
 set -euo pipefail
 zig="${ZIG:-zig}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"

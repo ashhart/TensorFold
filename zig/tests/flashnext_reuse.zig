@@ -180,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     if (failures > 0) std.process.exit(1);
 }
 
-/// State at the turn's history, byte for byte: fresh pass ending there, fresh pass running past it, resumed pass.
+/// The state at the turn's history three ways, byte for byte: a fresh pass whose call ends there, a fresh pass whose call runs past it, a resumed one.
 fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failures: *usize) !void {
     const entry = store.find(turn.prompt[0..turn.history], &.{}, &.{}) orelse return; // nothing to resume before the history
     var states: [3]?*snap.State = .{ null, null, null };

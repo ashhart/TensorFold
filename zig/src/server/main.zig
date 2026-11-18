@@ -5,7 +5,6 @@ const cli = @import("cli.zig");
 const cli_config = @import("cli_config.zig");
 const log = @import("log.zig");
 const hub = @import("hub.zig");
-const drafter = @import("drafter.zig");
 const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
@@ -18,11 +17,9 @@ const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
-const launch_cli = @import("launch_cli.zig");
-const device_cli = @import("device_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
-    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
@@ -65,22 +62,13 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(io, "tensorfold-native " ++ @import("build_options").version ++ "\n");
         return 0;
     }
-    // help and a bare run lead with what this machine runs: the saved profile, or a quick scan with no driver
-    if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h") or std.mem.eql(u8, argv[1], "help"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, device_cli.summary(init));
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+    if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
     }
-    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "device")) return device_cli.main(init, argv[2..]);
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "web")) {
         const options = @import("build_options");
         return web_cli.main(init, argv[2..], .{ .version = options.version, .is_release = options.is_release });
-    }
-    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "launch")) {
-        var launch_out: [1024]u8 = undefined;
-        var launch_writer = std.Io.File.stdout().writerStreaming(io, &launch_out);
-        defer launch_writer.interface.flush() catch {};
-        return launch_cli.command(&.{ .a = a, .io = io, .environ = init.environ_map, .out = &launch_writer.interface }, argv[2..]);
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
         for (argv[2..]) |arg| if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -110,7 +98,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else return benchmark.main(init, argv[2..], engines.capabilities(a));
     }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
+        std.debug.print("usage: tensorfold-native capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -146,18 +134,14 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
-    const backend = if (std.mem.eql(u8, args.backend, "auto")) @import("benchmark_server.zig").buildBackend() else args.backend;
-    const draft = try drafter.select(a, io, init.environ_map, dir, args.drafter, args.no_drafts, backend, &problem) orelse return fail(problem);
-    args.drafter = draft.dir;
-    args.drafter_name = draft.name;
-    if (draft.automatic) log.line("drafter {s}, found in the local cache (--drafter none serves without it)", .{draft.name.?});
+    // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
+    args.drafter_name = args.drafter;
+    if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
     const model_type = modelType(a, io, dir, &problem) catch |e| {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
     };
     if (args.silence.refusal(model_type) orelse args.redraw.refusal(model_type)) |why| return fail(why);
-    // a current device profile's certain facts refuse a model this machine cannot run at all; otherwise nothing changes
-    if (device_cli.serveRefusal(a, io, init.environ_map, model_type)) |why| return fail(why);
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
     const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
@@ -179,7 +163,7 @@ pub fn main(init: std.process.Init) !u8 {
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
-    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, openEngine, .{ a, gpa, io, dir, model_type, &args, draft.automatic, &problem }) catch |e| {
+    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
         if (problem.len > 0) return fail(problem); // an engine that failed after saying why
         return e;
@@ -216,11 +200,6 @@ pub fn main(init: std.process.Init) !u8 {
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
         .tool_id_key = if (tool_ids) |*key| key else null,
     });
-}
-
-/// engines.open; a drafter serve paired by itself that does not open leaves the target serving alone.
-fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: *cli.Args, automatic: bool, problem: *[]const u8) !?api.Opened {
-    return drafter.openOrPlain(engines.open, .{ a, gpa, io, dir, model_type }, args, automatic, problem);
 }
 
 /// The reopen path the idle unload takes: the same open calls `main` made at startup.

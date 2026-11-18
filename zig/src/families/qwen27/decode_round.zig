@@ -126,7 +126,6 @@ pub const Runner = struct {
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library);
         errdefer attention.deinit();
-        attention.join = try @import("attention_join.zig").build(a, m.device, units, geometry.group(), geometry.kv_heads, paged);
         pipelines.end();
         const allocation_timing = @import("core").startup_receipt.span(.runtime_allocation);
         defer allocation_timing.end();
@@ -492,9 +491,7 @@ pub const Runner = struct {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
-        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
-        if (r.attention.join != null) plan.pair(&.{}); // a stream's rows in pairs over the keys below its window
-        return plan;
+        return attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
     }
 
     fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {

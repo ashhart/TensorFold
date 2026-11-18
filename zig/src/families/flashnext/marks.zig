@@ -1,4 +1,4 @@
-//! A prompt pass's marks: those a call runs past, the cache keeps there, and their crossing between the two Macs.
+//! A prompt pass's marks: those a call runs past, the cache's keeps there (the last call's after the first token), and their crossing between the two Macs.
 const std = @import("std");
 const fz = @import("replay.zig");
 const tpm = @import("tp.zig");
@@ -10,7 +10,7 @@ const Passed = Engine.Passed;
 /// Marks a prompt call can take its DeltaNet states at without ending there.
 pub const MARKS = 4;
 
-/// Each DeltaNet layer's conv windows and states at up to MARKS call rows ([linear][mark]) and each mark's n-gram tail.
+/// Each DeltaNet layer's conv windows and states at up to MARKS rows of one prompt call ([linear layer][mark]), and each mark's n-gram tail.
 pub const Slots = struct {
     cs: fz.Buf,
     so: fz.Buf,
@@ -37,7 +37,7 @@ pub fn linearIndex(m: *const fz.Model, i: usize) usize {
     return li;
 }
 
-/// The segment and prompt-buffer row a mark `at` rows into a call of `n` rows falls in (its last row before the mark).
+/// The segment and its prompt buffers' row that a mark `at` rows into a call of `n` rows falls in (its last row before the mark).
 pub fn markSeg(ps: []const *fz.Prompt, n: usize, at: usize) struct { p: *fz.Prompt, row: usize } {
     var k: usize = 0;
     while (k + 1 < ps.len and at > segments.start(n, ps.len, k + 1)) k += 1;
@@ -59,7 +59,7 @@ pub const Driver = struct {
         return (if (d.next < d.marks.len) d.marks[d.next] else len) - at;
     }
 
-    /// Marks inside a call of `rows` rows from `at`, as call rows (up to MARKS); `cut` ends at the next call.
+    /// The marks inside a call of `rows` rows from `at`, as rows of the call (up to MARKS); `cut` ends the call at the next one.
     pub fn inside(d: *const Driver, at: usize, rows: usize, out: *[MARKS]u32) Inside {
         var n: usize = 0;
         while (d.next + n < d.marks.len and d.marks[d.next + n] < at + rows) : (n += 1) {
@@ -69,7 +69,7 @@ pub const Driver = struct {
         return .{ .n = n };
     }
 
-    /// A mark the call ran past: kept now, or after first token when the call ends the prompt (sources stay put).
+    /// A mark the call ran past: kept now, or after the first token when the call ends the prompt (its sources stay put till then).
     pub fn passed(d: *Driver, e: *Engine, out: engine.Out, p: Passed, last_call: bool) void {
         if (!last_call) return keep(e, p, out);
         d.late[d.n_late] = p;
@@ -100,7 +100,7 @@ pub const Driver = struct {
     }
 };
 
-/// N-gram history at row `row` of a call from `at`: `hist0` (two tokens before call) moved on by the call's tokens.
+/// The n-gram history at row `row` of a call from `at`: `hist0` (the two tokens before the call) moved on by the call's tokens.
 pub fn histAt(hist0: [2]i64, prompt: []const u32, at: usize, row: usize) [2]i64 {
     var hist = hist0;
     for (prompt[at + row - @min(row, 2) .. at + row]) |tok| hist = .{ hist[1], tok };
@@ -118,7 +118,7 @@ fn bytesOf(b: fz.Buf) [*]const u8 {
     return b.b.contents() + b.off;
 }
 
-/// Each mark of a pair call (`rows`; rank 0 has `rows0`, this Mac starts `start`): state/tail moved to other's slot.
+/// Each mark of a pair call (`rows` of it; rank 0 holds `rows0`, this Mac starts at `start`): its states and tail from the Mac holding it into the other's slot.
 pub fn crossMarks(p: *fz.Prompt, m: *fz.Model, tp: *fz.Tp2, gpa: std.mem.Allocator, rows: []const u32, rows0: usize, start: usize) !void {
     const mk = m.marks orelse return;
     const tail_bytes = fz.PLE_TAIL * fz.WIDE * 2;

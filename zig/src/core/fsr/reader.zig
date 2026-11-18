@@ -36,11 +36,6 @@ pub fn expert(reader: anytype, spans: []const Span, destinations: []const []u8) 
 
 /// One bounded batch validates every file before reading, then checks all lengths again before publication.
 pub fn batch(source: anytype, jobs: anytype, experts: anytype, strides: [9]usize, slabs: [9][]u8, sizes: []u64, stats: *Stats) !void {
-    return batchOf(9, source, jobs, experts, strides, slabs, sizes, stats);
-}
-
-pub fn batchOf(comptime components: usize, source: anytype, jobs: anytype, experts: []const [components]Span, strides: [components]usize, slabs: [components][]u8, sizes: []u64, stats: *Stats) !void {
-    if (components == 0) @compileError("an expert needs at least one stored component");
     if (jobs.len == 0) return;
     @memset(sizes, unchecked);
     for (jobs) |job| for (experts[job.ticket.key]) |span| {
@@ -54,7 +49,7 @@ pub fn batchOf(comptime components: usize, source: anytype, jobs: anytype, exper
     };
     var requests: [width]Request = undefined;
     var count: usize = 0;
-    for (0..components) |part| {
+    for (0..9) |part| {
         var current: ?Request = null;
         for (jobs) |job| {
             const span = experts[job.ticket.key][part];

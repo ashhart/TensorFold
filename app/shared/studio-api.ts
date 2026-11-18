@@ -34,7 +34,6 @@ import type { UserQuestion, UserQuestionAnswer } from '../electron/agent/types'
 import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } from './bot-recipe'
 import type { ComposerDraftScope, ComposerDraftSnapshot, ComposerDraftWrite, ComposerDraftWriteResult } from './composer-drafts'
 import type { ThreadMessageEditInput, ThreadMessageEditPreparation } from './thread-message-edit'
-import type { ModelReadinessRequest } from './model-readiness'
 import type { AttachmentTextCapability, AttachmentTextRequest, AttachmentTextResult } from '../electron/agent/types'
 
 export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryApi, MessageQuoteApi, GoogleWorkspaceApi, ModelBenchmarkApi, ConversationSearchApi, DocumentLibraryApi, ReadableExportApi, WorkspaceBackupApi, RunRecoveryApi, ModelQualificationApi, ModelHelperApi {
@@ -185,7 +184,7 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   pickDirectory(): Promise<string | null>
   fetchModels(provider: Provider): Promise<string[]>
   testProviderResponse(input: { provider: Provider; model: string }): Promise<ProviderGenerationProbe>
-  getModelReadiness(input: ModelReadinessRequest): Promise<Readiness>
+  getModelReadiness(input: { providerId?: string | null; accountId?: string | null; model?: string | null }): Promise<Readiness>
   loginCliProvider(input: { providerId: string; accountId?: string | null }): Promise<CliLoginResult>
   cancelCliLogin(providerId: string): Promise<{ cancelled: boolean }>
   checkCliTransport(input: { transport: 'codex-cli' | 'claude-cli'; cliPath?: string }): Promise<{ loggedIn: boolean; binaryPresent: boolean; detail?: string; message?: string }>

@@ -1,0 +1,85 @@
+// Prefill attention softmax, in place over the f32 scores of sdpa_scores_tile: one 256-thread workgroup per (head, row).
+// Arithmetic is sdpa_decode_native.comp's: strided max scan and 256-lane tree, strided exp-sum and tree, then
+// probs = exp(score - max) * (1 / sum), each lane writing only its own slots.
+
+#version 460
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) buffer Scores {
+  float values[];
+} score_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+// Score row stride in words is out_strides[1], set by Attention from max_visible_keys.
+
+shared float s_tree[256];
+
+void main() {
+  uint thread = gl_LocalInvocationID.x;
+  uint head = gl_WorkGroupID.x;
+  uint row = gl_WorkGroupID.y;
+  uint rows = params.dims;
+  uint key_end = params.matrix_k - rows + row + 1u;
+  uint base = (head * rows + row) * params.out_strides[1];
+
+  float local_max = uintBitsToFloat(0xff800000u);
+  for (uint index = thread; index < key_end; index += 256u) {
+    float next = score_data.values[base + index];
+    if (isnan(next) || next > local_max) {
+      local_max = next;
+    }
+  }
+  s_tree[thread] = local_max;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (thread < stride) {
+      s_tree[thread] = max(s_tree[thread], s_tree[thread + stride]);
+    }
+    barrier();
+  }
+  float row_max = s_tree[0];
+  barrier();
+
+  float local_sum = 0.0;
+  for (uint index = thread; index < key_end; index += 256u) {
+    local_sum += exp(score_data.values[base + index] - row_max);
+  }
+  s_tree[thread] = local_sum;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (thread < stride) {
+      s_tree[thread] += s_tree[thread + stride];
+    }
+    barrier();
+  }
+  float normalizer = 1.0 / s_tree[0];
+  barrier();
+
+  for (uint index = thread; index < key_end; index += 256u) {
+    score_data.values[base + index] = exp(score_data.values[base + index] - row_max) * normalizer;
+  }
+}

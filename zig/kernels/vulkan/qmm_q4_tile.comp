@@ -1,0 +1,156 @@
+#version 460
+// qmm_q4_vec4 over tiled weights, 32 columns a tile: words [tile][k/32][lane], scales [tile][group][lane].
+// ACT_F32: x rows and the output are f32 (two vec4 a group of eight), scales and biases stay bf16.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 256) in;
+
+#ifdef ACT_F32
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  vec4 values[];
+} input_x;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  uvec4 values[];
+} input_x;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer InputW {
+  uvec4 values[];
+} input_w;
+layout(set = 0, binding = 2, std430) readonly buffer Scales {
+  uint16_t values[];
+} scales;
+layout(set = 0, binding = 3, std430) readonly buffer Biases {
+  uint16_t values[];
+} biases;
+#ifdef ACT_F32
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  float values[];
+} output_data;
+#else
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  uint16_t values[];
+} output_data;
+#endif
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+
+float bf16_value(uint16_t x) {
+  return uintBitsToFloat(uint(x) << 16u);
+}
+
+// 256 lanes dequantize each 2-group chunk of weights into shared memory, then 32 lanes sum k in the old serial order.
+const uint CHUNK = 2u;
+shared float wd[CHUNK * 64u * 32u];
+
+void main() {
+  uint groups_per_row = params.matrix_k / 64u;
+  uint tiles = (params.matrix_n + 31u) >> 5u;
+  uint lane = gl_LocalInvocationID.x & 31u;
+  uint split = gl_LocalInvocationID.x >> 5u;
+  uint blocks = params.matrix_m * tiles;
+  for (uint block = gl_WorkGroupID.x; block < blocks; block += gl_NumWorkGroups.x) {
+    uint row = block / tiles;
+    uint tile = block - row * tiles;
+    uint column = (tile << 5u) + lane;
+    uint w_base = tile * params.matrix_k + lane;
+    uint x_vec = row * (params.matrix_k / 8u);
+    uint param_base = tile * (groups_per_row * 32u) + lane;
+    float accumulator = 0.0;
+    for (uint chunk = 0u; chunk < groups_per_row; chunk += CHUNK) {
+      uint c_groups = min(CHUNK, groups_per_row - chunk);
+      for (uint job = gl_LocalInvocationID.x; job < c_groups * 256u; job += 256u) {
+        uint wlane = job & 31u;
+        uint ght = job >> 5u;
+        uint g = chunk + (ght >> 3u);
+        uint gl = ght >> 3u;
+        uint half_group = (ght >> 2u) & 1u;
+        uint t = ght & 3u;
+        uvec4 w4 = input_w.values[w_base - lane + wlane + (g * 2u + half_group) * 32u];
+        float scale = bf16_value(scales.values[param_base - lane + wlane + g * 32u]);
+        float bias = bf16_value(biases.values[param_base - lane + wlane + g * 32u]);
+        uint word = w4[t];
+        uint kin = (gl * 2u + half_group) * 32u + t * 8u;
+        uint at = kin * 32u + wlane;
+#ifdef ACT_F32
+        for (uint e = 0u; e < 8u; ++e) {
+          wd[at + e * 32u] = scale * float((word >> (e * 4u)) & 0xfu) + bias;
+        }
+#else
+        for (uint pair = 0u; pair < 4u; ++pair) {
+          wd[at + (pair * 2u) * 32u] = scale * float((word >> (pair * 8u)) & 0xfu) + bias;
+          wd[at + (pair * 2u + 1u) * 32u] = scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias;
+        }
+#endif
+      }
+      barrier();
+      if (split == 0u) {
+        for (uint gl = 0u; gl < c_groups; ++gl) {
+          uint group = chunk + gl;
+          for (uint half_group = 0u; half_group < 2u; ++half_group) {
+            for (uint t = 0u; t < 4u; ++t) {
+              uint x_at = x_vec + group * 8u + half_group * 4u + t;
+              uint kin = (gl * 2u + half_group) * 32u + t * 8u;
+#ifdef ACT_F32
+              vec4 x_lo = input_x.values[x_at * 2u];
+              vec4 x_hi = input_x.values[x_at * 2u + 1u];
+              for (uint e = 0u; e < 8u; ++e) {
+                float xv = e < 4u ? x_lo[e] : x_hi[e - 4u];
+                accumulator += xv * wd[(kin + e) * 32u + lane];
+              }
+#else
+              uvec4 x8 = input_x.values[x_at];
+              for (uint pair = 0u; pair < 4u; ++pair) {
+                uint x_pair = x8[pair];
+                accumulator += uintBitsToFloat(x_pair << 16u) * wd[(kin + pair * 2u) * 32u + lane];
+                accumulator += uintBitsToFloat(x_pair & 0xffff0000u) * wd[(kin + pair * 2u + 1u) * 32u + lane];
+              }
+#endif
+            }
+          }
+        }
+      }
+      barrier();
+    }
+    if (split == 0u && column < params.matrix_n) {
+      uint index = row * params.matrix_n + column;
+#ifdef ACT_F32
+      output_data.values[params.output_offset + index] = accumulator;
+#else
+      output_data.values[params.output_offset + index] = bf16_store(accumulator);
+#endif
+    }
+    barrier();
+  }
+}

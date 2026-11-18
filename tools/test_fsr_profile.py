@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 from fsr_profile import TraceError, analyze
 from fsr_synthetic import generate
 
@@ -22,48 +21,6 @@ def run(events, budgets=(40,)):
 
 
 class LocalityTests(unittest.TestCase):
-    def test_three_stage_trace_uses_each_stage_expert_count_and_six_widths(self):
-        path = Path(__file__).resolve().parents[1] / "zig/src/core/fsr/fixtures/mtp-stages.jsonl"
-        events = [json.loads(line) for line in path.read_text().splitlines()]
-        stride = events[0]["slot_bytes"]
-        events[0]["component_bytes"] = [5898240, 368640] * 3
-        result = run(events, (15744 * stride + 3,))
-        self.assertEqual(result["windows"], 2)
-        fit = result["frontier"][0]
-        self.assertEqual(fit["slots"], 15744)
-        self.assertEqual(fit["unused_tail_bytes"], 3)
-        self.assertEqual(fit["demands"], 84)
-        self.assertEqual(fit["coalesced_read_requests"], 84 * 9)
-        for bad in (0, True, "128"):
-            broken = [dict(event) for event in events]
-            broken[0]["mtp_experts"] = bad
-            with self.subTest(bad=bad), self.assertRaises(TraceError):
-                run(broken)
-        for mode in ("range", "missing", "order"):
-            broken = [dict(event) for event in events]
-            if mode == "range":
-                broken[-5]["ids"] = [128]
-            elif mode == "missing":
-                del broken[-4]
-            else:
-                broken[-4], broken[-3] = broken[-3], broken[-4]
-            with self.subTest(mode=mode), self.assertRaises(TraceError):
-                run(broken)
-
-    def test_six_short_components_do_not_inherit_nine_request_accounting(self):
-        events = fixture()
-        events[0]["component_bytes"] = [4] * 6
-        events[0]["slot_bytes"] = 24
-        got = run(events, (96,))["frontier"][0]
-        self.assertEqual(got["component_reads_without_coalescing"], 24)
-        self.assertEqual(got["coalesced_read_requests"], 12)
-
-    def test_main_trace_golden_remains_a_valid_profile_without_stage_metadata(self):
-        path = Path(__file__).resolve().parents[1] / "zig/src/core/fsr/fixtures/flashnext-trace.jsonl"
-        result = analyze(path.read_text().splitlines(), [8 << 30])
-        self.assertEqual(result["windows"], 4)
-        self.assertEqual(result["frontier"][0]["slots"], 2796)
-
     def test_synthetic_routes_are_complete_repeatable_and_preserve_raw_rows(self):
         for locality in ("uniform", "hot80", "sticky"):
             events = list(generate(2, locality, 1039, rows=3, streams=2, prompt=True))

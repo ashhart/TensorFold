@@ -33,56 +33,6 @@ inline void glm_rows_pass(const device uint8_t* w, const device bfloat* s, const
       for (int j = 0; j < cols; j++) o0[size_t(m + r) * d.ldo + j] = bfloat(acc[r][j]);
 }
 
-// Two E4M3 codes of a word (bytes 0 and 2) as a half2 of value / 256, exact: the magnitude bits as a half's, the sign.
-inline half2 glm_f8_h2(uint word) { return as_type<half2>(((word & 0x007F007Fu) << 7) | ((word & 0x00800080u) << 8)); }
-
-// RPS rows of E4M3 codes at w (K a row) with sc their 128-row block's f32 scales: tf_rp_rows_at's lanes and sums.
-template <int RPS>
-inline void glm_f8_rows(const device uint8_t* w, const device float* sc, const device bfloat* x, int K, uint lane,
-                        thread float (*acc)[RPS]) {
-  const int FULL = K / 512 * 512;
-  w += lane * 16;
-  sc += lane / 8;
-  const int xl = int(lane) * 16;
-  for (int j = 0; j < RPS; j++) acc[0][j] = 0.0f;
-  for (int k0 = 0; k0 <= FULL; k0 += 512) {
-    if (k0 == FULL && !(FULL < K && int(lane) < (K - FULL) / 16)) break;
-    float xt[16];
-    for (int i = 0; i < 16; i++) xt[i] = float(x[xl + k0 + i]);
-    const float s = sc[0] * 256.0f;
-    for (int j = 0; j < RPS; j++) {
-      const uint4 raw = *(const device uint4*)(w + j * K);
-      float q[16];
-      for (int i = 0; i < 4; i++) {
-        const half2 a = glm_f8_h2(raw[i]), b = glm_f8_h2(raw[i] >> 8);
-        q[4 * i] = float(a.x); q[4 * i + 1] = float(b.x); q[4 * i + 2] = float(a.y); q[4 * i + 3] = float(b.y);
-      }
-      float accum = 0.0f;
-      for (int i = 0; i < 4; i++)
-        accum += (xt[4 * i] * q[4 * i] + xt[4 * i + 1] * q[4 * i + 1] + xt[4 * i + 2] * q[4 * i + 2] +
-                  xt[4 * i + 3] * q[4 * i + 3]);
-      acc[0][j] += s * accum;
-    }
-    w += 512;
-    sc += 4;
-  }
-  for (int j = 0; j < RPS; j++) acc[0][j] = simd_sum(acc[0][j]);
-}
-
-// Expert e's rows [row0, row0 + RPS) of a stack [experts, n, K]: affine (S, B bf16 at `group`), or F8 (S f32 blocks).
-template <int RPS, int BITS, bool F8>
-inline void glm_expert_rows(const device uint32_t* W, const device bfloat* S, const device bfloat* B, int e, int n,
-                            int row0, const device bfloat* x, int K, int group, uint lane, thread float (*acc)[RPS]) {
-  const size_t at = size_t(e) * n + row0;
-  if (F8) {
-    const device float* sc = (const device float*)S + (size_t(e) * (n / 128) + row0 / 128) * (K / 128);
-    glm_f8_rows<RPS>((const device uint8_t*)W + at * K, sc, x, K, lane, acc);
-  } else {
-    const size_t kb = size_t(K) * BITS / 8, kg = size_t(K / group);
-    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, group, lane, acc);
-  }
-}
-
 // The three-row passes before a window's pairs and last row: four rows take two pairs, not a three and a one.
 inline int glm_threes(int rows) { return rows / 3 - (rows % 3 == 1 && rows > 3 ? 1 : 0); }
 
@@ -121,7 +71,7 @@ template <int BITS, bool WIDE>
 }
 
 // Slot y through expert ids[y] on x row y / repeat (GLU: gate W and up W2, SwiGLU'd); grid (n / 8, slots).
-template <int BITS, bool GLU, bool F8 = false>
+template <int BITS, bool GLU>
 [[kernel]] void glm_rows_ids(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                              const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                              constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
@@ -139,12 +89,14 @@ template <int BITS, bool GLU, bool F8 = false>
     if (int(lane) < cols) out[lane] = bfloat(0.0f);
     return;
   }
+  const size_t at = size_t(expert) * d.n + row0;
+  const size_t kb = size_t(d.k) * BITS / 8, kg = size_t(d.k / d.group);
   const device bfloat* x = X + size_t(slot / d.repeat) * d.k;
   float acc[1][4];
-  glm_expert_rows<4, BITS, F8>(W, S, B, expert, d.n, row0, x, d.k, d.group, lane, acc);
+  tf_rp_rows<4, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, d.k, d.group, lane, acc);
   if (GLU) {
     float up[1][4];
-    glm_expert_rows<4, BITS, F8>(W2, S2, B2, expert, d.n, row0, x, d.k, d.group, lane, up);
+    tf_rp_rows<4, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, d.k, d.group, lane, up);
     if (lane == 0)
       for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
   } else if (lane == 0) {
@@ -152,8 +104,8 @@ template <int BITS, bool GLU, bool F8 = false>
   }
 }
 
-// Slots as glm_rows_ids (BITS, or F8), then X2's rows through the shared expert (SBITS; GLU: gate then up) into OUT2.
-template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0, bool F8 = false> // RPS columns a simdgroup; KC: k
+// Slots as glm_rows_ids (BITS), then X2's rows through the shared expert (SBITS; GLU: gate then up rows) into OUT2.
+template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0> // RPS columns a simdgroup; KC: k compiled in
 [[kernel]] void glm_moe_rows(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                              const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                              constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
@@ -181,12 +133,16 @@ template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0, bool F8 = fals
       if (int(lane) < cols) out[lane] = bfloat(0.0f);
       return;
     }
+    const size_t at = size_t(expert) * d.n + row0;
+    const size_t kb = size_t(K) * BITS / 8;
     x = X + size_t(y / d.repeat) * K;
     float acc[1][RPS];
-    glm_expert_rows<RPS, BITS, F8>(W, S, B, expert, d.n, row0, x, K, d.group, lane, acc);
+    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, d.group, lane,
+                                    acc);
     if (GLU) {
       float up[1][RPS];
-      glm_expert_rows<RPS, BITS, F8>(W2, S2, B2, expert, d.n, row0, x, K, d.group, lane, up);
+      tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, K, d.group,
+                                      lane, up);
       if (lane == 0)
         for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
     } else if (lane == 0) {
@@ -214,69 +170,8 @@ template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0, bool F8 = fals
   }
 }
 
-// glm_moe_rows by unique expert (uids, umem, ucount): a simdgroup a pick, z = slots the shared; glm_moe_rows's sums.
-#define GLM_MAXR 16
-template <int BITS, int SBITS, bool GLU, int RPS = 4, bool F8 = false>
-[[max_total_threads_per_threadgroup(32 * GLM_MAXR)]]
-[[kernel]] void glm_moe_rows_u(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
-                               const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
-                               constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
-                               const device int* uids [[buffer(6)]], const device uint32_t* W2 [[buffer(7)]],
-                               const device bfloat* S2 [[buffer(8)]], const device bfloat* B2 [[buffer(9)]],
-                               const device bfloat* X2 [[buffer(10)]], const device uint32_t* SW [[buffer(11)]],
-                               const device bfloat* SS [[buffer(12)]], const device bfloat* SB [[buffer(13)]],
-                               device bfloat* OUT2 [[buffer(14)]], const device int* umem [[buffer(15)]],
-                               const device int* ucount [[buffer(16)]],
-                               uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                               uint nsg [[simdgroups_per_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
-  const int row0 = int(tg.x) * RPS;
-  if (row0 >= d.n) return;
-  const int z = int(tg.y);
-  const int m = int(sg);
-  const int cols = metal::min(RPS, d.n - row0);
-  const int K = d.k;
-  const size_t kg = size_t(K / d.group);
-  if (z < d.slots) {
-    if (z >= ucount[0]) return;
-    const int pick = umem[z * GLM_MAXR + m];
-    if (pick < 0) return;
-    device bfloat* out = OUT + size_t(pick) * d.ldo + row0;
-    const device bfloat* x = X + size_t(pick / d.repeat) * K;
-    float acc[1][RPS];
-    glm_expert_rows<RPS, BITS, F8>(W, S, B, uids[z], d.n, row0, x, K, d.group, lane, acc);
-    if (GLU) {
-      float up[1][RPS];
-      glm_expert_rows<RPS, BITS, F8>(W2, S2, B2, uids[z], d.n, row0, x, K, d.group, lane, up);
-      if (lane == 0)
-        for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
-    } else if (lane == 0) {
-      for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
-    }
-    return;
-  }
-  const int r = m;
-  if (r >= int(nsg)) return;
-  const size_t skb = size_t(K) * SBITS / 8;
-  const device bfloat* x = X2 + size_t(r) * K;
-  device bfloat* out = OUT2 + size_t(r) * d.n + row0;
-  const device uint8_t* gw = (const device uint8_t*)SW + size_t(row0) * skb;
-  const device bfloat* gs = SS + size_t(row0) * kg;
-  const device bfloat* gb = SB + size_t(row0) * kg;
-  float acc[1][RPS];
-  tf_rp_rows<RPS, 1, SBITS, false>(gw, gs, gb, x, K, d.group, lane, acc);
-  if (GLU) {
-    const size_t up_at = size_t(d.n);
-    float up[1][RPS];
-    tf_rp_rows<RPS, 1, SBITS, false>(gw + up_at * skb, gs + up_at * kg, gb + up_at * kg, x, K, d.group, lane, up);
-    if (lane == 0)
-      for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
-  } else if (lane == 0) {
-    for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
-  }
-}
-
 // Expert e's sorted pairs: GLU x row order[i] / repeat to out row i, else x row i to row order[i]; grid (n / 8, e).
-template <int BITS, bool GLU, bool F8 = false>
+template <int BITS, bool GLU>
 [[kernel]] void glm_rows_sorted(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                                 const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                                 constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
@@ -289,17 +184,20 @@ template <int BITS, bool GLU, bool F8 = false>
   if (row0 >= d.n) return;
   const int e = int(tg.y);
   const int lo = offsets[e], hi = e + 1 < d.experts ? offsets[e + 1] : d.slots;
+  const size_t at = size_t(e) * d.n + row0;
+  const size_t kb = size_t(d.k) * BITS / 8, kg = size_t(d.k / d.group);
+  const device uint8_t* w = (const device uint8_t*)W + at * kb;
   const int cols = metal::min(4, d.n - row0);
   #pragma clang loop unroll(disable)
   for (int i = lo; i < hi; i++) {
     const int src = GLU ? order[i] / d.repeat : i;
     const int dst = GLU ? i : order[i];
     float acc[1][4];
-    glm_expert_rows<4, BITS, F8>(W, S, B, e, d.n, row0, X + size_t(src) * d.k, d.k, d.group, lane, acc);
+    tf_rp_rows<4, 1, BITS, false>(w, S + at * kg, B + at * kg, X + size_t(src) * d.k, d.k, d.group, lane, acc);
     device bfloat* out = OUT + size_t(dst) * d.ldo + row0;
     if (GLU) {
       float up[1][4];
-      glm_expert_rows<4, BITS, F8>(W2, S2, B2, e, d.n, row0, X + size_t(src) * d.k, d.k, d.group, lane, up);
+      tf_rp_rows<4, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, X + size_t(src) * d.k, d.k, d.group, lane, up);
       if (lane == 0)
         for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
     } else if (lane == 0) {
@@ -428,30 +326,10 @@ GLM_ROWS_AT(8)
   template [[host_name("glm_moe_rows_q" #B "_s8")]] [[kernel]]                                                         \
       decltype(glm_moe_rows<B, 8, false>) glm_moe_rows<B, 8, false>;                                                   \
   template [[host_name("glm_moe_rows_glu_q" #B "_s8")]] [[kernel]]                                                     \
-      decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;                                                     \
-  template [[host_name("glm_moe_rows_u_q" #B "_s8")]] [[kernel]]                                                       \
-      decltype(glm_moe_rows_u<B, 8, false>) glm_moe_rows_u<B, 8, false>;                                               \
-  template [[host_name("glm_moe_rows_glu_u_q" #B "_s8")]] [[kernel]]                                                   \
-      decltype(glm_moe_rows_u<B, 8, true>) glm_moe_rows_u<B, 8, true>;
+      decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;
 GLM_MOE_AT(2)
 GLM_MOE_AT(3)
 GLM_MOE_AT(4)
 GLM_MOE_AT(5)
 GLM_MOE_AT(6)
 GLM_MOE_AT(8)
-
-// The FP8 checkpoint's routed experts (E4M3, 128 x 128 f32 scales) beside the 8-bit shared expert.
-template [[host_name("glm_rows_ids_f8")]] [[kernel]] decltype(glm_rows_ids<8, false, true>) glm_rows_ids<8, false, true>;
-template [[host_name("glm_rows_glu_ids_f8")]] [[kernel]] decltype(glm_rows_ids<8, true, true>) glm_rows_ids<8, true, true>;
-template [[host_name("glm_rows_sorted_f8")]] [[kernel]]
-    decltype(glm_rows_sorted<8, false, true>) glm_rows_sorted<8, false, true>;
-template [[host_name("glm_rows_glu_sorted_f8")]] [[kernel]]
-    decltype(glm_rows_sorted<8, true, true>) glm_rows_sorted<8, true, true>;
-template [[host_name("glm_moe_rows_f8_s8")]] [[kernel]]
-    decltype(glm_moe_rows<8, 8, false, 4, 0, true>) glm_moe_rows<8, 8, false, 4, 0, true>;
-template [[host_name("glm_moe_rows_glu_f8_s8")]] [[kernel]]
-    decltype(glm_moe_rows<8, 8, true, 4, 0, true>) glm_moe_rows<8, 8, true, 4, 0, true>;
-template [[host_name("glm_moe_rows_u_f8_s8")]] [[kernel]]
-    decltype(glm_moe_rows_u<8, 8, false, 4, true>) glm_moe_rows_u<8, 8, false, 4, true>;
-template [[host_name("glm_moe_rows_glu_u_f8_s8")]] [[kernel]]
-    decltype(glm_moe_rows_u<8, 8, true, 4, true>) glm_moe_rows_u<8, 8, true, 4, true>;

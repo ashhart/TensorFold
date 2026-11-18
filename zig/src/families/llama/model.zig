@@ -30,8 +30,6 @@ pub const Model = struct {
     inv: mtl.Buffer,
     /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
     shared_queue: bool,
-    /// Qwen3 embeddings alone normalize each projected Q and K head before RoPE.
-    head_norm: ?mtl.Pipeline = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         return loadOn(gpa, io, dir, null);
@@ -39,18 +37,12 @@ pub const Model = struct {
 
     /// As `load`, on `queue` when given (the model then never releases it).
     pub fn loadOn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, queue: ?mtl.Queue) !*Model {
-        return loadPrepared(gpa, io, dir, try cfg.Config.read(gpa, io, dir), queue, weights.load);
-    }
-
-    /// The same dense forward, with a family-validated geometry and checkpoint reader.
-    pub fn loadPrepared(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, config: cfg.Config, queue: ?mtl.Queue, comptime read_weights: anytype) !*Model {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.gpa = gpa;
-        m.config = config;
-        m.head_norm = null;
+        m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later
@@ -63,7 +55,7 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFile(m.device, path, "");
-        m.weights = try read_weights(gpa, &m.checkpoint, &m.config);
+        m.weights = try weights.load(gpa, &m.checkpoint, &m.config);
         errdefer m.weights.deinit(gpa);
         {
             const src = try contracts.glueSource(gpa);
@@ -117,7 +109,6 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        if (m.head_norm) |p| p.deinit();
         m.inv.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();
         m.sample_full.deinit();

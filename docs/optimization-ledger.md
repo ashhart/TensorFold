@@ -76,7 +76,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
-| 28. Scale index | ? | done M[#2760], open M[#2805] | ? | ? | ? |
+| 28. Scale index | ? | open M[#2760] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
@@ -328,11 +328,8 @@ below; these are estimates for planning a port, not results.
    what stays in RAM beside it.
 
 9. **FP8 KV cache.** `--kv-cache fp8` stores keys and values as e4m3 with a scale a row, which halves KV memory for
-   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; it changes tokens against
-   the BF16 cache, so it is not qualified. A diagnostic receipt on FP4-Local at TP=2 measures 6,960 cache bytes a
-   token on each rank against 13,056 (−47%, beside 231 MiB fixed a stream either way), the mean NLL within 0.06%
-   teacher-forced and cold prompts 3 to 5% slower
-   ([receipt](receipts/glm-kv-fp8-3a56d4eb/README.md)). DeepSeek-V4.1's compressed attention is FP8 by design.
+   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; its quality qualification is
+   pending. DeepSeek-V4.1's compressed attention is FP8 by design.
 
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
@@ -469,10 +466,8 @@ below; these are estimates for planning a port, not results.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
-    Macs before tensor units ([#2760], plan in [#2751]); its prompt gathers and grouped expert kernels read it too,
-    the routed experts' stored arrays are released and it is the default, `TF_FLASHNEXT_SCALE_INDEX=0` turning it
-    off ([#2805]). The dense rows still read the stored arrays. `?` cells: the same count has not been run on those
-    checkpoints.
+    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
+    dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
 
 29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the
     default. It reuses DFlash2's taps and tap ring and adds a code bridge and an exact-sender table.
@@ -630,4 +625,3 @@ below; these are estimates for planning a port, not results.
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
-[#2805]: https://github.com/ashhart/TensorFold/pull/2805

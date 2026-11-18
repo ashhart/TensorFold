@@ -136,6 +136,5 @@ test "the /v1/load object carries every group a host fills, and only server valu
     }
     const parked = try loadBody(a, snapshot(true));
     try std.testing.expect(has(parked, "\"parked\":true") and has(parked, "\"http_active\""));
-    // as keys: a refusal label such as admission_capacity_exceeded is a server value, shown while parked too
-    for ([_][]const u8{ "\"running\":", "\"tokens\":", "\"capacity\":", "\"busy_us\":", "\"fill_unknown\":" }) |key| try std.testing.expect(!has(parked, key));
+    for ([_][]const u8{ "running", "tokens", "capacity", "busy_us", "fill_unknown" }) |key| try std.testing.expect(!has(parked, key));
 }

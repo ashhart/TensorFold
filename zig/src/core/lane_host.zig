@@ -160,12 +160,6 @@ pub const LaneHost = struct {
         return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
     }
 
-    /// Advertise the cache capabilities: warm turns follow the store, so a cache-less start claims none.
-    pub fn advertiseCache(h: *LaneHost, store: ?*pc.Store) void {
-        h.info_.prompt_cache = store != null;
-        h.info_.warm_turns = store != null;
-    }
-
     const plain_vtable: Engine.VTable = .{
         .info = infoFn,
         .submit = submitFn,
@@ -307,7 +301,6 @@ pub const LaneHost = struct {
     }
 
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
-        if (reason == .cancelled) load.progress(h, job);
         h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
         ledger.release(h, job); // its stream's caches are already freed (reaped, discarded or released)
@@ -365,13 +358,11 @@ pub const LaneHost = struct {
         };
         if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
             const job = h.queued.orderedRemove(at);
-            h.load.failures[@backingInt(load.Failure.prompt_too_large)] += 1;
             h.unlock();
             h.finish(job, .failed, ledger.too_big);
             return .failed;
         }
         if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
-            h.queued.items[at].wait_reason = .ledger_bytes;
             h.unlock();
             return .none;
         }

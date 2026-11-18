@@ -171,10 +171,9 @@ test "DeepSeek chat: reply splits, whole and streamed, thinking on and off" {
     // cut by the length while still reasoning: no content
     s = try probe(a, "on/cut", &.{ .{ .text = "Plan" }, .{ .text = "Hi" } }, true, "");
     try t.expectEqualStrings("", s.content);
-    // ended (EOS) before any close: the reasoning is also the answer (#3687)
+    // ended (EOS) before any close: all reasoning
     s = try probe(a, "on/no-close", &.{ .{ .text = "Plan" }, .{ .id = eos } }, true, "");
-    try t.expectEqualStrings("Plan", s.reasoning);
-    try t.expectEqualStrings("Plan", s.content);
+    try t.expectEqualStrings("", s.content);
     // a reply that writes its own opener after the prompt's
     s = try probe(a, "on/own-opener", &.{ .{ .id = think_open }, .{ .text = "Plan" }, .{ .id = think_close }, .{ .text = "Hi" }, .{ .id = eos } }, true, "");
     try t.expectEqualStrings("Hi", s.content);

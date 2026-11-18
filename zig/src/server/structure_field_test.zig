@@ -67,10 +67,10 @@ const Stub = struct {
 };
 
 // The compiler boundary records the kind it is asked for; no xgrammar library or GPU is loaded.
-pub const Compile = struct {
+const Compile = struct {
     kind: c_int = -1,
 
-    pub fn compiler(c: *Compile) api.grammar.Compiler {
+    fn compiler(c: *Compile) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;

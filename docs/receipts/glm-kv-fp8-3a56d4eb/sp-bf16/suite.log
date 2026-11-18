@@ -1,8 +1,0 @@
-RESULT nodraft rc=0
-RESULT drafted rc=0
-RESULT prefill2048 rc=0
-RESULT prefill8192 rc=0
-RESULT prefill9600 rc=0
-RESULT prefill32768 rc=0
-RESULT prefill38400 rc=0
-RESULT prefill65536 rc=0

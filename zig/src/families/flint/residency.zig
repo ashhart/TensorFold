@@ -14,18 +14,13 @@ pub fn hold(h: anytype) !void {
     try list.appendSlice(h.gpa, m.weights.stacked.items);
     try mtl.resident.fields.append(h.gpa, &list, &h.metal.scratch);
     try mtl.resident.fields.append(h.gpa, &list, &h.metal.prompt);
-    if (h.drafter) |d| try d.buffers(&list);
     h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "flint");
-    if (h.resident) |*r| {
-        h.metal.setResident(r.follow());
-        if (h.drafter) |d| d.setResident(r.follow());
-    }
+    if (h.resident) |*r| h.metal.setResident(r.follow());
     h.warm = if (h.resident) |*r| r.target() else .{ .queue = m.queue };
 }
 
 pub fn drop(h: anytype) void {
     h.metal.setResident(null);
-    if (h.drafter) |d| d.setResident(null);
     if (h.resident) |*r| r.deinit();
     h.resident = null;
     h.warm = .{ .queue = h.model.queue };

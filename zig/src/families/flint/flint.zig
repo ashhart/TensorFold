@@ -7,11 +7,9 @@ pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
 pub const budget = @import("budget.zig");
 pub const residency = @import("residency.zig");
-pub const draft = @import("draft.zig");
 pub const snapshot = @import("snapshot.zig");
 
 test {
-    _ = backend;
     _ = config;
     _ = budget;
     _ = snapshot;

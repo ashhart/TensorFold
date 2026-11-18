@@ -36,8 +36,6 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
-    .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
-    .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
@@ -53,10 +51,6 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .raw = "/etc/tensorfold/tool id.key", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "0", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
-    .{ .name = "TF_SHARED_PRICE_LOG", .raw = "0", .n = 0 },
-    .{ .name = "TF_SHARED_PRICE_LOG", .raw = "1", .n = 1 },
-    .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "0", .n = 0 },
-    .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
@@ -64,8 +58,6 @@ const valid = [_]Case{
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .raw = "1792", .n = 1792 },
-    .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .raw = "0", .n = 0 },
-    .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_DSPINE_WINDOW", .raw = "16", .n = 16 },
@@ -77,8 +69,6 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
-    .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
-    .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
@@ -103,14 +93,6 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
-    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
-    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "LFM3_FUSE", .raw = "7", .n = 7 },
@@ -119,10 +101,6 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "subject", .n = 2 },
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .n = 3 },
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
-    .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "0", .n = 0 },
-    .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "1", .n = 1 },
-    .{ .name = "TF_SLIDE_TAP_CHECK", .raw = "0", .n = 0 },
-    .{ .name = "TF_SLIDE_TAP_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
@@ -265,19 +243,6 @@ test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA
     try t.expect(try e.value(bool, name, "1", false));
 }
 
-test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unset keeps pages on" {
-    const name = "TENSORFOLD_LFM2_KV_PAGES";
-    for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, name) != null);
-    }
-    try t.expect(try e.value(bool, name, null, true));
-    try t.expect(try e.value(bool, name, "1", true));
-    try t.expect(!try e.value(bool, name, "0", true));
-}
-
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
     try t.expectEqual(@as(f64, 3.25), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "3.25", 0));
     try t.expectEqual(@as(f64, 0), try e.value(f64, "TF_DSV41_GRAPH_FLOOR_GIB", "0", 1));
@@ -326,26 +291,4 @@ test "environment: a legacy alias is checked only while its canonical name is un
     try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
     for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
     try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
-}
-
-test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
-    for (flags) |name| {
-        try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
-        try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
-        for ([_][]const u8{ "", " ", "\t" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(name, raw));
-        for ([_][]const u8{ "00", "false", "2", "yes" }) |raw| {
-            try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
-            const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, all)).?;
-            defer a.free(why);
-            try t.expect(std.mem.indexOf(u8, why, name) != null);
-        }
-    }
-    // unset and every valid value keep today's meaning: resume on unless 0, pages off unless 1
-    try t.expect(try e.value(bool, "TF_QWEN27_SLOT_RESUME", null, true));
-    try t.expect(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "", true));
-    try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
-    try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
-    try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
-    try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
 }

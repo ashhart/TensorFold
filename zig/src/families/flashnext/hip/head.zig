@@ -24,14 +24,16 @@ pub fn caches(
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
-/// `segs`' tokens over `streams` (a row each) from each segment's `pos`; `prompt`: rows on prompt tiles.
+/// `tokens` (each the token after its row) over `streams` from `pos`; `prompt`: a prompt chunk's rows on prompt tiles.
 pub fn run(
     ops: Ops,
     prompt: bool,
     m: *const model.Model,
     host: *forward.Host,
-    segs: []const forward.Seg,
+    c: *cache.Caches,
     streams: Tensor,
+    tokens: []const u32,
+    pos: usize,
     ones: hip.DeviceBuffer,
 ) !Out {
     var o = ops;
@@ -39,22 +41,16 @@ pub fn run(
     o.prefill = prompt;
     const w = &m.mtp.?;
     const d = w.dims;
-    var rows: usize = 0;
-    for (segs) |g| rows += g.tokens.len;
+    const rows = tokens.len;
     if (rows * d.streams * m.act.size() > ones.len) return error.HeadRowsPastOnes;
     const ids = try host.gpa.alloc(i32, rows);
     defer host.gpa.free(ids);
     const at_pos = try host.gpa.alloc(i32, rows);
     defer host.gpa.free(at_pos);
-    var at: usize = 0;
-    for (segs) |g| {
-        for (g.tokens, 0..) |t, r| {
-            if (t >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
-            ids[at + r] = @intCast(t);
-            at_pos[at + r] = @intCast(g.pos + r);
-        }
-        g.c.pooled = @min(g.c.pooled, g.pos / d.index_ratio);
-        at += g.tokens.len;
+    for (ids, at_pos, tokens, 0..) |*i, *p, t, r| {
+        if (t >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
+        i.* = @intCast(t);
+        p.* = @intCast(pos + r);
     }
     const dev_ids = try host.put(o, std.mem.sliceAsBytes(ids));
     const dev_pos = try host.put(o, std.mem.sliceAsBytes(at_pos));
@@ -83,18 +79,20 @@ pub fn run(
     try forward.hcNorm(o, m, h, e, .{ .ptr = ones.base(), .kind = m.act }, x, l.ahc.scale, rows);
     const inject = try take(o, m.act, rows * d.streams);
     const mixed = try forward.hcPre(o, m, l.ahc, x, rows, inject);
-    const branch = try mixers.sparse(o, m, d, l.mixer.sparse, segs, 0, mixed, rows, dev_pos, host, null);
+    const seg = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = pos }};
+    c.pooled = @min(c.pooled, pos / d.index_ratio);
+    const branch = try mixers.sparse(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos, host, null);
     try forward.hcNorm(o, m, h, branch, inject, x, l.mhc.scale, rows);
     const mixed2 = try forward.hcPre(o, m, l.mhc, x, rows, inject);
     const y = try hip.moe.run(o, m.act, l.moe, mixed2, rows, prompt);
     try forward.hcNorm(o, m, h, y, inject, x, w.mix.scale, rows);
-    for (segs) |g| g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
+    c.pooled = (pos + rows) / d.index_ratio;
     return .{ .mixed = try forward.hcPre(o, m, w.mix, x, rows, null), .streams = h };
 }
 
-/// Each mixed row's greedy draft token and probability; `window` for a shared round's rows, else a prompt's.
+/// The draft head's greedy token for each of `rows` mixed rows (argmax over the draft vocabulary) and its probability.
 pub fn draws(
-    ops: Ops,
+    o: Ops,
     m: *const model.Model,
     host: *forward.Host,
     s: hip.Stream,
@@ -103,10 +101,7 @@ pub fn draws(
     ids: []const u32,
     out: []u32,
     probs: []f32,
-    window: bool,
 ) !void {
-    var o = ops;
-    o.window = window;
     const w = &m.mtp.?;
     const logits = try o.project(mixed, w.draft, rows, false);
     const arg = try o.arena.of(i32, 2 * rows);
