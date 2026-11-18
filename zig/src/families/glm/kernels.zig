@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const moe_route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const mm_groups = @import("mm_groups.zig");
 const hc = @import("../../core/hc.zig");
 const wide = @import("wide.zig");
 
@@ -116,6 +117,7 @@ pub const Kernels = struct {
     sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
     absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
+    mm_groups: mm_groups.Pipes, // the routed gathers walked in column groups (mm_groups.zig): mm_bf16's bits
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
     wide: ?wide.Pipes = null, // the products at other widths (wide.zig), for a checkpoint that has one
 
@@ -259,6 +261,8 @@ fn pickSources(gpa: std.mem.Allocator, route_core: []const u8, gu: []const u8, d
     return .{ gate_up, try edit(gpa, down, member, by_pick) };
 }
 
+const m16_names = affine_mm.names ++ mm_groups.names;
+
 /// Compile every library on worker threads.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
@@ -311,11 +315,12 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(igate_src);
     var igate_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{ moe_route.names[0], "glm_route_logits_one" }, .out = &igate_out };
-    const m16_src = try affine_mm.source(device, gpa, .{});
+    const m16_src = try mm_groups.source(device, gpa); // affine_mm.names, then the column-group gathers
     defer gpa.free(m16_src);
     const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true });
     defer gpa.free(m32_src);
-    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
+    var m16_out: [m16_names.len]mtl.Pipeline = undefined;
+    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &m16_names, .out = &m16_out };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
     defer gpa.free(kda_src);
@@ -410,6 +415,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.latent_values = attn_out[1];
     k.latent_scores_rows = attn_out[2];
     k.latent_values_rows = attn_out[3];
+    k.mm_bf16 = m16_out[0..affine_mm.names.len].*;
+    k.mm_groups = m16_out[affine_mm.names.len..].*;
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
     k.route_logits_one = route_out[2];
