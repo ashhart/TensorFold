@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: stopping Chat Replay during its final reply now marks the replay cancelled and keeps only the turns already completed, leaving the interrupted reply out of the done count and saved results; other engine errors still use the per-turn error path (#3815). Thanks to @AIFlowML.
+
 - Web: on reattachment to a running engine, the last unfinished log line stays buffered until the engine completes it, so a split context-window line is recorded once and supplies startup telemetry; truncating the log clears that fragment (#3813). Thanks to @AIFlowML.
 
 - Web: settings files whose JSON root is an array or a scalar now fall back to defaults at startup instead of raising, and the original file is left untouched; a valid settings object still loads its known fields (#3808). Thanks to @AIFlowML.
