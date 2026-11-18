@@ -200,6 +200,45 @@ try {
   const rescan = await lowMemory.scan()
   assert.deepEqual(rescan.models.map((model: any) => [model.id, model.loadable, model.reason]), lowered.models.map((model: any) => [model.id, model.loadable, model.reason]), 'a later rescan agrees with the refreshed state')
 
+  const qwen27 = {
+    hidden_size: 5120, vocab_size: 248320, num_hidden_layers: 64, intermediate_size: 17408,
+    linear_num_key_heads: 16, linear_num_value_heads: 48, linear_key_head_dim: 128,
+    linear_value_head_dim: 128, linear_conv_kernel_dim: 4, num_attention_heads: 24,
+    num_key_value_heads: 4, head_dim: 256, full_attention_interval: 4,
+  }
+  const qwen27Library = library({ appHome: path.join(root, 'qwen27-app') })
+  const qwen27Models = path.join(root, 'qwen27-models')
+  const qwen27Cases = [
+    { name: 'untied', tied: false, text: qwen27 },
+    { name: 'wrong-kv-heads', tied: false, text: { ...qwen27, num_key_value_heads: 2 } },
+    { name: 'wrong-interval', tied: false, text: { ...qwen27, full_attention_interval: 2 } },
+    { name: 'tied-root', tied: true, text: qwen27 },
+    { name: 'tied-tower', tied: false, text: { ...qwen27, tie_word_embeddings: true } },
+  ]
+  for (const { name, tied, text } of qwen27Cases) {
+    const folder = path.join(qwen27Models, name)
+    await checkpoint(folder)
+    await fs.writeFile(path.join(folder, 'config.json'), JSON.stringify({
+      model_type: 'qwen3_5', tie_word_embeddings: tied, quantization: { bits: 4, group_size: 64 },
+      text_config: text,
+    }))
+  }
+  const qwen27Entries = (await qwen27Library.addFolder(qwen27Models)).models
+  const untied = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'untied'))!
+  assert.equal(untied.loadable, true, 'the qualified untied 27B is available in the library')
+  assert.equal((await qwen27Library.resolve(untied.id)).path, untied.path)
+  const wrongHeads = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'wrong-kv-heads'))!
+  assert.equal(wrongHeads.loadable, false)
+  assert.match(wrongHeads.reason!, /num key value heads is 2.*UnqualifiedQwenShape/)
+  const wrongInterval = qwen27Entries.find((model) => model.path === path.join(qwen27Models, 'wrong-interval'))!
+  assert.equal(wrongInterval.loadable, false)
+  assert.match(wrongInterval.reason!, /layer types/)
+  for (const name of ['tied-root', 'tied-tower']) {
+    const tied = qwen27Entries.find((model) => model.path === path.join(qwen27Models, name))!
+    assert.equal(tied.loadable, false)
+    assert.match(tied.reason!, /UnsupportedQwenGeometry/)
+  }
+
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')
   await assert.rejects(() => library().snapshot(), /library is invalid/)
