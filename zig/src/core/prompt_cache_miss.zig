@@ -136,8 +136,10 @@ pub fn derive(s: *const pc.Store, prompt: []const u32, starts: []const u32, span
         if (cause == null and e.at > n) n = e.at;
     }
     if (cause == null) if (s.ring.held(prompt)) |rec| {
-        cause = rec.cause;
-        n = rec.at;
+        if (rec.at > resumed) { // a removed state is a miss only when it resumed further than this lookup
+            cause = rec.cause;
+            n = rec.at;
+        }
     };
     if (cause == null) cause = if (hit != null) .none else .cold;
     return .{
