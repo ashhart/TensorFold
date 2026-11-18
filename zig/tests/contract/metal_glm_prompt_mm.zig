@@ -36,17 +36,18 @@ const Slot = enum(u8) { x, gw, gs, gb, uw, us, ub, dw, ds, db, offs, order, sums
 
 pub const Case = struct {
     control: bool,
+    ahead: bool, // the control's fault is in the step-ahead loads, not the column groups
     mm: affine_mm.Pipes,
     ours: groups.Pipes,
 
-    pub fn init(s: *bits.Suite, control: bool) !Case {
+    pub fn init(s: *bits.Suite, control: bool, ahead: bool) !Case {
         const loader = try s.production();
         const own = try text(s.a, s.device);
         defer s.a.free(own);
         _ = try loader.require(own);
-        const body = if (control) try bits.edited(s.a, own, "inline int gt_order(", "col = g * GT_GROUP + rem % GT_GROUP;", "col = rem % GT_GROUP + 0 * g;") else try s.a.dupe(u8, own);
+        const body = if (!control) try s.a.dupe(u8, own) else if (ahead) try bits.edited(s.a, own, "inline void gt_k_loop(", "next = am_load(wq + STEP_BYTES);", "next = am_load(wq);") else try bits.edited(s.a, own, "inline int gt_order(", "col = g * GT_GROUP + rem % GT_GROUP;", "col = rem % GT_GROUP + 0 * g;");
         defer s.a.free(body);
-        var x: Case = .{ .control = control, .mm = undefined, .ours = undefined };
+        var x: Case = .{ .control = control, .ahead = ahead, .mm = undefined, .ours = undefined };
         var made: usize = 0;
         errdefer for (x.mm[0..made]) |p| p.deinit();
         for (affine_mm.names, &x.mm) |n, *p| {
@@ -65,11 +66,12 @@ pub const Case = struct {
         for (x.mm) |p| p.deinit();
         for (x.ours) |p| p.deinit();
     }
-    pub fn name(control: bool) []const u8 {
-        return if (control) "control: metal glm launch prompt experts, every column group taking the first group's columns" else "metal glm launch prompt experts gate/up and down in column groups";
+    pub fn name(control: bool, ahead: bool) []const u8 {
+        if (control and ahead) return "control: metal glm launch prompt experts, each step's codes loaded again in place of the next step's";
+        return if (control) "control: metal glm launch prompt experts, every column group taking the first group's columns" else "metal glm launch prompt experts gate/up and down in column groups, codes a step ahead";
     }
     pub fn spec(x: *const Case) c.Spec {
-        return bits.spec(name(x.control), "tf_affine_gather_glu and tf_affine_gather_scatter at 32 and 64 rows", "the one-launch gathers' bytes in every pair's activations and outputs", &served, "core/affine_mm.zig's tiles and sums; only the order the tiles run in changes");
+        return bits.spec(name(x.control, x.ahead), "tf_affine_gather_glu and tf_affine_gather_scatter at 32 and 64 rows", "the one-launch gathers' bytes in every pair's activations and outputs", &served, "core/affine_mm.zig's tiles and sums; only the order the tiles run in and when their codes load change");
     }
     pub fn layout(_: *const Case, s: c.Shape) ?bits.Layout {
         if (s.rows == 0 or s.rows > 1100 or s.rows % TOPK != 0 or s.n != N or s.k != D) return null;
@@ -243,9 +245,10 @@ pub const Dense = struct {
 
 pub fn collect(s: *bits.Suite, only: ?[]const u8) !void {
     for ([_]bool{ false, true }) |control| {
-        if (s.wanted(only, Case.name(control))) try s.add(Case, try Case.init(s, control));
+        if (s.wanted(only, Case.name(control, false))) try s.add(Case, try Case.init(s, control, false));
         if (s.wanted(only, Dense.name(control))) try s.add(Dense, try Dense.init(s, control));
     }
+    if (s.wanted(only, Case.name(true, true))) try s.add(Case, try Case.init(s, true, true));
 }
 
 /// Gate 5's registrations `glm launch prompt <experts|dense> <function>`: the loader's prompt matmul library.
