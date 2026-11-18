@@ -405,9 +405,9 @@ pub const Set = struct {
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         set.embeds = .{ .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_embed") } }, .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_ctl_embed"), .ctl = true } } };
         set.lerps = .{
-            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_lerp"), .w = 0.30078125 } },
-            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_lerp"), .w = 0.69921875 } },
-            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_ctl_lerp"), .w = 0.69921875, .ctl = true } },
+            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_lerp"), .w = 0.3 } },
+            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_lerp"), .w = 0.7 } },
+            .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_ctl_lerp"), .w = 0.7, .ctl = true } },
         };
         set.sums_ = .{ .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_rank_sum") } }, .{ .rig = rig, .k = .{ .f = try m.function("tf_rtp2_ctl_rank_sum"), .ctl = true } } };
         set.heads = .{
