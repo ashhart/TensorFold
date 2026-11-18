@@ -2,8 +2,8 @@
 const std = @import("std");
 const mtl = @import("metal");
 const dec = @import("h3_image_decoder");
-const resample = @import("picture_writer").resample;
-const png = @import("picture_writer").png;
+const resample = @import("core").picture.resample;
+const png = @import("core").png;
 const selftest = @import("h3_image_decoder_selftest.zig");
 
 const vae = dec.vae;
