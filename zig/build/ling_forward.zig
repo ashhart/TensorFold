@@ -44,7 +44,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "ling_checkpoint", .module = ling_ck }, .{ .name = "ling_rows", .module = ling_rows }, .{ .name = "ling_forward", .module = ling_forward } },
+        .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "ling_checkpoint", .module = ling_ck }, .{ .name = "ling_rows", .module = ling_rows }, .{ .name = "ling_forward", .module = ling_forward }, .{ .name = "ling_mla", .module = ling_mla } },
     }) });
     b.step("tf-ling-forward", "Build the native Ling bf16 full-forward diagnostic").dependOn(&b.addInstallArtifact(ling_forward_tool, .{}).step);
     const python = b.graph.environ_map.get("TF_LING_PYTHON") orelse "python3";
@@ -76,6 +76,4 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "ling_checkpoint", .module = ling_ck } },
     }) });
     b.step("tf-ling-checkpoint", "Build the native bf16 Ling checkpoint validator").dependOn(&b.addInstallArtifact(ling_checkpoint, .{}).step);
-
-    @import("rotary_sweep.zig").steps(b, target, metal_mod);
 }
