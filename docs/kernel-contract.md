@@ -422,10 +422,17 @@ the four-output gate/up and down kernels' activations and outputs. On an Ultra's
 with the norm after (`glm_kda_parts`, `glm_kda_norm`) keep `kda_rows`' bytes at 2 to 16 rows. The boundary's two-group
 split runs in the same boundary entries, and the attention entry runs the prefetched score and value bodies with a
 control that multiplies the prefetched block. The one-row router and indexer-gate logits (`glm_route_logits_one`, fp32
-and bf16 out) also meet float64 at every gate, each row its own one-row launch, and give `tf_route_logits`' bits. Gate 1
-plants NaN and both infinities and requires the predecessor's bytes, NaN payloads included; these entries compare and
-keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source fault red at
-`shapes`, and its launches are in `glm_launch_records.zig`.
+and bf16 out) also meet float64 at every gate, each row its own one-row launch, and give `tf_route_logits`' bits. The
+core route select (`tf_route_select`, its picks by simd max and min and its groups' offsets by prefix sums) keeps main's
+picks, weights, held groups, pick lists and counts at GLM's shape (every expert held, or either half) and Step-5's, over
+ties, NaNs, signed zeros and -inf biases. `glm_mla_norms` (three roles, and four with the query norm) keeps main's
+`glm_rms`, `glm_layer_norm` and `glm_scale` launches; the attention entry's scores kernel scales the queries by 1/16 as
+it loads them, against main's `glm_scale` first. The boundary that combines a MoE block's picks (`tf_hc_expand_mix_moe`,
+and its parts to 2 rows) keeps main's combine then expand, and a one-row MoE layer whose gate/up groups replay the
+select keeps main's select then the one-row gathers (its picks held to the 16 experts given weights by -inf biases
+elsewhere). Gate 1 plants NaN and both infinities and requires the predecessor's bytes, NaN payloads included; these
+entries compare and keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source
+fault red at `shapes`, and its launches are in `glm_launch_records.zig`.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
 3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
 replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
