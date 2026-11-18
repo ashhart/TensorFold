@@ -89,6 +89,8 @@ ASCII and UTF16 spans, names, decoded images, legal inputs and public build evid
 Base64 is recursively inspected within bounds; a recognized encoded archive/binary requiring another decoder is refused.
 Extraction limits, unknown payload kinds, unreviewed sections, changed inputs and failed tools fail the gate.
 Private decoder reports, raw findings, diagnostic logs, readable corpora and context configuration are never uploaded.
+The public build receipt withholds home directory fields and records the hash of the complete runner-local manifest.
+The public receipt itself is scanned and bound to the final archive.
 A failed compiler stage can print only a normalized diagnostic tail that passes both privacy and secret scans.
 
 The shared Windows packager preserves bin/tensorfold.exe and the native CLI banner.

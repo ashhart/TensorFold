@@ -16,7 +16,7 @@ import zipfile
 
 from artifact_gate import (unpack, verify_source, stable_snapshot, require_catalog,
                            require_bridge_cuda, require_native_images, resolve_encoded_findings, secret_scan, allowed_import)
-from build_preview import verify_publication
+from build_preview import verify_publication, public_provenance
 from cuda_review import containers
 from pe_review import review
 from privacy_review import Scanner, word_hash
@@ -261,6 +261,16 @@ class RefusalControls(unittest.TestCase):
             (root / "untracked-input.txt").write_text("synthetic unreviewed input\n")
             with self.assertRaisesRegex(ValueError, "clean complete"):
                 verify_source(root, source)
+
+    def test_public_provenance_withholds_home_paths_but_keeps_build_evidence(self):
+        argv = [r"C:\Users\fixture\tool.exe", "-Dtarget=x86_64-windows-gnu", "/home/fixture/input"]
+        private = {"commands": [{"argv": argv, "log_sha256": "a" * 64}], "toolchain": {"version": "0.17.0"}}
+        public = public_provenance(private)
+        self.assertEqual(public["commands"][0]["argv"], ["$WITHHELD_HOME_PATH", argv[1], "$WITHHELD_HOME_PATH"])
+        self.assertEqual(public["commands"][0]["log_sha256"], "a" * 64)
+        self.assertEqual(public["toolchain"], private["toolchain"])
+        self.assertNotIn("fixture", json.dumps(public))
+        self.assertIn("fixture", json.dumps(private))
 
     def test_final_publication_freeze_refuses_changed_zip(self):
         with tempfile.TemporaryDirectory() as directory:

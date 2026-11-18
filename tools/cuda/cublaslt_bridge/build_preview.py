@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 from artifact_gate import qualify, stable_snapshot, secret_scan
 from runtime_overlay import create
 from runtime_sources import digest, fetch
-from privacy_review import Scanner
+from privacy_review import RULES, Scanner
 
 HERE = Path(__file__).resolve().parent
 STAGE = "plan"
@@ -54,6 +54,17 @@ def tree(root):
             result.append({"path": path.relative_to(root).as_posix(),
                            "bytes": path.stat().st_size, "sha256": digest(path)})
     return result
+
+
+def public_provenance(value):
+    """Project build evidence without exposing machine-local home directory fields."""
+    if isinstance(value, dict):
+        return {key: public_provenance(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [public_provenance(item) for item in value]
+    if isinstance(value, str) and RULES["home-path"].search(value):
+        return "$WITHHELD_HOME_PATH"
+    return value
 
 
 def verify_publication(repo, directory):
@@ -262,7 +273,11 @@ def main():
     public = work / "publish"
     public.mkdir()
     provenance_path = public / "BUILD-PROVENANCE.json"
-    write(provenance_path, provenance)
+    raw_provenance_path = work / "build-provenance.private.json"
+    write(raw_provenance_path, provenance)
+    published_provenance = public_provenance(provenance)
+    published_provenance["private_record_sha256"] = digest(raw_provenance_path)
+    write(provenance_path, published_provenance)
     STAGE = "artifact-review"
     report = qualify(repo, work, archive, gitleaks, context_path, [provenance_path])
     # Smoke only the already reviewed CLI, without model or CUDA initialization.
