@@ -162,6 +162,7 @@ export function startPull(opts: PullOptions): PullHandle {
         await runStep(step, index)
       }
       await measure()
+      if (cancelled) throw new Error('cancelled')
       state.state = 'done'
       state.phase = 'Downloaded'
       if (state.totalBytes != null) state.receivedBytes = state.totalBytes
