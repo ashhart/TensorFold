@@ -192,18 +192,32 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     std.debug.print("matmul check (layer 0 KDA in-projection, {d} rows x {d}): {d} of {d} bf16 outputs differ ({d:.3}%), at most {d} steps\n", .{ rows, N, differ, @as(usize, rows) * N, 100 * @as(f64, @floatFromInt(differ)) / @as(f64, @floatFromInt(@as(usize, rows) * N)), worst });
 }
 
-/// Prompt chunk GPU time, median of `reps`: whole, then each class left out (alone with `only`); pairs run it together.
+/// Prompt chunk GPU time, median of `reps`: whole, then each class left out (alone with `only`); GLM_PROFILE_AT=N.
 pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, parts: bool) !void {
     const pr = &(e.pr orelse return error.NoPromptPath);
     const C = fwd.Class;
-    const rows: u32 = @intCast(@min(prompt.len, pr.rows));
-    if (rows + 1 > e.s.cap) return error.ContextFull;
+    // GLM_PROFILE_AT=N: the chunk at position N, the prompt's rows before it run first (the caches a long prompt has)
+    const at: u32 = if (platform.c.getenv("GLM_PROFILE_AT")) |v| @intCast(@min(try std.fmt.parseInt(usize, std.mem.span(v), 10), prompt.len - 1)) else 0;
+    const rows: u32 = @intCast(@min(prompt.len - at, pr.rows));
+    if (at + rows + 1 > e.s.cap) return error.ContextFull;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     e.sync();
-    @memcpy(Engine.u32s(e.prompt_ids, rows), prompt[0..rows]);
+    @memcpy(Engine.u32s(e.prompt_ids, at + rows), prompt[0 .. at + rows]);
+    if (at > 0) e.s.reset();
+    var done: u32 = 0;
+    while (done < at) { // the rows before the chunk, in chunks, as a prompt pass runs them
+        const n = @min(pr.rows, at - done);
+        var x = e.ctx();
+        x.sc = &pr.streams;
+        const b = e.begin();
+        prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids.at(@as(usize, done) * 4), n, done);
+        try e.finish(b.cb, b.enc);
+        fwd.flipKda(&x);
+        done += n;
+    }
     const P = fwd.Part;
-    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out") } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends, 0, 0 };
+    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out"), P.bit("hc_mix"), P.bit("r_router"), P.bit("r_topk"), P.bit("e_gateup"), P.bit("e_down"), P.bit("s_gateup"), P.bit("s_down"), P.bit("combine") } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var all: u32 = 0;
     for (classes) |m| all |= m;
     const times = try e.gpa.alloc(f64, reps);
@@ -217,9 +231,9 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
         const m = if (mask == all) all else if (only and mask != 0) all & ~mask else mask;
         if (parts) x.pskip = m else x.skip = m;
         for (0..reps + 1) |rep| {
-            e.s.reset();
+            if (at == 0) e.s.reset(); // later chunks keep the caches (each rep reads the same state, writes the same rows)
             const b = e.begin();
-            prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids, rows, 0);
+            prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), rows, at);
             try e.finish(b.cb, b.enc);
             if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3;
         }
@@ -227,7 +241,7 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
         const med = times[reps / 2];
         if (mi == 0) full = med;
         const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == all) "none" else if (parts) fwd.Part.names[@ctz(mask)] else fwd.Class.names[@ctz(mask)];
-        std.debug.print("prompt profile {d} rows{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
+        std.debug.print("prompt profile {d} rows at {d}{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, at, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
         if (mask != 0 and !only and mask != all) std.debug.print("  class {d:8.2} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
     }
 }
