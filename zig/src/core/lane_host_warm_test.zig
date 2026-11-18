@@ -1,4 +1,7 @@
 //! A background warm pass and the real request that arrives while it runs, through LaneHost.
+test {
+    _ = @import("lane_host_warm_handoff_test.zig");
+}
 const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
