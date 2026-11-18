@@ -12,6 +12,7 @@ const MASK_WORDS = q.MASK_WORDS;
 const Model = loader.Model;
 const Proj = loader.Proj;
 const SPLIT = q.SPLIT;
+const PREMIN = 1024; // decode.cl's PREMIN: XPU_ATTN_PREF leaves rows below it on the slices
 const limits = @import("limits.zig");
 const cand = @import("cand.zig");
 const tail = @import("prompt_tail.zig");
@@ -43,6 +44,9 @@ pub const Acts = struct {
     pm: *anyopaque,
     pl: *anyopaque,
     po: *anyopaque,
+    pmp: *anyopaque, // XPU_ATTN_PREF partials of the prefix chunks: fp32 [16, aq, chunks], and pop [.., 256]
+    plp: *anyopaque,
+    pop: *anyopaque,
     pscr: *anyopaque, // fp32 [maxRows, D]
     logits: *anyopaque, // rank 0: fp16 [16, VOCAB] (peers: minimal stub)
     shard_logits: *anyopaque, // TP>1: fp16 [16, vocab_len]
@@ -75,6 +79,7 @@ pub const Acts = struct {
         const rows = q.maxRows();
         const nc = limits.chunks(rows);
         const ns = limits.splits(q.MAX_CTX, SPLIT);
+        const npc: usize = if (q.attn_pref != 0) q.MAX_CTX / q.attn_pref + 1 else 1;
         const h_cols: usize = @max(@as(usize, D), @max(@as(usize, sh.ff), @as(usize, sh.od)));
         const max_g_stride: usize = gStride(h_cols / 64);
         const p_cols: usize = @max(@as(usize, 2 * sh.ff), @max(@as(usize, sh.gdn_in), @as(usize, sh.att_in)));
@@ -99,6 +104,9 @@ pub const Acts = struct {
             .pm = try d.alloc_(16 * @as(usize, sh.aq) * ns * 4),
             .pl = try d.alloc_(16 * @as(usize, sh.aq) * ns * 4),
             .po = try d.alloc_(16 * @as(usize, sh.aq) * ns * 256 * 4),
+            .pmp = try d.alloc_(16 * @as(usize, sh.aq) * npc * 4),
+            .plp = try d.alloc_(16 * @as(usize, sh.aq) * npc * 4),
+            .pop = try d.alloc_(16 * @as(usize, sh.aq) * npc * 256 * 4),
             .pscr = try d.alloc_(rows * D * 4),
             .logits = try d.alloc_(if (rank == 0) 16 * VOCAB * 2 else 64),
             .shard_logits = try d.alloc_(if (q.TP > 1) 16 * @as(usize, vocab_len) * 2 else 64),
@@ -418,8 +426,21 @@ pub fn forwardRunner(r: *q.Runner, ids: []const i32, p0: u32, mode: Mode) !?i32 
                 } else if (wide) {
                     try d.launch(d.k.attn_prompt, .{ .x = (wr + 7) / 8, .y = sh.akv }, .{ wa.q, l.kc.?, l.vc.?, wa.y, @as(i32, @intCast(ap0)), @as(i32, @intCast(wr)), @as(f32, 1.0 / 16.0) });
                 } else {
-                    try d.launch(d.k.attn_decode, .{ .x = T, .y = sh.akv, .z = ns }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi_max_pos != null) tree else table, mt, mpos, kvCap() });
-                    try d.launch(d.k.attn_merge, .{ .x = sh.aq * 16, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                    const multi = mode.multi_max_pos != null;
+                    const pre: u32 = if (!multi or !mode.tree) q.attn_pref else 0;
+                    const top: u32 = if (mode.multi_max_pos) |mp_top| mp_top else p0 + 15; // no row of the round is past it
+                    const nch: u32 = if (pre != 0 and top >= PREMIN + 16) (top - 16) / pre else 0; // chunks any row of the round uses
+                    if (nch != 0) {
+                        const npc: u32 = q.MAX_CTX / pre + 1;
+                        const nst: u32 = (@max(pre, PREMIN) + 16 + SPLIT - 1) / SPLIT; // a row's slices past its prefix
+                        const pg: ze.GroupCount = .{ .x = if (multi) T else (T * 6 + 7) / 8, .y = sh.akv, .z = nch };
+                        if (q.kv_i8) try d.launch(d.k.attn_pref8, pg, .{ a.q, l.kc.?, l.vc.?, a.pmp, a.plp, a.pop, t32, @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(f32, 1.0 / 16.0), mt, mpos, kvCap() }) else try d.launch(d.k.attn_pref, pg, .{ a.q, l.kc.?, l.vc.?, a.pmp, a.plp, a.pop, t32, @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(f32, 1.0 / 16.0), mt, mpos });
+                        try d.launch(d.k.attn_tail, .{ .x = T, .y = sh.akv, .z = nst }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(nst)), @as(f32, 1.0 / 16.0), if (multi) tree else table, mt, mpos, kvCap(), @as(i32, @intCast(pre)) });
+                        try d.launch(d.k.attn_merge2, .{ .x = sh.aq, .y = T }, .{ a.pmp, a.plp, a.pop, a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(npc)), @as(i32, @intCast(pre)), @as(i32, @intCast(nst)), table, mpos });
+                    } else {
+                        try d.launch(d.k.attn_decode, .{ .x = T, .y = sh.akv, .z = ns }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi_max_pos != null) tree else table, mt, mpos, kvCap() });
+                        try d.launch(d.k.attn_merge, .{ .x = sh.aq * 16, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
+                    }
                 }
                 if (q.kv8 & 1 != 0) try d.launch(d.k.rot_heads, .{ .x = wr, .y = sh.aq }, .{wa.y});
                 const p_attn: *anyopaque = if (tail_at) |t0| off(a.p, t0 * @as(usize, sh.att_in) * 2) else a.p;

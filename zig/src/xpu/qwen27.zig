@@ -152,6 +152,8 @@ pub var prompt_tail_on = true;
 pub var a8_group: u32 = 0;
 pub var kv8: i32 = 0;
 pub var kv_i8 = false;
+/// XPU_ATTN_PREF=CH (a multiple of 32 from 64 to 4096): decode attention reads the prefix once a round on DPAS.
+pub var attn_pref: u32 = 0;
 pub var rot_on: i32 = 0;
 pub var prefill_int4 = false;
 pub var int4_sites: u32 = 8;
@@ -253,6 +255,10 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .gdn_step = try d.kernel(md, "gdn_step", 16),
         .attn_decode = try d.kernel(md, "attn_decode", 16),
         .attn_merge = try d.kernel(md, "attn_merge", 16),
+        .attn_pref = try d.kernel(md, "attn_pref", 16),
+        .attn_pref8 = try d.kernel(md, "attn_pref8", 16),
+        .attn_tail = try d.kernel(md, "attn_tail", 16),
+        .attn_merge2 = try d.kernel(md, "attn_merge2", 16),
         .kv_move = try d.kernel(md, "kv_move", 16),
         .exl3_gemv = try d.kernel(md, "exl3_gemv", 16),
         .rot_heads = try d.kernel(mg, "rot_heads", 16),
@@ -285,7 +291,7 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
         .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
     };
-    for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
+    for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.attn_pref, d.k.attn_pref8, d.k.attn_tail, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
 }
 
 pub const Runner = struct {
@@ -375,6 +381,8 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
         if (std.c.getenv("XPU_KV_INT8") != null) kv_i8 = true;
+        if (std.c.getenv("XPU_ATTN_PREF")) |v| attn_pref = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (attn_pref != 0 and (attn_pref % 32 != 0 or attn_pref < 64 or attn_pref > 4096)) return error.AttnPrefNotAMultipleOf32From64To4096;
         if (std.c.getenv("XPU_PREFILL_INT4") != null) prefill_int4 = true;
         if (std.c.getenv("XPU_PREFILL_INT4_SITES")) |v| int4_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_KV8")) |v| kv8 = try std.fmt.parseInt(i32, std.mem.span(v), 10);
