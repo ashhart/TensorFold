@@ -402,15 +402,22 @@ GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 an
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
-GLM-5.3-Flash's other served Metal launches (`metal_glm_launch.zig`, names `metal glm launch ...`) each run the
-loader's own library text beside the kernel they replace, on the same inputs, and must give its bytes in every written
-buffer, untouched guards and poisoned padding included. The decode select's merge (rows within 3,072 blocks) and its
-mark and merge (past 8,192 blocks, to rows past 65,536 blocks where the merge falls back to the whole row) keep
+GLM-5.3-Flash's other served Metal launches (`metal_glm_launch.zig`, names `metal glm launch ...`) each run the loader's
+own library text beside the kernel they replace, on the same inputs, and must give its bytes in every written buffer,
+untouched guards and poisoned padding included. The decode select's merge (rows within 3,072 blocks) and its mark and
+merge (past 8,192 blocks, to rows past 65,536 blocks where the merge falls back to the whole row) keep
 `glm_index_select`'s key lists over ties, signed zeros, NaNs, infinities and a floor that overshoots. The windowed KDA
 step (`glm_kda_window`, 64 heads, and `glm_kda_window_tp`, 32) keeps `kda_rows`' outputs, next state and next conv
-window at 2 to 16 rows. Gate 1 plants NaN and both infinities and requires the predecessor's bytes, NaN payloads
-included; these entries compare and keep sums rather than requalify them, so gate 4 does not apply. Each has a control,
-a planted source fault red at `shapes`, and its launches are in `glm_launch_records.zig`.
+window at 2 to 16 rows. A window's dense attention as `attendRows` launches it (`glm_latent_scores_rows`,
+`glm_softmax_rows`, `glm_latent_values_rows`) keeps main's one-row launches' scores, probabilities and outputs row by
+row, 1 to 2,048 keys across the 256-key join and the 1,024-key split, against a frozen copy of main's `glm_attn.metal`.
+The hyper-connection boundary as `core/hc.zig` launches it (the expand's parts on six groups a slice to 4 rows) keeps
+main's expand and split (a frozen `hc_boundary.metal`) in the streams, partial sums, normed row, post and comb, as raw
+words, for separate streams, in place and at a first read. The decode experts at `moe.zig`'s outputs a simdgroup keep
+the four-output gate/up and down kernels' activations and outputs. Gate 1 plants NaN and both infinities and requires
+the predecessor's bytes, NaN payloads included; these entries compare and keep sums rather than requalify them, so gate
+4 does not apply. Each has a control, a planted source fault red at `shapes`, and its launches are in
+`glm_launch_records.zig`.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
 3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
 replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
