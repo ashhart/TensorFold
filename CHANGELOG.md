@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Transcribe on CUDA: the language model loads from the bf16 release as published, with exact bf16 caches and no conversion. The audio encoder runs on the GPU: log-mel, the ASR encoder, the streaming speaker encoder and its cache, fusion and projection. `tf-cuda-test audio-check` writes every encoder stage. Every other Nemotron checkpoint loads as before, and audio input in the server follows in #1632 (#1631). Thanks to @BobClawblaw, and to @cwschroeder for the CI report.
+
 - CUDA: Gemma 4, Dory and Spark2.5 can keep conversations on disk through the shared kept-image store (#3135, part of #840). Thanks to @jschmied.
 
 - CUDA: a dense Qwen 3.5 MLP's NVFP4 prompt gate, up and activation run in one launch for prompt rows past 16, with the same bytes (#3252). Thanks to @jschmied.
