@@ -155,7 +155,7 @@ class Model:
                 y[t] += self.mlp(x[t:t + 1], f"{p}experts.{int(idx[t, j])}.", le)[0] * w[t, j]
         return r(r(y) + self.mlp(x, p + "shared_experts.", ls))
 
-    def logits(self, ids):
+    def logits(self, ids, trace=None):
         c, ck = self.c, self.ck
         x = ck.t("model.word_embeddings.weight").double()[ids]
         for i in range(c["num_hidden_layers"]):
@@ -166,6 +166,8 @@ class Model:
             x = self.r(x + (self.mla(h, p + "attention.") if mla else self.kda(h, p + "attention.")))
             h = self.norm(x, ck.t(p + "post_attention_layernorm.weight"))
             x = self.r(x + (self.moe(h, p + "mlp.", i) if i >= c["first_k_dense_replace"] else self.mlp(h, p + "mlp.", 0)))
+            if trace is not None:
+                trace(i, x)
         self.hidden = self.norm(x, ck.t("model.norm.weight"))
         return self.hidden @ ck.lin("lm_head").T
 
@@ -192,6 +194,7 @@ def main():
     a.add_argument("ckpt", help="a ling-synth directory (config.json, model.safetensors) or a sharded checkpoint's")
     a.add_argument("out", help="the reference file: ids, float64 and bf16-point logits, the picks it routed on")
     a.add_argument("--tokens", type=int, default=88)
+    a.add_argument("--layer-trace", help="write per-layer float64 and bf16-point hidden rows beside logits")
     a.add_argument("--picks", help="route on these picks (i32 [MoE layers][tokens][top_k], the graph's) instead")
     a.add_argument("--mtp", help="also the MTP layer's logits (float64, bf16 points) and its own picks, to this file")
     a.add_argument("--ids", help="these tokens (i32, ling-lanes' OUT.ids) instead of the fixed walk; --tokens follows")
@@ -235,8 +238,17 @@ def main():
         forced = torch.frombuffer(bytearray(open(o.picks, "rb").read()), dtype=torch.int32).view(nm, T, -1)
     with torch.no_grad():
         exact = Model(ck, c, lambda z: z, forced)
-        l64 = exact.logits(ids)
-        lbf = Model(ck, c, bf16, forced).logits(ids)
+        traces = [[], []]
+        def capture(which):
+            return lambda layer, x: traces[which].append(x.clone())
+        l64 = exact.logits(ids, capture(0) if o.layer_trace else None)
+        lbf = Model(ck, c, bf16, forced).logits(ids, capture(1) if o.layer_trace else None)
+        if o.layer_trace:
+            with open(o.layer_trace, "wb") as f:
+                f.write(b"TFLINGH1" + struct.pack("<3I", c["num_hidden_layers"], T, c["hidden_size"]))
+                for layers in traces:
+                    for x in layers:
+                        f.write(x.contiguous().numpy().tobytes())
         if o.mtp:  # the bf16-point model's own picks route its MTP layer; float64's are written for the flips
             rounded = Model(ck, c, bf16, forced)
             rounded.logits(ids)
