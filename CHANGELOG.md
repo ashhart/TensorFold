@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on CUDA: combine the routed experts with the shared expert in one pass, preserving the FMA order and BF16 rounding while removing an intermediate FP32 buffer pass.
+- DeepSeek-V4.1 on CUDA: combine the routed experts with the shared expert in one pass, preserving the FMA order and BF16 rounding while removing an intermediate FP32 buffer pass (#3827).
 
 - Tools: add the heat-exchanger agent evaluation and its bounded Python execution helper (#3086).
 
