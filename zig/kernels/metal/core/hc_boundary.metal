@@ -79,6 +79,76 @@ template <bool EXPAND>
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
 
+// tf_hc_expand_mix's parts on MIX / 4 groups a slice (z: 4 mixes; z 0 also squares, streams): the same sums, order.
+template <bool EXPAND>
+[[kernel]] void tf_hc_expand_mix_parts(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
+                                   const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
+                                   const device uint4* FNP [[buffer(4)]], device bfloat* XNEW [[buffer(5)]],
+                                   device float* PART [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
+                                   uint3 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float red[8][5];
+  const int j = int(tg.x), r = int(tg.y), og = int(tg.z);
+  const uint t = tpos.x;
+  const device bfloat* xo = XOLD + size_t(r) * F;
+  float vals[4];
+  float ss = 0.0f;
+  for (int tn = 0; tn < 4; tn++) {
+    const int f = 1024 * j + 4 * int(t) + tn;
+    float v;
+    if (EXPAND) {
+      const int s = f / TF_D, d = f - s * TF_D;
+      const float y = POST[r * S + s] * float(BRANCH[size_t(r) * TF_D + d]);
+      const device float* c = COMB + r * S * S;
+      float mm = c[0 * S + s] * float(xo[0 * TF_D + d]);
+      mm = fma(c[1 * S + s], float(xo[1 * TF_D + d]), mm);
+      mm = fma(c[2 * S + s], float(xo[2 * TF_D + d]), mm);
+      mm = fma(c[3 * S + s], float(xo[3 * TF_D + d]), mm);
+      const bfloat nb = bfloat(hc_add_nc(y, mm));
+      if (og == 0) XNEW[size_t(r) * F + f] = nb;
+      v = float(nb);
+    } else {
+      v = float(xo[f]);
+    }
+    vals[tn] = v;
+    ss = hc_sq_acc(ss, v);
+  }
+  float acc[5];
+  {
+    const device uint4* w = FNP + (size_t(og * 8 + int(sg)) * 32 + lane) * SLICES * 2 + j * 2;
+    float inter[4][4];
+    for (int h = 0; h < 2; h++) {
+      const uint4 v = w[h];
+      const uint words[4] = {v.x, v.y, v.z, v.w};
+      for (int k = 0; k < 4; k++) {
+        const int e = h * 8 + k * 2;
+        inter[e / 4][e % 4] = as_type<float>(words[k] << 16);
+        inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[k] & 0xffff0000u);
+      }
+    }
+    for (int tm = 0; tm < 4; tm++) {
+      float a = 0.0f;
+      for (int tn = 0; tn < 4; tn++) a += inter[tm][tn] * vals[tn];
+      acc[tm] = a;
+    }
+  }
+  acc[4] = ss;
+  const int parts = og == 0 ? 5 : 4;
+  for (int i = 0; i < parts; i++) {
+    const float v = simd_sum(acc[i]);
+    if (lane == 0) red[sg][i] = v;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(t) < parts) {
+    float a = red[0][t];
+    for (int k = 1; k < 8; k++) a += red[k][t];
+    PART[(size_t(r) * SLICES + j) * PARTS + (t < 4 ? og * 4 + int(t) : MIX)] = a;
+  }
+}
+
+template [[host_name("tf_hc_expand_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<true>) tf_hc_expand_mix_parts<true>;
+template [[host_name("tf_hc_first_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<false>) tf_hc_expand_mix_parts<false>;
+
 // In-place pending branch to the streams (one prompt buffer): TF_D / 4 a row, 4 stream columns each, read before write.
 [[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                                      const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
