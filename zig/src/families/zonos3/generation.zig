@@ -131,6 +131,11 @@ pub const Run = struct {
         }
     }
 
+    /// The row `sample` appended: what a pass over several requests' lanes runs for this one.
+    pub fn lastRow(r: *const Run) [W]i32 {
+        return r.rows.items[r.rows.items.len - 1];
+    }
+
     /// The generated rows (caller frees) and the end-of-audio frame; the run is spent.
     pub fn result(r: *Run) !Result {
         return .{ .rows = try r.rows.toOwnedSlice(r.gpa), .eos_frame = r.eos_frame };

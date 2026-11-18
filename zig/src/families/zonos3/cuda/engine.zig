@@ -41,6 +41,9 @@ pub const Probe = struct {
 /// One stream's caches and position: what `run` reads and advances.
 pub const Lane = struct { kv: [cfg.layers][2]u64, conv: [cfg.layers]u64, gstate: [cfg.layers]u64, state: u64, position: usize = 0 };
 
+/// One lane's next row in a pass over several lanes, and where its logits go.
+pub const Turn = struct { lane: usize, row: [W]i32, out: *[cfg.head_rows]f32 };
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     o: Options,
@@ -295,12 +298,35 @@ pub const Engine = struct {
         var at: usize = 0;
         while (at < rows.len) {
             const t = @min(e.o.max_rows, rows.len - at);
-            try e.pass(rows[at..][0..t], at, replaced, at + t == rows.len, probe);
+            try e.pass(rows[at..][0..t], at, replaced, at + t == rows.len, probe, null);
             at += t;
         }
     }
 
-    fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe) !void {
+    /// One row of each of `turns`' lanes in one pass; each lane moves a position and its logits go to its `out`.
+    pub fn runLanes(e: *Engine, turns: []const Turn) !void {
+        if (turns.len == 0) return;
+        if (turns.len > e.o.max_rows) return error.TooManyLanes;
+        e.lanes.items[e.active].position = e.position;
+        var rows: [64][W]i32 = undefined;
+        if (turns.len > rows.len) return error.TooManyLanes;
+        for (turns, rows[0..turns.len], 0..) |turn, *row, b| {
+            if (turn.lane >= e.lanes.items.len) return error.NoSuchLane;
+            for (turns[0..b]) |earlier| if (earlier.lane == turn.lane) return error.LaneTwice;
+            if (e.lanes.items[turn.lane].position + 1 > e.o.max_ctx) return error.ContextFull;
+            for (turn.row[0..cfg.codebooks]) |code| if (code < 0 or code >= cfg.audio_vocab) return error.BadFrameRow;
+            if (turn.row[cfg.codebooks] < 0 or turn.row[cfg.codebooks] >= e.w.text_rows) return error.BadFrameRow;
+            row.* = turn.row;
+        }
+        try e.pass(rows[0..turns.len], 0, &.{}, true, null, turns);
+        for (turns, 0..) |turn, b| try e.buf(e.logits + b * cfg.head_rows * 4).downloadAsync(0, std.mem.asBytes(turn.out), e.stream.handle);
+        try e.stream.synchronize();
+        for (turns) |turn| e.lanes.items[turn.lane].position += 1;
+        e.position = e.lanes.items[e.active].position;
+    }
+
+    /// `many`: a row of each of those turns' lanes at the lane's own position; else rows in a row on the lane in use.
+    fn pass(e: *Engine, rows: []const [W]i32, first: usize, replaced: []const Replace, last: bool, probe: ?Probe, many: ?[]const Turn) !void {
         const k = &e.k;
         const s = e.stream;
         const t = rows.len;
@@ -328,10 +354,14 @@ pub const Engine = struct {
                 .gdn => |g| {
                     const ps = cfg.gdn_proj;
                     try k.linear(s, g.in_proj, e.xn, D, D, ps, e.proj, ps, t, .{});
-                    try k.convSilu(s, e.proj, ps, t, g.conv, e.conv[li], e.conv_out, cfg.gdn_conv);
+                    if (many) |turns| {
+                        for (turns, 0..) |turn, b| try k.convSilu(s, e.proj + b * ps * 4, ps, 1, g.conv, e.lanes.items[turn.lane].conv[li], e.conv_out + b * cfg.gdn_conv * 4, cfg.gdn_conv);
+                    } else try k.convSilu(s, e.proj, ps, t, g.conv, e.conv[li], e.conv_out, cfg.gdn_conv);
                     if (probe) |p| try p.at("gdn_conv_{d}", li, e.conv_out, t, cfg.gdn_conv);
                     try k.gdnPrep(s, e.conv_out, e.proj, ps, 4 * cfg.gdn_inner, g.a_log, g.dt_bias, e.gates, t);
-                    try k.gdn(s, e.conv_out, e.gates, t, e.gstate[li], e.o32);
+                    if (many) |turns| {
+                        for (turns, 0..) |turn, b| try k.gdn(s, e.conv_out + b * cfg.gdn_conv * 4, e.gates + b * cfg.gdn_heads * 2 * 4, 1, e.lanes.items[turn.lane].gstate[li], e.o32 + b * cfg.gdn_inner * 4);
+                    } else try k.gdn(s, e.conv_out, e.gates, t, e.gstate[li], e.o32);
                     if (probe) |p| try p.at("gdn_recurrent_{d}", li, e.o32, t, cfg.gdn_inner);
                     try k.gatedNorm(s, e.o32, e.proj, ps, cfg.gdn_conv, g.out_weight, e.y, t);
                     if (probe) |p| try p.at("gdn_gated_{d}", li, e.y, t, cfg.gdn_inner);
@@ -341,8 +371,17 @@ pub const Engine = struct {
                     try k.linear(s, a.wq, e.xn, D, D, cfg.attn_inner, e.q, cfg.attn_inner, t, .{});
                     try k.linear(s, a.wkv, e.xn, D, D, 2 * cfg.kv_width, e.kvraw, 2 * cfg.kv_width, t, .{});
                     try k.linear(s, a.gater, e.xn, D, D, cfg.heads, e.gate, cfg.heads, t, .{});
-                    try k.attnPrep(s, e.q, e.kvraw, a.temp, pos0, e.kv[li][0], e.kv[li][1], cfg.rope_theta, t);
-                    try k.attention(s, e.q, e.kv[li][0], e.kv[li][1], e.gate, pos0, e.y, t);
+                    if (many) |turns| {
+                        for (turns, 0..) |turn, b| {
+                            const l = &e.lanes.items[turn.lane];
+                            const qb = e.q + b * cfg.attn_inner * 4;
+                            try k.attnPrep(s, qb, e.kvraw + b * 2 * cfg.kv_width * 4, a.temp, l.position, l.kv[li][0], l.kv[li][1], cfg.rope_theta, 1);
+                            try k.attention(s, qb, l.kv[li][0], l.kv[li][1], e.gate + b * cfg.heads * 4, l.position, e.y + b * cfg.attn_inner * 4, 1);
+                        }
+                    } else {
+                        try k.attnPrep(s, e.q, e.kvraw, a.temp, pos0, e.kv[li][0], e.kv[li][1], cfg.rope_theta, t);
+                        try k.attention(s, e.q, e.kv[li][0], e.kv[li][1], e.gate, pos0, e.y, t);
+                    }
                     try k.linear(s, a.wo, e.y, cfg.attn_inner, cfg.attn_inner, D, attn_out, D, t, .{});
                 },
             }
@@ -379,7 +418,7 @@ pub const Engine = struct {
         if (probe) |p| try p.f(p.ctx, "attnres_final", e.mixed, t, D);
         try k.rmsnorm(s, e.mixed, D, e.w.out_norm, e.xn, D, D, cfg.eps, t);
         if (probe) |p| try p.f(p.ctx, "out_norm", e.xn, t, D);
-        if (probe != null) {
+        if (probe != null or many != null) {
             try k.linear(s, e.w.head, e.xn, D, D, cfg.head_rows, e.logits, cfg.head_rows, t, .{});
             try k.softcap(s, e.logits, t * cfg.head_rows, cfg.softcap);
             if (probe) |p| try p.f(p.ctx, "logits", e.logits, t, cfg.head_rows);
@@ -387,7 +426,7 @@ pub const Engine = struct {
             try k.linear(s, e.w.head, e.xn + (t - 1) * D * 4, D, D, cfg.head_rows, e.logits, cfg.head_rows, 1, .{});
             try k.softcap(s, e.logits, cfg.head_rows, cfg.softcap);
         }
-        e.position = pos0 + t;
+        if (many == null) e.position = pos0 + t;
     }
 
     /// The last row's logits [codebooks][audio_vocab] to the host.
