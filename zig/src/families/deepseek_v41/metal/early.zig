@@ -1,20 +1,23 @@
-//! Drafts behind the verify: a greedy window's picks, acceptance, ingest and next pass queued behind it on the GPU.
+//! Drafts behind the verify: a window's picks (greedy or keyed), acceptance, ingest and next pass queued on the GPU.
 const std = @import("std");
 const mtl = @import("metal");
 const host = @import("dsv41");
-const sources = @import("kernel_sources");
 const dspark = @import("dspark.zig");
 const plan_ = @import("dspark_plan.zig");
 const pipelines = @import("pipelines.zig");
+const picks_ = @import("early_picks.zig");
 
 const iface = host.iface;
+const lanes = host.lanes;
 const R = pipelines.max_rows;
 const Plan = plan_.Plan;
 const threads = 1024;
+pub const raced = picks_.raced;
 
 pub const Stats = struct {
-    /// chains queued behind a window; their passes the lanes took, and those dropped (their ring rows put back)
+    /// chains queued behind a window (`keyed`: of sampled windows); their passes the lanes took, and those dropped
     queued: u64 = 0,
+    keyed: u64 = 0,
     used: u64 = 0,
     dropped: u64 = 0,
     /// chains whose accepted count a test swapped (`skew_every`)
@@ -40,9 +43,8 @@ const Chain = struct {
 pub const Early = struct {
     a: std.mem.Allocator,
     x: *dspark.Pass,
-    pick: mtl.Pipeline,
-    accept: mtl.Pipeline,
-    /// tokens [R] u32, picks [R] u32, then the accepted count and the bonus
+    picks: picks_.Picks,
+    /// tokens [R] u32, picks [R] u32, the accepted count and the bonus, then each sampled row's key base [R] u64
     state: mtl.Buffer,
     /// the plan of each accepted count: [R][Plan.ints] i32
     plans: mtl.Buffer,
@@ -57,15 +59,12 @@ pub const Early = struct {
     const tokens_at = 0;
     const picks_at = 4 * R;
     const result_at = 8 * R;
+    const bases_at = 8 * R + 16;
 
     pub fn init(a: std.mem.Allocator, x: *dspark.Pass) !*Early {
-        const lib = try mtl.Library.fromSource(x.device, sources.dsv41.early, mtl.CompileOptions.mlx());
-        defer lib.deinit();
-        const pick = try mtl.Pipeline.init(x.device, lib, "tf_dsv41_early_pick", false);
-        errdefer pick.deinit();
-        const accept = try mtl.Pipeline.init(x.device, lib, "tf_dsv41_early_accept", false);
-        errdefer accept.deinit();
-        const state = try x.device.buffer(result_at + 16, mtl.ResourceOptions.shared);
+        var picks = try picks_.Picks.init(x.device);
+        errdefer picks.deinit();
+        const state = try x.device.buffer(bases_at + 8 * R, mtl.ResourceOptions.shared);
         errdefer state.deinit();
         const plans = try x.device.buffer(@as(usize, R) * Plan.ints * 4, mtl.ResourceOptions.shared);
         errdefer plans.deinit();
@@ -76,14 +75,13 @@ pub const Early = struct {
             set.commit();
         }
         const e = try a.create(Early);
-        e.* = .{ .a = a, .x = x, .pick = pick, .accept = accept, .state = state, .plans = plans };
+        e.* = .{ .a = a, .x = x, .picks = picks, .state = state, .plans = plans };
         return e;
     }
 
     pub fn deinit(e: *Early) void {
         e.drain() catch {};
-        e.pick.deinit();
-        e.accept.deinit();
+        e.picks.deinit();
         e.state.deinit();
         e.plans.deinit();
         e.a.destroy(e);
@@ -91,9 +89,9 @@ pub const Early = struct {
 
     // the window ---------------------------------------------------------------------------------------------------
 
-    /// Before a window: `slot`'s rows from `start` may draft behind it (keyed rows stay with the host's sampler).
+    /// Before a window: `slot`'s rows from `start` may draft behind it (a keyed window's sampling is read at `queue`).
     pub fn arm(e: *Early, slot: u32, start: u64, rows: u32, sampled: bool) void {
-        if (sampled) return;
+        _ = sampled;
         if (e.armed != null) e.crowded = true else e.armed = .{ .slot = slot, .start = start, .rows = rows };
     }
 
@@ -111,7 +109,9 @@ pub const Early = struct {
         const B = c.dspark_block;
         const n: u32 = @intCast(g.tokens.len);
         if (g.slot != armed.slot or g.start != armed.start or n != armed.rows or g.slot >= x.runs.len) return;
-        if (g.sampling) |s| if (s.temperature > 0) return;
+        const keyed = if (g.sampling) |s| s.temperature > 0 else false;
+        if (keyed and !raced(g.sampling.?, c.vocab)) return;
+        if (g.draws.len != n) return;
         // rows past the accepted ones land in the block's own rows, which every pass writes before it reads them
         if (n == 0 or n > B + 1 or n > R or g.start + n + B > x.tables.positions) return;
         // the slot's rows from the window on as the drafter last had them (a cut window's put back), then kept again
@@ -123,20 +123,22 @@ pub const Early = struct {
         defer pool.pop();
         const cb = x.queue.commandBuffer();
         // a buffer never committed never runs: the rings stay as they are
-        e.encode(cb, logits, logits_off, taps, n, skew) catch return;
+        e.encode(cb, logits, logits_off, taps, n, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
         e.stats.skewed += @intFromBool(skew);
+        e.stats.keyed += @intFromBool(keyed);
         e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .taps = taps, .cb = cb.retain() };
         e.stats.queued += 1;
     }
 
-    /// The host's part of a chain: the window's ids, a plan for each accepted count, the block's ids.
+    /// The host's part of a chain: the window's ids (and keyed rows' key bases), each accepted count's plan, the block.
     fn stage(e: *Early, g: iface.Segment, n: u32) !void {
         const x = e.x;
         const c = x.c;
         const B = c.dspark_block;
         const ids = e.state.slice(u32, R);
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
+        if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
         const all = e.plans.slice(i32, @as(usize, R) * Plan.ints);
         for (0..n) |acc| {
             const m = all[acc * Plan.ints ..][0..Plan.ints];
@@ -153,16 +155,12 @@ pub const Early = struct {
         host.dspark.blockIds(.{ .block = B, .noise = c.dspark_noise_token }, 0, block);
     }
 
-    /// The chain's encoders: picks and acceptance, the ingest of every window row (serial), then the pass (concurrent).
-    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, n: u32, skew: bool) !void {
+    /// The chain's encoders: picks (keyed by `smp`) and acceptance, every window row's ingest (serial), the pass.
+    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, n: u32, skew: bool, smp: ?lanes.Sampling) !void {
         const x = e.x;
         const se = cb.compute(.serial);
-        se.setPipeline(e.pick);
-        se.setValue(@as(u32, x.c.vocab), 0);
-        se.setBuffer(logits, logits_off, 1);
-        se.setBuffer(e.state, picks_at, 2);
-        se.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(threads, 1, 1));
-        se.setPipeline(e.accept);
+        e.picks.encode(se, .{ .buf = logits, .off = logits_off }, .{ .buf = e.state, .off = picks_at }, .{ .buf = e.state, .off = bases_at }, n, x.c.vocab, smp);
+        se.setPipeline(e.picks.accept);
         se.setValue([3]u32{ n, Plan.ints, @intFromBool(skew) }, 0);
         se.setBuffer(e.state, tokens_at, 1);
         se.setBuffer(e.state, picks_at, 2);
@@ -263,6 +261,6 @@ pub const Early = struct {
 
     pub fn describe(e: *const Early, buf: []u8) []const u8 {
         const s = e.stats;
-        return std.fmt.bufPrint(buf, "drafts behind the verify: {d} queued, {d} used, {d} dropped; {d} drafter ring rows put back", .{ s.queued, s.used, s.dropped, e.x.undo.restored }) catch buf[0..0];
+        return std.fmt.bufPrint(buf, "drafts behind the verify: {d} queued ({d} keyed), {d} used, {d} dropped; {d} drafter ring rows put back", .{ s.queued, s.keyed, s.used, s.dropped, e.x.undo.restored }) catch buf[0..0];
     }
 };
