@@ -26,7 +26,7 @@ fn ranked(rank: u32) !void {
     const a = testing.allocator;
     var c = fixture.dsparkConfig();
     c.dspark_markov_rank = rank;
-    const ds = try fds.Ds.initWith(a, testing.io, c, limit, 81, 3, true);
+    const ds = try fds.Ds.initWith(a, testing.io, c, limit, 81, 3, .{ .gpu_chain = true });
     defer ds.deinit();
     try testing.expect(ds.pass.mk != null);
     const n: usize = c.dspark_block;

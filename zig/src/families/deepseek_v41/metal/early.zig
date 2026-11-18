@@ -32,8 +32,10 @@ const Chain = struct {
     slot: u32,
     start: u64,
     rows: u32,
-    /// its pass's chain runs on the GPU (a greedy window)
+    /// its pass's chain runs on the GPU (dspark.Pass.drawsOnGpu)
     gpu: bool,
+    /// the drafts its pass makes
+    block: u32,
     taps: mtl.Buffer,
     cb: mtl.CommandBuffer,
     /// the window's first rows the lanes asked ingested: the chain's own ingest when its picks accepted as many
@@ -108,36 +110,35 @@ pub const Early = struct {
         const g = group[0];
         const x = e.x;
         const c = x.c;
-        const B = c.dspark_block;
+        const B = x.blockOf(g.slot);
         const n: u32 = @intCast(g.tokens.len);
         if (g.slot != armed.slot or g.start != armed.start or n != armed.rows or g.slot >= x.runs.len) return;
         const keyed = if (g.sampling) |s| s.temperature > 0 else false;
         if (keyed and !raced(g.sampling.?, c.vocab)) return;
         if (g.draws.len != n) return;
         // rows past the accepted ones land in the block's own rows, which every pass writes before it reads them
-        if (n == 0 or n > B + 1 or n > R or g.start + n + B > x.tables.positions) return;
+        if (n == 0 or n > c.dspark_block + 1 or n > R or g.start + n + B > x.tables.positions) return;
         // the slot's rows from the window on as the drafter last had them (a cut window's put back), then kept again
         x.undo.settle(g.slot, g.start);
-        e.stage(g, n) catch return;
+        e.stage(g, n, B) catch return;
         x.undo.save(g.slot, g.start, n);
         const skew = e.skew_every > 0 and n > 1 and (e.stats.queued + 1) % e.skew_every == 0;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = x.queue.commandBuffer();
         // a buffer never committed never runs: the rings stay as they are
-        e.encode(cb, logits, logits_off, taps, g.start, n, skew, if (keyed) g.sampling.? else null) catch return;
+        e.encode(cb, logits, logits_off, taps, g.start, n, B, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
         e.stats.skewed += @intFromBool(skew);
         e.stats.keyed += @intFromBool(keyed);
-        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .gpu = x.mk != null, .taps = taps, .cb = cb.retain() };
+        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .block = B, .gpu = x.mk != null, .taps = taps, .cb = cb.retain() };
         e.stats.queued += 1;
     }
 
     /// The host's part of a chain: the window's ids (and keyed rows' key bases), each accepted count's plan, the block.
-    fn stage(e: *Early, g: iface.Segment, n: u32) !void {
+    fn stage(e: *Early, g: iface.Segment, n: u32, B: u32) !void {
         const x = e.x;
         const c = x.c;
-        const B = c.dspark_block;
         const ids = e.state.slice(u32, R);
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
         if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
@@ -153,14 +154,14 @@ pub const Early = struct {
             }
             var run = x.runs[g.slot];
             run.land(g.start, acc + 1);
-            try Plan.writeBlockTo(m, c, 0, g.slot, g.start + acc + 1, run);
+            try Plan.writeBlockTo(m, c, 0, g.slot, g.start + acc + 1, run, B);
         }
         const block: []u32 = @alignCast(std.mem.bytesAsSlice(u32, x.b.bytes(x.b.ids, 4 * B)));
         host.dspark.blockIds(.{ .block = B, .noise = c.dspark_noise_token }, 0, block);
     }
 
     /// The chain's encoders: picks (keyed by `smp`) and acceptance, every window row's ingest (serial), the pass.
-    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, start: u64, n: u32, skew: bool, smp: ?lanes.Sampling) !void {
+    fn encode(e: *Early, cb: mtl.CommandBuffer, logits: mtl.Buffer, logits_off: usize, taps: mtl.Buffer, start: u64, n: u32, B: u32, skew: bool, smp: ?lanes.Sampling) !void {
         const x = e.x;
         const se = cb.compute(.serial);
         e.picks.encode(se, .{ .buf = logits, .off = logits_off }, .{ .buf = e.state, .off = picks_at }, .{ .buf = e.state, .off = bases_at }, n, x.c.vocab, smp);
@@ -179,7 +180,7 @@ pub const Early = struct {
         se.end();
         try ok;
         const ce = cb.compute(.concurrent);
-        const l: dspark.Launch = .{ .rows = x.c.dspark_block, .asks = &.{}, .gpu = x.mk != null };
+        const l: dspark.Launch = .{ .rows = B, .n = B, .asks = &.{}, .gpu = x.mk != null };
         const done = x.encodeAll(ce, &l);
         ce.end();
         try done;
@@ -217,7 +218,7 @@ pub const Early = struct {
         const m = ch.deferred.?;
         if (got.acc + 1 == m and got.bonus == ask.anchor) {
             e.keep(ch, m);
-            const l: dspark.Launch = .{ .rows = e.x.c.dspark_block, .asks = (&ask)[0..1], .gpu = ch.gpu };
+            const l: dspark.Launch = .{ .rows = ch.block, .n = ch.block, .asks = (&ask)[0..1], .gpu = ch.gpu };
             try e.x.finish(&l, out);
             e.stats.used += 1;
             return;

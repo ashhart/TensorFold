@@ -410,3 +410,41 @@ test "dsv41 metal dspark: refusals (rows past the taps, a position past the tabl
     c.dspark_experts = 12;
     try testing.expectError(error.UnsupportedDspark, pkg.pipelines.check(&c));
 }
+
+test "dsv41 metal dspark: a block of 7 with a narrow 5: the narrow pass equals a block of 5's, a wide one makes 7 drafts" {
+    const a = testing.allocator;
+    var c7 = fixture.dsparkConfig();
+    c7.dspark_block = 7;
+    const d7 = try Ds.initWith(a, testing.io, c7, limit, 69, 1, .{ .narrow = 5 });
+    defer d7.deinit();
+    const d5 = try Ds.initWith(a, testing.io, fixture.dsparkConfig(), limit, 69, 1, .{});
+    defer d5.deinit();
+    var bad: usize = 0;
+    var wide_live: usize = 0;
+    for (0..3) |round| {
+        const at: u64 = 420 + 23 * round;
+        for ([_]*Ds{ d7, d5 }) |d| {
+            d.pass.reset(0);
+            try d.ingest(0, at - 180, 180, 70 + round);
+        }
+        const ask = Ds.ask(0, @intCast(9 + round), at, if (round == 2) sampled(at) else null);
+        // a narrow pass (the slot's last window verified fewer than 5 drafts)
+        d7.pass.note(0, 3);
+        const o7 = try Out.init(a, &c7);
+        defer o7.deinit(a);
+        var p7 = [1]pkg.dspark.Proposal{.{ .drafts = o7.drafts, .conf = o7.conf }};
+        try d7.pass.propose(&.{ask}, &p7);
+        const o5 = try proposeOne(a, d5, ask);
+        defer o5.deinit(a);
+        for (o7.drafts[0..5], o5.drafts) |x, y| bad += @intFromBool(x != y);
+        for (o7.conf[0..5], o5.conf) |x, y| bad += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+        for (o7.conf[5..]) |q| bad += @intFromBool(q != 0);
+        // a wide pass (the last window verified 5): seven drafts, each with a confidence
+        d7.pass.note(0, 6);
+        try d7.pass.propose(&.{ask}, &p7);
+        for (o7.conf) |q| wide_live += @intFromBool(q > 0);
+    }
+    std.debug.print("{s} dsv41 metal dspark narrow passes: {d} values differ from a block of 5's; {d} of 21 wide confidences set\n", .{ if (bad == 0 and wide_live == 21) "PASS" else "FAIL", bad, wide_live });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual(@as(usize, 21), wide_live);
+}
