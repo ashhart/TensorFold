@@ -149,11 +149,12 @@ pub fn kindOf(c: Call) Kind {
     return kindFor(c, 1);
 }
 
-/// K in whole 1024s and 2048 or more columns a batch: e at 1-5 rows, d above; else f at 2-6 rows and b otherwise.
+/// f at one row; K in whole 1024s and 2048 or more columns a batch: e at 2-5 rows, d above; else f to 6 rows, then b.
 fn kindFor(c: Call, launches: u32) Kind {
     if (c.split == 1) return .a;
+    if (c.rows == 1) return .f;
     if (c.k % 1024 == 0 and c.n * launches >= 2048) return if (c.rows <= 5) .e else .d;
-    return if (c.rows >= 2 and c.rows <= 6) .f else .b;
+    return if (c.rows <= 6) .f else .b;
 }
 
 /// `encode`'s two launches as one: a group of `tiles` simdgroups a column block, the same bits, no scratch.
