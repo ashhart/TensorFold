@@ -37,8 +37,74 @@ pub fn load(a: Allocator, io: std.Io, file: []const u8) ?Doc {
 }
 
 pub fn parse(a: Allocator, bytes: []const u8) ?Doc {
-    const doc = std.json.parseFromSliceLeaky(Doc, a, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .parse_numbers = false }) catch return null;
+    defer parsed.deinit();
+    const doc = readValue(Doc, a, parsed.value) catch return null;
     return if (doc.schema == schema) doc else null;
+}
+
+// The typed integer parser's quad-float fallback pulls compiler-rt's memcpy into the native server.
+fn readValue(comptime T: type, a: Allocator, source: std.json.Value) std.json.ParseFromValueError!T {
+    switch (@typeInfo(T)) {
+        .int => switch (source) {
+            .number_string, .string => |raw| return decimalInteger(T, raw),
+            else => return error.UnexpectedToken,
+        },
+        .optional => |info| {
+            if (source == .null) return null;
+            return try readValue(info.child, a, source);
+        },
+        .@"struct" => |info| {
+            if (source != .object) return error.UnexpectedToken;
+            var result: T = undefined;
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
+                @field(result, name) = if (source.object.get(name)) |v|
+                    try readValue(Field, a, v)
+                else
+                    attrs.defaultValue(Field) orelse return error.MissingField;
+            }
+            return result;
+        },
+        .pointer => |info| {
+            if (info.size != .slice) @compileError("device profiles only contain slice pointers");
+            if (info.child == u8 and source == .string) return a.dupe(u8, source.string);
+            if (source != .array) return error.UnexpectedToken;
+            const values = try a.alloc(info.child, source.array.items.len);
+            for (values, source.array.items) |*out, item| out.* = try readValue(info.child, a, item);
+            return values;
+        },
+        .bool, .@"enum" => return std.json.innerParseFromValue(T, a, source, .{}),
+        else => @compileError("unsupported device profile type " ++ @typeName(T)),
+    }
+}
+
+fn decimalInteger(comptime T: type, raw: []const u8) std.json.ParseFromValueError!T {
+    if (std.mem.indexOfAny(u8, raw, ".eE") == null) return std.fmt.parseInt(T, raw, 10);
+    const negative = raw[0] == '-';
+    const unsigned = if (negative or raw[0] == '+') raw[1..] else raw;
+    const split = std.mem.indexOfAny(u8, unsigned, "eE") orelse unsigned.len;
+    const mantissa = unsigned[0..split];
+    const exponent = if (split == unsigned.len) 0 else try std.fmt.parseInt(i64, unsigned[split + 1 ..], 10);
+    const point = std.mem.indexOfScalar(u8, mantissa, '.') orelse mantissa.len;
+    const decimal_places: i64 = @intCast(mantissa.len -| (point + 1));
+    const significant = std.mem.trimEnd(u8, mantissa, "0");
+    const zeros: i64 = @intCast(mantissa.len - significant.len);
+    var seen_digit = zeros != 0;
+    var value: T = 0;
+    for (significant, 0..) |ch, index| {
+        if (index == point) continue;
+        if (ch < '0' or ch > '9') return error.InvalidNumber;
+        seen_digit = true;
+        value = try std.math.add(T, try std.math.mul(T, value, 10), ch - '0');
+    }
+    if (!seen_digit) return error.InvalidNumber;
+    if (value == 0) return 0;
+    if (negative) return error.Overflow;
+    const places = try std.math.add(i64, exponent, zeros - decimal_places);
+    if (places < 0) return error.InvalidNumber;
+    const power = std.math.cast(T, places) orelse return error.Overflow;
+    const scale = std.math.powi(T, 10, power) catch return error.Overflow;
+    return std.math.mul(T, value, scale);
 }
 
 pub fn write(w: *std.Io.Writer, doc: Doc) !void {
