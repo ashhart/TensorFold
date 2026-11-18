@@ -210,7 +210,9 @@ pub fn chatBody(a: Allocator, marker: []const u8, stream: bool) ![]const u8 {
 
 pub const Served = struct {
     code: u8 = 255,
+    finished: std.atomic.Value(bool) = .init(false),
     fn run(x: *Served, gpa: Allocator, io: std.Io, args: cli.Args, setup: serve.Setup) void {
+        defer x.finished.store(true, .release);
         x.code = serve.run(gpa, io, args, setup);
     }
 };
@@ -223,6 +225,7 @@ pub fn start(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow: *S
 /// ``start`` with flags beyond the defaults (key file, admission); the host and port stay the fixture's.
 pub fn startWith(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow: *Slow, tt: *TestText, x: *Served, extra_args: cli.Args) !std.Thread {
     listen_port.store(0, .release);
+    x.finished.store(false, .release);
     var args = extra_args;
     args.host = "127.0.0.1";
     args.port = 0;
@@ -234,7 +237,13 @@ pub fn startWith(gpa: Allocator, io: std.Io, env: *std.process.Environ.Map, slow
         .on_listen = onListen,
         .stop = .{ .ctx = slow, .halt = Slow.halt, .close = Slow.close },
     } });
-    while (listen_port.load(.acquire) == 0) std.Io.sleep(io, .fromMilliseconds(2), .awake) catch {};
+    while (listen_port.load(.acquire) == 0) {
+        if (x.finished.load(.acquire)) {
+            t.join();
+            return error.ServerStoppedBeforeListening;
+        }
+        std.Io.sleep(io, .fromMilliseconds(2), .awake) catch {};
+    }
     return t;
 }
 

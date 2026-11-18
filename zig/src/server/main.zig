@@ -22,7 +22,7 @@ const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
-    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--stall-seconds N] [--stall-exit] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++

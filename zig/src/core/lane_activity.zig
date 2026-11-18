@@ -22,3 +22,17 @@ pub const Failure = struct {
     ctx: *anyopaque,
     call: *const fn (*anyopaque, anyerror) void,
 };
+
+/// Both observers follow the same work lifetime; a family's own progress/failure policy is retained.
+pub const Work = struct {
+    backend: Activity.Scope,
+    sentinel: Activity.Scope,
+    pub fn enter(h: anytype) Work {
+        const sentinel = Activity.enter(h.stall.activity());
+        return .{ .backend = Activity.enter(h.activity), .sentinel = sentinel };
+    }
+    pub fn end(w: *Work) void {
+        w.backend.end();
+        w.sentinel.end();
+    }
+};
