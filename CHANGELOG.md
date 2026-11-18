@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `tensorfold web`: when `uv` is missing, the fallback points to uv's installation guide and asks for `uv` on PATH instead of suggesting `pip install --user`; the printed install command, consent and exit status are unchanged (#3746, fixes #3743). Thanks to @AIFlowML.
+
 - Desktop: a manual Refresh results click in Benchmarks now takes priority over an in-flight status poll, so duplicate reads stay coalesced and a late response from the old poll cannot replace the refreshed result (#3817). Thanks to @AIFlowML.
 
 - Desktop: new local project Chats and Tasks keep an explicit Provider key or Default login selection through thread creation and renderer configuration instead of falling back to a named account; projects that omit the account field keep their old fallback (#3810). Thanks to @AIFlowML.
