@@ -44,6 +44,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
+    const mrows = b.addExecutable(.{ .name = "tf-glm-moe-rows", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_moe_rows.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-moe-rows", "GLM-5.3-Flash's decode experts of 1-16 rows at two and four outputs a simdgroup, bit for bit, GPU time").dependOn(&b.addInstallArtifact(mrows, .{}).step);
     const arows = b.addExecutable(.{ .name = "tf-glm-attn-rows", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/glm_attn_rows.zig"),
         .target = target,
