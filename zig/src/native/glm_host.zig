@@ -88,7 +88,9 @@ fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Eng
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, decode_share: ?f64, learn: ?Learn, vision: ?api.VisionOpen, drafter: ?[]const u8, drafter_name: ?[]const u8, drafter_bits: u8) !*Host {
     // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
-    const eng = try ge.Engine.loadWith(gpa, io, dir, window + 64, speed_up, learn != null, limits, true);
+    const pool_tokens = try glm.pool_size.fromEnv();
+    try glm.pool_size.needsPool(pool_tokens, speed_up != null);
+    const eng = try ge.Engine.loadWith(gpa, io, dir, glm.pool_size.cacheTokens(window, pool_tokens), speed_up, learn != null, limits, true, pool_tokens);
     errdefer eng.deinit();
     if (drafter) |d| try glm.metal_dflash_load.load(gpa, io, eng, d, drafter_bits); // freed with the engine
     var toks: [96]u32 = undefined;
@@ -127,7 +129,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    const serves = @min(window, glm.pool.capacity(&h.slots) -| (glm.state.max_rows + 1)); // prompt + reply a stream's caches hold beside its last window (a pool keeps whole blocks)
+    const serves = glm.pool_size.streamWindow(window, glm.pool.capacity(&h.slots)); // a pool keeps whole blocks
     var offer: ?api.Vision = null;
     if (eng.vision) |v| {
         const o = vision.?;
@@ -180,7 +182,9 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     errdefer h.host.stop();
     if (eng.followsPeer()) h.follower = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, follow, .{h});
     const role = if (eng.ep == null) "" else if (eng.followsPeer()) ", speed-up rank 1" else ", speed-up rank 0";
-    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), context {d} tokens, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, window, n });
+    var ctx_words: [160]u8 = undefined;
+    const context = glm.pool_size.contextWords(&ctx_words, if (pool_tokens == null) window else serves, pool_tokens, glm.pool.capacity(&h.slots));
+    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), {s}, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, context, n });
     return h;
 }
 
