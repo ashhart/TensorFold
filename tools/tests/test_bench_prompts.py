@@ -80,8 +80,11 @@ class DistinctCell(unittest.TestCase):
         self.assertEqual([c["prompt"] for c in report["cells"]], ["distinct"])
         cell = report["cells"][0]
         self.assertEqual({sent_text(b) for b in bodies if b["max_tokens"] != 16}, {q["prompt"] for q in items[:4]})
-        self.assertEqual(cell["alone"], {"equal": 4, "unequal": 0, "failed": 0})
-        self.assertEqual(cell["serial"], {"equal": 4, "unequal": 0, "failed": 0})
+        # The canned replies stream one after another and carry no draft counters: equal, but proving neither.
+        self.assertEqual(cell["alone"], {"equal": 4, "unequal": 0, "failed": 0,
+                                         "vacuous": "1 of 1 reps had no two streams decoding at once"})
+        self.assertEqual(cell["serial"], {"equal": 4, "unequal": 0, "failed": 0, "accepted": 0, "plain_drafted": 0,
+                                          "vacuous": "the server reported no draft counters for some runs"})
         self.assertEqual(sum(1 for b in bodies if b.get("draft") is False), 4)
 
     def test_prompts_and_mixed_are_exclusive(self):
