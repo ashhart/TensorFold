@@ -64,10 +64,7 @@ pub const Worker = struct {
         if (n > ls.len) return error.WindowTooWide;
         var at: usize = 2;
         for (0..n) |i| {
-            if (at + 2 > m.len or m[at + 1] > lanes.max_window or at + 2 + m[
-                at +
-                    1
-            ] > m.len) return error.WindowTooWide;
+            if (at + 2 > m.len or m[at + 1] > w.h.e.window or at + 2 + m[at + 1] > m.len) return error.WindowTooWide;
             ls[i] = try f.lane(m[at]);
             toks[i] = m[at + 2 ..][0..m[at + 1]];
             at += 2 + m[at + 1];

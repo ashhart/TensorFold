@@ -16,6 +16,13 @@ const widths = @import("widths.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats = admit.formats;
+/// MTP drafts the HIP head chains on one rank: `--mtp-drafts` is refused past this.
+pub const mtp_max_drafts: u32 = @import("head.zig").max_depth;
+
+/// Device bytes one lane holds (`window` tokens, `rw` window rows); `pub` so `deep_drafts_test.zig` checks it.
+pub fn laneBytesFor(window: usize, rw: usize, page: u64, state: u64, hidden: u64, act: u64) u64 {
+    return pages.pagesFor(window + rw + 1) * page + state * (rw + 2) + rw * hidden * act;
+}
 /// Positions a stream holds when neither --context nor the checkpoint's config names a window.
 pub const default_context: i64 = 32768;
 /// The engine cuts prompts itself.
@@ -206,14 +213,13 @@ fn prepare(
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({t})", .{ dir, err }),
     };
     errdefer e.deinit();
-    const capacity: usize = window + hip_lanes.max_window + 1;
+    const capacity: usize = window + e.window + 1;
     const token = try plan.tokenBytes(c, o.world, act, v.mtp);
     const state = try plan.streamBytes(c, o.world, act);
     const page = token * pages.tokens;
     const snap = state + c.hidden * act;
     // a lane: its pages, its Mamba state, its window's snapshots and the head's rows
-    const lane: u64 = pages.pagesFor(capacity) * page + state * (hip_lanes.max_window + 2) +
-        hip_lanes.max_window * c.hidden * act;
+    const lane: u64 = laneBytesFor(window, e.window, page, state, c.hidden, act);
     const fixed: u64 = v.weights + admit.scratch_bytes + (64 << 20);
     if (fixed >= room) return heard(steps, problem, admit.tooBig(a, v, .{ .window = window, .room = room }, problem));
     const left = room - fixed;
@@ -272,7 +278,7 @@ fn prepare(
         cache.pages,
         cache.snaps,
         e.o.chunk,
-        hip_lanes.max_window,
+        e.window,
     });
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup };
 }
@@ -326,7 +332,7 @@ pub fn open(
     return .{
         .backend = backend.backend(),
         .facts = backend.facts(),
-        .rows = hip_lanes.max_window,
+        .rows = @intCast(p.e.window),
         .ctx = own,
         .deinit = release,
         .streams = p.streams,
