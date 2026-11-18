@@ -44,7 +44,7 @@ const Held = struct {
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false, steps: bool = false, decode_share: ?f64 = null, early: bool = true };
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false, steps: bool = false, decode_share: ?f64 = null, early: bool = true, block: ?u32 = null };
 
 /// Set when a model opened with a residency owner closes: every buffer the target joined to it had left.
 pub var resident_left: ?bool = null;
@@ -54,7 +54,9 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
     const h = try a.create(Held);
     errdefer a.destroy(h);
     h.* = .{ .a = a, .f = undefined, .w = undefined };
-    h.f = try ff.Fwd.initWith(a, io, config(), limit, seed);
+    var cfg = config();
+    if (o.block) |b| cfg.dspark_block = b;
+    h.f = try ff.Fwd.initWith(a, io, cfg, limit, seed);
     errdefer h.f.deinit();
     const r = h.f.r;
     {
