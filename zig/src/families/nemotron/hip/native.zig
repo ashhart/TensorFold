@@ -188,6 +188,7 @@ fn prepare(
         .policy = dev.policy,
         .mtp = dev.policy.mtp.drafts > 0,
         .pool = false,
+        .cfg = v.config,
     }) catch |err| return switch (err) {
         error.PeerRefused, error.LinkFailed => steps.stoppedBy(a, problem),
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({t})", .{ dir, err }),
