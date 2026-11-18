@@ -70,6 +70,8 @@ pub const Pass = struct {
     runs: []Run,
     /// the context-free slot the layer encoders' Ctx names (the drafter reads its own rings)
     noslot: kv.Slot,
+    /// the drafter's weights and buffers held resident on the queue (null: no residency sets on this OS)
+    resident: ?mtl.ResidencySet = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
         if (c.mtp_layers == 0 or p.route_dspark == null or w.stages.len != c.mtp_layers) return error.NoDspark;
@@ -95,10 +97,33 @@ pub const Pass = struct {
         }
         x.runs = try a.alloc(Run, opt.slots);
         @memset(x.runs, .{});
+        x.resident = x.holdResident();
         return x;
     }
 
+    /// Every buffer a pass binds, resident in one set on the queue (outside one, an ingest waited up to 0.6 s).
+    fn holdResident(x: *const Pass) ?mtl.ResidencySet {
+        const set = x.device.residencySet(64) catch return null;
+        for (x.rings) |r| set.add(r);
+        for ([_]mtl.Buffer{ x.quant, x.plan.buf, x.b.buf, x.w.arena }) |b| set.add(b);
+        for (x.w.stages) |*l| {
+            set.add(l.arena);
+            set.add(l.table);
+            for (l.backing()) |b| set.add(b);
+        }
+        if (x.w.head) |h| set.add(h.buf);
+        set.commit();
+        set.requestResidency();
+        x.queue.addResidencySet(set);
+        std.log.info("dsv41 drafter: {d:.1} GiB kept resident in its own set", .{mtl.ResidencySet.gibs(set.allocatedSize())});
+        return set;
+    }
+
     pub fn deinit(x: *Pass) void {
+        if (x.resident) |set| {
+            x.queue.removeResidencySet(set);
+            set.deinit();
+        }
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
