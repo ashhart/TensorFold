@@ -160,11 +160,14 @@ pub const Checkpoint = struct {
     /// Every file's pages out of the page cache (safetensors.File.release).
     pub fn release(self: *const Checkpoint) void {
         for (self.files.items) |*f| f.release(self.gpa);
+        // Windows has no per-range advice: the step's whole set goes, once, rather than once a shard
+        @import("sys").working_set.release();
     }
 
     /// `release`, leaving `keep`'s bytes (parts of these files read later) in the pages they live in.
     pub fn releaseExcept(self: *const Checkpoint, keep: []const []const u8) void {
         for (self.files.items) |*f| f.releaseExcept(keep, self.gpa);
+        @import("sys").working_set.release();
     }
 
     /// Every tensor named `short`... read into the page cache by `readers` threads of their own until `join`.

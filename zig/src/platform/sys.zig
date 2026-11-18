@@ -23,6 +23,7 @@ pub const DynLib = if (windows) WinDynLib else if (builtin.os.tag == .macos) Mac
 pub const experimental = @import("experimental.zig");
 pub const memory_policy = @import("memory_policy.zig");
 pub const machine = @import("machine.zig");
+pub const working_set = @import("working_set.zig");
 pub const optional_libraries = @import("optional_libraries.zig");
 
 /// An environment variable's value, through libc (std.process.Environ.getPosix does not build on Windows).
