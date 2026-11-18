@@ -630,3 +630,42 @@ test "dsv41 metal serve: (j) drafts on the GPU over the whole vocabulary (greedy
     try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
     try testing.expect(rounds_same and r_off.drafted > 0 and st_on.used > 0 and st_on.dropped == 0 and st.dropped > 0);
 }
+
+test "dsv41 metal serve: (k) a block of 7 after windows of 5 drafts, 5 after others: with and behind the verify == serial" {
+    const p0 = try ids(150, 38);
+    defer gpa.free(p0);
+    const p1 = try ids(210, 39);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 555, .temperature = 0.9, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 40 }, .{ .prompt = p1, .max = 40, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    // the cost depth: mostly narrow passes; the static depth of 5 (narrow windows verify 5): wide passes after
+    var bad: usize = 0;
+    var same_rounds = true;
+    for ([_]bool{ false, true }) |static| {
+        if (static) {
+            _ = setenv("TF_DSV41_DEPTH", "static", 1);
+            _ = setenv("TF_DSV41_DRAFT_DEPTH", "7", 1);
+        }
+        defer if (static) {
+            _ = unsetenv("TF_DSV41_DEPTH");
+            _ = unsetenv("TF_DSV41_DRAFT_DEPTH");
+        };
+        var off: [2][]u32 = undefined;
+        const r_off = try servedWith(&asks, .{ .early = false, .block = 7, .narrow = 5 }, 0, &off, null);
+        defer freeAll(&off);
+        var on: [2][]u32 = undefined;
+        const r_on = try servedWith(&asks, .{ .early = true, .block = 7, .narrow = 5 }, 0, &on, null);
+        defer freeAll(&on);
+        var sk: [2][]u32 = undefined;
+        _ = try servedWith(&asks, .{ .early = true, .block = 7, .narrow = 5 }, 2, &sk, null);
+        defer freeAll(&sk);
+        bad += same(&want, &off) + same(&want, &on) + same(&want, &sk);
+        same_rounds = same_rounds and std.meta.eql(r_off, r_on);
+        say(bad == 0 and same_rounds, "(k) narrow 5 / wide 7, {s} depth: {d} replies differ; {d} rows in {d} windows", .{ if (static) "static" else "cost", bad, r_off.rows, r_off.windows });
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(same_rounds);
+}

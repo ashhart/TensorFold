@@ -100,14 +100,14 @@ pub const Plan = struct {
         return .{ .pos = p.at(ipos), .dest = p.at(idest) };
     }
 
-    /// One slot of a draft launch: `block` rows at positions p .. p + block - 1 in rows [row0, row0 + block).
-    pub fn writeBlock(p: *const Plan, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run) !void {
-        return writeBlockTo(p.ints32(), c, j, slot, start, ctx);
+    /// One slot of a draft launch: `n` rows at positions p .. p + n - 1 in rows [j * n, j * n + n).
+    pub fn writeBlock(p: *const Plan, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run, n: u32) !void {
+        return writeBlockTo(p.ints32(), c, j, slot, start, ctx, n);
     }
 
     /// `writeBlock` into `m`, a plan's ints held elsewhere (the plans a launch behind a verify picks from).
-    pub fn writeBlockTo(m: []i32, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run) !void {
-        const n = c.dspark_block;
+    pub fn writeBlockTo(m: []i32, c: *const Config, j: u32, slot: u32, start: u64, ctx: Run, n: u32) !void {
+        if (n == 0 or n > c.dspark_block) return error.BadRows;
         const row0 = j * n;
         if (row0 + n > max_rows or m.len < ints) return error.BadRows;
         const cx = ctx.context(c.window, start);
