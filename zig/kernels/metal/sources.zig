@@ -142,6 +142,8 @@ pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// A window's rows' dense-attention softmaxes in one launch, appended to ops/softmax.metal (tf_softmax_row).
+pub const glm_softmax_rows = @embedFile("glm_softmax_rows.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
 pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
