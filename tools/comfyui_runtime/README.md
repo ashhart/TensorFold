@@ -11,7 +11,7 @@ SM120 is refused by name. `install` and `update` read every GPU's compute capabi
 Generation also requires the NVIDIA driver and CUDA 13 cuBLASLt runtime libraries. The dynamic loader must find `libcuda.so.1` and `libcublasLt.so.13` (or `libcublasLt.so`) on its search path. An nvcc-only installation does not provide these generation prerequisites.
 
 ```sh
-python installer/tensorfold_runtime.py install \
+python tools/comfyui_runtime/tensorfold_runtime.py install \
   --comfy-root /path/to/ComfyUI \
   --backend cuda \
   --zig /path/to/zig \
@@ -40,7 +40,7 @@ The source archive pin was taken from the exact official URL above. An optional 
 ## Run
 
 ```sh
-python installer/tensorfold_runtime.py run --comfy-root /path/to/ComfyUI -- TRANSFORMER_DIR CASE OUT_DIR
+python tools/comfyui_runtime/tensorfold_runtime.py run --comfy-root /path/to/ComfyUI -- TRANSFORMER_DIR CASE OUT_DIR
 ```
 
 `run` refuses any GPU but GB10 (sm_121), verifies the active manifest and the worker's SHA-256, then replaces itself with the installed `tf-moss-image`, passing the arguments after `--` unchanged. The worker never starts, and so never loads weights, on a refused GPU.
@@ -48,8 +48,8 @@ python installer/tensorfold_runtime.py run --comfy-root /path/to/ComfyUI -- TRAN
 ## Updates and status
 
 ```sh
-python installer/tensorfold_runtime.py update --comfy-root /path/to/ComfyUI --nvcc /usr/local/cuda/bin/nvcc
-python installer/tensorfold_runtime.py status --comfy-root /path/to/ComfyUI
+python tools/comfyui_runtime/tensorfold_runtime.py update --comfy-root /path/to/ComfyUI --nvcc /usr/local/cuda/bin/nvcc
+python tools/comfyui_runtime/tensorfold_runtime.py status --comfy-root /path/to/ComfyUI
 ```
 
 `update` resolves the latest stable standalone engine automatically. If the installed engine, media revision and compatibility patch are current, it keeps the existing installation. An old manifest without the compatibility digest rebuilds MOSS before activation, including when the CLI version is unchanged. When only the standalone engine changes, it reuses the verified MOSS worker without requiring Zig or nvcc and without rebuilding them. Downgrades are refused. A changed media revision requires an explicitly updated integration release and its compatibility pin. If an existing installation fails integrity checks, `update` stops; `install` builds a verified replacement while preserving the old manifest until activation.
@@ -63,7 +63,7 @@ The checksum files for the latest CLI are fetched from the same official release
 ## Verification
 
 ```sh
-python -m unittest discover -s installer/tests -v
+python -m unittest discover -s tools/comfyui_runtime/tests -v
 ```
 
 These tests exercise archive attacks, release metadata, exact source/toolchain pins, GPU admission at install and run, subprocess failures, deadlines and descendant cleanup, offline status, tampering and failed-build/activation preservation. They do not establish image correctness, GPU compatibility or performance. The installer makes no claim that its probes qualify real generation.
