@@ -76,6 +76,37 @@ test "device profile: a scan saves, reads back whole, and stays until the hardwa
     try t.expectEqual(@as(?profile.Due, .hardware), (try scan.current(a, t.io, file, more, newer, "x", false, false)).scanned);
 }
 
+test "device profile: a changed Mac wired limit refreshes the saved budget" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try folder(a);
+    defer std.Io.Dir.cwd().deleteTree(t.io, root) catch {};
+    const file = try std.fs.path.join(a, &.{ root, ".tensorfold", "device.json" });
+    const mac = try parse.macos(a, "aarch64", fx.m1_max_wired);
+    const bin: scan.Binary = .{ .version = "test", .offer = .{ .version = "test", .backends = &.{"metal"} } };
+    const original = try scan.current(a, t.io, file, mac, bin, "2026-11-13T01:00:00Z", false, true);
+    try t.expect(original.saved and original.support.budget > 0);
+    const unchanged = try scan.current(a, t.io, file, mac, bin, "2026-11-13T02:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, null), unchanged.scanned);
+    try t.expect(scan.fresh(a, t.io, file, mac, bin.version) != null);
+
+    var limited = mac;
+    limited.gpu_wired_limit = bin.offer.margin;
+    const stale = scan.fresh(a, t.io, file, limited, bin.version);
+    const lower = try scan.current(a, t.io, file, limited, bin, "2026-11-13T03:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, .hardware), lower.scanned);
+    try t.expect(stale == null);
+    try t.expect(lower.saved);
+    try t.expectEqual(limited.gpu_wired_limit, lower.doc.machine.gpu_wired_limit);
+    try t.expectEqual(@as(u64, 0), lower.support.budget);
+    try t.expect(scan.fresh(a, t.io, file, limited, bin.version) != null);
+
+    const restored = try scan.current(a, t.io, file, mac, bin, "2026-11-13T04:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, .hardware), restored.scanned);
+    try t.expectEqual(original.support.budget, restored.support.budget);
+}
+
 test "device profile: a driver that does not answer keeps the OS's listing and a quick scan" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
