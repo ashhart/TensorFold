@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: the Parallel search tests no longer depend on the system's DNS (#3489). Thanks to @AIFlowML.
+
 - App: Git keeps working in the sandbox when macOS selects Xcode without a legacy `xcode_select_link` (#3479). Thanks to @AIFlowML.
 
 - App: an oversized scroll delta is refused as a bad request instead of stopping the computer-use helper (#3470). Thanks to @AIFlowML.
