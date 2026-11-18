@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: new local project Chats and Tasks keep an explicit Provider key or Default login selection through thread creation and renderer configuration instead of falling back to a named account; projects that omit the account field keep their old fallback (#3810). Thanks to @AIFlowML.
+
 - Tests: the Desktop power test runs the real power module with a fake process handle and a mock clock, checking owned shutdown, the restart backoff boundary and saved errors without looking up or stopping unrelated host processes (#3804). Thanks to @AIFlowML.
 
 - Desktop: deleting an unloaded checkpoint refreshes the engine snapshot so the open Models view drops its old Downloads row; the browser demo removes that row from its backing snapshot too (#3798, fixes #3796). Thanks to @AIFlowML.
