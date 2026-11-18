@@ -190,6 +190,27 @@ __global__ void combine_kernel(const float* __restrict__ y, const float* __restr
     out[(size_t)r * D + d] = acc;
 }
 
+// out[r][d] (bf16) = RNE(combine_kernel's chain + sy[r][d]): combine_kernel and add_bf16_kernel in one pass
+__global__ void combine_add_kernel(const float* __restrict__ y, const float* __restrict__ wts,
+                                   const float* __restrict__ sy, __nv_bfloat16* __restrict__ out, int D, int slots) {
+    const int r = blockIdx.x;
+    const int d = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
+    if (d >= D) return;
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    for (int k = 0; k < slots; ++k) {
+        const float w = wts[r * slots + k];
+        const float4 v = *reinterpret_cast<const float4*>(y + ((size_t)r * slots + k) * D + d);
+        a0 = fmaf(w, v.x, a0);
+        a1 = fmaf(w, v.y, a1);
+        a2 = fmaf(w, v.z, a2);
+        a3 = fmaf(w, v.w, a3);
+    }
+    const float4 s = *reinterpret_cast<const float4*>(sy + (size_t)r * D + d);
+    __nv_bfloat162* o = reinterpret_cast<__nv_bfloat162*>(out + (size_t)r * D + d);
+    o[0] = __halves2bfloat162(__float2bfloat16_rn(__fadd_rn(a0, s.x)), __float2bfloat16_rn(__fadd_rn(a1, s.y)));
+    o[1] = __halves2bfloat162(__float2bfloat16_rn(__fadd_rn(a2, s.z)), __float2bfloat16_rn(__fadd_rn(a3, s.w)));
+}
+
 // down_epilogue_kernel then combine_kernel in one launch, the same arithmetic in the same order (the same bits).
 __device__ __forceinline__ void store_out(float* o, float v) { *o = v; }
 __device__ __forceinline__ void store_out(__nv_bfloat16* o, float v) { *o = __float2bfloat16_rn(v); }

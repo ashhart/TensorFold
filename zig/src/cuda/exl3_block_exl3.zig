@@ -71,6 +71,7 @@ const up_sym = struct {
     const gateup_epilogue = "_ZN15tf_exl3_experts22gateup_epilogue_kernelEPKfPKiPK6__halfS6_S6_PS4_iiiifi";
     const down_epilogue = "_ZN15tf_exl3_experts20down_epilogue_kernelEPKfPKiPK6__halfPfiiii";
     const combine = "_ZN15tf_exl3_experts14combine_kernelEPKfS1_Pfii";
+    const combine_add = "_ZN15tf_exl3_experts18combine_add_kernelEPKfS1_S1_P13__nv_bfloat16ii";
     // templated on the output (R1: fp32, or bf16 rounded as stored = fp32 then .to(bf16))
     const down_combine_f32 = "_ZN15tf_exl3_experts19down_combine_kernelIfEEvPKfPKiPK6__halfPfS2_PT_iiiii";
     const down_combine_bf16 = "_ZN15tf_exl3_experts19down_combine_kernelI13__nv_bfloat16EEvPKfPKiPK6__halfPfS3_PT_iiiii";
@@ -136,6 +137,7 @@ pub const Functions = struct {
     gateup_epilogue: cuda.Function,
     down_epilogue: cuda.Function,
     combine: cuda.Function,
+    combine_add: cuda.Function,
     down_combine: [2]cuda.Function, // fp32, bf16 out
     gm_gu: [gm_k2s.len][2][gu_tiles.len]Gm, // [k2][xm - 1][cfg]
     gm_dn: [gm_k2s.len][dn_tiles.len]Gm,
@@ -161,6 +163,7 @@ pub const Functions = struct {
         f.gateup_epilogue = try experts.function(up_sym.gateup_epilogue);
         f.down_epilogue = try experts.function(up_sym.down_epilogue);
         f.combine = try experts.function(up_sym.combine);
+        f.combine_add = try experts.function(up_sym.combine_add);
         f.down_combine = .{ try experts.function(up_sym.down_combine_f32), try experts.function(up_sym.down_combine_bf16) };
         return f;
     }
@@ -420,6 +423,15 @@ pub const Ops = struct {
         for ([_]u64{ y, wts, out }) |v| a.add(v);
         for ([_]usize{ D, slots }) |v| a.add(int(v));
         try go(o.f.combine, o.s, .{ rows, (D + 255) / 256, 1 }, 256, 0, false, &a);
+    }
+
+    /// combine, then the shared expert's add and one bf16 rounding (add_bf16_kernel), in one pass: out bf16 [rows, D].
+    pub fn combineAdd(o: Ops, y: u64, wts: u64, sy: u64, out: u64, rows: usize, D: usize, slots: usize) !void {
+        if (D % 4 != 0) return error.Shape;
+        var a: cuda.Args = .{};
+        for ([_]u64{ y, wts, sy, out }) |v| a.add(v);
+        for ([_]usize{ D, slots }) |v| a.add(int(v));
+        try go(o.f.combine_add, o.s, .{ rows, (D / 4 + 255) / 256, 1 }, 256, 0, false, &a);
     }
 
     /// exl3x_down_combine_cuda: down_epilogue then combine in one launch, same bits; `out_bf16`: bf16 out (RNE).

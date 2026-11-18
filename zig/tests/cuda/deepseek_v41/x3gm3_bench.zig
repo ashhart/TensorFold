@@ -143,6 +143,25 @@ fn variantName(buf: []u8, v: usize) ![]const u8 {
     return std.fmt.bufPrint(buf, "v3[{d}] tile {d},{d},{d},{d},{d} lean {d}", .{ v, x.t[0], x.t[1], x.t[2], x.t[3], x.t[4], x.lean });
 }
 
+const Comb = struct {
+    o: exl3.Ops,
+    p: @typeInfo(@TypeOf(dsv41.Kernels.others)).@"fn".return_type.?,
+    y: u64,
+    w: u64,
+    sy: u64,
+    routed: u64,
+    out: u64,
+    R: usize,
+    fused: bool = false,
+
+    fn run(ctx: *const anyopaque) anyerror!void {
+        const s: *const Comb = @ptrCast(@alignCast(ctx));
+        if (s.fused) return s.o.combineAdd(s.y, s.w, s.sy, s.out, s.R, D, slots);
+        try s.o.combine(s.y, s.w, s.routed, s.R, D, slots);
+        try s.p.addBf16(s.routed, s.sy, s.out, s.R * D);
+    }
+};
+
 pub fn run(gpu: Gpu, k: *const dsv41.Kernels, rows_arg: ?[]const u8, reps_arg: ?[]const u8) !void {
     const gpa = gpu.gpa;
     const d = gpu.d;
@@ -270,6 +289,33 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels, rows_arg: ?[]const u8, reps_arg: ?
         st.xd = xd2.ptr;
         const dnd = try timeIt(stream, d, ticket, .{ .ctx = &st, .run = State.down }, reps);
         std.debug.print("  RESULT rows {d} {s}: v2 {d:.3} ms, v3 default {d:.3} ms ({d:.1}%), best variants {d:.3} ms ({d:.1}%)\n", .{ R, if (skew) "zipf" else "uniform", gu2 + dn2, gud + dnd, 100.0 * ((gud + dnd) - (gu2 + dn2)) / (gu2 + dn2), best_gu + best_dn, 100.0 * ((best_gu + best_dn) - (gu2 + dn2)) / (gu2 + dn2) });
+        {
+            const hw = try gpa.alloc(f32, R * slots);
+            defer gpa.free(hw);
+            for (hw) |*v| v.* = 0.05 + 0.45 * rng.unit();
+            const hs = try gpa.alloc(f32, R * D);
+            defer gpa.free(hs);
+            for (hs) |*v| v.* = -2.0 + 4.0 * rng.unit();
+            var w6 = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(hw));
+            defer w6.free();
+            var sy = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(hs));
+            defer sy.free();
+            var routed = try cuda.DeviceBuffer.alloc(d, 4 * R * D);
+            defer routed.free();
+            var out_a = try cuda.DeviceBuffer.alloc(d, 2 * R * D);
+            defer out_a.free();
+            var out_b = try cuda.DeviceBuffer.alloc(d, 2 * R * D);
+            defer out_b.free();
+            const cs: Comb = .{ .o = o, .p = k.others(stream), .y = y2.ptr, .w = w6.ptr, .sy = sy.ptr, .routed = routed.ptr, .out = out_a.ptr, .R = R };
+            var cf = cs;
+            cf.out = out_b.ptr;
+            cf.fused = true;
+            const t_two = try timeIt(stream, d, ticket, .{ .ctx = &cs, .run = Comb.run }, reps);
+            const t_one = try timeIt(stream, d, ticket, .{ .ctx = &cf, .run = Comb.run }, reps);
+            try stream.synchronize();
+            try sameDevice(gpa, "x3gm3-bench combine_add vs combine + add_bf16", out_b, out_a, 2 * R * D);
+            std.debug.print("  combine + add_bf16 {d:.3} ms, combine_add {d:.3} ms ({d:.1}%) BITEXACT\n", .{ t_two, t_one, 100.0 * (t_one - t_two) / t_two });
+        }
         if (!skew) {
             total_v2 += gu2 + dn2;
             total_v3 += gud + dnd;

@@ -66,6 +66,7 @@ pub fn experts(f: dk.exl3.Functions) void {
     note(f.gateup_epilogue, 32, 0, 1);
     note(f.down_epilogue, 32, 0, 1);
     note(f.combine, 256, 0, 1);
+    note(f.combine_add, 256, 0, 1);
     for (f.down_combine) |fun| note(fun, 1024, 0, 1); // Ops permits up to 32 routed slots.
     for (f.gm_dequant) |fun| note(fun, 32, 0, 1);
     for (f.gm_rot) |row| for (row) |fun| note(fun, 256, 0, 1);
