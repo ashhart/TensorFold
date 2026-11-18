@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: draft SenseNova-Loop-9B with its published mtp.safetensors head, keys-only intermediate prompt absorb and multi-stream batched draft rounds (#3868, fixes #3781).
+
 - Metal: serve SenseNova-Loop-9B natively in BF16 and AWQ 4-bit (g128) with 56-step two-stream mHC, 512K YaRN and vision (#3859, refs #3781).
 
 - App: confirming an `ultrathink` effort change now applies it (#3502). Thanks to @AIFlowML.

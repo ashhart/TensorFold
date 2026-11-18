@@ -197,11 +197,11 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 12. Add + norm | done¹ | done M¹ | yes | open M[#3859] |
 | 13. MoE grouped | done¹ | done¹ | no (dense) | no (dense) |
 | 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
-| 15. MTP | done¹ | no (DSpark) | no (prompt) | open M |
+| 15. MTP | done¹ | no (DSpark) | no (prompt) | open M[#3868] |
 | 16. DFlash(2) | yes | yes | no (prompt) | yes |
 | 17. DSpark | yes | yes | no (prompt) | yes |
 | 18. Copy drafts | done M¹ | done [#2221] | no (prompt) | done¹ |
-| 19. Shared drafts | yes | yes | no (prompt) | open M |
+| 19. Shared drafts | yes | yes | no (prompt) | open M[#3868] |
 | 20. Solo chunks | yes | yes | no (prompt) | yes |
 | 21. Read-ahead | no (Metal) | no (Metal) | yes | no (Metal) |
 | 22. Direct load | yes | yes | yes | yes |
