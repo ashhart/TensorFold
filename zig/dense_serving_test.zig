@@ -44,6 +44,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // 4dd870b84d's sequence: the first input norm keys on g.first + i (#2579); BF16 norms take norm_shift (#2383)
-    try std.testing.expectEqualStrings("7be514892c77ce544d809f73d5a7e2dec2fd33bcb40c68ab67ab6e409a1c02f8", &hash(out.items));
+    // #3723's sequence: the norms' add flags come from the schedule (main's values on the plain one)
+    try std.testing.expectEqualStrings("d3b1945b32c39d7da82a87a634fc76245b93aaf21bf0ba20c0400db632221503", &hash(out.items));
 }
