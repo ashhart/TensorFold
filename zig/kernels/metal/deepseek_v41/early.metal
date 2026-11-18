@@ -53,46 +53,6 @@ struct TfEarlyKeyedArgs {
   float t;     // the temperature (at least 1e-6, as the host floors it)
 };
 
-// splitmix64's finalizer, as the host's keyed sampler mixes its keys.
-inline ulong tf_early_mix(ulong v) {
-  v ^= v >> 30;
-  v *= 0xBF58476D1CE4E5B9ul;
-  v ^= v >> 27;
-  v *= 0x94D049BB133111EBul;
-  return v ^ (v >> 31);
-}
-
-inline bool tf_early_finite(float v) {
-  return (as_type<uint>(v) & 0x7f800000u) != 0x7f800000u;
-}
-
-// Gumbel noise -log(-log(u)) of the host's uniform (bits >> 11) / 2^53 + 2^-54 in float: -log(u) by series near u = 1.
-inline float tf_early_gumbel(ulong bits) {
-  const ulong m = bits >> 11;
-  const float w = (float((1ul << 53) - m) - 0.5f) * 0x1p-53f;  // 1 - u
-  float l;
-  if (w < 0.0625f) {
-    float term = w, sum = w;
-    for (uint k = 2; k <= 8u; ++k) {
-      term *= w;
-      sum += term / float(k);
-    }
-    l = sum;
-  } else {
-    l = -precise::log(float(m) * 0x1p-53f + 0x1p-54f);
-  }
-  return -precise::log(l);
-}
-
-// The better of two draws: the larger score, then the earlier of (value desc, id asc), as the host breaks a tie.
-inline void tf_early_beats(thread float& s, thread float& v, thread uint& i, float os, float ov, uint oi) {
-  if (os > s || (os == s && (ov > v || (ov == v && oi < i)))) {
-    s = os;
-    v = ov;
-    i = oi;
-  }
-}
-
 // A raced row's keyed pick: the largest x / t + gumbel(key); a value not finite picks none (the host sorts such rows).
 [[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_dsv41_early_keyed(
     constant TfEarlyKeyedArgs& args [[buffer(0)]],
@@ -114,14 +74,14 @@ inline void tf_early_beats(thread float& s, thread float& v, thread uint& i, flo
   for (uint i = tid; i < args.vocab; i += TF_TG) {
     const float v = x[i];
     const float xv = v / args.t;
-    if (!tf_early_finite(v) || !tf_early_finite(xv)) {
+    if (!tf_key_finite(v) || !tf_key_finite(xv)) {
       bad = 1u;
       continue;
     }
-    tf_early_beats(bs, bv, bi, xv + tf_early_gumbel(tf_early_mix(base ^ ulong(i))), v, i);
+    tf_key_beats(bs, bv, bi, xv + tf_key_gumbel(tf_key_mix(base ^ ulong(i))), v, i);
   }
   for (ushort off = 16; off > 0; off >>= 1) {
-    tf_early_beats(bs, bv, bi, simd_shuffle_down(bs, off), simd_shuffle_down(bv, off), simd_shuffle_down(bi, off));
+    tf_key_beats(bs, bv, bi, simd_shuffle_down(bs, off), simd_shuffle_down(bv, off), simd_shuffle_down(bi, off));
     bad |= simd_shuffle_down(bad, off);
   }
   if (lane == 0u) {
@@ -138,7 +98,7 @@ inline void tf_early_beats(thread float& s, thread float& v, thread uint& i, flo
   bi = on ? part_i[lane] : TF_NONE;
   bad = on ? part_bad[lane] : 0u;
   for (ushort off = 16; off > 0; off >>= 1) {
-    tf_early_beats(bs, bv, bi, simd_shuffle_down(bs, off), simd_shuffle_down(bv, off), simd_shuffle_down(bi, off));
+    tf_key_beats(bs, bv, bi, simd_shuffle_down(bs, off), simd_shuffle_down(bv, off), simd_shuffle_down(bi, off));
     bad |= simd_shuffle_down(bad, off);
   }
   if (lane == 0u) picks[row] = bad != 0u ? TF_NONE : bi;
@@ -148,6 +108,7 @@ struct TfEarlyAcceptArgs {
   uint rows;  // the window's rows: the pending token's, then the drafts'
   uint ints;  // a plan's ints (each accepted count's plan in `plans`)
   uint skew;  // tests: 1 swaps an accepted count of 0 and 1, so the chain parts from the host's commit
+  uint pos_lo, pos_hi;  // the next ask's first draft's position less the accepted count
 };
 
 // The drafts the picks accept (the host's rule), each count's plan copied in, the bonus into the block and the result.
@@ -159,6 +120,7 @@ struct TfEarlyAcceptArgs {
     device int* plan [[buffer(4)]],
     device uint* ids [[buffer(5)]],
     device uint* result [[buffer(6)]],
+    device ulong* pos0 [[buffer(7)]],
     uint tid [[thread_index_in_threadgroup]]) {
   uint acc = 0u;
   while (acc + 1u < args.rows && tokens[acc + 1u] == picks[acc]) acc++;
@@ -169,5 +131,6 @@ struct TfEarlyAcceptArgs {
     ids[0] = picks[acc];
     result[0] = acc;
     result[1] = picks[acc];
+    pos0[0] = (ulong(args.pos_hi) << 32 | args.pos_lo) + acc;
   }
 }

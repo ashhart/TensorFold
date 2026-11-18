@@ -599,3 +599,34 @@ test "dsv41 metal serve: (i) a block of 7 past the drafter's 5, every draft veri
     try testing.expectEqual([2]usize{ 0, 0 }, bad);
     try testing.expect(deep and std.meta.eql(r_off, r_on) and st.used > 0 and st.dropped > 0);
 }
+
+test "dsv41 metal serve: (j) drafts on the GPU over the whole vocabulary (greedy, keyed), with and behind the verify == serial" {
+    const p0 = try ids(160, 36);
+    defer gpa.free(p0);
+    const p1 = try ids(220, 37);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 31, .temperature = 0.9, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 40 }, .{ .prompt = p1, .max = 40, .sampling = hot } };
+    const ref_m = try fs.open(gpa, io, seed, .{ .slots = 1, .drafts = false, .rank = 32 });
+    var want: [2][]u32 = undefined;
+    for (&asks, &want) |k, *o| o.* = try ref_m.t.serial(0, k.prompt, k.max, k.sampling);
+    fs.close(ref_m);
+    defer freeAll(&want);
+    var off: [2][]u32 = undefined;
+    const r_off = try servedWith(&asks, .{ .early = false, .rank = 32, .gpu_chain = true }, 0, &off, null);
+    defer freeAll(&off);
+    // behind the verify the chains draw the same drafts as a pass after the commit: the same rounds
+    var on: [2][]u32 = undefined;
+    var st_on: pkg.early.Stats = .{};
+    const r_on = try servedWith(&asks, .{ .early = true, .rank = 32, .gpu_chain = true }, 0, &on, &st_on);
+    defer freeAll(&on);
+    var sk: [2][]u32 = undefined;
+    var st: pkg.early.Stats = .{};
+    const r_sk = try servedWith(&asks, .{ .early = true, .rank = 32, .gpu_chain = true }, 2, &sk, &st);
+    defer freeAll(&sk);
+    const bad = [3]usize{ same(&want, &off), same(&want, &on), same(&want, &sk) };
+    const rounds_same = std.meta.eql(r_off, r_on) and std.meta.eql(r_off, r_sk);
+    say(bad[0] + bad[1] + bad[2] == 0 and rounds_same, "(j) GPU chains: drafted / behind the verify / parted vs serial: {d} / {d} / {d} differ; drafted rows {d} / {d} / {d}; chains {d} queued, {d} used, {d} dropped", .{ bad[0], bad[1], bad[2], r_off.drafted, r_on.drafted, r_sk.drafted, st.queued, st.used, st.dropped });
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, bad);
+    try testing.expect(rounds_same and r_off.drafted > 0 and st_on.used > 0 and st_on.dropped == 0 and st.dropped > 0);
+}

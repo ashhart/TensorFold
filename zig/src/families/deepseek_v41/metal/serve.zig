@@ -47,6 +47,8 @@ pub const Options = struct {
     decode_share: ?f64 = null,
     /// greedy windows' next passes queued behind them (the lanes' speculative pass, on unless TF_DSV41_SPEC_DRAFT=0)
     early: bool = true,
+    /// drafts on the GPU over the whole vocabulary (TF_DSV41_MARKOV_GPU, on by default at boot)
+    gpu_chain: bool = false,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -74,7 +76,7 @@ pub const Metal = struct {
         errdefer m.t.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {
-            m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab) });
+            m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab), .gpu_chain = opt.gpu_chain });
             errdefer m.dp.?.deinit();
             m.ad = .{ .x = m.dp.?, .t = m.t };
             if (opt.early) m.early = try early_.Early.init(a, m.dp.?);
