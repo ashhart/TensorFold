@@ -100,7 +100,7 @@ def test_one_model_is_recommended_when_one_runs_here(tmp_path, monkeypatch):
 
     machine = Machine(os="macOS", os_version="27.0", arch="arm64", chip="Apple M6", ram_bytes=32 * 1024**3,
                       ram_available_bytes=20 * 1024**3, unified_memory=True, backend="mlx")
-    monkeypatch.setattr(cat, "native_here", lambda _e, *, backend=None: False)
+    monkeypatch.setattr(cat, "native_here", lambda _e: False)
     rows = cat.view(machine, backend="mlx")
     picked = [m for m in rows if m.get("recommended")]
     assert len(picked) <= 1
