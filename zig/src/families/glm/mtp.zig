@@ -55,6 +55,7 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     if (gathered) { // the rows' queries and indexer weights, as the absorb computed them where the rows were
         fwd.qmv(x, e, x.k.qmv_x, normed, L.attn.mla.x_proj, sc.xp, rows);
         fwd.indexWeights(x, e, sc.xp, c.xProj(), sc.iw, rows);
+        x.q_normed = false; // the queries from this x_proj: mlaAttend norms them
     }
     fwd.mlaAttend(x, e, mi, &L.attn.mla, rows, pos);
     add(x, e, res, sc.branch, sc.m_out, rows * D);
