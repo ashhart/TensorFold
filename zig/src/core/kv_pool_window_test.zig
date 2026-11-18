@@ -30,14 +30,15 @@ fn exact(p: *const kv.Pool) bool {
         alone += @intFromBool(r == 1 and l == 0);
     }
     const r = &p.retired;
-    for (r.pending.items) |id| if (p.refs[id] != 0 or r.tokens[id] <= r.settled) return false;
+    for (r.pending.items) |id| if (p.refs[id] != 0 or r.token(id) <= r.settled) return false;
     var marks: usize = 0;
     var waits: usize = 0;
-    for (r.tokens, 0..) |t, i| {
+    for (r.tokens.items, r.marked.items) |t, i| {
         marks += @intFromBool(t != 0);
         waits += @intFromBool(t > r.settled and p.refs[i] == 1 and p.leased[i] == 0);
     }
-    for (r.marked.items, 0..) |id, i| if (r.tokens[id] == 0 or r.slots[id] != i) return false;
+    for (r.marked.items, 0..) |id, i| if (r.token(id) == 0 or r.slots.get(id) != i) return false;
+    if (r.slots.count() != r.tokens.items.len or r.tokens.items.len != r.marked.items.len) return false;
     if (marks != r.marked.items.len or waits != kv.retirement.waiting(p)) return false;
     if (p.nfree < p.promised) return false;
     return free == p.nfree and
