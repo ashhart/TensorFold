@@ -1,11 +1,15 @@
 # Building native release archives
 
 The release owner chooses `MAJOR.MINOR.PATCH`. No new release number is set here.
-Use the pinned Zig in `.zig-version`, a Mac with the Xcode macOS SDK, and qualified CUDA fatbins:
+Use the pinned Zig in `.zig-version`, a Mac with the Xcode macOS SDK, and qualified CUDA fatbins.
+The release build also needs the [pinned XGrammar checkout](../zig/src/platform/grammar_library.zig) with its submodules.
 
 ```sh
-zig build dist -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins -j2
-zig build dist-smoke -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins -j2
+git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar /absolute/path/to/xgrammar
+zig build dist -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins \
+  -Dxgrammar=/absolute/path/to/xgrammar -j2
+zig build dist-smoke -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins \
+  -Dxgrammar=/absolute/path/to/xgrammar -j2
 ```
 
 `dist` builds all three native servers and writes archives and companion SHA-256 files to `zig-out/dist/`.
