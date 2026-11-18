@@ -45,7 +45,7 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "tensorfold", .module = api } },
     }) });
     b.step("check-glm-gather-gpu-host", "Compile the GPU gather equality gate without compiling or running shaders").dependOn(&gpu_check.step);
-    const schedule = b.addTest(.{ .filters = &.{ "glm prefill:", "fill aging:", "glm order:" }, .root_module = b.createModule(.{
+    const schedule = b.addTest(.{ .filters = &.{ "glm prefill:", "fill aging:", "glm order:", "glm pool tokens:" }, .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_schedule_tests.zig"),
         .target = b.graph.host,
         .optimize = .debug,

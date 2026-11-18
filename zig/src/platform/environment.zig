@@ -87,6 +87,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
+    .{ .name = "GLM_POOL_TOKENS", .scope = .metal, .kind = .u32, .trim = " \t", .first_digit = true, .min = 1024, .max = 4294967231, .forms = "a whole number of tokens from 1024 to 4294967231 (unset or blank: the --context window)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
