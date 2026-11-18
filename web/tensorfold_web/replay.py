@@ -52,7 +52,7 @@ class Replays:
             if not isinstance(target.get("url"), str) or not target.get("model"):
                 raise ValueError("another engine needs its address and a model")
             # a user or password in the address would be kept in the replay's title, settings and exports
-            url = settings_mod._engine_url(target["url"]).removesuffix("/v1")
+            url = settings_mod.engine_root(settings_mod._engine_url(target["url"]))
             target = {**target, "url": url}
             base, key, model, engine = url, target.get("key") or None, target["model"], target.get("label") or url
         else:
