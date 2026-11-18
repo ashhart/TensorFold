@@ -152,7 +152,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastRound => "--parallel: Ripple on CUDA holds at most 16 streams",
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Ripple streams than asked at this --context: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.NoStreamFits => "the CUDA memory budget fits no Ripple stream after the weights: lower --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
-        error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves ExLlamaV3 packs at 5.0 or 6.0 bits with an 8-bit head, the bitrates measured so far; this pack is another",
+        error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves one measured ExLlamaV3 pack, 5.0 bits a weight with an 8-bit head (ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw): this pack is another",
         error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
         else => null,
     };
