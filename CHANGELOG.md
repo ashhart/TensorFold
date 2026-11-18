@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: `POST /api/conversations` now keeps a validated `pinned` and `folder` supplied at creation, so the response, later reads and folder counts agree; requests that omit those fields keep the old response shape (#3825, fixes #3822). Thanks to @AIFlowML.
+
 - Web: cleaning up Bench runs now drops a finished comparison only once none of its runs remain, so two passes can remove one a single pass kept; age-filtered cleanup considers only comparisons touched by that pass, and a full cleanup also clears a comparison left with no runs (#3820, fixes #3818). Thanks to @AIFlowML.
 
 - Web: stopping Chat Replay during its final reply now marks the replay cancelled and keeps only the turns already completed, leaving the interrupted reply out of the done count and saved results; other engine errors still use the per-turn error path (#3815). Thanks to @AIFlowML.
