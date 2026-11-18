@@ -365,7 +365,7 @@ test "flashnext prefill: an active flag share leaves a gated family's chunks exa
     var ends: [64]u32 = undefined;
     var n: usize = 0;
     while (true) {
-        const hint = hostfill.capRows(&host);
+        const hint = hostfill.capRows(&host, s.prompt_len -| s.cached);
         try std.testing.expectEqual(@as(u32, 0), hint); // gated out: the flag alone never caps this family
         const done = try fill.step(&f, &s, hint);
         ends[n] = @intCast(s.fill_at.load(.monotonic));
@@ -374,7 +374,7 @@ test "flashnext prefill: an active flag share leaves a gated family's chunks exa
     }
     try std.testing.expectEqualSlices(u32, cold_ends[0..cold_n], ends[0..n]); // exactness by construction: no drift
     core.backend.chunk_invariant = true; // the knob is live: a qualified family's cap arrives
-    try std.testing.expectEqual(hostfill.decode_cap_rows, hostfill.capRows(&host));
+    try std.testing.expectEqual(hostfill.decode_cap_rows, hostfill.capRows(&host, s.prompt_len -| s.cached));
 }
 
 // The host's nonzero hint caps a call beside decoders in place of decode_rows; 0 keeps them.

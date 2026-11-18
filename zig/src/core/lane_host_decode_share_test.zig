@@ -14,12 +14,12 @@ fn clearShareEnv() void {
 }
 
 test "the flag's decode share is the prompt's complement, 0 keeps whole prompts" {
-    try std.testing.expectEqual(@as(f64, 0.9), fill.Share.fromDecode(0.1).p);
-    try std.testing.expectEqual(@as(f64, 1), fill.Share.fromDecode(0).p);
-    try std.testing.expectEqual(@as(f64, 1), fill.Share.fromDecode(-0.5).p);
-    try std.testing.expectEqual(@as(f64, 1), fill.Share.fromDecode(1.5).p);
-    try std.testing.expectEqual(@as(f64, 1), fill.Share.fromDecode(std.math.nan(f64)).p);
-    try std.testing.expectEqual(@as(f64, fill.Share.min_share), fill.Share.fromDecode(0.995).p);
+    try std.testing.expectEqual(@as(f64, 0.9), fill.decodeShare.fromDecode(0.1).p);
+    try std.testing.expectEqual(@as(f64, 1), fill.decodeShare.fromDecode(0).p);
+    try std.testing.expectEqual(@as(f64, 1), fill.decodeShare.fromDecode(-0.5).p);
+    try std.testing.expectEqual(@as(f64, 1), fill.decodeShare.fromDecode(1.5).p);
+    try std.testing.expectEqual(@as(f64, 1), fill.decodeShare.fromDecode(std.math.nan(f64)).p);
+    try std.testing.expectEqual(@as(f64, fill.Share.min_share), fill.decodeShare.fromDecode(0.995).p);
 }
 
 test "the flag sets the host's share; absence keeps the default until the env says otherwise" {
