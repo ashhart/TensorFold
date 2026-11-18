@@ -92,7 +92,7 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     const k = x.k;
     const sc = x.sc;
     if (x.fused_route) {
-        if (on(x, "r_router")) moe_route.logits(e, k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
+        if (on(x, "r_router")) moe_route.logits(e, if (rows == 1) k.route_logits_one else k.route_logits, route_shape, x_in, w.router, sc.logits_r, rows);
         if (!on(x, "r_topk")) return;
         if (x.ep) |ep| if (!c.byRows()) return moe_route.select(e, k.route_select, sc.logits_r, w.bias, c.routed_scale, rows, c.own, ep.outputs(sc.pick, sc.wts));
         const rl = sc.rl;
