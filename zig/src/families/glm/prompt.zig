@@ -238,9 +238,11 @@ fn add(x: *const fwd.Ctx, e: mtl.ComputeEncoder, a: Ref, b: Ref, out: Ref, n: u3
 
 /// The shared expert on M rows into `ys`.
 fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
-    qmm(p, e, x_in, w.sh_gate_up, p.sgu, M);
-    swiglu(x, e, p.sgu, p.sact, M, x.c.moe_inter);
-    qmm(p, e, p.sact, w.sh_down, p.ys, M);
+    if (fwd.on(x, "s_gateup")) {
+        qmm(p, e, x_in, w.sh_gate_up, p.sgu, M);
+        swiglu(x, e, p.sgu, p.sact, M, x.c.moe_inter);
+    }
+    if (fwd.on(x, "s_down")) qmm(p, e, p.sact, w.sh_down, p.ys, M);
 }
 
 /// Shared expert, route, experts gathered by expert; by rows, this Mac's halves summed in slot order and swapped.
@@ -297,10 +299,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
-        gateUp(p, mm, x, e, w, x_in, M, n);
-        affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        if (fwd.on(x, "e_gateup")) gateUp(p, mm, x, e, w, x_in, M, n);
+        if (fwd.on(x, "e_down")) affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
-    if (s & Class.combine != 0) return;
+    if (s & Class.combine != 0 or !fwd.on(x, "combine")) return;
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ p.ys, p.yp, p.wts });
     fwd.shape(e, 3, .{ M, c.topk });
@@ -314,7 +316,8 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     const k = x.k;
     const E = c.experts;
     const n = M * c.topk;
-    moe_route.logits(e, k.route_logits, kernels.route_shape, x_in, w.router, p.logits_r, M); // the decode's bits, any rows
+    if (fwd.on(x, "r_router")) moe_route.logits(e, k.route_logits, kernels.route_shape, x_in, w.router, p.logits_r, M); // the decode's bits, any rows
+    if (!fwd.on(x, "r_topk")) return;
     e.setPipeline(k.route_rows);
     bind(e, 0, .{ p.logits_r, w.bias });
     e.setValue(c.routed_scale, 2);
