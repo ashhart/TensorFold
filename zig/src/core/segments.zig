@@ -1,4 +1,4 @@
-//! Staggered prompt segments: each on its own queue does a serial chunk's work; output equals serial order.
+//! Staggered prompt segments, for any family: each segment on its own queue does what a serial chunk of its rows does, so the output equals the chunks run in order.
 const std = @import("std");
 const mtl = @import("metal");
 const Fence = @import("fence.zig").Fence;

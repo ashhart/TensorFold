@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "रूपरेखा की प्रविष्टि खोल दी गई है।",
   "Quoted message opened.": "उद्धृत संदेश खोल दिया गया है।",
-  "Search match opened.": "खोज का परिणाम खोल दिया गया है।",
-  "Conversation unavailable": "बातचीत उपलब्ध नहीं है",
-  "This conversation was archived or deleted, or it has not loaded yet.": "यह बातचीत संग्रहित या हटाई गई है, या अभी लोड नहीं हुई है।",
-  "Back to Home": "होम पर वापस"
+  "Search match opened.": "खोज का परिणाम खोल दिया गया है।"
 }

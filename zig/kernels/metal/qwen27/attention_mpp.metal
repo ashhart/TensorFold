@@ -176,9 +176,6 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
     constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* paths [[buffer(4)]], device const int* nodes [[buffer(5)]],
     device const float* POA [[buffer(6)]], device const float* PMA [[buffer(7)]], device const float* PLA [[buffer(8)]],
     device float* PO [[buffer(9)]], device float* PM [[buffer(10)]], device float* PL [[buffer(11)]],
-#if Q27_JOIN
-    device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], ushort thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     ushort sg [[simdgroup_index_in_threadgroup]], ushort tid [[thread_index_in_threadgroup]]) {
   // four simdgroups load each K and V tile; simdgroup 0 alone does the arithmetic, in the one-simdgroup order
@@ -190,13 +187,6 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   const int st = nodes[NW * node + 1];
   const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0], CK = nodes[NW * node + 2];
   if (int(cb) >= meta[MG + st * MS + 5]) return;
-#if Q27_JOIN
-  // a pair's joint chunk (one width, keys both rows hold alike) runs in its lead's group, the rider in lines 8 on
-  const bool joint = int(cb) < mates[3 * node + 1];
-  if (joint && mates[3 * node + 2] == 2) return;
-  const int mate = mates[3 * node];
-  const int nB = joint && mate >= 0 ? meta[MG + nodes[NW * mate + 1] * MS + 4] + nodes[NW * mate] + 1 : 0;
-#endif
   const int la = meta[MG + st * MS + 3] * 16 + (int(node) - meta[MG + st * MS + 6]) * G;
   const int depth = nodes[NW * node];
   const device bfloat* Kb = caches[st].keys;
@@ -207,11 +197,7 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   const short fn = ((qid & 2) | (lane & 1)) * 4;
   const int r0 = fm, r1 = fm + 8;
   const int n0 = r0 < G ? nmax : 0;
-#if Q27_JOIN
-  const int n1 = r1 < G ? nmax : (r1 - 8 < G ? nB : 0);
-#else
   const int n1 = r1 < G ? nmax : 0;
-#endif
   threadgroup half myP[16 * TK];
   threadgroup bfloat KV[32 * D];
   const device bfloat* kbase = (const device bfloat*)Kb + (int64_t)hk * meta[MG + st * MS + 7];
@@ -329,9 +315,6 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
     device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
     device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
     device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]], constant uint& heads [[buffer(11)]],
-#if Q27_JOIN
-    device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
@@ -369,12 +352,7 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
     }
   }
   for (int c = 0; c < NCBS; c++) {
-#if Q27_JOIN
-    const bool rides = mates[3 * node + 2] == 2 && c < mates[3 * node + 1];
-    const int64_t row = (((int64_t)hk * NCB + c) * W + (rides ? mates[3 * node] : node)) * 16 + g + (rides ? 8 : 0);
-#else
     const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
-#endif
     const float mc = PMB[row];
     if (mc == -INFINITY) continue;
     const float lc = PLB[row];
@@ -400,9 +378,6 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
     device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
     device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
     device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
-#if Q27_JOIN
-    device const int* mates [[buffer(12)]],
-#endif
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
@@ -440,12 +415,7 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
     }
   }
   for (int c = 0; c < NCBS; c++) {
-#if Q27_JOIN
-    const bool rides = mates[3 * node + 2] == 2 && c < mates[3 * node + 1];
-    const int64_t row = (((int64_t)hk * NCB + c) * W + (rides ? mates[3 * node] : node)) * 16 + g + (rides ? 8 : 0);
-#else
     const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
-#endif
     const float mc = PMB[row];
     if (mc == -INFINITY) continue;
     const float lc = PLB[row];

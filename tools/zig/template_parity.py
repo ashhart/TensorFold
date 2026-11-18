@@ -206,12 +206,6 @@ SYNTHETIC = [
     "{{ ['b', 'a'] | sort | join }}{{ [{'n': 'b'}, {'n': 'a'}] | sort(attribute='n') | map(attribute='n') | join }}{{ [{'n': 1}] | map(attribute='m', default='d') | join }}",
     "{% for x in 'ab' %}{{ x }}{{ loop.index0 }}{% endfor %}|{% for k in {'p': 1, 'q': 2} %}{{ k }}{% endfor %}|{% for x in none %}{% endfor %}",
     "{%- for m in messages -%}\n    {%- set content = m.content | trim -%}\n    {{- '<' + m.role + '>' + content -}}\n{%- endfor %}\nx",
-    "{{ '0.5'|float }}|{{ 3|float }}|{{ 'abc'|float }}|{{ 'abc'|float(2.5) }}|{{ true|float }}|{{ ' 7 '|float }}|{{ none|float }}|{{ 0.9|float }}|{{ '1e3'|float }}|{{ ''|float }}|{{ '0x10'|float }}",
-    "{{ '1_0'|float }}|{{ '1__0'|float }}|{{ '_1'|float }}|{{ '1_'|float }}|{{ '1_0.5_5'|float }}|{{ [1]|float }}|{{ {}|float(7) }}|{{ 'x'|float(default=2.5) }}",
-    "{{ '1.'|float }}|{{ '.5'|float }}|{{ '+3'|float }}|{{ '-0'|float }}|{{ 'inf'|float }}|{{ 'nan'|float }}|{{ '1e'|float }}|{{ '1e1_0'|float }}|{{ '1_.5'|float }}",
-    "{{ 1|float(2, 3) }}",
-    "{{ 1|float(boolean=true) }}",
-    "{{ undefined_name|float }}",
 ]
 # Jinja2 features the native engine refuses on purpose; parity here means the native render fails loudly.
 UNSUPPORTED = [

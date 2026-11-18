@@ -22,5 +22,4 @@ test {
     _ = engine;
     _ = follow;
     _ = native;
-    _ = @import("cuda_prompt_tail.zig"); // which prompt rows the last layer runs
 }

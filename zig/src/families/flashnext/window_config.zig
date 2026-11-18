@@ -1,7 +1,6 @@
 //! One load owns its capacity and rotary policy; planning a later load changes no live engine.
 const std = @import("std");
 pub const trained: usize = @import("flashnext_memory").trained;
-pub const minimum: usize = @import("flashnext_memory").prompt.PMAX;
 pub const maximum: usize = 4 * trained + 64;
 pub const Settings = struct {
     capacity: usize = trained,
@@ -10,32 +9,24 @@ pub const Settings = struct {
     ssd_experts: ?u64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
-    pub fn staggered(s: Settings) bool {
-        return s.ssd_experts == null and !s.ple_on_ssd and s.fsr_trace == null;
-    }
-    pub fn sibling(s: Settings, paired: bool) bool {
-        return s.staggered() or paired;
-    }
     pub fn validate(s: Settings, paired: bool) !void {
         if (paired and (s.ssd_experts != null or s.ple_on_ssd or s.fsr_trace != null)) return error.FsrNeedsSingleMetalDevice;
-        if (s.capacity < minimum or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
-        if (s.factor == 0) {
-            if (s.capacity > trained + 64) return error.BadRotaryPolicy;
-        } else if (s.factor != 4 or s.capacity <= trained) return error.BadRotaryPolicy;
+        if (s.capacity < trained or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
+        if (s.factor != (if (s.capacity > trained) @as(f64, 4) else 0)) return error.BadRotaryPolicy;
         if (paired and s.factor > 0) return error.LongWindowPairUnsupported;
     }
 };
 pub const Choice = struct { settings: Settings = .{}, refusal: ?[]const u8 = null };
 pub fn plan(window: i64, native: i64, margin: i64, paired: bool) !Choice {
     if (window < 0 or margin < 0) return error.ContextTooLong;
-    if (native <= 0 or window == 0 or window == native) return .{};
-    if (paired and window > native) return .{ .refusal = "--context past the trained window is served on one Mac; the --speed-up pair reads up to it" };
+    if (native <= 0 or window <= native) return .{};
+    if (paired) return .{ .refusal = "--context past the trained window is served on one Mac; the --speed-up pair reads up to it" };
     const n = std.math.cast(usize, window) orelse return error.ContextTooLong;
     const extra = std.math.cast(usize, margin) orelse return error.ContextTooLong;
     const requested = std.math.add(usize, n, extra) catch return error.ContextTooLong;
     if (requested > maximum) return error.ContextTooLong;
-    const cap = std.mem.alignForward(usize, @max(requested, minimum), 4);
-    const settings: Settings = .{ .capacity = cap, .factor = if (window > native) 4 else 0 };
+    const cap = std.mem.alignForward(usize, @max(requested, trained), 4);
+    const settings: Settings = .{ .capacity = cap, .factor = if (cap > trained) 4 else 0 };
     try settings.validate(false);
     return .{ .settings = settings };
 }

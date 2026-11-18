@@ -17,7 +17,7 @@ pub const Int4 = struct {
     zeros: Tensor,
 };
 
-pub const Attention = struct { q: Dense, k: Dense, v: Dense, o: Dense, q_norm: ?Tensor = null, k_norm: ?Tensor = null };
+pub const Attention = struct { q: Dense, k: Dense, v: Dense, o: Dense };
 pub const Mlp = struct { gate: Dense, up: Dense, down: Dense };
 pub const Layer = struct { input_norm: Tensor, post_norm: Tensor, attn: Attention, mlp: Mlp };
 
@@ -83,7 +83,7 @@ fn int4(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usiz
     return .{ .buf = got[0].buffer, .off = got[0].offset, .n = n, .k = k, .int4 = .{ .scales = got[1], .zeros = got[2] } };
 }
 
-pub fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: []const u8) !Tensor {
+fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: []const u8) !Tensor {
     var buf: [256]u8 = undefined;
     const n = try name(&buf, prefix, suffix);
     const t = try c.get(n);
@@ -95,7 +95,7 @@ pub fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: 
 }
 
 /// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 8-byte aligned for the row kernel.
-pub fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
+fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
     var buf: [256]u8 = undefined;
     const full = try name(&buf, prefix, suffix);
     const w = try c.get(full);

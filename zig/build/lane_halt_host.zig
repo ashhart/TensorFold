@@ -6,13 +6,6 @@ pub fn steps(b: *std.Build) void {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const interrupted = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_interrupted_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     b.step("test-lane-interrupted-host", "Interrupted prompt retention and clean retries without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = interrupted, .filters = &.{"interrupted prefill:"} })).step);
-    const seeds = b.addOptions(); // -Dexplore-seeds=N sweeps N schedules; -Dexplore-seed=S replays one
-    seeds.addOption(u32, "seeds", b.option(u32, "explore-seeds", "Schedules test-lane-explore-host runs a scenario") orelse 200);
-    seeds.addOption(?u64, "seed", b.option(u64, "explore-seed", "One lane host schedule to replay (a failure prints it)"));
-    seeds.addOption(bool, "tally", b.option(bool, "explore-tally", "Print what the explored schedules did") orelse false);
-    const explore = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_explore_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    explore.addOptions("explore_options", seeds);
-    b.step("test-lane-explore-host", "Lane host invariants under seeded arrivals, cancels, room and pressure, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = explore, .filters = &.{"explore:"} })).step);
     const safe_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true });
     const strand = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_strand_test.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = safe_lanes }} });
     b.step("test-lane-strand-host", "Refused, cancelled and failed requests give back every lane, page and slot without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = strand, .filters = &.{"lane strand:"} })).step);
@@ -20,8 +13,6 @@ pub fn steps(b: *std.Build) void {
     b.step("test-lane-halt-host", "Halt ordering with a fake backend and no GPU dependencies").dependOn(&b.addRunArtifact(halt).step);
     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);
     b.step("test-lane-api-host", "Shared lane host and engine API CPU regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
-    b.step("test-shared-price-learning-host", "Independent plain prices and signed row learning together without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{"shared combined prices:"} })).step);
-    b.step("test-wait-reasons-host", "Stored wait reasons in the load ledger with a fake backend and planner").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"wait reason ledger:"} })).step);
     b.step("test-conversation-cache-host", "Returning conversation eviction and queued-resume regressions without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{ "newest cache:", "queued cache:" } })).step);
     b.step("test-cache-progress-host", "One-state follow-ups and new conversations keep their next endpoint").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"queued cache: progress"} })).step);
     b.step("test-snapshot-index-host", "Prompt-cache lookup index against the whole-store scan, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"snapshot index:"} })).step);

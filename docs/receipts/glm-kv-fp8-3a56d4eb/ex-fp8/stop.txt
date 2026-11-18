@@ -1,2 +1,0 @@
-rank 0 rc="returncode": 0
-rank 1 rc="returncode": 0

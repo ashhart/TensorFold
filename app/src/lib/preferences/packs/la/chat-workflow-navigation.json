@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "Pars conspectus aperta est.",
   "Quoted message opened.": "Nuntius citatus apertus est.",
-  "Search match opened.": "Eventus quaestionis apertus est.",
-  "Conversation unavailable": "Colloquium deest",
-  "This conversation was archived or deleted, or it has not loaded yet.": "Hoc colloquium vel archivatum vel deletum est, vel nondum oneratum est.",
-  "Back to Home": "Ad domum redi"
+  "Search match opened.": "Eventus quaestionis apertus est."
 }

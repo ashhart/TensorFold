@@ -1,17 +1,7 @@
-//! `pull`'s and `rm`'s own tests: `cli/hub.zig` reads the engine registry (`native_engines`); pull also needs EXLR8's.
+//! `pull`'s own tests: `cli/hub.zig` reads the engine registry, so they need `native_engines` and EXLR8's import.
 const std = @import("std");
 
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, engines: *std.Build.Module, core: *std.Build.Module, test_step: *std.Build.Step) void {
-    // rm's tests make their own cache of links, hard links and copies, so they run on every OS
-    const rm = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/src/cli/rm_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{.{ .name = "native_engines", .module = engines }},
-    }) }));
-    b.step("test-rm-host", "Checkpoint removal in a temporary cache: shared blobs, refs, dry runs, refusals and links out").dependOn(&rm.step);
-    test_step.dependOn(&rm.step);
     if (target.result.os.tag == .windows) return; // the fake hub listens on a POSIX socket
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/cli/pull_test.zig"),
@@ -20,9 +10,6 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .link_libc = true,
         .imports = &.{ .{ .name = "native_engines", .module = engines }, @import("exlr8.zig").cliImport(b, target, optimize, core) },
     });
-    const lock_test = b.addRunArtifact(b.addTest(.{ .root_module = mod, .filters = &.{"pull refuses cache mutation"} }));
-    b.step("test-pull-cache-lock-host", "Cache mutation refusal before any HTTP request").dependOn(&lock_test.step);
-    test_step.dependOn(&lock_test.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
     b.step("test-pull-host", "Checkpoint download paths: a nested shard folder, retries, resume and the whole-file fallback").dependOn(&run.step);
     test_step.dependOn(&run.step);

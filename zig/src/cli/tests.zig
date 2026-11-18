@@ -11,7 +11,5 @@ test {
     _ = @import("pull_runs.zig");
     _ = @import("pull_exlr8.zig");
     _ = @import("pull_exlr8_plan.zig");
-    _ = @import("rm.zig");
-    _ = @import("rm_test.zig");
     _ = @import("cli.zig");
 }

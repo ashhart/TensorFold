@@ -519,16 +519,11 @@ pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: R
 
 /// `head` over the first `vocab` tokens; `greedy` forces the MTP draft head's argmax draws.
 pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
-    headWith(x, e, x.w.head, in, logits, picks, rows, vocab, greedy);
-}
-
-/// headOver through the LM head `hw` (the MTP drafts' own when one is loaded).
-pub fn headWith(x: *const Ctx, e: mtl.ComputeEncoder, hw: wts.Affine, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
     if (x.skip & Class.head != 0) return;
     const part = x.c.vocabPart(); // TP2: this Mac's half, its picks merged with the peer's
     const n: u32 = if (vocab > part[0]) @min(vocab, part[1]) - part[0] else 0;
     if (n > 0) {
-        var q = hw;
+        var q = x.w.head;
         q.n = n;
         qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
         const payload = @import("draw_rule.zig").Payload.init(if (greedy) null else x.draws, rows, vocab);

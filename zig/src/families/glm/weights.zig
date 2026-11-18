@@ -8,7 +8,6 @@ const quant = @import("quant.zig");
 const affine = @import("affine.zig");
 const layout = @import("names.zig");
 const load_plan = @import("load_plan.zig");
-const fp8 = @import("fp8.zig");
 
 pub const Width = quant.Width;
 
@@ -58,7 +57,6 @@ pub const Weights = struct {
     mtp: ?Mtp = null,
     embed: Affine = undefined,
     head: Affine = undefined,
-    draft_head: ?Affine = null, // layers.45.shared_head.head when stored (one Mac): the MTP drafts' own LM head
     norm: Ref = undefined,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
     bytes: usize = 0,
@@ -105,7 +103,7 @@ const Loader = struct {
         };
     }
 
-    pub fn expect(s: Src, name: []const u8, dtype: st.DType, shape: []const usize) !void {
+    fn expect(s: Src, name: []const u8, dtype: st.DType, shape: []const usize) !void {
         if (s.dtype == dtype and s.rank == shape.len and std.mem.eql(usize, s.shape[0..s.rank], shape)) return;
         quant.say("glm: {s} is {t} {any}; the kernels read {t} {any}", .{ name, s.dtype, s.shape[0..s.rank], dtype, shape });
         return error.UnexpectedTensor;
@@ -138,14 +136,14 @@ const Loader = struct {
         l.w.bytes += len;
     }
 
-    pub fn take(l: *Loader, len: usize) Ref {
+    fn take(l: *Loader, len: usize) Ref {
         const at = l.cur_at;
         l.cur_at = std.mem.alignForward(usize, at + len, 256);
         if (l.cur_at > l.cur_len) std.debug.panic("glm: a weights buffer of {d} bytes is too small for {d}", .{ l.cur_len, l.cur_at });
         return .{ .buf = l.cur orelse .{ .id = undefined }, .off = at };
     }
 
-    pub fn copyTo(l: *Loader, s: Src, dst: Ref) !void {
+    fn copyTo(l: *Loader, s: Src, dst: Ref) !void {
         if (l.dry) return;
         try l.copies.append(l.gpa, .{ .shard = s.shard, .off = s.off, .len = s.len, .dst = dst.addr() });
     }
@@ -329,7 +327,6 @@ const Loader = struct {
         const every = i == l.c.layers; // the MTP layer: every expert whole on every Mac (its drafts need no exchange)
         const lo = if (every) 0 else l.c.own[0];
         const e = (if (every) l.c.experts else l.c.own[1]) - lo;
-        if (fp8.isExpert(l, i, lo, proj)) return fp8.experts(l, i, proj, n_all, k_all, part == .whole, lo, e);
         const in_lo: usize = l.c.inter[0];
         const in_n: usize = l.c.inter[1] - l.c.inter[0];
         const n = if (part == .rows) in_n else n_all;
@@ -491,7 +488,7 @@ const Loader = struct {
             const by_rows = c.byRows() and i != c.layers;
             moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
             moe.up = try l.experts(i, "up_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
-            if (!std.meta.eql(moe.gate.width(), moe.up.width()) or moe.gate.fp8 != moe.up.fp8) { // one launch, SwiGLU'd
+            if (!std.meta.eql(moe.gate.width(), moe.up.width())) { // one launch takes both, SwiGLU'd
                 var buf: [96]u8 = undefined;
                 return mixed(try std.fmt.bufPrint(&buf, "layer {d}'s routed gate_proj", .{i}), moe.gate.width(), "up_proj", moe.up.width());
             }
@@ -527,14 +524,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     l.widths = try readWidths(l.arena, dir, c);
     const D: usize = c.hidden;
     const V: usize = c.vocab;
-    const dh_name = prefix ++ "layers.45.shared_head.head"; // a lighter LM head for the MTP drafts (verification keeps lm_head)
-    const dh = c.tp == 1 and c.mtp > 0 and l.names.contains(dh_name ++ ".weight");
-    const dh_bytes = if (dh) affine.bytes(V, D, try l.widths.of(dh_name)) else 0;
-    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + affine.bytes(V, D, try l.widths.of("lm_head")) + dh_bytes + D * 2 + 8 * 256);
+    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + affine.bytes(V, D, try l.widths.of("lm_head")) + D * 2 + 8 * 256);
     w.embed = try l.mat(.embed, D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
     const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
     w.head = try l.stack(.head, D, "lm_head", &.{""}, &.{vp[0]}, &.{vp[1] - vp[0]}, &.{V}, 1, .{});
-    if (dh) w.draft_head = try l.stack(.head, D, dh_name, &.{""}, &.{0}, &.{V}, &.{V}, 1, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
     for (0..c.run) |i| w.layers[i] = try l.layer(i);
     const has_mtp = c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight");

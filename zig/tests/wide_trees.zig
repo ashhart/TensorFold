@@ -1,4 +1,4 @@
-//! Sibling-heavy draft-tree window cost: each node's expert picks from its path, then experts on the tree schedule.
+//! Sibling-heavy draft trees' window cost: each node's expert picks from its own path, then the expert kernels on the tree's schedule.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -123,7 +123,7 @@ fn expertsMs(p: *Probe, picks: *const Picks, members_pass: usize, reps: usize) !
     return probe.median(ms[0..reps]);
 }
 
-/// Expected tokens per round (1 + each node's path probability) for the tree minus the `w`-row chain.
+/// Expected tokens a round (1 + each node's path probability) for the tree minus the chain of `w` rows, by the head's chances.
 fn landed(probs: []const [8]f64, toks: []const [8]u32, shape: Shape, w: usize) f64 {
     _ = toks;
     var chain: f64 = 0;
@@ -153,7 +153,7 @@ fn distinct(picks: *const Picks, moes: usize) usize {
     return total;
 }
 
-/// Per sampled position: the chain window and each tree's picks, experts timed alone, chain window timed whole.
+/// Per sampled position: the chain window and each tree's picks, their experts timed alone, the chain window timed whole.
 pub fn run(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, model: []const u8, path: []const u8, name: []const u8, samples: usize, every: usize, reps: usize) !void {
     const prompts = try probe.readPrompts(arena, path);
     const prompt = prompts.map.get(name) orelse return error.NoSuchPrompt;

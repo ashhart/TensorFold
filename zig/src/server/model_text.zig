@@ -16,8 +16,6 @@ pub const RenderOptions = struct {
     response_format: ?json.Value = null,
     /// The server serves images: native image parts may render.
     images: bool = false,
-    /// Set to the byte where each message's own output starts (sorted); left empty by renderers that can't say.
-    message_starts: ?*[]usize = null,
 };
 
 pub const Error = error{ Template, OutOfMemory };

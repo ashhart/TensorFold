@@ -142,10 +142,9 @@ jobs:
             exit 0
           fi
           python3 -m unittest discover -s tools/zig -p host_tests_test.py -v
-      # The host aggregate is split across `zig` and `zig-b` (two runners, -j2 each) so both shards finish inside one
-      # runner's budget; the `--test-timeout` still lets the DeepSeek AOT enumeration finish on hosted runners.
-      - name: zig build test-host-a
-        run: zig build -Dfixed-cpu test-host-a --test-timeout 20m
+      # Keep per-test timeouts while allowing the DeepSeek AOT enumeration to finish on hosted runners.
+      - name: zig build test-host
+        run: zig build -Dfixed-cpu test-host --test-timeout 20m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
@@ -189,57 +188,6 @@ jobs:
         with:
           path: .zig-cache
           key: zig-build-v3-Linux-0.17.0-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
-
-  # The second half of the host aggregate, on its own runner so the two shards run in parallel inside the 90-minute
-  # budget. Same git inputs, Zig setup and restored cache as `zig`; no lean/fmt/python checks and no cache save (only
-  # `zig` saves the shared cache). The host graph regressions still run here so a bad shard split fails both jobs.
-  zig-b:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
-          use-cache: false
-      # Same restore key as `zig`; `zig` is the only job that saves it, and the nightly run starts from nothing.
-      # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
-      - if: ${{ github.event_name != 'schedule' }}
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-Linux-0.17.0-${{ github.sha }}
-          restore-keys: zig-build-v3-Linux-0.17.0-
-      # A checkout or a restored cache gives every file a new id, and Zig 0.17's cache misses on one even when the
-      # contents match (fixed on Zig's master, ziglang/zig#37238). A failure here costs time, never a check.
-      # --prune deletes the entries this checkout can't hit, so a cache that main restores and saves stays one build.
-      - name: Let a restored cache fit this checkout
-        shell: bash
-        run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" --prune || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
-      - name: Host test graph regressions
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PUSH_BASE: ${{ github.event.before }}
-        run: |
-          if [ -n "$BASE_REF" ]; then
-            base=$(git merge-base HEAD "origin/$BASE_REF" 2> /dev/null || true)
-          else
-            base=$(git rev-parse --verify "$PUSH_BASE^{commit}" 2> /dev/null || true)
-          fi
-          if [ -n "$base" ] && git diff --quiet "$base" HEAD -- \
-              build.zig zig/build/host_tests.zig tools/zig/host_tests_test.py; then
-            echo "Host test graph inputs are unchanged."
-            exit 0
-          fi
-          python3 -m unittest discover -s tools/zig -p host_tests_test.py -v
-      # Keep per-test timeouts while allowing the DeepSeek AOT enumeration to finish on hosted runners.
-      - name: zig build test-host-b
-        run: zig build -Dfixed-cpu test-host-b --test-timeout 20m
-
   zig-windows:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -376,7 +324,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, compile, hip, deepseek]
+        suite: [fast, host, compile, hip, deepseek]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

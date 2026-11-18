@@ -2,8 +2,6 @@ export interface ModelReadinessRequest {
   providerId?: string | null
   accountId?: string | null
   model?: string | null
-  // Opt-in live model-list probe for local HTTP providers (issue 3539). Absent keeps the pure check.
-  checkEndpoint?: boolean
 }
 
 export function modelForReadiness(input: ModelReadinessRequest | null | undefined, activeProviderId: string | null, activeModel: string | null): string | null {

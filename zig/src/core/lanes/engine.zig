@@ -23,7 +23,7 @@ const Plan = win.Plan;
 const f = ev.f;
 const str = trail.str;
 const int = trail.int;
-pub const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
+const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
 const Result = struct { rows: u32, keep: u32, got: []const u32 };
 const Unread = struct { event: usize, handle: u64 };
 pub const Engine = struct {
@@ -53,7 +53,6 @@ pub const Engine = struct {
     grammar_workers: @import("grammar_parallel.zig").State = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
-    price_log: ?bool = null, // TF_SHARED_PRICE_LOG, read at the first priced shared round (lanes/price_log.zig)
     pub fn init(gpa: Allocator, cfg: *const Config, backend: be.Backend, clock: be.Clock) Engine {
         return .{
             .gpa = gpa,
@@ -255,13 +254,78 @@ pub const Engine = struct {
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
 
-    /// The shared round lives in its own file and takes the private draft call as an argument.
+    /// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
     fn roundStreams(e: *Engine, entries: []*Stream) !void {
-        return @import("shared_round.zig").run(e, entries, Engine.askDrafts);
+        e.clock.start();
+        try e.late.flush(e, Engine.askDrafts);
+        const a = e.arena.allocator();
+        const plans = try a.alloc(Plan, entries.len);
+        for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
+        try win.allocate(e, plans);
+        try @import("grammar_parallel.zig").constrain(e, plans);
+        const windows = try a.alloc(be.Window, plans.len);
+        const out = try a.alloc(be.Verified, plans.len);
+        var total: u64 = 0;
+        for (plans, windows, out) |p, *w, *o| {
+            w.* = try win.build(e, p, false);
+            o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
+            total += w.rows();
+        }
+        try e.backend.verify(windows, out);
+        const outcomes = try a.alloc(Outcome, plans.len);
+        const paths = try a.alloc([]const u32, plans.len);
+        for (plans, windows, out, outcomes, paths) |p, w, o, *oc, *path| {
+            const tokens = try win.tokens(e, w, o);
+            oc.* = try e.conclude(p.stream, p, o.sampled, o.rows, tokens, try win.rowParents(e, w), w.positions);
+            path.* = oc.path;
+            const rows: u32 = @intCast(w.rows());
+            p.stream.min_rows = if (p.stream.min_rows == 0) rows else @min(p.stream.min_rows, rows);
+        }
+        var heads: std.ArrayList(usize) = .empty;
+        for (plans, 0..) |p, i| {
+            if (e.cfg.family_mtp and p.stream.drafts) try heads.append(a, i);
+        }
+        const whos = try a.alloc(depth.Who, heads.items.len);
+        for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
+        const budgets = try a.alloc(i64, heads.items.len);
+        const sampled = win.anySampled(plans);
+        if (e.cfg.allocate_shared_drafts)
+            try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets)
+        else
+            try e.rule.budgets(whos, win.probe(e), sampled, budgets);
+        const ids = try a.alloc(ev.Value, heads.items.len);
+        for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
+        try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
+        if (heads.items.len > 0 and e.cfg.draft_streams) {
+            // every stream's head in one batch (the backend drafts a depth for all of them at once)
+            const requests = try a.alloc(be.DraftRequest, heads.items.len);
+            for (requests, heads.items, budgets) |*r, i, d| {
+                const s = plans[i].stream;
+                r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(d) };
+            }
+            try e.askDrafts(requests);
+        } else {
+            for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
+        }
+        if (e.cfg.root_copies) for (heads.items, budgets) |i, *d| {
+            if (plans[i].stream.next) |held| if (held.count == 0) {
+                d.* = 0;
+            };
+        };
+        try e.backend.keep(windows, paths);
+        if (e.cfg.timed) {
+            // the drafts budgets priced past each stream's first are no part of the round's overhead
+            var steps: i64 = 0;
+            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
+            const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
+            try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
+            try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
+        }
+        if (e.backend.round_observer != null) e.backend.observed(paths);
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
-    pub fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, rows_lp: []const LogRow, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
+    fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, rows_lp: []const LogRow, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
         const a = e.arena.allocator();
         const rows = tokens.len;
         var path: []u32 = undefined;
@@ -376,7 +440,7 @@ pub const Engine = struct {
     }
 
     /// Read the kept rows with their following tokens and ask the head for the next round's drafts.
-    pub fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
+    fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
         var w = win.who(s);
         const d: u32 = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
         const request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d };

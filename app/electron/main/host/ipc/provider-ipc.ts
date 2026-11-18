@@ -1,10 +1,10 @@
 import { modelForReadiness, type ModelReadinessRequest } from '../../../../shared/model-readiness'
-import { discoverLocalProvider, fetchLmStudioModels, fetchOllamaModels, fetchOpenAiCompatibleModels } from '../../../agent/local-providers'
+import { discoverLocalProvider } from '../../../agent/local-providers'
 import { providerWithAccount } from '../../../agent/provider-accounts'
 import { assertLocalProviderDiscoveryUrl, auditPreview } from '../../../agent/security'
-import { modelReadiness, isLocalHttpSource } from '../../../agent/cli-auth'
+import { modelReadiness } from '../../../agent/cli-auth'
 import { checkCliAuth, cliBinaryNames, startCliLogin, cancelCliLogin } from '../../../agent/cli-auth-runtime'
-import type { Provider, ProviderDiscoveryKind, Readiness, VoiceTranscriptionInput } from '../../../agent/types'
+import type { Provider, ProviderDiscoveryKind, VoiceTranscriptionInput } from '../../../agent/types'
 import { store } from '../../state'
 import { auditEvent, requireSecurityRole } from '../audit'
 import { handle } from '../ipc'
@@ -25,29 +25,6 @@ export function getManagedKokoroService(): KokoroService {
     app.once('before-quit', () => managedKokoro?.dispose())
   }
   return managedKokoro
-}
-
-// Opt-in live check (3539): local HTTP chat-completions are Ready only with models; null keeps the presence answer.
-function isLiveCheckableLocalProvider(provider: Provider): boolean {
-  return isLocalHttpSource(provider) && (provider.transport ?? 'chat-completions') === 'chat-completions'
-}
-
-async function liveLocalReadiness(provider: Provider): Promise<Readiness | null> {
-  const name = provider.name || 'This provider'
-  const baseUrl = provider.baseUrl?.trim() ?? ''
-  const apiKey = provider.apiKey?.trim() ?? ''
-  const notReady: Readiness = { ready: false, reason: 'needs-endpoint', message: `${name} is not reachable or reports no models — start it or add a model in Settings → Models & Accounts.` }
-  try {
-    // Ollama's key-less probe is cheapest; a real key goes through the OpenAI-compatible call so it is not dropped.
-    const models = provider.source === 'ollama' && !apiKey
-      ? await fetchOllamaModels(baseUrl)
-      : provider.source === 'lmstudio'
-        ? await fetchLmStudioModels(baseUrl, apiKey)
-        : await fetchOpenAiCompatibleModels(baseUrl, apiKey)
-    return models.length ? null : notReady
-  } catch {
-    return notReady
-  }
 }
 
 export function registerProviderIpc() {
@@ -156,9 +133,7 @@ handle('provider:readiness', async (_e, input: ModelReadinessRequest) => {
     const auth = await checkCliAuth(provider)
     return { ...modelReadiness({ provider, cliBinaryPresent: auth.binaryPresent, cliLoggedIn: auth.loggedIn }), detail: auth.detail }
   }
-  const presence = modelReadiness({ provider, hasApiKey: !!provider.apiKey?.trim() })
-  if (input?.checkEndpoint !== true || !presence.ready || !isLiveCheckableLocalProvider(provider)) return presence
-  return await liveLocalReadiness(provider) ?? presence
+  return modelReadiness({ provider, hasApiKey: !!provider.apiKey?.trim() })
 })
 
 // Authorize a CLI provider in-app via its OAuth flow (`codex login` /

@@ -69,7 +69,6 @@ const linux_compile = [_][]const u8{
 const linux_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-forward",
-    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -89,7 +88,6 @@ const linux_fast = [_][]const u8{
     "test-native-options-host",
     "test-template-limits-host",
     "test-originals-host",
-    "test-tokenizer-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -188,7 +186,6 @@ const linux_host = [_][]const u8{
     "test-inc4-round-host",
     "test-inc4-rows-host",
     "test-kernel-seed-host",
-    "test-lane-explore-host",
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
@@ -281,7 +278,6 @@ const macos_adapters = [_][]const u8{
     "test-flashnext-pack-cache",
     "test-gguf-linux-compile",
     "test-h3-modulation-bf16",
-    "test-h3-read-ahead",
     "test-masked-values-host",
     "test-metal-counters-host",
     "test-minimax-info-host",
@@ -302,7 +298,6 @@ const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-draft",
     "test-dsv41-forward",
-    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -319,7 +314,6 @@ const macos_fast = [_][]const u8{
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
     "test-template-limits-host",
-    "test-tokenizer-host",
 };
 
 const macos_lanes = [_][]const u8{

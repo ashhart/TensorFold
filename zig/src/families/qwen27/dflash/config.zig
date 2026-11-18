@@ -6,7 +6,6 @@ pub const max_taps = 8;
 /// The 27B drafter's taps (five); `tap_count` says how many of a config's `taps` are in use.
 pub const tap_ids = [max_taps]u32{ 5, 19, 33, 47, 61, 0, 0, 0 };
 /// incoai/Ornith-1.5-122B-DFlash2: six layers over Ornith-1.5-122B's 48, a block of 16.
-pub const flint_tap_ids = [max_taps]u32{ 5, 15, 26, 36, 46, 0, 0, 0 };
 pub const ornith_tap_ids = [max_taps]u32{ 1, 7, 14, 20, 26, 32, 39, 45 };
 pub const Config = struct {
     hidden: u32 = 5120,
@@ -71,13 +70,11 @@ pub const Config = struct {
     pub fn bind(c: Config, hidden: usize, vocab: usize, layers: usize) !void {
         if (hidden != c.hidden or vocab != c.vocab or layers != c.target_layers) return error.DraftForAnotherTarget;
     }
-    /// Published Qwen, Ornith and Flint shapes admitted by the shared Metal draft runtime.
+    /// The 27B's stock drafter, or Ornith-1.5-122B's: the two contracts the Metal runtime has run.
     pub fn requireStock(c: Config) !void {
         try c.check();
         const stock = c.hidden == 5120 and c.intermediate == 17408 and c.layers == 5 and c.heads == 32 and c.kv_heads == 8 and c.target_layers == 64 and c.mask == 248070 and c.block == 8 and c.tap_count == 5;
         const ornith = c.hidden == 3072 and c.intermediate == 9216 and c.layers == 6 and c.heads == 32 and c.kv_heads == 8 and c.target_layers == 48 and c.mask == 248077 and c.block == 16 and c.tap_count == 8 and std.mem.eql(u32, c.tapIds(), ornith_tap_ids[0..8]);
-        const flint = c.hidden == 2048 and c.intermediate == 6144 and c.layers == 5 and c.heads == 32 and c.kv_heads == 8 and c.target_layers == 49 and c.vocab == 150144 and c.mask == 150019 and c.block == 8 and c.tap_count == 5 and c.theta == 10000 and std.mem.eql(u32, c.tapIds(), flint_tap_ids[0..5]);
-        if (flint and c.head_dim == 128 and c.window == 2048 and c.group == 16 and c.conv == 2 and c.rank == 256 and c.topk == 16 and c.eps == 1e-6) return;
         if (c.vocab != 248320 or c.head_dim != 128 or c.window != 2048 or c.group != 16 or c.conv != 2 or c.rank != 256 or c.topk != 16 or c.eps != 1e-6 or c.theta != 10000000 or !(stock or ornith)) return error.NotStockDFlash2;
     }
 };
@@ -264,19 +261,4 @@ test "a 9B target refuses the 27B's DFlash2 and a 9B-shaped DFlash2 by name from
         small = next;
     }
     try std.testing.expectError(error.NotStockDFlash2, admitFolders(nine, small));
-}
-
-test "Flint DFlash2 binds only its published target shape and post-block taps" {
-    const c = try parse(std.testing.allocator, @embedFile("flint_fixture.json"));
-    try c.bind(2048, 150144, 49);
-    try std.testing.expectEqualSlices(u32, flint_tap_ids[0..5], c.tapIds());
-    try std.testing.expectEqual(@as(u32, 10240), c.tapWidth());
-    try std.testing.expectEqual(@as(usize, 81), c.tensorCount());
-    try std.testing.expectError(error.DraftForAnotherTarget, c.bind(5120, 248320, 64));
-    var bad = c;
-    bad.taps[0] -= 1;
-    try std.testing.expectError(error.NotStockDFlash2, bad.requireStock());
-    bad = c;
-    bad.theta = 10000000;
-    try std.testing.expectError(error.NotStockDFlash2, bad.requireStock());
 }

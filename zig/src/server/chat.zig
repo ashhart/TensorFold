@@ -13,9 +13,9 @@ const cached_tokens = @import("cached_tokens.zig");
 const ids = @import("ids.zig");
 const clock = @import("clock.zig");
 const wait = @import("wait_reason.zig");
-const refusals = @import("refusals.zig");
 const server_mod = @import("server.zig");
 const Server = server_mod.Server;
+const chunk_plan = @import("chunk_plan.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
 const StopHook = @import("stop_hook.zig").StopHook;
 const engine_refusal = @import("engine_refusal.zig");
@@ -87,7 +87,6 @@ pub const Reply = struct {
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
-    reasoning_recovered: bool = false, // ended at its end token in an unclosed think block: content repeats it
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -199,9 +198,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .rewind_len = @intCast(rendered.rewind_len),
         .user_end = @intCast(rendered.user_end),
         .shared_prefixes = shared.items,
-        .message_starts = rendered.message_starts,
         // a cut before the conversation's own text: fresh sessions resume their whole harness
-        .chunks = try srv.chunks.request(a, rendered.ids, system_len),
+        .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk),
         // from the tokens alone, for every request: cached states are keyed by tokens
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids),
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
@@ -264,16 +262,16 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
-        error.Busy => refusals.count(srv, .engine_busy, cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{})),
-        error.Closed => refusals.count(srv, .engine_unavailable, cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{})),
-        error.InvalidSpans => refusals.count(srv, .invalid_request, cx.fail(.request, "the prompt span layout is invalid", .{})),
-        error.InvalidRequest => refusals.count(srv, .invalid_request, cx.fail(.request, "the request does not match the loaded model", .{})),
-        error.Stale => refusals.failure(srv, .engine_stale, cx.fail(.server, "{s}", .{api.stale_message})),
-        error.MemoryPressure => refusals.count(srv, .memory_pressure, cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message})),
+        error.Busy => cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{}),
+        error.Closed => cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{}),
+        error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
+        error.InvalidRequest => cx.fail(.request, "the request does not match the loaded model", .{}),
+        error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
+        error.MemoryPressure => cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message}),
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false, .recover = input.prompt == null and request.structure == null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {

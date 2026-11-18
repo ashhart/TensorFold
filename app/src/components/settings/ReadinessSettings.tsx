@@ -79,7 +79,7 @@ export function ReadinessSettings({ ctx }: { ctx: SettingsSectionContext }) {
     const initial = Object.fromEntries(providerEntries.map((entry) => [entry.key, { status: 'checking' as const }]))
     setProviderReadiness(initial)
     for (const entry of providerEntries) {
-      api.getModelReadiness({ providerId: entry.providerId, accountId: entry.accountId, checkEndpoint: true })
+      api.getModelReadiness({ providerId: entry.providerId, accountId: entry.accountId })
         .then((value) => {
           if (cancelled) return
           setProviderReadiness((current) => ({ ...current, [entry.key]: { status: 'ok', value } }))

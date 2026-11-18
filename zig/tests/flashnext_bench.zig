@@ -116,7 +116,8 @@ const Bench = struct {
         for (p.lanes) |l| try b.encodeLane(p, l, mode);
     }
 
-    /// DeltaNet step per layer: recorded kernel (0), fz_gdn (1), fz_gdn last-state only (2); rank 0 when `tp`.
+    /// The DeltaNet step over every linear layer: the recorded kernel (0), fz_gdn (1), fz_gdn storing only the last
+    /// row's state (2); speed-up mode's rank 0 heads when `tp`.
     fn encodeGdn(b: *Bench, rows: usize, tp: bool, which: usize) !void {
         for (&b.m.layers) |*L| if (L.linear) try b.gdnLayer(L, rows, tp, which);
     }
@@ -165,7 +166,8 @@ const Bench = struct {
         return cb.gpuSeconds();
     }
 
-    /// GPU seconds of `f(args)`: median of 5 buffers x 12 runs on a serial encoder; a short pass raises clocks first.
+    /// GPU seconds of one `f(args)`: the median of five command buffers that each run it twelve times on a serial
+    /// encoder (a lone pass of a few short kernels runs before the GPU's clocks rise).
     fn timed(b: *Bench, comptime f: anytype, args: anytype) !f64 {
         var s: [5]f64 = undefined;
         for (&s) |*v| {

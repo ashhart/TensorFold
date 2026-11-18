@@ -20,8 +20,6 @@ const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const cancel_ids = @import("cancel_ids.zig");
-const prompt_list = @import("prompt_list.zig");
-const completion_prompt = @import("completion_prompt.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -123,7 +121,6 @@ pub const Plan = struct {
     separate_usage: bool,
     policy: tool_stream.Policy,
     named: []const u8,
-    prompts: []const []const u8 = &.{}, // a raw completion's list of prompts, each its own choice (prompt_list.zig)
 };
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
@@ -146,8 +143,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
-    const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
-    if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"));
+    if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");
     const max = if (first != null and first.?.truthy()) first else body.get("max_completion_tokens");
@@ -186,8 +182,50 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
-        .prompts = prompts,
     };
+}
+
+/// A completion's prompt as the model reads it: token ids as given, anything else as text.
+fn legacyPrompt(srv: *Server, cx: *Cx, prompt: ?Value) errors.Refused!chat.Prompt {
+    const p = prompt orelse return .{ .text = "" };
+    if (p == .array and p.array.len > 0 and allInts(p.array)) {
+        const vocab = srv.text.vocabSize();
+        const out = try cx.a.alloc(u32, p.array.len);
+        for (p.array, out) |t, *slot| slot.* = try promptId(cx, vocab, t);
+        return .{ .ids = out };
+    }
+    return .{ .text = try promptText(srv, cx, p) };
+}
+
+/// A prompt token id, refused unless it is an integer inside the vocabulary.
+fn promptId(cx: *Cx, vocab: u32, t: Value) errors.Refused!u32 {
+    const n = if (t == .int) t.int64() else null;
+    if (n == null or n.? < 0 or n.? >= vocab) return cx.fail(.request, "prompt token ids must be integers in the valid range 0 to {d}", .{@as(i64, vocab) - 1});
+    return @intCast(n.?);
+}
+
+fn allInts(items: []const Value) bool {
+    for (items) |t| if (t != .int and t != .bool) return false;
+    return true;
+}
+
+fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
+    switch (p) {
+        .string => |s| return s,
+        .null => return "",
+        .array => |items| {
+            if (allInts(items)) {
+                const vocab = srv.text.vocabSize();
+                const toks = try cx.a.alloc(u32, items.len);
+                for (items, toks) |t, *slot| slot.* = try promptId(cx, vocab, t);
+                return srv.text.decode(cx.a, toks) catch return error.OutOfMemory;
+            }
+            var parts: std.ArrayList([]const u8) = .empty;
+            for (items) |item| try parts.append(cx.a, try promptText(srv, cx, item));
+            return std.mem.join(cx.a, "\n", parts.items);
+        },
+        else => return tool_specs.pyStr(cx.a, p),
+    }
 }
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
@@ -214,7 +252,6 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
-    if (p.prompts.len > 0) return prompt_list.run(srv, a, out, gone, p, p.prompts, raw);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
@@ -226,7 +263,7 @@ fn logRefused(id: []const u8, message: []const u8) void {
     log.line("{s}", .{log.refused(&buf, id, message)});
 }
 
-pub const Run = struct {
+const Run = struct {
     srv: *Server,
     a: Allocator,
     out: Out,
@@ -337,7 +374,7 @@ pub const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    pub fn whole(r: *Run, gone: Gone, field: []const u8) void {
+    fn whole(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
@@ -470,7 +507,7 @@ pub const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    pub fn stream(r: *Run, gone: Gone, field: []const u8) void {
+    fn stream(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         const tools = r.plan.input.tools.len > 0;
         var cx: Cx = .{ .a = a };

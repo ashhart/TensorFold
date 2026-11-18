@@ -72,16 +72,6 @@ pub fn hexSha(text: []const u8) bool {
     return true;
 }
 
-/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
-pub fn revisionOk(text: []const u8) bool {
-    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
-    for (text) |ch| {
-        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
-        if (!ok) return false;
-    }
-    return true;
-}
-
 /// The cached snapshot serving `repo`: refs/main's revision, else the newest snapshot with a config.json.
 pub fn cachedSnapshot(a: Allocator, io: std.Io, hub: []const u8, repo: []const u8) !?[]const u8 {
     const dir_name = try repoDirName(a, repo);
@@ -316,7 +306,7 @@ test "cache layout helpers read a synthetic cache" {
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs" }));
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/snapshots" }));
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs/main" }), .data = "../../models--Org--Name/snapshots/0123456789abcdef0123456789abcdef01234567" });
-    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a non-sha ref is refused
+    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a ref that is not a sha is never joined
     const missing = try cachedSnapshot(a, io, hub, "Org/Other");
     try std.testing.expect(missing == null);
 }

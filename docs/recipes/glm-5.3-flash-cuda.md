@@ -47,13 +47,8 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
-- `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default and the
-  only qualified cache. FP8 is lossy, so its replies differ from the BF16 cache's, and a mode that changes tokens is
-  not qualified. A diagnostic receipt on FP4-Local at TP=2 on two GB10
-  ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)) measures how far it moves: teacher-forced over 360,418
-  positions, the mean NLL within 0.06% and the best token the same at 95.5% of positions, a KL over the top 20 of
-  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache 6,960 bytes a rank against 13,056 (−47%), beside the
-  231 MiB each stream holds either way; cold prompts 3 to 5% slower.
+- `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
+  qualification are pending ([1.1.2](../../CHANGELOG.md#112)).
 - `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
@@ -107,24 +102,8 @@ Unset or 0 retains the existing policy. Copies use the normal target verify/part
 drafter; `--no-drafts` and `"draft": false` remain plain. MTP uses its timed window prices; DFlash2 keeps its seed
 prices. Observed copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix;
 cost may choose plain.
-See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). On one checkpoint, copies kept
-every reply the same token for token, but sped some loads up and slowed others, so the default stays off (#1910).
-`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4`, greedy, two GB10s at TP=2 with `--parallel 4`, main `0fed2e4a5f`: decode
-tok/s with copies on against `TF_GLM_COPIES=0`, four fresh launches (off, on, on, off). The on launches turned copies
-on through a local default that takes the same path as `TF_GLM_COPIES=1`.
-
-| Load | 1 stream | 4 streams, per stream | 4 streams, aggregate |
-| --- | ---: | ---: | ---: |
-| A quoted document (~400 tokens back) | +8.1% faster | +0.6% faster | −0.4% slower |
-| Code | +2.3% faster | −1.0% slower | −1.5% slower |
-| One code prompt on every stream | −0.2% inside | +10.1% faster | +11.0% faster |
-| A file edited back | +9.9% faster | +1.5% faster | +2.5% faster |
-| Prose | −3.6% slower | +9.7% faster | +6.5% faster |
-| Prose after a 31K-token prompt | −0.8% inside | +6.7% faster | +4.0% faster |
-| Prose after a 56K-token prompt | −0.6% inside | +6.6% faster | +4.6% faster |
-
-Faster is a copy-on mean above both copy-off launches, slower one below the copy-off mean by more than the copy-off
-range (0.25% at least), and inside the rest. Other checkpoints and sampled replies may read differently.
+See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
+pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
 
 ## Window prices
 
@@ -134,16 +113,12 @@ bits. MTP also times windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, with s
 chained draft step. Its startup line reports `glm: windows (timed)` and the expert form. DFlash2 keeps the existing
 seed forward and step prices in lone and shared rounds; it times only the target expert-form race and reports
 `glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or published to the lane core.
-`TF_GLM_EXPERT_FORM=classic` or `factored` names the form instead and skips the race, so launches compare at one
-form, and a load that times nothing still runs it (`glm: expert form (untimed)`); a named form's startup line puts
-`(TF_GLM_EXPERT_FORM)` after the form's word.
 
 The measurements stay in `~/.cache/tensorfold/window-costs`, keyed by the build, GPU/driver, full checkpoint and drafter
 identity, drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul
-modes, dense/head bits, KV placement, the recorded NCCL channel/P2P settings and a form `TF_GLM_EXPERT_FORM` names, so
-a named form never reads the race's record. The DFlash2 form-only records have separate keys from window tables. An
-identity too long for its buffer skips both price caches with a log line and still measures the required work; it
-never truncates an identity or refuses the model for that reason.
+modes, dense/head bits, KV placement and the recorded NCCL channel/P2P settings. The DFlash2 form-only records have
+separate keys from window tables. An identity too long for its buffer skips both price caches with a log line and
+still measures the required work; it never truncates an identity or refuses the model for that reason.
 
 An older TP=2 GB10 receipt, before the unused DFlash2 timing was removed, had one empty-price-cache load of 85.2 s
 and other loads of 70-75 s. Its drafter mode is not recorded. That single sample does not estimate this startup path.

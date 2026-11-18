@@ -16,11 +16,7 @@ pub const Geometry = struct { name: []const u8, heads: u32, kv_heads: u32, hidde
 /// Nanbeige4.3-33B, the family's first model, and Nanbeige4.1-3B, its drafter.
 pub const nanbeige43: Geometry = .{ .name = "33B", .heads = 56, .kv_heads = 8, .hidden = 7168, .intermediate = 22016, .vocab = 166912 };
 pub const nanbeige41: Geometry = .{ .name = "3B", .heads = 20, .kv_heads = 4, .hidden = 2560, .intermediate = 10496, .vocab = 166144 };
-/// Qwen3 embeddings reuse this forward with their own admission and per-head RMS norms.
-pub const qwen3_06: Geometry = .{ .name = "qwen3-0.6B", .heads = 16, .kv_heads = 8, .hidden = 1024, .intermediate = 3072, .vocab = 151669 };
-pub const qwen3_4: Geometry = .{ .name = "qwen3-4B", .heads = 32, .kv_heads = 8, .hidden = 2560, .intermediate = 9728, .vocab = 151665 };
-pub const qwen3_8: Geometry = .{ .name = "qwen3-8B", .heads = 32, .kv_heads = 8, .hidden = 4096, .intermediate = 12288, .vocab = 151665 };
-pub const geometries = [_]Geometry{ nanbeige43, nanbeige41, qwen3_06, qwen3_4, qwen3_8 };
+pub const geometries = [_]Geometry{ nanbeige43, nanbeige41 };
 
 pub const glue_names = model.glue_names;
 pub const gemm_names = [_][]const u8{ "ll_gemm_00", "ll_gemm_01", "ll_gemm_10", "ll_gemm_11" };

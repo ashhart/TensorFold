@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build Zig CUDA engine with PyTorch's nvcc. Usage: TF_NEMO=<dir> TF_ZIG=<zig> bash -u build.sh RUN CAPTURE_RUN
+# Builds the Zig CUDA engine with the PyTorch image's nvcc, then proves each fatbin's SASS against the Python extension's. Usage: TF_NEMO=<work dir: src/ out/ aot/> TF_ZIG=<zig binary> bash -u build.sh RUN CAPTURE_RUN
 set -u
 RUN="${1:?run id}"
 CAP="${2:?capture run whose torch_ext holds the Python builds}"

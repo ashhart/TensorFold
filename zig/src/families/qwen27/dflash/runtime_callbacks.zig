@@ -58,7 +58,7 @@ fn embed(ptr: *anyopaque, epoch: u64, _: ck.Linear, ids: []const u32) !op.View {
     @memcpy(r.buf.slice(u32, ids.len), ids);
     const y = try b.frame.alloc(@intCast(ids.len), b.config.hidden, .bf16);
     const out = try b.frame.ref(y);
-    try b.target.glue.embeddingShape(e, b.target.config.hidden, b.target.config.vocab, b.target.weights.embed, .{ .buffer = r.buf, .offset = r.off }, .{ .buffer = out.buf, .offset = out.off }, @intCast(ids.len));
+    try b.target.glue.embedding(e, b.target.config, b.target.weights.embed, .{ .buffer = r.buf, .offset = r.off }, .{ .buffer = out.buf, .offset = out.off }, @intCast(ids.len));
     e.barrier();
     return y;
 }
@@ -102,7 +102,7 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     const y = try b.frame.alloc(x.rows, b.head.linear.n, .bf16);
     const input = try b.frame.ref(x);
     const output = try b.frame.ref(y);
-    try b.target.kernels.quant(e, b.head.linear, .{ .buffer = input.buf, .offset = input.off }, null, b.target.dims, .{ .buffer = output.buf, .offset = output.off }, x.rows);
+    try b.target.kernels.quant(e, b.head.linear, .{ .buffer = input.buf, .offset = input.off }, null, b.target.frame.get(.dims), .{ .buffer = output.buf, .offset = output.off }, x.rows);
     e.barrier();
     return .{ .logits = y, .token_ids = if (b.head.ids) |ids| try b.frame.add(.{ .buf = ids }, 1, b.head.linear.n, b.head.linear.n, .u32) else null };
 }

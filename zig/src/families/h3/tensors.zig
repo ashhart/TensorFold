@@ -1,8 +1,7 @@
 //! Safetensors files mapped once and handed to Metal whole, and a checkpoint's shards searched by tensor name.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("core").safetensors;
-const read_ahead = @import("read_ahead.zig");
+const st = @import("safetensors");
 
 /// A safetensors file mapped once and handed to Metal whole; a tensor is an offset into that one buffer.
 pub const Tensors = struct {
@@ -11,7 +10,6 @@ pub const Tensors = struct {
     data: usize,
     names: st.Header,
     arena: std.heap.ArenaAllocator,
-    path: [:0]const u8,
 
     pub fn open(gpa: std.mem.Allocator, device: mtl.Device, path: [*:0]const u8) !Tensors {
         const map = try mtl.MappedFile.open(path);
@@ -22,9 +20,8 @@ pub const Tensors = struct {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const names = try st.parseHeader(arena.allocator(), map.bytes[8..][0..header_len], map.size - 8 - header_len);
-        const owned = try arena.allocator().dupeSentinel(u8, std.mem.span(path), 0);
         const buffer = try device.bufferNoCopy(map.bytes.ptr, map.bytes.len, mtl.ResourceOptions.shared);
-        return .{ .map = map, .buffer = buffer, .data = 8 + header_len, .names = names, .arena = arena, .path = owned };
+        return .{ .map = map, .buffer = buffer, .data = 8 + header_len, .names = names, .arena = arena };
     }
 
     pub fn deinit(self: *Tensors) void {
@@ -93,14 +90,6 @@ pub const Checkpoint = struct {
             };
         }
         return .{ .shards = shards };
-    }
-
-    /// Every shard's whole file into the page cache, ahead of the first forward's faults.
-    pub fn readAhead(self: *const Checkpoint, gpa: std.mem.Allocator, io: std.Io) !void {
-        const shards = try gpa.alloc(read_ahead.Shard, self.shards.len);
-        defer gpa.free(shards);
-        for (shards, self.shards) |*s, *shard| s.* = .{ .path = shard.path, .size = shard.map.size };
-        _ = try read_ahead.read(gpa, io, shards);
     }
 
     pub fn entry(self: *const Checkpoint, name: []const u8) ?st.Entry {

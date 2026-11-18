@@ -71,12 +71,31 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
 
-## Vulkan affine projections
+## Vulkan shaders from omarchy-mlx
 
-`zig/kernels/vulkan/qmm.comp` adapts the GLSL shader from
-[mlx-omarchy](https://github.com/joshuaswarren/omarchy-mlx), MIT License,
-Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
-Its arithmetic is unchanged; the native Vulkan path does not link MLX.
+These files in `zig/kernels/vulkan/` come from [omarchy-mlx](https://github.com/joshuaswarren/omarchy-mlx),
+MIT License, Copyright © 2026 Joshua Warren and mlx-omarchy contributors. The first lines of each file name its
+source path and commit. The native Vulkan path does not link MLX.
+
+- `argreduce_chunk.comp`
+- `argreduce_combine.comp`
+- `binary_vec.comp`
+- `cast.comp`
+- `conv_dw1d.comp`
+- `copy_general.comp`
+- `dequant.comp`
+- `fast_norm.comp`
+- `fast_norm_gated.comp`
+- `fast_rope.comp`
+- `gated_delta_decode.comp`
+- `gated_delta_prefill_oracle.comp`
+- `gather_take.comp`
+- `gdn_conv_decode.comp`
+- `omarchy_trig.h`
+- `qmm.comp`
+- `sdpa_decode_native.comp`
+- `swiglu.comp`
+
 See [the license text](LICENSES/mlx-omarchy-MIT.txt).
 
 ## Qwen Flash Next
@@ -525,10 +544,3 @@ by measuring torch's output on the release's tables bit for bit.
 
 TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
 own code as the reference.
-
-## Indian-script tokenizer fixture
-
-`INDIC` in `tools/zig/tokenizer_parity.py` holds one sentence of
-[IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
-and ZWJ/ZWNJ conjuncts after it are TensorFold's own.

@@ -136,7 +136,6 @@ pub const Spec = struct {
     loop_guard: bool = false,
     loop_stop: bool = false, // with loop_guard: finish where it fires instead of forcing the close
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
-    message_starts: []const u32 = &.{}, // where each templated message begins (api.Request.message_starts); not a cut
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
@@ -176,7 +175,6 @@ pub const Stream = struct {
     loop_period: ?u32 = null,
     long_loop: long_loop.Index = .{}, // the reasoning's runs, for passages repeated verbatim (long_loop.zig)
     chunks: []const u32,
-    message_starts: []const u32,
     history_len: u32,
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
@@ -247,7 +245,6 @@ pub const Stream = struct {
     grant_short: bool = false, // the last grant verified fewer drafts than the stream held
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
-    draft_chances_cut: ?usize = null, // first chance a cut left unknown (null: measured); a chances hook marks it
     copy_width: ?u32 = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
@@ -274,7 +271,6 @@ pub const Stream = struct {
             .loop_guard = spec.loop_guard,
             .loop_stop = spec.loop_stop,
             .chunks = spec.chunks,
-            .message_starts = spec.message_starts,
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
@@ -323,7 +319,6 @@ pub const Stream = struct {
         s.grant_gain = null;
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
-        s.draft_chances_cut = null;
         s.copy_width = null;
         s.proposal_depth = null;
     }

@@ -43,8 +43,9 @@ const Host = struct {
 };
 
 /// TF_QWEN35_METAL_KV_PAGES=1: the streams' keys and values in pages of the core KV pool.
-fn pagesOn() !bool {
-    return @import("sys").environment.read(bool, "TF_QWEN35_METAL_KV_PAGES", false);
+fn pagesOn() bool {
+    const v = std.c.getenv("TF_QWEN35_METAL_KV_PAGES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
 /// The pool beside the model under the load limit: kv_pool's plan of the streams and pages, made now; why not, or null.
@@ -95,7 +96,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     // TF_QWEN35_METAL_KV_PAGES: the page plan sets the streams; otherwise each stream's whole cache is admitted at load
-    const paged = try pagesOn();
+    const paged = pagesOn();
     const served: u32 = if (paged) o.lanes else try metal_admit.streams(a, "qwen3.5", q.state.cacheBytes(@intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse {
         h.metal.deinit();
         model.deinit();
@@ -134,11 +135,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
             h.cache = api.prompt_cache.Store.init(gpa, .{
                 .ptr = h.metal,
                 .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
-            }, .{ .planned = true, .grid = chunk, .chunk = chunk, .warm_usable = true }, plan.budget_bytes);
+            }, .{ .planned = true, .grid = chunk, .chunk = chunk }, plan.budget_bytes);
             h.host.cache = &h.cache.?;
+            h.host.info_.prompt_cache = true;
         }
     }
-    h.host.advertiseCache(if (h.cache) |*store| store else null);
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "qwen3.5");
     errdefer mtl.resident.streams.drop(h);

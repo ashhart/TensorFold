@@ -5,15 +5,11 @@ const info = @import("info.zig");
 const pull = @import("pull.zig");
 const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
-const rm = @import("rm.zig");
 const lora_merge = @import("core").lora_merge;
-/// The checkpoints `models` lists, sized, for `tensorfold device`.
-pub const onDisk = models.onDisk;
 
 const usage =
     \\usage: tensorfold models [--json]
     \\       tensorfold info MODEL
-    \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
@@ -26,7 +22,7 @@ const usage =
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;
     const cmd = args[0];
-    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan") or std.mem.eql(u8, cmd, "rm");
+    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan");
 }
 
 /// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
@@ -34,8 +30,7 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const a = init.arena.allocator();
     var out_buf: [64 << 10]u8 = undefined;
     var err_buf: [4 << 10]u8 = undefined;
-    // Streaming keeps redirected stdout and stderr from overwriting each other.
-    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buf);
+    var out = std.Io.File.stdout().writerStreaming(init.io, &out_buf); // streaming: positional writes from both would overwrite each other in one redirected file
     var err = std.Io.File.stderr().writerStreaming(init.io, &err_buf);
     defer out.interface.flush() catch {};
     defer err.interface.flush() catch {};
@@ -61,16 +56,6 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         if (node) |o| return pull_exlr8.run(a, init.io, &out.interface, &err.interface, env, args[1], o);
         return pull.run(a, init.io, &out.interface, &err.interface, env, null, args[1]);
-    }
-    if (std.mem.eql(u8, args[0], "rm")) {
-        const parsed = rm.parseArgs(args[1..]) orelse {
-            try err.interface.writeAll(usage);
-            return 2;
-        };
-        var in_buf: [256]u8 = undefined;
-        var input = std.Io.File.stdin().readerStreaming(init.io, &in_buf);
-        const interactive = std.Io.File.stdin().isTty(init.io) catch false;
-        return rm.run(a, init.io, &out.interface, &err.interface, env, null, parsed, .{ .interactive = interactive, .input = &input.interface });
     }
     if (std.mem.eql(u8, args[0], "plan")) {
         const parsed = plan.parseArgs(a, args[1..]) orelse {
@@ -102,6 +87,5 @@ test "wants only the checkpoint subcommands" {
     try std.testing.expect(wants(&.{ "info", "Org/Flash" }));
     try std.testing.expect(wants(&.{ "merge", "model", "adapter", "out" }));
     try std.testing.expect(wants(&.{ "merge", "dense", "adapter", "out", "--quantize", "shipped" }));
-    try std.testing.expect(wants(&.{ "rm", "Org/Flash@main", "--yes" }));
     try std.testing.expect(!wants(&.{"run"}) and !wants(&.{}) and !wants(&.{"serve"}));
 }

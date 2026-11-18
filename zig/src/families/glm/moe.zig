@@ -15,10 +15,6 @@ const bind = fwd.bind;
 const shape = fwd.shape;
 const size = fwd.size;
 
-comptime {
-    std.debug.assert(st.max_rows == wide.max_members); // the route's member lists, read by wide.moe's unique launches
-}
-
 /// MoE block (shared expert, route, routed experts, combine); expert parallel: our experts, sent, the peer's received.
 pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     std.debug.assert(rows <= st.max_rows);
@@ -67,7 +63,6 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
             c.swiglu_limit,
             .{ .x = x_in, .ids = sc.pick, .act = sc.act, .acts = sc.acts, .ye = sc.ye, .ys = sc.ys },
             rows,
-            .{ .ids = sc.uids, .members = sc.umem, .count = sc.ucount }, // the route's unique experts, every window
         );
     } else {
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });

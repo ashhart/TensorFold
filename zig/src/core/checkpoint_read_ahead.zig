@@ -3,7 +3,6 @@ const std = @import("std");
 const prefetch = @import("checkpoint_prefetch.zig");
 const Checkpoint = @import("checkpoint.zig").Checkpoint;
 pub const Span = prefetch.Span;
-pub const chunk = prefetch.chunk;
 pub const readerCount = prefetch.readerCount;
 const none = std.math.maxInt(usize);
 

@@ -48,7 +48,8 @@ pub fn send(e: *Engine, tp: *fz.Tp2, prompt: []const u32, from: usize, marks: []
     e.peer_drops.clearRetainingCapacity();
 }
 
-/// Rank 0's request: resume state, drops, reply in `out` (null: hashed, states kept at marks); null once rank 0 closes.
+/// One of rank 0's requests: its resume state (answered to rank 0), its drops, then the reply in step into `out` (null: hashed and
+/// logged, this Mac's states kept at its marks; tf-flashnext-run passes its own); null once rank 0 closes.
 pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const tp = e.r.tp orelse return error.NotSpeedUpMode;
     const req = tp.waitRequest() orelse return null;
@@ -132,7 +133,7 @@ const Reply = struct {
     }
 };
 
-/// This Mac's state at `at` under rank 0's name gives the same tokens unless past budget by >SLACK.
+/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens unless it passes the budget by more than SLACK; free buffers then trimmed.
 fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     const size = e.snap_pool.size(snapshot.bytes(at));
     if (!admits(e.peer_budget, e.peer_held, size)) return std.log.warn("speed-up rank 1: kept nothing at {d}: {d} MiB held and {d} MiB more pass the {d} MiB budget and its slack", .{ at, e.peer_held >> 20, size >> 20, e.peer_budget >> 20 });
@@ -143,10 +144,10 @@ fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     e.snap_pool.trim(e.peer_budget -| e.peer_held);
 }
 
-/// How far rank 1's buffers may pass the budget: it holds rank 0's states, but its pool hands some larger buffers.
+/// How far rank 1's buffers may run past the budget: it holds rank 0's states, but its pool hands some of them larger buffers.
 const SLACK: u64 = 1 << 30;
 
-/// Whether a state of `size` bytes fits beside `held` (rank 0 makes room first; this stops only a runaway).
+/// Whether a new state of `size` bytes fits beside `held` (rank 0 makes room before the request; this stops only a runaway).
 fn admits(budget: u64, held: u64, size: u64) bool {
     return budget > 0 and held + size <= budget + SLACK;
 }

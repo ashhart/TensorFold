@@ -350,7 +350,7 @@ pub fn moeTwo(
         .acts = z.at(TOPK * N * 2),
         .ye = rf(io.y),
         .ys = rf(io.y).at(TOPK * D * 2),
-    }, 1, null);
+    }, 1);
 }
 
 fn routedRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, io: Io) void {

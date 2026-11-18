@@ -8,7 +8,7 @@ pub const simd = @import("simd_qmm.zig");
 /// Groups of 64 at any width with fp32 sums: the same tiles, rows at a stride.
 pub const simd_bits = @import("simd_qmm_bits.zig");
 
-/// The narrow kernel's rows per weight read; wide windows use 8, 4, 2 and 1.
+/// Rows a weight read (the kernel's MB); a window takes batches of this, then one row at a time.
 pub const batch = 2;
 
 /// Output columns a simdgroup and simdgroups a threadgroup (the kernel's RPS and SG).
@@ -73,19 +73,13 @@ pub const Pipelines = struct {
     indexed: [variants]mtl.Pipeline,
     indexed_relu2: [variants]mtl.Pipeline,
     strided: [variants]mtl.Pipeline,
-    wide_plain: [variants]mtl.Pipeline,
-    wide_relu2: [variants]mtl.Pipeline,
-    wide_strided: [variants]mtl.Pipeline,
-    wide: bool = false, // windows of 4+ rows take the 8-row kernels only on chips with tensor units (the M5 path)
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const wide = device.tensorUnits();
-        const lib = try mtl.Library.fromSource(device, source(wide), mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, sources.core_row_projection, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
-        p.wide = wide;
         inline for (bit_widths, 0..) |bits, b| inline for (.{ "f32", "bf16" }, 0..) |sum, m| {
             const i = b * 2 + m;
             p.plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_q{d}_{s}", .{ bits, sum }), false);
@@ -93,11 +87,6 @@ pub const Pipelines = struct {
             p.indexed[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_q{d}_{s}", .{ bits, sum }), false);
             p.indexed_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_relu2_q{d}_{s}", .{ bits, sum }), false);
             p.strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_strided_q{d}_{s}", .{ bits, sum }), false);
-            if (wide) {
-                p.wide_plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_q{d}_{s}", .{ bits, sum }), false);
-                p.wide_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_relu2_q{d}_{s}", .{ bits, sum }), false);
-                p.wide_strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_strided_q{d}_{s}", .{ bits, sum }), false);
-            }
         };
         return p;
     }
@@ -108,18 +97,8 @@ pub const Pipelines = struct {
         for (p.indexed) |x| x.deinit();
         for (p.indexed_relu2) |x| x.deinit();
         for (p.strided) |x| x.deinit();
-        if (p.wide) {
-            for (p.wide_plain) |x| x.deinit();
-            for (p.wide_relu2) |x| x.deinit();
-            for (p.wide_strided) |x| x.deinit();
-        }
     }
 };
-
-/// Chips without tensor units compile the original narrow source, with no wide definitions or control edits.
-pub fn source(wide: bool) []const u8 {
-    return if (wide) sources.core_row_projection else sources.core_row_projection_legacy;
-}
 
 /// Dispatch: pipeline, dims (K, N, group, rows/slots, experts, repeat), grid; buffers x, W, S, B, dims, out 0-5, ids 6.
 pub const Call = struct { pipeline: mtl.Pipeline, dims: [6]i32, groups: usize, slots: usize = 1, threads: usize = 32 * groups };
@@ -129,8 +108,7 @@ pub fn call(p: *const Pipelines, w: Weights, rows: usize, relu2: bool) !Call {
     try w.validate();
     if (rows == 0) return error.NoRows;
     const i = w.variant();
-    const pipeline = if (rows >= 4 and p.wide) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
-    return .{ .pipeline = pipeline, .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, .groups = w.n / (columns * groups) };
+    return .{ .pipeline = if (relu2) p.relu2[i] else p.plain[i], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, .groups = w.n / (columns * groups) };
 }
 
 /// `call` with output row m at y + m * `stride` values: a fused stack member writes its columns of the rows.
@@ -138,7 +116,7 @@ pub fn callStrided(p: *const Pipelines, w: Weights, rows: usize, stride: usize) 
     try w.validate();
     if (rows == 0) return error.NoRows;
     if (stride < w.n or stride > std.math.maxInt(i32)) return error.UnsupportedRowStride;
-    return .{ .pipeline = if (rows >= 4 and p.wide) p.wide_strided[w.variant()] else p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
+    return .{ .pipeline = p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
 }
 
 /// y[slots, n] = x[slot / repeat] W[ids[slot]]^T; the grid's y is the slot.
@@ -202,55 +180,4 @@ test "a strided call writes rows at least a matrix wide" {
     try std.testing.expectError(error.NoRows, callStrided(&p, w, 0, 64));
     const c = try callStrided(&p, w, 2, 192);
     try std.testing.expectEqual([6]i32{ 128, 64, 64, 2, 192, 1 }, c.dims);
-}
-
-test "row dispatch selects wide contiguous and strided pipelines from four rows" {
-    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
-    var p: Pipelines = undefined;
-    p.wide = true;
-    inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
-        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = .{ .id = @ptrFromInt(0x1000 + tag * 0x100 + i) };
-    }
-    for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
-        const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
-        const i = w.variant();
-        for (1..33) |rows| {
-            for ([_]bool{ false, true }) |relu2| {
-                const expected = if (rows >= 4) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
-                try std.testing.expectEqual(expected.id, (try call(&p, w, rows, relu2)).pipeline.id);
-            }
-            const expected = if (rows >= 4) p.wide_strided[i] else p.strided[i];
-            try std.testing.expectEqual(expected.id, (try callStrided(&p, w, rows, 128)).pipeline.id);
-        }
-    };
-}
-
-test "row dispatch without tensor units keeps main's pipelines at every row count" {
-    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
-    var p: Pipelines = undefined;
-    p.wide = false;
-    inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
-        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = .{ .id = @ptrFromInt(0x1000 + tag * 0x100 + i) };
-    }
-    for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
-        const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
-        const i = w.variant();
-        for (1..33) |rows| {
-            for ([_]bool{ false, true }) |relu2| {
-                const expected = if (relu2) p.relu2[i] else p.plain[i];
-                try std.testing.expectEqual(expected.id, (try call(&p, w, rows, relu2)).pipeline.id);
-            }
-            try std.testing.expectEqual(p.strided[i].id, (try callStrided(&p, w, rows, 128)).pipeline.id);
-        }
-    };
-}
-
-test "without tensor units the source has no wide grouping, tensor units retain the wide source" {
-    const narrow = source(false);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_wide") == null);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_body") == null);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "TF_RP_BAD_ROWS") == null);
-    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_indexed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source(true), "tf_row_projection_wide") != null);
-    try std.testing.expectEqualStrings(sources.core_row_projection, source(true));
 }

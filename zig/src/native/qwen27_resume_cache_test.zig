@@ -56,43 +56,6 @@ fn point(from: u32, ids: []const u32, history: u32, marks: []const u32) u32 {
     return rules.cachePoint(true, from, 2048, ids.len, history, marks, &.{}, &.{});
 }
 
-fn unneeded(_: *anyopaque, _: *const pc.Entry) bool {
-    return false;
-}
-
-test "qwen27 resume: an optional history pin fits beside every state and promised byte and slot" {
-    var family: Family = .{ .at = 5000 };
-    var store = pc.Store.init(t.allocator, family.snapshots(), .{ .warm = .on }, 8 << 30);
-    defer store.deinit();
-    const prompt: [5108]u32 = @splat(1);
-    const other: [5001]u32 = @splat(2);
-    try t.expect(store.keep(&prompt, 5000, null, &.{}, &.{}));
-    try t.expect(store.keep(&other, 5000, null, &.{}, &.{}));
-    const history = store.find(&prompt, &.{}, &.{}).?;
-    const all = store.held + Family.bytes(&family, 5107);
-    for ([_]bool{ false, true }) |keep_others| {
-        store.keep_others = keep_others;
-        store.budget = all - 1;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.budget = all;
-        store.most = 3;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 2;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 3;
-        store.reservation_guard = .{ .ctx = &family, .needed = unneeded, .promised = .{ .bytes = 1 } };
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.budget = all + 1;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.reservation_guard.?.promised.slots = 1;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 4;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        try t.expect(!rules.pinReplyHistory(&store, history, 4999, 5107));
-        store.reservation_guard = null;
-    }
-}
-
 test "qwen27 resume: A then B then A restores 2048 with a cache too small for the history" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

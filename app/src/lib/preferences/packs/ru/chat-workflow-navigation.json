@@ -1,8 +1,5 @@
 {
   "Outline item opened.": "Пункт плана беседы открыт.",
   "Quoted message opened.": "Цитируемое сообщение открыто.",
-  "Search match opened.": "Результат поиска открыт.",
-  "Conversation unavailable": "Разговор недоступен",
-  "This conversation was archived or deleted, or it has not loaded yet.": "Этот разговор был архивирован или удалён, либо ещё не загружен.",
-  "Back to Home": "Назад на главную"
+  "Search match opened.": "Результат поиска открыт."
 }

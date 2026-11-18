@@ -63,19 +63,19 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     errdefer device.deinit();
     const existing = device.allocated();
     const base_extra = try std.math.add(u64, requested, existing);
-    const plain = try memory.budgetLiveFor(weights, window.capacity, inventory, base_extra, existing, window.sibling(paired));
+    const plain = try memory.budgetLive(weights, window.capacity, inventory, base_extra, existing);
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
     const cache = @import("rotary_cache.zig");
     const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
     const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
-    const startup = try memory.budgetLiveFor(weights, window.capacity, inventory, extra, existing, window.sibling(paired));
+    const startup = try memory.budgetLive(weights, window.capacity, inventory, extra, existing);
     const load_limit = memory.admitBudget(limit, startup, route.needs_build) catch |err| {
         if (err == error.FlashNextMemoryShortfall) {
             const need = startup.forPhase(route.needs_build);
             const gib: f64 = 1 << 30;
-            std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, applicable prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
+            std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, both prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
         }
         return err;
     };
@@ -91,7 +91,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.copy = true;
     e.copy_min = 3;
     e.copy_long = 6;
-    e.segments = window.staggered();
+    e.segments = window.ssd_experts == null and !window.ple_on_ssd and window.fsr_trace == null;
     e.mark_taps = true;
     e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
@@ -206,7 +206,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
-    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null and !r.device.tensorUnits();
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -235,6 +235,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&L.ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(r, "mix", .{});
@@ -332,6 +333,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &ex);
         m.mtp = .{
             .ahc = try hcOf(r, "mtp.ahc", .{}),
             .mhc = try hcOf(r, "mtp.mhc", .{}),
@@ -384,28 +386,16 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
 
     e.r = r;
     e.m = m;
-    if (r.sb_index) { // before the prompt kernels compile: they read the routed experts through the index too
-        var widths = try @import("widths.zig").Widths.init(arena, &cfg);
-        defer widths.deinit();
-        const ws = try @import("engine_widths.zig").read(&cfg, &widths, r.ngram);
-        var sets: [LAYERS + 1]@import("scale_index.zig").Set = undefined;
-        for (&m.layers, 0..) |*L, i| sets[i] = .{ .ex = &L.ex, .xw = ws.layers[i] };
-        sets[LAYERS] = .{ .ex = &m.mtp.ex, .xw = ws.mtp };
-        try @import("scale_index.zig").build(r, &sets);
-    }
     e.pr = try arena.create(Prompt);
     e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
     const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
-    const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
-    e.pr2 = e.pr;
-    if (r.window.sibling(tp_path != null)) {
-        e.pr2 = try arena.create(Prompt);
-        e.pr2.* = try e.pr.sibling();
-    }
+    e.pr2 = try arena.create(Prompt);
+    e.pr2.* = try e.pr.sibling();
     try e.rounds();
     e.tsel = try GSelect.init(r, 0);
     e.msel = try GSelect.init(r, 0);
     // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in...
+    const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
     if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
     if (tp_path) |path| r.tp = try fz.Tp2.init(arena, io, r.device, path);
     if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them

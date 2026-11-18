@@ -4,7 +4,6 @@ const fill = @import("lane_host_fill.zig");
 const lane_halt = @import("lane_halt.zig");
 const lane_stream = @import("lane_stream.zig");
 const recalls = @import("lane_host_recall.zig");
-const load = @import("lane_host_load.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
@@ -31,7 +30,6 @@ pub fn takeCancels(h: *LaneHost) void {
         h.unlock();
         if (found) |job| {
             if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
-                @import("lane_host_load.zig").calling(h, job);
                 keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
                     _ = dropFailed(h, job, err);
                     continue;
@@ -56,7 +54,6 @@ pub fn failed(h: *const LaneHost, err: anyerror) void {
 /// A request the backend failed: the failure hook hears the error and the request ends with the backend's words.
 pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
     failed(h, err);
-    load.failed(h, .backend_prompt);
     return h.drop(job, h.words(err));
 }
 
@@ -130,7 +127,6 @@ pub fn failAll(h: *LaneHost, message: []const u8) void {
 fn endFailed(h: *LaneHost, job: *Job, message: []const u8) void {
     h.lock();
     fill.unfill(h, job);
-    h.load.failures[@backingInt(load.Failure.backend_round)] += 1;
     h.unlock();
     if (job.started and !job.stream.finished) h.core.discard(&job.stream);
     h.finish(job, .failed, message);
@@ -170,11 +166,11 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         h.queued.insert(h.gpa, 0, job) catch break :blk false;
         break :blk true;
     };
-    load.ended(job); // before the teardown: this attempt's time leaves with it
+    @import("lane_host_load.zig").ended(job); // before the teardown: this attempt's time leaves with it
     if (waits) {
         h.load.requeued += 1;
         h.memory_lanes = others; // under the lock: a publish reads it
-    } else if (others == 0) h.load.failures[@backingInt(load.Failure.lane_memory_alone)] += 1;
+    }
     h.unlock();
     if (!waits) {
         h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);

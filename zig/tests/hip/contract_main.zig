@@ -40,7 +40,6 @@ const vl_k = @import("contract_vl.zig");
 const pos_k = @import("contract_vl_position.zig");
 const sparse_k = @import("contract_sparse_lanes.zig");
 const skew_k = @import("contract_wmma_skew.zig");
-const idx_k = @import("contract_idx_scores.zig");
 
 const g = core.contract.gates;
 
@@ -346,10 +345,6 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
     defer sparse.deinit();
     try kernels.append(a, sparse.kernel());
-    var idx_scores: [2]idx_k.IdxScores = undefined;
-    for (&idx_scores, std.enums.values(idx_k.Fault)) |*x, fault| x.* = .init(a, &r, s, &l, fault);
-    defer for (&idx_scores) |*x| x.deinit();
-    for (&idx_scores) |*x| try kernels.append(a, x.kernel());
     var skews: [skew_k.cases.len]skew_k.Skew = undefined;
     for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&skews) |*x| x.deinit();

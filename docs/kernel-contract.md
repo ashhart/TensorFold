@@ -350,10 +350,6 @@ is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rm
 Four controls: the recurrence one row short of the prompt and with one key head, and the prework norming q with k's
 weights and writing gate and beta to each other's outputs.
 
-HIP also checks Flash Next's indexer block score kernel (`tf_fn_idx_scores`, `contract_idx_scores.zig`, record in
-`hip_records_sparse.zig`): staging each tile's rows of `q` in LDS when `heads * dims <= 512`, checked against the
-fp64 relu-summed head dots with one control leaving out each row's last head (`shapes`).
-
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
@@ -409,9 +405,6 @@ CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 we
 and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
-CUDA also checks GLM's NVFP4_NZ5 block 32 experts (`tf_nvfp4_nz5_*`), each bit-equal to the block 16 instance it
-replaces on the same values: a planted +5 is a 4 there under its scale two e4m3 steps up (x1.25), and the E2M1
-entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's

@@ -141,24 +141,7 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
     followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
   }
 
-  if (!thread) {
-    // A thread id with no loaded thread used to render a blank window: every
-    // [Open] path navigates by id alone, and a ticket keeps its threadId after
-    // its thread is archived or deleted (#3387). Say so instead of nothing.
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-        <h1 className="text-[16px] font-medium text-ink">{tx("Conversation unavailable")}</h1>
-        <p className="max-w-[420px] text-[13px] leading-relaxed text-ink-2">{tx("This conversation was archived or deleted, or it has not loaded yet.")}</p>
-        <button
-          type="button"
-          className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-accent"
-          onClick={() => useStore.getState().setView({ name: 'home' })}
-        >
-          {tx("Back to Home")}
-        </button>
-      </div>
-    )
-  }
+  if (!thread) return null
   const renderTimelineItem = (item: TimelineItem, turn: TurnSummary) => {
     if (item.kind === 'user') return <SentUserMessage thread={thread} item={item} busy={busy} onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined} />
     if (item.kind === 'cue') return <CueBubble text={item.text || ''} state={item.state} />

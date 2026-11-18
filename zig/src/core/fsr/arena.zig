@@ -8,20 +8,14 @@ pub const worker_stack_bytes = 16 << 20;
 pub const Expert = [components]reader.Span;
 
 pub fn Arena(comptime Reader: type) type {
-    return ArenaOf(Reader, components);
-}
-
-pub fn ArenaOf(comptime Reader: type, comptime component_count: usize) type {
-    if (component_count == 0) @compileError("an expert needs at least one stored component");
     return struct {
-        pub const Expert = [component_count]reader.Span;
         const Self = @This();
         pub const Job = struct { ticket: cache.Ticket, failure: ?anyerror = null };
         a: std.mem.Allocator,
         source: Reader,
-        experts: []const Self.Expert,
-        strides: [component_count]usize,
-        slabs: [component_count][]u8,
+        experts: []const Expert,
+        strides: [components]usize,
+        slabs: [components][]u8,
         clock: cache.Cache,
         jobs: []Job,
         job_count: usize = 0,
@@ -45,18 +39,18 @@ pub fn ArenaOf(comptime Reader: type, comptime component_count: usize) type {
         cancelled_forecasts: u64 = 0,
 
         /// Slabs belong to the GPU owner. No separate selected-expert weight table or staging copy is made.
-        pub fn init(a: std.mem.Allocator, source: Reader, experts: []const Self.Expert, strides: [component_count]usize, slabs: [component_count][]u8) !Self {
+        pub fn init(a: std.mem.Allocator, source: Reader, experts: []const Expert, strides: [components]usize, slabs: [components][]u8) !Self {
             return initMapped(a, source, experts, strides, slabs, null);
         }
 
-        pub fn initMapped(a: std.mem.Allocator, source: Reader, experts: []const Self.Expert, strides: [component_count]usize, slabs: [component_count][]u8, map: ?[]i32) !Self {
+        pub fn initMapped(a: std.mem.Allocator, source: Reader, experts: []const Expert, strides: [components]usize, slabs: [components][]u8, map: ?[]i32) !Self {
             if (experts.len == 0) return error.NoExperts;
             if (strides[0] == 0 or slabs[0].len % strides[0] != 0) return error.InvalidSlab;
             const capacity = slabs[0].len / strides[0];
             for (strides, slabs) |stride, slab| {
                 if (stride == 0 or slab.len != try std.math.mul(usize, capacity, stride)) return error.InvalidSlab;
             }
-            const bound = try std.math.mul(usize, experts.len, component_count);
+            const bound = try std.math.mul(usize, experts.len, components);
             var files: usize = 0;
             for (experts) |expert| for (expert, strides) |span, stride| {
                 if (span.length > stride) return error.InvalidSlab;
@@ -96,7 +90,7 @@ pub fn ArenaOf(comptime Reader: type, comptime component_count: usize) type {
                 const i = s.next.fetchAdd(1, .acq_rel);
                 if (i >= s.ahead_count) return;
                 const job = &s.ahead[i];
-                reader.batchOf(component_count, s.source, @as(*[1]Job, @ptrCast(job)), s.experts, s.strides, s.slabs, s.ahead_sizes, &s.ahead_io) catch |err| {
+                reader.batch(s.source, @as(*[1]Job, @ptrCast(job)), s.experts, s.strides, s.slabs, s.ahead_sizes, &s.ahead_io) catch |err| {
                     job.failure = err;
                 };
                 s.finished.store(i + 1, .release);
@@ -156,7 +150,7 @@ pub fn ArenaOf(comptime Reader: type, comptime component_count: usize) type {
         }
 
         fn execute(s: *Self) void {
-            reader.batchOf(component_count, s.source, s.jobs[0..s.job_count], s.experts, s.strides, s.slabs, s.file_sizes, &s.io) catch |err| {
+            reader.batch(s.source, s.jobs[0..s.job_count], s.experts, s.strides, s.slabs, s.file_sizes, &s.io) catch |err| {
                 for (s.jobs[0..s.job_count]) |*job| job.failure = err;
             };
         }

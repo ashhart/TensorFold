@@ -43,11 +43,7 @@ calls need `libtfgrammar` beside the binary (release archives ship it; from sour
   template); leave the flag out. Give hard requests a large `max_tokens`; the card suggests 32,768.
 - **Tools.** The template's `<tool_call>name<arg_key>…</arg_key><arg_value>…</arg_value></tool_call>` calls are parsed
   as GLM-style tool calls, and required or named tool choices are constrained by the grammar.
-- **Drafts.** Copy drafts apply without an external head. Add `--drafter ~/models/Flint-DFlash2` for
-  `incoai/Flint-DFlash2` at `39b0a7f7a1` (Apache-2.0). Its published BF16 tensors use the shared DFlash2 runtime;
-  `--drafter-bits 4` prepares resident 4-bit draft projections, and `--drafter-bits 0` keeps BF16 draft projections.
-  Target weights and verification stay unchanged. This head requires an M5 and `--parallel` from 1 to 4;
-  other chips and larger stream counts are refused by name.
+- **Drafts.** The checkpoint has no draft head; the lane engine's copy drafts apply.
 
 ## Checks
 
@@ -56,34 +52,3 @@ prompt's last logits, or forced steps along given tokens, for comparison with a 
 one-row steps with 16-row windows bit for bit; `bench` times decode steps.
 
 Only the M5's tensor units were checked; M1-M4 are untested.
-
-## External head receipt
-
-An M5 Ultra with 256 GiB RAM on macOS 27.0.1 checked the published INT4 target and DFlash2 head above.
-The server used context 8192, parallel capacity 4 and no prompt cache for cold measurements.
-Requests used 128 output tokens, seed 1234, top-k 20, top-p 0.95, and Flint's normal reasoning template.
-Each stream count used the first one, two or four prompts: sky colour, Python prime factors, a bicycle explanation,
-and a small JSON object. The same binary ran without and with the head, with copies enabled on both.
-A warm-up process was discarded, then no-head/head/head/no-head processes alternated.
-Each table rate is total output tokens divided by the synchronized group's wall time, median of two processes.
-
-| Temperature | Streams | No head tok/s | DFlash2 tok/s | No head tokens/round | DFlash2 tokens/round |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1 | 174.6 | 233.0 | 1.01 | 2.98 |
-| 0 | 2 | 221.4 | 289.7 | 1.04 | 2.74 |
-| 0 | 4 | 305.2 | 330.3 | 1.04 | 2.59 |
-| 0.7 | 1 | 166.0 | 193.7 | 1.01 | 2.64 |
-| 0.7 | 2 | 208.8 | 258.2 | 1.02 | 2.63 |
-| 0.7 | 4 | 278.7 | 280.7 | 1.03 | 2.50 |
-
-Four sampled streams were nearly flat in the final repeat, with overlapping process ranges.
-An earlier balanced run took 1.8% longer with the head, with separated ranges, so this cell has no reliable gain.
-The head is optional; these prompts do not establish a speedup on every workload.
-Ready physical footprint was 22.32-22.32 GiB without the head and 22.72-22.72 GiB with it;
-peak footprint during the measured processes was 23.04-23.09 and 23.96-23.96 GiB respectively.
-
-All 110 cold replies in the balanced matrix kept complete token arrays and messages equal to solo plain execution.
-Additional checks covered the new binary without a head, first-token and reply logprobs, full-vocabulary sampling,
-BF16-head drafting, and a chat restored at 2402 of 2428 prompt tokens versus fresh execution.
-The new tap kernel passed its exceptional-value, repeat/guard and shape gates, with its planted control red,
-and its M1/M2 offline launch compiles. The head itself was exercised only on M5.

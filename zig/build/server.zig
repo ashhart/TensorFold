@@ -30,19 +30,6 @@ pub fn ollamaHostTests(b: *std.Build, all: *std.Build.Step) void {
     all.dependOn(&run.step);
 }
 
-/// The launch command's child environment and refusals, without a network or an agent.
-pub fn launchHostTests(b: *std.Build, all: *std.Build.Step) void {
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/src/server/launch_cli.zig"),
-        .target = b.graph.host,
-        .link_libc = true,
-    }) });
-    const run = b.addRunArtifact(tests);
-    run.has_side_effects = true;
-    b.step("test-launch-cli-host", "Launch agent registry, child environment and refusals without network").dependOn(&run.step);
-    all.dependOn(&run.step);
-}
-
 /// The server's JSON values as a module (zig/src/server/json.zig), so a family's serving code shares them.
 pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
@@ -102,7 +89,6 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
-    b.step("test-images-host", "Image route counts, seeds, refusals and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence:", "images_generations_test." } })).step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);

@@ -1,0 +1,127 @@
+// Prefill attention scores for one kv head, tiled: a workgroup scores 16 queries (4 query heads x 4 rows) against 16 keys, so
+// every K tile is read once for 16 queries instead of once per (head, row) workgroup.
+// Per-dot order is sdpa_decode_native.comp's: f32 q*scale once, bf16 K widened exactly, ascending-d accumulation.
+// The first pass of the three-kernel prefill SDPA: sdpa_scores_tile, sdpa_softmax_rows, sdpa_pv_tile.
+
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Query {
+#ifdef F32_Q
+  float values[];
+#else
+  uint16_t values[];
+#endif
+} query_data;
+layout(set = 0, binding = 1, std430) readonly buffer Key {
+  uint16_t values[];
+} key_data;
+layout(set = 0, binding = 2, std430) writeonly buffer Scores {
+  float values[];
+} score_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+const uint DIM = 256u;
+const uint QT = 16u;
+const uint KT = 16u;
+const uint DC = 64u;
+const uint DCP = DC + 1u;
+// Score row stride in words is out_strides[1], set by Attention from max_visible_keys.
+
+shared float s_q[QT * DC];
+shared float s_k[KT * DCP];
+
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+#ifdef F32_Q
+#define Q_LOAD(x) (x)
+#else
+#define Q_LOAD(x) bf16_load(x)
+#endif
+
+void main() {
+  uint tx = gl_LocalInvocationID.x;
+  uint ty = gl_LocalInvocationID.y;
+  uint lin = ty * 16u + tx;
+  uint kv_head = gl_WorkGroupID.z;
+  uint repeats = params.matrix_m / params.matrix_n;
+  uint rows = params.dims;
+  uint rows_per_block = QT / repeats;
+  uint row0 = gl_WorkGroupID.y * rows_per_block;
+  uint key0 = gl_WorkGroupID.x * KT;
+  uint first_key = params.matrix_k - rows;
+  // The block's last row sees the most keys; a key tile past that has no causal score to write.
+  uint block_end = first_key + min(row0 + rows_per_block, rows);
+  if (key0 >= block_end) {
+    return;
+  }
+
+  float acc = 0.0;
+  for (uint dc = 0u; dc < DIM; dc += DC) {
+    for (uint i = lin; i < QT * DC; i += 256u) {
+      uint qq = i / DC;
+      uint dd = i % DC;
+      uint qhead = kv_head * repeats + qq / rows_per_block;
+      uint qrow = row0 + qq % rows_per_block;
+      float v = 0.0;
+      if (qrow < rows) {
+        v = params.alpha * Q_LOAD(
+            query_data.values[params.lhs_offset + qhead * params.shape[0] +
+                qrow * params.out_strides[0] + (dc + dd) * params.shape[3]]);
+      }
+      s_q[i] = v;
+    }
+    for (uint i = lin; i < KT * DC; i += 256u) {
+      uint kk = i / DC;
+      uint dd = i % DC;
+      uint key = key0 + kk;
+      float v = 0.0;
+      if (key < params.matrix_k) {
+        v = bf16_load(key_data.values[params.rhs_offset +
+            kv_head * params.shape[1] + key * params.shape[2] +
+            (dc + dd) * params.in_strides[0]]);
+      }
+      s_k[kk * DCP + dd] = v;
+    }
+    barrier();
+    for (uint i = 0u; i < DC; ++i) {
+      acc = fma(s_q[ty * DC + i], s_k[tx * DCP + i], acc);
+    }
+    barrier();
+  }
+
+  uint head = kv_head * repeats + ty / rows_per_block;
+  uint row = row0 + ty % rows_per_block;
+  uint key = key0 + tx;
+  if (row < rows && key < first_key + row + 1u) {
+    score_data.values[(head * rows + row) * params.out_strides[1] + key] = 1.0 * acc;
+  }
+}

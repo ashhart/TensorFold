@@ -24,7 +24,7 @@ pub const max_runs = 6;
 /// A run of a split stack: one member (0.6.6 calls each apart), rows [row, row + n) of the fused output, bytes its own.
 pub const Run = struct { w: Ref, s: Ref, b: Ref, row: u32, n: u32, bits: u8, group: u16 };
 
-/// An MLX affine matrix: w [n, k bits / 32] u32, s and b [n, k / group] bf16 (stacked: [e, n, ...]); or `fp8`.
+/// An MLX affine matrix: w [n, k bits / 32] u32, s and b [n, k / group] bf16 (stacked: [e, n, ...]).
 pub const Affine = struct {
     w: Ref,
     s: Ref,
@@ -35,7 +35,6 @@ pub const Affine = struct {
     group: u16,
     more: u8 = 0, // runs past the first, whose bytes and width are the matrix's own: 0 for one width
     runs: [max_runs - 1]Run = undefined,
-    fp8: bool = false, // the FP8 checkpoint's E4M3 codes [n, k], s its f32 scales [n / 128, k / 128], no b
 
     pub fn width(q: Affine) Width {
         return .{ .bits = q.bits, .group = q.group };
@@ -63,20 +62,6 @@ pub fn bytes(n: usize, k: usize, w: Width) usize {
     return wBytes(n, k, w) + 2 * sBytes(n, k, w);
 }
 
-/// The FP8 checkpoint's square scale blocks: a scale for each 128 rows by 128 columns.
-pub const fp8_block = 128;
-
-/// Bytes of an FP8 [n, k]'s f32 scales, [n / 128, k / 128]; null unless n and k are whole blocks.
-pub fn fp8Scales(n: usize, k: usize) ?usize {
-    if (n == 0 or k == 0 or n % fp8_block != 0 or k % fp8_block != 0) return null;
-    return (n / fp8_block) * (k / fp8_block) * 4;
-}
-
-/// Bytes of an FP8 [n, k]: a byte a code, then its scales.
-pub fn fp8Bytes(n: usize, k: usize) usize {
-    return n * k + (fp8Scales(n, k) orelse 0);
-}
-
 /// [n, k]'s stored shapes at `w`: u32 words [n, k bits / 32], bf16 tables [n, k / group]; null when k does not pack.
 pub fn shapes(n: usize, k: usize, w: Width) ?[2][2]usize {
     if (k == 0 or k % w.group != 0 or k * w.bits % 32 != 0) return null;
@@ -92,15 +77,10 @@ pub fn cut(lo: usize, k: usize, w: Width) ?[2][2]usize {
 /// Matrices (each run of a split stack) by width, for a plan's summary.
 pub const Tally = struct {
     count: [9][3]u32 = @splat(@splat(0)), // by bits, then group 32, 64, 128
-    fp8: u32 = 0,
 
     pub fn add(t: *Tally, v: anytype) void {
         const T = @TypeOf(v);
         if (T == Affine) {
-            if (v.fp8) {
-                t.fp8 += 1;
-                return;
-            }
             for (0..@as(usize, v.more) + 1) |i| {
                 const r = v.run(i);
                 if (r.n > 0 and r.bits > 0) t.count[r.bits][std.math.log2_int(u16, r.group) - 5] += 1;
@@ -125,7 +105,6 @@ pub const Tally = struct {
             const sep = if (n == 0) "" else ", ";
             n += (std.fmt.bufPrint(buf[n..], "{s}{d}-bit/{d} x{d}", .{ sep, bits, @as(u32, 32) << @intCast(gi), x }) catch return buf[0..n]).len;
         };
-        if (t.fp8 > 0) n += (std.fmt.bufPrint(buf[n..], "{s}FP8 E4M3/128x128 x{d}", .{ if (n == 0) "" else ", ", t.fp8 }) catch return buf[0..n]).len;
         return buf[0..n];
     }
 };

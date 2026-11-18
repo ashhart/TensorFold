@@ -43,7 +43,7 @@ fn exercise(k4: bool, tbo: bool, budget: i64) !void {
     try fp.planPrograms(&f, &p, 2048, &layers);
     if (k4 or tbo) try ws.planWorkspace(&f, &original, 2048, &layers);
     if (tbo) try t.expectEqual(ws.planBytes(&original), try fp.workspaceBytes(&f, 2048));
-    const row_sizes: []const i64 = if (k4) &.{ 2049, 3072, 4095, 4096 } else &.{ 17, 18, 32, 1025, 2047, 2048 };
+    const row_sizes: [4]i64 = if (k4) .{ 2049, 3072, 4095, 4096 } else .{ 17, 1025, 2047, 2048 };
     for ([_]bool{ false, true }) |shared| {
         var wp: buffers.Plan = .{ .a = a };
         for (original.sizes.keys(), original.sizes.values()) |k, v| try wp.sizes.put(a, k, v);
@@ -136,34 +136,4 @@ test "index scratch: TBO-B materialisation missing from full-row endpoints is pl
     try t.expect(short.sizes.contains(scores_role));
     try t.expect(!short.sizes.contains("L.k4~b~ix.stream"));
     try t.expectEqual(ws.planBytes(&short), try fp.workspaceBytes(&f, 2048));
-}
-
-test "prefill plan: segments of 17..33 rows write the spare streams within the planned roles, full and replay" {
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const cfg: Config = .{};
-    var w: block.Widths = .{};
-    try check.parseDense(a, &w, @embedFile("fixtures/dense-k2.txt"));
-    try check.parseExperts(a, &w, @embedFile("fixtures/expert-k2.txt"));
-    var layers: [25]u32 = undefined;
-    for (&layers, 0..) |*l, i| l.* = @intCast(i);
-    const o: block.Options = .{ .gm_v2 = .one, .limit = 299008, .rope_rows = 301056, .index_budget = 64 << 20, .taps = true };
-    for ([_]bool{ false, true }) |replay| {
-        var f = @import("forward.zig").Forward.init(a, &cfg, &w, o, undefined, undefined);
-        f.layers = &layers;
-        var state: fp.State = .{ .mode = if (replay) .replay else .full };
-        f.prefill_state = &state;
-        var p: buffers.Plan = .{ .a = a };
-        try fp.planPrograms(&f, &p, 2048, &layers);
-        // a boundary of at most split_rows rows writes "w.x<1 - cur>": the plan sizes it for those rows
-        var n: i64 = 17;
-        while (n <= bp.split_rows + 1) : (n += 1) for ([_]i64{ 0, 2048, 65536 }) |start| {
-            var tmp = std.heap.ArenaAllocator.init(t.allocator);
-            defer tmp.deinit();
-            const ta = tmp.allocator();
-            const cs = if (replay) try bp.emitReplay(ta, &cfg, &w, o, layers[0..21], n, start, .encoder) else try bp.emitPrefill(ta, &cfg, &w, o, &layers, n, start, true);
-            try covered(ta, cs, &p, &p);
-        };
-    }
 }

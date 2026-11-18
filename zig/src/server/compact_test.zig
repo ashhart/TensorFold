@@ -72,9 +72,9 @@ const Stay = struct {
     }
 };
 
-pub const Text = struct {
+const Text = struct {
     reasoning: bool = false,
-    pub fn text(t: *@This()) model_text.Text {
+    fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -126,7 +126,7 @@ pub const Text = struct {
     }
 };
 
-pub const Eng = struct {
+const Eng = struct {
     window: u32,
     cache: bool = false,
     prompts: std.ArrayList([]u8) = .empty,
@@ -134,7 +134,7 @@ pub const Eng = struct {
     early: usize = 0,
     late: usize = 0,
 
-    pub fn engine(e: *Eng) api.Engine {
+    fn engine(e: *Eng) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
@@ -165,7 +165,7 @@ pub const Eng = struct {
     }
 };
 
-pub fn freePrompts(e: *Eng) void {
+fn freePrompts(e: *Eng) void {
     for (e.prompts.items) |p| gpa.free(p);
     e.prompts.deinit(gpa);
 }

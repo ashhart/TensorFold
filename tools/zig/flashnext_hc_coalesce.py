@@ -1,4 +1,5 @@
-# Copy a dump: hyper-connection products read weights in order (same bits); inputs padded 1 in 32 vs bank conflicts.
+"""Copy a dump with the hyper-connection row kernels' product stage reading weights in order (same products, same
+ordered sums: the same bits); their staged inputs padded one float in 32 against bank conflicts."""
 import os, sys
 from pathlib import Path
 

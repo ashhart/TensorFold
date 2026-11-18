@@ -14,8 +14,6 @@ pub var blits: usize = 0;
 pub const Copy = struct { id: usize, off: usize };
 pub var sources: [512]Copy = @splat(.{ .id = 0, .off = 0 }); // every copy's source buffer and offset, in order
 pub var source_count: usize = 0;
-pub var destinations: [512]Copy = @splat(.{ .id = 0, .off = 0 });
-pub var copy_bytes: [512]usize = @splat(0);
 pub var draws: usize = 0;
 pub var rotary_calls: usize = 0;
 pub var fsr_fence_updates: usize = 0;
@@ -178,12 +176,12 @@ pub const CommandBuffer = struct {
 };
 pub const BlitEncoder = struct {
     pub fn copy(_: BlitEncoder, a: Buffer, ao: usize, b: Buffer, bo: usize, n: usize) void {
+        _ = b;
+        _ = bo;
         if (first_blit == null) first_blit = .{ .offset = ao, .bytes = n };
         blits += 1;
         if (source_count < sources.len) {
             sources[source_count] = .{ .id = a.id, .off = ao };
-            destinations[source_count] = .{ .id = b.id, .off = bo };
-            copy_bytes[source_count] = n;
             source_count += 1;
         }
     }

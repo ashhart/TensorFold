@@ -1,7 +1,7 @@
 
 // Prompt chunk's KDA layer (appended to kda_rows' source): f_b, g_b on tensor units, prep, recurrence, output norm.
 
-// Prompt-block KDA: one head per simdgroup (conv, SiLU, q/k norms, f_b decay, beta); P_shape = rows, pitch, start.
+// A prompt block's KDA inputs, a head a simdgroup (conv, SiLU, q/k norms, f_b's decay, beta); P_shape: rows, pitch, block start (FB, outputs by block row).
 template <int H, int D, int TAPS, int HB>
 [[kernel]] void glm_kda_prep(const device bfloat16_t* P [[buffer(0)]], const constant int* P_shape [[buffer(1)]],
                              const device bfloat16_t* CS [[buffer(2)]], const device float* CW [[buffer(3)]],

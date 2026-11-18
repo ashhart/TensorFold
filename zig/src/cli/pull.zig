@@ -9,7 +9,6 @@ const blobName = single.blobName;
 const fileStat = single.fileStat;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
-const revisionOk = hub.revisionOk;
 
 pub const GiB: u64 = 1 << 30;
 
@@ -34,13 +33,6 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     }
     const endpoint = envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
     const root = try hub.cacheDir(a, env, override);
-    const w = std.Io.Dir.cwd();
-    try w.createDirPath(io, root);
-    const mutation = @import("sys").folder_lock.hold(a, root, true) catch |e| {
-        try err_out.print("tensorfold pull: cache {s} is busy or cannot be locked ({t}); retry after other pulls or removals finish\n", .{ root, e });
-        return 1;
-    };
-    defer mutation.release();
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
 
@@ -90,6 +82,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const blobs_dir = try std.fs.path.join(a, &.{ repo_dir, "blobs" });
     const snapshot_dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", sha });
     const refs_dir = try std.fs.path.join(a, &.{ repo_dir, "refs" });
+    const w = std.Io.Dir.cwd();
     for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
 
     var big: std.ArrayList(Big) = .empty;
@@ -190,6 +183,16 @@ pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writ
     // The sha names the snapshot dir and is written to refs/main: only a 40-hex git sha is a path.
     if (!hub.hexSha(sha.string)) return error.BadHubJson;
     return try a.dupe(u8, sha.string);
+}
+
+/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
+fn revisionOk(text: []const u8) bool {
+    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
+    for (text) |ch| {
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.
