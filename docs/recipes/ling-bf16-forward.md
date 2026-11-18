@@ -1,6 +1,6 @@
 # Ling tiny bf16 forward diagnostic
 
-This local step-3 diagnostic runs the 24-layer Ling-3.0-tiny backbone on Metal.
+This diagnostic runs the 24-layer Ling-3.0-tiny backbone on Metal.
 It reuses Kimi's row projections, RMS, residual add, KDA, MLA and expert combine;
 Ling's grouped route and three MLA glue kernels; and LFM3's bf16-point SwiGLU.
 No GPU kernel source or registration changes are introduced. `kernel_contract.zig`
