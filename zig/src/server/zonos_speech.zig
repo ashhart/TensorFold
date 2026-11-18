@@ -57,11 +57,11 @@ pub const State = struct {
     /// The release's speaker encoder, when its checkpoint is in the folder: a clip's embedding for the speaker row.
     speaker: ?*anyopaque = null,
 
-    /// A clip's speaker embedding, on this thread's cores; null without the encoder.
-    pub fn embed(st: *const State, audio: []const f32) !?[req.config.speaker_dim]f32 {
+    /// A clip's speaker embedding from its samples at their own rate, on this thread's cores; null without the encoder.
+    pub fn embed(st: *const State, clip: Clip) !?[req.config.speaker_dim]f32 {
         if (!@hasDecl(req, "speaker")) return null;
         const encoder: *const req.speaker.Encoder = @ptrCast(@alignCast(st.speaker orelse return null));
-        return try encoder.embed(std.heap.c_allocator, audio, null);
+        return try encoder.embed(std.heap.c_allocator, clip.source, clip.rate, null);
     }
 };
 
@@ -134,13 +134,15 @@ fn referenceCodes(cx: *errors.Cx, value: json.Value) errors.Refused![]const [req
     return out;
 }
 
-/// `ref_audio` (a base64 WAV, or a data: URL of one) to mono 44.1 kHz as the release prepares a clip, cut to 60 s.
-fn referenceAudio(cx: *errors.Cx, value: json.Value) errors.Refused![]const f32 {
-    return clipAudio(cx, value, fields.clip, true);
-}
-
 /// A clip field (a base64 WAV, or a data: URL of one) to mono 44.1 kHz as the release prepares one; `cut`: to 60 s.
 pub fn clipAudio(cx: *errors.Cx, value: json.Value, comptime name: []const u8, cut: bool) errors.Refused![]const f32 {
+    return (try clipSourced(cx, value, name, cut)).audio;
+}
+
+/// A clip at 44.1 kHz for the codec, and as sent (`source` at `rate`) for the speaker encoder and aligner to resample.
+pub const Clip = struct { audio: []const f32, source: []const f32, rate: u32 };
+
+pub fn clipSourced(cx: *errors.Cx, value: json.Value, comptime name: []const u8, cut: bool) errors.Refused!Clip {
     const what = error_prefix ++ " " ++ name;
     const text = value.str() orelse return cx.refuse(what ++ " must be a base64 string holding a WAV file");
     const payload = if (std.mem.startsWith(u8, text, "data:")) text[(std.mem.indexOfScalar(u8, text, ',') orelse return cx.refuse(what ++ " is a data URL without a payload")) + 1 ..] else text;
@@ -164,7 +166,11 @@ pub fn clipAudio(cx: *errors.Cx, value: json.Value, comptime name: []const u8, c
     if (peak > 1) for (audio) |*x| {
         x.* /= peak;
     };
-    return if (cut) audio[0..@min(audio.len, max_clip)] else audio;
+    const kept = if (cut) audio[0..@min(audio.len, max_clip)] else audio;
+    if (clip.rate == rate) return .{ .audio = kept, .source = kept, .rate = rate };
+    for (clip.samples) |x| if (!std.math.isFinite(x)) return cx.refuse(what ++ " holds samples that are not finite");
+    const seconds = if (cut) max_clip / rate else clip.samples.len;
+    return .{ .audio = kept, .source = clip.samples[0..@min(clip.samples.len, seconds * clip.rate)], .rate = clip.rate };
 }
 
 fn number(v: json.Value) ?f64 {
@@ -274,10 +280,11 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
             if (!std.math.isFinite(x.*)) return cx.refuse(message);
         }
     }
-    var audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
+    const uploaded: ?Clip = if (clip) |value| try clipSourced(cx, value, fields.clip, true) else null;
+    var audio: []const f32 = if (uploaded) |u| u.audio else &.{};
     if (by_embedding and clip != null) {
         // the clip's embedding fills the speaker row; its codes are not a prefix
-        vector = (st.embed(audio) catch return cx.other("the speaker encoder failed on this clip")) orelse
+        vector = (st.embed(uploaded.?) catch return cx.other("the speaker encoder failed on this clip")) orelse
             return cx.refuse(error_prefix ++ " a clip's embedding needs the release's speaker encoder (speaker_encoders/), which this folder lacks");
         audio = &.{};
     }

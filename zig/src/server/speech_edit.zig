@@ -161,10 +161,10 @@ fn hold(srv: *Server, cx: *Cx) errors.Refused!void {
 }
 
 /// edit_aligned_words: the text's words placed by the aligner, with edit tokens; null: the client left.
-fn alignText(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, audio: []const f32, transcript: []const u8) errors.Refused!?[]ep.Word {
+fn alignText(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, clip: zonos.Clip, transcript: []const u8) errors.Refused!?[]ep.Word {
     const a = cx.a;
     if (!st.aligning) return cx.refuse(prefix ++ "this release folder has no aligner (web/aligner): send original_words with their timings");
-    if (audio.len > 30 * 44100) return cx.refuse(prefix ++ "the aligner places words in clips of at most 30 s: send original_words with their timings");
+    if (clip.source.len > 30 * @as(usize, clip.rate)) return cx.refuse(prefix ++ "the aligner places words in clips of at most 30 s: send original_words with their timings");
     const spoken = ep.words(a, transcript) catch return cx.refuse(prefix ++ "the text must be valid UTF-8");
     var wordy: std.ArrayList([]const u8) = .empty;
     var bytes: usize = 0;
@@ -180,7 +180,8 @@ fn alignText(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, audio: []c
         var result: api.SpeechResult = .{};
         var out: api.SpeechEdit.Out = .{};
         const ask: api.SpeechEdit = .{ .op = .place, .words = wordy.items, .spans_ms = spans, .presence = presence, .out = &out };
-        if (!try step(srv, c, cx, &.{ .prompt = &.{}, .pcm = &.{}, .result = &result, .seed = 0, .reference_audio = audio, .edit = &ask })) return null;
+        // the aligner hears the clip as sent, resampled to 16 kHz from its own rate
+        if (!try step(srv, c, cx, &.{ .prompt = &.{}, .pcm = &.{}, .result = &result, .seed = 0, .reference_audio = clip.source, .reference_rate = clip.rate, .edit = &ask })) return null;
         for (placed, presence, spans) |*p, *logit, span| {
             const prob = 1.0 / (1.0 + @exp(-logit.*));
             logit.* = if (std.math.isNan(prob)) 0 else prob;
@@ -188,7 +189,7 @@ fn alignText(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, audio: []c
         }
     }
     // the clip's length as the aligner hears it: at 16 kHz
-    const duration = @as(f64, @floatFromInt((audio.len * 160 + 440) / 441)) / 16000.0;
+    const duration = @as(f64, @floatFromInt((clip.source.len * 16000 + clip.rate - 1) / clip.rate)) / 16000.0;
     const found = try aw.assemble(a, spoken, placed, presence, duration);
     var out: std.ArrayList(ep.Word) = .empty;
     for (spoken, found) |token, w| {
@@ -233,10 +234,11 @@ fn alignOnly(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, raw: Value
     _ = try editLanguage(cx, raw);
     const transcript = std.mem.trim(u8, raw.strField("text") orelse return cx.refuse(prefix ++ "text is required"), " \t\r\n");
     if (transcript.len == 0) return cx.refuse(prefix ++ "text is empty");
-    const audio = try zonos.clipAudio(cx, raw.field("audio_base64") orelse return cx.refuse(prefix ++ "audio_base64 is required"), "audio_base64", false);
+    const clip = try zonos.clipSourced(cx, raw.field("audio_base64") orelse return cx.refuse(prefix ++ "audio_base64 is required"), "audio_base64", false);
+    const audio = clip.audio;
     try hold(srv, cx);
     defer _ = srv.speech_inflight.fetchSub(1, .acq_rel);
-    const found = try alignText(srv, c, cx, st, audio, transcript) orelse return null;
+    const found = try alignText(srv, c, cx, st, clip, transcript) orelse return null;
     const o = try object(a);
     try o.put(a, "text", .{ .string = transcript });
     try o.put(a, "duration", .{ .float = @as(f64, @floatFromInt(audio.len)) / 44100.0 });
@@ -297,7 +299,8 @@ fn run(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, sp: api.SpeechIn
     const normalize: ?bool = if (raw.field("text_normalization")) |v| (if (v == .bool) v.bool else return cx.refuse(prefix ++ "text_normalization must be a boolean")) else null;
     if (normalize == true and !textnorm.available(a)) return cx.refuse(textnorm.missing());
     const buckets = try zonos.conditions(st, cx, raw);
-    const audio = try zonos.clipAudio(cx, raw.field("audio_base64") orelse return cx.refuse(prefix ++ "audio_base64 is required"), "audio_base64", false);
+    const upload = try zonos.clipSourced(cx, raw.field("audio_base64") orelse return cx.refuse(prefix ++ "audio_base64 is required"), "audio_base64", false);
+    const audio = upload.audio;
     const duration = @as(f64, @floatFromInt(audio.len)) / 44100.0;
     const clip_frames = (audio.len + 2939) / 2940;
     if (clip_frames > req.reference_frames) return cx.fail(.request, prefix ++ "the clip is {d:.1} s long; at most 60 s are edited here", .{duration});
@@ -330,7 +333,7 @@ fn run(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, sp: api.SpeechIn
     var result: api.SpeechResult = .{};
     var out: api.SpeechEdit.Out = .{};
     const clip = try a.alloc([C]i32, clip_frames);
-    if (encode_voice) embedding = (st.embed(audio) catch return cx.other("the speaker encoder failed on this clip")) orelse
+    if (encode_voice) embedding = (st.embed(upload) catch return cx.other("the speaker encoder failed on this clip")) orelse
         return cx.refuse(prefix ++ "the clip's speaker row needs the release's speaker encoder (speaker_encoders/), which this folder lacks: send speaker_embedding false, or 192 numbers");
     const encode: api.SpeechEdit = .{ .op = .encode, .codes = clip, .out = &out };
     if (!try step(srv, c, cx, &.{ .prompt = &.{}, .pcm = &.{}, .result = &result, .seed = 0, .reference_audio = audio, .edit = &encode })) return null;
@@ -349,7 +352,7 @@ fn run(srv: *Server, c: *Conn, cx: *Cx, st: *const zonos.State, sp: api.SpeechIn
     // the clip's words, when the edit reads them and the request brings only their text: the aligner places them
     if (request.original == null and (raw.field("spans") == null or request.windowed() or (request.min_fill_ratio > 0 and original_text != null))) {
         const said = original_text orelse return cx.refuse(prefix ++ "this edit reads the clip's words: send the clip's transcript as original_text (no speech recognition is served)");
-        request.original = try alignText(srv, c, cx, st, audio, said) orelse return null;
+        request.original = try alignText(srv, c, cx, st, upload, said) orelse return null;
     }
     if (raw.field("spans")) |v| {
         const message = prefix ++ "spans must be a list of [start, end] in seconds";
