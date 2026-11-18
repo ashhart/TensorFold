@@ -27,9 +27,10 @@ def connect_ctx(engine_url: str, model: str | None, *, share: bool, api_key: str
     parts = urlsplit(engine_url)
     port = parts.port or 8080
     base = f"http://{lan_hostname()}:{port}" if share and parts.hostname in ("127.0.0.1", "localhost") else engine_url.rstrip("/")
+    docker_base = f"http://host.docker.internal:{port}" if parts.hostname in LOOPBACK_NAMES else ""
     # an engine started with a key wants it from every client, shared or not
     return recipes.Ctx(base=base, key=api_key or "local", model=model or "the served model",
-                       docker_base=f"http://host.docker.internal:{port}")
+                       docker_base=docker_base)
 
 LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
