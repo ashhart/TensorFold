@@ -91,7 +91,7 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.
-- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
+- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 3,072) caps the rows of one prompt pass. Every pass reads the weights
   of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
   stream decoding during a pass waits up to the whole pass for its next token. See
   [Prompt chunk size](#prompt-chunk-size).
@@ -244,7 +244,7 @@ in one start of four on this machine. After the 131,072-token prompt the process
 ### Prompt chunk size
 
 `TF_FLASHNEXT_CHUNK` sets how many prompt rows one pass takes. A prompt of N rows runs in ceil(N / chunk) passes: a
-1,922-row prompt is two passes at the default 1,536 and one at 8,192.
+1,922-row prompt is two passes at 1,536 and one at the default 3,072 or at 8,192.
 
 - **For:** every pass reads the gate, up and down weights of each routed expert its rows route to (1.84 MB of gate and
   up weights an expert, 512 experts a layer). Fewer passes read each expert fewer times, so a prompt longer than one
@@ -265,7 +265,7 @@ change the sums. Two costs remain:
 On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
 `--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0` (two fresh servers for each setting, medians):
 
-| | unset (1,536) | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
+| | `TF_FLASHNEXT_CHUNK_SOLO` unset, chunk 1,536 | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
 | --- | --- | --- | --- |
 | First token, one stream, at 1,927 / 8,320 / 31,736 tokens | 0.99 / 4.07 / 16.05 s | 0.91 / 3.88 / 14.94 s | 0.89 / 3.86 / 14.78 s |
 | Longest wait between a decoding stream's tokens while an 8k prompt runs | 0.81 s | 0.81 s | 0.85 s |
