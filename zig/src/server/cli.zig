@@ -245,8 +245,7 @@ pub const Args = struct {
     slide_drift_gate: bool = false,
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
-    /// --parallel was on the command line: TENSORFOLD_PARALLEL then stays out of the way (main applies the env default).
-    parallel_named: bool = false,
+    parallel_named: bool = false, // --parallel was on the command line: TENSORFOLD_PARALLEL then stays out of the way
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -492,8 +491,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
     } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) {
-        out.parallel = v;
-        out.parallel_named = true;
+        out.parallel, out.parallel_named = .{ v, true };
     } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
