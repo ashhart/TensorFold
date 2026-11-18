@@ -126,7 +126,7 @@ zig/src/families/flashnext/cuda_embed_main.zig	2b596788cccd420368fe803676e8ad45a
 zig/src/families/flashnext/cuda_gdn.zig	bc952357f4d6c076542b419b0ee71bbdce89715f0223ab31b4abf821fc2bee62	raw
 zig/src/families/flashnext/cuda_glue.zig	0bd837ea17d1bd0a7a0820dc0ee99c4da90113c15d62b3fac31bd7af47a0ecb1	raw
 zig/src/families/flashnext/cuda_hc.zig	01f897ac65d6edd2cd6ac76d97cb4d96619c25ffa85bd619d6d76f4f465cda9a	raw
-zig/src/families/flashnext/cuda_head.zig	fc6410e8b17d559a12d81fd4bee9ab4e65f6f8b0999796c68baba58efb8fe818	raw
+zig/src/families/flashnext/cuda_head.zig	734cc1ccea8e99ce9a061273a2dd3042f32e4848b622b5de616aa4b6f546bdd4	raw	#3749: TF_FLASHNEXT_SHARD_HEAD read through platform/environment.zig, blank as unset
 zig/src/families/flashnext/cuda_images.zig	5bd8a6c06cb69440522f4392794d9ef52b3760195b97d96f2316b1acac271bd4	raw
 zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a124de2a7019041ed1f7483b2a4a2d7c99	raw
 zig/src/families/flashnext/cuda_lanes.zig	8578e64c69611c219709f48a4ba646bfd01fa02d793d788ea7e577ae03d07808	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate, #3308 (loader host test updates the named startup-refusal expectations; no runtime edit to this pinned file); #3135 (kept_disk renamed kept_view for the shared kept image; no served change)
