@@ -1,6 +1,6 @@
 import { OriginalDiagnostic } from './OriginalDiagnostic'
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
@@ -17,9 +17,15 @@ export function ReplayPanel() {
   const [bundle, setBundle] = useState<RunExportBundle | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
+  const [launching, setLaunching] = useState(false)
+  const launchInFlight = useRef(false)
+  const openCycle = useRef(0)
 
   useEffect(() => {
-    const onOpen = () => { setOpen(true); setBundle(null); setError(null) }
+    const onOpen = () => {
+      openCycle.current += 1
+      setOpen(true); setBundle(null); setError(null)
+    }
     window.addEventListener('vontra:replay', onOpen)
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
     window.addEventListener('keydown', onKey)
@@ -30,6 +36,7 @@ export function ReplayPanel() {
   const close = () => setOpen(false)
   const prompt = (bundle?.messages ?? []).find((m) => m?.role === 'user')?.content ?? ''
   const evidence = bundle?.evidence
+  const canReplay = Boolean(prompt.trim()) && !launching
 
   const choose = async () => {
     setImporting(true); setError(null)
@@ -42,12 +49,24 @@ export function ReplayPanel() {
   }
 
   const replay = async () => {
-    if (!prompt.trim()) return
+    if (launchInFlight.current || !prompt.trim()) return
     const s = useStore.getState().settings
     if (!s?.activeProviderId || !s.activeModel) { setError(tx("Configure a provider and model in Settings first.")); return }
-    const result = await useStore.getState().launch({ text: prompt, cwd: s.defaultCwd || '', providerId: s.activeProviderId, model: s.activeModel, approvalMode: s.approvalMode, providerAccountId: s.activeProviderAccountId, projectId: null })
-    if (!result.ok) { setError(result.error || tx("The replay could not start.")); return }
-    setOpen(false)
+    const cycle = openCycle.current
+    launchInFlight.current = true
+    setLaunching(true)
+    setError(null)
+    try {
+      const result = await useStore.getState().launch({ text: prompt, cwd: s.defaultCwd || '', providerId: s.activeProviderId, model: s.activeModel, approvalMode: s.approvalMode, providerAccountId: s.activeProviderAccountId, projectId: null })
+      if (cycle !== openCycle.current) return
+      if (!result.ok) { setError(result.error || tx("The replay could not start.")); return }
+      setOpen(false)
+    } catch (failure) {
+      if (cycle === openCycle.current) setError(failure instanceof Error ? failure.message : tx("The replay could not start."))
+    } finally {
+      launchInFlight.current = false
+      setLaunching(false)
+    }
   }
 
   return (
@@ -109,11 +128,11 @@ export function ReplayPanel() {
         </div>
 
         <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
-          {bundle && <button onClick={choose} className="rounded-md border border-line px-2.5 py-1.5 text-[13px] text-ink-3 hover:text-ink">{tx("Choose another…")}</button>}
+          {bundle && <button onClick={choose} disabled={launching} className="rounded-md border border-line px-2.5 py-1.5 text-[13px] text-ink-3 hover:text-ink disabled:opacity-50">{tx("Choose another…")}</button>}
           <div className="flex-1" />
           <button onClick={close} className="rounded-md px-3 py-1.5 text-[13px] text-ink-3 hover:text-ink">{tx("Close")}</button>
-          <button onClick={replay} disabled={!prompt.trim()} className={clsx('flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px]', prompt.trim() ? 'bg-accent text-accent-ink hover:bg-accent-strong' : 'bg-ink-5 text-ink-4')}>
-            <Icon name="play" size={13} />{tx("Replay as new task")}</button>
+          <button onClick={replay} disabled={!canReplay} className={clsx('flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[13px]', canReplay ? 'bg-accent text-accent-ink hover:bg-accent-strong' : 'bg-ink-5 text-ink-4')}>
+            <Icon name="play" size={13} />{launching ? tx("Starting…") : tx("Replay as new task")}</button>
         </div>
       </div>
     </div>
