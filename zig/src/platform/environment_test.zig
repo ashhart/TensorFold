@@ -163,6 +163,10 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_DRAFTS", .raw = "3", .n = 3 },
+    .{ .name = "TF_MTP_PLAIN_GUARD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_BITS", .raw = "4", .n = 4 },
+    .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
@@ -290,6 +294,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
         .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
+        .{ "TF_MTP_BITS", "8" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

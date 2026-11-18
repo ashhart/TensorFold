@@ -4,6 +4,7 @@ pub const mhc_ref = @import("mhc_ref.zig");
 pub const mhc_metal = @import("mhc_metal.zig");
 pub const awq = @import("awq.zig");
 pub const linear_gpu = @import("linear_gpu.zig");
+pub const mtp_weights = @import("mtp_weights.zig");
 
 test {
     _ = config;
@@ -11,4 +12,5 @@ test {
     _ = mhc_metal;
     _ = awq;
     _ = linear_gpu;
+    _ = mtp_weights;
 }
