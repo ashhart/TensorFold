@@ -552,3 +552,7 @@ fn readWrapped() !void {
 test "a storage whose byte count wraps past 2^64 is refused, not sized by the wrapped count" {
     try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(readWrapped, .{}));
 }
+
+test {
+    _ = @import("torch_pth_test.zig");
+}
