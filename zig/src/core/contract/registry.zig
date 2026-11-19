@@ -568,8 +568,7 @@ test {
     _ = @import("nemotron_ssd_records.zig");
 }
 const paging = @import("paging_pending.zig");
-/// The Metal collector keeps measured slots and the restored vision declarations.
-pub const all_metal = joins.all_metal;
+pub const all_metal = joins.all_metal; // The Metal collector keeps measured slots and restored vision declarations.
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
