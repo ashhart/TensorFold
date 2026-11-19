@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the GLM-5.3-Flash CUDA recipe covers switchless RoCE links on separate IPv4 subnets: NCCL 2.30.7 or later with `NCCL_IB_SUBNET_AWARE_ROUTING=1` and `NCCL_IB_SUBNET_PREFIX_LEN`, and how to check the NCCL version and NIC each rank picked at startup (#2993). Thanks to @vdalesandro.
+
 - Families: Nemotron, GLM, Qwen 3.8 27B, MiniMax M3, Dory, tensor-parallel fabric, pictures and video settings read through platform/environment.zig (#3558).
 
 - Qwen3.5 on Metal: the text-only server no longer keeps the vision tower stored between the language-model tensors in GPU memory, so the 2B holds 1.7 GiB instead of 2.3 GiB measured with `footprint` after load, with replies unchanged (#3407). Thanks to @jschmied.
