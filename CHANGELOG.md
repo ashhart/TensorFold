@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Qwen3.8-27B recipe pulls the checkpoint and its drafter one repository at a time, since the native `pull` takes one (#3982). Thanks to @jayleaton.
+
 - Docs: the Nemotron 3.5 recipe gives the pull and serve commands for NVIDIA's NVFP4 export of Lightning, and its CUDA section no longer says the export is not read (#3981). Thanks to @jayleaton.
 
 - Docs: the Qwen3.6 MoE recipe names the sections that belong to the Python 0.6.6 engine and links its native CUDA section, where it linked the Windows build guide (#3977). Thanks to @jayleaton.
