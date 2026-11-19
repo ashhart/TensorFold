@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- OCR: the native HIP engine reads documents through `POST /v1/ocr` in Mistral's OCR contract (its Python and TypeScript SDKs), with dots.mocr's reader (a box for each layout block). Images and PDFs (`--vision-pdf`) share one page budget per request (`TENSORFOLD_MAX_PDF_PAGES`, default 16), each PDF measured before any inference and each page rendered just before it is read, and Mistral crops share one image budget (256 images, 4 times the page pixels, 16 MiB plus 2 MiB a page). An option that changes content and that TensorFold cannot apply, such as annotations, is refused. A page cut at the context limit or out of its model's format fails the whole request with HTTP 422; `docs/api.md` lists the contract's fields, statuses and limits (#2570, #2571, #2440). Thanks to @laudney.
+
 - Docs: the optimization ledger adds rows 30 to 32 (small-kernel fusion, stream-tile prefetch and the filled-item prompt grid), each `failed` for Flash Next on HIP with the measurements from #1603 (#3160, refs #1603). Thanks to @gilby.
 
 - Docs: the Qwen3.8-27B recipe says to serve with `--thinking-budget 4096` when thinking is on, and gives its GPQA Diamond result on TensorFold 1.2.7 and one GB10: replies cut at the limit from 78 of 198 to 0, and correct from 58.1% to 82.8% (#3373, fixes #3323).
