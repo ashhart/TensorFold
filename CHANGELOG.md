@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
+
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
 
 - gpt-oss: a first host-only slice reads `openai/gpt-oss-20b`'s config and refuses unknown or unsupported fields by name, checks all 459 tensor names of the published checkpoint, and adds an MXFP4 reader for 32-value E2M1 blocks with UE8M0 scales that never rewrites checkpoint bytes; nothing is registered with the server yet (#3513).
