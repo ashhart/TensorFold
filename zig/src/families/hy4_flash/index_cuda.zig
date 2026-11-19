@@ -1,9 +1,4 @@
-//! CUDA composition of Hy4-flash's compressed sparse indexer, after the reference's CompressedIndexer and
-//! `metal_index.zig`: each pass caches its rows' normalized token keys, pools the four-slot groups it closed
-//! (FP32 value/gate projections, `intra_group_ape`, `key_norm`), rotates their trailing 64 channels at the
-//! group's first token, then ranks a row's closed groups with the 16 rotated query heads and keeps 511 of
-//! them plus the causal part of its own group. Slots are cache slots; a group is pooled only once closed,
-//! so a rejected draft suffix leaves no stale group behind.
+//! Hy4-flash's CUDA compressed indexer: cache token keys, pool closed groups, rank them, keep 511 plus its own.
 const std = @import("std");
 const cuda = @import("cuda");
 const mla = @import("mla_cuda.zig");
@@ -69,8 +64,7 @@ pub const Indexer = struct {
         try cache.copyFrom(b.first_slot * width * 2, b.staged, b.count * width * 2, s.handle);
     }
 
-    /// Pool, normalize and rotate `count` closed groups from `first_group` into the group arena.
-    /// `positions` holds each group's first-token coordinates, `table` room for `count` rotary rows.
+    /// Pool, normalize and rotate `count` closed groups from `first_group` (positions: each group's first token).
     pub fn poolGroups(self: Indexer, s: cuda.Stream, project: mla.Projections, w: Weights, cache: u64, arena: u64, first_group: u32, count: u32, positions: u64, table: u64, p: rotary.Parameters, eps: f32) !void {
         if (count == 0) return;
         var args: cuda.Args = .{};
