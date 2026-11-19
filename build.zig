@@ -206,7 +206,7 @@ pub fn build(b: *std.Build) void {
     }
     const tp_options = @import("zig/build/options.zig").tp(b);
     switch (target.result.os.tag) {
-        .macos => metalTargets(b, target, optimize, draft_ids, build_options_module, test_step),
+        .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options, cuda_options),
         else => {},
     }
