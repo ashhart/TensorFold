@@ -14,7 +14,10 @@ const Cache = caches.Cache;
 pub fn sharing() !usize {
     const v = @import("core").profile.given(.TF_QWEN_KV_SHARE) orelse return 0;
     const snaps = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenKvShare;
-    if (snaps > 0) if (@import("cuda_native.zig").requestStartsOn()) return error.QwenRequestStartsWithSharedKv;
+    if (snaps > 0) {
+        const starts = @import("core").profile.lookup("TF_QWEN_REQUEST_STARTS") orelse return snaps;
+        if (std.mem.eql(u8, starts, "1")) return error.QwenRequestStartsWithSharedKv;
+    }
     return snaps;
 }
 
