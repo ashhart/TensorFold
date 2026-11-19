@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
+- Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
 - Server: the next turn's background prefill puts the reply's reasoning into its guess when the client sends reasoning back, so thinking requests resume from the real next prompt instead of redoing the pass from before the reply; clients whose history drops reasoning keep the old guess (#3264).
 
