@@ -20,9 +20,9 @@ test "residency owner Qwen27: actual lazy rollback bank joins, grows and leaves 
         const device = record.device();
         const shape = try abi.Shape.init(geometry());
         const budget = try Budget.init(shape, 1, 3, 16);
-        var pool: bank.Pool = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined };
+        var pool: bank.Pool = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined, .scratch = bank.Pool.emptyScratch(a) };
         defer {
-            pool.releaseBefore();
+            pool.deinitScratch();
             for (pool.buffers) |b| b.deinit();
         }
         var owner = (try mtl.resident.Resident.hold(a, std.testing.io, device, record.queue(), &pool.buffers, "qwen27")).?;
@@ -192,8 +192,9 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 .capacity = 16,
             };
             const budget = try Budget.init(try abi.Shape.init(model.config), 1, 1, 16);
-            r.gdn = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined };
+            r.gdn = .{ .budget = budget, .buffers = try bank.Pool.allocateBuffers(device, budget), .kernels = undefined, .scratch = bank.Pool.emptyScratch(a) };
             defer for (r.gdn.buffers) |b| b.deinit();
+            defer r.gdn.deinitScratch();
             const limits: attn.Limits = .{ .rows = 16, .streams = 1, .keys = 32 };
             r.scratch = try attn.Scratch.init(device, limits);
             defer r.scratch.deinit();
