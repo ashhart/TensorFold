@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
+
 - App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
 
 - GLM-5.3-Flash on Metal: on Macs without tensor units (before M5), prompt processing uses vectorized GLM-only matmul, KDA and indexer kernels with 32-row matmul tiles; M5 Macs and every other Metal family keep their kernels, and the author's token hashes match main (#3921, refs #3152). Thanks to @gilby.
