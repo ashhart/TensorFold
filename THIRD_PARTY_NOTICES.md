@@ -335,6 +335,7 @@ These follow a model's release code or a library's model code for their math, ro
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+- `zig/kernels/metal/idol.metal`, `zig/kernels/cuda/idol.cu` and `zig/kernels/cuda/idol_attention.cuh`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
@@ -532,3 +533,15 @@ own code as the reference.
 [IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
 and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
+
+## Inkling 2 Small test fixtures
+
+`zig/src/families/inkling2/fixtures/` holds files and values taken from Thinking Machines' Inkling 2 Small release at
+revision `2ad1157016e1aac77b6ff1b770e7c05229403134`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, `chat_template.jinja`, `mini_tokenizer.json` (its
+`tokenizer.json` cut to the added tokens, the byte alphabet and the first 1,500 merges) and the prompts and ids in
+`prompt_cases.json` and `mini_cases.json`, which the Hugging Face transformers and tokenizers libraries produced from
+those files. `tiny_config.json` and the tensor tables
+`tiny_model_header.txt` and `tiny_mtp_header.txt` describe `tiny-random/inkling-2` at revision
+`0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
+model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.

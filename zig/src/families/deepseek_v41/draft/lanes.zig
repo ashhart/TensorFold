@@ -24,6 +24,8 @@ pub const Options = struct {
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
     plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
+    steps: bool = false, // prompts a step at a time between rounds (lane_steps.zig), for a target with pieces
+    step_rows: u32 = 0, // a step's rows when the host sets no cap (the target's prompt chunk)
 };
 
 /// A stream's slot and what the backend holds for it between rounds.
@@ -83,6 +85,7 @@ pub const Lanes = struct {
 
     pub fn backend(x: *Lanes) be.Backend {
         const pieces = x.target.pieces();
+        if (pieces and x.opts.steps) return .{ .ptr = x, .vtable = &vtable_steps, .chunk_invariant = true };
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
@@ -96,6 +99,13 @@ pub const Lanes = struct {
         v.join = join;
         v.pieces = roundPieces;
         v.finals = roundFinals;
+        break :blk v;
+    };
+    /// Options.steps: the lane host fills prompts a step at a time over the pieces, other streams' rounds between
+    const vtable_steps: be.Backend.VTable = blk: {
+        var v = vtable_pieces;
+        v.prefill_step = @import("lane_steps.zig").prefillStep;
+        v.reports_fill = true;
         break :blk v;
     };
 
@@ -188,7 +198,7 @@ pub const Lanes = struct {
     }
 
     /// A prompt in pieces (lane_host.zig `Rounds`): new slot, drafter context and depth reset, target admits/restores.
-    fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
+    pub fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
         const x = self(ptr);
         if (x.streams.get(s) != null) return error.StreamLive;
         @import("lane_retire.zig").recover(x);
@@ -268,7 +278,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
+    pub fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
         st.first = first_;
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
@@ -557,7 +567,7 @@ pub const Lanes = struct {
         return st.n > 0;
     }
 
-    fn release(ptr: *anyopaque, s: *Stream) void {
+    pub fn release(ptr: *anyopaque, s: *Stream) void {
         const x = self(ptr);
         const kv = x.streams.fetchRemove(s) orelse return;
         const st = kv.value;

@@ -20,6 +20,7 @@ pub const snapshot = @import("snapshot.zig");
 
 test {
     _ = backend;
+    _ = @import("model.zig");
     _ = assistant;
     _ = assistant_weights;
     _ = config;

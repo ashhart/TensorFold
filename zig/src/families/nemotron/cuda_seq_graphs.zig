@@ -30,8 +30,8 @@ pub const Stats = struct {
 
 /// Whether TF_GRAPH_LOG=1 asks for a line a request: its captures, their time, its replays and eager windows.
 pub fn logFromEnv() bool {
-    const v = platform.c.getenv("TF_GRAPH_LOG") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = (@import("sys").environment.Process{}).get("TF_GRAPH_LOG") orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.

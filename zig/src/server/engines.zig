@@ -25,6 +25,9 @@ pub fn environment(a: Allocator, args: cli.Args) !?[]const u8 {
 /// The serve flags past the common ones the backend lists (tensor parallelism, MTP, kept entries, policy).
 pub const serves: []const []const u8 = if (@hasDecl(native, "serves")) native.serves else &.{};
 
+/// Whether this binary's engines use Metal 4 (the DeepSeek server's do): the Metal wrapper compiles it in only then.
+pub const metal4: bool = @hasDecl(native, "metal4") and native.metal4;
+
 /// The backend's std options when it has any (HIP: no alternate signal stack for RCCL's threads); else the defaults.
 pub const std_options: std.Options = @import("std_options.zig").of(native);
 

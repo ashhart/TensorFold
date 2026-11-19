@@ -1,0 +1,11 @@
+  layers loaded: 8/64
+  layers loaded: 16/64
+  layers loaded: 24/64
+  layers loaded: 32/64
+  layers loaded: 40/64
+  layers loaded: 48/64
+  layers loaded: 56/64
+  layers loaded: 64/64
+cut at 64: 0 of 248320 logits differ from the whole prompt
+cut at 1024: 0 of 248320 logits differ from the whole prompt
+ok

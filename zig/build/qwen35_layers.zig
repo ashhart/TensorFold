@@ -1,4 +1,4 @@
-//! The std-only shared modules (`qwen35_layers`, `qwen35_rules`, `rope_config`) for every build consumer.
+//! The std-only shared modules (`qwen35_layers`, `qwen35_rules`, `rope_config`, `config_fields`, `checkpoint_eos`).
 
 const std = @import("std");
 
@@ -23,6 +23,18 @@ const shared = [_]Shared{
         .path = "core/rope_config.zig",
         .step = "test-rope-config",
         .about = "A tower's RoPE keys: rope_parameters, the legacy rope_scaling and the top-level keys, read one way",
+    },
+    .{
+        .name = "config_fields",
+        .path = "core/config_fields.zig",
+        .step = "test-config-fields",
+        .about = "Typed config.json field reads whose refusals name the source and the field",
+    },
+    .{
+        .name = "checkpoint_eos",
+        .path = "core/tokenizer/eos.zig",
+        .step = "test-checkpoint-eos",
+        .about = "Checkpoint EOS ids by a named policy per family: order, nesting, most ids, none refused",
     },
 };
 

@@ -1,6 +1,7 @@
 //! Enabled-only numeric frame receipts join actual CUDA forward buckets to the shared core's accepted paths.
 const std = @import("std");
 const be = @import("lanes").backend;
+const platform = @import("sys");
 pub const Shape = @import("cuda_shapes.zig").Shape;
 pub const Trace = struct {
     const Frame = struct { first: usize, windows: usize, offered: usize, bucket: usize, ms: f64 };
@@ -8,7 +9,7 @@ pub const Trace = struct {
     len: usize = 0,
 
     pub fn enabled() bool {
-        return std.c.getenv("TF_TIMING") != null;
+        return platform.environment.read(bool, "TF_TIMING", false) catch false;
     }
 
     pub fn create(a: std.mem.Allocator, on: bool) !?*Trace {

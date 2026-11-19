@@ -32,11 +32,31 @@ const QWEN35: PinnedGeometry = {
     linear_num_value_heads: 16,
     linear_key_head_dim: 128,
     linear_value_head_dim: 128,
-    linear_conv_kernel_dim: 6144,
+    linear_conv_kernel_dim: 4,
     num_attention_heads: 8,
     num_key_value_heads: 2,
     head_dim: 256,
     full_attention_interval: 4,
+  },
+}
+
+const QWEN27: PinnedGeometry = {
+  title: 'Qwen3.5 27B',
+  engineError: 'UnqualifiedQwenShape',
+  section: 'text_config',
+  dims: {
+    hidden_size: 5120,
+    vocab_size: 248320,
+    num_hidden_layers: 64,
+    intermediate_size: 17408,
+    linear_num_key_heads: 16,
+    linear_num_value_heads: 48,
+    linear_key_head_dim: 128,
+    linear_value_head_dim: 128,
+    linear_conv_kernel_dim: 4,
+    num_attention_heads: 24,
+    num_key_value_heads: 4,
+    head_dim: 256,
   },
 }
 
@@ -76,11 +96,15 @@ function layerTypesMatch(kind: string, layers: unknown): boolean {
 }
 
 export function admitGeometry(modelType: string, config: unknown): GeometryAdmission {
-  const pinned = PINNED[modelType]
-  if (!pinned) return { admitted: true, reason: null }
+  const defaultGeometry = PINNED[modelType]
+  if (!defaultGeometry) return { admitted: true, reason: null }
   if (!plain(config)) return { admitted: true, reason: null }
-  const section = pinned.section ? config[pinned.section] : config
+  const section = defaultGeometry.section ? config[defaultGeometry.section] : config
   if (!plain(section)) return { admitted: true, reason: null }
+  // The native dispatcher sends a tied head or the 2B hidden size to the 2B engine.
+  const useQwen27 = modelType === 'qwen3_5' && section.hidden_size === QWEN27.dims.hidden_size &&
+    config.hidden_size !== QWEN35.dims.hidden_size && config.tie_word_embeddings !== true && section.tie_word_embeddings !== true
+  const pinned = useQwen27 ? QWEN27 : defaultGeometry
   for (const [key, expected] of Object.entries(pinned.dims)) {
     const value = section[key]
     if (value === undefined || value === null) continue
@@ -91,7 +115,9 @@ export function admitGeometry(modelType: string, config: unknown): GeometryAdmis
       }
     }
   }
-  if (!layerTypesMatch(modelType, section.layer_types)) {
+  const interval = section.full_attention_interval
+  const wrongQwen27Interval = useQwen27 && typeof interval === 'number' && interval > 0 && interval !== 4
+  if (wrongQwen27Interval || !layerTypesMatch(modelType, section.layer_types)) {
     return {
       admitted: false,
       reason: `This checkpoint's layer types are not the ones the bundled engine serves for ${pinned.title}; the engine refuses it (${pinned.engineError}).`,

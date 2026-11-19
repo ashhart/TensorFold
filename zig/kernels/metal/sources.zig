@@ -142,12 +142,16 @@ pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// A window's rows' dense-attention softmaxes in one launch, appended to ops/softmax.metal (tf_softmax_row).
+pub const glm_softmax_rows = @embedFile("glm_softmax_rows.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
 pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
 pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+/// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
 /// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
@@ -157,12 +161,22 @@ pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
+/// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
+pub const glm_kda_window = @embedFile("glm_kda_window.metal");
+/// And on two threadgroups a head (their value columns), then each head's norm: kda_rows' values (Ultra-class GPUs).
+pub const glm_kda_parts = @embedFile("glm_kda_parts.metal");
+/// Prompt chunks' expert gathers walked in column groups, appended to core/affine_mm.metal at 4 bits, groups of 64.
+pub const glm_mm_groups = @embedFile("glm_mm_groups.metal");
+/// The router's logits for a one-row window, appended to core/moe_route.metal at GLM's two shapes.
+pub const glm_route_one = @embedFile("glm_route_one.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
 pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
 pub const glm_sparse_nax = @embedFile("glm_sparse_nax.metal");
 /// A prompt chunk's index scores on the tensor units (nax.h inlined at load).
 pub const glm_index_nax = @embedFile("glm_index_nax.metal");
+/// Decode rows' key lists on many threadgroups: a sampled floor marks candidates, a merge selects among them.
+pub const glm_select = @embedFile("glm_select.metal");
 /// A prompt chunk's MLA absorb on the tensor units (nax.h inlined at load).
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.

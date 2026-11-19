@@ -79,7 +79,7 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
-        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+        if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
             if (n < 16 or n > 2048 or n % 16 != 0) {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
@@ -92,7 +92,11 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
-        const c = try cfg.parse(a, text, null);
+        var problem: cfg.Problem = .{};
+        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+            if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
+            return e;
+        };
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
@@ -158,7 +162,7 @@ pub const Model = struct {
         m.share_pending = false;
         defer m.checkpoint.closeFiles();
         const c = m.config;
-        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
         const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
@@ -210,7 +214,7 @@ pub const Model = struct {
 
 /// A prompt pass's requested rows, before the runner's frame and attention limits.
 pub fn promptRows(c: cfg.Config, generation: u32) u32 {
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
+    const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
     return @import("prompt_rows.zig").requested(generation, c.moe(), value);
 }
 

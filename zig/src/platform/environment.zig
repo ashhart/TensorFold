@@ -3,7 +3,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3 };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
@@ -45,6 +45,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
+    .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
@@ -53,6 +54,20 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+    // Qwen 3.5 CUDA and HIP settings, read through this table:
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
+    .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
+    .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
+    .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
+    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
+    .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q27_POCKET_OFF", .scope = .cuda, .kind = .path, .forms = "all, or a list of layer:neuron pairs without control characters (default off)" },
+    .{ .name = "TF_Q27_TAIL", .scope = .cuda, .kind = .word, .words = &.{"off"}, .forms = "off (default: each nudged sequence's tail rows)" },
+    .{ .name = "TF_Q27_GEMM", .scope = .cuda, .kind = .word, .words = &.{"narrow"}, .forms = "narrow (default: 128x128 tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
@@ -66,6 +81,9 @@ pub const rules = [_]Rule{
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
+    .{ .name = "TF_METAL4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps Metal 3; 1 sends the work of a family that supports it through Metal 4 on macOS 26 and later, the default for DeepSeek-V4.1 there)" },
+    .{ .name = "TF_METAL4_TIMELINE", .scope = .metal, .kind = .u32, .forms = "a whole round count from 0 to 4294967295 (0, the default, stamps nothing; n stamps every stage of n rounds of each kind on a Metal 4 queue and logs them)" },
+    .{ .name = "TF_DSV41_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 logs DeepSeek-V4.1 Metal decode rounds' host and GPU milliseconds by rows)" },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
@@ -211,6 +229,15 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
     .{ .name = "TF_FLASHNEXT_PROMPT", .scope = .flashnext, .kind = .word, .words = &.{"rows"}, .forms = "rows for the rows path (unset or blank keeps the plain path)" },
+    // Family rank and prompt settings below are read through their own family's startup scope.
+    .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
+    .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
+    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_GLM_WORLD gives one rank)" },
+    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_GLM_RANK gives one rank)" },
+    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_NEMOTRON_WORLD gives one rank)" },
+    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_NEMOTRON_RANK gives one rank)" },
+    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_MINIMAX_WORLD gives one rank)" },
+    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank count, 2 on CUDA (unset with TF_MINIMAX_RANK gives one rank)" },
 };
 
 pub fn rule(name: []const u8) Rule {
@@ -298,6 +325,11 @@ pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]cons
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
 }
 
+/// A registered setting's raw text, for readers that parse it against runtime bounds the table cannot name.
+pub fn rawText(name: [:0]const u8) ?[]const u8 {
+    return sys.getenv(name);
+}
+
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
@@ -374,6 +406,8 @@ pub const Flags = struct {
     drama3: bool = false,
     glm: bool = false,
     flashnext: bool = false,
+    nemotron: bool = false,
+    minimax_m3: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -391,6 +425,8 @@ pub const Flags = struct {
             .drama3 => f.drama3,
             .glm => f.glm,
             .flashnext => f.flashnext,
+            .nemotron => f.nemotron,
+            .minimax_m3 => f.minimax_m3,
         };
     }
 };

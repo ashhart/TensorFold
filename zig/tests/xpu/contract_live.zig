@@ -12,6 +12,7 @@ fn isControl(r: records.Record) bool {
 
 fn imageOf(name: []const u8) ?rig_.Image {
     if (std.mem.eql(u8, name, "glue")) return .glue;
+    if (std.mem.eql(u8, name, "tp")) return .tp;
     if (std.mem.eql(u8, name, "contract_controls")) return .controls;
     return null;
 }
@@ -24,7 +25,18 @@ fn argsOf(symbol: []const u8) u32 {
         .{ "gated_norm", 12 },
         .{ "swiglu", 7 },
         .{ "argmax", 3 },
+        .{ "topk_part", 6 },
+        .{ "topk_merge", 6 },
         .{ "embed", 6 },
+        .{ "tp2_allreduce_f16", 4 },
+        .{ "tp4_allreduce_f16", 6 },
+        .{ "tp2_rs_f16", 5 },
+        .{ "tp4_rs_f16", 7 },
+        .{ "tp2_allreduce_bf16", 4 },
+        .{ "tp4_allreduce_bf16", 6 },
+        .{ "tp2_allreduce_f32", 4 },
+        .{ "tp4_allreduce_f32", 6 },
+        .{ "tp4_rs_f32", 7 },
     };
     for (table) |e| if (std.mem.eql(u8, e[0], symbol)) return e[1];
     return 1; // gate 5's controls take one output pointer

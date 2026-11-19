@@ -100,7 +100,7 @@ pub const Metal = struct {
             .tokens = try m.device.buffer(ring * 4, opts),
             .prompt = try m.device.buffer(@max(o.capacity, 16) * 4, opts),
             .fence = try Fence.init(m.device),
-            .trace = platform.c.getenv("TF_SLIDE_TRACE") != null,
+            .trace = (@import("sys").environment.Process{}).get("TF_SLIDE_TRACE") != null,
             .coop_split = fwd.splitOn(),
         };
         if (o.chunk > fused_rows) b.wide = try prefill.Prefill.init(m, @min(o.chunk, o.capacity));

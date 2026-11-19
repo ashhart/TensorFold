@@ -24,6 +24,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     for ([_][]const u8{ "glue_attn.cl", "glue_quant.cl" }) |part| glue.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
     const glue_dir = glue.addOutputDirectoryArg("ocloc-glue");
     _ = files.addCopyFile(glue_dir.path(b, "glue.bin"), b.fmt("{s}/glue.bin", .{device}));
+    const tp_obj = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
+    tp_obj.addFileArg(b.path("zig/kernels/xpu/tp.cl"));
+    tp_obj.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", "tp", "-out_dir" });
+    tp_obj.setCwd(b.path("."));
+    const tp_dir = tp_obj.addOutputDirectoryArg("ocloc-tp");
+    _ = files.addCopyFile(tp_dir.path(b, "tp.bin"), b.fmt("{s}/tp.bin", .{device}));
     const ctl = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
     ctl.addFileArg(b.path("zig/kernels/xpu/contract_controls.cl"));
     ctl.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", "contract_controls", "-out_dir" });
@@ -58,7 +64,7 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
     const files = b.addWriteFiles();
     if (prebuilt) |dir| {
-        for ([_][]const u8{ "glue", "contract_controls", "contract_gate_controls" }) |name| {
+        for ([_][]const u8{ "glue", "tp", "contract_controls", "contract_gate_controls" }) |name| {
             _ = files.addCopyFile(.{ .cwd_relative = b.fmt("{s}/{s}.bin", .{ dir, name }) }, b.fmt("{s}.bin", .{name}));
         }
     } else {
@@ -70,17 +76,22 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         for ([_][]const u8{ "glue_attn.cl", "glue_quant.cl" }) |part| glue.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const glue_dir = glue.addOutputDirectoryArg("ocloc-glue-run");
         _ = files.addCopyFile(glue_dir.path(b, "glue.bin"), "glue.bin");
-        for ([_][]const u8{ "contract_controls", "contract_gate_controls" }) |name| {
+        for ([_][2][]const u8{
+            .{ "tp", "zig/kernels/xpu/tp.cl" },
+            .{ "contract_controls", "zig/kernels/xpu/contract_controls.cl" },
+            .{ "contract_gate_controls", "zig/kernels/xpu/contract_gate_controls.cl" },
+        }) |pair| {
             const run = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
-            run.addFileArg(b.path(b.fmt("zig/kernels/xpu/{s}.cl", .{name})));
-            run.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", name, "-out_dir" });
+            run.addFileArg(b.path(pair[1]));
+            run.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", pair[0], "-out_dir" });
             run.setCwd(b.path("."));
-            const dir = run.addOutputDirectoryArg(b.fmt("ocloc-{s}-run", .{name}));
-            _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{name})), b.fmt("{s}.bin", .{name}));
+            const dir = run.addOutputDirectoryArg(b.fmt("ocloc-{s}-run", .{pair[0]}));
+            _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{pair[0]})), b.fmt("{s}.bin", .{pair[0]}));
         }
     }
     const images = b.createModule(.{ .root_source_file = files.add("xpu_contract_images.zig",
         \\pub const glue align(8) = @embedFile("glue.bin").*;
+        \\pub const tp align(8) = @embedFile("tp.bin").*;
         \\pub const controls align(8) = @embedFile("contract_controls.bin").*;
         \\pub const gate_controls align(8) = @embedFile("contract_gate_controls.bin").*;
     ), .target = target, .optimize = optimize });

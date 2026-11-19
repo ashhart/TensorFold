@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
+const tape_mod = @import("prompt_tape.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const Engine = @import("engine.zig").Engine;
 
@@ -104,11 +105,15 @@ pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { sam
 
 /// Knock-out profile: a `depth`-draft round replayed `reps` times, each launch class left out in turn; median GPU time.
 pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !void {
+    const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
+    if (d > 0) return profileRows(e, d, d + 1, reps, only, parts);
+    var it = std.mem.tokenizeScalar(u8, if (platform.c.getenv("GLM_PROFILE_ROWS")) |v| std.mem.span(v) else "1", ','); // copy windows' rows, without the MTP head
+    while (it.next()) |v| try profileRows(e, 0, std.math.clamp(std.fmt.parseInt(u32, v, 10) catch 1, 1, st.max_rows), reps, only, parts);
+}
+
+fn profileRows(e: *Engine, d: u32, R: u32, reps: usize, only: bool, parts: bool) !void {
     const c = &e.c;
     const D = c.hidden;
-    const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
-    const wide = if (platform.c.getenv("GLM_PROFILE_ROWS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1 else 1; // a copy window's rows, without the MTP head
-    const R = if (d == 0) std.math.clamp(wide, 1, st.max_rows) else d + 1;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (e.s.pos + R + 1 > e.s.cap) return error.ContextFull;
@@ -144,6 +149,7 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
         std.mem.sort(f64, times, {}, std.sort.asc(f64));
         const med = times[reps / 2];
         if (mi == 0) full = med;
+        if (mi == 0) std.debug.print("profile {d} rows: the last MoE layer's unique experts {d}\n", .{ R, if (R == 1) 8 else Engine.u32s(e.sc.ucount, 1)[0] }); // one row: its picks (no groups)
         const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == 0xffff_ffff) "none" else if (parts) fwd.Part.names[@ctz(mask)] else fwd.Class.names[@ctz(mask)];
         std.debug.print("profile {d} rows{s}: {s:<10} {d:7.3} ms (min {d:.3}, max {d:.3}){s}", .{ R, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == 0xffff_ffff) "\n" else "" });
         if (mask != 0 and !only and mask != 0xffff_ffff) std.debug.print("  class {d:6.3} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
@@ -187,22 +193,38 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     std.debug.print("matmul check (layer 0 KDA in-projection, {d} rows x {d}): {d} of {d} bf16 outputs differ ({d:.3}%), at most {d} steps\n", .{ rows, N, differ, @as(usize, rows) * N, 100 * @as(f64, @floatFromInt(differ)) / @as(f64, @floatFromInt(@as(usize, rows) * N)), worst });
 }
 
-/// Prompt chunk GPU time, median of `reps`: whole, then each class left out (alone with `only`); pairs run it together.
+/// Prompt chunk GPU time, median of `reps`: whole, then each class left out (alone with `only`); GLM_PROFILE_AT=N.
 pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, parts: bool) !void {
     const pr = &(e.pr orelse return error.NoPromptPath);
     const C = fwd.Class;
-    const rows: u32 = @intCast(@min(prompt.len, pr.rows));
-    if (rows + 1 > e.s.cap) return error.ContextFull;
+    // GLM_PROFILE_AT=N: the chunk at position N, the prompt's rows before it run first (the caches a long prompt has)
+    const at: u32 = if (platform.c.getenv("GLM_PROFILE_AT")) |v| @intCast(@min(try std.fmt.parseInt(usize, std.mem.span(v), 10), prompt.len - 1)) else 0;
+    const rows: u32 = @intCast(@min(prompt.len - at, pr.rows));
+    if (at + rows + 1 > e.s.cap) return error.ContextFull;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     e.sync();
-    @memcpy(Engine.u32s(e.prompt_ids, rows), prompt[0..rows]);
-    const P = fwd.Part;
-    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out") } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends, 0, 0 };
-    var all: u32 = 0;
-    for (classes) |m| all |= m;
+    @memcpy(Engine.u32s(e.prompt_ids, at + rows), prompt[0 .. at + rows]);
+    if (at > 0) e.s.reset();
+    var done: u32 = 0;
+    while (done < at) { // the rows before the chunk, in chunks, as a prompt pass runs them
+        const n = @min(pr.rows, at - done);
+        var x = e.ctx();
+        x.sc = &pr.streams;
+        const b = e.begin();
+        prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids.at(@as(usize, done) * 4), n, done);
+        try e.finish(b.cb, b.enc);
+        fwd.flipKda(&x);
+        done += n;
+    }
     const times = try e.gpa.alloc(f64, reps);
     defer e.gpa.free(times);
+    const run: Run = .{ .e = e, .pr = pr, .rows = rows, .at = at, .times = times };
+    if (parts and platform.c.getenv("GLM_PROFILE_TAPE") != null) return profileTaped(run); // routes and lists played
+    const P = fwd.Part;
+    const classes = if (parts) [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out"), P.bit("hc_mix"), P.bit("r_router"), P.bit("r_topk"), P.bit("e_gateup"), P.bit("e_down"), P.bit("s_gateup"), P.bit("s_down"), P.bit("combine") } else [_]u32{ C.hc, C.kda, C.mla, C.dense, C.route, C.routed, C.shared, C.exchange, C.combine, C.ends, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var all: u32 = 0;
+    for (classes) |m| all |= m;
     var full: f64 = 0;
     for (0..classes.len + 3) |mi| {
         const mask: u32 = if (mi == 0 or mi == classes.len + 2) 0 else if (mi == classes.len + 1) all else classes[mi - 1];
@@ -211,19 +233,84 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
         x.sc = &pr.streams;
         const m = if (mask == all) all else if (only and mask != 0) all & ~mask else mask;
         if (parts) x.pskip = m else x.skip = m;
-        for (0..reps + 1) |rep| {
-            e.s.reset();
-            const b = e.begin();
-            prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids, rows, 0);
-            try e.finish(b.cb, b.enc);
-            if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3;
-        }
-        std.mem.sort(f64, times, {}, std.sort.asc(f64));
-        const med = times[reps / 2];
+        const med = try run.median(&x);
         if (mi == 0) full = med;
         const name = if (mask == 0) (if (mi == 0) "full" else "full again") else if (mask == all) "none" else if (parts) fwd.Part.names[@ctz(mask)] else fwd.Class.names[@ctz(mask)];
-        std.debug.print("prompt profile {d} rows{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
+        std.debug.print("prompt profile {d} rows at {d}{s}: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2}){s}", .{ rows, at, if (only) " only" else "", name, med, times[0], times[reps - 1], if (mask == 0 or only or mask == all) "\n" else "" });
         if (mask != 0 and !only and mask != all) std.debug.print("  class {d:8.2} ms {d:5.1}%\n", .{ full - med, 100 * (full - med) / full });
+    }
+}
+
+/// One profiled chunk: the median GPU time of a pass over it.
+const Run = struct {
+    e: *Engine,
+    pr: *const prompt_mod.Prompt,
+    rows: u32,
+    at: u32,
+    times: []f64,
+
+    fn median(r: Run, x: *fwd.Ctx) !f64 {
+        for (0..r.times.len + 1) |rep| {
+            if (r.at == 0) r.e.s.reset(); // later chunks keep the caches (each rep reads and writes the same rows)
+            const b = r.e.begin();
+            prompt_mod.backbone(r.pr, x, b.enc, r.e.prompt_ids.at(@as(usize, r.at) * 4), r.rows, r.at);
+            try r.e.finish(b.cb, b.enc);
+            if (rep > 0) r.times[rep - 1] = (r.e.gpu[1] - r.e.gpu[0]) * 1e3;
+        }
+        std.mem.sort(f64, r.times, {}, std.sort.asc(f64));
+        return r.times[r.times.len / 2];
+    }
+};
+
+/// GLM_PROFILE_TAPE: parts against a pass whose routes and key lists play back from a recorded whole pass.
+fn profileTaped(r: Run) !void {
+    const e = r.e;
+    const c = &e.c;
+    var moes: u32 = 0;
+    for (e.w.layers[0..c.run]) |*l| moes += @intFromBool(l.mlp == .moe);
+    var t = try tape_mod.Tape.init(&e.arena, moes, c.countKind(.mla), r.rows, c.topk, c.experts, c.keyWidth());
+    const pr: *prompt_mod.Prompt = @constCast(r.pr);
+    pr.tape = &t;
+    defer pr.tape = null;
+    const P = fwd.Part;
+    const parts = [_]u32{ P.bit("mla_proj"), P.bit("mla_cache"), P.bit("mla_absorb"), P.bit("mla_select"), P.bit("mla_attn"), P.bit("mla_unabs"), P.bit("mla_out"), P.bit("kda_in"), P.bit("kda_pre"), P.bit("kda_scan"), P.bit("kda_post"), P.bit("kda_out"), P.bit("hc_mix"), P.bit("r_router"), P.bit("r_topk"), P.bit("e_gateup"), P.bit("e_down"), P.bit("s_gateup"), P.bit("s_down"), P.bit("combine") };
+    var all: u32 = 0;
+    for (parts) |m| all |= m;
+    const M = tape_mod.Mode;
+    const Step = struct { name: []const u8, skip: u32 = 0, route: M = .play, keys: M = .play };
+    var steps: [parts.len + 6]Step = undefined;
+    steps[0] = .{ .name = "full", .route = .off, .keys = .off };
+    steps[1] = .{ .name = "taped" };
+    steps[2] = .{ .name = "route", .route = .off };
+    steps[3] = .{ .name = "select", .keys = .off };
+    for (parts, 0..) |m, i| steps[4 + i] = .{ .name = P.names[@ctz(m)], .skip = m };
+    steps[parts.len + 4] = .{ .name = "none", .skip = all };
+    steps[parts.len + 5] = .{ .name = "full again", .route = .off, .keys = .off };
+    { // the tape: one whole pass recorded
+        var x = e.ctx();
+        x.sc = &pr.streams;
+        t.route_mode = .record;
+        t.keys_mode = .record;
+        if (r.at == 0) e.s.reset();
+        const b = e.begin();
+        prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids.at(@as(usize, r.at) * 4), r.rows, r.at);
+        try e.finish(b.cb, b.enc);
+    }
+    var base: f64 = 0;
+    var full: f64 = 0;
+    for (steps, 0..) |st_, i| {
+        var x = e.ctx();
+        x.sc = &pr.streams;
+        x.pskip = st_.skip;
+        t.route_mode = st_.route;
+        t.keys_mode = st_.keys;
+        const med = try r.median(&x);
+        if (i == 0) full = med;
+        if (i == 1) base = med;
+        std.debug.print("prompt profile {d} rows at {d} taped: {s:<10} {d:9.2} ms (min {d:.2}, max {d:.2})", .{ r.rows, r.at, st_.name, med, r.times[0], r.times[r.times.len - 1] });
+        const d = if (i == 2 or i == 3) med - base else base - med; // live parts add, knock-outs take away
+        if (i >= 2 and i < steps.len - 2) std.debug.print("  part {d:8.2} ms {d:5.1}%", .{ d, 100 * d / full });
+        std.debug.print("\n", .{});
     }
 }
 

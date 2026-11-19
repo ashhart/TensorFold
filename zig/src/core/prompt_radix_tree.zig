@@ -5,12 +5,14 @@ const Allocator = std.mem.Allocator;
 
 const pc = @import("prompt_cache.zig");
 const parts = @import("prompt_radix_parts.zig");
+const tail_mod = @import("prompt_radix_tail.zig");
 
 pub const Saved = pc.Saved;
 pub const Snapshots = pc.Snapshots;
 pub const Pages = pc.Pages;
 pub const Counts = pc.Counts;
 pub const Identity = @import("cache_images.zig").Identity;
+pub const Tail = tail_mod.Tail;
 
 /// What rows depend on beyond their key and images: a tree never shares a page between two of these.
 pub const Ns = struct { namespace: u64 = 0, frame: u32 = 0 };
@@ -23,7 +25,7 @@ pub const Key = struct {
 };
 
 /// The images whose rows overlap [lo, hi), of a list in prompt order.
-fn overlapping(ids: []const Identity, lo: usize, hi: usize) []const Identity {
+pub fn overlapping(ids: []const Identity, lo: usize, hi: usize) []const Identity {
     var a: usize = 0;
     while (a < ids.len and ids[a].at + ids[a].tokens <= lo) a += 1;
     var b = a;
@@ -32,7 +34,7 @@ fn overlapping(ids: []const Identity, lo: usize, hi: usize) []const Identity {
 }
 
 /// Whether the same images, exactly, overlap [lo, hi) in both lists.
-fn sameImages(x: []const Identity, y: []const Identity, lo: usize, hi: usize) bool {
+pub fn sameImages(x: []const Identity, y: []const Identity, lo: usize, hi: usize) bool {
     const a = overlapping(x, lo, hi);
     const b = overlapping(y, lo, hi);
     if (a.len != b.len) return false;
@@ -59,6 +61,23 @@ pub const Entry = struct {
     hit: bool = false,
     /// Resumed again after a later prompt kept a state below it: a turn several continuations share, never superseded.
     branched: bool = false,
+    /// Its rows past its node's end (C4); null at the node's end.
+    tail: ?Tail = null,
+};
+
+/// A state the tree holds: a node's entry at its end, or one of its tails.
+pub const Found = struct {
+    node: *Node,
+    tail: ?usize = null,
+
+    pub fn entry(f: Found) *Entry {
+        return if (f.tail) |i| &f.node.tails.items[i] else &f.node.entry.?;
+    }
+
+    /// The tokens below the state.
+    pub fn at(f: Found) u32 {
+        return f.node.end + if (f.tail) |i| f.node.tails.items[i].tail.?.r else 0;
+    }
 };
 
 /// A matched position: `pages` logical pages into `node` (1 to its count).
@@ -85,6 +104,8 @@ pub const Node = struct {
     ns: Ns = .{},
     kids: std.ArrayList(*Node) = .empty,
     entry: ?Entry = null,
+    /// Entries past its end inside the next page (C4), each with its tail.
+    tails: std.ArrayList(Entry) = .empty,
     used: u64 = 0,
     /// A keep or a restore in progress here: no eviction or prune takes this node, its entry or its path.
     pins: u32 = 0,
@@ -133,6 +154,8 @@ pub const Tree = struct {
         for (n.kids.items) |k| t.drop(k);
         n.kids.deinit(t.gpa);
         if (n.entry) |e| t.dropEntry(e);
+        for (n.tails.items) |e| t.dropEntry(e);
+        n.tails.deinit(t.gpa);
         for (n.pages) |id| t.holds.drop(t.pages, id);
         t.gpa.free(n.tokens);
         t.gpa.free(n.pages);
@@ -187,6 +210,26 @@ pub const Tree = struct {
             at += p * t.page;
             node = c;
             if (c.entry != null and ok.ok(c.end)) best = c;
+        }
+        return best;
+    }
+
+    /// The deepest tail `k` repeats at a resume point at most `limit` rows in, on the root or a node it repeats whole.
+    pub fn deepestTail(t: *const Tree, k: Key, limit: usize, ok: anytype) ?Found {
+        var node = t.root;
+        var at: usize = 0;
+        var best: ?Found = null;
+        while (true) {
+            for (node.tails.items, 0..) |e, i| {
+                const pos = node.end + e.tail.?.r;
+                if (pos > limit or !ok.ok(@intCast(pos)) or !e.tail.?.matches(node.end, k)) continue;
+                if (best == null or pos > best.?.at()) best = .{ .node = node, .tail = i };
+            }
+            if (at + t.page > limit) break;
+            const c = t.child(node, k, at) orelse break;
+            if (t.common(c, k, at, (limit - at) / t.page) < t.npages(c)) break;
+            at = c.end;
+            node = c;
         }
         return best;
     }
@@ -334,10 +377,11 @@ pub const Tree = struct {
         return up;
     }
 
-    /// An entry's snapshot, parts and prompt go.
+    /// An entry's snapshot, parts, tail and prompt go.
     fn dropEntry(t: *Tree, e: Entry) void {
         if (e.saved) |saved| t.family.vtable.drop(t.family.ptr, saved);
         t.dropParts(e.parts);
+        if (e.tail) |tl| tail_mod.free(t, tl);
         t.gpa.free(e.last);
     }
 
@@ -366,11 +410,25 @@ pub const Tree = struct {
         t.prune(n);
     }
 
+    /// Frees the state `f` names, and the nodes below nothing keeps.
+    pub fn evictAt(t: *Tree, f: Found) void {
+        const i = f.tail orelse return t.evict(f.node);
+        std.debug.assert(f.node.pins == 0); // a keep or a restore in progress
+        t.dropTail(f.node, i);
+        t.prune(f.node);
+    }
+
+    fn dropTail(t: *Tree, n: *Node, i: usize) void {
+        t.dropEntry(n.tails.orderedRemove(i));
+        t.snaps -= 1;
+        t.counts.evicted += 1;
+    }
+
     /// Removes `start` and its parents while they hold no state and have nothing below them.
     pub fn prune(t: *Tree, start: *Node) void {
         var n = start;
         while (n.parent) |parent| {
-            if (n.kids.items.len > 0 or n.entry != null or n.pins > 0) return;
+            if (n.kids.items.len > 0 or n.entry != null or n.tails.items.len > 0 or n.pins > 0) return;
             const slot = std.mem.indexOfScalar(*Node, parent.kids.items, n).?;
             _ = parent.kids.swapRemove(slot);
             t.drop(n);
@@ -393,7 +451,8 @@ pub const Tree = struct {
     }
 
     fn weakestLeaf(t: *const Tree, n: *Node, best: *?*Node) void {
-        if (n.parent != null and n.kids.items.len == 0 and n.pins == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
+        // the root is a leaf only for its tails
+        if ((n.parent != null or n.tails.items.len > 0) and n.kids.items.len == 0 and n.pins == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
         for (n.kids.items) |k| t.weakestLeaf(k, best);
     }
 
@@ -402,6 +461,7 @@ pub const Tree = struct {
         var best: ?*Node = null;
         t.weakestLeaf(t.root, &best);
         const n = best orelse return false;
+        while (n.tails.items.len > 0) t.dropTail(n, n.tails.items.len - 1);
         if (n.entry != null) t.evict(n) else t.prune(n);
         return true;
     }
@@ -415,6 +475,7 @@ pub const Tree = struct {
 
     fn sum(n: *const Node, out: *u64) void {
         if (n.entry) |e| out.* += e.bytes;
+        for (n.tails.items) |e| out.* += e.bytes;
         for (n.kids.items) |k| sum(k, out);
     }
 };

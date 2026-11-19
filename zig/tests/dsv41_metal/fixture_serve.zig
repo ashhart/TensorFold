@@ -44,7 +44,7 @@ const Held = struct {
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false };
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false, steps: bool = false, decode_share: ?f64 = null };
 
 /// Set when a model opened with a residency owner closes: every buffer the target joined to it had left.
 pub var resident_left: ?bool = null;
@@ -77,7 +77,7 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
     }
     const env: pkg.target.Env = .{ .device = r.device, .queue = r.queue, .c = &r.c, .p = &r.p, .tables = &r.tables, .s = &r.s, .model = h.f.model(), .lookup = h.f.lookup() };
     const parts: pkg.serve.Parts = .{ .env = env, .top = &r.top.?, .dspark = &h.w, .owner = .{ .ctx = h, .close = Held.close }, .resident = if (h.res) |*x| x else null };
-    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk } });
+    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk }, .steps = o.steps, .decode_share = o.decode_share });
 }
 
 /// Closes a model `open` made (the served engine closes its own through serve_lanes).

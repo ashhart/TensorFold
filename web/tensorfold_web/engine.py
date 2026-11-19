@@ -287,7 +287,7 @@ class Engine:
         """The generation, address and key, read together."""
 
         with self.target_lock:
-            return self.generation, self.settings.engine_url.rstrip("/"), self.key_in_use()
+            return self.generation, settings_mod.engine_root(self.settings.engine_url), self.key_in_use()
 
     def retargeted(self) -> None:
         """The address or the key changed (the caller holds ``target_lock``): readings begun before are not used."""

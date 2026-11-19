@@ -1,0 +1,378 @@
+test
++- test-gemma4-attention-backward-host
+   +- run test w
+GEMMA_BACKWARD_COORD f64 ring=false probes=528 absolute=3.64061833e-9 relative=4.53574179e-8
+GEMMA_BACKWARD_COORD f64 ring=true probes=528 absolute=5.46947088e-9 relative=6.09718296e-7
+GEMMA_BACKWARD_COORD f32 ring=false probes=528 absolute=3.95812094e-8 relative=2.23293772e-6
+GEMMA_BACKWARD_COORD f32 ring=true probes=528 absolute=7.24321580e-8 relative=3.06041068e-5
+GEMMA_BACKWARD_DIRECTION f64 heads=32 kv=16 width=256 keys=1024 ring=true absolute=1.92214333e-12
+GEMMA_BACKWARD_DIRECTION f32 heads=32 kv=16 width=256 keys=1024 ring=true absolute=4.54335236e-10
+GEMMA_BACKWARD_DIRECTION f64 heads=32 kv=4 width=512 keys=129 ring=false absolute=2.63458163e-10
+GEMMA_BACKWARD_DIRECTION f32 heads=32 kv=4 width=512 keys=129 ring=false absolute=7.14385351e-9
+GEMMA_BACKWARD_DIRECTION f64 heads=16 kv=8 width=256 keys=1025 ring=false absolute=1.78777837e-12
+GEMMA_BACKWARD_DIRECTION f32 heads=16 kv=8 width=256 keys=1025 ring=false absolute=3.40492079e-11
+GEMMA_BACKWARD_DIRECTION f64 heads=16 kv=1 width=512 keys=129 ring=false absolute=1.49084216e-9
+GEMMA_BACKWARD_DIRECTION f32 heads=16 kv=1 width=512 keys=129 ring=false absolute=3.41651685e-9
+failed command: ./.zig-cache/o/95e04f41f4c3513bdfa98b51676e4b63/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): glm: lane cost identity exceeds its buffer; skipping the lane cost cache
+failed command: ./.zig-cache/o/1174e6cb70799b7ee11f4337006a32ae/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): TF_GLM_L2PF: layer 0's site n reads 0x10000000, which starts no weight buffer; prefetch off
+failed command: ./.zig-cache/o/805560af67ca4a2897f37d4b3a890c94/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+GLM snapshot sizing rank=0 world=2 at=2048 bytes=257949696 arena=7088302592
+GLM snapshot sizing rank=0 world=2 at=34816 bytes=698351616 arena=7088302592
+GLM snapshot sizing rank=0 world=2 at=266240 bytes=3720347648 arena=7088302592
+failed command: ./.zig-cache/o/25130ed9b4bfe4945e540f9f55175c78/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=-inf lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=-inf lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=second-stream len=2053 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=false
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=2 cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=null lse=null cache=own input=not_captured scores=masked row_finite=false
+failed command: ./.zig-cache/o/fda98d3a95599029c5a239294ec921fc/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- run test w
+[default] (warn): lane host: a packed decision failed (DeviceLost)
+failed command: ./.zig-cache/o/64c39f784f0d855fa275c925adb38898/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- run test w
+[default] (warn): lane host: a packed decision failed (DeviceLost)
+failed command: ./.zig-cache/o/027803a4b0bf19e9faaa87e41fe23de3/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=nan lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=false input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream len=2051 cap=4096 top=1 lse=2 cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=-inf lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=-inf lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=second-stream len=2053 cap=4096 top=-inf lse=nan cache=own batched=true input=head_streams input_finite=true row_finite=true
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=nan cache=own input=not_captured scores=raw row_finite=false
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=1 rows=2 len=2051 cap=4096 top=1 lse=2 cache=own input=not_captured scores=raw row_finite=null
+Flash Next ProposalNonfinite stream=fixture-stream kind=verify row=0 rows=1 len=2051 cap=4096 top=null lse=null cache=own input=not_captured scores=masked row_finite=false
+failed command: ./.zig-cache/o/cc46b24ce41842dbbd962514a8b148ae/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+FIXTURE case=13 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=15 refused=this server accepts text parts only; image, audio and video inputs are unsupported
+FIXTURE case=26 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=47 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=63 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=78 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=84 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=96 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=119 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=135 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=139 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=143 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=146 refused=this server accepts text parts only; image, audio and video inputs are unsupported
+FIXTURE case=161 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=174 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=190 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=203 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=211 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=216 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=229 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=230 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=235 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=242 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=261 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=275 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE total=328 accepted=78 equal=50 qualified=3 refused=25
+
+====== expected this output: =========
+b4cfdbdcffc07986f211a0b06658c220e5e4b8479088a0dd3735d6aa3817da8f␃
+
+======== instead found this: =========
+97e8b46f1ecd9e656de312b81cc417c5ee5eb08c69bbad10372cb06e3bb97b2d␃
+
+======================================
+First difference occurs on line 1:
+expected:
+b4cfdbdcffc07986f211a0b06658c220e5e4b8479088a0dd3735d6aa3817da8f
+^ ('\x62')
+found:
+97e8b46f1ecd9e656de312b81cc417c5ee5eb08c69bbad10372cb06e3bb97b2d
+^ ('\x39')
+
+====== expected this output: =========
+d8e86eef6c2ab57d119e862b266fafd247c84ee0bdebbd9175f77716f0fdc720␃
+
+======== instead found this: =========
+38139122ede11ae61ca23a9537ad3926ffa9538659e5c06ac7406bcb221c6ae4␃
+
+======================================
+First difference occurs on line 1:
+expected:
+d8e86eef6c2ab57d119e862b266fafd247c84ee0bdebbd9175f77716f0fdc720
+^ ('\x64')
+found:
+38139122ede11ae61ca23a9537ad3926ffa9538659e5c06ac7406bcb221c6ae4
+^ ('\x33')
+
+====== expected this output: =========
+8b5aad89ce0dd3960142a2adc00784ca946838fa4bc801be99044cef9f88448e␃
+
+======== instead found this: =========
+460ace0beeb72eaa7263940df2bd00625f4e63c2bc4dca30e120c01b11e6b7df␃
+
+======================================
+First difference occurs on line 1:
+expected:
+8b5aad89ce0dd3960142a2adc00784ca946838fa4bc801be99044cef9f88448e
+^ ('\x38')
+found:
+460ace0beeb72eaa7263940df2bd00625f4e63c2bc4dca30e120c01b11e6b7df
+^ ('\x34')
+DEEPSEEK_CHAT_GOLDENS 234 committed encoding.py cases (56 with a response_format)
+failed command: ./.zig-cache/o/d21ea30f02208020ee969d66630785b1/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+1/7 qwen_cuda_weights_test.test.Qwen tower weights: existing MLX names and every byte match HF in one shard...OK
+2/7 qwen_cuda_weights_test.test.Qwen tower weights: indexed MLX fallback and sharded HF preserve every tensor...OK
+3/7 qwen_cuda_weights_test.test.Qwen tower weights: malformed selected shape and dtype fail without a fallback...model.visual.patch_embed.proj.weight: f16 { 2, 3, 2, 16, 16 }, expected bf16 { 2, 3, 2, 16, 16 }
+model.visual.patch_embed.proj.weight: bf16 { 2, 3, 2, 8, 32 }, expected bf16 { 2, 3, 2, 16, 16 }
+vision_tower.patch_embed.proj.weight: f16 { 2, 2, 16, 16, 3 }, expected bf16 { 2, 2, 16, 16, 3 }
+vision_tower.patch_embed.proj.weight: bf16 { 2, 2, 16, 8, 6 }, expected bf16 { 2, 2, 16, 16, 3 }
+OK
+4/7 qwen_cuda_weights_test.test.Qwen tower weights: missing selected tensor and unused selected tensors fail closed...checkpoint has no tensor vision_tower.blocks.0.mlp.linear_fc1.bias
+unused checkpoint tensor vision_tower.extra
+checkpoint has no tensor model.visual.blocks.0.mlp.linear_fc1.bias
+unused checkpoint tensor model.visual.extra
+OK
+5/7 qwen_cuda_weights_test.test.Qwen tower weights: HF patch keeps the authored precedence when both namespaces exist...OK
+6/7 qwen_cuda_weights_test.test.Qwen tower weights: every copy refusal and MLX retry release their host owners...OK
+7/7 qwen_cuda_weights_test.test.Qwen tower weights: allocation failures balance the fallback reader and transpose scratch...OK
+7 passed; 0 skipped; 0 failed.
+test
++- test-cuda-host
+   +- run test w
+release privacy: symlink refused
+release privacy: symlink refused
+release privacy: symlink refused
+release privacy input directory is missing
+failed command: ./.zig-cache/o/c6867f8cf0e235fc184a3f92d0c38b89/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+discovery verbs: retained through TLS, atexit and destructor; child exit 0
+discovery grammar: retained through TLS, atexit and destructor; child exit 0
+test
++- run test w
+[default] (warn): Flash Next config.json: rope_parameters.rope_type asks for scaled RoPE (YaRN); this reader runs plain RoPE
+[default] (warn): Flash Next config.json: rope_scaling asks for scaled RoPE (YaRN); this reader runs plain RoPE
+failed command: ./.zig-cache/o/74d1eff08812341c5d20d23ff320372f/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-env-defaults-host
+   +- run test w
+[default] (warn): TF_GLM_L2PF: layer 0's site n reads 0x10000000, which starts no weight buffer; prefetch off
+failed command: ./.zig-cache/o/b130927226e2a7a87f4d89a6a6be25d1/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-flashnext-constraint-host
+   +- run test w
+[default] (warn): lane host: a round failed (GpuFailed): the round's streams fail
+failed command: ./.zig-cache/o/3610fdb7113b6ca00a670d21436bf521/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+[default] (warn): lane host: a packed decision failed (DeviceLost)
+failed command: ./.zig-cache/o/d7e9f4ebca2fbab63e430d9eeac8e9ce/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-flashnext-constraint-host
+   +- run test w
+[default] (warn): lane host: a round failed (GpuFailed): the round's streams fail
+failed command: ./.zig-cache/o/5b1ff842b21c78575a37f491d3ee6814/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+N/A  prompt attention tf_fa_wide_edge_f16 on gfx1151: not served there
+N/A  prompt attention tf_fa_wide_edge_bf16 on gfx1151: not served there
+N/A  prompt attention tf_fa_paged_edge_f16 on gfx1151: not served there
+N/A  prompt attention tf_fa_paged_edge_bf16 on gfx1151: not served there
+N/A  dense gemm dense_gemm_block<DotBF16, 8> on gfx1030: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Small> on gfx1030: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Small> on gfx1100: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Small> on gfx1151: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Big> on gfx1030: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Big> on gfx1100: not served there
+N/A  dense gemm dense_wmma12_gemm<DotBF16, W12Big> on gfx1151: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Pair> on gfx1030: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Pair> on gfx1100: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Pair> on gfx1151: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Big> on gfx1030: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Big> on gfx1100: not served there
+N/A  dense gemm dense_wmma12_gemm_silu<DotBF16, W12Big> on gfx1151: not served there
+N/A  dense gemm tf_ref_wmma12_k32 on gfx1030: not served there
+N/A  dense gemm tf_ref_wmma12_k32 on gfx1100: not served there
+N/A  dense gemm tf_ref_wmma12_k32 on gfx1151: not served there
+N/A  wmma skew tile 4-bit on gfx1030: not served there
+N/A  wmma skew tile 4-bit on gfx1201: not served there
+joint schema load: skipped, TF_CLEF_DIR names no clef-flash checkpoint
+joint schema reference: FP64 vs torch FP64 max 6.217248937900877e-15; BF16 emulation vs torch BF16 max 0.0176 (2.25 steps at the largest logit); against FP64 (worst, mean): torch BF16 0.0132 0.0071, emulation 0.0143 0.0046
+joint schema reference: near-zero normalize and cosine, BF16 emulation within 0 BF16 ulp of torch
+failed command: ./.zig-cache/o/54278bf5a5e70e8badfe20cd765d9d46/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
+
+test
++- test-cuda-host
+   +- run test w
+FIXTURE case=13 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=15 refused=this server accepts text parts only; image, audio and video inputs are unsupported
+FIXTURE case=26 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=47 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=63 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=78 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=84 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=96 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=119 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=135 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=139 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=143 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=146 refused=this server accepts text parts only; image, audio and video inputs are unsupported
+FIXTURE case=161 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=174 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=190 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=203 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=211 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=216 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=229 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=230 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=235 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=242 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE case=261 refused=response_format type must be text, json_object or json_schema, not 'string'
+FIXTURE case=275 refused=response_format type must be text, json_object or json_schema, not 'object'
+FIXTURE total=328 accepted=78 equal=50 qualified=3 refused=25
+
+====== expected this output: =========
+b4cfdbdcffc07986f211a0b06658c220e5e4b8479088a0dd3735d6aa3817da8f␃
+
+======== instead found this: =========
+97e8b46f1ecd9e656de312b81cc417c5ee5eb08c69bbad10372cb06e3bb97b2d␃
+
+======================================
+First difference occurs on line 1:
+expected:
+b4cfdbdcffc07986f211a0b06658c220e5e4b8479088a0dd3735d6aa3817da8f
+^ ('\x62')
+found:
+97e8b46f1ecd9e656de312b81cc417c5ee5eb08c69bbad10372cb06e3bb97b2d
+^ ('\x39')
+
+====== expected this output: =========
+d8e86eef6c2ab57d119e862b266fafd247c84ee0bdebbd9175f77716f0fdc720␃
+
+======== instead found this: =========
+38139122ede11ae61ca23a9537ad3926ffa9538659e5c06ac7406bcb221c6ae4␃
+
+======================================
+First difference occurs on line 1:
+expected:
+d8e86eef6c2ab57d119e862b266fafd247c84ee0bdebbd9175f77716f0fdc720
+^ ('\x64')
+found:
+38139122ede11ae61ca23a9537ad3926ffa9538659e5c06ac7406bcb221c6ae4
+^ ('\x33')
+
+====== expected this output: =========
+8b5aad89ce0dd3960142a2adc00784ca946838fa4bc801be99044cef9f88448e␃
+
+======== instead found this: =========
+460ace0beeb72eaa7263940df2bd00625f4e63c2bc4dca30e120c01b11e6b7df␃
+
+======================================
+First difference occurs on line 1:
+expected:
+8b5aad89ce0dd3960142a2adc00784ca946838fa4bc801be99044cef9f88448e
+^ ('\x38')
+found:
+460ace0beeb72eaa7263940df2bd00625f4e63c2bc4dca30e120c01b11e6b7df
+^ ('\x34')
+DEEPSEEK_CHAT_GOLDENS 234 committed encoding.py cases (56 with a response_format)
+quoted markers: skipped, TF_TOKENIZER_DIRS names no tokenizer directories (quoted spellings)
+quoted markers: skipped, TF_TOKENIZER_DIRS names no tokenizer directories (refusal)
+Clef tokens: skipped, TF_CLEF_DIR names no clef-flash checkpoint (12 records pinned)
+[default] (warn): libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[default] (warn): libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+failed command: ./.zig-cache/o/c00ed70fddb5c5546c326fcdc196b22c/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-

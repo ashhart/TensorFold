@@ -49,7 +49,8 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
+`/v1/imprint`, adding or deleting voices (`--manage-voices`), another method, or a suffix alias such as `/alt/completions`
+that the server answers for a full key. The route
 is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
 `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
 or a parked model reloads. The public routes stay public.
@@ -259,7 +260,7 @@ context-window check still applies. Cohere-style requests retain the reranker's 
 
 ## OCR
 
-The native HIP engine reads page images through Mistral's OCR contract when it serves a model with an OCR reader
+The native HIP engine reads pages through Mistral's OCR contract when it serves a model with an OCR reader
 and `--vision`.
 
 | Route | Contract | Request | Reply | Written for |
@@ -295,41 +296,48 @@ The reader writes block text in one Markdown flavour, the one Mistral's page Mar
 - Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
   16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
   decoded pixels disagree is refused as bad input.
-- PDF documents and `pages` are not read: a PDF document is HTTP 400 "PDF documents are not read on POST /v1/ocr;
-  send each page as a PNG, JPEG or WebP image", and any non-null `pages` is HTTP 400 "pages selects pages of a PDF
-  document; POST /v1/ocr reads one page image".
-- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, at most 32 MiB.
-  `http://` URLs are refused.
+- PDFs need `--vision-pdf`. PDFium renders each selected page at up to 144 DPI, at most 2048 pixels a side and
+  about 3.6 megapixels; boxes and sizes are in pixels of the rendered page. Mistral reports that DPI (72 for an
+  image). Every PDF of a request is measured before the first page is read (its page count and each selected
+  page's size, with no rendering), so a page index out of range, the page budget or a page that does not load fails
+  before any GPU work. Each page is then rendered just before it is read and freed when it is done, so one rendered
+  page is in memory at a time; a page that loads but does not render fails the request when it is reached.
+- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, and PDFs when
+  `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
+- Page budget: images count one page each and PDFs their selected pages; a request reads at most
+  `TENSORFOLD_MAX_PDF_PAGES` pages (default 16, also the most it may be set to). `--vision-max-images` does not
+  apply. Over the budget, a request is refused before any inference.
 - Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
   pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
   page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
   file); without it `include_image_base64` is HTTP 400.
 
-The page is read as one user turn (the page image, then the reader's prompt), greedy, with thinking off and
-`max_tokens` equal to all the context the prompt leaves. It succeeds only when the reply stops on its end token
-and the reader can parse it.
+Pages are read one at a time, each as one user turn (the page image, then the reader's prompt), greedy, with
+thinking off and `max_tokens` equal to all the context the prompt leaves. A page succeeds only when the reply
+stops on its end token and the reader can parse it.
 
 ### Failures
 
 | Failure | Mistral |
 | --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve | 400 |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 |
 | Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
 | The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
-| Engine fault or out of memory | 500 |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 |
 | Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
 
-An unreadable page's message names its index, and the model's raw text goes to the server log, never to the
-client. 422 means the same request fails the same way again under greedy decoding; a 503 carries `Retry-After`.
-A client that disconnects stops the request before its page is read.
+A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
+message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
+same request fails the same way again under greedy decoding; a 503 carries `Retry-After`. A client that disconnects
+stops the request before its next page or PDF render.
 
 ### Mistral: `POST /v1/ocr`
 
 | Field | Meaning |
 | --- | --- |
 | `model` | Any string or null. The reply names the requested id when it is the served name or an `--alias`, else the served name, so `--alias mistral-ocr-latest` lets copied examples echo it |
-| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes must be a PNG, JPEG or WebP image; a PDF is HTTP 400 (above). `{"type": "file"}` is HTTP 400 |
-| `pages` | Any non-null value is HTTP 400 (above): an image has one page |
+| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes decide PDF or image. `{"type": "file"}` is HTTP 400 |
+| `pages` | 0-based page indices as a list or a string such as `"0,2-4"`; duplicates are merged. An image has only page `0`. At most 1024 entries (a range counts its length) before merging, and the page budget after |
 | `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
 | `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
 | `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
@@ -343,8 +351,7 @@ A client that disconnects stops the request before its page is read.
 `dimensions` (`dpi`, `height`, `width`) and `blocks`; `hyperlinks` is left out. A block has `type` (`text`,
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
-blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size. An
-image's `dimensions.dpi` is 72.
+blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
 
 ## System One on a Clef engine
 
@@ -597,9 +604,10 @@ are the exception: absent both, replies take 0.8 of that time and a filling prom
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
-hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
-and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
+hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
+steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
+Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
@@ -1740,3 +1748,61 @@ streamed.
 ```bash
 curl http://127.0.0.1:8080/api/embed -d '{"model":"local-model","input":"hello"}'
 ```
+
+## Request journal and replay
+
+`TENSORFOLD_REQUEST_JOURNAL=PATH` turns on a request journal; it is off unless set, and only `PATH` and its siblings are
+written. **It holds every chat and completion prompt and reply in full**: treat it like the conversations themselves.
+Image URLs and PDF data are replaced with `<redacted>`, as in `TENSORFOLD_REQUEST_LOG`, which is unchanged. No HTTP header
+is journaled, so API keys and `Authorization` values never reach it. The server creates `PATH` and `PATH.lock`
+owner-only (0600), refuses a symbolic link or a file others can read, and holds `PATH.lock` while it runs, so a second
+server on the same journal does not start. Benchmark child servers never inherit the variable.
+
+Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
+the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
+thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
+reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+requests are journaled in the chat form they are translated to. A raw completion whose `prompt` is a list is not
+replay-exact: its per-prompt prepared records are not written, and its individual drawn seeds are not journaled.
+
+Size is bounded: a file rotates at 64 MiB to `PATH.1`, older files move up, and `PATH.3` is the last kept, so the
+journal holds at most 256 MiB. A body or reply too large for one 8 MiB record keeps its size and hash only. Each record
+is one `write` with no sync, so the journal adds three small appends to a request and nothing to its tokens; a full
+disk or a write error loses that record (the server logs it once), never the request. A record survives the server
+process crashing, not a power loss.
+
+On the next start the server reads the kept files. A request that started and never finished, with no clean stop after
+it, was in flight at a crash: a `quarantine` line flags it, and the server never retries it. Its fingerprint is SHA-256
+over the API key's label (as in the access log), the route and the whole body, so it matches only the same key sending
+the same request. One crash only flags what was in flight, since a crash can come from elsewhere (another route, the
+machine) and the requests beside it are not to blame. A request whose fingerprint was in flight at two crashes is
+refused with a 400 `request_quarantined` before the engine sees it, which ends a client's retry loop after the second
+crash. Other requests, and other keys sending the same body, are served as before; the check is one hash lookup. Without
+API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
+Ctrl-C) quarantines nothing.
+
+`tools/replay_request.py` lists, clears and replays journaled requests:
+
+```sh
+python3 tools/replay_request.py requests.jsonl --list
+python3 tools/replay_request.py requests.jsonl --id chatcmpl-example --base http://127.0.0.1:8080
+python3 tools/replay_request.py requests.jsonl --clear chatcmpl-example   # or a fingerprint, or all; server stopped
+```
+
+`--list` sends nothing. A replay sends the journaled body once to its route; when the client sent no seed, it adds the
+seed the server drew. It compares the reply's output: every choice's text, reasoning, tool calls (without their ids),
+logprobs and finish reason, the token counts, the stop sequence and `tensorfold.token_sha256`, the SHA-256 of the reply's
+token ids, so equal means the same tokens. Streams compare their joined deltas, whatever their frame boundaries. Reply
+ids, `created`, timings, `cached_tokens` and keepalives are left out; `--whole-body` compares every byte instead and
+will differ on those. A reply too large to keep is compared by its token hash. Exit 0 is equal, 1 is different, and 2
+means there was no finished reply to compare. `--body FILE` supplies the original request when images or a PDF were
+redacted or the body was too large; `--allow-quarantined` sends a quarantined request on purpose; `--key-env NAME`
+names the variable holding the API key (`TENSORFOLD_API_KEY` by default), which is sent and never written.
+
+A replay is exact on the same build, checkpoint, tokenizer, drafter and server flags, since TensorFold's decode gives the
+same tokens for the same prompt and seed with or without drafts, alone or batched. It is not exact across builds or
+checkpoints, after the server's defaults change, when a Messages request relied on the server's thinking default, when
+the body was restored with different media, or for a request whose server ran several generations for it (Cortheon)
+without a client seed or `--prompt-seed`, since only the last drawn seed is journaled.
+Unseeded prompt lists are not replay-exact either: each prompt draws its own seed, and those per-prompt prepared
+records are omitted. Send a client seed or keep the same `--prompt-seed` setting for an exact list replay.

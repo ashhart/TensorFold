@@ -12,12 +12,26 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - cancel_reply: the request a client left answers differently the next time it arrives.
 - cancel_health: a server a client left answers ``/health`` with an error.
 - evict: a chat turn pushed out of the prompt cache reports it (0 cached) but answers from the stale state.
+- undrafted: no request drafts, so a drafted reply runs the plain path.
+- plain_drafts: a ``"draft": false`` request drafts anyway, so both arms run the same drafted path.
+- sampled_drafts: a sampled request drafts nothing, so drafting is exercised only greedy.
+- unsampled: temperature and seed never reach the sampler; a sampled request gets the greedy reply.
+- serial: the server takes one request at a time, so requests sent together never overlap in it.
+- empty: every reply is empty (no tokens), so every pair of replies hashes the same.
 
 ``running(..., warm=S)`` keeps the server busy (one running, more waiting) for ``S`` seconds after each reply, as a
 server that prefills the chat's next turn in the background; ``lanes_free=False`` leaves ``capacity.lanes_free`` out
 of ``GET /v1/load``, as a server without lanes.
 
-The cached server reports five cached tokens for a later chat turn (more than one message). It keeps the prompts it
+A request is counted in ``GET /v1/load``'s running and active chat requests while open. One that finds another in
+flight within ``PARTNER_WINDOW`` stays open ``HOLD`` seconds more; a request alone leaves after the window. While a
+client polls the census (two reads within ``WATCHED`` seconds, the last that recent), a request waits
+``WATCHED_WINDOW`` for a partner, as threads sent together can start a scheduler tick apart (about 16 ms on Windows),
+and a pair stays open until a census counts two open at once (at most ``COUNTED`` seconds), so however slow a census
+read is, one taken meanwhile sees them.
+
+The cached server reports five cached tokens for a later chat turn (more than one message), and for a one-message
+prompt it answered before. It keeps the prompts it
 answered in an LRU of ``CAPACITY`` entries; a prompt pushed out reports 0 until it is asked again. ``GET /v1/load``,
 ``/metrics`` and ``/health`` show the lanes open streams hold, the disconnects counted and the server's health.
 
@@ -42,20 +56,26 @@ import threading
 import time
 
 FAULTS = ("drafted", "repeat", "concurrent", "resumed", "refusals", "cancel_lane", "cancel_free", "cancel_reply",
-          "cancel_health", "evict")
+          "cancel_health", "evict", "undrafted", "plain_drafts", "sampled_drafts", "unsampled", "serial", "empty")
 BATCH_WINDOW = 0.15  # seconds a lone request waits for a partner under the concurrent fault
 DONE = b"data: [DONE]\n\n"
 HASHES = {"token_sha": "d" * 12, "token_sha256": "d" * 64}
 CAPACITY = 4  # prompt cache entries the cached server keeps
 LANES = 8
 TOKEN_GAP = 0.0002  # seconds between streamed events
+PARTNER_WINDOW = 0.01  # seconds a request waits for another to share the server with
+HOLD = 0.025  # seconds a request that shares the server stays open, when no census is being read
+WATCHED_WINDOW = 0.06  # seconds a request waits for a partner while a census is read
+WATCHED = 0.1  # a census read this recent, after one this close before it, is a client polling
+COUNTED = 0.5  # most seconds a pair waits for a census to count it, while watched
 
 
-def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi"):
+def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi", tokens=4, sampling="greedy", prompt=9):
     """A chat completion body carrying the fields the kit reads."""
-    return {"choices": [{"message": {"content": text}}], "tensorfold": {"token_sha256": sha},
-            "speculative": {"accepted": accepted, "drafted": drafted},
-            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": cached}}}
+    return {"choices": [{"message": {"content": text}}], "tensorfold": {"token_sha256": sha, "sampling": sampling},
+            "speculative": {"rounds": int(drafted > 0), "accepted": accepted, "drafted": drafted},
+            "usage": {"prompt_tokens": prompt, "completion_tokens": tokens,
+                      "prompt_tokens_details": {"cached_tokens": cached}}}
 
 
 def refusal(body, fault=None):
@@ -71,8 +91,13 @@ def refusal(body, fault=None):
     return None
 
 
+def messages_of(body) -> list:
+    """A chat request's messages; a completion request's prompt as one user message."""
+    return body.get("messages") or [{"role": "user", "content": body.get("prompt", "")}]
+
+
 def text_of(body) -> str:
-    return " ".join(m.get("content", "") for m in body.get("messages", []))
+    return " ".join(m.get("content", "") for m in messages_of(body))
 
 
 def event(chunk: dict) -> bytes:
@@ -144,7 +169,11 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         server = self.server
         if self.path == "/v1/load":
             with server.lock:
-                busy, warming = server.streams + server.leaked, time.monotonic() < server.warm_until
+                busy, warming = server.streams + server.leaked + server.inflight, time.monotonic() < server.warm_until
+                server.census_gap, server.census_at = time.monotonic() - server.census_at, time.monotonic()
+                if busy > 1:
+                    server.overlaps += 1
+                    server.cond.notify_all()
             capacity = {"mode": "window", "lanes_free": LANES - busy - server.lost} if server.lanes_free else {}
             return self.reply(200, {"lanes": LANES, "running": busy + warming, "waiting": 19 * warming,
                                     "http_active": {"chat_completions": busy}, "capacity": capacity})
@@ -164,6 +193,20 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if error:
             return self.reply(400, {"error": {"message": error, "type": "invalid_request_error"}})
         key = json.dumps({k: v for k, v in body.items() if k not in ("stream", "stream_options")}, sort_keys=True)
+        with server.one if server.fault == "serial" else contextlib.nullcontext():
+            payload = self.answer(body, key)
+            # Out of flight before the reply is written: the client's next request must not find this one counted.
+            if body.get("stream"):
+                self.play(streamed(payload, body.get("max_tokens", 16), TOKEN_GAP), key)
+            else:
+                self.reply(200, payload)
+        with server.lock:
+            server.warm_until = time.monotonic() + server.warm
+        time.sleep(server.linger)
+
+    def answer(self, body, key) -> dict:
+        """The reply's body, computed while the request is counted in flight."""
+        server, messages = self.server, messages_of(body)
         with server.lock:
             server.seen[key] = server.seen.get(key, 0) + 1
             arrival = server.seen[key]
@@ -171,34 +214,38 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             after_cut = key in server.cut
             server.cut.discard(key)
         try:
-            batched = self.batched() if server.fault == "concurrent" else False
-            seed = body["seed"] if body.get("temperature") else None
-            cached, stale = self.lookup(body["messages"])
+            watched = time.monotonic() - server.census_at < WATCHED and server.census_gap < WATCHED  # a poller
+            window = WATCHED_WINDOW if watched else PARTNER_WINDOW
+            batched = self.batched(BATCH_WINDOW if server.fault == "concurrent" else window)
+            if batched:
+                self.counted() if watched else time.sleep(HOLD)
+            sampled = bool(body.get("temperature")) and server.fault != "unsampled"
+            cached, stale = self.lookup(messages)
             salt = "stale" if stale else "after a cut" if after_cut and server.fault == "cancel_reply" else None
-            salt = salt or self.salt(body, arrival, batched)
-            sha = hashlib.sha256(json.dumps([body["messages"], seed, salt]).encode()).hexdigest()
-            self.keep(body["messages"])
-            accepted = 2 if body.get("draft", True) else 0
-            payload = doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6])
+            salt = salt or self.salt(body, arrival, batched and server.fault == "concurrent")
+            seed = body.get("seed") if sampled else None
+            sha = hashlib.sha256(json.dumps([messages, seed, salt]).encode()).hexdigest()
+            self.keep(messages)
+            drafts = (body.get("draft", True) or server.fault == "plain_drafts") and server.fault != "undrafted"
+            accepted = 2 if drafts and not (sampled and server.fault == "sampled_drafts") else 0
+            if server.fault == "empty":
+                return doc(sha=hashlib.sha256(b"").hexdigest(), cached=cached, accepted=accepted, drafted=accepted,
+                           text="", tokens=0)
+            return doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6],
+                       sampling="exact" if sampled else "greedy", prompt=max(9, len(text_of(body)) // 4))
         finally:
             with server.lock:
                 server.inflight -= 1
-        # Out of flight before the reply is written: the client's next request must not find this one still counted.
-        if body.get("stream"):
-            self.play(streamed(payload, body.get("max_tokens", 16), TOKEN_GAP), key)
-        else:
-            self.reply(200, payload)
-        with server.lock:
-            server.warm_until = time.monotonic() + server.warm
-        time.sleep(server.linger)
 
     def lookup(self, messages):
         """Cached tokens for the prompt, and whether the evict fault answers from an evicted prompt."""
         server = self.server
-        if not server.cache or len(messages) < 2:
+        if not server.cache:
             return 0, False
         with server.lock:
             whole = json.dumps(messages)
+            if len(messages) < 2:
+                return (5 if whole in server.kept else 0), False
             if whole in server.evicted:
                 return 0, server.fault == "evict"
             return (0 if server.fault == "resumed" and whole not in server.kept else 5), False
@@ -216,12 +263,19 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             while len(server.kept) > CAPACITY:
                 server.evicted.add(server.kept.popitem(last=False)[0])
 
-    def batched(self) -> bool:
-        """True when another request shares the server with this one within the batch window."""
+    def batched(self, window: float) -> bool:
+        """True when another request shares the server with this one within ``window`` seconds."""
         server = self.server
         with server.cond:
             server.cond.notify_all()
-            return server.cond.wait_for(lambda: server.inflight > 1, timeout=BATCH_WINDOW)
+            return server.cond.wait_for(lambda: server.inflight > 1, timeout=window)
+
+    def counted(self):
+        """Wait, at most ``COUNTED`` seconds, for a ``GET /v1/load`` that counts two chat requests open at once."""
+        server = self.server
+        with server.cond:
+            mark = server.overlaps
+            server.cond.wait_for(lambda: server.overlaps > mark, timeout=COUNTED)
 
     def salt(self, body, arrival, batched):
         """A planted fault changes the reply by adding a salt to its hash; None leaves it correct."""
@@ -275,9 +329,10 @@ def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_fre
     server = FixtureHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
-    server.streams = server.leaked = server.lost = server.disconnects = 0
+    server.streams = server.leaked = server.lost = server.disconnects = server.overlaps = 0
     server.warm, server.warm_until, server.lanes_free = warm, 0.0, lanes_free
-    server.lock = threading.Lock()
+    server.census_at, server.census_gap = -1e9, 1e9  # no census read yet
+    server.lock, server.one = threading.Lock(), threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()

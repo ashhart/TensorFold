@@ -32,9 +32,9 @@ pub const Options = struct {
     want: usize = 1,
 };
 
-/// Whether the smaller chunk's scratch admits more of `want` streams of `per` bytes in `room` than the larger's.
-pub fn narrows(room: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
-    return @min(want, (room -| smaller) / per) > @min(want, (room -| larger) / per);
+/// Whether the smaller chunk admits more of `want` streams than the larger's in `room`, after the `slots` bytes.
+pub fn narrows(room: u64, slots: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
+    return @min(want, (room -| slots -| smaller) / per) > @min(want, (room -| slots -| larger) / per);
 }
 
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
@@ -280,10 +280,14 @@ pub const Engine = struct {
         if (small >= e.o.chunk) return larger;
         const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
         const room = pool.room(hip.usage(false).device);
+        const slots: u64 = if (gdn.supported(e.weights.model.dims, e.cfg.layers))
+            @intCast(gdn.Slots.bytes(e.weights.model.dims, @max(e.o.want, 1)))
+        else
+            0;
         const asked = e.o.chunk;
         e.o.chunk = small;
         const smaller = try e.scratchBytes();
-        if (!narrows(room, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
+        if (!narrows(room, slots, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
             e.o.chunk = asked;
             return larger;
         }
@@ -527,13 +531,23 @@ fn weightMapOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.Obje
 test "a chunk narrows only when its scratch costs a stream the server asked for" {
     const gib: u64 = 1 << 30;
     // one stream asked, room for many either way: the larger chunk stays
-    try std.testing.expect(!narrows(40 * gib, 7 * gib, 2 * gib, 3 * gib, 1));
+    try std.testing.expect(!narrows(40 * gib, 0, 7 * gib, 2 * gib, 3 * gib, 1));
     // one stream fits only beside the smaller chunk's scratch
-    try std.testing.expect(narrows(9 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    try std.testing.expect(narrows(9 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
     // four asked: the larger chunk leaves three, the smaller four
-    try std.testing.expect(narrows(20 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    try std.testing.expect(narrows(20 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 4));
     // four asked and four fit beside either
-    try std.testing.expect(!narrows(30 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    try std.testing.expect(!narrows(30 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 4));
     // neither fits one: nothing to gain
-    try std.testing.expect(!narrows(3 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    try std.testing.expect(!narrows(3 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
+}
+
+test "the chunk fallback leaves the window plan slots' bytes off the room" {
+    const gib: u64 = 1 << 30;
+    // one stream fits beside either chunk's scratch: the larger stays
+    try std.testing.expect(!narrows(13 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
+    // the same room with the slots' bytes off it: one stream fits only beside the smaller chunk's scratch
+    try std.testing.expect(narrows(13 * gib, 4 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    // the room was already tight for four with no slots: the subtraction stays a narrowing
+    try std.testing.expect(narrows(20 * gib, 4 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
 }

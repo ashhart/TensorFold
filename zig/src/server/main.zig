@@ -22,7 +22,7 @@ const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
-    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--log-json]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
@@ -52,6 +52,9 @@ const not_lanes = "--recall drafts from a record in the lane engine's rounds, " 
 pub const serves = engines.serves;
 
 pub const std_options = engines.std_options;
+
+/// Read by the Metal wrapper at compile time: Metal 4 only in a binary whose engines use it.
+pub const tf_metal4 = engines.metal4;
 
 pub fn main(init: std.process.Init) !u8 {
     const entry = std.Io.Clock.awake.now(init.io).toNanoseconds();

@@ -1,6 +1,7 @@
 //! The 27B's input gradients for Living Weights as calls on one stream.
 const std = @import("std");
 const cuda = @import("cuda");
+const platform = @import("sys");
 
 /// A 4-bit matrix [n, k] in MLX's layout: words [n, k / 8], bf16 scales and biases [n, k / group].
 pub const Q4 = struct { w: u64, s: u64, b: u64, n: usize, k: usize, group: usize = 64 };
@@ -51,7 +52,7 @@ pub const Kernels = struct {
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
-        const narrow = if (@import("sys").c.getenv("TF_Q27_GEMM")) |v| std.mem.eql(u8, std.mem.span(v), "narrow") else false;
+        const narrow = (try platform.environment.read(?u64, "TF_Q27_GEMM", null)) != null;
         var k: Kernels = .{ .own = try cuda.Module.load(d, cuda.kernels.qwen27_train), .attn = undefined, .train = undefined, .fo = undefined, .fa = undefined, .ft = undefined, .wide = !narrow };
         errdefer k.own.unload();
         k.attn = try cuda.Module.load(d, cuda.kernels.attn_train);
@@ -417,4 +418,12 @@ test "splits stay within the K rows and fill small products" {
     try std.testing.expectEqual(@as(usize, 1), splitsFor(1024, 5120, 248320));
     try std.testing.expect(splitsFor(16, 5120, 248320) > 1);
     try std.testing.expectEqual(@as(usize, 1), splitsFor(16, 5120, 512));
+}
+
+test "TF_Q27_GEMM: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_Q27_GEMM", null));
+    try std.testing.expectEqual(@as(?u64, 0), try platform.environment.parse("TF_Q27_GEMM", "narrow"));
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.value(?u64, "TF_Q27_GEMM", null, null));
+    try std.testing.expect((try platform.environment.value(?u64, "TF_Q27_GEMM", "narrow", null)) != null);
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_Q27_GEMM", "wide"));
 }

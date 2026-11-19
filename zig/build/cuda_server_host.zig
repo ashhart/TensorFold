@@ -15,6 +15,10 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    b.step("test-responses-owner-host", "Stored and running Responses stay with their creating API key").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "Responses owner:", "a whole response keeps", "the cancel route's path", "a held name", "with API keys only", "auth scopes:" } })).step);
+    const owner_socket = b.addTest(.{ .root_module = server_tests, .filters = &.{"Responses owner socket:"} });
+    b.step("check-responses-owner-socket-host", "Compile authenticated Responses transport tests without listening").dependOn(&owner_socket.step);
+    b.step("test-responses-owner-socket-host", "Authenticated Responses ownership over local HTTP and WebSocket sockets").dependOn(&b.addRunArtifact(owner_socket).step);
     const startup_receipt = b.step("test-startup-receipt-host", "Monotonic startup receipts and fail-closed readiness without devices");
     const startup_spans = b.createModule(.{ .root_source_file = b.path("zig/src/core/startup_receipt.zig"), .target = host, .link_libc = true });
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup_spans, .filters = &.{"startup receipt:"} })).step);
@@ -67,7 +71,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "image", "video" } })).step);
     media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{ "qwen_vl", "video" } })).step);
     b.step("test-http-limits-host", "Total HTTP read deadlines and connection admission without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"HTTP limits:"} })).step);
+    b.step("test-request-log-host", "Default text and opt-in JSON access, ended and refused log lines without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "default request log:", "json request log:" } })).step);
     b.step("test-server-recovery-host", "Incomplete replies, token allocation and bounded SSE storage without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Server recovery:"} })).step);
+    b.step("test-request-journal-host", "The request journal's records, rotation and crash quarantine on a fake engine").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request journal:"} })).step);
     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
     b.step("test-cors-template-host", "Exact CORS and special-preserving template route regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "CORS", "apply-template:" } })).step);
     b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);

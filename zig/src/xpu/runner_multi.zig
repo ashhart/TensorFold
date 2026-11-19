@@ -101,11 +101,8 @@ pub fn verifyMulti(r: *Runner, wins: []const Win) !void {
     const d = &r.d;
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.acts.mt, &r.mt_host, LAYERS * 16 * 8 * 8, null, 0, null));
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.acts.mpos, &r.pos_host, T * 4, null, 0, null));
-    _ = try forward(d, &r.model, &r.acts, @ptrCast(r.ids_host[0..T]), 0, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = tree, .multi = .{ .mt = r.acts.mt, .pos = r.acts.mpos, .max_pos = max_pos } });
-    var toks: [16]i32 = undefined;
-    try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, &toks, r.acts.tok, T * 4, null, 0, null));
-    try d.sync();
-    for (r.block[0..T], toks[0..T]) |*o, t| o.* = @intCast(t);
+    _ = try forward(d, &r.model, &r.acts, @ptrCast(r.ids_host[0..T]), 0, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = tree, .multi = .{ .mt = r.acts.mt, .pos = r.acts.mpos, .max_pos = max_pos }, .rows_out = &r.tok_host, .cand = r.candMode() });
+    for (r.block[0..T], r.tok_host[0..T]) |*o, t| o.* = @intCast(t);
     for (wins, 0..) |w, i| r.multi_slots[i] = w.slot;
     r.multi_count = @intCast(wins.len);
     r.multi_tree = tree;

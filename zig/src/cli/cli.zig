@@ -11,8 +11,8 @@ const lora_merge = @import("core").lora_merge;
 pub const onDisk = models.onDisk;
 
 const usage =
-    \\usage: tensorfold models [--json]
-    \\       tensorfold info MODEL
+    \\usage: tensorfold models [--all] [--json]
+    \\       tensorfold info MODEL [--context N] [--parallel N|auto]
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
@@ -43,12 +43,18 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     for (args, argv) |*x, y| x.* = y;
     const env = init.environ_map;
     if (std.mem.eql(u8, args[0], "models")) {
-        const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
-        if (args.len != 1 and !json) {
-            try err.interface.writeAll(usage);
-            return 2;
+        var opts: models.Options = .{};
+        for (args[1..]) |flag| {
+            if (std.mem.eql(u8, flag, "--json")) {
+                opts.json = true;
+            } else if (std.mem.eql(u8, flag, "--all")) {
+                opts.all = true;
+            } else {
+                try err.interface.writeAll(usage);
+                return 2;
+            }
         }
-        return models.run(a, init.io, &out.interface, env, null, json);
+        return models.run(a, init.io, &out.interface, env, null, opts, null);
     }
     if (std.mem.eql(u8, args[0], "pull")) {
         if (args.len < 2) {
@@ -90,11 +96,12 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, m.dense, m.adapter, m.dest, m.shipped);
     }
-    if (args.len != 2) {
+    const start = if (args.len >= 2) info.parseStart(args[2..]) else null;
+    if (start == null) {
         try err.interface.writeAll(usage);
         return 2;
     }
-    return info.run(a, init.io, &out.interface, env, null, args[1]);
+    return info.runStart(a, init.io, &out.interface, env, null, args[1], start.?);
 }
 
 test "wants only the checkpoint subcommands" {

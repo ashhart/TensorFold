@@ -8,7 +8,7 @@ const routes = @import("routes.zig");
 const Allocator = std.mem.Allocator;
 
 /// A client request's ask: set by the route, read by each of its generation loops (chat_generation.zig).
-pub const Entry = struct { asked: std.atomic.Value(bool) = .init(false) };
+pub const Entry = struct { asked: std.atomic.Value(bool) = .init(false), owner: ?[32]u8 = null };
 
 /// The process's client requests by public id (chatcmpl-, cmpl-, resp_), held by openai.runNamed; ids are random.
 pub var registry: Registry = .{};
@@ -48,11 +48,12 @@ pub const Registry = struct {
         };
     }
 
-    /// Asks the request named `id` to stop; false when no running or queued request has it.
-    pub fn cancel(r: *Registry, io: std.Io, id: []const u8) bool {
+    /// Ask the caller's request to stop; another key's id is the same miss as an unknown id.
+    pub fn cancel(r: *Registry, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         r.mutex.lockUncancelable(io);
         defer r.mutex.unlock(io);
         const e = r.map.get(id) orelse return false;
+        if (!std.meta.eql(e.owner, owner)) return false;
         e.asked.store(true, .release);
         return true;
     }
@@ -82,9 +83,9 @@ pub fn match(route: []const u8) ?[]const u8 {
 }
 
 /// The route's answer: 200 with the id when a request had it, else 404 `request_not_found`.
-pub fn answer(io: std.Io, a: Allocator, id: []const u8) !struct { status: u16, body: json.Value } {
+pub fn answer(io: std.Io, a: Allocator, id: []const u8, owner: ?[32]u8) !struct { status: u16, body: json.Value } {
     const o = try json.newObject(a);
-    if (registry.cancel(io, id)) {
+    if (registry.cancel(io, id, owner)) {
         try o.put(a, "id", .{ .string = id });
         try o.put(a, "object", .{ .string = "request.cancel" });
         try o.put(a, "cancelled", .{ .bool = true });
@@ -137,7 +138,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, id: []const u8) void {
         if (keyed) return @import("auth_scope_reply.zig").deny(conn, false, .route);
         return routes.sendValue(conn, a, 403, refusal(a) catch return);
     }
-    const got = answer(srv.io, a, id) catch return conn.sendError(a, 500, "out of memory", null) catch {};
+    const got = answer(srv.io, a, id, conn.key_digest) catch return conn.sendError(a, 500, "out of memory", null) catch {};
     routes.sendValue(conn, a, got.status, got.body);
 }
 
@@ -153,11 +154,11 @@ test "a held name is cancelled once asked, dropped when its request ends, and an
     var e: Entry = .{};
     const names_ = [_][]const u8{ "cmpl-test-held", "", "resp_test-held" };
     registry.add(io, &names_, &e);
-    try std.testing.expect(registry.cancel(io, "resp_test-held"));
+    try std.testing.expect(registry.cancel(io, "resp_test-held", null));
     try std.testing.expect(e.asked.load(.acquire));
     registry.remove(io, &names_, &e);
-    try std.testing.expect(!registry.cancel(io, "cmpl-test-held"));
-    try std.testing.expect(!registry.cancel(io, "cmpl-never"));
+    try std.testing.expect(!registry.cancel(io, "cmpl-test-held", null));
+    try std.testing.expect(!registry.cancel(io, "cmpl-never", null));
 }
 
 test "with API keys only an admin key may cancel; without keys only a direct loopback caller may" {

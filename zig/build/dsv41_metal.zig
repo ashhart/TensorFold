@@ -55,7 +55,7 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));
     run.has_side_effects = true; // a device run: never cached
     step.dependOn(&run.step);
-    // the served engine over the tiny model: LaneHost replies, drafts, the prompt cache, seeds, cancels
+    // the served tiny model: serve_test.zig, whose test block brings in steps_test.zig (prompts in steps)
     const serve = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/serve_test.zig"),
         .target = b.graph.host,
@@ -67,7 +67,7 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const serve_run = b.addRunArtifact(b.addTest(.{ .root_module = serve }));
     serve_run.has_side_effects = true;
     step.dependOn(&serve_run.step);
-    const serve_step = b.step("test-dsv41-metal-serve", "DeepSeek-V4.1 Metal served through LaneHost: concurrent, drafted, cached, seeded, cancelled");
+    const serve_step = b.step("test-dsv41-metal-serve", "DeepSeek-V4.1 Metal served through LaneHost: concurrent, drafted, cached, seeded, cancelled, in steps");
     serve_step.dependOn(&serve_run.step);
     // the release-checkpoint steps (TF_DSV41_REAL) stay opt-in, so the umbrella holds the default device suites
     const all = b.step("test-dsv41-metal-all", "DeepSeek-V4.1 Metal: every device test step on this GPU (layer, served)");

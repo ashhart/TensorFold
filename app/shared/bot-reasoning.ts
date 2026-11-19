@@ -1,12 +1,9 @@
 import type { ReasoningEffortSetting, Thread } from '../electron/agent/types'
-
-const efforts = new Set<ReasoningEffortSetting>([
-  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultrathink', 'ultracode', 'dynamic', '512',
-])
+import { isReasoningEffortSetting } from './reasoning-effort'
 
 export function normalizeBotReasoningEffort(value: unknown): ReasoningEffortSetting | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'string' || !efforts.has(value as ReasoningEffortSetting)) {
+  if (!isReasoningEffortSetting(value)) {
     throw new Error('Invalid bot reasoning effort; choose an available effort level.')
   }
   return value as ReasoningEffortSetting

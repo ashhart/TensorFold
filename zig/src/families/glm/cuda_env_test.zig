@@ -22,6 +22,7 @@ const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
+const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB", "TF_GLM_RANK", "TF_GLM_WORLD" };
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -60,12 +61,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
+    for (added) |name| try t.expect((try row(name)).kind != .flag);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len, n);
 }
 
 test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {

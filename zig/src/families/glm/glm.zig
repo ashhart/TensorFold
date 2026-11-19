@@ -2,6 +2,7 @@
 pub const config = @import("config.zig");
 pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");
+pub const hc = @import("../../core/hc.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const mtp = @import("mtp.zig");
@@ -17,6 +18,7 @@ pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
 pub const affine = @import("affine.zig");
 pub const wide = @import("wide.zig");
+pub const mm_groups = @import("mm_groups.zig");
 pub const vision = @import("vision.zig");
 pub const image = @import("image.zig");
 pub const video = @import("video.zig");

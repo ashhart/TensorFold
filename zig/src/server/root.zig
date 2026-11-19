@@ -60,6 +60,8 @@ test {
     _ = @import("reply_code.zig");
     _ = @import("reply_text.zig");
     _ = @import("reply_incremental_test.zig");
+    _ = @import("recipient_reply_test.zig");
+    _ = @import("recipient_cut_test.zig");
     _ = @import("tool_parse.zig");
     _ = @import("tool_lfm2.zig");
     _ = @import("tool_lfm2_stream_test.zig");
@@ -119,10 +121,13 @@ test {
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
     _ = @import("log.zig");
+    _ = @import("log_test.zig");
     _ = @import("request_log.zig");
+    _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("pdf_measure_test.zig");
     _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
@@ -245,6 +250,8 @@ test {
     _ = @import("message_starts_proof_test.zig");
     _ = @import("message_marks_test.zig");
     _ = @import("responses_store.zig");
+    _ = @import("responses_owner_test.zig");
+    _ = @import("responses_owner_socket_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("cortheon/research.zig");
@@ -316,6 +323,9 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("voice_cli.zig");
+    _ = @import("drama_voice_store.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
@@ -324,6 +334,7 @@ test {
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/run_pdf_test.zig");
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");

@@ -114,9 +114,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     runner.addImport("glm_cuda", glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat, mods.api));
     @import("minimax_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core, mods.lanes, runner);
-    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) } }) |m| runner.addImport(m[0], m[1]);
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "dory", @import("dory.zig").module(b, target, optimize, cuda, mods.core, mods.lanes) }, .{ "idol_cuda", @import("idol_cuda.zig").targets(b, target, optimize, strip, cuda, mods.core) } }) |m| runner.addImport(m[0], m[1]);
     runner.addImport("gemma4_cuda", @import("gemma4_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     runner.addImport("spark25", @import("spark25.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
+    // the served family and its engine, for the dots runner
+    const dots = native.engines.import_table.get("dots_mocr_cuda").?;
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "dots_mocr_cuda", dots }, .{ "cuda_dense", dots.import_table.get("cuda_dense").? } }) |m| runner.addImport(m[0], m[1]);
     runner.addImport("moss_image_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda_kernels.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("prompt_pages", b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_prompt_pages.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = mods.api }, .{ .name = "core", .module = mods.core } } })); // TF_KV_SHARE's store, for the pages checks
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
@@ -200,6 +203,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     all.dependOn(step);
     @import("release_version.zig").tests(b, step);
     @import("environment.zig").tests(b, step);
+    @import("machine.zig").tests(b, step);
     const flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/build/cuda_release_flags.zig"),
         .target = b.graph.host,

@@ -186,7 +186,7 @@ pub const Served = struct {
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined, .write_ms = write_ms, .probe = probe };
         s.srv = try server.Server.init(gpa, std.testing.io, script.engine(), s.text.text(), config, null);
         if (probe) |p| p.srv = s.srv;
-        s.srv.voices = script.voices;
+        try s.srv.voices.swap(script.voices);
         if (script.output_full) s.srv.speech_inflight.store(s.srv.info.lanes, .release);
         var head: [256]u8 = undefined;
         const method_path = if (script.get_voices) "GET /v1/voices" else "POST /v1/audio/speech";

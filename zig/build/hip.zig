@@ -168,6 +168,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native.import_table.get("glm_ocr").?, .filters = &.{"GLM-OCR native admission:"} })).step);
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
+    @import("hip_followers.zig").steps(b, &.{ host.serve, host.flashnext, host.nemotron });
     @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     @import("lighton_hip.zig").host(b, host.lighton, test_step);
@@ -543,7 +544,6 @@ pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
 }
-
 /// The HIP compiler as the build found it, the device bitcode it links, and whether gfx1100 relaxes branches earlier.
 pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool = false };
 

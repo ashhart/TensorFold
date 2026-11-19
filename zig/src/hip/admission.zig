@@ -55,10 +55,7 @@ pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
     const integrated = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
     const own: MemInfo = .{ .total = card.total, .available = card.free };
-    const env: Env = .{
-        .reserve = getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
-        .limit = getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
-    };
+    const env = envTexts();
     if (windows) {
         // WDDM reports the whole budget through the driver: no host text, no dedicated-VRAM file.
         const p = try plan(false, own, null, null, env);
@@ -78,6 +75,12 @@ pub const Source = enum { card, carve_out, host };
 
 /// The reserve and cap variables' text, unset as null.
 pub const Env = struct { reserve: ?[]const u8 = null, limit: ?[]const u8 = null };
+
+/// The two settings' texts, registered in platform/environment.zig; `plan` refuses them against the runtime bounds.
+pub fn envTexts() Env {
+    const e = @import("sys").environment;
+    return .{ .reserve = e.rawText("TENSORFOLD_MEMORY_RESERVE_GIB"), .limit = e.rawText("TENSORFOLD_HIP_MEMORY_LIMIT_GB") };
+}
 
 pub const Plan = struct { pool: Pool, source: Source };
 
@@ -173,10 +176,6 @@ fn announce(p: Plan) void {
     std.log.info("HIP memory budget from {s}: {d:.1} of {d:.1} GiB free, {d:.1} GiB reserve", .{ what, f, t, r });
 }
 
-fn getenv(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
-}
-
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
 pub fn procText(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
@@ -252,4 +251,13 @@ test "a carve-out needs the card's total to be the dedicated VRAM: not past it, 
     const big = "MemTotal: 127926272 kB\nMemAvailable: 115343360 kB\n";
     const shared = plan(true, .{ .total = 60 * g, .available = 59 * g }, big, g / 2, .{ .reserve = "1" });
     try std.testing.expectError(error.BadReserve, shared); // shared memory keeps its floor of 2
+}
+
+test "HIP memory settings: the platform parses unset, valid and malformed text" {
+    const e = @import("sys").environment;
+    for ([_][:0]const u8{ "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_HIP_MEMORY_LIMIT_GB" }) |name| {
+        try std.testing.expectEqual(@as(f64, 7), try e.value(f64, name, null, 7));
+        try std.testing.expectEqual(@as(f64, 2.5), try e.value(f64, name, "2.5", 7));
+        try std.testing.expectError(error.InvalidEnvironment, e.check(name, "none"));
+    }
 }
