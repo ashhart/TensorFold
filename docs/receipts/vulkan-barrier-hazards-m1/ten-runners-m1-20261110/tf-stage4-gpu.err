@@ -1,0 +1,10 @@
+MILESTONE device-found elapsed_ms=8 name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 api=1.4.362 storage16=true int16=true subgroups=63 shuffle-relative=true subgroup-size=32 fence-timeout=60000ms
+MILESTONE conv-split elapsed_ms=110 tokens=8 split worst=1.1318588482563632e-2 conv worst=9.960479179851554e-1 of bounds, conv input and state carry-out bit-exact, repeats byte-identical, inputs unchanged, planted outputs refused
+MILESTONE split-standalone worst=3.689453278087952e-2 of bound
+MILESTONE prefill elapsed_ms=136 tokens=8 chunk=8 chunks=null worst=6.315034419925415e-1 of bound, hf matches independent f64 reference from poison, repeats byte-identical, h0 and soa unchanged, planted outputs refused
+MILESTONE split-standalone worst=3.689453278087952e-2 of bound
+MILESTONE prefill elapsed_ms=174 tokens=8 chunk=4 chunks=1 worst=6.315034419925415e-1 of bound, hf matches independent f64 reference from poison, repeats byte-identical, h0 and soa unchanged, planted outputs refused
+MILESTONE decode elapsed_ms=186 worst=9.852585125692864e-1 of bound, repeats byte-identical, inputs unchanged, planted outputs refused
+MILESTONE conv-decode elapsed_ms=191 conv worst=9.960479179851554e-1 split worst=7.421311625377545e-3 of bounds, carry-out state bit-exact, split ran on the ACTUAL activated bits, repeats byte-identical, inputs unchanged, planted outputs refused
+MILESTONE norm elapsed_ms=193 rows=4 worst=2.750397409250156e-3 of bound, repeats byte-identical, inputs unchanged, planted outputs refused
+RESULT stage4 elapsed_ms=193 on "Apple M1 (G13G B1)": passed=6 total=6

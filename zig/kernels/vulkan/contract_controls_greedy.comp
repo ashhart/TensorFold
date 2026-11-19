@@ -1,0 +1,37 @@
+// Greedy Vulkan control: OpFMax lets NaN lose; it accepts nonfinite rows, so the nonfinite gate must fail.
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  uint16_t values[];
+} input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer Maxima {
+  float values[];
+} maxima_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+} params;
+
+shared float block_max[256];
+
+void main() {
+  uint thread = gl_LocalInvocationID.x;
+  uint row = gl_WorkGroupID.x;
+  float m = uintBitsToFloat(0xff800000u); // -inf
+  for (uint i = thread; i < params.count; i += 256u)
+    m = max(m, uintBitsToFloat(uint(input_data.values[row * params.count + i]) << 16u));
+  block_max[thread] = m;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (thread < stride)
+      block_max[thread] = max(block_max[thread], block_max[thread + stride]);
+    barrier();
+  }
+  if (thread == 0u)
+    maxima_data.values[row] = block_max[0];
+}
