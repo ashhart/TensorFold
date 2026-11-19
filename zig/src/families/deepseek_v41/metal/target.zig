@@ -78,6 +78,8 @@ pub const Slot = struct {
     whole: bool = false,
     /// the images `setImages` named for the next prompt (their pixels borrowed until it is prefilled)
     images: []vrows.Image = &.{},
+    /// the ViT rows of this prompt's images, read by the encoder's prompt passes until the prompt ends
+    image_rows: ?vrows.Rows = null,
     /// the rows the last prompt took from kept state
     resumed: u32 = 0,
     /// a prompt begun in pieces (prompt_steps.zig) and not yet finished: its rows from `tail.end` are still to run
@@ -177,6 +179,7 @@ pub const Target = struct {
         s.hist.deinit(a);
         s.hit.deinit(a);
         a.free(s.images);
+        if (s.image_rows) |*r| r.deinit();
     }
 
     pub fn deinit(t: *Target) void {
@@ -258,25 +261,26 @@ pub const Target = struct {
         return out;
     }
 
-    fn prefill(ptr: *anyopaque, slot: u32, ids_in: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
+    fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
         const s = st.s;
-        if (st.hit) |e| if (e.ids.len == ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
+        const prompt_ids = s.hist.items; // image positions carry their virtual ids
+        if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
         // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
-        for (t.keepPoints(ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
-        t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
+        for (t.keepPoints(prompt_ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
+        t.pr.run(t.promptEnv(), &s.kv, &s.tail, prompt_ids) catch |e| return t.fail(e);
         return t.endPrompt(s, null, smp, draw);
     }
 
     /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
-    pub fn startPrompt(t: *Target, slot: u32, ids: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
+    pub fn startPrompt(t: *Target, slot: u32, ids_in: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         const c = t.env.c;
         if (s.live or s.filling) return error.SlotLive;
-        if (ids.len == 0) return error.EmptyPrompt;
-        if (ids.len >= t.opt.limit) return error.PastLimit;
+        if (ids_in.len == 0) return error.EmptyPrompt;
+        if (ids_in.len >= t.opt.limit) return error.PastLimit;
         const images = s.images;
         s.images = &.{};
         defer t.a.free(images);
@@ -284,9 +288,9 @@ pub const Target = struct {
         defer if (vids) |v| t.a.free(v);
         if (images.len > 0) {
             if (t.tower == null) return error.NoVision;
-            vids = try t.withVids(ids, images);
+            vids = try t.withVids(ids_in, images);
         }
-        const ids: []const u32 = vids orelse ids;
+        const ids: []const u32 = vids orelse ids_in;
         for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
         s.whole = false;
@@ -306,6 +310,10 @@ pub const Target = struct {
             t.stats.hits += 1;
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
+        if (images.len > 0) {
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, ids.len, t.opt.prompt.chunk, at);
+            t.pr.images = if (s.image_rows) |*r| r else null;
+        }
         s.resumed = at;
         s.tail.end = at;
         s.tail.done = at;
@@ -332,6 +340,9 @@ pub const Target = struct {
     /// The prompt's rows are in (`hit`: a kept state's logits, else the prompt head's): taps, choice, the slot live.
     pub fn endPrompt(t: *Target, s: *Slot, hit: ?[]const f32, smp: ?lanes.Sampling, draw: u64) !u32 {
         const c = t.env.c;
+        t.pr.images = null;
+        if (s.image_rows) |*r| r.deinit();
+        s.image_rows = null;
         const n: u32 = @intCast(s.hist.items.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
