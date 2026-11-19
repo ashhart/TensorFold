@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-M3.1-Flash on CUDA: with two or more streams, the drafter takes several streams' DSpark blocks in one pass, as many as a decode window's 16 rows hold, instead of one pass a stream; drafts only choose what the target verifies, so replies are unchanged (#1426). Thanks to @BobClawblaw.
+
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
