@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- OCR: the native HIP engine reads documents through `POST /v1/ocr` in Mistral's OCR contract (its Python and TypeScript SDKs), with dots.mocr's reader (a box for each layout block). Images and PDFs (`--vision-pdf`) share one page budget per request (`TENSORFOLD_MAX_PDF_PAGES`, default 16), each PDF measured before any inference and each page rendered just before it is read, and Mistral crops share one image budget (256 images, 4 times the page pixels, 16 MiB plus 2 MiB a page). An option that changes content and that TensorFold cannot apply, such as annotations, is refused. A page cut at the context limit or out of its model's format fails the whole request with HTTP 422; `docs/api.md` lists the contract's fields, statuses and limits (#2570, #2571, #2440). Thanks to @laudney.
+
+- CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
+
 ## 1.3.0
 
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
