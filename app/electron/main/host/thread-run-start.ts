@@ -367,7 +367,7 @@ export function createThreadRunStarter(deps: ThreadRuntimeDeps, support: ThreadR
       emit({ runId, threadId: thread.id, type: 'item_add', item: { id: randomUUID(), kind: 'notice', title: 'Budget', text: initialSpend.warning, state: 'ok', createdAt: Date.now() } })
     }
 
-    if (!localHelpersOnly && !thread.googleLocalOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
+    if (!isEngineProvider(provider) && !localHelpersOnly && !thread.googleLocalOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
 
     const review: ThreadRunReview = { viewedSkillNames: new Set(), provider: null, model: '' }
     const routeContext: ThreadRouteContext = {
