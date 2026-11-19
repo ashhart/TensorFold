@@ -3,11 +3,14 @@
 //! post-quant 1x1x1 conv before the ViT, tile 256/overlap 64 with cross-fade).
 //! Weights: video_vae/source/model.safetensors, tensor names decoder.* and
 //! post_quant_conv.*. Reference for parity:
-//! zig/src/families/h3/vae/reference/vae_video.py. Kernels: vae.metal.
+//! zig/src/families/h3/vae/reference/vae_video.py. Kernels: vae.metal, joined
+//! into the family source through h3_kernels.
 
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
+const frags = @import("../../core/frags.zig");
+const bind = @import("h3_kernels").Kernels.bind;
 
 pub const Config = struct {
     latent_channels: usize = 24,
@@ -26,8 +29,8 @@ pub const Config = struct {
     token_drop: usize = 3,
     tile: usize = 256,
     tile_overlap: usize = 64,
-    latents_mean: [24]f32,
-    latents_std: [24]f32,
+    latents_mean: []const f32 = &.{},
+    latents_std: []const f32 = &.{},
 
     pub fn dim(self: *const Config) usize {
         return self.heads * self.head_dim;
@@ -57,7 +60,6 @@ pub const Decoder = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     config: Config,
-    // ViT weights as f32 host buffers (one per tensor), shapes verified at load.
     x_embedder_w: []f32,
     x_embedder_b: []f32,
     register_tokens: []f32,
@@ -69,6 +71,9 @@ pub const Decoder = struct {
     post_quant_w: []f32,
     post_quant_b: []f32,
     vit_checkpoint: ck.Checkpoint,
+    lib: mtl.Library,
+    p_rmsnorm: mtl.Pipeline,
+    p_swiglu: mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, pipeline_dir: []const u8) !*Decoder {
         var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -95,11 +100,23 @@ pub const Decoder = struct {
             .post_quant_w = &.{},
             .post_quant_b = &.{},
             .vit_checkpoint = ck.Checkpoint.init(gpa),
+            .lib = undefined,
+            .p_rmsnorm = undefined,
+            .p_swiglu = undefined,
         };
         try checkGeometry(d.config, wrapper_bytes, source_bytes);
 
         d.queue = try device.queue();
         errdefer d.queue.deinit();
+
+        const src = try frags.source(device, gpa, @import("h3_kernels").source);
+        defer gpa.free(src);
+        d.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+        errdefer d.lib.deinit();
+        d.p_rmsnorm = try mtl.Pipeline.init(device, d.lib, "h3_vae_rmsnorm", false);
+        errdefer d.p_rmsnorm.deinit();
+        d.p_swiglu = try mtl.Pipeline.init(device, d.lib, "h3_vae_swiglu", false);
+        errdefer d.p_swiglu.deinit();
 
         var vit = ck.Checkpoint.init(gpa);
         try vit.addFile(device, try std.fmt.allocPrintSentinel(arena, "{s}/video_vae/source/model.safetensors", .{pipeline_dir}, 0), "");
@@ -108,13 +125,22 @@ pub const Decoder = struct {
         return d;
     }
 
+    pub fn deinit(d: *Decoder) void {
+        d.p_rmsnorm.deinit();
+        d.p_swiglu.deinit();
+        d.lib.deinit();
+        d.queue.deinit();
+        d.vit_checkpoint.deinit();
+        d.gpa.destroy(d);
+    }
+
     fn parseConfig(wrapper_json: []const u8, source_json: []const u8) !Config {
         var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
         const wrapper = try std.json.parseFromSlice(std.json.Value, arena, wrapper_json, .{});
         const source = try std.json.parseFromSlice(std.json.Value, arena, source_json, .{});
-        var c: Config = .{ .latents_mean = undefined, .latents_std = undefined };
+        var c: Config = .{};
         if (source.value.object.get("z_channels")) |v| if (v == .integer) {
             if (v.integer != 24) return error.UnsupportedGeometry;
         };
