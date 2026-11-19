@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: a new host step, `test-hip-followers-host`, runs the HIP followers' step-parser tests (the `hip_serve` protocol tests and the Flash Next, Qwen and Nemotron HIP worker security tests) in CI, where no build step ran them (#3091).
+
 - Kernel contract: the nvcc 13.2/13.3 usage table moves to its own registry_cuda_sets.zig, so registry.zig has room under the 600-line limit; the registered set is unchanged (#3865).
 
 - Tools: `tools/draft_divergence.py` checks drafted decoding returns exactly the plain token IDs on prompts around recorded BF16 near-ties, at draft caps 1, 4 and 8 (#3841).
