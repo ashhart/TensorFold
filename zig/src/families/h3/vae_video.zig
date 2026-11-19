@@ -381,6 +381,7 @@ pub const Decoder = struct {
             e.end();
             // residual: tokens += qkv * scale1 (CPU side, small)
             cb.commit(); cb.wait();
+            qkv_w.deinit(); qkv_b.deinit(); n1_w.deinit(); s1.deinit();
             const qkv_host = qkv.slice(f32, rows * dim);
             for (0..rows) |r| {
                 for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
@@ -446,6 +447,7 @@ pub const Decoder = struct {
             for (0..rows) |r| {
                 for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
             }
+            n2_w.deinit(); out_w.deinit(); out_b.deinit(); s2.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
             @memcpy(normed.slice(f32, rows * dim), tokens_full[0 .. rows * dim]);
         }
         normed.deinit();
