@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
+const rp = @import("round_prof.zig");
 const slot_images = @import("slot_images.zig");
 const pool = @import("pool.zig");
 const mirror = @import("mirror.zig");
@@ -377,6 +378,7 @@ pub const Backend = struct {
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);
         try b.sl.window(b.wins.items, &draws);
+        const t_picks = rp.tick(b.sl.prof);
         const picks = Engine.u32s(b.sl.e.sc.picks, total);
         var row: usize = 0;
         for (windows, out, b.wins.items) |w, o, win| {
@@ -385,10 +387,15 @@ pub const Backend = struct {
             @memcpy(o.drafts[w.held..], w.tokens);
             row += w.rows();
         }
+        rp.since(b.sl.prof, .picks, t_picks);
+        rp.verified(b.sl.prof);
     }
 
     fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const b = self(ptr);
+        rp.laneEnd(b.sl.prof);
+        const t_keeps = rp.tick(b.sl.prof);
+        defer rp.since(b.sl.prof, .keeps, t_keeps);
         for (windows, paths) |w, path| {
             for (path, 0..) |r, k| if (r != k) return error.TreeWindowsUnsupported;
             const i = try b.slotOf(w.stream);
@@ -401,6 +408,9 @@ pub const Backend = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const b = self(ptr);
+        rp.laneEnd(b.sl.prof);
+        const t_drafts = rp.tick(b.sl.prof);
+        defer rp.since(b.sl.prof, .drafts, t_drafts);
         var ones: [st.max_rows]u32 = undefined; // a prompt's first token, the one its head absorbs with
         b.drafts.clearRetainingCapacity();
         if (requests.len > ones.len) return error.DraftOutOfStep;
