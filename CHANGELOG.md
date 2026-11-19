@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
+
 - GLM-5.3-Flash on CUDA: a dense MLP (layers 0 to 2) stored as bf16 is read as bf16 in any checkpoint, not only an EXL3 one, where a ModelOpt checkpoint that left those layers unquantized was refused by the module's name; checkpoints whose dense layers are NVFP4 or MXFP8 load as before (#3680). Thanks to @Bizuayeu.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_FUSED_SPLIT=1` (opt-in) runs decode projections that split K over a cluster, at 2,048 output columns or more, on the fused form, adding the K slices in the cluster's order so the bits are unchanged; unset, blank or `0` keeps the current kernels, and Metal and HIP refuse `1` at startup (#3475). Thanks to @BadAd84.
@@ -387,7 +389,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: a fact graph save whose final rename fails no longer leaves its temporary file behind (#3096).
 
 - Cluster: a pull plan asks for each file's safetensors header, and a file read in full is fetched whole, so its manifest hash is checked (#3095).
-- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name, decoded on the host at load to the bf16 bytes it was coded from; before, such a checkpoint was refused by the missing tensor's name. GLM-5.3-Flash on CUDA is the one loader that attaches it, with the same tokens as the plain checkpoint and a longer load (38 to 40 s for 12 GB of coded bf16 on GB10s). A structurally damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649).
 
 - Tests: the macOS dashboard test no longer looks for a paged prefix cache tile the page never had; the paged store publishes no status (#3094).
 
