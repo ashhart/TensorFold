@@ -9,7 +9,7 @@ const Arena = vk.arena.Arena;
 const View = vk.tensor.View;
 
 // Whole-prompt rows are split into dispatch chunks capped here; persistent windows use this cap.
-pub const max_prefill_rows: usize = 32;
+pub const max_prefill_rows: usize = 64;
 
 // Layers 0-3 keep every activation store in f32; 4+ round stores to bf16 (the validated store policy).
 pub const wide_layers: usize = state.wide_layers;
@@ -19,7 +19,7 @@ pub fn actKind(layer: usize) vk.tensor.Kind {
     return if (layer < wide_layers) .f32 else .bf16;
 }
 /// The GDN prefill scan's chunk cap (chunks of 1 when a prefill fits one).
-pub const max_gdn_chunk: u64 = 32;
+pub const max_gdn_chunk: u64 = max_prefill_rows;
 
 comptime {
     if (2 * pinned.query_heads * pinned.head_dim != 4096)
@@ -190,7 +190,8 @@ test "extractQPlan derives the interleaved geometry and refuses torn views" {
     try testing.expectEqual(@as(u32, 24), plan.heads_rows);
     try testing.expectEqual(@as(u32, 512), plan.in_head_stride);
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(0, 0, 0));
-    try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(33, 33 * 2048, 33 * 4096)); // past the prefill cap
+    const past = max_prefill_rows + 1;
+    try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(past, past * 2048, past * 4096)); // past the prefill cap
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(2, 2 * 2048, 2 * 4095));
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(2, 2 * 2047, 2 * 4096));
 }

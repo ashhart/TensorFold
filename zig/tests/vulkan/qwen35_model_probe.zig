@@ -20,7 +20,7 @@ const usage = "usage: tf-qwen35-model [--vendor ID] [--timeout-ms MS] [--context
     "  --timeout-ms MS   bound on every fence wait, 1 to 300000 (default 10000); a timeout ends the process\n" ++
     "  --context N       KV context capacity to request, 1 to 7168 (default 256)\n" ++
     "  --teacher-forced  feed each scored step's oracle id as the next input (labelled per-step mode; default off)\n" ++
-    "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 32-row chunking)\n";
+    "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 64-row chunking)\n";
 
 const Elapsed = struct {
     io: std.Io,
@@ -76,7 +76,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
     return o;
 }
 
-// Canonical prefill chunking: how many 32-row chunks `rows` spans; pure, host-tested; the chunk size is the engine's.
+// Canonical prefill chunking: how many 64-row chunks `rows` spans; pure, host-tested; the chunk size is the engine's.
 pub fn chunkCount(rows: usize) usize {
     return (rows + engine_mod.max_prefill_rows - 1) / engine_mod.max_prefill_rows;
 }
@@ -411,7 +411,7 @@ pub fn main(init: std.process.Init) !u8 {
         .status = if (match_a and match_b and ids_equal and logits_equal) "ok" else "mismatch",
         .steps = expected.len,
         .execution_mode = if (opts.teacher_forced) teacher_forced_mode else free_running_mode,
-        .prefill_schedule = if (opts.sequential_prefill) "rowwise" else "chunk32",
+        .prefill_schedule = if (opts.sequential_prefill) "rowwise" else "chunked",
         .context_cap = opts.context,
         .prompt_chunks = if (opts.sequential_prefill) prompt.len else chunkCount(prompt.len),
         .prefill_chunk_rows = if (opts.sequential_prefill) 1 else engine_mod.max_prefill_rows,
@@ -450,7 +450,7 @@ pub fn main(init: std.process.Init) !u8 {
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
 
-// Greedy: prefill (32-row chunks; --sequential-prefill per token = boundary evidence); ids_out.len argreduce draws.
+// Greedy: prefill in max_prefill_rows chunks (--sequential-prefill: per token, boundary evidence); ids_out.len draws.
 fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
     if (sequential) {
         for (prompt) |tok| try e.prefill(&.{tok});
@@ -526,14 +526,14 @@ test "parseArgs context and mode flags keep the anchor default and bound the con
     try testing.expect(parseArgs(&.{ "--context", "256", "/m", "/i", "/o", "/out", "/extra" }) == null);
 }
 
-test "chunkCount spans the canonical 32-row chunks without a configurable size" {
-    try testing.expectEqual(@as(usize, engine_mod.max_prefill_rows), 32);
+test "chunkCount spans the canonical 64-row chunks without a configurable size" {
+    try testing.expectEqual(@as(usize, engine_mod.max_prefill_rows), 64);
     try testing.expectEqual(@as(usize, 1), chunkCount(1));
-    try testing.expectEqual(@as(usize, 1), chunkCount(32));
-    try testing.expectEqual(@as(usize, 2), chunkCount(33)); // boundary: two chunks
-    try testing.expectEqual(@as(usize, 2), chunkCount(64));
-    try testing.expectEqual(@as(usize, 3), chunkCount(65)); // boundary: three chunks
-    try testing.expectEqual(@as(usize, 224), chunkCount(7168)); // full context
+    try testing.expectEqual(@as(usize, 1), chunkCount(64));
+    try testing.expectEqual(@as(usize, 2), chunkCount(65)); // boundary: two chunks
+    try testing.expectEqual(@as(usize, 2), chunkCount(128));
+    try testing.expectEqual(@as(usize, 3), chunkCount(129)); // boundary: three chunks
+    try testing.expectEqual(@as(usize, 112), chunkCount(7168)); // full context
 }
 
 test "parseNpy takes exactly a v1 LE u32 rank-1 array" {
