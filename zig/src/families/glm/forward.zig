@@ -42,7 +42,6 @@ pub const Ctx = struct {
 
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
 pub const Span = struct { at: u32, n: u32, row: u32 };
-
 /// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
 pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u32) void {
     const inj = x.inject orelse return;
@@ -67,7 +66,6 @@ pub const rulesFor = @import("draw_rule.zig").rulesFor;
 pub const parseSampling = @import("draw_rule.zig").parseSampling;
 pub const envSampling = @import("draw_rule.zig").envSampling;
 pub const SamplingError = @import("draw_rule.zig").SamplingError;
-
 /// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
 pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
 
@@ -137,7 +135,6 @@ const MlaNorms = extern struct { x_stride: u32, kv_at: u32, ik_at: u32, iw_at: u
 const index_weight_scale: f32 = 1.0 / 64.0;
 const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
-
 pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
 }
