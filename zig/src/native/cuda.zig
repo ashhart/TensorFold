@@ -496,6 +496,7 @@ const toGib = family_memory.toGib;
 const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
+    _ = @import("cuda_qwen_host_test.zig");
     _ = @import("cuda_family_info.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");

@@ -527,3 +527,12 @@ test "TF_KV_SHARE's slots alone (GLM): the cache keeps the slots it holds, the n
     many.cache = 16 * g;
     try expectEqual(@as(usize, kv.most_snaps), (try kv.plan(glm, many)).snaps);
 }
+
+test "kv safety: Qwen flag-unset plan keeps main's window and run figures at one and eight streams" {
+    const l: kv.Layout = .{ .fixed_bytes = 32, .token_bytes = 2, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
+    for ([_]u32{ 1, 8 }) |lanes| for ([_]bool{ false, true }) |all| {
+        const p = try kv.plan(l, .{ .room = 10000, .engine = 0, .lanes = lanes, .fixed = true, .window = 128, .engine_paged = all });
+        const expected: usize = if (lanes == 1) (if (all) 8 else 0) else (if (all) 78 else 70);
+        try expectEqual(kv.Plan{ .lanes = lanes, .snaps = 0, .copied = 0, .pages = expected }, p);
+    };
+}
