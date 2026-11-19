@@ -15,6 +15,15 @@ using namespace mpp::tensor_ops;
 #ifndef TF_ROW_BLOCKS
 #define TF_ROW_BLOCKS 0
 #endif
+// Reg path: each split adds its rows' group sums itself (tf_lane_xsum, the sums pass's own loop), so no sums
+// dispatch or barrier comes before the projection; the words are the same.
+#ifndef TF_INLINE_SUMS
+#define TF_INLINE_SUMS 0
+#endif
+#if TF_INLINE_SUMS
+// A split's groups at most; its (group, row) sums sit in threadgroup memory as XS does with stride 16.
+constant constexpr int TF_GPS = (TF_GN + TF_SK - 1) / TF_SK;
+#endif
 #ifndef TF_YS
 #define TF_YS TF_N
 #endif
@@ -224,6 +233,17 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
   const device uint4* sbv = (const device uint4*)SBt;
   float C[NF * 8];
   for (int i = 0; i < NF * 8; i++) C[i] = 0.0f;
+#if TF_INLINE_SUMS && !TF_PRECOMPUTE_SUMS
+  // the split's group sums up front, a (group, row) chain a lane at a time over the pass's rows: the same words
+  threadgroup float xs_all[TF_SK * TF_GPS * 16];
+  threadgroup float* XT = xs_all + sg * TF_GPS * 16;
+  for (int p = lane; p < (g_end - g_begin) * 16; p += 32) XT[p] = 0.0f;
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  for (int p = lane; p < (g_end - g_begin) * M; p += 32) XT[(p / M) * 16 + p % M] = tf_lane_xsum(X, p % M, g_begin + p / M, M);
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+#undef TF_SUM_VALUE
+#define TF_SUM_VALUE(row, g) XT[((g) - g_begin) * 16 + (row)]
+#endif
   tf_raw r0 = tf_lane_fetch(W, sbv, tile, g_begin, g_end, n0, lane, fn);
 #if TF_PF == 2
   tf_raw r1 = tf_lane_fetch(W, sbv, tile, g_begin + 1, g_end, n0, lane, fn);
@@ -303,12 +323,28 @@ uint group_id [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_sim
 }
 #endif
 
-#if TF_BITS == 4 && defined(TF_REG)
-struct tf_reg_load { uint4 w0, w1, q0, q1; float x0, x1; }; // a lane's codes, its two metadata quads and its two row sums for one group
+#if (TF_BITS == 4 || TF_BITS == 8) && defined(TF_REG)
+// a lane's codes (4-bit: two quads; 8-bit: the same codes a byte each, four quads), its two metadata quads and its
+// two row sums for one group
+#if TF_BITS == 8
+struct tf_reg_load { uint4 w[4]; uint4 q0, q1; float x0, x1; };
+constant constexpr int TF_REG_QUADS = 4;
+#define TF_REG_CODES(wl, g) {wl[(size_t)(g) * 128], wl[(size_t)(g) * 128 + 32], wl[(size_t)(g) * 128 + 64], wl[(size_t)(g) * 128 + 96]}
+#else
+struct tf_reg_load { uint4 w0, w1, q0, q1; float x0, x1; };
+constant constexpr int TF_REG_QUADS = 2;
+#define TF_REG_CODES(wl, g) wl[(size_t)(g) * 64], wl[(size_t)(g) * 64 + 32]
+#endif
 
 inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv, const device float* XS, int g, int n, int m, int stride) {
-  return {wl[(size_t)g * 64], wl[(size_t)g * 64 + 32], sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XS[g * stride + m], XS[g * stride + m + 8]};
+  return {TF_REG_CODES(wl, g), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XS[g * stride + m], XS[g * stride + m + 8]};
 }
+
+#if TF_INLINE_SUMS
+inline tf_reg_load tf_reg_fetch_tg(const device uint4* wl, const device uint4* sbv, const threadgroup float* XT, int g, int first, int n, int m) {
+  return {TF_REG_CODES(wl, g), sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XT[(g - first) * 16 + m], XT[(g - first) * 16 + m + 8]};
+}
+#endif
 
 // tf_lane's arithmetic with codes unpacked straight into tensor-op registers: every word equals tf_lane_pair's.
 [[kernel]] void tf_lane_reg(const device bfloat* X [[buffer(0)]], const device uint4* W [[buffer(1)]], const device bfloat* SB [[buffer(2)]],
@@ -329,25 +365,46 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   auto cb = op.template get_right_input_cooperative_tensor<bfloat, half, float>();
   auto P = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(a0)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   thread half2* b2 = (thread half2*)&cb[0];
-  const device uint4* wl = W + (size_t)tile * KG * 64 + lane;
+  const device uint4* wl = W + (size_t)tile * KG * 32 * TF_REG_QUADS + lane;
   const device uint4* sbv = (const device uint4*)SB;
   const half2 bias = half2(1024.0h);
   float C[16];
   for (int i = 0; i < 16; i++) C[i] = 0.0f;
   tf_reg_load next = {};
-  if (first < last) next = tf_reg_fetch(wl, sbv, XS, first, n0 + nb, mb, stride);
+#if TF_INLINE_SUMS
+  threadgroup float xs_all[TF_SK * TF_GPS * 16];
+  threadgroup float* XT = xs_all + ks * TF_GPS * 16;
+  // one (group, row) sum a lane at a time over the pass's rows only; rows past it read zero
+  for (int p = lane; p < (last - first) * 16; p += 32) XT[p] = 0.0f;
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  for (int p = lane; p < (last - first) * M; p += 32) XT[(p / M) * 16 + p % M] = tf_lane_xsum(X, p % M, first + p / M, M);
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+#define TF_REG_FETCH(g) tf_reg_fetch_tg(wl, sbv, XT, g, first, n0 + nb, mb)
+#else
+#define TF_REG_FETCH(g) tf_reg_fetch(wl, sbv, XS, g, n0 + nb, mb, stride)
+#endif
+  if (first < last) next = TF_REG_FETCH(first);
   for (int g = first; g < last; g++) {
     const tf_reg_load cur = next;
     for (int w = 0; w < 8; w++) {
+      const int e = 16 * (w & 1) + 2 * (w >> 1);
+#if TF_BITS == 8
+      // the 4-bit order a byte a code: word 2w holds that word's first four codes, 2w + 1 the four 16 deeper
+      const uint a = cur.w[w >> 1][2 * (w & 1)], c = cur.w[w >> 1][2 * (w & 1) + 1];
+      b2[e] = as_type<half2>((a & 0xFFu) | ((a << 8) & 0x00FF0000u) | 0x64006400u) - bias;
+      b2[e + 1] = as_type<half2>(((a >> 16) & 0xFFu) | ((a >> 8) & 0x00FF0000u) | 0x64006400u) - bias;
+      b2[e + 8] = as_type<half2>((c & 0xFFu) | ((c << 8) & 0x00FF0000u) | 0x64006400u) - bias;
+      b2[e + 9] = as_type<half2>(((c >> 16) & 0xFFu) | ((c >> 8) & 0x00FF0000u) | 0x64006400u) - bias;
+#else
       // 1024 + code as fp16 bits, codes (0,4) (1,5) (2,6) (3,7) of a word; subtracting 1024 is exact
       const uint word = w < 4 ? cur.w0[w] : cur.w1[w - 4], lo = word & 0x0F0F0F0Fu, hi = (word >> 4) & 0x0F0F0F0Fu;
-      const int e = 16 * (w & 1) + 2 * (w >> 1);
       b2[e] = as_type<half2>((lo & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 1] = as_type<half2>((hi & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 8] = as_type<half2>(((lo >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 9] = as_type<half2>(((hi >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
+#endif
     }
-    if (g + 1 < last) next = tf_reg_fetch(wl, sbv, XS, g + 1, n0 + nb, mb, stride);
+    if (g + 1 < last) next = TF_REG_FETCH(g + 1);
     auto x = a.slice(g * GS, 0);
     op.run(x, cb, P);
     for (int j = 0; j < 4; j++) {
