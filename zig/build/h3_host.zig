@@ -2,7 +2,7 @@
 const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    const core = coreModule(b, target);
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "core", .module = core }} });
     const filter = b.option([]const u8, "h3-filter", "Run one H3 host regression");
     const cases = b.addTest(.{ .root_module = root, .filters = if (filter) |f| &.{f} else &.{} });
@@ -21,7 +21,7 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const imports: []const std.Build.Module.Import = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels }, .{ .name = "gpu_turn", .module = b.createModule(.{ .root_source_file = b.path("zig/src/server/gpu_turn.zig"), .target = target, .optimize = .Debug }) } };
     const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = imports });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
-    const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core } } }) });
+    const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "checkpoint_fixture", .module = fixture(b, core) } } }) });
     const compile = b.step("compile-h3-host", "Compile the actual H3 tools (tf-h3-dit, tf-h3-image) without compiling or executing shaders");
     compile.dependOn(&tool.step);
     compile.dependOn(&picture_tool.step);
@@ -95,9 +95,15 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }
 
-/// The core module for the CUDA side's checkpoint (h3/checkpoint.zig).
+/// The core files H3 reads, for every H3 module (core/h3_core.zig).
 pub fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    return b.createModule(.{ .root_source_file = b.path("zig/src/core/h3_core.zig"), .target = target, .link_libc = true });
+}
+
+/// `checkpoint_fixture` for a tool that also holds `core`, which owns the fixture's file.
+pub fn fixture(b: *std.Build, core: *std.Build.Module) *std.Build.Module {
+    const file = b.addWriteFiles().add("h3_fixture_alias.zig", "pub const Entry = f.Entry;\npub const image = f.image;\npub const aligned = f.aligned;\npub const write = f.write;\nconst f = @import(\"core\").checkpoint_fixture;\n");
+    return b.createModule(.{ .root_source_file = file, .imports = &.{.{ .name = "core", .module = core }} });
 }
 
 /// H3's clip and picture tools share the maintained Metal family and core checkpoint reader.

@@ -63,6 +63,7 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("ricursive_prep_records.zig").cuda ++
     @import("ricursive_attn_records.zig").cuda ++
     @import("registry_media.zig").cuda_pending;
+    @import("h3_image_cuda_records.zig").records;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
@@ -161,4 +162,5 @@ test {
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
+    _ = @import("h3_image_cuda_records.zig");
 }

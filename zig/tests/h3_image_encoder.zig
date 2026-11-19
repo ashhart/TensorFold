@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const he = @import("h3_image_encoder");
-const codec = @import("core").picture;
+const codec = @import("picture_codec");
 const noise = @import("torch_noise");
 const selftest = @import("h3_image_encoder_selftest.zig");
 
