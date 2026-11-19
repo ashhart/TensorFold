@@ -7,6 +7,7 @@ const config = @import("config.zig");
 const knob_types = @import("knob_types.zig");
 const moe = @import("block_moe.zig");
 const block_prefetch = @import("block_prefetch.zig");
+const float_linear = @import("float_linear.zig");
 const partition = @import("partition.zig");
 const block_attn = @import("block_attn.zig");
 const block_index = @import("block_index.zig");
@@ -25,6 +26,11 @@ pub const Widths = struct {
 
     pub fn k2(w: *const Widths, name: []const u8) !u32 {
         return w.dense.get(name) orelse error.NoWidth;
+    }
+
+    /// A projection the pack keeps as a float matrix (`<name>.plain`, no trellis): the width table records 0.
+    pub fn plain(w: *const Widths, name: []const u8) bool {
+        return (w.dense.get(name) orelse return false) == 0;
     }
 };
 
@@ -311,6 +317,9 @@ pub const Emitter = struct {
 
     /// `r1`'s RMS_FOLD: rot_in norms its rows itself (rms(x, w, eps), rmsnorm's order) before the rotation.
     pub const Norm = struct { w: Arg, eps: f64 };
+
+    /// TF_DSV41_FLOAT_LINEAR: one float projection, on `_plain` (float_linear.zig).
+    pub const plain = float_linear.plain;
 
     /// x3seg rot_in, then dense3 a width: the group's projections in one rot_in launch, one linear launch a K2.
     pub fn fused(e: *Emitter, tag: []const u8, ps: []const Proj) !void {

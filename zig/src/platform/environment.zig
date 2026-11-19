@@ -181,6 +181,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_R1", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_PREFETCH_AHEAD", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_KV_NORM_STORE", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_FLOAT_LINEAR", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ROUTER_GROUP_ROT", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_TOOL_GRAMMAR", .scope = .dsv41, .kind = .flag, .trim = " ", .alias_of = "TENSORFOLD_TOOL_GRAMMAR", .forms = "0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)" },
