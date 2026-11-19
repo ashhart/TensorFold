@@ -1529,7 +1529,8 @@ same handler and engine path. A response has that chat completion's prompt and t
   turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
   `parallel_tool_calls` works as in chat. `namespace` groups are accepted too, one level deep: their function children
-  reach the engine flattened as `<namespace>__<tool>`, and their `function_call` items carry the child's `name` plus the group as `namespace`.
+  reach the engine flattened as `<namespace>__<tool>`, and their `function_call` items carry the child's `name` plus
+  the group as `namespace`. A child's own name cannot start with its group's `<namespace>__` prefix.
 - `max_output_tokens` counts reasoning tokens too. `temperature`, `top_p`, `top_k`, `min_p` and `seed` sample as in
   chat.
 - `reasoning.effort` follows the chat effort rule: unset is the template's default and `none` turns thinking off.
