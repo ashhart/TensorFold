@@ -298,13 +298,18 @@ test "lone copy price: HIP's facts without a head keep main's shared rounds, two
     }
 }
 
-test "lone copy price: copy_guard follows plain_guard unless a family sets it" {
-    for ([_]bool{ false, true }) |plain| for ([_]?bool{ null, false, true }) |copy| {
-        var cfg = try cfgs.Config.init(gpa, .{ .exact_width = 16, .plain_guard = plain, .copy_guard = copy }, 16, 15);
-        defer cfg.deinit(gpa);
-        try std.testing.expectEqual(plain, cfg.plain_guard);
-        try std.testing.expectEqual(copy orelse plain, cfg.copy_guard);
-    };
+test "lone copy price: copy_guard is off unless a family opts in, whatever plain_guard says" {
+    for ([_]bool{ false, true }) |plain| {
+        var unset = try cfgs.Config.init(gpa, .{ .exact_width = 16, .plain_guard = plain }, 16, 15);
+        defer unset.deinit(gpa);
+        try std.testing.expectEqual(plain, unset.plain_guard);
+        try std.testing.expect(!unset.copy_guard);
+        for ([_]bool{ false, true }) |copy| {
+            var cfg = try cfgs.Config.init(gpa, .{ .exact_width = 16, .plain_guard = plain, .copy_guard = copy }, 16, 15);
+            defer cfg.deinit(gpa);
+            try std.testing.expectEqual(copy, cfg.copy_guard);
+        }
+    }
 }
 
 test "lone copy price: a head without plain_guard prices copies against its own rounds, not the load-time forward" {
