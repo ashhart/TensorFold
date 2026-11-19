@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
+
 - Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895). Thanks to @Mirrdhyn.
 
 - dots.mocr on CUDA: the image tower (42 blocks and the 2×2 merger) is built but not yet served, so `--vision` stays refused and replies are unchanged; two GB10 runner commands check it, `tf-cuda-test dots-image` (encodes twice, compares bytes, then checks the generated page's `vision-merged` hash against its pin) and `dots-stages` (writes each stage's rows as `.npy` for the oracle) (#2770, refs #1927). Thanks to @laudney.
