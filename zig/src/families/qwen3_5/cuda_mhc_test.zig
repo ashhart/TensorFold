@@ -10,10 +10,10 @@ const Fake = struct {
     r: u64 = 200,
     mhc: mhc.Runtime = .{},
     calls: usize = 0,
-    ids: [5]usize = undefined,
-    values: [5][8]u64 = @splat(@splat(0)),
-    counts: [5]usize = undefined,
-    grids: [5]usize = undefined,
+    ids: [6]usize = undefined,
+    values: [6][10]u64 = @splat(@splat(0)),
+    counts: [6]usize = undefined,
+    grids: [6]usize = undefined,
 
     pub fn run(e: *Fake, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         const n = e.calls;
@@ -23,7 +23,7 @@ const Fake = struct {
         try t.expectEqual(@as(usize, 256), block[0]);
         const fields = @typeInfo(@TypeOf(args)).@"struct".field_names;
         e.counts[n] = fields.len;
-        inline for (fields, 0..) |field, i| e.values[n][i] = @intCast(@field(args, field));
+        inline for (fields, 0..) |field, i| e.values[n][i] = if (@TypeOf(@field(args, field)) == f32) @as(u32, @bitCast(@field(args, field))) else @intCast(@field(args, field));
     }
 };
 
@@ -43,13 +43,17 @@ test "SenseNova mHC: checked launches pass pointers, row count and parameters" {
     try mhc.enter(&e, true, 7, 600);
     try mhc.enter(&e, false, 7, 600);
     try mhc.route(&e, 700, 800, 7, 600);
+    e.mhc.iterations = 3;
+    e.mhc.pre_scale = 1.5;
+    try mhc.route(&e, 700, 800, 7, 600);
     try mhc.merge(&e, 7, 600);
     try mhc.leave(&e, 7, 600);
-    try t.expectEqualSlices(usize, &.{ 1, 1, 2, 3, 4 }, &e.ids);
+    try t.expectEqualSlices(usize, &.{ 1, 1, 2, 2, 3, 4 }, &e.ids);
     try t.expectEqualSlices(u64, &.{ 100, 200, 300, 4096, 600 }, e.values[0][0..5]);
     try t.expectEqualSlices(u64, &.{ 100, 0, 300, 4096, 600 }, e.values[1][0..5]);
-    try t.expectEqualSlices(u64, &.{ 300, 700, 800, 100, 400, 500, 4096, 600 }, &e.values[2]);
-    try t.expectEqualSlices(u64, &.{ 300, 200, 400, 500, 4096, 600 }, e.values[3][0..6]);
-    try t.expectEqualSlices(u64, &.{ 300, 100, 4096, 600 }, e.values[4][0..4]);
+    try t.expectEqualSlices(u64, &.{ 300, 700, 800, 100, 400, 500, 4096, 20, @as(u32, @bitCast(@as(f32, 1))), 600 }, &e.values[2]);
+    try t.expectEqualSlices(u64, &.{ 300, 700, 800, 100, 400, 500, 4096, 3, @as(u32, @bitCast(@as(f32, 1.5))), 600 }, &e.values[3]);
+    try t.expectEqualSlices(u64, &.{ 300, 200, 400, 500, 4096, 600 }, e.values[4][0..6]);
+    try t.expectEqualSlices(u64, &.{ 300, 100, 4096, 600 }, e.values[5][0..4]);
     for (e.grids) |grid| try t.expectEqual(@as(usize, 7), grid);
 }
