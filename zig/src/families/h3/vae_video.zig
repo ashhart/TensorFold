@@ -373,29 +373,32 @@ pub const Decoder = struct {
 
         const attended = try gpa.alloc(f32, heads * rows * head_dim);
         defer gpa.free(attended);
-        for (0..heads) |h| {
-            for (0..rows) |r| {
-                const scores = try gpa.alloc(f32, rows);
-                defer gpa.free(scores);
-                var max_s: f32 = -1e30;
-                for (0..rows) |k| {
-                    var dot: f32 = 0;
-                    for (0..head_dim) |i| dot += q_rot[(h * rows + r) * head_dim + i] * k_rot[(h * rows + k) * head_dim + i];
-                    scores[k] = dot * (1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))));
-                    if (scores[k] > max_s) max_s = scores[k];
-                }
-                var sum: f32 = 0;
-                for (0..rows) |k| {
-                    scores[k] = @exp(scores[k] - max_s);
-                    sum += scores[k];
-                }
-                for (0..head_dim) |i| {
-                    var out: f32 = 0;
-                    for (0..rows) |k| out += scores[k] * v_flat[(h * rows + k) * head_dim + i];
-                    attended[(h * rows + r) * head_dim + i] = out / sum;
-                }
-            }
-        }
+        var command = self.queue.commandBuffer();
+        const encoder = command.compute(.concurrent);
+        const attention_params = extern struct { rows: u32, head_dim: u32 }{ .rows = @intCast(rows), .head_dim = @intCast(head_dim) };
+        const q_buf = try self.device.buffer(q_rot.len * 4, mtl.ResourceOptions.shared);
+        defer q_buf.deinit();
+        const k_buf = try self.device.buffer(k_rot.len * 4, mtl.ResourceOptions.shared);
+        defer k_buf.deinit();
+        const v_buf = try self.device.buffer(v_flat.len * 4, mtl.ResourceOptions.shared);
+        defer v_buf.deinit();
+        @memcpy(q_buf.slice(f32, q_rot.len), q_rot);
+        @memcpy(k_buf.slice(f32, k_rot.len), k_rot);
+        @memcpy(v_buf.slice(f32, v_flat.len), v_flat);
+        const out_buf = try self.device.buffer(attended.len * 4, mtl.ResourceOptions.shared);
+        defer out_buf.deinit();
+        const e = encoder;
+        e.setPipeline(self.p_attention);
+        e.setBuffer(q_buf, 0, 0);
+        e.setBuffer(k_buf, 0, 1);
+        e.setBuffer(v_buf, 0, 2);
+        e.setBuffer(out_buf, 0, 3);
+        e.setValue(attention_params, 4);
+        e.dispatchGroups(mtl.Size.of(rows, heads, 1), mtl.Size.of(256, 1, 1));
+        e.end();
+        command.commit();
+        command.wait();
+        @memcpy(attended, out_buf.slice(f32, attended.len));
 
         for (0..rows) |r| {
             for (0..dim) |o| {
