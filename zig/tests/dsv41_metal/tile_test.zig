@@ -1,4 +1,4 @@
-//! The decode layer picks its FP8 kernel by row count: the row kernel below the tile's rows, the MMA tile from them.
+//! The decode layer picks its FP8 kernel by rows and columns: the row kernel below 5 rows, the MMA tile for wide ones.
 const std = @import("std");
 const mtl = @import("metal");
 const pkg = @import("dsv41_metal");
@@ -35,16 +35,14 @@ fn count(r: *fixture.Rig, rows: u32) ![2]usize {
     return out;
 }
 
-test "dsv41 metal: a layer's FP8 projections run on the row kernel below the tile's rows and on the tile from them" {
+test "dsv41 metal: a layer's FP8 projections run on the row kernel below 5 rows and its wide ones on the tile from 5" {
     const r = try fixture.Rig.init(testing.allocator, testing.io, 1280, 44);
     defer r.deinit();
+    // the fixture's wq_b (2048 columns) and index wq_b (4096) are wide at K 128; the rest stay on the row kernel
+    try testing.expect(tile.minRows(.{ .k = 128, .n = 2048, .rows = 1 }, 1) == 5 and tile.minRows(.{ .k = 256, .n = 256, .rows = 1 }, 1) > tile.max_rows);
     for (1..tile.max_rows + 1) |rows| {
         const n = try count(r, @intCast(rows));
-        if (rows < tile.min_rows) {
-            try testing.expect(n[0] == 0 and n[1] > 0);
-        } else {
-            try testing.expect(n[0] > 0 and n[1] == 0);
-        }
+        try testing.expect(n[1] > 0 and (n[0] > 0) == (rows >= 5));
     }
-    std.debug.print("PASS dsv41 metal FP8 kernel by rows: row kernel at 1-{d} rows, the MMA tile at {d}-16\n", .{ tile.min_rows - 1, tile.min_rows });
+    std.debug.print("PASS dsv41 metal FP8 kernel by rows: row kernel at 1-4 rows, the MMA tile for wide projections at 5-16\n", .{});
 }

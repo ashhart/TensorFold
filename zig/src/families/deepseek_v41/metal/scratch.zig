@@ -91,6 +91,8 @@ pub const Scratch = struct {
     hcp: Ref = undefined,
     /// the wide prenorm's partial sums (fused.zig)
     nrp: Ref = undefined,
+    /// counts of groups done, zero between launches (glue.zig's gatePlan: the last group routes and plans)
+    sync: Ref = undefined,
     meta: Ref = undefined,
 
     /// Buffers for up to 16 rows of one stream; `limit` positions bound the index scores' width.
@@ -159,6 +161,7 @@ pub const Scratch = struct {
         s.fp8s = L.take(s, &off, fp8Scratch(c));
         s.hcp = L.take(s, &off, pipelines.fused.mixScratch(R));
         s.nrp = L.take(s, &off, pipelines.fused.normScratch(R));
+        s.sync = L.take(s, &off, 256);
         s.meta = L.take(s, &off, Meta.ints * 4);
         return off;
     }
