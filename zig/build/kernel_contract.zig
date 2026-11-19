@@ -226,7 +226,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
-pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath) *std.Build.Step {
+pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, h3_image: [2]?std.Build.LazyPath) *std.Build.Step {
     const opts = b.addOptions();
     opts.addOption(bool, "controls", controls != null);
     runner.root_module.addOptions("contract_options", opts);
@@ -234,9 +234,12 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     runner.root_module.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
     // MiniMax H3's image (the tf-h3 library's) for its kernels' registrations
     runner.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = h3 orelse b.addWriteFiles().add("h3.fatbin", "") });
+    const names = [2][]const u8{ "h3_image_decoder", "h3_image_prompt" };
+    for (names, h3_image) |n, file| runner.root_module.addAnonymousImport(b.fmt("fatbin_{s}", .{n}), .{ .root_source_file = file orelse b.addWriteFiles().add(b.fmt("{s}.fatbin", .{n}), "") });
     const install = b.step("kernel-contract-fatbins", "Install all CUDA contract images (fatbin/)");
     if (controls) |file| install.dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     if (h3) |file| install.dependOn(&b.addInstallFile(file, "fatbin/h3.fatbin").step);
+    for (names, h3_image) |n, file| if (file) |f| install.dependOn(&b.addInstallFile(f, b.fmt("fatbin/{s}.fatbin", .{n})).step);
     const run = b.addRunArtifact(runner);
     run.addArg("kernel-contract");
     b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
