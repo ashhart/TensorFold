@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: NVFP4 expert decode streams its weights through a per-warp `cp.async` ring with the same output bits; on an RTX PRO 6000 (sm_120) with drafts off the author measured GLM-5.3 decode at 104.1 tok/s against 83.8, and on GB10 (sm_121) it is level (#2266). Thanks to @eleqtrizit.
+
 - Docs: the GLM-5.3-Flash CUDA recipe covers switchless RoCE links on separate IPv4 subnets: NCCL 2.30.7 or later with `NCCL_IB_SUBNET_AWARE_ROUTING=1` and `NCCL_IB_SUBNET_PREFIX_LEN`, and how to check the NCCL version and NIC each rank picked at startup (#2993). Thanks to @vdalesandro.
 
 - Families: Nemotron, GLM, Qwen 3.8 27B, MiniMax M3, Dory, tensor-parallel fabric, pictures and video settings read through platform/environment.zig (#3558).
@@ -877,7 +879,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Gemma 4 on CUDA: `TF_GEMMA4_CHUNK_SOLO` is a row of the shared environment table and the lane core's `solo_chunk.rows` reads it there instead of calling `getenv`, so a family that follows the new-family recipe registers its solo variable; empty or whitespace-only text now means off, where it was refused, and every other value is accepted or refused, with the same message, as before (#2587).
 - Tests: the Qwen4 QSA backward host test prints its coordinate and direction lines only when a comparison fails, naming the first wrong one; a passing run writes nothing to stderr (#2588, refs #1852).
 - Docs: the image page says how the native server finds libjpeg-turbo 3.1.4.1 for JPEG input: why the release is pinned, the search order and file names on macOS, Linux and Windows, `TENSORFOLD_LIBTURBOJPEG`, and what each startup warning means (#2590, refs #2581).
-- NVFP4 routed experts on CUDA: the decode expert kernels feed each warp from a cp.async ring four k-groups deep, with the same sums in the same order, so tokens are unchanged. GLM-5.3-Flash at TP=2 on two RTX PRO 6000 Blackwell (sm_120) decodes 24% faster without drafts (83.7 to 104.1 tok/s) and 7% to 13% faster with them. GB10 (sm_121) keeps its register-loaded kernels, level with before on Qwen3.6-35B-A3B and Nemotron 3.5 Lightning NVFP4 (#2266, fixes #2265). Thanks to @eleqtrizit.
 
 - Internal: a shared CUDA MLA image (`mla.cu`, `cuda.mla`) for a 512-wide latent with 64 roped columns and 128-wide heads, on GLM's MLA chunk bodies, which move from `glm_glue_attn.cuh` to `common/mla.cuh` and which GLM instantiates at its old widths (its SASS is identical on all five SMs). Its seven launches are under the kernel contract with a planted control each, and `test-mla-twins-host` keeps its absorb, expand and per-rank merge GLM's kernels token for token. No family calls it yet (#2335, refs #850). Thanks to @ajensenwaud.
 
