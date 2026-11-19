@@ -12,7 +12,12 @@ pub const Uploader = struct {
     gpa: std.mem.Allocator,
     bufs: std.ArrayList(memory.DeviceBuffer) = .empty,
     max_buffers: usize = 0, // caller supplies a finite tensor budget; zero refuses uploads
-    bytes: usize = 0, // the tensors' total device bytes
+    bytes: usize = 0, // the tensors' total device bytes (whole slabs once `slab` is set)
+    /// Nonzero: uploads up to half this size are carved, 256-byte aligned, from shared blocks of this size.
+    /// One cuMemAlloc per small tensor costs ~1.84x on GB10 (2 MiB granularity): 2,000 x 1.18 MB took 4.04 GiB.
+    slab: usize = 0,
+    slab_at: ?usize = null, // index in `bufs` of the open slab
+    slab_used: usize = 0,
 
     pub fn deinit(u: *Uploader) void {
         for (u.bufs.items) |*b| b.free();
@@ -20,6 +25,7 @@ pub const Uploader = struct {
     }
 
     pub fn dev(u: *Uploader, bytes: []const u8) !u64 {
+        if (u.slab != 0 and bytes.len <= u.slab / 2) return u.carve(bytes);
         if (u.bufs.items.len >= u.max_buffers) return error.UploadLimit;
         const total = std.math.add(usize, u.bytes, bytes.len) catch return error.UploadLimit;
         try u.bufs.ensureUnusedCapacity(u.gpa, 1);
@@ -27,6 +33,25 @@ pub const Uploader = struct {
         u.bufs.appendAssumeCapacity(b);
         u.bytes = total;
         return b.ptr;
+    }
+
+    fn carve(u: *Uploader, bytes: []const u8) !u64 {
+        const at = std.mem.alignForward(usize, u.slab_used, 256);
+        if (u.slab_at == null or at + bytes.len > u.slab) {
+            if (u.bufs.items.len >= u.max_buffers) return error.UploadLimit;
+            const total = std.math.add(usize, u.bytes, u.slab) catch return error.UploadLimit;
+            try u.bufs.ensureUnusedCapacity(u.gpa, 1);
+            const b = try memory.DeviceBuffer.alloc(u.d, u.slab);
+            u.bufs.appendAssumeCapacity(b);
+            u.bytes = total;
+            u.slab_at = u.bufs.items.len - 1;
+            u.slab_used = 0;
+            return u.carve(bytes);
+        }
+        const b = u.bufs.items[u.slab_at.?];
+        try b.upload(at, bytes);
+        u.slab_used = at + bytes.len;
+        return b.ptr + at;
     }
 
     /// One dense group: `parts` (exl3_load.Parts) and `g` (exl3_load.Group) as the Weight; the scales must be fp16.
@@ -52,6 +77,9 @@ pub const Uploader = struct {
         };
     }
     pub fn rollback(u: *Uploader, mark: usize) void {
+        if (u.slab_at) |i| if (i >= mark) {
+            u.slab_at = null;
+        };
         while (u.bufs.items.len > mark) {
             var b = u.bufs.pop().?;
             u.bytes -= b.len;
@@ -110,7 +138,10 @@ pub fn layer(u: *Uploader, a: std.mem.Allocator, dims: usize, width: usize, cb: 
 fn pointers(u: *Uploader, a: std.mem.Allocator, projs: []const Proj) ![]u64 {
     const out = try a.alloc(u64, projs.len);
     errdefer a.free(out);
-    for (projs, 0..) |p, i| out[i] = try u.dev(p.trellis);
+    // Identical source slices (a fixture's placeholder experts) share one device copy.
+    for (projs, 0..) |p, i| out[i] = for (projs[0..i], 0..) |q, j| {
+        if (q.trellis.ptr == p.trellis.ptr and q.trellis.len == p.trellis.len) break out[j];
+    } else try u.dev(p.trellis);
     return out;
 }
 
@@ -212,14 +243,16 @@ test "expert upload retains independent projection widths and expands packed sca
     var u: Uploader = .{ .d = &d, .gpa = std.testing.allocator, .max_buffers = 18 };
     defer u.deinit();
     const signs: [16]u8 = @splat(255);
-    var gate: [2]Proj = @splat(.{ .trellis = &.{ 0, 0 }, .suh = &signs, .svh = &signs, .k2 = 8, .signs = true });
+    const trellis: [6][2]u8 = @splat(@splat(0)); // distinct slices: identical ones share one upload
+    var gate: [2]Proj = @splat(.{ .trellis = &trellis[0], .suh = &signs, .svh = &signs, .k2 = 8, .signs = true });
+    gate[1].trellis = &trellis[1];
     gate[1].k2 = 10;
     var up = gate;
-    up[0].k2 = 12;
-    up[1].k2 = 16;
+    up[0] = .{ .trellis = &trellis[2], .suh = &signs, .svh = &signs, .k2 = 12, .signs = true };
+    up[1] = .{ .trellis = &trellis[3], .suh = &signs, .svh = &signs, .k2 = 16, .signs = true };
     var down = gate;
-    down[0].k2 = 9;
-    down[1].k2 = 13;
+    down[0] = .{ .trellis = &trellis[4], .suh = &signs, .svh = &signs, .k2 = 9, .signs = true };
+    down[1] = .{ .trellis = &trellis[5], .suh = &signs, .svh = &signs, .k2 = 13, .signs = true };
     const l = try layer(&u, std.testing.allocator, 128, 128, .mul1, 0, 0, &gate, &up, &down);
     try std.testing.expect(l.gate_k2 != l.up_k2 and l.up_k2 != l.down_k2);
     for ([_][2]u32{ .{ 8, 10 }, .{ 12, 16 }, .{ 9, 13 } }, 9..) |expected, j| {
@@ -227,6 +260,65 @@ test "expert upload retains independent projection widths and expands packed sca
     }
     try std.testing.expectEqual(@as(usize, 18), u.bufs.items.len);
     try std.testing.expectEqual(@as(u16, 0xbc00), std.mem.readInt(u16, mock.copied[0..2], .little));
+}
+
+test "experts naming the same trellis bytes share one device copy" {
+    const mock = @import("exl3_mock.zig");
+    var d = mock.init();
+    var u: Uploader = .{ .d = &d, .gpa = std.testing.allocator, .max_buffers = 32 };
+    defer u.deinit();
+    const scales: [256]u8 = @splat(0);
+    const shared: [2]u8 = .{ 1, 2 };
+    const other: [2]u8 = .{ 3, 4 };
+    const projs = [_]Proj{
+        .{ .trellis = &shared, .suh = &scales, .svh = &scales, .k2 = 8 },
+        .{ .trellis = &other, .suh = &scales, .svh = &scales, .k2 = 8 },
+        .{ .trellis = &shared, .suh = &scales, .svh = &scales, .k2 = 8 },
+    };
+    const table = try pointers(&u, std.testing.allocator, &projs);
+    defer std.testing.allocator.free(table);
+    try std.testing.expectEqual(@as(usize, 2), mock.allocations);
+    try std.testing.expectEqual(table[0], table[2]);
+    try std.testing.expect(table[0] != table[1]);
+}
+
+test "small uploads are carved from one aligned slab; large ones and overflow get their own" {
+    const mock = @import("exl3_mock.zig");
+    var d = mock.init();
+    var u: Uploader = .{ .d = &d, .gpa = std.testing.allocator, .max_buffers = 8, .slab = 1024 };
+    defer u.deinit();
+    const small: [100]u8 = @splat(7);
+    const a = try u.dev(&small);
+    const b = try u.dev(&small);
+    try std.testing.expectEqual(@as(usize, 1), mock.allocations);
+    try std.testing.expectEqual(a + 256, b);
+    try std.testing.expectEqual(@as(usize, 1024), u.bytes);
+    try std.testing.expectEqual(@as(u8, 7), mock.copied[0]);
+    const big: [600]u8 = @splat(1); // more than half a slab: its own allocation
+    _ = try u.dev(&big);
+    try std.testing.expectEqual(@as(usize, 2), mock.allocations);
+    _ = try u.dev(&small);
+    _ = try u.dev(&small); // offsets 0, 256, 512, 768 fill the slab
+    try std.testing.expectEqual(@as(usize, 2), mock.allocations);
+    _ = try u.dev(&small); // the fifth no longer fits: a second slab opens
+    try std.testing.expectEqual(@as(usize, 3), mock.allocations);
+    try std.testing.expectEqual(@as(usize, 1024 + 600 + 1024), u.bytes);
+}
+
+test "rolling back past an open slab forgets it" {
+    const mock = @import("exl3_mock.zig");
+    var d = mock.init();
+    var u: Uploader = .{ .d = &d, .gpa = std.testing.allocator, .max_buffers = 4, .slab = 1024 };
+    defer u.deinit();
+    const small: [100]u8 = @splat(0);
+    _ = try u.dev(&small);
+    u.rollback(0);
+    try std.testing.expectEqual(@as(usize, 0), u.bufs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), u.bytes);
+    try std.testing.expectEqual(mock.allocations, mock.frees);
+    _ = try u.dev(&small); // must not carve from the freed slab
+    try std.testing.expectEqual(@as(usize, 2), mock.allocations);
+    try std.testing.expectEqual(@as(usize, 1), u.bufs.items.len);
 }
 
 test {
