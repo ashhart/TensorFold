@@ -103,13 +103,14 @@ pub const Kernels = struct {
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
     wide: ?wide.Pipes = null, // the products at other widths (wide.zig), for a checkpoint that has one
+    m3_fast: bool, // pre-M5 Metal dispatch geometry (32x64 affine_mm, 4-sg KDA scan, 32x64/64 index NAX)
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
             if (T == mtl.Pipeline) @field(k, name).deinit() else if (T == ?wide.Pipes) {
                 if (k.wide) |*w| w.deinit();
-            } else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
+            } else if (T != u64 and T != bool) for (&@field(k, name)) |*p| p.deinit();
         }
     }
 
@@ -231,6 +232,8 @@ pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype
 
 fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
+    const m3_fast = !device.tensorUnits();
+    k.m3_fast = m3_fast;
     var jobs: [generated.len + 23]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
@@ -263,13 +266,14 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(igate_src);
     var igate_out: [1]mtl.Pipeline = undefined;
     jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{moe_route.names[0]}, .out = &igate_out };
-    const m16_src = try affine_mm.source(device, gpa, .{});
+    const m16_src = try affine_mm.source(device, gpa, .{ .glm_m3_fast = m3_fast });
     defer gpa.free(m16_src);
-    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true });
+    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true, .glm_m3_fast = m3_fast });
     defer gpa.free(m32_src);
     jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &affine_mm.names, .out = &k.mm_bf16 };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
-    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt });
+    const m3_def = if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
+    const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, m3_def, sources.glm_kda_prompt });
     defer gpa.free(kda_src);
     var kda_out: [6]mtl.Pipeline = undefined;
     jobs[generated.len + 9] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
@@ -294,7 +298,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
     jobs[generated.len + 14] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
-    const index_src = try frags.source(device, gpa, sources.glm_index_nax);
+    const index_raw = try std.mem.concat(gpa, u8, &.{ m3_def, sources.glm_index_nax });
+    defer gpa.free(index_raw);
+    const index_src = try frags.source(device, gpa, index_raw);
     defer gpa.free(index_src);
     var index_out: [2]mtl.Pipeline = undefined;
     jobs[generated.len + 15] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };

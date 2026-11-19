@@ -1,6 +1,9 @@
 // M5 tensor-unit fragments shared by every NAX kernel (ops and prefill): layout, loads, stores and the 16x32x16 op.
 #include <metal_stdlib>
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+#if defined(TF_SIMD_FRAGS) && defined(TF_GLM_M3_FAST)
+#include <metal_simdgroup_matrix>
+#endif
 
 namespace tfp {
 using namespace metal;
@@ -107,10 +110,15 @@ inline short2 frag_home(ushort l) {
 template <typename T, typename P>
 inline void frag_get(thread frag<T>& f, P p, int ld, int r, int c, short2 home) {
   const P q = p + (r + home.y) * ld + (c + home.x);
+#ifdef TF_GLM_M3_FAST
+  f[0] = T(q[0]); f[1] = T(q[1]); f[2] = T(q[8]); f[3] = T(q[9]);
+  f[4] = T(q[8 * ld]); f[5] = T(q[8 * ld + 1]); f[6] = T(q[8 * ld + 8]); f[7] = T(q[8 * ld + 9]);
+#else
   TF_UNROLL
   for (short e = 0; e < 8; e++) {
     f[e] = T(q[(e >> 2) * 8 * ld + TF_COL(e)]);
   }
+#endif
 }
 
 template <typename T, typename S>
@@ -164,6 +172,55 @@ inline void frag_put_in(thread const frag<float>& f, device O* p, int ld, int r,
 template <bool TA, bool TB, typename C, typename A, typename B>
 inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<A>& a, thread const frag<B>& b0,
                       thread const frag<B>& b1) {
+#ifdef TF_GLM_M3_FAST
+  simdgroup_matrix<A, 8, 8> a00, a01, a10, a11;
+  simdgroup_matrix<B, 8, 8> b00, b01, b10, b11, c00, c01, c10, c11;
+  simdgroup_matrix<C, 8, 8> d00, d01, d10, d11, e00, e01, e10, e11;
+  a00.thread_elements()[0] = a[0]; a00.thread_elements()[1] = a[1];
+  a01.thread_elements()[0] = a[2]; a01.thread_elements()[1] = a[3];
+  a10.thread_elements()[0] = a[4]; a10.thread_elements()[1] = a[5];
+  a11.thread_elements()[0] = a[6]; a11.thread_elements()[1] = a[7];
+  b00.thread_elements()[0] = b0[0]; b00.thread_elements()[1] = b0[1];
+  b01.thread_elements()[0] = b0[2]; b01.thread_elements()[1] = b0[3];
+  b10.thread_elements()[0] = b0[4]; b10.thread_elements()[1] = b0[5];
+  b11.thread_elements()[0] = b0[6]; b11.thread_elements()[1] = b0[7];
+  c00.thread_elements()[0] = b1[0]; c00.thread_elements()[1] = b1[1];
+  c01.thread_elements()[0] = b1[2]; c01.thread_elements()[1] = b1[3];
+  c10.thread_elements()[0] = b1[4]; c10.thread_elements()[1] = b1[5];
+  c11.thread_elements()[0] = b1[6]; c11.thread_elements()[1] = b1[7];
+  d00.thread_elements()[0] = lo[0]; d00.thread_elements()[1] = lo[1];
+  d01.thread_elements()[0] = lo[2]; d01.thread_elements()[1] = lo[3];
+  d10.thread_elements()[0] = lo[4]; d10.thread_elements()[1] = lo[5];
+  d11.thread_elements()[0] = lo[6]; d11.thread_elements()[1] = lo[7];
+  e00.thread_elements()[0] = hi[0]; e00.thread_elements()[1] = hi[1];
+  e01.thread_elements()[0] = hi[2]; e01.thread_elements()[1] = hi[3];
+  e10.thread_elements()[0] = hi[4]; e10.thread_elements()[1] = hi[5];
+  e11.thread_elements()[0] = hi[6]; e11.thread_elements()[1] = hi[7];
+  simdgroup_multiply_accumulate(d00, a00, b00, d00);
+  simdgroup_multiply_accumulate(d01, a00, b01, d01);
+  simdgroup_multiply_accumulate(d10, a10, b00, d10);
+  simdgroup_multiply_accumulate(d11, a10, b01, d11);
+  simdgroup_multiply_accumulate(e00, a00, c00, e00);
+  simdgroup_multiply_accumulate(e01, a00, c01, e01);
+  simdgroup_multiply_accumulate(e10, a10, c00, e10);
+  simdgroup_multiply_accumulate(e11, a10, c01, e11);
+  simdgroup_multiply_accumulate(d00, a01, b10, d00);
+  simdgroup_multiply_accumulate(d01, a01, b11, d01);
+  simdgroup_multiply_accumulate(d10, a11, b10, d10);
+  simdgroup_multiply_accumulate(d11, a11, b11, d11);
+  simdgroup_multiply_accumulate(e00, a01, c10, e00);
+  simdgroup_multiply_accumulate(e01, a01, c11, e01);
+  simdgroup_multiply_accumulate(e10, a11, c10, e10);
+  simdgroup_multiply_accumulate(e11, a11, c11, e11);
+  lo[0] = d00.thread_elements()[0]; lo[1] = d00.thread_elements()[1];
+  lo[2] = d01.thread_elements()[0]; lo[3] = d01.thread_elements()[1];
+  lo[4] = d10.thread_elements()[0]; lo[5] = d10.thread_elements()[1];
+  lo[6] = d11.thread_elements()[0]; lo[7] = d11.thread_elements()[1];
+  hi[0] = e00.thread_elements()[0]; hi[1] = e00.thread_elements()[1];
+  hi[2] = e01.thread_elements()[0]; hi[3] = e01.thread_elements()[1];
+  hi[4] = e10.thread_elements()[0]; hi[5] = e10.thread_elements()[1];
+  hi[6] = e11.thread_elements()[0]; hi[7] = e11.thread_elements()[1];
+#else
   using namespace mpp::tensor_ops;
   constexpr auto shape = matmul2d_descriptor(16, 32, 16, TA, TB, true, matmul2d_descriptor::mode::multiply_accumulate);
   matmul2d<shape, execution_simdgroup> op;
@@ -187,7 +244,42 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
     lo[e] = acc[j];
     hi[e] = acc[j + 4];
   }
+#endif
 }
+
+#ifdef TF_GLM_M3_FAST
+// Half-width 16x16 multiply-accumulate used by GLM's decode index kernel when TF_GLM_M3_FAST is active.
+template <typename C, typename A, typename B>
+inline void mma_16x16(thread frag<C>& d, thread const frag<A>& a, thread const frag<B>& b) {
+  simdgroup_matrix<A, 8, 8> a00, a01, a10, a11;
+  simdgroup_matrix<B, 8, 8> b00, b01, b10, b11;
+  simdgroup_matrix<C, 8, 8> d00, d01, d10, d11;
+  a00.thread_elements()[0] = a[0]; a00.thread_elements()[1] = a[1];
+  a01.thread_elements()[0] = a[2]; a01.thread_elements()[1] = a[3];
+  a10.thread_elements()[0] = a[4]; a10.thread_elements()[1] = a[5];
+  a11.thread_elements()[0] = a[6]; a11.thread_elements()[1] = a[7];
+  b00.thread_elements()[0] = b[0]; b00.thread_elements()[1] = b[1];
+  b01.thread_elements()[0] = b[2]; b01.thread_elements()[1] = b[3];
+  b10.thread_elements()[0] = b[4]; b10.thread_elements()[1] = b[5];
+  b11.thread_elements()[0] = b[6]; b11.thread_elements()[1] = b[7];
+  d00.thread_elements()[0] = d[0]; d00.thread_elements()[1] = d[1];
+  d01.thread_elements()[0] = d[2]; d01.thread_elements()[1] = d[3];
+  d10.thread_elements()[0] = d[4]; d10.thread_elements()[1] = d[5];
+  d11.thread_elements()[0] = d[6]; d11.thread_elements()[1] = d[7];
+  simdgroup_multiply_accumulate(d00, a00, b00, d00);
+  simdgroup_multiply_accumulate(d01, a00, b01, d01);
+  simdgroup_multiply_accumulate(d10, a10, b00, d10);
+  simdgroup_multiply_accumulate(d11, a10, b01, d11);
+  simdgroup_multiply_accumulate(d00, a01, b10, d00);
+  simdgroup_multiply_accumulate(d01, a01, b11, d01);
+  simdgroup_multiply_accumulate(d10, a11, b10, d10);
+  simdgroup_multiply_accumulate(d11, a11, b11, d11);
+  d[0] = d00.thread_elements()[0]; d[1] = d00.thread_elements()[1];
+  d[2] = d01.thread_elements()[0]; d[3] = d01.thread_elements()[1];
+  d[4] = d10.thread_elements()[0]; d[5] = d10.thread_elements()[1];
+  d[6] = d11.thread_elements()[0]; d[7] = d11.thread_elements()[1];
+}
+#endif
 #endif
 
 // frag_get from a block whose rows home.y and home.y + 8 start at r0 and r1; an unflagged row reads as zero.

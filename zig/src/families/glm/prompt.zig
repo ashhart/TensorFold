@@ -191,7 +191,7 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     if (!wide.native(q)) return qmmAt(p, e, x, q.k, q, y, M);
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
+    affine_mm.denseBm(e, p.mm.mm_bf16, x, p.sums, q, y, M, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
@@ -206,13 +206,13 @@ fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine
     );
     const mm = p.mm.mm_bf16;
     affine_mm.rowSumsAt(e, mm, 64, x, p.sums, M, q.k, ld);
-    affine_mm.denseBatch(e, mm, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
+    affine_mm.denseBatchBm(e, mm, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) }, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
 fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
+    affine_mm.denseBm(e, p.mm.mm_f32, x, p.sums, q, y, M, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// Routed experts' gate, up and SwiGLU on the M rows of `x_in` its pairs read (expert order) into `act` ([n, gate.n]).
@@ -377,7 +377,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
             e.setPipeline(if (tp) k.kda_scan_tp else k.kda_scan);
             bind(e, 0, .{ q, kk, v, g, beta, L.st[if (r0 == 0) cur else 1 - cur], L.st[1 - cur], sy });
             e.setValue(@as(i32, @intCast(m)), 8);
-            e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
+            if (x.k.m3_fast) e.dispatchGroups(size(c.kda_dim / 16, H, 1), size(128, 1, 1)) else e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
         }
         if (!fwd.on(x, "kda_post")) continue;
         e.setPipeline(if (tp) k.kda_post_tp else k.kda_post);
@@ -386,7 +386,7 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
         bind(e, 4, .{ p.y.at(@as(usize, r0) * W * 2), p.proj });
         fwd.shape(e, 6, .{ M, pitch }); // every block writes the next chunk's conv window, the same rows
         bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
-        e.dispatchGroups(size(m, H, 1), size(32, 1, 1));
+        if (x.k.m3_fast) e.dispatchGroups(size(m, H / 4, 1), size(128, 1, 1)) else e.dispatchGroups(size(m, H, 1), size(32, 1, 1));
     }
 }
 
@@ -411,7 +411,8 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
+    const bs: affine_mm.Strides = .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) };
+    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, bs, if (p.mm.m3_fast) 32 else 64);
 }
 
 /// `n` rows' key lists from index scores over every pooled block they read (positions p0..), scores on tensor units.
@@ -419,10 +420,11 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
     const c = x.c;
     const s_stride = x.s.cap / c.kpool + 1;
     const most = (p0 + n) / c.kpool; // the last row's blocks
+    const rm: u32 = if (x.k.m3_fast) 32 else 64;
     e.setPipeline(x.k.index_scores_nax);
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, p.sscore });
     e.setValue([5]u32{ p0, c.qrProj(), c.i_heads, s_stride, n }, 4);
-    e.dispatchGroups(size((most + 63) / 64, (n + 63) / 64, 1), size(128, 1, 1));
+    e.dispatchGroups(size((most + 63) / 64, (n + rm - 1) / rm, 1), size(128, 1, 1));
     e.setPipeline(x.k.index_select);
     bind(e, 0, .{ p.sscore, indices });
     e.setValue([5]u32{ p0, c.i_topk / c.kpool, c.keyWidth(), s_stride, c.keyWidth() }, 2);

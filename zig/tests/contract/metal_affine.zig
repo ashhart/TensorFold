@@ -17,7 +17,7 @@ const lane = tf.lane_projection;
 pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, lane, lane_reg, qk };
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's or simd_sums' planted fault.
-pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, control: bool = false, served: ?[]const c.Shape = null };
+pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, control: bool = false, served: ?[]const c.Shape = null };
 pub const Reg = struct { v: Variant, name: []const u8 };
 /// The half-operand tiles, the chunk pairs on the prepass's sums, and their planted controls, beside simd_qmm's entry.
 pub const half = [_]Reg{
@@ -58,7 +58,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
     const step: usize = @max(16, v.group);
     return switch (v.kind) {
         .row => .{ .name = name, .accum = .f32, .depth = rowDepth, .out = out, .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = step, .min = step } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } } },
-        .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = if (v.bits == 8 and v.group == 64) &router_rows else &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
+        .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = @max(64, v.group), .min = @max(64, v.group) } }, .served = if (v.bits == 8 and v.group == 64) &router_rows else &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
         .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         // the 27B's norm-fed widths past 6,144 (8 chunks), as the prompt chunk's tiles and its 9-row tail take them
         .simd_half => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 32, .n = 6240, .k = 512 }, .{ .rows = 9, .n = 12288, .k = 256 } } },
@@ -107,7 +107,7 @@ pub const Proj = struct {
             .simd, .simd_half, .simd_sums => p.sq_p = try sq.Pipelines.load(device),
             .simd_bits => p.sqb_p = try sqb.Pipelines.load(device),
             .affine_mm => {
-                const src = try mm.source(device, a, .{ .bits = v.bits, .group = @intCast(v.group), .out_f32 = v.f32_out });
+                const src = try mm.source(device, a, .{ .bits = v.bits, .group = @intCast(v.group), .out_f32 = v.f32_out, .glm_m3_fast = v.glm_m3_fast });
                 defer a.free(src);
                 const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
                 defer lib.deinit();
@@ -273,7 +273,8 @@ pub const Proj = struct {
                 const xs = .{ .buf = p.sums.buf, .off = p.sums.off };
                 const q = .{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .s = .{ .buf = p.s.buf, .off = p.s.off }, .b = .{ .buf = p.b.buf, .off = p.b.off }, .n = @as(u32, @intCast(shape.n)), .k = @as(u32, @intCast(shape.k)) };
                 mm.rowSums(e, p.mm_p.?, @intCast(p.v.group), x, xs, @intCast(shape.rows), @intCast(shape.k));
-                mm.dense(e, p.mm_p.?, x, xs, q, .{ .buf = p.out.buf, .off = p.out.off }, @intCast(shape.rows));
+                const bm: u32 = if (p.v.glm_m3_fast and p.v.control) 128 else if (p.v.glm_m3_fast and !p.rig.device.tensorUnits()) 32 else 64;
+                mm.denseBm(e, p.mm_p.?, x, xs, q, .{ .buf = p.out.buf, .off = p.out.off }, @intCast(shape.rows), bm);
             },
             .qk => {
                 const rows: u32 = @intCast(shape.rows);

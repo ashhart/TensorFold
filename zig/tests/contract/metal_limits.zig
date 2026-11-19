@@ -326,11 +326,18 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = sources.core_simd_qmm;
     } else if (has(d.name, "affine_mm")) {
         if (!assemble) return undefined;
-        const bits: u8 = if (has(d.name, "q8")) 8 else 4;
-        const group: u16 = if (has(d.name, "g32")) 32 else 64;
-        head = try std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T bfloat\n", .{ bits, group });
-        text = sources.core_affine_mm;
-        frags = true;
+        const bits: u8 = if (has(d.name, "q8")) 8 else if (has(d.name, "q6")) 6 else if (has(d.name, "q5")) 5 else if (has(d.name, "q2")) 2 else 4;
+        const group: u16 = if (has(d.name, "g128")) 128 else if (has(d.name, "g32")) 32 else 64;
+        const out_t: []const u8 = if (has(d.name, "fp32")) "float" else "bfloat";
+        const m3_head: []const u8 = if (has(d.name, "glm m3")) "#define TF_GLM_M3_FAST 1\n" else "";
+        head = try std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n", .{ bits, group, out_t });
+        const pre_head = if (m3_head.len == 0) head else try std.mem.concat(a, u8, &.{ head, m3_head });
+        const pre = try preM5(a, pre_head, sources.core_affine_mm);
+        const here = if (device.tensorUnits()) blk: {
+            const body = try tf.frags.source(device, a, sources.core_affine_mm);
+            break :blk try std.mem.concat(a, u8, &.{ head, body });
+        } else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     } else if (has(d.name, "lane projection")) {
         if (!assemble) return undefined;
         const sk: usize = if (has(d.name, "sk4")) 4 else 1;
