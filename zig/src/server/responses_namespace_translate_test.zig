@@ -213,7 +213,8 @@ test "tool_choice: allowed_tools drops a name no tool carries instead of refusin
     const none = try chat(&cx, flat, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"absent\"}]}");
     try std.testing.expectEqual(@as(usize, 0), none.object.get("tools").?.array.len);
     const stray = try chat(&cx, flat, "{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"now\",\"namespace\":\"anything\"}]}");
-    try std.testing.expectEqual(@as(usize, 1), stray.object.get("tools").?.array.len); // a flat-only entry is its name: the extra key goes unread
+    // A flat-only entry is its name: the extra key goes unread.
+    try std.testing.expectEqual(@as(usize, 1), stray.object.get("tools").?.array.len);
     try std.testing.expectEqualStrings("now", stray.object.get("tools").?.array[0].get("function").?.strField("name").?);
 }
 
@@ -423,14 +424,33 @@ test "a namespace child's description: absent or null keeps the namespace's, ano
     try std.testing.expectError(error.Refused, offered(&cx, base ++ ",\"description\":5}]}]"));
 }
 
-test "tool_choice: a selector equal to a child's composed name is that child, not ambiguous" {
+test "a child with its namespace prefix is refused before a call can round trip to another child" {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     var cx: errors.Cx = .{ .a = arena.allocator() };
     const tools =
         \\[{"type":"namespace","name":"a","description":"ad","tools":[{"type":"function","name":"b"},{"type":"function","name":"a__b"}]}]
     ;
-    try std.testing.expectEqualStrings("a__b", try chosen(&cx, tools, "{\"type\":\"function\",\"name\":\"a__b\"}"));
+    try std.testing.expectError(error.Refused, offered(&cx, tools));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "must not start with its namespace") != null);
+    const items =
+        \\[{"type":"function_call","call_id":"c1","name":"a__b","namespace":"a","arguments":"{}"}]
+    ;
+    try std.testing.expectError(error.Refused, chatWith(&cx, tools, items));
+    const flat = try offered(&cx, "[{\"type\":\"function\",\"name\":\"a__b\"}]");
+    try std.testing.expectEqualStrings("a__b", flat[0].get("function").?.strField("name").?);
+}
+
+test "an empty input namespace is refused by both raw translation and the message converter" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const items =
+        \\[{"type":"function_call","call_id":"c1","name":"get_weather","namespace":"","arguments":"{}"}]
+    ;
+    try std.testing.expectError(error.Refused, chatWith(&cx, weather_ns, items));
+    try std.testing.expectError(error.Refused, responses.messages(&cx, (try json.parse(cx.a, items)).ok.array));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "nonempty string") != null);
 }
 
 test "tool_choice: an explicit namespace never picks a top-level tool with the same name" {

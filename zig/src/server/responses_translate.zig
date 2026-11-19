@@ -122,7 +122,7 @@ fn flatName(cx: *Cx, namespace: ?Value, name: []const u8) errors.Refused![]const
     const ns = namespace orelse return name;
     if (ns == .null) return name;
     if (ns != .string) return cx.refuse("a function_call item's namespace must be a string");
-    if (ns.string.len == 0) return name;
+    if (ns.string.len == 0) return cx.refuse("a function_call item's namespace must be a nonempty string");
     const prefix = try std.fmt.allocPrint(cx.a, "{s}__", .{ns.string});
     if (std.mem.startsWith(u8, name, prefix)) return name;
     return try std.fmt.allocPrint(cx.a, "{s}{s}", .{ prefix, name });
@@ -139,8 +139,7 @@ fn spells(name: []const u8, group: []const u8, own: []const u8) bool {
 }
 
 /// ``flat`` as the request declares it: a composed <group>__<child> engine name, or null when no group spells it.
-pub fn childName(a: Allocator, declared: ?Value, flat: []const u8) ?Child {
-    _ = a;
+pub fn childName(declared: ?Value, flat: []const u8) ?Child {
     if (declared == null or declared.? != .array) return null;
     for (declared.?.array) |tool| {
         if (!tool.typeIs("namespace")) continue;
@@ -154,6 +153,14 @@ pub fn childName(a: Allocator, declared: ?Value, flat: []const u8) ?Child {
         }
     }
     return null;
+}
+
+/// Write a call's own name and namespace from the request's declared tools.
+pub fn writeCallName(a: Allocator, item: *json.Object, declared: ?Value, name: []const u8) Allocator.Error!void {
+    if (childName(declared, name)) |child| {
+        try item.put(a, "name", .{ .string = child.name });
+        try item.put(a, "namespace", .{ .string = child.namespace });
+    } else try item.put(a, "name", .{ .string = name });
 }
 
 /// Input items (output items too) as chat messages: a turn's reasoning, text and calls are one assistant message.
@@ -278,6 +285,8 @@ fn functionTool(cx: *Cx, names: ?*std.ArrayList([]const u8), out: *std.ArrayList
     for ([_][]const u8{ "name", "description", "parameters", "strict" }) |k| if (tool.field(k)) |v| try function.put(cx.a, k, v);
     var flat = name;
     if (ns_name.len > 0) {
+        const prefix = try std.fmt.allocPrint(cx.a, "{s}__", .{ns_name});
+        if (std.mem.startsWith(u8, name, prefix)) return cx.refuse("a namespace child's name must not start with its namespace and '__'");
         if (tool.get("description")) |d| if (d != .null and d != .string) return cx.refuse("a namespace tool's child needs a string description");
         flat = try std.fmt.allocPrint(cx.a, "{s}__{s}", .{ ns_name, name });
         const own = tool.strField("description") orelse "";
@@ -315,7 +324,7 @@ fn tools(cx: *Cx, raw: ?Value) errors.Refused!?[]Value {
     if (value != .array) return cx.refuse("tools must be a list");
     var out: std.ArrayList(Value) = .empty;
     var names: std.ArrayList([]const u8) = .empty; // every name the tools end up with, so none is given twice
-    const taken = if (hasNamespace(value)) &names else null; // a flat-only list is checked only for its own names
+    const taken = if (hasNamespace(value)) &names else null; // flat-only lists keep main's unchecked names
     for (value.array) |tool| {
         if (tool.typeIs("namespace")) {
             try namespaceTools(cx, &names, &out, tool);
@@ -382,7 +391,8 @@ fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value, declared: ?Value) errors.
         const given = choice.strField("name").?;
         const found = try selectorName(cx.a, declared, given, if (namespaced) choice.strField("namespace") else null);
         if (found) |name| if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, choice.get("name").?)});
-        const resolved = found orelse given; // an unresolved name keeps its own spelling, which is the name tool_specs refuses it by
+        // An unresolved name keeps its own spelling, which is the name tool_specs refuses it by.
+        const resolved = found orelse given;
         const function = try json.newObject(cx.a);
         try function.put(cx.a, "name", .{ .string = resolved });
         const c = try json.newObject(cx.a);
@@ -403,7 +413,8 @@ fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value, declared: ?Value) errors.
         var resolved: std.ArrayList([]const u8) = .empty;
         for (list) |t| {
             const pick = t.strField("name") orelse if (namespaced) return cx.refuse("allowed_tools may name function tools only") else continue;
-            const name = try selectorName(cx.a, declared, pick, if (namespaced) t.strField("namespace") else null) orelse continue; // an entry no tool carries keeps nothing
+            // An entry no tool carries keeps nothing.
+            const name = try selectorName(cx.a, declared, pick, if (namespaced) t.strField("namespace") else null) orelse continue;
             if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, t.get("name").?)});
             try resolved.append(cx.a, name);
         }
