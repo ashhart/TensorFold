@@ -480,8 +480,8 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     return c;
 }
 
-/// The widths the kernels are built for (cuda.zig's tests hold them to glm_glue and the latent cache); KDA's: cuda.kda.
-pub const fixed = .{ .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
+/// The widths the kernels are built for (cuda.zig's tests hold them to glm_kda, glm_glue and the latent cache).
+pub const fixed = .{ .kda_dim = 128, .conv = 4, .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
 /// glue.rmsnorm's instances for q_lora_rank (256 is Ling-3.0-tiny's); the hidden width takes the router's three.
 pub const q_lora_widths = [_]u32{ 256, 512, 1536, 4096 };
 /// The hidden width: the norms' 512, 1536 and 4096, which the router's slices (8 x 64 inputs) also divide.
