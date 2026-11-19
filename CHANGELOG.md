@@ -17,6 +17,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA on unified-memory Linux (GB10): the start-up memory budget is at most the free memory CUDA reports, less the same reserve, instead of `/proc/meminfo` alone, and the server first drops the checkpoint's own shards from the page cache, so a checkpoint that was just read is not refused for its own cached pages; discrete cards, Windows, Metal and HIP are unchanged (#3192, part of #1857).
 - Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
 
+- GLM-5.3 on CUDA: the latent row width and cache count, the DSA indexer's pool size, key store and index rope, and 576-wide roped latent rows are read from the model instead of fixed at GLM-5.3-Flash's values (one new kernel, `tf_mla_absorb_q_192`), so full GLM-5.3's shapes (79 caches of 576-value rows, pools of 1, top 2,048, 64 roped index dims) can run on the Flash pieces; GLM-5.3-Flash's launches and replies are unchanged (#3949, part of #3063).
+
 
 
 ## 1.3.3
