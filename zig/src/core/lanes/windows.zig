@@ -30,6 +30,7 @@ pub const Plan = struct {
     parents: ?[]const i32 = null, // a tree's drafts' parents
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     cost_probe_rows: ?u32 = null, // an unseen width selected for calibration, confirmed by a matching completed round
+    probe_rows: ?u32 = null, // a depth probe's rows this round: a lone window keeps them
     context_copy: bool = false, // branch_from names a copied continuation appended to the head
     copy_trusted: bool = true, // the copy is priced from cfg.copy_rate's prior (trustedCopy), else from short_rate's
     deferred_copy: []const u32 = &.{}, // a full priced head may free room for this continuation
@@ -112,6 +113,11 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         }
     }
     if (!p.context_copy and e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
+    // a depth probe asked one draft past the priced width: this round verifies it, so its estimate can move
+    if (s.depth) |*st| if (st.probe) |rows| {
+        p.probe_rows = @intCast(@min(rows, @as(i64, @intCast(p.count()))));
+        st.probe = null;
+    };
     try trail.event(e, &.{ f("ev", trail.str("plan")), f("stream", trail.str(s.id)), f("kind", trail.str(@tagName(p.kind))), f("n", trail.int(p.count())), f("tree", .{ .bool = p.parents != null }) });
     return p;
 }
@@ -317,6 +323,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         plans[0].stream.cost_probe_trial = lone_costs.trial(plans[0].stream, probs[0], count + 1);
     }
     if (live) {
+        // a depth probe asks one draft past the priced width: keep it, or the acceptance it explores never moves
+        keepProbe(&plans[0], counts);
         var expected: f64 = 1;
         for (probs[0][0..counts[0]]) |chance| expected += chance;
         const ms = own.get(1 + @as(i64, counts[0]));
@@ -354,6 +362,13 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         r.* = .{ .list = pair };
     }
     try trail.event(e, &.{ f("ev", trail.str("alloc")), f("plans", .{ .list = rows }) });
+}
+
+/// A depth probe asks one draft past the priced width: this round verifies it, so its estimate can move.
+pub fn keepProbe(p: *const Plan, counts: []u32) void {
+    if (p.probe_rows) |rows| {
+        if (rows > counts[0]) counts[0] = rows;
+    }
 }
 
 /// A family's row policy decides each head window's drafts (lanes/trim.zig); other windows run whole.
