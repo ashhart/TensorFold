@@ -81,7 +81,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 30. Small-kernel fusion | ? | failed H[#1603] | ? | ? | ? |
 | 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
-| 30. Dependent launches | ? | ? | open [#3652] | ? | ? |
+| 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -117,7 +117,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 30. Small-kernel fusion | ? | ? | ? | ? | ? |
 | 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
-| 30. Dependent launches | ? | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -153,7 +153,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 30. Small-kernel fusion | ? | ? | ? | ? |
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
-| 30. Dependent launches | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -195,7 +195,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 30. Small-kernel fusion | ? | ? | ? | ? |
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
-| 30. Dependent launches | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -231,7 +231,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 30. Small-kernel fusion | ? | ? | ? |
 | 31. Stream-tile prefetch | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? |
-| 30. Dependent launches | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -281,7 +281,7 @@ below; these are estimates for planning a port, not results.
 | 30. Small-kernel fusion | none | low | none | HIP Flash Next: 1.2–2.0 % of a round for the hyper-connection block, 2.4–4.0 % for all four groups |
 | 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
-| 30. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
+| 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
 
 ## The optimizations
 
@@ -529,7 +529,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | flashnext (H) | first-token ratios 0.99–1.01, prompt tok/s at most 1.2 % better, decode and concurrency level | [#1603], one Strix Halo iGPU (gfx1151) |
 
-30. **Dependent launches.** On sm_90 and newer a kernel can launch while the one before it ends, then wait
+33. **Dependent launches.** On sm_90 and newer a kernel can launch while the one before it ends, then wait
     (`griddepcontrol.wait`) only where it reads that kernel's output; a linear can stream its fixed weights in before
     the wait. GLM ([#3652]) opens every kernel with the wait and its qmmf decode tiles load weights first: decode
     +6.8 % plain and +4.0 % drafted at TP=2 on GB10, the same tokens. An input a predecessor writes must not be
