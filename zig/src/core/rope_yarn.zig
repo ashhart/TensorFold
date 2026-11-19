@@ -37,3 +37,16 @@ test "Qwen3.6's YaRN table (theta 1e7, factor 4 over 262,144) equals transformer
     for (y.freq, torch) |got, want| try std.testing.expectEqual(want, @as(u32, @bitCast(got)));
     try std.testing.expectEqual(@as(f32, @floatCast(1.138629436111989)), y.scale);
 }
+
+test "SenseNova-Loop-9B's YaRN table (theta 1e7, factor 2 over 262,144) equals transformers 5.14.1's, word for word" {
+    // transformers 5.14.1 static YaRN inv_freq and attention_scaling under torch 2.13.0, fp32 words
+    const torch = [32]u32{
+        0x3f800000, 0x3f1ab32b, 0x3ebaf81b, 0x3e61f835, 0x3e088d77, 0x3da50956, 0x3d47763f, 0x3cf11177,
+        0x3c91ad39, 0x3c301052, 0x3bd4ca15, 0x3b80967d, 0x3b1b690d, 0x3abbd3ed, 0x3a6301e2, 0x3a009b22,
+        0x399111f4, 0x3922ce9d, 0x38b5a1aa, 0x384939ae, 0x37dd1727, 0x37707cc9, 0x37012dab, 0x369c1fc4,
+        0x363cb0c1, 0x35e40cc6, 0x3589cf4a, 0x35268e4c, 0x34c94c57, 0x3473499d, 0x3413048e, 0x33b1af44,
+    };
+    const y = yarn(10000000, 2, 262144);
+    for (y.freq, torch) |got, want| try std.testing.expectEqual(want, @as(u32, @bitCast(got)));
+    try std.testing.expectEqual(@as(u32, 0x3f88df4e), @as(u32, @bitCast(y.scale)));
+}

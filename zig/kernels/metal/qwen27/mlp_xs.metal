@@ -16,16 +16,21 @@ Q27_SPECIALIZE
   const uint t = thread_position_in_threadgroup.x;
   const uint g = threadgroup_position_in_grid.x;
   const uint m = threadgroup_position_in_grid.y;
+  #if Q27_XS == 128
+  constexpr int G = 128;
+  #else
+  constexpr int G = 64;
+  #endif
   #if Q27_XS
   const int M = dims[0], MP = dims[1];
-  threadgroup bfloat hb[64];
+  threadgroup bfloat hb[G];
   if (int(m) >= M) {
     if (t == 0) XS[g * MP + m] = 0.0f;
     return;
   }
   #endif
-  const int e = int(m) * N + int(g) * 64 + int(t);
-  const int fused = int(m) * 2 * N + int(g) * 64 + int(t);  // GATE and UP point into the fused gate_up rows
+  const int e = int(m) * N + int(g) * G + int(t);
+  const int fused = int(m) * 2 * N + int(g) * G + int(t);  // GATE and UP point into the fused gate_up rows
   const float gf = float(GATE[fused]);
   const bfloat h = bfloat(gf / (1.0f + metal::exp(-gf)) * float(UP[fused]));
   HOUT[e] = h;
@@ -34,7 +39,7 @@ Q27_SPECIALIZE
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
     float acc = 0.0f;
-    for (int i = 0; i < 64; i++) acc += float(hb[i]);
+    for (int i = 0; i < G; i++) acc += float(hb[i]);
     XS[g * MP + m] = acc;
   }
   #endif
