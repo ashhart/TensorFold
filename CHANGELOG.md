@@ -74,6 +74,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `tensorfold device`: a saved macOS profile is refreshed when the live GPU wired-memory limit changes, so the reported available weight bytes match the current limit (#3780, fixes #3778). Thanks to @AIFlowML.
 
+- Qwen3.8-27B on Metal: a sampled reply's draft tree ranks its candidates with the draw's own keyed noise, as on CUDA, so it needs fewer rounds for the same tokens: on an M4 Max with the MLX 4-bit checkpoint and DFlash2 at temperature 1, about 6% fewer rounds and 7% less decode time; greedy replies are unchanged (#3978).
+
 - GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines instead of waiting in a collective receive for the whole pass, so a long image pass no longer trips a net plugin's operation timeout and stops every rank; replies are unchanged (#3675, for #3614). Thanks to @ultradaoto.
 - Desktop: a Qwen3.8-27B checkpoint is offered and loads, where the library applied the 2B geometry to every `qwen3_5` checkpoint and rejected the supported 27B at hidden size 5,120 (#3771). Thanks to @AIFlowML.
 
