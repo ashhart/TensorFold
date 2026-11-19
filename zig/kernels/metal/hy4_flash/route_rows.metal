@@ -1,7 +1,5 @@
 
-// Appended to the core router source (its TF_E, TF_TOPK, PER, RouteArgs and tf_sigmoid_precise). A prompt chunk's
-// picks and weights: tf_route_select's per-row top-k (sigmoid + bias, ties to the lower id, weights normalized and
-// scaled) step for step, one simdgroup a row and a threadgroup per row, so every row runs at once.
+// Appended to the core router source (its TF_E, TF_TOPK, PER, RouteArgs and tf_sigmoid_precise).
 [[kernel]] void tf_hy4_route_select_rows(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                          constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                          device float* WTS [[buffer(4)]], uint r_ [[threadgroup_position_in_grid]],
@@ -43,10 +41,7 @@
   }
 }
 
-// tf_hy4_route_select_rows as ranks: one thread an expert (TF_E <= 512, threadgroup 512), each expert's rank the
-// count of experts ahead of it (larger sigmoid + bias, ties to the lower id), so the top-k write themselves in pick
-// order; then the weights normalized in that order as the loop does. The same picks, order and weights (same
-// sigmoid, same sums), without the k sequential arg-max rounds.
+// tf_hy4_route_select_rows as ranks: one thread an expert (TF_E <= 512, threadgroup 512)
 [[kernel]] void tf_hy4_route_select_rank(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                          constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                          device float* WTS [[buffer(4)]], uint r_ [[threadgroup_position_in_grid]],

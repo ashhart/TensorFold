@@ -1,4 +1,4 @@
-//! The engine's row_projection for the Hy4-flash family files, which import it by name (the speed probe builds it alone).
+//! The engine's row_projection for the Hy4-flash family files
 const m = @import("tensorfold").row_projection;
 pub const simd = m.simd;
 pub const simd_bits = m.simd_bits;
