@@ -65,7 +65,16 @@ pub const kept_disk = @import("cuda_disk.zig");
 
 /// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
 pub const request_starts = true;
+pub const request_starts_default_on = true;
 pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
+
+/// Message starts are the default for this family; its switch set to anything but 1 turns them off.
+/// Same contract as native/cuda_snaps.zig's requestStepFor; the module boundary keeps that file out
+/// of reach here, and both sides are pinned by host tests.
+pub fn requestStartsOn() bool {
+    const v = @import("core").profile.lookup(request_starts_switch) orelse return request_starts_default_on;
+    return std.mem.eql(u8, v, "1");
+}
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;

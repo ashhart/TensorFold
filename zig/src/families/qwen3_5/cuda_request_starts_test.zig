@@ -52,7 +52,9 @@ test "request starts: shared-KV parser keeps off values and its existing count e
     var saved = try Saved.take();
     defer saved.restore();
     try put("TF_QWEN_KV_SHARE", "32");
-    for ([_]?[:0]const u8{ null, "", "0", "off", "on", "true", "2" }) |v| {
+    try put("TF_QWEN_REQUEST_STARTS", null); // unset: starts are this family's default, so shared KV refuses
+    try t.expectError(error.QwenRequestStartsWithSharedKv, prefix.sharing());
+    for ([_]?[:0]const u8{ "", "0", "off", "on", "true", "2" }) |v| {
         try put("TF_QWEN_REQUEST_STARTS", v);
         try t.expectEqual(@as(usize, 32), try prefix.sharing());
     }

@@ -49,10 +49,12 @@ pub fn requestMinimum(comptime F: type) u32 {
     return if (@hasDecl(F, "request_min_chunk")) F.request_min_chunk else 1;
 }
 
-/// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
+/// A family whose own switch declares `request_starts_default_on` keeps message starts unless its
+/// switch is set to anything but 1; every other family keeps the opt-in: only exact 1 turns it on.
 pub fn requestStepFor(comptime F: type, value: ?[]const u8) u32 {
-    const v = value orelse return 0;
-    if (!std.mem.eql(u8, v, "1")) return 0;
+    if (value) |v| {
+        if (!std.mem.eql(u8, v, "1")) return 0;
+    } else if (!@hasDecl(F, "request_starts_default_on") or !F.request_starts_default_on) return 0;
     return if (@hasDecl(F, "request_starts") and F.request_starts) F.snap_grid else 0;
 }
 
