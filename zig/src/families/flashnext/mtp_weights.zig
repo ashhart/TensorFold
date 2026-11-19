@@ -24,7 +24,7 @@ const held = [_][]const u8{ ".fc_embedding", ".fc_hidden", ".shared_expert" };
 
 /// Whether `mxfp8` leaves the linear the loader names by `prefix`: a name covers the projections it opens.
 pub fn kept(prefix: []const u8) bool {
-    for (held) |name| if (std.mem.indexOf(u8, prefix, name) != null) return true;
+    for (held) |keep| if (std.mem.indexOf(u8, prefix, keep) != null) return true;
     return false;
 }
 
