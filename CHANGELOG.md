@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: prompt attention's permlane16 fetches inactive lanes (#4080, fixes #3765).
+
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
 
 - Model configs: a `config.json` head count of 0 is refused by name before any division instead of panicking, for Qwen 3.5 on HIP (`ZeroHeadCount`), Nemotron, the Gemma 4 DFlash drafter on Metal and DeepSeek-V4.1's Metal vision config (#3777). Thanks to @jschmied.
