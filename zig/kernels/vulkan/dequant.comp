@@ -1,0 +1,260 @@
+#version 460
+
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/dequant.comp at fde15c1ece69:
+
+// code unchanged, comments condensed.
+
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
+// Affine dequant: out = q * scale + bias; one thread owns one packed unit along the last axis.
+
+// bits 2/4/8: uint32 words, 32/bits values low-bits-first; bits 3/5/6: byte packs via BYTE_AT.
+
+// FP_MODE: e8m0/e4m3 scale bytes; fp4 e2m1 nibbles or fp8 e4m3 bytes (Metal fp4.h/fp8.h).
+
+// Honeykrisp: straight-line per-thread unit load; no lane-divergent word loads.
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+#ifdef FP_MODE
+layout(set = 0, binding = 0, std430) readonly buffer InputW {
+  uint values[];
+} input_w;
+// Scale bytes addressed through the word view.
+layout(set = 0, binding = 1, std430) readonly buffer Scales {
+  uint values[];
+} scales_data;
+// Optional nvfp4 global scale float32 word; dummy when unbound (flags bit 1).
+layout(set = 0, binding = 2, std430) readonly buffer GlobalScale {
+  uint values[];
+} global_scale_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer InputW {
+  uint values[];
+} input_w;
+layout(set = 0, binding = 1, std430) readonly buffer Scales {
+  STORAGE_TYPE values[];
+} scales_data;
+layout(set = 0, binding = 2, std430) readonly buffer Biases {
+  STORAGE_TYPE values[];
+} biases_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#endif
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+// FP_MODE push: operation=bits, reduce_size=group, matrix_n=packs/row, matrix_k=groups/row.
+
+// aux_offset=scale-byte start, rhs_size=global-scale word, flags bit1=has global scale.
+
+#ifdef FP_MODE
+float fp8_decode(uint bits) {
+  float magnitude = unpackHalf2x16((bits & 127u) << 7u).x * 256.0;
+  return ((bits & 128u) != 0u) ? -magnitude : magnitude;
+}
+
+float e8m0_decode(uint bits) {
+  return uintBitsToFloat(bits == 0u ? 0x400000u : bits << 23u);
+}
+
+// FP4 E2M1 via Metal fp4_e2m1 fp16 trick: (bits&7)<<9 subnormal, *16384 for 2^14.
+float fp4_decode(uint code) {
+  float magnitude = unpackHalf2x16((code & 7u) << 9u).x * 16384.0;
+  return ((code & 8u) != 0u) ? -magnitude : magnitude;
+}
+#endif
+
+// Constant-shift select chain from scatter.comp: runtime word/lane, constant shift per lane.
+uint byte_at(uint word, uint lane) {
+  return (lane == 0u)
+      ? (word & 0xFFu)
+      : (lane == 1u)
+      ? ((word >> 8u) & 0xFFu)
+      : (lane == 2u)
+      ? ((word >> 16u) & 0xFFu)
+      : ((word >> 24u) & 0xFFu);
+}
+
+void main() {
+  uint bits = params.operation;
+  uint group_size = params.reduce_size;
+  uint stride = gl_NumWorkGroups.x * 256u;
+#ifdef FP_MODE
+  uint pack_factor = (bits == 8u) ? 1u : 2u;
+  bool has_global_scale = (params.flags & 2u) != 0u;
+  float global_dec = 1.0;
+  if (has_global_scale) {
+    global_dec =
+        uintBitsToFloat(global_scale_data.values[params.rhs_size]) / 2688.0;
+  }
+  for (uint unit = gl_GlobalInvocationID.x; unit < params.count;
+       unit += stride) {
+    uint row = unit / params.matrix_n;
+    uint unit_column = unit % params.matrix_n;
+    uint group = (unit_column * pack_factor) / group_size;
+    uint scale_addr = params.aux_offset + row * params.matrix_k + group;
+    uint scale_byte = byte_at(
+        scales_data.values[scale_addr >> 2u], scale_addr & 3u);
+    float scale = (group_size == 16u) ? fp8_decode(scale_byte)
+                                      : e8m0_decode(scale_byte);
+    if (has_global_scale) {
+      scale *= global_dec;
+    }
+    uint packed_addr = params.lhs_offset + unit;
+    uint packed_byte = byte_at(
+        input_w.values[packed_addr >> 2u], packed_addr & 3u);
+    uint value_base = params.output_offset + unit * pack_factor;
+    if (bits == 8u) {
+      output_data.values[value_base] =
+          STORE_VALUE(scale * fp8_decode(packed_byte));
+    } else {
+      output_data.values[value_base] = STORE_VALUE(
+          scale * fp4_decode(packed_byte & 0xFu));
+      output_data.values[value_base + 1u] = STORE_VALUE(
+          scale * fp4_decode(packed_byte >> 4u));
+    }
+  }
+#else
+  uint is_byte_bits = (bits == 3u || bits == 5u || bits == 6u) ? 1u : 0u;
+  uint pack_factor = is_byte_bits == 1u
+      ? (bits == 6u ? 4u : 8u)
+      : (32u / bits);
+  uint bytes_per_pack = is_byte_bits == 1u ? (bits == 5u ? 5u : 3u) : 1u;
+  uint value_mask = (1u << bits) - 1u;
+  uint units_per_group = group_size / pack_factor;
+
+  for (uint unit = gl_GlobalInvocationID.x; unit < params.count;
+       unit += stride) {
+    uint row = unit / params.matrix_n;
+    uint unit_column = unit % params.matrix_n;
+    uint group = unit_column / units_per_group;
+    float scale = LOAD_VALUE(
+        scales_data.values[params.rhs_offset + row * params.matrix_k +
+            group]);
+    float bias = LOAD_VALUE(
+        biases_data.values[params.aux_offset + row * params.matrix_k +
+            group]);
+    uint value_base = params.output_offset + unit * pack_factor;
+    if (is_byte_bits == 1u) {
+// Byte pack: BYTE_AT bytes then upstream per-element extract masks (compile-time constants).
+      uint pack_base = params.lhs_offset + unit * bytes_per_pack;
+      uint c0 = byte_at(input_w.values[pack_base >> 2u], pack_base & 3u);
+      uint c1 = byte_at(
+          input_w.values[(pack_base + 1u) >> 2u], (pack_base + 1u) & 3u);
+      uint c2 = byte_at(
+          input_w.values[(pack_base + 2u) >> 2u], (pack_base + 2u) & 3u);
+      uint c3 = uint(0u);
+      uint c4 = uint(0u);
+      if (bytes_per_pack == 5u) {
+        c3 = byte_at(
+            input_w.values[(pack_base + 3u) >> 2u], (pack_base + 3u) & 3u);
+        c4 = byte_at(
+            input_w.values[(pack_base + 4u) >> 2u], (pack_base + 4u) & 3u);
+      }
+      if (bits == 3u) {
+        output_data.values[value_base] = STORE_VALUE(
+            scale * float(c0 & 0x7u) + bias);
+        output_data.values[value_base + 1u] = STORE_VALUE(
+            scale * float((c0 & 0x38u) >> 3) + bias);
+        output_data.values[value_base + 2u] = STORE_VALUE(
+            scale * float(((c0 & 0xc0u) >> 6) + ((c1 & 0x1u) << 2)) + bias);
+        output_data.values[value_base + 3u] = STORE_VALUE(
+            scale * float((c1 & 0xeu) >> 1) + bias);
+        output_data.values[value_base + 4u] = STORE_VALUE(
+            scale * float((c1 & 0x70u) >> 4) + bias);
+        output_data.values[value_base + 5u] = STORE_VALUE(
+            scale * float(((c1 & 0x80u) >> 7) + ((c2 & 0x3u) << 1)) + bias);
+        output_data.values[value_base + 6u] = STORE_VALUE(
+            scale * float((c2 & 0x1cu) >> 2) + bias);
+        output_data.values[value_base + 7u] = STORE_VALUE(
+            scale * float((c2 & 0xe0u) >> 5) + bias);
+      } else if (bits == 5u) {
+        output_data.values[value_base] = STORE_VALUE(
+            scale * float(c0 & 0x1fu) + bias);
+        output_data.values[value_base + 1u] = STORE_VALUE(
+            scale * float(((c0 & 0xe0u) >> 5) + ((c1 & 0x3u) << 3)) + bias);
+        output_data.values[value_base + 2u] = STORE_VALUE(
+            scale * float((c1 & 0x7cu) >> 2) + bias);
+        output_data.values[value_base + 3u] = STORE_VALUE(
+            scale * float(((c1 & 0x80u) >> 7) + ((c2 & 0xfu) << 1)) + bias);
+        output_data.values[value_base + 4u] = STORE_VALUE(
+            scale * float(((c2 & 0xf0u) >> 4) + ((c3 & 0x1u) << 4)) + bias);
+        output_data.values[value_base + 5u] = STORE_VALUE(
+            scale * float((c3 & 0x3eu) >> 1) + bias);
+        output_data.values[value_base + 6u] = STORE_VALUE(
+            scale * float(((c3 & 0xc0u) >> 6) + ((c4 & 0x7u) << 2)) + bias);
+        output_data.values[value_base + 7u] = STORE_VALUE(
+            scale * float((c4 & 0xf8u) >> 3) + bias);
+      } else {
+        output_data.values[value_base] = STORE_VALUE(
+            scale * float(c0 & 0x3fu) + bias);
+        output_data.values[value_base + 1u] = STORE_VALUE(
+            scale * float(((c0 >> 6) & 0x3u) + ((c1 & 0xfu) << 2)) + bias);
+        output_data.values[value_base + 2u] = STORE_VALUE(
+            scale * float(((c1 >> 4) & 0xfu) + ((c2 & 0x3u) << 4)) + bias);
+        output_data.values[value_base + 3u] = STORE_VALUE(
+            scale * float((c2 >> 2) & 0x3fu) + bias);
+      }
+    } else {
+      uint word = input_w.values[params.lhs_offset + unit];
+      for (uint lane = 0u; lane < pack_factor; ++lane) {
+        uint q = (word >> (lane * bits)) & value_mask;
+        output_data.values[value_base + lane] =
+            STORE_VALUE(scale * float(q) + bias);
+      }
+    }
+  }
+#endif
+}
