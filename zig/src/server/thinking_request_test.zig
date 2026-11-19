@@ -311,13 +311,21 @@ fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u
     try std.testing.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
     const message = whole.get("choices").?.array[0].get("message").?;
     const is_closed = ids[ids.len - 1] == 301;
-    try std.testing.expectEqualStrings("K", message.strField("content").?);
+    try std.testing.expectEqualStrings(if (is_closed) "K" else "", message.strField("content").?);
     if (is_closed) {
         try std.testing.expect(message.strField("reasoning_content") == null);
     } else try std.testing.expectEqualStrings("K", message.strField("reasoning_content").?);
     const tokens = whole.get("tensorfold").?.get("token_ids").?.array;
     try std.testing.expectEqual(@as(usize, 1), tokens.len);
     try std.testing.expectEqual(@as(?i64, 2), tokens[0].int64());
+}
+
+test "thinking request: checkpoint GLM 5.3 off closes its generation prefix and preserves main ids" {
+    try checkpoint(@embedFile("fixtures/thinking/glm53.jinja"), @embedFile("fixtures/thinking/glm53-tokenizer_config.json"), "glm5_next", "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>H<|assistant|><think>");
+}
+
+test "thinking request: checkpoint LFM2 off closes its generation prefix and preserves main ids" {
+    try checkpoint(@embedFile("fixtures/thinking/lfm2.jinja"), @embedFile("fixtures/thinking/lfm2-tokenizer_config.json"), "lfm2_moe", "<|startoftext|><|im_start|>user\nH<|im_end|>\n<|im_start|>assistant\n<think>");
 }
 
 /// GLM 5.3's template with thinking off, served: the prompt carries `word` from `effort`, which the reply reports.
