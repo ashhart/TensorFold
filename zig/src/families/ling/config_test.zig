@@ -274,7 +274,7 @@ test "the shapes the kernels take are accepted: the tiny config as written and w
         return e;
     };
     const c = try load();
-    try t.expect(c.kda_dim == 128 and c.conv == 4 and c.kv_lora == config.fixed.kv_lora);
+    try t.expect(c.kda_dim == config.fixed.kda_dim and c.conv == config.fixed.conv and c.kv_lora == config.fixed.kv_lora);
 }
 
 test "routing groups: groups of one and a single pick refused (HF's rule differs there); one group, all groups kept, groups of two accepted" {
