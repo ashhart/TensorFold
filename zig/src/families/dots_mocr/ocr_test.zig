@@ -76,6 +76,7 @@ test "dots: the reader's prompt is the one every oracle run recorded" {
     defer arena.deinit();
     for ([_][]const u8{ page_json, line_json, cut_json }) |text|
         try t.expectEqualStrings((try fixture(arena.allocator(), text)).prompt_sha256, &hex(ocr.prompt));
+    try t.expectEqual(api.ocr.Geometry.block, ocr.reader.geometry);
 }
 
 test "dots: oracle runs in TF_DOTS_OCR_DIR match their fixtures' hashes and read as their pages" {
@@ -90,7 +91,7 @@ test "dots: oracle runs in TF_DOTS_OCR_DIR match their fixtures' hashes and read
     for (kinds, blocks) |kind, b| {
         try t.expectEqual(kind, b.kind);
         try t.expect(b.content.len > 0);
-        for (b.quad) |q| try t.expect(q[0] >= 0 and q[0] <= 1240 and q[1] >= 0 and q[1] <= 1754);
+        for (b.quad.?) |q| try t.expect(q[0] >= 0 and q[0] <= 1240 and q[1] >= 0 and q[1] <= 1754);
     }
     // The page's table has a spanned header cell, so it stays one clean HTML table.
     try t.expect(std.mem.startsWith(u8, blocks[6].content, "<table>") and std.mem.endsWith(u8, blocks[6].content, "</table>"));
@@ -128,7 +129,7 @@ test "dots: a page reads as headers, title, text, caption, spanned table, list a
     const sx: f32 = 1240.0 / 1232.0;
     const sy: f32 = 1754.0 / 1764.0;
     const want: api.ocr.Quad = .{ .{ 70 * sx, 50 * sy }, .{ 410 * sx, 50 * sy }, .{ 410 * sx, 90 * sy }, .{ 70 * sx, 90 * sy } };
-    for (want, blocks[0].quad) |w, g| for (w, g) |x, y| try t.expectApproxEqAbs(x, y, 1e-3);
+    for (want, blocks[0].quad.?) |w, g| for (w, g) |x, y| try t.expectApproxEqAbs(x, y, 1e-3);
     try t.expectEqualStrings("TENSORFOLD READER NOTES", blocks[0].content);
     try t.expectEqualStrings("# Reading a Page Twice", blocks[2].content);
     try t.expectEqualStrings("## 1. Why the second read matters", blocks[3].content);
@@ -174,7 +175,7 @@ test "dots: boxes scale to the original from the frames of two token budgets" {
         // One block covering the frame's middle half covers the original's middle half.
         const text = try std.fmt.allocPrint(a, "[{{\"bbox\": [{d}, {d}, {d}, {d}], \"category\": \"Text\", \"text\": \"x\"}}]", .{ frame.width / 4, frame.height / 4, frame.width / 4 * 3, frame.height / 4 * 3 });
         const blocks = try ocr.parse(a, text, original, frame.*);
-        const q = blocks[0].quad;
+        const q = blocks[0].quad.?;
         const sx = 1700.0 / @as(f32, @floatFromInt(frame.width));
         const sy = 2250.0 / @as(f32, @floatFromInt(frame.height));
         try t.expectApproxEqAbs(@as(f32, @floatFromInt(frame.width / 4)) * sx, q[0][0], 1e-3);
@@ -214,7 +215,7 @@ test "dots: golden boxes on a 1000 x 333 page come back in the client's pixels f
         const text = try std.fmt.allocPrint(a, "[{{\"bbox\": [{d}, {d}, {d}, {d}], \"category\": \"Text\", \"text\": \"x\"}}]", .{ g.model[0], g.model[1], g.model[2], g.model[3] });
         const blocks = try ocr.parse(a, text, original, prepared.frame.?);
         try t.expectEqual(@as(usize, 1), blocks.len);
-        const q = blocks[0].quad;
+        const q = blocks[0].quad.?;
         const want: api.ocr.Quad = .{ .{ g.client[0], g.client[1] }, .{ g.client[2], g.client[1] }, .{ g.client[2], g.client[3] }, .{ g.client[0], g.client[3] } };
         for (want, q) |w, got| {
             try t.expectApproxEqAbs(w[0], got[0], 1e-3);
@@ -285,10 +286,10 @@ test "dots: pictures keep empty content, empty blocks drop, reversed boxes swap"
     try t.expectEqual(@as(usize, 3), blocks.len);
     try t.expectEqual(api.ocr.Kind.picture, blocks[0].kind);
     try t.expectEqualStrings("", blocks[0].content);
-    try t.expectEqual(api.ocr.Quad{ .{ 20, 40 }, .{ 60, 40 }, .{ 60, 80 }, .{ 20, 80 } }, blocks[0].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 20, 40 }, .{ 60, 40 }, .{ 60, 80 }, .{ 20, 80 } }, blocks[0].quad.?);
     try t.expectEqualStrings("kept", blocks[1].content);
-    try t.expectEqual(api.ocr.Quad{ .{ 20, 40 }, .{ 100, 40 }, .{ 100, 120 }, .{ 20, 120 } }, blocks[1].quad);
-    try t.expectEqual(api.ocr.Quad{ .{ 1, 3 }, .{ 5, 3 }, .{ 5, 7 }, .{ 1, 7 } }, blocks[2].quad);
+    try t.expectEqual(api.ocr.Quad{ .{ 20, 40 }, .{ 100, 40 }, .{ 100, 120 }, .{ 20, 120 } }, blocks[1].quad.?);
+    try t.expectEqual(api.ocr.Quad{ .{ 1, 3 }, .{ 5, 3 }, .{ 5, 7 }, .{ 1, 7 } }, blocks[2].quad.?);
     try t.expectEqual(@as(usize, 0), (try ocr.parse(a, " [] \n", .{ .width = 1, .height = 1 }, .{ .width = 1, .height = 1 })).len);
 }
 

@@ -7,6 +7,7 @@ const serve = @import("hip_serve");
 const c = @import("config.zig");
 const Engine = @import("hip_engine.zig").Engine;
 const Hip = @import("hip_lanes.zig").Hip;
+const ocr = @import("ocr.zig");
 
 pub const model_type = c.model_type;
 pub const formats: []const []const u8 = &.{"bf16"};
@@ -56,8 +57,7 @@ fn release(ptr: *anyopaque) void {
 }
 fn prepare(ptr: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !api.PreparedImage {
     const own: *Owned = @ptrCast(@alignCast(ptr));
-    const p = try @import("processor.zig").prepare(own.e.io, a, bytes, @min(max_tokens, 6144));
-    return .{ .pixels = p.pixels, .gh = @intCast(p.geometry.h / 14), .gw = @intCast(p.geometry.w / 14), .tokens = @intCast(p.geometry.tokens()), .hash = p.hash };
+    return ocr.prepared(try @import("processor.zig").prepare(own.e.io, a, bytes, @min(max_tokens, 6144)));
 }
 const markers = [_]u32{ c.image_start, c.image_token, c.image_end };
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: serve.Options, problem: *[]const u8) !Loaded {
@@ -78,6 +78,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     const vision: ?api.Vision = if (o.vision) |v| .{ .ctx = own, .prepare = prepare, .image_token = c.image_token, .markers = &markers, .part_type = "image", .image_tokens = if (v.image_tokens_set) v.image_tokens else 6144, .max_images = v.max_images, .explain = @import("sys").optional_libraries.explain } else null;
     return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .offer = .{
         .vision = vision,
+        .ocr = ocr.reader,
         .cache = if (e.cache_bytes > 0) &h.store else null,
         .cache_capacity = .{ .budget_bytes = e.cache_bytes, .minimum_state_bytes = @import("hip_snapshot.zig").Snapshot.bytes(1) },
     } };
