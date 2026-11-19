@@ -6,7 +6,6 @@ const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
 const paging = @import("paging.zig");
-
 const DeviceBuffer = cuda.DeviceBuffer;
 const grouped = cuda.grouped;
 const experts = cuda.experts;
@@ -347,7 +346,7 @@ pub const Model = struct {
         defer gpa.free(host);
         var at: usize = 0;
         for (chains) |ch| for (ch.tokens, 0..) |t, i| {
-            host[at] = @intCast(t);
+            host[at] = if (t < m.c.vocab) @intCast(t) else return error.TokenOutsideVocabulary; // embed reads w[id] unchecked
             host[n + at] = @intCast(ch.p0 + i);
             host[2 * n + at] = @intCast(ch.slot);
             at += 1;

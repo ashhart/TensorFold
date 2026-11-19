@@ -110,6 +110,7 @@ const Pass = struct {
 };
 
 fn embedRow(comptime Tri: type, p: *Pass, tri: Tri, token: u32, h: u64) !void {
+    if (token >= vocab) return error.InvalidToken; // embed reads the table at id unchecked
     const id: i32 = @intCast(token);
     // on the compute stream (queued _embed launches still read ids), then waited for: `id` lives on this frame
     try p.s.ids.uploadAsync(0, std.mem.asBytes(&id), p.stream.handle);

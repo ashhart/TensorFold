@@ -111,7 +111,6 @@ pub const Cuda = struct {
         @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
         return .{ .bits = self.bits_dev + slot * words * 4, .words = words };
     }
-
     /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const self = of(ptr);
@@ -529,7 +528,7 @@ pub const Cuda = struct {
                 continue;
             }
             if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
-            try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
+            try h.stage(follow);
             parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .rule_host = if (self.e.sampling) |x| sampler.rule(x) else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
