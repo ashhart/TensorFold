@@ -1,6 +1,4 @@
-// Hy4-flash's absorbed-MLA BF16 products on the tensor units (nax.h's 16x32x16 op): every row count runs the same
-// tiles, so prompt chunks and decode rows get the same bits. One head a threadgroup column, 16 rows by 128 outputs a
-// threadgroup (4 simdgroups of 16 x 32).
+// Hy4-flash's absorbed-MLA BF16 products on the tensor units (nax.h's 16x32x16 op)
 #include "../nax.h"
 using namespace tfp;
 
@@ -42,8 +40,7 @@ inline bfloat hy4n_round(float value) {
     }
 }
 
-// values[r][h][0, 256) = gate(latent[r][h][0, 512) W_UV[h]^T), W_UV[h] stored [256][512]; the gate as
-// tf_hy4_gate_values: the value rounded, times its rounded sigmoid, rounded.
+// values[r][h][0, 256) = gate(latent[r][h][0, 512) W_UV[h]^T), W_UV[h] stored [256][512];
 [[kernel]] void tf_hy4_expand_gated_nax(const device bfloat* latent [[buffer(0)]], const device bfloat* wv [[buffer(1)]],
                                         device bfloat* values [[buffer(2)]], constant Hy4MlaProjectArgs& args [[buffer(3)]],
                                         const device bfloat* logits [[buffer(4)]], uint3 group [[threadgroup_position_in_grid]],
@@ -75,17 +72,11 @@ inline bfloat hy4n_round(float value) {
     }
 }
 
-// Absorbed MLA attention on the tensor units, flash style: one head and 16 query rows a threadgroup, 32-key tiles at
-// absolute key indices (so a row's tiles and their order are its own, whatever rows share its block; tiles outside a
-// row's range are exact no-ops for it). S = Q K^T with the 576 key columns split over the 4 simdgroups and their
-// partials added in a fixed order; an online softmax a row; O += P V with each simdgroup owning 128 latent columns;
-// the learned sink joins at the end. ranges[r] = [lo, hi) key indices; tiles[t] = the slot of key index 32 t (a
-// tile's 32 slots are consecutive).
+// Absorbed MLA attention on the tensor units, flash style
 constant constexpr int hy4_tk = 32, hy4_kw = 576, hy4_lw = 512;
 struct Hy4FlashShape { uint rows, heads; float scale; uint pad; };
 
 // SPLIT (decode passes, one row block): threadgroup z of `a.pad` takes the z-th run of the tiles and stores its
-// unnormalized O, running max and sum (fp32) for tf_hy4_attend_combine instead of the sink and the division.
 template <bool SPLIT>
 inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cache, const device uint2* ranges,
                            const device uint* tiles, const device float* sinks, device bfloat* out,
@@ -255,8 +246,7 @@ inline void hy4_attend_nax(const device bfloat* query, const device bfloat* cach
     hy4_attend_nax<true>(query, cache, ranges, tiles, sinks, out, a, group, sg, lane, o_part, ml_part, part);
 }
 
-// The split runs of tf_hy4_attend_nax_split joined with the learned sink: out = sum_z O_z e^(m_z - M) / L,
-// L = sum_z l_z e^(m_z - M) + e^(sink - M), M the largest of the maxima and the sink. Grid (heads, rows), 128 threads.
+// The split runs of tf_hy4_attend_nax_split joined with the learned sink
 [[kernel]] void tf_hy4_attend_combine(const device float* o_part [[buffer(0)]], const device float* ml_part [[buffer(1)]],
                                       const device float* sinks [[buffer(2)]], device bfloat* out [[buffer(3)]],
                                       constant Hy4FlashShape& a [[buffer(4)]], uint2 group [[threadgroup_position_in_grid]],

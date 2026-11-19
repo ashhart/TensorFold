@@ -1,5 +1,4 @@
-// Hy4-flash's compressed indexer, the parts before scoring: each row's normalized token key into the layer's key
-// cache, and each four-slot group's pooled, normalized key (fp32 inside, BF16 out; RoPE runs after, on the cache).
+// Hy4-flash's compressed indexer, the parts before scoring
 #include <metal_stdlib>
 using namespace metal;
 #pragma clang fp contract(off)
@@ -15,8 +14,7 @@ inline ushort hy4_ix_round(float value) {
     return ushort((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
-// One threadgroup of 128 a row: RMS over the 128 key columns in fp32, the normalized value rounded to BF16, then
-// times the BF16 gain (a BF16 product), written at the row's cache slot.
+// One threadgroup of 128 a row: RMS over the 128 key columns in fp32, the normalized value rounded to BF16
 kernel void tf_hy4_index_keys(
     const device ushort *keys [[buffer(0)]],
     const device ushort *gain [[buffer(1)]],
@@ -40,10 +38,7 @@ kernel void tf_hy4_index_keys(
     cache[ulong(slot) * 128 + t] = hy4_ix_round(hy4_ix_value(gain[t]) * normed);
 }
 
-// One threadgroup of 128 a group (thread = output column): the four token keys through the fp32 value and gate
-// projections ([out][in]), the slot softmax of the gates plus the intra-group position bias, the weighted sum, and
-// the fp32 key norm, rounded to BF16 at the group's cache row. The four slots of a group are its tokens' cache
-// slots 4g..4g+3.
+// One threadgroup of 128 a group (thread = output column)
 kernel void tf_hy4_index_groups(
     const device ushort *token_keys [[buffer(0)]],
     const device float *value_w [[buffer(1)]],

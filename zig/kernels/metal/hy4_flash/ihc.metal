@@ -60,9 +60,7 @@ kernel void tf_hy4_ihc_collapse(
     }
 }
 
-// tf_hy4_ihc_collapse with the gate count fixed at compile time: the same thread partition, fma chains, simd
-// butterflies and partial sums in the same order, so the same bits, but the eight gate sums live in registers
-// and the loads of an iteration issue together instead of through an indexed stack array.
+// tf_hy4_ihc_collapse with the gate count fixed at compile time
 template <uint G>
 inline void ihc_collapse_fixed(
     const device bfloat *hidden, const device float *project, const device float *bias, const device float *scale,
@@ -119,10 +117,7 @@ inline void ihc_collapse_fixed(
 HY4_IHC_FIXED(4)
 HY4_IHC_FIXED(8)
 
-// The same collapse in two launches. tf_hy4_ihc_partials runs each of the 256-thread version's eight simdgroups as
-// its own threadgroup (simdgroup s on core s instead of all eight on one core): thread t = 32 s + lane keeps its
-// stride-256 fma chain and butterfly, and lane 0 stores the simdgroup's sums as part[row][gate][s] (gate 8: sum of
-// squares). tf_hy4_ihc_finish then adds the eight partials in the same order and writes the collapsed row.
+// The same collapse in two launches.
 template <uint G>
 inline void ihc_partials_fixed(const device bfloat *hidden, const device float *project, device float *part,
                                constant Hy4IhcShape &a, uint row, uint simd, uint lane) {
@@ -148,8 +143,7 @@ inline void ihc_partials_fixed(const device bfloat *hidden, const device float *
     }
 }
 
-// Threadgroup `slice` of a row writes columns [256 slice, 256 slice + 256): every slice derives the same gates from
-// the same partials in the same order, and slice 0 alone stores the post gates.
+// Threadgroup `slice` of a row writes columns [256 slice, 256 slice + 256)
 template <uint G>
 inline void ihc_finish_fixed(const device bfloat *hidden, const device float *part, const device float *bias,
                              const device float *scale, device bfloat *collapsed, device float *post,
@@ -230,13 +224,7 @@ kernel void tf_hy4_draft_residual(
     out[o] = bfloat(float(base[i]) + float(branch[o]));
 }
 
-// ---- Sub-block seams in two launches instead of five (decode and prompt alike) ----
-// tail: a sub-block's branch (one input, or two added in bfloat as the expert branches are) through its output RMS
-// norm (bf16(x * inv) * gain, as the norm kernel rounds), mixed into the four residual streams with the post gates
-// (rounded as tf_hy4_ihc_add), and, when the next collapse's weights are given, that collapse's fp32 partial sums
-// over the mixed streams. 12 threadgroups of 256 threads a row, each element once; every threadgroup derives the norm
-// scale itself from the branch row (6 KB) and stores its 19 sums at part[row][sum][tg] (16 slots a sum).
-// mode 0: partials only of the given streams (no branch; after an Engram layer).
+// ---- Sub-block seams in two launches instead of five (decode and prompt alike) ---- tail
 constant constexpr uint seam_tgs = 12;
 struct Hy4TailShape { uint rows, width, two, partials; float eps; uint mode; };
 
@@ -250,8 +238,7 @@ inline float seam_tg_sum(float v, uint lane, uint sg, threadgroup float *scratch
     return total;
 }
 
-// The 10 stream products sum_i m[s][i] m[u][i] (s <= u) a row, so the head gets the collapsed row's sum of squares
-// as pre^T Gram pre instead of a second pass over the row: part[row][9 + k][tg].
+// The 10 stream products sum_i m[s][i] m[u][i] (s <= u) a row
 constant constexpr uint seam_gram = 10;
 constant constexpr uint seam_slots = 16;
 
@@ -277,8 +264,7 @@ inline void ihc_tail(const device bfloat *branch, const device bfloat *branch2, 
     for (uint j = 0; j < G; ++j) logits[j] = 0.0f;
 #pragma unroll
     for (uint k = 0; k < seam_gram; ++k) gram[k] = 0.0f;
-    // a column's four streams together (for the 3072 width, thread t of threadgroup tg owns one column; its stream
-    // order is the flat order's, so the gate sums keep their bits)
+    // a column's four streams together (for the 3072 width, thread t of threadgroup tg owns one column;
     for (uint col = tg * 256 + t; col < W; col += seam_tgs * 256) {
         float m[4];
         float v = 0.0f, normed = 0.0f;
@@ -335,9 +321,7 @@ inline void ihc_tail(const device bfloat *branch, const device bfloat *branch2, 
     }
 }
 
-// head: the collapse's gates from the tail's partials (added over the 12 threadgroups in order), the collapsed row
-// (as tf_hy4_ihc_finish), then the sub-block's input RMS norm with the row's sum of squares from the tail's stream
-// products: 12 threadgroups of 256 a row, a column a thread, no pass over the whole row.
+// head: the collapse's gates from the tail's partials (added over the 12 threadgroups in order)
 template <uint G>
 inline void ihc_head(const device bfloat *hidden, const device float *part, const device float *bias,
                      const device float *scale, const device bfloat *gain, device bfloat *collapsed,
@@ -376,11 +360,7 @@ inline void ihc_head(const device bfloat *hidden, const device float *part, cons
     }
 }
 
-// ---- tail and the next head in one launch (decode passes): the row's 12 threadgroups meet at an in-kernel barrier
-// between them (all are resident: at most 16 rows a launch), so the head's gates and Gram sums come from every
-// threadgroup's partials without a second launch. A thread owns one column (width 3072 = 12 x 256) and keeps its
-// four mixed stream values in registers across the barrier. The partials cross threadgroups as device atomics.
-// The same arithmetic as ihc_tail then ihc_head (the same sums in the same orders), so the same bits.
+// ---- tail and the next head in one launch (decode passes)
 struct Hy4SeamBarrier { atomic_uint count; atomic_uint gen; };
 
 inline void seam_barrier(device Hy4SeamBarrier* b, uint t) {

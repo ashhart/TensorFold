@@ -12,8 +12,7 @@ pub const absorbed_stride = latent + rope;
 
 pub const HeadRange = struct { first: u32, count: u32 };
 
-/// The checkpoint's own affine kv_b rows for the selected heads (per head: 192 key rows, then 256 value rows, each
-/// 512 latent values in groups of 64), for decode GEMVs that read the codes instead of the BF16 copies.
+/// The checkpoint's own affine kv_b rows for the selected heads (per head
 pub const Packed = struct {
     bits: u8,
     words: []u8,
