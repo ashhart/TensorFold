@@ -1,4 +1,4 @@
-# Gemma 4 31B, native Metal
+# Gemma 4 31B, native Metal and CUDA
 
 This recipe covers text generation with
 [`mlx-community/gemma-4-31B-it-4bit`](https://huggingface.co/mlx-community/gemma-4-31B-it-4bit/tree/696d436c404745a59f30e4939a658162b0a9e57f),
@@ -95,6 +95,21 @@ server took 0.07 s (ten idle gaps, none slower).
 | Images (`--vision`) | PNG and JPEG data URLs, and public HTTPS URLs with `--vision-urls`, below. |
 | Structured output | `response_format` and the `guided_*` fields, drafts on and off, below. |
 | Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |
+
+## CUDA
+
+On Linux with an NVIDIA GPU, the release archive serves the same checkpoint and drafter without a build. Pull both
+into the Hugging Face cache and name the drafter by its repository:
+
+```bash
+tensorfold pull mlx-community/gemma-4-31B-it-4bit@696d436c404745a59f30e4939a658162b0a9e57f
+tensorfold pull z-lab/gemma-4-31B-it-DFlash@eabd648301ce28583cc14757912e5e0f84e152e1
+tensorfold serve mlx-community/gemma-4-31B-it-4bit --drafter z-lab/gemma-4-31B-it-DFlash
+```
+
+On one GB10 with 1.2.10, the startup line reports 47.5 GiB for the model at the default 32,768-token window, well above
+the 17.2 GiB download; leave room for it. The GB10 prefill and drafted-decode rates are in the
+[1.1.4 changes](../../CHANGELOG.md#114).
 
 ## Images
 
