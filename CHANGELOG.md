@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: Qwen 3.5 prices a lone stream's copy windows (suffix matches from the prompt or the reply) from its own timed rounds, so a copy that would cost more than it lands is cut to its best prefix or left off, and keeps those prices across requests; replies are unchanged, and other families opt in through `copy_guard` (#3728, fixes #3390). Thanks to @AbrahamCete.
+
 - DeepSeek-V4.1 on Metal: with `TF_DSV41_PREFILL_PIECES=1`, `TENSORFOLD_PREFILL_ORDER=srpt`, a prompt policy, share or budget, or `--decode-share` set, a prompt runs a chunk at a time between the other streams' rounds, so a short request no longer waits behind a long prompt; with none of them set, prompts run whole as before (#2950, refs #2984). Thanks to @gilby.
 
 - `tensorfold info` on Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prints the startup budget `serve` charges a Qwen3.8-27B-class checkpoint (weights, each stream's KV and state, the prompt scratch; no drafter or images) and whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context; `info` also copies `model_type` out of the parse before freeing it (#3268, refs #2761). Thanks to @cshintov.
