@@ -94,7 +94,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
 
-- Qwen3.8-27B on Metal: M5 qk projections, flat glue and optional Metal 4 verify submission share replacement-kernel contract checks; prompt chunks retain Metal 3 submission (#2342).
+- Qwen3.8-27B on Metal: M5 qk projections and flat glue share replacement-kernel contract checks (#2342).
 
 ## 1.3.0
 
