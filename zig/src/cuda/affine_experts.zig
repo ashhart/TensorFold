@@ -62,7 +62,6 @@ pub const Kernels = struct {
     }
 
     /// Up returns pair rows in BF16. Down reads pair rows and returns FP32 expert contributions.
-    /// IDs outside this rank's slice write zeros, preserving the global route ordering on each rank.
     pub fn run(self: Kernels, s: Stream, precision: Precision, direction: Direction, b: Arguments, a: Shape) !void {
         try a.check();
         if (direction == .up and b.src_rows == 0) return error.AffineExpertMissingRows;

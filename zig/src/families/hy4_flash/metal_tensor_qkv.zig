@@ -60,8 +60,7 @@ fn layout(bits: u8, n: usize, k: usize, sk: usize) lane.Layout {
     };
 }
 
-/// Any other dense projection [n, k] on tensor units: the QKV layout, with split-K by depth (2 under 2048, 4 to 4096,
-/// else 8). Every row's bits are the same however many rows share the encode (independent 16-row blocks).
+/// Any other dense projection [n, k] on tensor units
 pub fn denseLayout(bits: u8, n: usize, k: usize) lane.Layout {
     return layout(bits, n, k, if (k < 2048) 2 else if (k <= 4096) 4 else 8);
 }
@@ -78,8 +77,7 @@ pub fn flavor(t: config.Text, heads: u32) usize {
     return if (heads == t.swa_num_attention_heads) 1 else 0;
 }
 
-/// Passes of at most this many rows take the reg kernels that add their own group sums: the same words as the
-/// sums pass, without its dispatch and barrier.
+/// Passes of at most this many rows take the reg kernels that add their own group sums
 pub const inline_rows = 8;
 
 /// `l` with the kernel adding its split's group sums up front (4-bit reg and 8-bit layouts; null otherwise).

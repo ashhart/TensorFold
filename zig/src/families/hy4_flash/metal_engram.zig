@@ -13,14 +13,11 @@ const ihc = @import("ihc.zig");
 const Ref = common.Ref;
 const width = 96;
 
-/// Where the n-gram tables live (TF_HY4_ENGRAM): nvme reads the checkpoint's mapping (pages on demand, read
-/// ahead a step at a time); ram copies the tables into resident memory for the host's gather; gpu keeps them in GPU
-/// memory and gathers there, the host only hashing the windows. All three stage the same bits.
+/// Where the n-gram tables live (TF_HY4_ENGRAM)
 pub const Placement = enum { nvme, ram, gpu };
 
-pub fn placement() Placement {
-    const v = std.mem.span(std.c.getenv("TF_HY4_ENGRAM") orelse return .nvme);
-    return std.meta.stringToEnum(Placement, v) orelse .nvme;
+pub fn placement() !Placement {
+    return @fromBackingInt(@intCast(try @import("sys").environment.read(u32, "TF_HY4_ENGRAM", 0)));
 }
 
 pub const Layer = struct {
@@ -63,7 +60,7 @@ pub const Layer = struct {
             .fp8 = fp8,
             .hidden = hidden,
         };
-        switch (placement()) {
+        switch (try placement()) {
             .nvme => {},
             .ram, .gpu => |where| {
                 const t = &out.table.affine;

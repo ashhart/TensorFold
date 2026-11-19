@@ -103,8 +103,7 @@ pub const Kernels = struct {
     pub const TailShape = extern struct { rows: u32, width: u32, two: u32, partials: u32, eps: f32, mode: u32 };
     pub const Tail = struct { branch: Ref, branch2: ?Ref = null, gain: Ref, residual: Ref, post: Ref, output: Ref, next: ?Ref = null, partials: Ref };
 
-    /// A sub-block's branch (or two, added) through its output norm, mixed into the streams; with `next` (the next
-    /// collapse's projection, `gates` of them) also that collapse's partials.
+    /// A sub-block's branch (or two, added) through its output norm, mixed into the streams;
     pub fn tailPass(self: Kernels, e: mtl.ComputeEncoder, b: Tail, rows: u32, width: u32, eps: f32, gates: u32) void {
         e.setPipeline(self.tail[@intFromBool(gates != ihc.streams)]);
         const args = [_]Ref{ b.branch, b.branch2 orelse b.branch, b.gain, b.residual, b.post, b.output, b.next orelse b.branch, b.partials };

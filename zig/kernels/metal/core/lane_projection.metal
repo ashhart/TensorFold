@@ -15,8 +15,7 @@ using namespace mpp::tensor_ops;
 #ifndef TF_ROW_BLOCKS
 #define TF_ROW_BLOCKS 0
 #endif
-// Reg path: each split adds its rows' group sums itself (tf_lane_xsum, the sums pass's own loop), so no sums
-// dispatch or barrier comes before the projection; the words are the same.
+// TF_INLINE_SUMS: each split adds its rows' group sums with the sums pass's own loop (no sums dispatch, same words).
 #ifndef TF_INLINE_SUMS
 #define TF_INLINE_SUMS 0
 #endif
@@ -324,8 +323,7 @@ uint group_id [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_sim
 #endif
 
 #if (TF_BITS == 4 || TF_BITS == 8) && defined(TF_REG)
-// a lane's codes (4-bit: two quads; 8-bit: the same codes a byte each, four quads), its two metadata quads and its
-// two row sums for one group
+// A lane's codes for one group (4-bit: two quads; 8-bit: the same codes a byte each), metadata quads and row sums.
 #if TF_BITS == 8
 struct tf_reg_load { uint4 w[4]; uint4 q0, q1; float x0, x1; };
 constant constexpr int TF_REG_QUADS = 4;
