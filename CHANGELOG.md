@@ -641,7 +641,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Kernel contract: Hy4-flash's Metal kernels (its indexer, MLA projections and attention, hyper-connections, routing, experts, row windows and Engram) and its lane projection variants (8-bit reg, inline group sums) register under gates 1 to 5, with a planted control for each group; twelve gate-1 findings on non-finite inputs are recorded as known (#4022).
 
-- Qwen3.8-27B on Metal: M5 qk projections, flat glue and optional Metal 4 verify submission share replacement-kernel contract checks; prompt chunks retain Metal 3 submission (#2342).
+- Qwen3.8-27B on Metal: M5 qk projections and flat glue share replacement-kernel contract checks (#2342).
 
 ## 1.3.0
 
