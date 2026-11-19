@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: a request cancelled during its prompt pass, a drafted round or a streamed reply keeps the prompt state it completed when the prompt cache has room, so a follow-up on the same conversation resumes there instead of re-reading the history; after a cancelled reply, slot 0 first rewinds to its saved prompt state, and in the shared lane core a cancelled pass gives up only its own cache reservation (#3643, for #3618).
+
 - Server: every prompt-cache lookup records why it did not resume further (for example `cold`, `evicted`, `shed`, `prompt_changed` or `reply_changed`), and `/metrics` counts them as `prompt_cache_miss_total{reason}` over a fixed list of reason names (#3706, for #3686). Thanks to @bikepresentball.
 
 - DeepSeek-V4.1 on Metal: the prompt layer's compressor, indexer key and weight, and MoE gate projections run on a new simdgroup-matrix kernel (`tf_dsv41_mv_mma`) at 16 or more rows, bit-equal to the matrix-vector kernel it replaces (#3668, refs #2984). Thanks to @gilby.
