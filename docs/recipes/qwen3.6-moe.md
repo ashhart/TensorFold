@@ -1,14 +1,15 @@
 # Qwen3.6-35B-A3B
 
-This recipe describes the Python engine, frozen at 0.6.6 and available at the
-[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, variables and paths belong to that
-engine. @cshintov brought the model to Macs in [#138](https://github.com/ashhart/TensorFold/pull/138), and
+The Mac execution, CUDA execution and Measurements sections describe the Python engine, frozen at 0.6.6 and available
+at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6); their flags, variables and paths belong to
+that engine. @cshintov brought the model to Macs in [#138](https://github.com/ashhart/TensorFold/pull/138), and
 @philip-pentatonic ([#78](https://github.com/ashhart/TensorFold/pull/78),
 [#84](https://github.com/ashhart/TensorFold/pull/84)) and @BHCC2025
 ([#270](https://github.com/ashhart/TensorFold/pull/270)) worked on its CUDA path; see [credits](../credits.md).
-The native CUDA engine serves the checkpoint with its MTP layer ([docs/WINDOWS.md](../WINDOWS.md)); the Metal native
-binary has no `qwen3_5_moe` family yet and cannot serve the checkpoint there; `tensorfold pull` and `tensorfold
-info` still read it, since the hub registers the model type.
+The native CUDA engine serves the checkpoint with its MTP layer: see
+[NVIDIA's NVFP4 checkpoint](#nvidias-nvfp4-checkpoint-native-cuda) and its [1M-token window](#a-1m-token-window-yarn).
+The Metal native binary has no `qwen3_5_moe` family yet and cannot serve the checkpoint there; `tensorfold pull` and
+`tensorfold info` still read it, since the hub registers the model type.
 
 The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
 (Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense
