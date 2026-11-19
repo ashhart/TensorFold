@@ -38,7 +38,7 @@ pub const Packed = struct {
         const w = try owner.alloc(l.weightWords() * 4);
         const sb = try owner.alloc(l.metadataElements() * 2);
         try lane.pack(l, words, scales, bias, w.slice(u32, l.weightWords()), sb.slice(u16, l.metadataElements()));
-        if (l.reg) try lane.regOrder(owner.d, &.{.{ .w = .{ .buf = w }, .n = l.n, .k = l.k }});
+        if (l.reg and l.format.bits == 8) try lane.regOrder8(w.slice(u32, l.weightWords()), l.n, l.k) else if (l.reg) try lane.regOrder(owner.d, &.{.{ .w = .{ .buf = w }, .n = l.n, .k = l.k }});
         return .{ .w = .{ .buf = w }, .sb = .{ .buf = sb } };
     }
 };
@@ -52,11 +52,11 @@ fn layout(bits: u8, n: usize, k: usize, sk: usize) lane.Layout {
         .k = k,
         .sk = sk,
         .format = .{ .bits = bits, .group = 64 },
-        .reg = bits == 4,
-        .precompute_sums = bits == 4,
+        .reg = true,
+        .precompute_sums = true,
         // a whole prompt chunk in one encode on the reg path (independent 16-row blocks, so the same bits)
         .rows = prompt_rows,
-        .row_blocks = bits != 4,
+        .row_blocks = false,
     };
 }
 
@@ -78,9 +78,24 @@ pub fn flavor(t: config.Text, heads: u32) usize {
     return if (heads == t.swa_num_attention_heads) 1 else 0;
 }
 
+/// Passes of at most this many rows take the reg kernels that add their own group sums: the same words as the
+/// sums pass, without its dispatch and barrier.
+pub const inline_rows = 8;
+
+/// `l` with the kernel adding its split's group sums up front (4-bit reg and 8-bit layouts; null otherwise).
+pub fn withInlineSums(l: lane.Layout) ?lane.Layout {
+    if (!l.reg and l.format.bits != 8) return null;
+    var out = l;
+    out.inline_sums = true;
+    return out;
+}
+
 pub const Kernels = struct {
     inputs: [2]lane.Projection,
     queries: [2]lane.Projection,
+    /// The same projections adding their own group sums (4-bit reg layouts), for passes of inline_rows at most.
+    inline_inputs: [2]?lane.Projection = .{ null, null },
+    inline_queries: [2]?lane.Projection = .{ null, null },
     unpack: mtl.Pipeline,
 
     pub fn load(a: std.mem.Allocator, d: mtl.Device, t: config.Text, bits: u8) !Kernels {
@@ -103,6 +118,10 @@ pub const Kernels = struct {
             out.inputs[i] = input;
             made += 1;
         }
+        for ([_]u32{ t.num_attention_heads, t.swa_num_attention_heads }, 0..) |heads, i| {
+            if (withInlineSums(inputLayout(t, bits, heads))) |l| out.inline_inputs[i] = try lane.Projection.init(a, d, l);
+            if (withInlineSums(queryLayout(t, bits, heads))) |l| out.inline_queries[i] = try lane.Projection.init(a, d, l);
+        }
         return out;
     }
 
@@ -111,7 +130,21 @@ pub const Kernels = struct {
             a.deinit();
             b.deinit();
         }
+        for (self.inline_inputs, self.inline_queries) |a, b| {
+            if (a) |x| x.deinit();
+            if (b) |x| x.deinit();
+        }
         self.unpack.deinit();
+    }
+
+    pub fn inputFor(self: *const Kernels, which: usize, rows: u32) *const lane.Projection {
+        if (rows <= inline_rows) if (self.inline_inputs[which]) |*p| return p;
+        return &self.inputs[which];
+    }
+
+    pub fn queryFor(self: *const Kernels, which: usize, rows: u32) *const lane.Projection {
+        if (rows <= inline_rows) if (self.inline_queries[which]) |*p| return p;
+        return &self.queries[which];
     }
 
     pub fn split(self: Kernels, e: mtl.ComputeEncoder, input: lane.Ref, q: lane.Ref, kv: lane.Ref, gates: lane.Ref, rows: u32, q_rank: u32, gate_cols: u32) void {
