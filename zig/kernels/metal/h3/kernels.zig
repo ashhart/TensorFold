@@ -1,5 +1,5 @@
 //! MiniMax H3's Metal kernels: three sources joined and compiled at load, after the prefill kernels' gemm_nax.
-pub const source = @embedFile("h3_rows.metal") ++ @embedFile("h3_routing.metal") ++ @embedFile("h3_attention.metal");
+pub const source = @embedFile("h3_rows.metal") ++ @embedFile("h3_routing.metal") ++ @embedFile("h3_attention.metal") ++ @embedFile("vae.metal");
 /// H3's own products, after `source`: they need gemm_nax's fragments ahead of them.
 pub const gemm_source = @embedFile("h3_gemm.metal");
 /// MLX's bf16 GEMM, x w^T with N a multiple of 128 and M a multiple of 64 (whole) or not (ragged).
