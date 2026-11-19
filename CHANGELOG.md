@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the XPU guide gives the size of a Qwen3.8-27B prompt-cache state with the DFlash2 drafter and bf16 K/V (64 KiB a prompt token plus 187 MiB), so the 2 GiB default keeps nothing past about 29,700 tokens, the log line that says so, and that a larger budget needs a smaller `--context` on one card (#3972). Thanks to @SergiioB.
+
 - HIP: prompt attention's permlane16 fetches inactive lanes (#4080, fixes #3765).
 
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
