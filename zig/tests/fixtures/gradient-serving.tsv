@@ -157,7 +157,7 @@ zig/src/families/flashnext/cuda_prompt.zig	81cce322243641902524962f95f04788b13b6
 zig/src/families/flashnext/cuda_prompt_load.zig	e51d065247748bfd96632c323e3df2306623dcd6495f0b17866d1b4070ace0f4	raw
 zig/src/families/flashnext/cuda_prompt_main.zig	2543cd166dc80cd97b1ca1ce930a6150f9d36b52ee231744606f83bf54f0669d	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_prompt_step.zig	e04030fb4a4fdb8780704a1bc0b5ba4b786159ab08a927fe32a636a893129d0c	raw
-zig/src/families/flashnext/cuda_prompt_wt.zig	71794cc78885b72634017294ef0e1ffaa1513a9f3679bb6203d2508c844fbc5d	raw	#3467: after load a shard drops its page cache except the n-gram ranges, and the sweep reaches nested shards; tensors and replies are unchanged#3413 (an MLX affine read-out refuses TF_FLASHNEXT_READOUT_FUSED=1 by name; unchanged when unset)
+zig/src/families/flashnext/cuda_prompt_wt.zig	860611b9e49e2078f7a9636164a1267a176a6a6fba0d4f7880532f7b26b6f5a9	raw	#3467: after load a shard drops its page cache except the n-gram ranges, and the sweep reaches nested shards; tensors and replies are unchanged#3413 (an MLX affine read-out refuses TF_FLASHNEXT_READOUT_FUSED=1 by name; unchanged when unset)
 zig/src/families/flashnext/cuda_qmm.zig	6d035feb053691cc9750a369c86a5463d41ed942764ad85b861bb628c106dccf	raw
 zig/src/families/flashnext/cuda_rank_engine.zig	e8826788ce7d26503f049b94c90c0f2247438402599b8e1947cb3cfa42828cfe	raw
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw

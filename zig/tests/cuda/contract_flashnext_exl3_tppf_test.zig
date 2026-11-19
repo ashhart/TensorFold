@@ -197,7 +197,7 @@ test "tppf contract: the block oracle is canon.subtree, and a masked slot is the
     }
 }
 
-/// Every row's slots 0 to 3 hold the products 1.25e8, 1, -1.25e8, 1 on leaves `at`, in every column; the other slots are masked.
+/// Plant 1.25e8, 1, -1.25e8, 1 on four leaves in every column; mask other slots.
 fn cancelling(cb: *ref.Combine, at: [4]usize) void {
     const y = [4]f32{ 1e9, 8, -1e9, 8 };
     const n = cb.shape.n;
@@ -208,8 +208,7 @@ fn cancelling(cb: *ref.Combine, at: [4]usize) void {
     };
 }
 
-/// Combine's gather buffer of `world` ranks, each region finished: the rows the finish gives. `cancel` plants the cancelling
-/// products of `cancelling`; `fault` is a planted combine fault.
+/// Finish every gathered region, optionally planting cancellation or a combine fault.
 fn gathered(world: usize, blocks: bool, shape: c.Shape, seed: u64, out: []f32, cancel: ?[4]usize, fault: ref.Fault) !void {
     var cb: ref.Combine = .{ .gpa = t.allocator, .blocks = blocks };
     defer cb.deinit();
@@ -258,7 +257,7 @@ test "tppf contract: cancelling products keep their +1s at every degree: the f64
     // 1.25e8 + 1 is not an f32 (spacing 8): the f32 tree rounded the +1s away and gave 0 where the exact sum is 2.
     const spread = [_][4]usize{ .{ 0, 1, 2, 3 }, .{ 0, 21, 42, 63 }, .{ 0, 9, 40, 62 } };
     for ([_]bool{ false, true }) |blocks| {
-        // the sub-block layout (257 rows: a full region and a one-row one) takes the two fixtures that split the cancellation over ranks
+        // 257 rows cross a gather region boundary while cancellation spans ranks.
         const first: usize = if (blocks) 1 else 0;
         const shape: c.Shape = .{ .rows = if (blocks) 257 else 3, .n = w, .k = 1 };
         const got = try t.allocator.alloc(f32, shape.rows * w);
@@ -274,8 +273,7 @@ test "tppf contract: cancelling products keep their +1s at every degree: the f64
 }
 
 test "tppf contract: a partial carried through f32 loses what the f64 partial keeps" {
-    // Two ranks: rank 0 holds the 1.25e8 and a +1, rank 1 the -1.25e8 and a +1. Each partial is +-1.25e8 +- 1 exactly in f64;
-    // rounded to f32 both lose the 1 and the finish gives 0 where it gives 2.
+    // Each rank's +/-1.25e8 + 1 loses the +1 through F32, so the finish returns 0 instead of 2.
     const shape: c.Shape = .{ .rows = 3, .n = w, .k = 1 };
     const got = try t.allocator.alloc(f32, shape.rows * w);
     defer t.allocator.free(got);
