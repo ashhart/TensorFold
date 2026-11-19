@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: with `TF_DSV41_PREFILL_PIECES=1`, `TENSORFOLD_PREFILL_ORDER=srpt`, a prompt policy, share or budget, or `--decode-share` set, a prompt runs a chunk at a time between the other streams' rounds, so a short request no longer waits behind a long prompt; with none of them set, prompts run whole as before (#2950, refs #2984). Thanks to @gilby.
+
 - `tensorfold info` on Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prints the startup budget `serve` charges a Qwen3.8-27B-class checkpoint (weights, each stream's KV and state, the prompt scratch; no drafter or images) and whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context; `info` also copies `model_type` out of the parse before freeing it (#3268, refs #2761). Thanks to @cshintov.
 
 - Nemotron on HIP: a checkpoint whose token table (`backbone.embeddings`) is stored bf16 beside quantized matrices, marked `false` in config.json's quantization block or stored without scales, is admitted and loads; its rows are gathered as stored, the memory plan counts them at their stored bytes, and the startup label adds `+bf16-embed`; a bf16 `lm_head`, projection or other unquantized tensor is still refused by name (#3575, refs #3061). Thanks to @gilby.
@@ -192,7 +194,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Bench: add served agent-cache traces and token-qualified A/B comparisons (#3263).
 - CI: remove the redundant nightly Linux host shard while retaining the fast, compile, HIP and DeepSeek shards (#3276).
 - Metal: Spark2.5 and Llama build their tensor-unit prompt attention from one shared source, Llama's at WINDOW 0 and RING 0; the compiled code is unchanged (#3269, part of #2251). Thanks to @jschmied.
-- DeepSeek-V4.1 on Metal: with `TF_DSV41_PREFILL_PIECES=1`, `TENSORFOLD_PREFILL_ORDER=srpt` or a prompt policy, share or budget set, or `--decode-share` given, a prompt runs a chunk at a time between the other streams' rounds, and decoding replies get a share of wall time between its chunks (`--decode-share`, else `TENSORFOLD_PREFILL_SHARE`, else 0.25), so a short request no longer waits behind a long prompt; the prompt's state and tokens equal the whole prompt's at any piece size, and with none of them set prompts run whole as before. On the release weights, a 64-token reply sent beside a 131,072-token cold prompt finishes in 6.3 to 13.0 s with `TF_DSV41_PREFILL_PIECES=1` against 130 to 142 s on base on an M5 Ultra, and in 7.6 to 13.8 s against 209 to 256 s on an M3 Ultra, with every answer equal to its run alone (#2950, part of #2984). Thanks to @gilby.
 
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
 
