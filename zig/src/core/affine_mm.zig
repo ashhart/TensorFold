@@ -14,6 +14,7 @@ pub const Format = struct {
     group: u16 = 64,
     out_f32: bool = false,
     glu: Glu = .clipped,
+    glm_m3_fast: bool = false,
     /// Scatter and GLU gathers read this batch's active-to-global expert map.
     mapped_experts: bool = false,
 };
@@ -29,10 +30,11 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
         .clipped_silu => "#define TF_GLU_ROUND_SILU 1\n",
         .clipped => "",
     };
+    const m3 = if (f.glm_m3_fast and !device.tensorUnits()) "#define TF_GLM_M3_FAST 1\n" else "";
     const map = if (f.mapped_experts) "#define TF_AM_MAPPED_EXPERTS 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";
-    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}";
-    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, body });
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, m3, body });
 }
 
 /// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.
@@ -66,12 +68,22 @@ pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: 
 
 /// y = x W^T using group `sums`; x is [rows, q.k], y is [rows, n], n = q.n rounded up to 64 (padded weights).
 pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
+    denseBm(e, p, x, sums, q, y, rows, 64);
+}
+
+/// `dense` with an explicit row-tile height `bm` (32 when compiled with TF_GLM_M3_FAST, 64 otherwise).
+pub fn denseBm(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, bm: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
-    denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
+    denseBatchBm(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) }, bm);
 }
 
 /// `batch` dense products over per-batch weight rows with strides `s`; q.n is a multiple of 64 (e.g. heads).
 pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
+    denseBatchBm(e, p, x, sums, q, y, rows, batch, s, 64);
+}
+
+/// `denseBatch` with an explicit row-tile height `bm` (32 when compiled with TF_GLM_M3_FAST, 64 otherwise).
+pub fn denseBatchBm(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides, bm: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     e.setPipeline(p[1]);
     bind(e, 0, x);
@@ -82,7 +94,7 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(q.k), .experts = 0 }, 5);
     bind(e, 6, y);
     e.setValue(s, 7);
-    e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, batch), mtl.Size.of(32, 2, 2));
+    e.dispatchGroups(mtl.Size.of(n / 64, (rows + bm - 1) / bm, batch), mtl.Size.of(32, 2, 2));
 }
 
 /// y [rows, q.n]: x times its row expert's W^T, rows expert-sorted (`offsets`: experts' first rows); q [experts, n, k].

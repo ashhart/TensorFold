@@ -152,6 +152,47 @@ inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
 #endif
 }
 
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+// GLM pre-M5: codes in [K=64][N=64] layout so frag_get reads transposed weights with zero bank conflict.
+inline void am_codes_kn(thread const Codes& c, threadgroup bfloat* tile, int w_n, int w_kh) {
+#if TF_BITS == 2
+  TF_UNROLL
+  for (short i = 0; i < 2; i++) {
+    const uint w = c.v[i];
+    TF_UNROLL
+    for (short j = 0; j < 16; j++) tile[(w_kh * 32 + i * 16 + j) * PAD + w_n] = bfloat(float((w >> (2 * j)) & 3u));
+  }
+#elif TF_BITS % 4 != 0
+  TF_UNROLL
+  for (short j = 0; j < 32; j++) {
+    const short at = TF_BITS * j, word = at / 32, shift = at % 32;
+    uint v = c.v[word] >> shift;
+    if (shift + TF_BITS > 32) v |= c.v[word + 1] << (32 - shift);
+    tile[(w_kh * 32 + j) * PAD + w_n] = bfloat(float(v & ((1u << TF_BITS) - 1u)));
+  }
+#elif TF_BITS == 4
+  TF_UNROLL
+  for (short i = 0; i < 4; i++) {
+    const uint w = c.v[0][i];
+    TF_UNROLL
+    for (short j = 0; j < 8; j++) {
+      tile[(w_kh * 32 + i * 8 + j) * PAD + w_n] = as_type<bfloat>(ushort(0x4300u | ((w >> (4 * j)) & 0xfu)));
+    }
+  }
+#else
+  TF_UNROLL
+  for (short i = 0; i < 8; i++) {
+    const uchar4 f = as_type<uchar4>(c.v[i / 4][i % 4]);
+    const int b = w_kh * 32 + i * 4;
+    tile[b * PAD + w_n] = bfloat(float(f.x));
+    tile[(b + 1) * PAD + w_n] = bfloat(float(f.y));
+    tile[(b + 2) * PAD + w_n] = bfloat(float(f.z));
+    tile[(b + 3) * PAD + w_n] = bfloat(float(f.w));
+  }
+#endif
+}
+#endif
+
 // A block of the code tile as the transposed right operand: 8-byte loads on M5 (PAD rows, 16-column blocks).
 #ifndef TF_SIMD_FRAGS
 #define am_tile_frag frag_get_tg
@@ -188,8 +229,13 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
   TF_UNROLL
   for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
     frag<bfloat> b0, b1, a[TL];
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+    frag_get(b0, tile, PAD, 16 * q, tn, home);
+    frag_get(b1, tile, PAD, 16 * q, tn + 16, home);
+#else
     am_tile_frag(b0, tile, PAD, tn, 16 * q, home);
     am_tile_frag(b1, tile, PAD, tn + 16, 16 * q, home);
+#endif
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
       a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
@@ -231,8 +277,13 @@ inline void am_step128(thread frag<float> (&acc)[TM][2], thread frag<float> (&pa
   TF_UNROLL
   for (short q = 0; q < 4; q++) {
     frag<bfloat> b0, b1, a[TL];
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+    frag_get(b0, tile, PAD, 16 * q, tn, home);
+    frag_get(b1, tile, PAD, 16 * q, tn + 16, home);
+#else
     frag_get_t(b0, tile, PAD, tn, 16 * q, home);
     frag_get_t(b1, tile, PAD, tn + 16, 16 * q, home);
+#endif
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
       a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
@@ -268,7 +319,11 @@ template <int TM>
 inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int K, int live,
                       const device uchar* wq, const device bfloat* scales, const device bfloat* biases,
                       threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t, short2 home) {
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+  const int w_n = int(t / 2), w_kh = int(t % 2);
+#else
   threadgroup bfloat* mine = tile + (t / 2) * PAD + 32 * (t % 2);
+#endif
   const int g_mine = TF_GROUP == 32 ? int(t % 2) : 0; // at g32 each thread of a pair takes one group's scale and bias
 #if TF_GROUP == 128
   frag<float> part[TM][2]; // a group's sums across its two steps
@@ -280,7 +335,11 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>&
   }
   for (int k = 0; k < K; k += 64) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+    am_codes_kn(am_load(wq), tile, w_n, w_kh);
+#else
     am_codes(am_load(wq), mine);
+#endif
     if (TF_GROUP == 32 || t % 2 == 0) {
       const float s = float(scales[g_mine]);
       sb[g_mine * 128 + t / 2] = s;
@@ -417,9 +476,14 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
                              uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup bfloat tile[64 * PAD];
   threadgroup float sb[NG * 128];
-  const int row = int(tg.y) * 64, col = int(tg.x) * 64, b = int(tg.z);
-  am_block<64>(X + long(b) * st.x_batch, st.x_row, XS + long(b) * st.sums_batch * (a.k / TF_GROUP),
-               st.sums_row * (a.k / TF_GROUP), row, min(64, a.rows - row), a.k, st.y_row, col,
+#if defined(TF_GLM_M3_FAST) && defined(TF_SIMD_FRAGS)
+  constexpr int BM = 32;
+#else
+  constexpr int BM = 64;
+#endif
+  const int row = int(tg.y) * BM, col = int(tg.x) * 64, b = int(tg.z);
+  am_block<BM>(X + long(b) * st.x_batch, st.x_row, XS + long(b) * st.sums_batch * (a.k / TF_GROUP),
+               st.sums_row * (a.k / TF_GROUP), row, min(BM, a.rows - row), a.k, st.y_row, col,
                long(b) * st.w_batch + col, W, S, B, Y + long(b) * st.y_batch, tile, sb, sg, lane);
 }
 
