@@ -443,6 +443,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 - Metal: Baidu's Unlimited-OCR-2 is served natively from its BF16 release on M5-class Macs: page images through `serve --vision`, the family's chat template built in, its SAM and CLIP image encoders and decoder under the kernel contract; on five reference pages every departure from the release's own reply is a one-step tie (#2074). Thanks to @BobClawblaw.
+- Unlimited-OCR-2 on native Metal (M5 GPUs): Baidu's BF16 release as published serves page images through
+  `tensorfold-native serve --vision`; one stream, greedy, up to 131,072 tokens. On the recipe's single pages its text
+  is identical to the release's own `infer` in torch bf16, or departs from it only where two candidate tokens lie
+  within one bf16 step of each other, the same two torch's float32 run weighs. The five-page document is served the
+  same way; its departures are listed in the recipe beside float32's (#2074). Thanks to @BobClawblaw.
+
+- The Vulkan engine records its dispatches into one command buffer and submits when 128 are waiting, or when the next upload, download or fill needs the queue, instead of one submission and fence wait per dispatch. Each pipeline holds a ring of 256 descriptor sets. No kernel changes, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit and tiled projections, a run took 56.0% less time on a 24-token prompt, 42.0% less on a 256-token document and 30.1% less on a 1,024-token document. On a 16-inch M1 Max, it took 84.1%, 82.5% and 61.8% less time on those inputs; the 256-token cell was noisy. Receipts: [docs/receipts/vulkan-submit-batch-m1](docs/receipts/vulkan-submit-batch-m1/README.md).
+
 ## 1.2.9
 
 - Flash Next on CUDA: a lone stream draws on its own path again; the batched draws #2927 added now run only when two or more streams share a step, so one sampled stream no longer pays the group's whole-buffer download each step. Tokens are unchanged (#3391, after #2927).
