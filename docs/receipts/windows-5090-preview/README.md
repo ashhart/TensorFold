@@ -33,7 +33,7 @@ The preview must use fresh source-built CUDA images and runtime libraries with t
 
 The preview is compiled with `-Dqwen-prefill-max-rows=8192`.
 That is a prompt chunk capacity, not a context-window setting or a new fidelity qualification.
-Set `TF_QWEN_PREFILL_ROWS=4096` for the upstream arithmetic path, with the experimental settings below unset.
+Leave `TF_QWEN_PREFILL_ROWS` unset (or set it to 4096) for the upstream arithmetic path, with the experimental settings below unset: unset, the 8192-row build serves 4096-row prompt chunks.
 The alternate hybrid profile requires the complete tuple below; startup rejects partial combinations before device/model access.
 The directory and library values are operator-provided inputs, not bundled weights or machine-specific paths.
 

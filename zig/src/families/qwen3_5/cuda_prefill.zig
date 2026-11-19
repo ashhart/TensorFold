@@ -6,7 +6,7 @@ const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 
 pub fn chunkRows(raw: ?[]const u8) !u32 {
-    const text = raw orelse return E.max_rows;
+    const text = raw orelse return @min(E.max_rows, @import("qwen_prefill_config").default_rows); // unset: 4096
     const n = std.fmt.parseInt(u32, text, 10) catch return error.InvalidPrefillChunk;
     if (n < 64 or n > E.max_rows or n % 64 != 0) return error.InvalidPrefillChunk;
     return n;
@@ -191,7 +191,7 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
 }
 
 test "explicit prefill chunks preserve a bounded cache-off grid" {
-    try std.testing.expectEqual(@as(u32, @intCast(E.max_rows)), try chunkRows(null));
+    try std.testing.expectEqual(@as(u32, 4096), try chunkRows(null)); // a wide build's unset chunk is upstream's 4096
     try std.testing.expectEqual(@as(u32, 1024), try chunkRows("1024"));
     var limit_text: [24]u8 = undefined;
     try std.testing.expectEqual(@as(u32, @intCast(E.max_rows)), try chunkRows(try std.fmt.bufPrint(&limit_text, "{d}", .{E.max_rows})));

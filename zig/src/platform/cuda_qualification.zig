@@ -95,7 +95,7 @@ pub fn refusal(model_type: []const u8, compiled_rows: usize, env: anytype) envir
         try present(env, "TF_DRAFT_BLOCK") or try whole(env, "TF_DRAFT_GRAPH", 0) != 0 or
         try whole(env, "TF_DRAFT_QWEN3_NORM", 0) != 0 or try floating(env, "TF_DRAFT_FEEDBACK_WEIGHT", 0) != 0 or
         (rows != 0 and rows != 4096);
-    if (!selected) return if ((if (rows == 0) compiled_rows else rows) == 4096) null else upstream_width;
+    if (!selected) return null; // unset or 4096: the upstream width chunkRows serves on every build
     if (!std.mem.eql(u8, model_type, "qwen3_5")) return dense_only;
     inline for (required) |r| if (!try accepts(r, env)) return r.failure;
     if (compiled_rows < 7680) return upstream_width;

@@ -158,8 +158,9 @@ test "CUDA qualification: numeric spellings and blank optional values keep their
     try check(arena.allocator(), "qwen3_5", .{ .entries = &.{.{ .name = "TF_QWEN_PREFILL_ROWS", .value = "4096" }}, .changed = .{ .name = "TF_DRAFT_COPY_MATCH", .value = " \t" } }, null);
 }
 
-test "CUDA qualification: a wide build cannot silently select its unrecorded serving width" {
+test "CUDA qualification: a wide build unset serves upstream's recorded 4096, never its unrecorded full width" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    try check(arena.allocator(), "qwen3_5", .{}, if (@import("qwen_prefill_config").max_rows == 4096) null else "TF_QWEN_PREFILL_ROWS");
+    try check(arena.allocator(), "qwen3_5", .{}, null); // unset: chunkRows serves 4096 on every build
+    try check(arena.allocator(), "qwen3_5", .{ .entries = &.{.{ .name = "TF_QWEN_PREFILL_ROWS", .value = "8192" }} }, "NVFP4 profile");
 }
