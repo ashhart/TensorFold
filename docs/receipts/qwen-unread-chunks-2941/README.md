@@ -8,13 +8,14 @@ cold prefill on one GB10.
 
 - Device binaries: base `0591c4e85dca440749063d171d4305d65a6edb50` and head `4a7a7f127`, one `zig build native
   -Dsm=121 -Dnvcc=/usr/local/cuda/bin/nvcc` build an arm. Binary md5: base `6720d18b2b1d8875477d5520b95dc26c`,
-  head `fe92ed6a93d7ede5c7a6bb6fa42a3cff`. The branch was rebased onto `13d7ce052` after these runs; those three
-  commits touch slide rollback only.
+  head `fe92ed6a93d7ede5c7a6bb6fa42a3cff`. The prompt-cache state rows below were measured after the rebase, on
+  current main `34cecd17e` against the review head `ee145a532`.
 - One NVIDIA GB10 (sm_121), CUDA 13.0 (V13.0.88), Zig 0.17.0, Linux 7.0.
 - Checkpoint `nvidia/Qwen3.6-35B-A3B-NVFP4`, revision `491c2f1ea524c639598bf8fa787a93fed5a6fbce`.
 - Serve flags: `--parallel 1 --context 40960 --no-update-check --prompt-cache-gib 0` for cold, sampled and drafted
-  rows; `--prompt-cache-gib 4` for the resumed turns. The GB10 also served an unrelated 86 GiB model, so cold TTFT
-  is reported but is not a clean performance gate; exactness is the gate.
+  rows; `--prompt-cache-gib 4` for the resumed turns, and `--prompt-cache-disk` for the kept-state rows. The GB10 also
+  served an unrelated 86 GiB model, so cold TTFT is reported but is not a clean performance gate; exactness is the
+  gate.
 
 ## Cold replies
 
@@ -80,6 +81,24 @@ same reply, so the resumed path equals a fresh one.
 
 The runs are `runs/{base,head}-chat8k.json`, `runs/{base,head}-chat16k.json` and `runs/head-chat-fresh.json`.
 
+The kept states at those two marks were then compared on base `34cecd17e` (current main, binary md5
+`570ce5ffe8eacad2243504d2ba007e55`) against head `ee145a532` (binary md5
+`ec9243bfe3cd65a08e66e9925eaab5e3`), a fresh server an arm with `--prompt-cache-gib 4 --prompt-cache-disk`, and the
+same commands. `states.py` reads the disk tier's `.st` file and every `.blk` file it names, and hashes payloads only:
+the files' trailers carry the build's own block names. The recurrence and convolution state is the state file's
+payload past its 16-byte position, shift and format words; the K/V digest covers each named block's payload. Both
+arms are byte-equal:
+
+| Resumed at | Field | Base | Head | Files |
+| ---: | --- | --- | --- | ---: |
+| 8,192 | Recurrence + conv state | `4c17690b79f771208134c6065f760cfca7ba8ed63f983e510d89f64b74e962f9` | `4c17690b79f771208134c6065f760cfca7ba8ed63f983e510d89f64b74e962f9` | 1 state |
+| 8,192 | K/V blocks | `c0d8a3685f8c0c142260be48766c2e56adeaf08fd43f3ef5899c006dee297d5f` | `c0d8a3685f8c0c142260be48766c2e56adeaf08fd43f3ef5899c006dee297d5f` | 32 blocks |
+| 16,384 | Recurrence + conv state | `a849f8970ab05562bab42fb78ff4ee57ef08ec70dfbf13f084ca3cdb5bd642a2` | `a849f8970ab05562bab42fb78ff4ee57ef08ec70dfbf13f084ca3cdb5bd642a2` | 1 state |
+| 16,384 | K/V blocks | `8909fc17c889bebe82313ae0ee39900acc2ed9ba386f2156aa5e958b873fecb4` | `8909fc17c889bebe82313ae0ee39900acc2ed9ba386f2156aa5e958b873fecb4` | 64 blocks |
+
+The same run reproduced the reply `token_sha256`/`output_sha256` rows above. The digests are in
+`runs/{base,head}-marks.json`.
+
 ## Commands
 
 ```sh
@@ -90,10 +109,12 @@ $BIN serve nvidia/Qwen3.6-35B-A3B-NVFP4 --name gate --port 8081 --context 40960 
 python3 $G/gate.py cold http://127.0.0.1:8081 gate $G/runs/head-cold.json
 python3 $G/gate.py sampled http://127.0.0.1:8081 gate $G/runs/head-sampled.json
 python3 $G/gate.py drafted http://127.0.0.1:8081 gate $G/runs/head-drafted.json
-# restart with --prompt-cache-gib 4
+# restart with --prompt-cache-gib 4 --prompt-cache-disk /tmp/states-head
 python3 $G/gate.py chat8k http://127.0.0.1:8081 gate $G/runs/head-chat8k.json
 python3 $G/gate.py chat16k http://127.0.0.1:8081 gate $G/runs/head-chat16k.json
+python3 $G/states.py /tmp/states-head 8192 16384 > $G/runs/head-marks.json
 ```
 
 `gate.py` sends the checkpoint's own tokenizer output through `tools/bench_concurrent.stream`, so each row is
-the server's own `ttft_s`, cached-token count and token hashes.
+the server's own `ttft_s`, cached-token count and token hashes. `states.py` reads the disk tier's kept states at a
+mark and hashes the recurrence, convolution and K/V payloads.
