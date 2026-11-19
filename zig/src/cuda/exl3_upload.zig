@@ -13,8 +13,7 @@ pub const Uploader = struct {
     bufs: std.ArrayList(memory.DeviceBuffer) = .empty,
     max_buffers: usize = 0, // caller supplies a finite tensor budget; zero refuses uploads
     bytes: usize = 0, // the tensors' total device bytes (whole slabs once `slab` is set)
-    /// Nonzero: uploads up to half this size are carved, 256-byte aligned, from shared blocks of this size.
-    /// One cuMemAlloc per small tensor costs ~1.84x on GB10 (2 MiB granularity): 2,000 x 1.18 MB took 4.04 GiB.
+    /// Nonzero: uploads up to half this size share 256-byte aligned slabs (a lone cuMemAlloc costs ~1.84x on GB10).
     slab: usize = 0,
     slab_at: ?usize = null, // index in `bufs` of the open slab
     slab_used: usize = 0,
