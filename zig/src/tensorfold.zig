@@ -41,6 +41,7 @@ pub const segments = @import("core/segments.zig");
 pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
+pub const rope_yarn = @import("core/rope_yarn.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 pub const moe_route = @import("core/moe_route.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
@@ -93,6 +94,7 @@ pub const ricursive = @import("families/ricursive/ricursive.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 pub const lfm3 = @import("families/lfm3/lfm3.zig");
+pub const sensenova_loop = @import("families/sensenova_loop/sensenova_loop.zig");
 
 test {
     std.testing.refAllDecls(@This());

@@ -7,13 +7,14 @@ const glue = @import("glue.zig");
 const row = core.row_projection;
 const lane = core.lane_projection;
 
-/// One affine width, as core.quant.mlx.Width: `bits` per weight, a scale and bias a `group` of K.
-pub const Width = struct { bits: u8, group: u16 };
+/// Affine or native/AWQ width of one module.
+pub const Kind = enum(u8) { affine, bf16, awq };
+pub const Width = struct { bits: u8, group: u16, kind: Kind = .affine };
 /// The qualified format: today's kernels and launches, unchanged.
 pub const uniform = Width{ .bits = 4, .group = 64 };
 
 pub fn isUniform(w: Width) bool {
-    return w.bits == uniform.bits and w.group == uniform.group;
+    return w.kind == .affine and w.bits == uniform.bits and w.group == uniform.group;
 }
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
@@ -94,12 +95,14 @@ pub const Widths = struct {
     /// Resolves only loaded modules, so draft-head (MTP) and vision overrides never decide admission.
     pub fn resolve(a: std.mem.Allocator, f: *const affine.Formats, c: cfg.Config) !Widths {
         if ((try f.resolve(null)) == null) return error.MissingAffineFormat;
-        const layers = try a.alloc([members]Width, c.layers);
+        const n = c.physicalLayers();
+        const layers = try a.alloc([members]Width, n);
         errdefer a.free(layers);
         var name: [96]u8 = undefined;
         for (layers, 0..) |*l, i| {
             l.* = @splat(uniform);
-            for (stacks(c.kind(i))) |stack| for (stack) |m| {
+            const k = if (c.looped) c.physKind(i) else c.kind(i);
+            for (stacks(k)) |stack| for (stack) |m| {
                 l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
             };
             if (c.moe()) for (routed) |m| {
@@ -108,6 +111,48 @@ pub const Widths = struct {
         }
         const embed = try one(f, "model.embed_tokens");
         return .{ .allocator = a, .layers = layers, .embed = embed, .head = if (c.tied_head) embed else try one(f, "lm_head") };
+    }
+
+    /// Resolve native BF16 or AWQ w4g128 on looped models, or MLX affine everywhere else.
+    pub fn resolveModel(a: std.mem.Allocator, json: []const u8, c: cfg.Config) !Widths {
+        if (!c.looped) {
+            var formats = try affine.Formats.init(a, json);
+            defer formats.deinit();
+            return Widths.resolve(a, &formats, c);
+        }
+        if (comptime !@hasDecl(@import("core"), "sensenova_loop")) return error.UnsupportedLoopedWidths;
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.BadConfig;
+        const awq_mod = @import("core").sensenova_loop.awq;
+        if (try awq_mod.parseConfig(a, parsed.value.object)) |ac_const| {
+            var ac = ac_const;
+            defer ac.deinit(a);
+            const layers = try a.alloc([members]Width, c.physicalLayers());
+            errdefer a.free(layers);
+            var name: [128]u8 = undefined;
+            const bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
+            const w4: Width = .{ .bits = ac.bits, .group = @intCast(ac.group_size), .kind = .awq };
+            for (layers, 0..) |*l, i| {
+                l.* = @splat(bf16);
+                for (stacks(c.physKind(i))) |stack| for (stack) |m| {
+                    const p = try std.fmt.bufPrint(&name, "model.language_model.layers.{d}.{s}", .{ i, leaf(c, m) });
+                    l[@backingInt(m)] = if (ac.isQuantized(p)) w4 else bf16;
+                };
+            }
+            if (ac.isQuantized("model.language_model.embed_tokens")) return error.UnqualifiedQwenFormat;
+            return .{ .allocator = a, .layers = layers, .embed = bf16, .head = if (ac.isQuantized("lm_head")) w4 else bf16 };
+        }
+        var formats = affine.Formats.init(a, json) catch |err| switch (err) {
+            error.NotAffine => return error.UnqualifiedQwenFormat,
+            else => return err,
+        };
+        defer formats.deinit();
+        if (formats.quant != null) return Widths.resolve(a, &formats, c);
+        const bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
+        const layers = try a.alloc([members]Width, c.physicalLayers());
+        for (layers) |*l| l.* = @splat(bf16);
+        return .{ .allocator = a, .layers = layers, .embed = bf16, .head = bf16 };
     }
 
     /// Every module 4-bit g64, for synthetic graphs.
@@ -131,10 +176,12 @@ pub const Widths = struct {
         var mixed = false;
         for (w.layers) |l| for (l) |x| {
             mixed = mixed or !isUniform(x);
+            if (x.kind != .affine) h.update(&.{@backingInt(x.kind)});
             h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
         };
         for ([_]Width{ w.embed, w.head }) |x| {
             mixed = mixed or !isUniform(x);
+            if (x.kind != .affine) h.update(&.{@backingInt(x.kind)});
             h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
         }
         return if (mixed) h.final() | 1 else 0;
@@ -149,8 +196,10 @@ fn one(f: *const affine.Formats, path: []const u8) !Width {
 /// The timed window costs' model shape; mixed widths add their tag, so checkpoints of one shape keep their own costs.
 pub fn costShape(c: cfg.Config, tag: u64, buf: []u8, rows: usize, drafted: bool) ![]const u8 {
     const s = try std.fmt.bufPrint(buf, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, rows, @intFromBool(drafted) });
-    if (tag == 0) return s;
-    return buf[0 .. s.len + (try std.fmt.bufPrint(buf[s.len..], "/w{x:0>16}", .{tag})).len];
+    if (tag == 0 and !c.looped) return s;
+    const t = if (tag != 0) s.len + (try std.fmt.bufPrint(buf[s.len..], "/w{x:0>16}", .{tag})).len else s.len;
+    if (!c.looped) return buf[0..t];
+    return buf[0 .. t + (try std.fmt.bufPrint(buf[t..], "/sn2", .{})).len];
 }
 
 /// What the chip's projection kernels run: lane kernels on tensor units for whole 32-row tiles, else the row kernels.
@@ -161,7 +210,7 @@ pub const Why = struct { layer: ?usize = null, module: []const u8 = "", width: W
 
 pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
     var buf: [3][2]usize = undefined;
-    for (0..c.layers) |i| for (stacks(c.kind(i))) |stack| {
+    for (0..w.layers.len) |i| for (stacks(if (c.looped) c.physKind(i) else c.kind(i))) |stack| {
         var ws: [3]Width = undefined;
         for (stack, 0..) |m, j| ws[j] = w.of(i, m);
         const list = runs(ws[0..stack.len], &buf);
@@ -200,7 +249,12 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
             }
         }
     };
-    glue.checkEmbed(.{ .width = @intCast(c.hidden), .rows = 1, .vocab = @intCast(c.vocab), .bits = w.embed.bits, .group = w.embed.group, .metadata = .bf16 }) catch |err| {
+    if (w.embed.kind == .bf16) {
+        if (c.hidden == 0 or c.vocab == 0) {
+            why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = error.BadEmbedding };
+            return error.UnqualifiedQwenFormat;
+        }
+    } else glue.checkEmbed(.{ .width = @intCast(c.hidden), .rows = 1, .vocab = @intCast(c.vocab), .bits = w.embed.bits, .group = w.embed.group, .metadata = .bf16 }) catch |err| {
         why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = err };
         return error.UnqualifiedQwenFormat;
     };
@@ -212,6 +266,14 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
 
 /// One run's kernel: 4-, 5-, and 6-bit g64 take reg lanes; other widths take non-reg lanes or row kernels.
 fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
+    if (w.kind == .bf16) {
+        if (n == 0 or k == 0 or k % 8 != 0) return error.BadProjectionShape;
+        return;
+    }
+    if (w.kind == .awq) {
+        if (w.bits != 4 or w.group != 128 or n == 0 or k == 0 or n % 8 != 0 or k % 128 != 0) return error.UnsupportedLaneGroup;
+        return;
+    }
     _ = try @import("projection.zig").split(n, k);
     // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
     if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
@@ -458,4 +520,29 @@ test "Qwen3.6-35B-A3B's published widths are admitted with and without tensor un
     ;
     try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmitA3b(split_gate, false, &why));
     try std.testing.expectEqual(error.SharedGateWidth, why.reason);
+}
+
+test "looped costShape appends cache-busting tag without altering Qwen shapes" {
+    const a = std.testing.allocator;
+    const text = try testConfig(a, "{\"bits\":4,\"group_size\":64}");
+    defer a.free(text);
+    var c = try cfg.parse(a, text, null);
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("64/5120/17408/248320/16/1", try costShape(c, 0, &buf, 16, true));
+    c.looped = true;
+    try std.testing.expectEqualStrings("64/5120/17408/248320/16/1/sn2", try costShape(c, 0, &buf, 16, true));
+    try std.testing.expectEqualStrings("64/5120/17408/248320/16/0/w000000000000002a/sn2", try costShape(c, 0x2a, &buf, 16, false));
+}
+
+test "affine widths tag keeps main's three-byte key while non-affine kinds hash distinctly" {
+    const a = std.testing.allocator;
+    var w = try Widths.uniformAll(a, 1);
+    defer w.deinit();
+    w.layers[0][0] = .{ .bits = 8, .group = 64 };
+    var want_hash = std.hash.Wyhash.init(0x27);
+    for (w.layers) |l| for (l) |x| want_hash.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
+    for ([_]Width{ w.embed, w.head }) |x| want_hash.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
+    try std.testing.expectEqual(want_hash.final() | 1, w.tag());
+    w.layers[0][0] = .{ .bits = 4, .group = 128, .kind = .awq };
+    try std.testing.expect(w.tag() != (want_hash.final() | 1));
 }
