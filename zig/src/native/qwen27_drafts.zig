@@ -10,6 +10,18 @@ const Metal = lb.Metal;
 const Tree = q.dflash.selector.Tree;
 const Proposal = q.dflash.runtime_model.Model.Proposal;
 
+/// The target draw's keyed Gumbel noise for a token at a position (lanes.sampling.sample), finite for the selector.
+pub const Draw = struct {
+    seed: u64,
+    pub fn noise(d: *Draw) q.dflash.selector.Noise {
+        return .{ .ptr = d, .draw = draw };
+    }
+    fn draw(ptr: *anyopaque, position: u64, token: u32) anyerror!f64 {
+        const d: *const Draw = @ptrCast(@alignCast(ptr));
+        return -@log(-@log(@min(lanes.sampling.uniform(d.seed, position, token), 1.0 - 0x1p-53)));
+    }
+};
+
 /// Only slots that currently draft compete for rows in the next shared allocation.
 fn live(b: *const Metal) usize {
     var n: usize = 0;
@@ -30,6 +42,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
     @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;
     var owners: [8]u32 = undefined;
+    var draws: [8]Draw = undefined;
     var n: usize = 0;
     const lone = live(b) == 1;
     var costs: [lb.max_rows]f64 = undefined;
@@ -61,6 +74,12 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             continue;
         };
         batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
+        // a sampled stream's tree ranks its candidates as the target's keyed race will draw them
+        if (r.position == stands + 1) if (r.stream.sampling) |x| {
+            draws[n] = .{ .seed = x.seed };
+            batch[n].noise = draws[n].noise();
+            batch[n].temperature = x.temperature;
+        };
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
