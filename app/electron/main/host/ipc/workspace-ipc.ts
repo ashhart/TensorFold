@@ -171,9 +171,11 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
     : projectWorkspace?.kind === 'ssh' && candidateCwd === projectWorkspace.path
     ? candidateCwd
     : candidateCwd && (await dirExists(candidateCwd)) ? candidateCwd : ''
-  const resolved = project ? resolveProjectProvider(project) : null
+  const usesProjectBaseAccount = project?.defaultProviderAccountId === null
+    && store.settings.providers.some((p) => p.id === project.defaultProviderId && (!project.localOnly || p.kind === 'local'))
+  const resolved = project ? resolveProjectProvider(project, usesProjectBaseAccount ? null : undefined) : null
   const baseProvider = resolved?.baseProvider ?? store.settings.providers.find((p) => p.id === store.settings.activeProviderId)
-  const providerAccountId = resolved?.providerAccountId ?? (baseProvider ? selectedProviderAccountId(baseProvider, store.settings.activeProviderAccountId ?? undefined) : null)
+  const providerAccountId = resolved ? resolved.providerAccountId : (baseProvider ? selectedProviderAccountId(baseProvider, store.settings.activeProviderAccountId ?? undefined) : null)
   const model = resolved?.model ?? (baseProvider ? resolveProviderModel(baseProvider, providerAccountId, store.settings.activeModel) : store.settings.activeModel)
   // Folder checks above yield; a simultaneous retry may have completed meanwhile.
   const concurrent = priorCreatedThread()

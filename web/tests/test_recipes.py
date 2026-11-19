@@ -1,9 +1,13 @@
+import json
 import time
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tensorfold_web import recipes
+from tensorfold_web import recipes, server_connect
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.catalog import Catalog
 from tensorfold_web.engine import Engine
@@ -104,3 +108,48 @@ def test_the_new_agents_are_written_for_the_place_and_window():
     assert 'primary: "tensorfold/Nemo"' in recipes.SNIPPETS["openclaw"](away) and "modelRoles" in recipes.SNIPPETS["omp"](away)
     kinds = {r.id: r.kind for r in recipes.RECIPES}
     assert kinds["openclaw"] == kinds["hermes"] == "assistant" and "continue" not in kinds
+
+
+def _event(data):
+    return b"data: " + json.dumps(data).encode() + b"\n\n"
+
+
+@pytest.mark.parametrize("case", ["failed", "truncated", "done", "finish-reason", "bare-cr"])
+def test_connect_probe_needs_a_successful_stream(monkeypatch, case):
+    partial = _event({"choices": [{"delta": {"content": "re"}, "finish_reason": None}]})
+    closed = b"data: [DONE]\n\n"
+    finished = _event({"choices": [{"delta": {"content": "ady"}, "finish_reason": "stop"}]})
+    error = _event({"error": {"message": "fixture decode stopped", "type": "server_error"}})
+    tail, detail = {
+        "failed": (error + closed, "fixture decode stopped"),
+        "truncated": (b"", "before the engine finished"),
+        "done": (finished + closed, "5 characters streamed"),
+        "finish-reason": (finished, "5 characters streamed"),
+        "bare-cr": (finished + closed, "5 characters streamed"),
+    }[case]
+
+    def respond(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "fixture"}]})
+        assert request.url.path == "/v1/chat/completions"
+        content = partial + tail
+        if case == "bare-cr":
+            content = content.replace(b"\n", b"\r")
+        return httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
+
+    client_type = httpx.Client
+    monkeypatch.setattr(recipes, "httpx", SimpleNamespace(
+        Client=lambda **kwargs: client_type(transport=httpx.MockTransport(respond), **kwargs),
+        Timeout=httpx.Timeout,
+        HTTPError=httpx.HTTPError,
+    ))
+    app = FastAPI()
+    engine = SimpleNamespace(status=lambda: SimpleNamespace(status="running", model="fixture"), key_in_use=lambda: None)
+    server_connect.install(app, engine, SimpleNamespace(engine_url="http://fixture.test"), None)
+    with TestClient(app) as client:
+        response = client.post("/api/connect/test", json={"recipe": "python"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["checks"][0]["ok"]
+    assert result["ok"] is result["checks"][1]["ok"] is (case in ("done", "finish-reason", "bare-cr"))
+    assert detail in result["checks"][1]["detail"]
