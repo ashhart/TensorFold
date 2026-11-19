@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: the prompt layer's compressor, indexer key and weight, and MoE gate projections run on a new simdgroup-matrix kernel (`tf_dsv41_mv_mma`) at 16 or more rows, bit-equal to the matrix-vector kernel it replaces (#3668, refs #2984). Thanks to @gilby.
+
 - App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
 
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.
