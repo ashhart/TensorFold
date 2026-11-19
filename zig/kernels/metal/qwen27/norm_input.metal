@@ -20,13 +20,16 @@ Q27_SPECIALIZE
   const uint m = threadgroup_position_in_grid.y;
   #if Q27_XS
   const int M = dims[0], MP = dims[1];
+  constexpr uint XS_T = (Q27_XS == 128) ? 8u : 4u;
+  constexpr uint XS_M = XS_T - 1u;
+  constexpr uint XS_S = (Q27_XS == 128) ? 3u : 2u;
   #endif
   constexpr int E = 16;
   constexpr int TPG = K / E;
   threadgroup float red[TPG / 32];
   #if Q27_XS
   if (int(m) >= M) {
-    if ((t & 3) == 0) XS[(t >> 2) * MP + m] = 0.0f;
+    if ((t & XS_M) == 0) XS[(t >> XS_S) * MP + m] = 0.0f;
     return;
   }
   #endif
@@ -49,19 +52,24 @@ Q27_SPECIALIZE
   float xv[E];
   #endif
   for (int i = 0; i < E; i++) {
-    const bfloat x = bfloat(float(Wt[int(t) * E + i]) * (hv[i] * inv));
+    #if defined(Q27_SHIFT) && Q27_SHIFT
+    const float gw = 1.0f + float(Wt[int(t) * E + i]);
+    #else
+    const float gw = float(Wt[int(t) * E + i]);
+    #endif
+    const bfloat x = bfloat(gw * (hv[i] * inv));
     XO[base + i] = x;
     #if Q27_XS
     xv[i] = float(x);
     #endif
   }
   #if Q27_XS
-  // a group's 64 values summed in order from zero, as the lane projection's sums are: its four threads take turns
+  // Each group's values are summed in index order from zero, matching the lane projection sums.
   float gs = 0.0f;
-  for (uint turn = 0; turn < 4; turn++) {
-    if ((t & 3) == turn) for (int i = 0; i < E; i++) gs += xv[i];
-    gs = simd_shuffle(gs, ushort((thread_index_in_simdgroup & ~3u) | turn));
+  for (uint turn = 0; turn < XS_T; turn++) {
+    if ((t & XS_M) == turn) for (int i = 0; i < E; i++) gs += xv[i];
+    gs = simd_shuffle(gs, ushort((thread_index_in_simdgroup & ~XS_M) | turn));
   }
-  if ((t & 3) == 0) XS[(t >> 2) * MP + m] = gs;
+  if ((t & XS_M) == 0) XS[(t >> XS_S) * MP + m] = gs;
   #endif
 }

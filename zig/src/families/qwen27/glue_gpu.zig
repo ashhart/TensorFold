@@ -14,6 +14,7 @@ pub const Gather = extern struct { rows: u32, width: u32, capacity: u32, planes:
 
 pub const Kernels = struct {
     embed: mtl.Pipeline,
+    embed_bf16: mtl.Pipeline,
     head: mtl.Pipeline,
     slice: mtl.Pipeline,
     add: mtl.Pipeline,
@@ -28,6 +29,8 @@ pub const Kernels = struct {
         defer copy.deinit();
         const embed = try mtl.Pipeline.init(device, lib, "q27_embed", false);
         errdefer embed.deinit();
+        const embed_bf16 = try mtl.Pipeline.init(device, lib, "q27_embed_bf16", false);
+        errdefer embed_bf16.deinit();
         const head = try mtl.Pipeline.init(device, lib, "q27_head_norm", false);
         errdefer head.deinit();
         const slice = try mtl.Pipeline.init(device, copy, "q27_slice", false);
@@ -37,11 +40,11 @@ pub const Kernels = struct {
         const gather = try mtl.Pipeline.init(device, copy, "q27_tap_gather", false);
         errdefer gather.deinit();
         const take = try mtl.Pipeline.init(device, copy, "q27_take", false);
-        return .{ .embed = embed, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
+        return .{ .embed = embed, .embed_bf16 = embed_bf16, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
     }
 
     pub fn deinit(k: Kernels) void {
-        inline for (.{ k.embed, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
+        inline for (.{ k.embed, k.embed_bf16, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
     }
 
     /// Each row whose `takes` entry names an image row gets that row's bits from `images` over its embedding.
@@ -74,12 +77,30 @@ pub const Kernels = struct {
         try span.end();
     }
 
+    pub fn embeddingBf16(k: Kernels, input_encoder: mtl.ComputeEncoder, width: usize, vocab: usize, table: Ref, ids: Ref, out: Ref, rows: u32) !void {
+        var span = profile.begin(k.profiler, input_encoder, .embedding);
+        errdefer span.cancel();
+        const e = span.encoder;
+        if (width == 0 or rows == 0 or vocab == 0) return error.BadEmbedding;
+        e.setPipeline(k.embed_bf16);
+        e.setBuffer(ids.buffer, ids.offset, 0);
+        e.setBuffer(table.buffer, table.offset, 1);
+        e.setValue(abi.EmbedBf16{ .width = @intCast(width), .rows = rows, .vocab = @intCast(vocab) }, 2);
+        e.setBuffer(out.buffer, out.offset, 3);
+        e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
+        try span.end();
+    }
+
     pub fn headNorm(k: Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, weight: Ref, out: Ref, width: u32, rows: u32, eps: f32) !void {
+        return k.headNormWith(input_encoder, x, weight, out, width, rows, eps, false);
+    }
+
+    pub fn headNormWith(k: Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, weight: Ref, out: Ref, width: u32, rows: u32, eps: f32, shift: bool) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Head{ .width = width, .rows = rows, .stride = width, .activation = .bf16, .gain = .bf16, .eps = eps };
+        const a = abi.Head{ .width = width, .rows = rows, .stride = width, .activation = .bf16, .gain = .bf16, .eps = eps, .shift = @intFromBool(shift) };
         e.setPipeline(k.head);
         bind(e, .{ x, weight });
         e.setValue(a, 2);

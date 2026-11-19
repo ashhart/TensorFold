@@ -94,21 +94,35 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const
 }
 
 pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []const u8, c: Config) !Weights {
+    return loadWithPrefixes(gpa, io, factory, dir, c, &.{prefix});
+}
+
+/// Search `prefixes` in order so looped SenseNova checkpoints can opt into `"model.visual."` without widening others.
+pub fn loadWithPrefixes(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []const u8, c: Config, prefixes: []const []const u8) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const found = try shards.headers(arena, io, dir);
+    var used_prefix: []const u8 = prefix;
+    var found: std.StringArrayHashMapUnmanaged(Src) = .empty;
+    for (prefixes, 0..) |pfx, pi| {
+        found = shards.headersFor(arena, io, dir, pfx) catch |err| switch (err) {
+            error.NoVisionTower => if (pi + 1 < prefixes.len) continue else return err,
+            else => return err,
+        };
+        used_prefix = pfx;
+        break;
+    }
     var w: Weights = .{ .buf = undefined, .blocks = try gpa.alloc(Block, c.depth) };
     errdefer gpa.free(w.blocks);
     const wants = (try wanted(arena, c, &w)).items;
     if (found.count() != wants.len) {
-        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), prefix, wants.len });
+        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), used_prefix, wants.len });
         return error.UnexpectedVisionTensors;
     }
     const srcs = try arena.alloc(Src, wants.len);
     var total: usize = 0;
     for (wants, srcs, 0..) |want, *s, i| {
-        const name = try std.fmt.allocPrint(arena, prefix ++ "{s}", .{want.name});
+        const name = try std.fmt.allocPrint(arena, "{s}{s}", .{ used_prefix, want.name });
         s.* = found.get(name) orelse {
             std.log.err("qwen vision: the checkpoint has no tensor {s}", .{name});
             return error.MissingVisionTensor;
@@ -167,4 +181,27 @@ test "the buffer holds the 27B tower's 333 tensors in bf16" {
     try std.testing.expectEqual(@as(usize, 333), wants.items.len);
     const n = try bytes(std.testing.allocator, c);
     try std.testing.expect(n > 900_000_000 and n < 930_000_000); // about 460 million weights
+}
+
+test "loadWith keeps vision_tower. only; model.visual. requires explicit prefix opt-in" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const sample = @import("config.zig");
+    const c = (try Config.parse(arena.allocator(), sample.sample_config, null, null)).?;
+    const hdr = "{\"model.visual.patch_embed.proj.weight\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}}";
+    var buf: [8 + hdr.len + 2]u8 = undefined;
+    std.mem.writeInt(u64, buf[0..8], hdr.len, .little);
+    @memcpy(buf[8..][0..hdr.len], hdr);
+    buf[8 + hdr.len ..][0..2].* = .{ 0, 0 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &buf });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    try std.testing.expectError(error.NoVisionTower, loadWith(gpa, io, @as(mtl.Device, undefined), dir, c));
+    const found = try shards.headersFor(arena.allocator(), io, dir, "model.visual.");
+    try std.testing.expectEqual(@as(usize, 1), found.count());
+    try std.testing.expect(found.contains("model.visual.patch_embed.proj.weight"));
 }
