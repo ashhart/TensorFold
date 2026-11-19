@@ -1,5 +1,4 @@
-//! Greedy generation with the CUDA Hy4-flash text model: prefill a prompt of token ids, decode N tokens,
-//! report load/prefill/decode times and write the prefill's last-row logits for comparison.
+//! Greedy generation with the CUDA Hy4-flash text model: prefill token ids, decode N, write timings and logits.
 const std = @import("std");
 const cuda = @import("cuda");
 const model = @import("cuda_model.zig");

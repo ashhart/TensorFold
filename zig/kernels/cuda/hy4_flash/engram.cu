@@ -1,5 +1,4 @@
-// Hy4-flash's Engram branch on CUDA, after `engram.metal`: file-backed BF16 rows enter as BF16; only the stock
-// profile simulates the checkpoint's FP8 round trip. Rounding points follow the reference's BF16 module chain.
+// Hy4-flash's Engram branch, rounded as engram.metal does; only the stock profile simulates the FP8 round trip.
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -56,8 +55,7 @@ __device__ __forceinline__ float four_warps(float v, float *parts) {
     return sum;
 }
 
-// One block per (stream, row): biased key and value, the stream's key/query norms, the signed-sqrt sigmoid gate,
-// then state + gate * signal + per-stream scale * signal. A media row leaves its streams untouched.
+// One block per (stream, row): normed key and query, signed-sqrt gate, then state + gate*signal + scale*signal.
 extern "C" __global__ void __launch_bounds__(128) tf_hy4_engram_apply(
     const __nv_bfloat16 *state, const __nv_bfloat16 *keys, const __nv_bfloat16 *key_bias,
     const __nv_bfloat16 *key_gain, const __nv_bfloat16 *query_gain, const __nv_bfloat16 *delta_gain,
