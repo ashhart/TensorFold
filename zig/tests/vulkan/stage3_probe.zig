@@ -103,6 +103,11 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .sdpa_rows_f32q = &shaders.sdpa_rows_f32q,
         .sdpa_rows_f32q_long = &shaders.sdpa_rows_f32q_long,
         .gate_f32 = &shaders.gate_f32,
+        .sdpa_scores_tile_bf16 = &shaders.sdpa_scores_tile_bf16,
+        .sdpa_scores_tile_f32q = &shaders.sdpa_scores_tile_f32q,
+        .sdpa_softmax_rows = &shaders.sdpa_softmax_rows,
+        .sdpa_pv_tile_bf16 = &shaders.sdpa_pv_tile_bf16,
+        .sdpa_pv_tile_f32 = &shaders.sdpa_pv_tile_f32,
     }, &ops);
     defer attn.deinit();
 

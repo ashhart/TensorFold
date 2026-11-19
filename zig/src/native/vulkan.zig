@@ -115,6 +115,11 @@ fn bundle() fam.engine.ShaderBundle {
             .sdpa_rows_f32q = &sh.sdpa_rows_f32q,
             .sdpa_rows_f32q_long = &sh.sdpa_rows_f32q_long,
             .gate_f32 = &sh.gate_f32,
+            .sdpa_scores_tile_bf16 = &sh.sdpa_scores_tile_bf16,
+            .sdpa_scores_tile_f32q = &sh.sdpa_scores_tile_f32q,
+            .sdpa_softmax_rows = &sh.sdpa_softmax_rows,
+            .sdpa_pv_tile_bf16 = &sh.sdpa_pv_tile_bf16,
+            .sdpa_pv_tile_f32 = &sh.sdpa_pv_tile_f32,
         },
         .gdn = .{
             .conv_dw1d_bf16 = &sh.conv_dw1d_bf16,
