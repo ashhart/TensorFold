@@ -47,32 +47,52 @@
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
-// Full fp32 attention: softmax(q k^T / sqrt(hd)) v, one threadgroup per head-row.
-// q, k, v [heads, rows, head_dim]; the softmax runs in fp32 with max subtraction.
+// Full fp32 attention: online softmax over keys in blocks, no fixed register array.
+// One threadgroup per head-row. Works for any rows.
 [[kernel]] void h3_vae_attention(
   const device float* Q [[buffer(0)]],
   const device float* K [[buffer(1)]],
   const device float* V [[buffer(2)]],
   device float* Y [[buffer(3)]],
-  constant uint* P [[buffer(4)]],        // P[0]=rows, P[1]=head_dim
-  uint3 tg [[threadgroup_position_in_grid]]) {
+  constant uint* P [[buffer(4)]],
+  uint3 tg [[threadgroup_position_in_grid]],
+  uint tid [[thread_index_in_threadgroup]],
+  uint threads [[threads_per_threadgroup]]) {
   const uint rows = P[0], hd = P[1];
   const uint head = tg.y, r = tg.x;
-  float scores[512];
-  float max_s = -1e30f;
-  for (uint k = 0; k < rows; k++) {
-    float dot = 0.0f;
-    for (uint i = 0; i < hd; i++) dot += Q[(head * rows + r) * hd + i] * K[(head * rows + k) * hd + i];
-    scores[k] = dot * rsqrt(float(hd));
-    if (scores[k] > max_s) max_s = scores[k];
+  const device float* q = Q + (head * rows + r) * hd;
+  threadgroup float acc[256];
+  float run_max = -1e30f;
+  float run_sum = 0.0f;
+  for (uint i = tid; i < hd; i += threads) acc[i] = 0.0f;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint BLOCK = 64;
+  for (uint k0 = 0; k0 < rows; k0 += BLOCK) {
+    const uint kend = min(k0 + BLOCK, rows);
+    threadgroup float bmax[1];
+    if (tid == 0) bmax[0] = -1e30f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint k = k0 + tid; k < kend; k += threads) {
+      float dot = 0.0f;
+      for (uint i = 0; i < hd; i++) dot += q[i] * K[(head * rows + k) * hd + i];
+      dot *= rsqrt(float(hd));
+      atomic_max(&bmax[0], dot);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float bm = max(bmax[0], run_max);
+    const float rescale = exp(run_max - bm);
+    for (uint k = k0 + tid; k < kend; k += threads) {
+      float dot = 0.0f;
+      for (uint i = 0; i < hd; i++) dot += q[i] * K[(head * rows + k) * hd + i];
+      const float w = exp(dot * rsqrt(float(hd)) - bm);
+      run_sum += w;
+      for (uint i = 0; i < hd; i++) acc[i] += w * V[(head * rows + k) * hd + i];
+    }
+    for (uint i = tid; i < hd; i += threads) acc[i] *= rescale;
+    run_max = bm;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  float sum = 0.0f;
-  for (uint k = 0; k < rows; k++) { scores[k] = exp(scores[k] - max_s); sum += scores[k]; }
-  for (uint i = 0; i < hd; i++) {
-    float out = 0.0f;
-    for (uint k = 0; k < rows; k++) out += scores[k] * V[(head * rows + k) * hd + i];
-    Y[(head * rows + r) * hd + i] = out / sum;
-  }
+  for (uint i = tid; i < hd; i += threads) Y[(head * rows + r) * hd + i] = acc[i] / run_sum;
 }
 
 // LayerNorm affine: mean/var in fp32, then (x - mean) / std * w + b.
