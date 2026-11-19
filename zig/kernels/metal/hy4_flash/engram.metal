@@ -116,3 +116,32 @@ kernel void tf_hy4_engram_apply(
         out[base + j] = bfloat(float(state[base + j]) + delta);
     }
 }
+
+// Engram tables resident in GPU memory: each cell's affine code times its group's scale, plus the bias (two fp32
+// roundings, as the host's dequant does), rounded to BF16 ties-to-even as the host's gather writes it, so every
+// placement stages the same bits. rows[token * 16 + column] = table row; out [token][column][96]; a.x bits, a.y cells.
+inline ushort hy4_engram_round(float v) {
+    const uint u = as_type<uint>(v);
+    if ((u & 0x7fffffffu) > 0x7f800000u) return ushort((u >> 16) | 0x40u);
+    return ushort((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
+}
+
+kernel void tf_hy4_engram_gather(
+    const device uint *words [[buffer(0)]],
+    const device ushort *scales [[buffer(1)]],
+    const device ushort *biases [[buffer(2)]],
+    const device uint *rows [[buffer(3)]],
+    device ushort *out [[buffer(4)]],
+    constant uint2 &a [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]) {
+    if (gid >= a.y) return;
+    const uint cell = gid / head_width, i = gid % head_width, bits = a.x;
+    const ulong row = rows[cell];
+    const uint bit = i * bits;
+    const uint word = words[row * (head_width * bits / 32) + bit / 32];
+    const float code = float((word >> (bit % 32)) & ((1u << bits) - 1u));
+    const ulong g = row * (head_width / 32) + i / 32;
+    const float s = as_type<float>(uint(scales[g]) << 16), b = as_type<float>(uint(biases[g]) << 16);
+    const float prod = code * s;
+    out[gid] = hy4_engram_round(prod + b);
+}

@@ -23,9 +23,9 @@ pub const Shape = extern struct {
 };
 
 pub const Weights = struct {
-    project: core.checkpoint.Tensor,
-    bias: core.checkpoint.Tensor,
-    scale: core.checkpoint.Tensor,
+    project: core.checkpoint_host.Tensor,
+    bias: core.checkpoint_host.Tensor,
+    scale: core.checkpoint_host.Tensor,
     shape: Shape,
 
     pub fn read(model: *loader.Loaded, which: Which, rows: u32) !Weights {

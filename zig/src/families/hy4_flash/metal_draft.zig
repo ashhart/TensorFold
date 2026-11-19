@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const source = @import("kernel_sources");
 const dense_ops = @import("draft_ops");
+const affine = @import("row_projection");
 const ck = @import("loader.zig");
 const model = @import("metal_model.zig");
 const common = @import("metal_dense.zig");
@@ -13,15 +14,83 @@ const rope = @import("rope.zig");
 
 pub const Ref = common.Ref;
 
+/// TF_HY4_DRAFT_BITS=4 or 8 quantizes DFly2's BF16 linears at load (MLX affine, groups of 64) so they run on the
+/// target's row kernels, one weight read a block. The draft only proposes: the target verifies every token, so the
+/// output is unchanged and only acceptance can move. Unset or 16 keeps BF16.
+fn draftBits() ?u8 {
+    const v = std.c.getenv("TF_HY4_DRAFT_BITS") orelse return null;
+    const bits = std.fmt.parseInt(u8, std.mem.span(v), 10) catch return null;
+    return if (bits == 4 or bits == 8) bits else null;
+}
+
+fn bf16Round(x: f32) u16 {
+    const u: u32 = @bitCast(x);
+    return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
+}
+
+fn bf16Value(w: u16) f32 {
+    return @bitCast(@as(u32, w) << 16);
+}
+
+/// MLX affine quantization of a BF16 [n, k] matrix: per group of 64 a bf16 scale and bias (the group's minimum),
+/// codes round((w - bias) / scale), packed low bits first into u32 words.
+fn quantize(b: *common.Buffers, bytes: []const u8, n: u32, k: u32, bits: u8) !affine.Weights {
+    const group = 64;
+    const groups = k / group;
+    const per_row = k * bits / 32;
+    const words = try b.alloc(@as(usize, n) * per_row * 4);
+    const scales = try b.alloc(@as(usize, n) * groups * 2);
+    const biases = try b.alloc(@as(usize, n) * groups * 2);
+    const wq = words.slice(u32, @as(usize, n) * per_row);
+    const sq = scales.slice(u16, @as(usize, n) * groups);
+    const bq = biases.slice(u16, @as(usize, n) * groups);
+    @memset(wq, 0);
+    const levels: f32 = @floatFromInt((@as(u32, 1) << @intCast(bits)) - 1);
+    for (0..n) |r| for (0..groups) |g| {
+        var lo: f32 = std.math.inf(f32);
+        var hi: f32 = -std.math.inf(f32);
+        const base = r * k + g * group;
+        for (0..group) |i| {
+            const v = bf16Value(std.mem.readInt(u16, bytes[2 * (base + i) ..][0..2], .little));
+            lo = @min(lo, v);
+            hi = @max(hi, v);
+        }
+        var scale = (hi - lo) / levels;
+        if (!(scale > 0)) scale = 1;
+        const s16 = bf16Round(scale);
+        const b16 = bf16Round(lo);
+        sq[r * groups + g] = s16;
+        bq[r * groups + g] = b16;
+        const sf = bf16Value(s16);
+        const bf = bf16Value(b16);
+        for (0..group) |i| {
+            const v = bf16Value(std.mem.readInt(u16, bytes[2 * (base + i) ..][0..2], .little));
+            const code: u32 = @intFromFloat(std.math.clamp(@round((v - bf) / sf), 0, levels));
+            const at = (g * group + i) * bits;
+            wq[r * per_row + at / 32] |= code << @intCast(at % 32);
+        }
+    };
+    const out: affine.Weights = .{ .w = words, .scales = scales, .biases = biases, .n = n, .k = k, .bits = bits, .group = group };
+    try out.validate();
+    return out;
+}
+
 const Linear = struct {
-    w: mtl.Buffer,
+    w: ?mtl.Buffer,
+    q: ?affine.Weights = null,
     n: u32,
     k: u32,
-    fn upload(b: *common.Buffers, t: @import("core").checkpoint.Tensor) !Linear {
-        return .{ .w = try b.upload(t.bytes), .n = @intCast(t.shape[0]), .k = @intCast(t.shape[1]) };
+    fn upload(b: *common.Buffers, t: @import("core").checkpoint_host.Tensor) !Linear {
+        const n: u32 = @intCast(t.shape[0]);
+        const k: u32 = @intCast(t.shape[1]);
+        if (draftBits()) |bits| if (k % 512 == 0 and n % 8 == 0) {
+            if (quantize(b, t.bytes, n, k, bits)) |q| return .{ .w = null, .q = q, .n = n, .k = k } else |_| {}
+        };
+        return .{ .w = try b.upload(t.bytes), .n = n, .k = k };
     }
-    fn run(p: Linear, ops: dense_ops.Ops, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32) !void {
-        try ops.linear(e, dr(x), .{ .buf = p.w }, dr(y), .{
+    fn run(p: Linear, kernels: *const common.Kernels, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32) !void {
+        if (p.q) |q| return kernels.project(e, q, x, y, rows);
+        try kernels.dense.linear(e, dr(x), .{ .buf = p.w.? }, dr(y), .{
             .rows = rows,
             .n = p.n,
             .k = p.k,
@@ -178,11 +247,12 @@ pub const Draft = struct {
         e.dispatchThreads(mtl.Size.of(self.hidden, rows, 1), mtl.Size.of(128, 1, 1));
     }
 
-    fn mlp(ops: dense_ops.Ops, e: mtl.ComputeEncoder, w: Feed, temp: *const common.Scratch, x: Ref, y: Ref, rows: u32) !void {
+    fn mlp(kernels: *const common.Kernels, e: mtl.ComputeEncoder, w: Feed, temp: *const common.Scratch, x: Ref, y: Ref, rows: u32) !void {
+        const ops = kernels.dense;
         const n = w.gate.n;
         if (n > temp.inner_capacity) return error.ShortHy4Scratch;
-        try w.gate.run(ops, e, x, temp.gate, rows);
-        try w.up.run(ops, e, x, temp.up, rows);
+        try w.gate.run(kernels, e, x, temp.gate, rows);
+        try w.up.run(kernels, e, x, temp.up, rows);
         e.barrier();
         try ops.swiglu(e, dr(temp.gate), dr(temp.up), dr(temp.inner), .{
             .rows = rows,
@@ -192,7 +262,7 @@ pub const Draft = struct {
             .y_stride = n,
         });
         e.barrier();
-        try w.down.run(ops, e, temp.inner, y, rows);
+        try w.down.run(kernels, e, temp.inner, y, rows);
     }
 
     pub fn encode(self: *const Draft, target: *const model.Model, e: mtl.ComputeEncoder, s: *Frame, ids: Ref, anchors: Ref, lanes: u32, caches: []const model.LayerCache) !void {
@@ -207,7 +277,7 @@ pub const Draft = struct {
         e.barrier();
         try self.norm(ops, e, begin, self.anchor_norm, s.concat, lanes, h, self.width * h, 2 * h);
         e.barrier();
-        try self.fusion.run(ops, e, s.concat, s.delta, lanes);
+        try self.fusion.run(&target.common, e, s.concat, s.delta, lanes);
         e.barrier();
         e.setPipeline(self.fuse);
         e.setBuffer(begin.buffer, begin.offset, 0);
@@ -235,13 +305,13 @@ pub const Draft = struct {
         const h = self.hidden;
         try self.norm(ops, e, x, w.norm, v.normalized, rows, h, h, h);
         e.barrier();
-        try w.q_low.run(ops, e, v.normalized, v.query_a, rows);
-        try w.kv.run(ops, e, v.normalized, v.kv, rows);
-        try w.gate.run(ops, e, v.normalized, v.value_logits, rows);
+        try w.q_low.run(&target.common, e, v.normalized, v.query_a, rows);
+        try w.kv.run(&target.common, e, v.normalized, v.kv, rows);
+        try w.gate.run(&target.common, e, v.normalized, v.value_logits, rows);
         e.barrier();
         try self.norm(ops, e, v.query_a, w.q_norm, v.query_norm, rows, w.q_low.n, w.q_low.n, w.q_low.n);
         e.barrier();
-        try w.q_high.run(ops, e, v.query_norm, v.query, rows);
+        try w.q_high.run(&target.common, e, v.query_norm, v.query, rows);
         e.barrier();
         try mla.forward(target.common.projections, target.common.attention, e, .{
             .query = v.query,
@@ -260,10 +330,11 @@ pub const Draft = struct {
                 .sinks = reference(w.sinks),
                 .scratch = v.attention,
                 .output = v.latent,
+                .key_scores = v.key_scores,
             },
         }, v.shape, w.rope);
         e.barrier();
-        try w.o.run(ops, e, v.values, v.branch, rows);
+        try w.o.run(&target.common, e, v.values, v.branch, rows);
         e.barrier();
         try self.norm(ops, e, v.branch, w.o_norm, v.normalized, rows, h, h, h);
         e.barrier();
@@ -271,7 +342,7 @@ pub const Draft = struct {
         e.barrier();
         try self.norm(ops, e, s.after_attention, w.mlp_norm, v.normalized, rows, h, h, h);
         e.barrier();
-        try mlp(ops, e, w.mlp, v, v.normalized, v.branch, rows);
+        try mlp(&target.common, e, w.mlp, v, v.normalized, v.branch, rows);
         e.barrier();
         self.add(e, s.after_attention, v.branch, y, rows, h);
     }
@@ -288,7 +359,7 @@ pub const Draft = struct {
         e.barrier();
         try self.norm(ops, e, s.previous, self.correct_embed, offset(s.concat, h), rows, h, h, 2 * h);
         e.barrier();
-        try mlp(ops, e, self.correction, &s.common, s.concat, s.delta, rows);
+        try mlp(&target.common, e, self.correction, &s.common, s.concat, s.delta, rows);
         e.barrier();
         self.add(e, draft, s.delta, s.previous, rows, h * self.width);
         e.barrier();

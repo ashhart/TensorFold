@@ -7,6 +7,19 @@ const loader = @import("loader.zig");
 const group = 32;
 
 /// Borrows the loader's checkpoint mapping. The large embedding table can stay in file-backed memory.
+fn willNeed(t: core.checkpoint_host.Tensor, spans: []const core.quant.Span) void {
+    const os = @import("builtin").os.tag;
+    if (os != .macos and os != .linux) return;
+    if (t.shape[0] == 0 or t.bytes.len == 0) return;
+    const row = t.bytes.len / t.shape[0];
+    const page = std.heap.pageSize();
+    for (spans) |span| {
+        const lo = std.mem.alignBackward(usize, @intFromPtr(t.bytes.ptr) + span.from * row, page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(t.bytes.ptr) + span.to * row, page);
+        _ = std.c.madvise(@ptrFromInt(lo), hi - lo, std.c.MADV.WILLNEED);
+    }
+}
+
 pub const Table = struct {
     map: engram.TokenMap,
     hash: engram.Layer,
@@ -42,6 +55,11 @@ pub const Table = struct {
         };
     }
 
+    /// The table rows a token window reads, one a column (the gather's spans).
+    pub fn windowRows(self: Table, window: [engram.order]u32) [engram.columns]u32 {
+        return self.hash.hash(self.map, window);
+    }
+
     pub fn elementsPerToken(self: Table) usize {
         return engram.columns * self.width;
     }
@@ -61,6 +79,9 @@ pub const Table = struct {
             }
         }
 
+        // Ask for every row's pages at once (asynchronous read-ahead), so cold rows' faults overlap rather than queue
+        // one by one in the copies below.
+        for ([_]core.checkpoint_host.Tensor{ self.affine.words, self.affine.scales, self.affine.biases }) |t| willNeed(t, spans);
         const words = try core.quant.slice.takeRows(a, self.affine.words, spans);
         defer a.free(words.bytes);
         const scales = try core.quant.slice.takeRows(a, self.affine.scales, spans);
