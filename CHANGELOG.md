@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: `serve` with `--drafter` runs Qwen3.8-27B's DFlash2 drafter on the HIP engine through the lane core, where it was refused, and the drafter's weights and per-stream contexts count in the memory plan (#3665, refs #1563). Thanks to @AbrahamCete.
+
 - HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
 
 - HIP: an EXL3 input rotation and trellis linear kernel group (`exl3/exl3.hip`) at 2 to 8 bits, the HIP side of the projection DeepSeek-V4.1's CUDA path calls for its head, Engram's `wkv` and the indexer's `wk`, with sums in a fixed order so a row's bits do not depend on the rows beside it; nothing serves through it yet (#3314, refs #2065). Thanks to @Shoestring-dev.
