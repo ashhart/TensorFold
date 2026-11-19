@@ -1,4 +1,3 @@
-// Run: node electron/agent/linux-sandbox.test.ts
 import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,7 +15,6 @@ try {
   mkdirSync(path.join(cwd, '.git', 'info'), { recursive: true })
   writeFileSync(path.join(cwd, '.git', 'config'), '[core]\n')
 
-  // build-test: cwd writable, network denied, git control pinned.
   const buildTest = linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false })
   assert.ok(buildTest.includes('--unshare-all'), 'namespaces unshared')
   assert.ok(!buildTest.includes('--share-net'), 'network stays unshared')
@@ -29,7 +27,6 @@ try {
   assert.ok(bind(buildTest, '--bind', path.join(cwd, '.git')), 'git dir pinned against rename')
   assert.equal(buildTest.at(-1), '--', 'argv ends before the command')
 
-  // A nested repository is pinned like the root: writable bind, control entries read-only.
   const nested = path.join(cwd, 'vendor', 'sub')
   mkdirSync(path.join(nested, '.git', 'hooks'), { recursive: true })
   writeFileSync(path.join(nested, '.git', 'config'), '[core]\n')
@@ -41,7 +38,6 @@ try {
 
   process.env.TENSORFOLD_LINUX_SANDBOX = '1'
 
-  // A repository inside a dependency folder and one several levels down are pinned too.
   const inModules = path.join(cwd, 'node_modules', 'dep')
   mkdirSync(path.join(inModules, '.git', 'hooks'), { recursive: true })
   writeFileSync(path.join(inModules, '.git', 'config'), '[core]\n')
@@ -53,7 +49,6 @@ try {
   assert.ok(bind(walked, '--bind', path.join(deep, '.git')), 'a deeply nested repository is pinned')
   ok('dependency folders and deep repositories are pinned, not skipped')
 
-  // Beyond the depth bound the walk refuses instead of pinning a subset.
   let chain = path.join(cwd, 'too-deep')
   for (let i = 0; i < 34; i++) chain = path.join(chain, `level-${i}`)
   mkdirSync(chain, { recursive: true })
@@ -61,7 +56,6 @@ try {
   rmSync(path.join(cwd, 'too-deep'), { recursive: true, force: true })
   ok('a workspace deeper than the walk bound is refused')
 
-  // A worktree inside the workspace is pinned, and its pointer file is frozen read-only.
   const innerWorktree = path.join(cwd, 'inner-worktree')
   const innerGitdir = path.join(cwd, '.git', 'worktrees', 'inner')
   mkdirSync(innerGitdir, { recursive: true })
@@ -72,7 +66,6 @@ try {
   assert.ok(bind(worktreeArgv, '--bind', innerGitdir), 'the worktree gitdir stays writable for refs and objects')
   ok('a nested worktree is pinned through its gitdir and its pointer is frozen')
 
-  // A directory the walk cannot inspect refuses instead of hiding a possible repository.
   const unreadable = path.join(cwd, 'unreadable-dir')
   mkdirSync(unreadable)
   chmodSync(unreadable, 0o000)
@@ -81,7 +74,6 @@ try {
   rmSync(unreadable, { recursive: true, force: true })
   ok('a directory the walk cannot inspect is refused')
 
-  // A worktree inside the workspace whose shared directory resolves outside it is refused.
   const sharedWorktree = path.join(cwd, 'shared-worktree')
   const sharedGitdir = path.join(cwd, '.git', 'worktrees', 'shared')
   const outsideShared = path.join(root, 'elsewhere-shared', '.git')
@@ -96,7 +88,6 @@ try {
   rmSync(path.join(cwd, '.git', 'worktrees', 'shared'), { recursive: true, force: true })
   ok('a worktree whose shared directory resolves outside the workspace is refused')
 
-  // A worktree whose gitdir lives outside the workspace is refused, and refusal fails closed.
   const outsideWorktree = path.join(root, 'outside-worktree')
   mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
   mkdirSync(outsideWorktree)
@@ -112,7 +103,6 @@ try {
     console.log('  (worktree refusal runtime check skipped: bubblewrap unavailable)')
   }
 
-  // A workspace without a repository cannot be protected; commands stay refused.
   const plain = path.join(root, 'plain-workspace')
   mkdirSync(plain)
   assert.throws(() => linuxSandboxArgv(plain, { allowCwdWrite: true, allowNetwork: false }), /needs a git workspace/)
@@ -125,7 +115,6 @@ try {
     console.log('  (non-repository refusal runtime check skipped: bubblewrap unavailable)')
   }
 
-  // read-only: cwd read-only; network-fetch: network shared.
   const readOnly = linuxSandboxArgv(cwd, { allowCwdWrite: false, allowNetwork: false })
   assert.ok(bind(readOnly, '--ro-bind', cwd), 'cwd bound read-only')
   assert.ok(!bind(readOnly, '--bind', cwd), 'cwd not writable')
@@ -134,7 +123,6 @@ try {
   assert.ok(network.includes('--share-net'), 'network-fetch shares the network namespace')
   ok('draft profile contains requested mount and network arguments (not confinement proof)')
 
-  // A workspace inside the temporary root must end read-only, after the writable parent mount.
   const tmpCwd = path.join(realpathSync(tmpdir()), 'vontra-tmp-workspace')
   mkdirSync(tmpCwd, { recursive: true })
   const tmpMounts = planLinuxMounts(tmpCwd, { allowCwdWrite: false, allowNetwork: false })
@@ -149,7 +137,6 @@ try {
   for (let i = 1; i < ordered.length; i++) assert.ok(ordered[i - 1].path.length <= ordered[i].path.length, 'mounts are parent-first')
   ok('mount plan keeps a read-only workspace decisive under a writable temporary parent')
 
-  // usrmerge-style symlinked roots get a compatibility symlink, not a broken path.
   const real = path.join(root, 'real-usr-bin')
   const link = path.join(root, 'bin')
   mkdirSync(real)
@@ -159,7 +146,6 @@ try {
   assert.ok(bind(withLink, '--ro-bind', real), 'the resolved root is bound')
   ok('symlinked read roots resolve and keep their original path visible')
 
-  // Draft integration cases; the backend remains disabled pending adversarial qualification.
   if (canUseLinuxSandbox()) {
     const hello = await runSandboxedCommand('printf hello', { cwd })
     assert.equal(hello.stdout, 'hello')

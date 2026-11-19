@@ -94,7 +94,6 @@ function refuseInspection(target: string, error: unknown): never {
   throw new LinuxSandboxError(`The sandbox cannot inspect ${target}: ${(error as Error)?.message ?? String(error)}`)
 }
 
-/** Real path under the workspace, or null when the entry does not exist. */
 function workspacePath(cwd: string, target: string): string | null {
   let resolved: string
   try { resolved = realpathSync(target) } catch (error) { if (isMissing(error)) return null; refuseInspection(target, error) }
@@ -102,8 +101,7 @@ function workspacePath(cwd: string, target: string): string | null {
   return resolved
 }
 
-// Empty read-only sources for control entries a repository does not have yet, so a writable run
-// cannot create them. They live outside every mount, under the user's cache directory.
+// Read-only placeholders prevent writable runs from creating absent Git control entries.
 let fixtures: { file: string; dir: string } | null = null
 function placeholderSources(cwd: string): { file: string; dir: string } {
   if (fixtures) return fixtures
@@ -124,7 +122,6 @@ function gitdirPointer(pointer: string): string | null {
   } catch { return null }
 }
 
-/** Existing control entries (and placeholders for missing ones) mounted read-only over the gitdir. */
 function pinControlEntries(cwd: string, gitDir: string, args: string[]): void {
   const sources = placeholderSources(cwd)
   for (const [entry, isDir] of [...GIT_CONTROL_FILES.map((name) => [name, false] as const), ...GIT_CONTROL_DIRS.map((name) => [name, true] as const)]) {
@@ -134,7 +131,6 @@ function pinControlEntries(cwd: string, gitDir: string, args: string[]): void {
   }
 }
 
-/** A git directory the profile pins: writable itself, its control entries read-only. */
 function pinGitDirectory(cwd: string, gitDir: string, args: string[]): void {
   const resolved = workspacePath(cwd, gitDir)
   if (!resolved) throw new LinuxSandboxError(`The sandbox cannot resolve the git directory ${gitDir}.`)
@@ -142,7 +138,6 @@ function pinGitDirectory(cwd: string, gitDir: string, args: string[]): void {
   pinControlEntries(cwd, gitDir, args)
 }
 
-/** A worktree pointer: frozen read-only, and its real gitdir must stay inside the workspace. */
 function pinWorktree(cwd: string, pointer: string, args: string[]): void {
   const pointerPath = workspacePath(cwd, pointer)
   if (!pointerPath) throw new LinuxSandboxError(`The sandbox cannot resolve the worktree pointer at ${pointer}.`)
@@ -205,7 +200,6 @@ function nestedGitPaths(cwd: string): string[] {
   return found
 }
 
-/** Root git metadata plus every nested repository, all pinned the same way. */
 export function gitMetadataArgs(cwd: string): string[] {
   const args: string[] = []
   const rootGit = path.join(cwd, '.git')
@@ -286,7 +280,6 @@ export function linuxSandboxArgv(cwd: string, options: LinuxSandboxProfileOption
   const args: string[] = ['--unshare-all', '--die-with-parent']
   if (options.allowNetwork) args.push('--share-net')
   args.push('--proc', '/proc', '--dev', '/dev')
-  // Parent-first order is what makes a read-only child decisive.
   for (const mount of mounts) args.push(mount.mode === 'rw' ? '--bind' : '--ro-bind', mount.path, mount.path)
   if (options.allowCwdWrite) args.push(...gitMetadataArgs(realpathSync(cwd)))
   args.push(...compatSymlinks(linuxReadRoots(cwd, options)))
