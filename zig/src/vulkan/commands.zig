@@ -1,5 +1,6 @@
 //! One command buffer and fence on the device's queue, and staged uploads and readbacks through it.
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("vk");
 const runtime = @import("runtime.zig");
 const memory = @import("memory.zig");
@@ -13,6 +14,12 @@ pub const Commands = struct {
     pool: c.VkCommandPool,
     cmd: c.VkCommandBuffer,
     fence: c.VkFence,
+    /// A command buffer is begun and holds the dispatches and copies recorded since the last submission.
+    recording: bool = false,
+    /// Dispatches in the open command buffer; Pipeline.run submits when it reaches half a batch.
+    pending: u32 = 0,
+    /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
+    poison: ?Error = null,
 
     pub fn init(dev: *const Device) Error!Commands {
         const api = &dev.api;
@@ -38,28 +45,50 @@ pub const Commands = struct {
         return .{ .dev = dev, .pool = pool, .cmd = cmd, .fence = fence };
     }
 
-    /// Frees the pool, its command buffer and the fence; call only after the last submit returned success.
+    /// Frees the pool, its command buffer and the fence after the last submit; dispatches never submitted are dropped.
     pub fn deinit(self: *Commands) void {
         self.dev.api.vkDestroyFence(self.dev.handle, self.fence, null);
         self.dev.api.vkDestroyCommandPool(self.dev.handle, self.pool, null);
         self.* = undefined;
     }
 
-    /// The command buffer, reset and begun for one submission.
+    /// Drops unsubmitted records unrun. Call before freeing any buffer an open command buffer may reference.
+    pub fn discard(self: *Commands) void {
+        if (!self.recording) return;
+        _ = self.dev.api.vkResetCommandBuffer(self.cmd, 0);
+        self.recording = false;
+        self.pending = 0;
+    }
+
+    /// The open command buffer; begun (and reset) only when nothing recorded earlier still waits for a submission.
     pub fn begin(self: *Commands) Error!c.VkCommandBuffer {
+        if (self.poison) |p| return p;
+        if (self.recording) return self.cmd;
         try check(self.dev.api.vkResetCommandBuffer(self.cmd, 0));
         const info: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
+        self.recording = true;
         return self.cmd;
     }
 
-    /// Finite fence wait; Timeout/InFlight require orExit to avoid freeing resources the GPU may still use.
+    /// Submits what is recorded (nothing if none); timeout_ns covers the whole batch; Timeout and InFlight need orExit.
     pub fn submit(self: *Commands, timeout_ns: u64) Error!void {
+        if (self.poison) |p| return p;
+        if (!self.recording) return;
         const api = &self.dev.api;
-        try check(api.vkEndCommandBuffer(self.cmd));
+        const ended = api.vkEndCommandBuffer(self.cmd);
+        if (ended != c.VK_SUCCESS) {
+            // Invalid after a failed end: poison the stream so no recording begin reuses it.
+            self.poison = error.CommandBufferInvalid;
+            self.recording = false;
+            if (!builtin.is_test) std.log.err("vulkan: vkEndCommandBuffer returned {d}; the command stream is poisoned", .{ended});
+            return error.CommandBufferInvalid;
+        }
+        self.recording = false;
+        self.pending = 0;
         const info: c.VkSubmitInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
@@ -75,7 +104,13 @@ pub const Commands = struct {
             std.log.err("vulkan: vkWaitForFences returned {d} within {d} ns of a submission", .{ waited_on, timeout_ns });
             return e;
         };
-        try check(api.vkResetFences(self.dev.handle, 1, &self.fence));
+        const reset_done = api.vkResetFences(self.dev.handle, 1, &self.fence);
+        if (reset_done != c.VK_SUCCESS) {
+            // The fence stays signaled after a good wait: poison the stream; orExit ends the process.
+            self.poison = error.FencePoisoned;
+            if (!builtin.is_test) std.log.err("vulkan: vkResetFences returned {d} after a signaled wait; the command stream is poisoned", .{reset_done});
+            return error.FencePoisoned;
+        }
     }
 };
 
@@ -101,6 +136,8 @@ pub fn orExit(result: anytype) @TypeOf(result) {
     _ = result catch |e| {
         if (e == error.Timeout) std.process.exit(124);
         if (e == error.InFlight) std.process.exit(1);
+        if (e == error.FencePoisoned) std.process.exit(1);
+        if (e == error.CommandBufferInvalid) std.process.exit(1);
         return e;
     };
     return result;
@@ -114,6 +151,35 @@ pub fn barrier(dev: *const Device, cmd: c.VkCommandBuffer, src_stage: u32, src_a
         .dstAccessMask = dst_access,
     };
     dev.api.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 1, &b, 0, null, 0, null);
+}
+
+// Fill geometry requires nonzero 4-byte-aligned offset/length within the buffer; host-tested.
+pub fn fillRange(buf_len: u64, offset: u64, len: u64) Error!void {
+    if (len == 0 or len % 4 != 0 or offset % 4 != 0) return error.Misaligned;
+    try memory.span(buf_len, offset, len);
+}
+
+// Record a 4-byte little-endian fill in a caller-begun command buffer; dst must be a device buffer from dev.
+pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offset: u64, len: u64, value: u32) Error!void {
+    if (dst.dev != dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+}
+
+/// Synchronous vkCmdFillBuffer of a device buffer range, with barriers; submits and waits.
+pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    const cmd = try cmds.begin();
+    barrier(cmds.dev, cmd, gpu_stages, gpu_writes, transfer, transfer_write);
+    cmds.dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+    try cmds.submit(timeout_ns);
+}
+
+/// fill(..., value = 0): the real device-side zero every family state uses.
+pub fn zero(cmds: *Commands, dst: Buffer, offset: u64, len: u64, timeout_ns: u64) Error!void {
+    try fill(cmds, dst, offset, len, 0, timeout_ns);
 }
 
 const gpu_stages: u32 = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -179,6 +245,164 @@ test "only a successful submit and a signalled fence let the caller free a submi
     try std.testing.expectError(error.InFlight, waited(c.VK_ERROR_OUT_OF_HOST_MEMORY));
     try std.testing.expectError(error.InFlight, waited(c.VK_ERROR_DEVICE_LOST));
     try std.testing.expectError(error.InFlight, waited(c.VK_NOT_READY));
+}
+
+test "discard drops the open command buffer's records and clears the batch state" {
+    const Calls = struct {
+        var resets: usize = 0;
+        fn reset(_: c.VkCommandBuffer, _: c.VkCommandBufferResetFlags) callconv(.c) c.VkResult {
+            resets += 1;
+            return c.VK_SUCCESS;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    var dev: Device = undefined;
+    dev.api = api;
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = undefined, .recording = true, .pending = 7 };
+    cmds.discard();
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    cmds.discard(); // nothing recording: no second reset call
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+}
+
+test "a failed reset still clears the batch state, and reuse fails without recording or submitting" {
+    const Calls = struct {
+        var resets: usize = 0;
+        var begins: usize = 0;
+        var submits: usize = 0;
+        fn reset(_: c.VkCommandBuffer, _: c.VkCommandBufferResetFlags) callconv(.c) c.VkResult {
+            resets += 1;
+            return c.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+        fn begin(_: c.VkCommandBuffer, _: [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult {
+            begins += 1;
+            return c.VK_SUCCESS;
+        }
+        fn submit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            submits += 1;
+            return c.VK_SUCCESS;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    api.vkBeginCommandBuffer = Calls.begin;
+    api.vkQueueSubmit = Calls.submit;
+    var dev: Device = undefined;
+    dev.api = api;
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = undefined, .recording = true, .pending = 7 };
+    // Discard ignores the reset result on purpose: nothing recorded was ever submitted.
+    cmds.discard();
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    // Submit is a no-op while not recording, and a failed begin reset adds no record.
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 0), Calls.submits);
+    try std.testing.expectError(error.OutOfMemory, cmds.begin());
+    try std.testing.expectEqual(@as(usize, 2), Calls.resets);
+    try std.testing.expectEqual(@as(usize, 0), Calls.begins);
+    try std.testing.expectEqual(false, cmds.recording);
+}
+
+test "a vkResetFences failure after a signaled wait poisons the stream terminally" {
+    const Calls = struct {
+        var ends: usize = 0;
+        var queues: usize = 0;
+        var waits: usize = 0;
+        var resets: usize = 0;
+        fn end(_: c.VkCommandBuffer) callconv(.c) c.VkResult {
+            ends += 1;
+            return c.VK_SUCCESS;
+        }
+        fn queueSubmit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            queues += 1;
+            return c.VK_SUCCESS;
+        }
+        fn wait(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence, _: c.VkBool32, _: c_ulonglong) callconv(.c) c.VkResult {
+            waits += 1;
+            return c.VK_SUCCESS;
+        }
+        fn reset(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence) callconv(.c) c.VkResult {
+            resets += 1;
+            return c.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkEndCommandBuffer = Calls.end;
+    api.vkQueueSubmit = Calls.queueSubmit;
+    api.vkWaitForFences = Calls.wait;
+    api.vkResetFences = Calls.reset;
+    var dev: Device = undefined;
+    dev.api = api;
+    dev.handle = @ptrFromInt(0x2000);
+    dev.queue = @ptrFromInt(0x3000);
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000), .recording = true, .pending = 3 };
+    std.testing.log_level = .err; // the poison path logs the reset failure, as it is meant to
+    defer std.testing.log_level = .warn;
+    // The fence is signaled after a good wait: a failed reset is terminal, and no submit may reuse it.
+    try std.testing.expectError(error.FencePoisoned, cmds.submit(0));
+    try std.testing.expectEqual(@as(usize, 1), Calls.queues);
+    try std.testing.expectEqual(@as(usize, 1), Calls.waits);
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+    try std.testing.expectEqual(false, cmds.recording);
+    cmds.pending = 3; // pretend records arrived after the poisoning
+    try std.testing.expectError(error.FencePoisoned, cmds.submit(0));
+    try std.testing.expectEqual(@as(usize, 1), Calls.queues); // no second submission ever reached the queue
+}
+
+test "a failed vkEndCommandBuffer poisons the stream: a caught error cannot reach a recording begin" {
+    const Calls = struct {
+        var ends: usize = 0;
+        var begins: usize = 0;
+        var queues: usize = 0;
+        fn end(_: c.VkCommandBuffer) callconv(.c) c.VkResult {
+            ends += 1;
+            return c.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+        fn begin(_: c.VkCommandBuffer, _: [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult {
+            begins += 1;
+            return c.VK_SUCCESS;
+        }
+        fn queueSubmit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            queues += 1;
+            return c.VK_SUCCESS;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkEndCommandBuffer = Calls.end;
+    api.vkBeginCommandBuffer = Calls.begin;
+    api.vkQueueSubmit = Calls.queueSubmit;
+    var dev: Device = undefined;
+    dev.api = api;
+    dev.handle = @ptrFromInt(0x2000);
+    dev.queue = @ptrFromInt(0x3000);
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000), .recording = true, .pending = 5 };
+    std.testing.log_level = .err; // the poison path logs the end failure, as it is meant to
+    defer std.testing.log_level = .warn;
+    // A gate wrapper catches this and continues: the buffer is invalid and must never be handed out again.
+    try std.testing.expectError(error.CommandBufferInvalid, cmds.submit(0));
+    try std.testing.expectEqual(@as(usize, 1), Calls.ends);
+    try std.testing.expectEqual(@as(usize, 0), Calls.queues);
+    try std.testing.expectEqual(false, cmds.recording);
+    // The caught-and-continued path: begin must refuse, not return the invalid open buffer.
+    try std.testing.expectError(error.CommandBufferInvalid, cmds.begin());
+    try std.testing.expectEqual(@as(usize, 0), Calls.begins);
+    // And submit refuses without queueing the poisoned records.
+    try std.testing.expectError(error.CommandBufferInvalid, cmds.submit(0));
+    try std.testing.expectEqual(@as(usize, 0), Calls.queues);
+}
+
+test "fill geometry refuses torn, empty and out-of-range fills" {
+    try fillRange(4096, 0, 4096);
+    try fillRange(4096, 12, 1024);
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 0, 0)); // empty
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 2, 1024));
+    try std.testing.expectError(error.Misaligned, fillRange(4096, 0, 6));
+    try std.testing.expectError(error.OutOfRange, fillRange(4096, 8, 4096));
+    try std.testing.expectError(error.OutOfRange, fillRange(0, 0, 4));
 }
 
 test "staged transfers refuse foreign devices, wrong kinds, aliasing and ranges past the buffer" {

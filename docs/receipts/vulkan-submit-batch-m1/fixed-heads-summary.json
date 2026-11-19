@@ -1,0 +1,322 @@
+{
+ "change": "Vulkan batched submission (#2016) measured on the float32-fixed heads",
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+  "mesa": "Honeykrisp, Omarchy Mesa build, library sha256 d75f4cbc",
+  "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
+  "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
+  "order": "old,new,new,old,old,new (three pairs, both orders)",
+  "decision_rule": "median run-2 gain of at least 3 percent and every pair positive"
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "start_utc": "2026-11-11T17:04:25+00:00",
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    },
+    "new": {
+     "sha256": "d9b2841744a03c80160d92959dd27ff40cb53110b0cd33f188ea24c9d729fa5d",
+     "bytes": 6109056
+    }
+   },
+   "logits_sha256_all_six_processes": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c",
+   "run2_ms_median": {
+    "old": 7994,
+    "new": 3371
+   },
+   "run2_gain_median": 0.5783087315486615,
+   "run2_gain_range": [
+    0.570097037793667,
+    0.5948388631228446
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 8242,
+     "run2_ms": 7832,
+     "peak_rss_bytes": 1503100928,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 3360,
+     "run2_ms": 3367,
+     "peak_rss_bytes": 1517191168,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 3361,
+     "run2_ms": 3371,
+     "peak_rss_bytes": 1517191168,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 7994,
+     "run2_ms": 7994,
+     "peak_rss_bytes": 1536081920,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 8579,
+     "run2_ms": 8409,
+     "peak_rss_bytes": 1535164416,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 3373,
+     "run2_ms": 3407,
+     "peak_rss_bytes": 1548992512,
+     "logits_sha256": "e946185d64aea5942265276e7b76f7d4c4560b543145e1139e9c2a09432ca00c"
+    }
+   ]
+  },
+  {
+   "case": "document-256",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "start_utc": "2026-11-11T17:40:46+00:00",
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    },
+    "new": {
+     "sha256": "d9b2841744a03c80160d92959dd27ff40cb53110b0cd33f188ea24c9d729fa5d",
+     "bytes": 6109056
+    }
+   },
+   "logits_sha256_all_six_processes": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a",
+   "run2_ms_median": {
+    "old": 15070,
+    "new": 9906
+   },
+   "run2_gain_median": 0.34100891787568216,
+   "run2_gain_range": [
+    0.3396814863968149,
+    0.367876970199732
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 15175,
+     "run2_ms": 15026,
+     "peak_rss_bytes": 1523728384,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 9901,
+     "run2_ms": 9902,
+     "peak_rss_bytes": 1517191168,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 9936,
+     "run2_ms": 9951,
+     "peak_rss_bytes": 1517174784,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 14738,
+     "run2_ms": 15070,
+     "peak_rss_bytes": 1504526336,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 15781,
+     "run2_ms": 15671,
+     "peak_rss_bytes": 1529544704,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 9903,
+     "run2_ms": 9906,
+     "peak_rss_bytes": 1517142016,
+     "logits_sha256": "3188aaae7d1182c133a89fde103722d23f3d81b57df259498c9b778ebe2d0d7a"
+    }
+   ]
+  },
+  {
+   "case": "document-1024",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "start_utc": "2026-11-11T18:20:53+00:00",
+   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+   "elfs": {
+    "old": {
+     "sha256": "b6d9a35b97786770f9424b6e0089c2daead0625e0e21597f8abb96c6f6cba3cb",
+     "bytes": 6116824
+    },
+    "new": {
+     "sha256": "d9b2841744a03c80160d92959dd27ff40cb53110b0cd33f188ea24c9d729fa5d",
+     "bytes": 6109056
+    }
+   },
+   "logits_sha256_all_six_processes": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356",
+   "run2_ms_median": {
+    "old": 38745,
+    "new": 32299
+   },
+   "run2_gain_median": 0.1663698541747322,
+   "run2_gain_range": [
+    0.1620646701614159,
+    0.17282750505231384
+   ],
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "run1_ms": 38501,
+     "run2_ms": 38745,
+     "peak_rss_bytes": 1516552192,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "run1_ms": 32292,
+     "run2_ms": 32299,
+     "peak_rss_bytes": 1529741312,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "run1_ms": 32293,
+     "run2_ms": 32335,
+     "peak_rss_bytes": 1529757696,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "run1_ms": 39385,
+     "run2_ms": 39091,
+     "peak_rss_bytes": 1517207552,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "run1_ms": 38865,
+     "run2_ms": 38534,
+     "peak_rss_bytes": 1517223936,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "run1_ms": 32254,
+     "run2_ms": 32289,
+     "peak_rss_bytes": 1529462784,
+     "logits_sha256": "82c353787e896b52c8def7f4cebbc087d42f71c4837505db8100df67b2235356"
+    }
+   ]
+  }
+ ],
+ "isolation": {
+  "case": "document-256, earlier builds in the current environment",
+  "status": "PASS_WITH_NOT_VERIFIED",
+  "start_utc": "2026-11-11T18:08:43+00:00",
+  "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+  "elfs": {
+   "old": {
+    "sha256": "151319df8f011fbb23c753a9398836e28215582c26ec8d7e6b4ad7aa0854c7b7",
+    "bytes": 5784808
+   },
+   "new": {
+    "sha256": "e84e79dd1fefed9889f833d92bed5c19d36033a189851b878232248dd7a6a7ea",
+    "bytes": 5765768
+   }
+  },
+  "logits_sha256_all_six_processes": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb",
+  "run2_ms_median": {
+   "old": 20838,
+   "new": 16567
+  },
+  "run2_gain_median": 0.20539399174584894,
+  "run2_gain_range": [
+   0.19968135953266064,
+   0.21128302785051178
+  ],
+  "processes": [
+   {
+    "label": "pr0-old",
+    "arm": "old",
+    "run1_ms": 20810,
+    "run2_ms": 20713,
+    "peak_rss_bytes": 1212760064,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   },
+   {
+    "label": "pr1-new",
+    "arm": "new",
+    "run1_ms": 16554,
+    "run2_ms": 16577,
+    "peak_rss_bytes": 1225080832,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   },
+   {
+    "label": "pr2-new",
+    "arm": "new",
+    "run1_ms": 16556,
+    "run2_ms": 16558,
+    "peak_rss_bytes": 1224343552,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   },
+   {
+    "label": "pr3-old",
+    "arm": "old",
+    "run1_ms": 20883,
+    "run2_ms": 20838,
+    "peak_rss_bytes": 1244938240,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   },
+   {
+    "label": "pr4-old",
+    "arm": "old",
+    "run1_ms": 20919,
+    "run2_ms": 21005,
+    "peak_rss_bytes": 1222115328,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   },
+   {
+    "label": "pr5-new",
+    "arm": "new",
+    "run1_ms": 16564,
+    "run2_ms": 16567,
+    "peak_rss_bytes": 1224294400,
+    "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+   }
+  ]
+ },
+ "isolation_note": "Same case, same host and kernel, with the earlier builds (old 151319df, new e84e79dd). The earlier README table was measured on kernel 7.1.12-2-20261013.18-sep-ARCH with Mesa git-9323171c12. Run times and gains differ between the environments, and these runs do not separate the cause.",
+ "excluded_attempts": [
+  "A first document-1024 attempt failed the packet's own prompt-token pin (256 instead of 1024) after one process. It is not counted."
+ ]
+}

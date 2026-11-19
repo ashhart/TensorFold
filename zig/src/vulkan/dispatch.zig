@@ -10,7 +10,11 @@ const check = runtime.check;
 
 pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings, BadPushSize, BadWorkgroup, BadGroupCount, BadBindings, Aliased };
 
-pub const max_bindings = 8;
+pub const max_bindings = 10;
+
+/// Dispatches recorded into one submission, so a descriptor set per dispatch; run submits at half of it.
+pub const batch_max: u32 = 256;
+const batch_flush: u32 = batch_max / 2;
 
 /// The shader's set 0: storage buffers 0..bindings-1, its push bytes, and a mask of the bindings it writes.
 pub const Layout = struct { bindings: u32, push_bytes: u32, writes: u32 };
@@ -27,7 +31,9 @@ pub const Pipeline = struct {
     pipeline_layout: c.VkPipelineLayout = null,
     pipeline: c.VkPipeline = null,
     pool: c.VkDescriptorPool = null,
-    set: c.VkDescriptorSet = null,
+    /// One set per dispatch recorded since the last submission; bind fills the next one, record binds the current one.
+    sets: [batch_max]c.VkDescriptorSet = @splat(null),
+    slot: usize = 0,
     bound: bool = false,
 
     /// Checks the module and the device's limits before creating anything; a failure destroys what was made.
@@ -98,22 +104,23 @@ pub const Pipeline = struct {
             return e;
         };
         errdefer api.vkDestroyPipeline(h, p.pipeline, null);
-        const size: c.VkDescriptorPoolSize = .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = layout.bindings };
+        const size: c.VkDescriptorPoolSize = .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = layout.bindings * batch_max };
         const pool_info: c.VkDescriptorPoolCreateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            .maxSets = 1,
+            .maxSets = batch_max,
             .poolSizeCount = 1,
             .pPoolSizes = &size,
         };
         try check(api.vkCreateDescriptorPool(h, &pool_info, null, &p.pool));
         errdefer api.vkDestroyDescriptorPool(h, p.pool, null);
+        const set_layouts: [batch_max]c.VkDescriptorSetLayout = @splat(p.set_layout);
         const alloc_info: c.VkDescriptorSetAllocateInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = p.pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &p.set_layout,
+            .descriptorSetCount = batch_max,
+            .pSetLayouts = &set_layouts,
         };
-        try check(api.vkAllocateDescriptorSets(h, &alloc_info, &p.set));
+        try check(api.vkAllocateDescriptorSets(h, &alloc_info, &p.sets));
         return p;
     }
 
@@ -127,7 +134,7 @@ pub const Pipeline = struct {
         api.vkDestroyDescriptorSetLayout(h, p.set_layout, null);
     }
 
-    /// Updates checked device-local bindings; call only when no submission using this descriptor set is pending.
+    /// Fills the next descriptor set with checked device-local bindings; earlier recorded dispatches keep their sets.
     pub fn bind(p: *Pipeline, bindings: []const Binding) Error!void {
         if (bindings.len != p.layout.bindings) return error.BadBindings;
         var infos: [max_bindings]c.VkDescriptorBufferInfo = undefined;
@@ -138,7 +145,7 @@ pub const Pipeline = struct {
             infos[i] = try b.buffer.descriptor(b.offset, b.len);
             writes[i] = .{
                 .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = p.set,
+                .dstSet = p.sets[(p.slot + 1) % batch_max],
                 .dstBinding = @intCast(i),
                 .descriptorCount = 1,
                 .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -147,6 +154,7 @@ pub const Pipeline = struct {
         }
         try disjoint(bindings, p.layout.writes);
         p.dev.api.vkUpdateDescriptorSets(p.dev.handle, p.layout.bindings, &writes, 0, null);
+        p.slot = (p.slot + 1) % batch_max;
         p.bound = true;
     }
 
@@ -161,7 +169,7 @@ pub const Pipeline = struct {
         };
         const api = &p.dev.api;
         api.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
-        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &p.set, 0, null);
+        api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &p.sets[p.slot], 0, null);
         if (push.len > 0) api.vkCmdPushConstants(cmd, p.pipeline_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, p.layout.push_bytes, push.ptr);
         api.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
         const reads = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -169,10 +177,11 @@ pub const Pipeline = struct {
         commands.barrier(p.dev, cmd, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, stages, reads);
     }
 
-    /// One dispatch in its own submission; wrap it in commands.orExit, which ends the process on error.Timeout.
+    /// Records one dispatch into the open command buffer; submitted with half a batch, or with the next copy or fill.
     pub fn run(p: *const Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
         try p.record(try cmds.begin(), push, groups);
-        try cmds.submit(timeout_ns);
+        cmds.pending += 1;
+        if (cmds.pending >= batch_flush) try cmds.submit(timeout_ns);
     }
 };
 
@@ -314,7 +323,17 @@ test "device limits refuse bindings, push bytes, workgroups and group counts pas
     try std.testing.expectError(error.BadWorkgroup, fits(l, qmm, .{ 512, 1, 1 }));
     l.maxComputeWorkGroupInvocations = 128;
     try std.testing.expectError(error.BadWorkgroup, fits(l, qmm, .{ 256, 1, 1 }));
+    // restore the limit the negative case reduced, before the positive cases
+    l.maxComputeWorkGroupInvocations = 256;
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 0, 1, 1 }));
     try std.testing.expectError(error.BadGroupCount, counts(.{ 65535, 65535, 65535 }, .{ 65536, 1, 1 }));
     try counts(.{ 65535, 65535, 65535 }, .{ 2, 1, 1 });
+    // The 10-binding GDN prefill/decode closures fit; 11 do not; fewer offered still refuses (real capacity).
+    l.maxPerStageDescriptorStorageBuffers = 10;
+    l.maxDescriptorSetStorageBuffers = 10;
+    l.maxPerStageResources = 10;
+    try fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 });
+    try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings + 1, .push_bytes = 120, .writes = 1 << 10 }, .{ 256, 1, 1 }));
+    l.maxPerStageDescriptorStorageBuffers = 8;
+    try std.testing.expectError(error.TooManyBindings, fits(l, .{ .bindings = max_bindings, .push_bytes = 120, .writes = 1 << 9 }, .{ 256, 1, 1 }));
 }
