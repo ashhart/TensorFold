@@ -1,6 +1,4 @@
-//! CUDA Engram branch for Hy4-flash, after `metal_engram.zig`: gathered BF16 table rows (direct reads or a
-//! resident copy) are optionally FP8 round-tripped (the stock checkpoint profile), normalized per hash head,
-//! projected once to a value and once per hyper-connection stream to a key, then gated into the four streams.
+//! Hy4-flash's CUDA Engram branch: optional FP8 round trip, per-head norm, value and per-stream keys, gated add.
 const std = @import("std");
 const cuda = @import("cuda");
 const engram = @import("engram.zig");

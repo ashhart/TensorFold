@@ -34,9 +34,7 @@ extern "C" __global__ void tf_hy4_pool_groups(
 #include <cuda_bf16.h>
 #include "../common/reduce.cuh"
 
-// One block per closed group, one thread per column: the reference's FP32 `key_value_projection` and
-// `key_gate_projection` of the group's four cached BF16 token keys (ascending-k FMA), the four-slot pooling
-// above with `intra_group_ape`, then the FP32 `key_norm`, rounded once to BF16. RoPE runs afterwards.
+// One block per closed group: FP32 value/gate projections of its 4 token keys, pooling with ape, FP32 key_norm.
 extern "C" __global__ void __launch_bounds__(128) tf_hy4_index_groups(
     const __nv_bfloat16 *token_keys,
     const float *value_weights,
