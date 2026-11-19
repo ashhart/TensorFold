@@ -123,11 +123,11 @@ fn rowsLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, x: 
     wide.dense(p, e, q, .{ .in = (affine.Ref{ .buf = x }).at(at), .ldx = q.k, .out = .{ .buf = out }, .ldo = q.n, .rows = m });
 }
 
-fn mmLaunch(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: mtl.Buffer, sums: mtl.Buffer, out: mtl.Buffer, m: u32) void {
+fn mmLaunch(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, bm: u32, q: affine.Affine, x: mtl.Buffer, sums: mtl.Buffer, out: mtl.Buffer, m: u32) void {
     const xr: affine.Ref = .{ .buf = x };
     const sr: affine.Ref = .{ .buf = sums };
     affine_mm.rowSums(e, mm, 64, xr, sr, m, q.k);
-    affine_mm.dense(e, mm, xr, sr, q, affine.Ref{ .buf = out }, m);
+    affine_mm.denseBm(e, mm, xr, sr, q, affine.Ref{ .buf = out }, m, bm);
 }
 
 /// Each class at its widths (g64): decode rows (alone == windowed) and the prompt's product vs fp64, every column.
@@ -167,7 +167,7 @@ pub fn check(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !Tally 
         // prompt: the chunk's product at rows 0 and 32; on the row kernels every row's bits equal the decode's
         const mm: ?affine_mm.Pipes = wide.mm(p, q); // prompt.zig's (2: the routed experts' gathers)
         const on_mm = mm != null;
-        if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
+        if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, p.mm_bm, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
         t.worst = 0;
         const pitch = if (on_mm) np else n;
         for ([_]usize{ 0, prompt_rows - 1 }) |i| try against(q, w, s, b, x, bufs[5].slice(u16, prompt_rows * pitch), pitch, i, &t, 1);
