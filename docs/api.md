@@ -999,6 +999,9 @@ with a smaller `--context` or `--parallel`.
 one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
 workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
 only with room to spare.
+After start-up on unified memory, `MemAvailable` settles somewhat above the reserve and the pool's page count can
+differ by a few tens between launches with the same settings, because the room is read once while the host is still
+settling.
 
 On a discrete card (an RTX 3090, an A100) the budget is the card's own free memory, as the driver reports it, less a
 reserve of a 32nd of the card and at least 1 GiB, and the plan is the same. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that
