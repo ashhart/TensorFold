@@ -213,7 +213,8 @@ The `qwen3_5` family combines Gated DeltaNet and full attention. The standard re
 4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
@@ -267,7 +268,8 @@ alone. One GPU: `--tp 2` stops at startup (two ranks read the MLX checkpoint), a
 input is qualified on this checkpoint.
 
 ```bash
-tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull nvidia/Qwen3.8-27B-NVFP4
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
 
