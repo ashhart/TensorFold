@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Nemotron 3.5 Super VL recipe pulls the checkpoint before serving it by name on one GB10 (#3993). Thanks to @jayleaton.
+
 - Docs: the Gemma 4 recipe gains a CUDA section for the 31B on one GB10, with the pinned pulls, the serve command and its 47.5 GiB startup size at the default window (#3992). Thanks to @jayleaton.
 
 - Docs: the Kolibri-1 recipe gives the pull step and serves the checkpoint by name, and its size reads 78.9 GB as the Hub reports it, here and in supported models (#3995). Thanks to @jayleaton.
