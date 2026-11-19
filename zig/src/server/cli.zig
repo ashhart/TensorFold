@@ -8,7 +8,6 @@ pub const Kind = enum {
     store_true, // --flag
     append, // repeatable --flag VALUE
 };
-
 pub const Flag = struct {
     name: []const u8,
     kind: Kind = .value,
@@ -271,7 +270,6 @@ pub const Args = struct {
     vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
 };
-
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
 
