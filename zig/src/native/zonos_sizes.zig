@@ -1,11 +1,12 @@
 //! The ZONOS3 host's device sizes: what a load, a request at once and a guided request are admitted for.
 const z3 = @import("zonos3");
 const zdec = @import("zonos_decoders.zig");
+const dev = @import("zonos_device.zig");
 
 /// The pinned release's weights as the device holds them: the backbone's bf16 and the keep2_plain decoder's fp32.
-pub const weight_bytes: u64 = 2_531_483_136;
-/// The clip encoder's weights, state and workspaces: the acoustic encoder, the SSL teacher and the quantizers.
-pub const clip_bytes: u64 = 5_643_510_688;
+pub const weight_bytes: u64 = 1_771_847_424 + zdec.weightBytes(.keep2_plain);
+/// The clip encoder's weights, state and workspaces, as loaded (Metal rounds each buffer up to 256 bytes).
+pub const clip_bytes: u64 = if (dev.on_metal) 5_643_511_296 else 5_643_510_688;
 
 /// Device bytes a guided request's second stream takes, allocated by the first such request.
 pub fn twinBytes(o: z3.Options) u64 {

@@ -3,7 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const z3 = @import("zonos3");
 const chunkFrames = @import("zonos_layout.zig").chunkFrames;
-const cuda = @import("cuda");
+const dev = @import("zonos_device.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -99,10 +99,10 @@ pub fn fillOut(ed: *const api.SpeechEdit, rows: []const [W]i32, end_frame: ?usiz
 pub fn clipEncoder(h: anytype) !*z3.clip.Clip {
     if (h.clip) |c| return c;
     const clip_bytes = @import("zonos_host.zig").clip_bytes;
-    if (h.admit) |a| if (clip_bytes > try a.room(a.ptr, &h.e.ctx)) return error.ClipEncoderNeedsMoreDeviceMemory;
-    const before = cuda.usage(false).device;
-    h.clip = try z3.clip.Clip.create(h.gpa, h.io, &h.e.driver, h.e.stream, h.dir, h.rel.generator, h.codec.w);
-    const took = cuda.usage(false).device - before;
+    if (h.admit) |a| if (clip_bytes > try a.room(a.ptr, dev.context(h.e))) return error.ClipEncoderNeedsMoreDeviceMemory;
+    const before = dev.held(h.e);
+    h.clip = try dev.clip(h.gpa, h.io, h.e, h.dir, h.rel.generator, h.codec);
+    const took = dev.held(h.e) - before;
     std.log.info("zonos3: clip encoder loaded, {d} bytes on the device ({d} admitted)", .{ took, clip_bytes });
     if (took > clip_bytes) return error.ClipEncoderOverItsAdmission;
     return h.clip.?;
@@ -112,8 +112,8 @@ pub fn clipEncoder(h: anytype) !*z3.clip.Clip {
 pub fn wordAligner(h: anytype) !*z3.aligner.Aligner {
     if (h.aligner) |a| return a;
     if (h.rel.aligner.len == 0) return error.NoAlignerInRelease;
-    if (h.admit) |a| if (aligner_bytes > try a.room(a.ptr, &h.e.ctx)) return error.AlignerNeedsMoreDeviceMemory;
-    h.aligner = try z3.aligner.Aligner.create(h.gpa, h.io, &h.e.driver, h.e.stream, h.rel.aligner, &h.codec.blas);
+    if (h.admit) |a| if (aligner_bytes > try a.room(a.ptr, dev.context(h.e))) return error.AlignerNeedsMoreDeviceMemory;
+    h.aligner = try dev.aligner(h.gpa, h.io, h.e, h.rel.aligner, h.codec);
     std.log.info("zonos3: aligner loaded, {d} bytes of weights on the device ({d} admitted)", .{ h.aligner.?.bytes(), aligner_bytes });
     return h.aligner.?;
 }

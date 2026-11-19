@@ -1,16 +1,16 @@
 //! ZONOS3's audio decoders on the host: the default loaded with the model, another on the first request that asks.
 const std = @import("std");
-const cuda = @import("cuda");
 const z3 = @import("zonos3");
+const dev = @import("zonos_device.zig");
 
 const Decoder = z3.codec.Decoder;
 const count = std.enums.values(Decoder).len;
 
-/// The device bytes of a decoder's weights: the generator's tables and its head, measured as loaded.
+/// The device bytes of a decoder's weights, measured as loaded (Metal rounds each buffer up to 256 bytes).
 pub fn weightBytes(d: Decoder) u64 {
     return switch (d) {
-        .keep2_plain => 759_635_712,
-        .full_mr => 4_253_052_672,
+        .keep2_plain => if (dev.on_metal) 759_636_224 else 759_635_712,
+        .full_mr => if (dev.on_metal) 4_253_053_184 else 4_253_052_672,
     };
 }
 
@@ -85,7 +85,7 @@ pub const Set = struct {
         if (s.codecs[@backingInt(d)]) |c| return c;
         var o = s.options;
         o.decoder = d;
-        const c = try z3.Codec.create(gpa, io, &e.driver, e.stream, gen, s.heads[@backingInt(d)], o);
+        const c = try dev.codec(gpa, io, e, gen, s.heads[@backingInt(d)], o);
         errdefer c.destroy();
         for (1..s.lanes) |_| _ = try c.addLane();
         if (c.w.bytes > weightBytes(d)) return error.DecoderOverItsAdmission;
@@ -106,10 +106,10 @@ pub fn codecFor(h: anytype, index: usize) !*z3.Codec {
     const d = try h.decoders.of(index);
     if (h.decoders.codecs[@backingInt(d)]) |c| return c;
     const need = h.decoders.bytes(d);
-    if (h.admit) |a| if (need > try a.room(a.ptr, &h.e.ctx)) return error.DecoderNeedsMoreDeviceMemory;
-    const before = cuda.usage(false).device;
+    if (h.admit) |a| if (need > try a.room(a.ptr, dev.context(h.e))) return error.DecoderNeedsMoreDeviceMemory;
+    const before = dev.held(h.e);
     const c = try h.decoders.load(h.gpa, h.io, h.e, h.rel.generator, d);
-    const took = cuda.usage(false).device - before;
+    const took = dev.held(h.e) - before;
     std.log.info("zonos3: decoder {s} loaded, {d} bytes on the device ({d} admitted)", .{ @tagName(d), took, need });
     if (took > need) return error.DecoderOverItsAdmission;
     return c;

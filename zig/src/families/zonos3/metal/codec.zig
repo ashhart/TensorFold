@@ -14,9 +14,17 @@ pub const frame_samples = 2940; // output samples a code frame
 const internal_frame = 2944; // 44160 Hz samples a code frame
 const head_rate = 16; // head frames a code frame
 
+pub const Decoder = wts.Decoder;
+
 pub const Options = struct {
     max_frames: usize = 2048, // code frames a request
     pass_frames: usize = 32, // code frames a pass through the trunk
+    decoder: Decoder = .keep2_plain,
+
+    /// A stage's K and V cache rows: its attention window and a pass's rows, a ring over positions.
+    pub fn ring(o: Options, stage: usize) usize {
+        return wts.stages[stage].ctx + (o.pass_frames << @intCast(stage));
+    }
 
     pub fn validate(o: Options) !void {
         if (o.max_frames == 0 or o.max_frames > 8192) return error.BadFrameBudget;
@@ -30,13 +38,27 @@ pub const Probe = struct {
     f: *const fn (ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize) anyerror!void,
 };
 
+/// One request's decoding state: the histories, the caches, the frames' spectra and the tail's samples so far.
+pub const Lane = struct {
+    sem_hist: [wts.sem_blocks]u64,
+    head_hist: [wts.head_blocks]u64,
+    hist: u64,
+    kv: [5][][2]u64,
+    spec_frames: [2]u64,
+    branches: u64,
+    mixed: u64,
+    frames: usize = 0,
+    emitted: usize = 0,
+};
+
 pub const Codec = struct {
     gpa: std.mem.Allocator,
     o: Options,
     g: *Gpu,
     own_gpu: bool, // a standalone codec closes its device
-    first_slot: usize, // the device's buffers from here on are this codec's
     w: *wts.Weights,
+    lanes: std.ArrayList(Lane), // every request's state; lanes[active] is stale while the fields below run it
+    active: usize,
     frames: usize = 0, // code frames decoded
     emitted: usize = 0, // samples handed out
     // state
@@ -57,9 +79,9 @@ pub const Codec = struct {
     // the tail, whole request
     branches: u64, // [2][internal samples]
     mixed: u64, // [internal samples]
-    audio: u64, // [samples]
+    audio: u64, // [samples], scratch: an emit writes and downloads it
 
-    /// The codec on `g`, after everything else made on it so far; destroy it before anything made on `g` before it.
+    /// The codec on `g`, beside what else is made on it; its buffers go with `destroy`.
     pub fn create(gpa: std.mem.Allocator, io: std.Io, g: *Gpu, generator: []const u8, head: []const u8, o: Options) !*Codec {
         try o.validate();
         const c = try gpa.create(Codec);
@@ -69,17 +91,20 @@ pub const Codec = struct {
         c.o = o;
         c.g = g;
         c.own_gpu = false;
-        c.first_slot = g.slots();
         c.frames = 0;
         c.emitted = 0;
+        c.lanes = .empty;
+        c.active = 0;
         for (&c.kv) |*layers| layers.* = &.{};
-        errdefer g.releaseFrom(c.first_slot);
-        c.w = try wts.load(gpa, io, g, generator, head);
+        const owner = g.own(c);
+        defer _ = g.own(owner);
+        errdefer g.release(c);
+        c.w = try wts.load(gpa, io, g, generator, head, o.decoder);
         errdefer {
             c.w.deinit();
             gpa.destroy(c.w);
         }
-        errdefer for (c.kv) |layers| gpa.free(layers);
+        errdefer c.freeLanes();
         try c.allocState();
         try c.reset();
         return c;
@@ -95,11 +120,57 @@ pub const Codec = struct {
     }
 
     pub fn destroy(c: *Codec) void {
-        for (c.kv) |layers| c.gpa.free(layers);
+        c.freeLanes();
         c.w.deinit();
         c.gpa.destroy(c.w);
-        if (c.own_gpu) c.g.close() else c.g.releaseFrom(c.first_slot);
+        if (c.own_gpu) c.g.close() else c.g.release(c);
         c.gpa.destroy(c);
+    }
+
+    fn freeLanes(c: *Codec) void {
+        if (c.lanes.items.len == 0) for (c.kv) |layers| c.gpa.free(layers);
+        for (c.lanes.items) |l| for (l.kv) |layers| c.gpa.free(layers);
+        c.lanes.deinit(c.gpa);
+    }
+
+    /// Device bytes of one more request's state under `o`.
+    pub fn laneBytes(o: Options) usize {
+        var g: Gpu = undefined;
+        g.counted = 0;
+        var c: Codec = undefined;
+        c.o = o;
+        c.g = &g;
+        _ = c.allocLane() catch unreachable;
+        return g.counted.?;
+    }
+
+    /// One more request's state on the device; its index for `use`. `reset` zeroes the lane in use.
+    pub fn addLane(c: *Codec) !usize {
+        const owner = c.g.own(c);
+        defer _ = c.g.own(owner);
+        try c.lanes.ensureUnusedCapacity(c.gpa, 1);
+        c.lanes.appendAssumeCapacity(try c.allocLane());
+        return c.lanes.items.len - 1;
+    }
+
+    /// Decodes lane `i`'s request from here on.
+    pub fn use(c: *Codec, i: usize) void {
+        if (i == c.active) return;
+        c.lanes.items[c.active] = .{ .sem_hist = c.sem_hist, .head_hist = c.head_hist, .hist = c.hist, .kv = c.kv, .spec_frames = c.spec_frames, .branches = c.branches, .mixed = c.mixed, .frames = c.frames, .emitted = c.emitted };
+        c.load(c.lanes.items[i]);
+        c.active = i;
+    }
+
+    fn load(c: *Codec, l: Lane) void {
+        c.sem_hist = l.sem_hist;
+        c.head_hist = l.head_hist;
+        c.hist = l.hist;
+        c.kv = l.kv;
+        c.spec_frames = l.spec_frames;
+        c.branches = l.branches;
+        c.mixed = l.mixed;
+        c.frames = l.frames;
+        c.emitted = l.emitted;
     }
 
     fn alloc(c: *Codec, bytes: usize) !u64 {
@@ -117,24 +188,43 @@ pub const Codec = struct {
         return g.counted.?;
     }
 
+    fn allocLane(c: *Codec) !Lane {
+        var l: Lane = undefined;
+        l.frames = 0;
+        l.emitted = 0;
+        for (&l.kv) |*layers| layers.* = &.{};
+        errdefer for (l.kv) |layers| c.gpa.free(layers);
+        const T = c.o.max_frames;
+        const one = W * 6 * 4;
+        c.hist_bytes = (wts.sem_blocks + wts.head_blocks) * one;
+        l.hist = try c.alloc(c.hist_bytes);
+        for (&l.sem_hist, 0..) |*h, i| h.* = l.hist + i * one;
+        for (&l.head_hist, 0..) |*h, i| h.* = l.hist + (wts.sem_blocks + i) * one;
+        for (&l.kv, wts.stages, 0..) |*layers, shape, si| {
+            const bytes = c.o.ring(si) * shape.d * 4;
+            const n = c.o.decoder.layers(si);
+            if (c.g.counted != null) {
+                for (0..2 * n) |_| _ = try c.alloc(bytes);
+                continue;
+            }
+            layers.* = try c.gpa.alloc([2]u64, n);
+            for (layers.*) |*pair| pair.* = .{ try c.alloc(bytes), try c.alloc(bytes) };
+        }
+        for (&l.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
+        l.branches = try c.alloc(2 * T * internal_frame * 4);
+        l.mixed = try c.alloc(T * internal_frame * 4);
+        return l;
+    }
+
     fn allocState(c: *Codec) !void {
         const T = c.o.max_frames;
         const R = head_rate * c.o.pass_frames;
-        const one = W * 6 * 4;
-        c.hist_bytes = (wts.sem_blocks + wts.head_blocks) * one;
-        c.hist = try c.alloc(c.hist_bytes);
-        for (&c.sem_hist, 0..) |*h, i| h.* = c.hist + i * one;
-        for (&c.head_hist, 0..) |*h, i| h.* = c.hist + (wts.sem_blocks + i) * one;
-        for (&c.kv, wts.stages, 0..) |*layers, shape, si| {
-            const bytes = (T << @intCast(si)) * shape.d * 4;
-            if (c.g.counted != null) {
-                for (0..2 * shape.layers) |_| _ = try c.alloc(bytes);
-                continue;
-            }
-            layers.* = try c.gpa.alloc([2]u64, shape.layers);
-            for (layers.*) |*pair| pair.* = .{ try c.alloc(bytes), try c.alloc(bytes) };
+        const l = try c.allocLane();
+        if (c.g.counted == null) {
+            errdefer for (l.kv) |layers| c.gpa.free(layers);
+            try c.lanes.append(c.gpa, l);
+            c.load(l);
         }
-        for (&c.spec_frames, wts.n_ffts) |*f, n| f.* = try c.alloc(head_rate * T * n * 4);
         c.codes = try c.alloc(c.o.pass_frames * 10 * 4);
         c.xa = try c.alloc(R * W * 4);
         c.xb = try c.alloc(R * W * 4);
@@ -142,8 +232,6 @@ pub const Codec = struct {
         c.o_ = try c.alloc(R * W * 4);
         c.att = try c.alloc(R * W * 4);
         c.big = try c.alloc(R * 3072 * 4);
-        c.branches = try c.alloc(2 * T * internal_frame * 4);
-        c.mixed = try c.alloc(T * internal_frame * 4);
         c.audio = try c.alloc(T * frame_samples * 4);
     }
 
@@ -151,7 +239,7 @@ pub const Codec = struct {
         try c.g.get(src, out);
     }
 
-    /// A new request: zero histories, no frames. Cache rows are written before they are read.
+    /// A new request on the lane in use: zero histories, no frames. Cache rows are written before they are read.
     pub fn reset(c: *Codec) !void {
         try c.g.flush();
         @memset(c.g.host(c.hist, c.hist_bytes), 0);
@@ -176,8 +264,8 @@ pub const Codec = struct {
         stage_layer.convnext(c.g, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, b, hist, x, rows);
     }
 
-    fn layer(c: *Codec, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) void {
-        stage_layer.layer(c.g, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, shape, L, kv, x, rows, pos0);
+    fn layer(c: *Codec, si: usize, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) void {
+        stage_layer.layer(c.g, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, wts.stages[si], L, kv, c.o.ring(si), x, rows, pos0);
     }
 
     fn pass(c: *Codec, codes: []const [10]i32, probe: ?Probe) !void {
@@ -199,7 +287,7 @@ pub const Codec = struct {
         for (wts.stages, w.stages, c.kv, 0..) |shape, st, kv, si| {
             const pos0 = c.frames << @intCast(si);
             k.linear(g, st.in_proj, 0, x, shape.in, shape.in, shape.d, y, shape.d, rows);
-            for (st.layers, kv) |L, pair| c.layer(shape, L, pair, y, rows, pos0);
+            for (st.layers, kv) |L, pair| c.layer(si, L, pair, y, rows, pos0);
             if (shape.out == 0) {
                 std.mem.swap(u64, &x, &y);
                 if (probe) |p| try p.f(p.ctx, "stage_8", x, rows, shape.d);

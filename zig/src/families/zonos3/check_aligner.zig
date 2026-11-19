@@ -1,8 +1,53 @@
 //! zonos3-generate --aligner-check: the aligner on a dumped clip against fusealign_hub on the same weights.
 const std = @import("std");
-const cuda = @import("cuda");
 const z3 = @import("zonos3");
 const gen = @import("generate.zig");
+
+const on_metal = @hasDecl(z3, "gpu");
+const cuda = if (on_metal) void else @import("cuda");
+
+/// The aligner on a device of its own: Metal's, or a CUDA context with the cuBLAS handle the decoder would give it.
+const Dev = if (on_metal) struct {
+    g: *z3.gpu.Gpu,
+
+    fn open(d: *Dev, gpa: std.mem.Allocator) !void {
+        d.g = try z3.gpu.Gpu.openFamily(gpa);
+    }
+    fn close(d: *Dev) void {
+        d.g.close();
+    }
+    fn aligner(d: *Dev, gpa: std.mem.Allocator, io: std.Io, weights: []const u8) !*z3.aligner.Aligner {
+        return z3.aligner.Aligner.create(gpa, io, d.g, weights);
+    }
+} else struct {
+    driver: cuda.Driver,
+    ctx: cuda.Context,
+    stream: cuda.Stream,
+    ws: cuda.DeviceBuffer,
+    blas: z3.blas.Blas,
+
+    fn open(d: *Dev, _: std.mem.Allocator) !void {
+        d.driver = try cuda.Driver.open();
+        errdefer d.driver.close();
+        d.ctx = try cuda.Context.init(&d.driver, 0);
+        errdefer d.ctx.deinit();
+        d.stream = try cuda.Stream.init(&d.driver, true);
+        errdefer d.stream.deinit();
+        d.ws = try cuda.DeviceBuffer.alloc(&d.driver, 32 << 20);
+        errdefer d.ws.free();
+        d.blas = try z3.blas.Blas.open(d.ws.ptr, 32 << 20);
+    }
+    fn close(d: *Dev) void {
+        d.blas.close();
+        d.ws.free();
+        d.stream.deinit();
+        d.ctx.deinit();
+        d.driver.close();
+    }
+    fn aligner(d: *Dev, gpa: std.mem.Allocator, io: std.Io, weights: []const u8) !*z3.aligner.Aligner {
+        return z3.aligner.Aligner.create(gpa, io, &d.driver, d.stream, weights, &d.blas);
+    }
+};
 
 const Check = struct {
     gpa: std.mem.Allocator,
@@ -54,18 +99,11 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, weights: []const
     const doc = (try std.json.parseFromSliceLeaky(std.json.Value, a, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "words.json" }), a, .limited(1 << 24)), .{})).object;
     var words: std.ArrayList([]const u8) = .empty;
     for (doc.get("tokens").?.array.items) |v| if (z3.align_words.isWordy(v.string)) try words.append(a, v.string);
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
-    var ws = try cuda.DeviceBuffer.alloc(&driver, 32 << 20);
-    defer ws.free();
-    var blas = try z3.blas.Blas.open(ws.ptr, 32 << 20);
-    defer blas.close();
+    var dev: Dev = undefined;
+    try dev.open(gpa);
+    defer dev.close();
     const t0 = gen.nowNs(io);
-    const al = try z3.aligner.Aligner.create(gpa, io, &driver, stream, weights, &blas);
+    const al = try dev.aligner(gpa, io, weights);
     defer al.destroy();
     const loaded = @as(f64, @floatFromInt(gen.nowNs(io) - t0)) / 1e9;
     const rate = try @import("check_speaker.zig").dumpRate(a, io, dir);

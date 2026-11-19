@@ -53,7 +53,6 @@ pub fn pool(gpa: std.mem.Allocator, ssl: []const f32, frames: usize) ![]f32 {
 pub const Quantizer = struct {
     gpa: std.mem.Allocator,
     g: *Gpu,
-    first_slot: usize, // the device's buffers from here on are this quantizer's
     dec: *const wts.Weights, // the decoder's code tables and semantic head
     w: *wts.Quantizer,
     hist: u64, // [8][W][6]: the semantic encoder's and head's ConvNeXt histories, zero at a lane's start
@@ -72,8 +71,9 @@ pub const Quantizer = struct {
         q.gpa = gpa;
         q.g = g;
         q.dec = dec;
-        q.first_slot = g.slots();
-        errdefer g.releaseFrom(q.first_slot);
+        const owner = g.own(q);
+        defer _ = g.own(owner);
+        errdefer g.release(q);
         q.w = try wts.loadQuantizer(gpa, io, g, generator);
         errdefer gpa.destroy(q.w);
         const n = lane_frames;
@@ -88,7 +88,7 @@ pub const Quantizer = struct {
     }
 
     pub fn destroy(q: *Quantizer) void {
-        q.g.releaseFrom(q.first_slot);
+        q.g.release(q);
         q.gpa.destroy(q.w);
         q.gpa.destroy(q);
     }

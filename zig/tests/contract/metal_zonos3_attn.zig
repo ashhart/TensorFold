@@ -44,6 +44,8 @@ pub const Attention = struct {
     fault: bool = false,
     shape: c.Shape = undefined,
     pos0: usize = 0,
+    /// codec: the caches' rows, a ring over positions (position j is row j % cap), as the served stages hold them
+    cap: usize = 0,
     /// backbone: q [T][512]; codec and teacher: qkv [T][3 n]
     q: []f32 = &.{},
     /// the key and value caches (backbone [L][128], codec [L][n]); the teacher's keys and values are qkv's
@@ -130,8 +132,20 @@ pub const Attention = struct {
             if (T > 4) vals[(self.pos0 + 4) * vstride + vfirst + 2 * hd + 1] = -ref.inf; // key head 2, from row 4 on
         }
         self.dev[0] = try ref.input(rig, self.q);
-        if (self.kc.len > 0) self.dev[1] = try ref.input(rig, self.kc);
-        if (self.vc.len > 0) self.dev[2] = try ref.input(rig, self.vc);
+        if (self.which == .codec) {
+            // the window and a pass's rows, the served ring's size: every position a row reads has a row of its own
+            self.cap = shape.k + T;
+            for ([_][]const f32{ self.kc, self.vc }, 1..) |rows, i| {
+                const ring = try a.alloc(f32, self.cap * cw);
+                defer a.free(ring);
+                @memset(ring, 0);
+                for (0..L) |j| @memcpy(ring[(j % self.cap) * cw ..][0..cw], rows[j * cw ..][0..cw]);
+                self.dev[i] = try ref.input(rig, ring);
+            }
+        } else {
+            if (self.kc.len > 0) self.dev[1] = try ref.input(rig, self.kc);
+            if (self.vc.len > 0) self.dev[2] = try ref.input(rig, self.vc);
+        }
         if (self.extra.len > 0) self.dev[3] = try ref.input(rig, self.extra);
         self.out = try rig.output(T * n * 4);
         return true;
@@ -144,8 +158,8 @@ pub const Attention = struct {
         switch (self.which) {
             .backbone => try rig.go(self.pipe, .{ T, 16, 1 }, 256, &.{ self.dev[0], self.dev[1], self.dev[2], self.dev[3], self.out }, extern struct { pos0: i32 }{ .pos0 = ref.int(self.pos0 -| less) }, 0),
             .codec => {
-                const A = extern struct { D: i32, pos0: i32, ctx: i32 };
-                try rig.go(self.pipe, .{ T, n / 64, 1 }, 128, &.{ self.dev[0], self.dev[1], self.dev[2], self.out }, A{ .D = ref.int(n), .pos0 = ref.int(self.pos0), .ctx = ref.int(self.shape.k - less) }, 0);
+                const A = extern struct { D: i32, pos0: i32, ctx: i32, cap: i32 };
+                try rig.go(self.pipe, .{ T, n / 64, 1 }, 128, &.{ self.dev[0], self.dev[1], self.dev[2], self.out }, A{ .D = ref.int(n), .pos0 = ref.int(self.pos0), .ctx = ref.int(self.shape.k - less), .cap = ref.int(self.cap) }, 0);
             },
             .teacher => {
                 const A = extern struct { D: i32, T: i32 };
@@ -351,8 +365,9 @@ pub const CodecPrep = struct {
     pos0: usize = 0,
     qkv: []f32 = &.{},
     out: [3]u64 = @splat(0),
-    /// the key and value caches, which the kernel writes at their absolute rows (pos0 + row)
+    /// the key and value caches, a ring of `cap` rows the kernel writes at (pos0 + row) % cap
     cache: [2]u64 = @splat(0),
+    cap: usize = 0,
 
     const rate: f32 = -9.210340371976184 * 2.0 / 64.0;
 
@@ -378,17 +393,20 @@ pub const CodecPrep = struct {
         self.qkv = try ref.values(a, rng, self.T * shape.n, fill, 2);
         if (fill == .nonfinite) ref.plant(self.qkv, self.T, shape.n);
         self.out = .{ try rig.output(self.qkv.len * 4), try rig.output(self.T * self.d * 4), try rig.output(self.T * self.d * 4) };
-        const cache = (self.pos0 + self.T + 1) * self.d * 4;
+        // one row more than a pass: the rows wrap past the ring's end wherever pos0 % cap leaves fewer than T after it
+        self.cap = self.T + 1;
+        const cache = self.cap * self.d * 4;
         self.cache = .{ try rig.scratch(cache), try rig.scratch(cache) };
         return true;
     }
 
     pub fn run(self: *CodecPrep, rig: *ref.Rig) !void {
         try ref.restore(rig, self.out[0], std.mem.sliceAsBytes(self.qkv));
-        const A = extern struct { D: i32, pos0: i32 };
-        try rig.go(self.pipe, .{ self.T, self.d / 64, 1 }, 32, &.{ self.out[0], self.cache[0], self.cache[1] }, A{ .D = ref.int(self.d), .pos0 = ref.int(self.pos0 + ref.one(self.fault)) }, 0);
-        const len = self.T * self.d * 4;
-        for (0..2) |i| @memcpy(rig.bytes(self.out[1 + i], len), rig.bytes(self.cache[i] + self.pos0 * self.d * 4, len));
+        const A = extern struct { D: i32, pos0: i32, cap: i32 };
+        try rig.go(self.pipe, .{ self.T, self.d / 64, 1 }, 32, &.{ self.out[0], self.cache[0], self.cache[1] }, A{ .D = ref.int(self.d), .pos0 = ref.int(self.pos0 + ref.one(self.fault)), .cap = ref.int(self.cap) }, 0);
+        const row = self.d * 4;
+        // the launch's outputs: positions pos0 .. pos0 + T, gathered from their ring rows
+        for (0..2) |i| for (0..self.T) |t| @memcpy(rig.bytes(self.out[1 + i] + t * row, row), rig.bytes(self.cache[i] + ((self.pos0 + t) % self.cap) * row, row));
     }
 
     pub fn count(self: *const CodecPrep) usize {

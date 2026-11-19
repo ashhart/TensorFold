@@ -12,7 +12,8 @@ const twinBytes = host.sizes.twinBytes;
 test "need: the weights, then state that grows with the context and with the frame budget" {
     const t = std.testing;
     const base = need(4096, 2000, .keep2_plain);
-    try t.expectEqual(@as(u64, 3_125_611_008), base);
+    // Metal has no cuBLAS workspace, and rounds each buffer up to 256 bytes
+    try t.expectEqual(@as(u64, if (@import("zonos_device.zig").on_metal) 3_097_555_712 else 3_125_611_008), base);
     // the full-size decoder as the default: its head in place of KEEP-2's, and more layers' caches
     try t.expect(need(4096, 2000, .full_mr) > base + 3_400_000_000);
     try t.expect(need(8192, 2000, .keep2_plain) > base and need(4096, 1000, .keep2_plain) < base);

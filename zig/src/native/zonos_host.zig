@@ -1,8 +1,8 @@
-//! Native speech from one ZONOS3 Mini family on CUDA: one request at a time, streamed in chunks or decoded at the end.
+//! Native speech from ZONOS3 Mini on CUDA or Metal: requests take turns a frame at a time, streamed or whole.
 const std = @import("std");
 const api = @import("engine_api");
 const z3 = @import("zonos3");
-const cuda = @import("cuda");
+const dev = @import("zonos_device.zig");
 const zedit = @import("zonos_edit.zig");
 const zfollow = @import("zonos_follow.zig");
 const zdec = @import("zonos_decoders.zig");
@@ -25,7 +25,7 @@ pub const Options = struct {
 };
 
 /// Who knows the pool: the device bytes a load may still take, on the context given.
-pub const Admit = struct { ptr: *anyopaque, room: *const fn (*anyopaque, *const cuda.Context) anyerror!u64 };
+pub const Admit = struct { ptr: *anyopaque, room: *const fn (*anyopaque, *const dev.Context) anyerror!u64 };
 
 /// A refused load's sizes, in bytes.
 pub const Refusal = struct { need: u64 = 0, room: u64 = 0 };
@@ -44,7 +44,7 @@ const Door = struct {
     o: Options,
     need: u64,
 
-    fn check(p: *anyopaque, ctx: *const cuda.Context) anyerror!void {
+    fn check(p: *anyopaque, ctx: *const dev.Context) anyerror!void {
         const d: *Door = @ptrCast(@alignCast(p));
         const a = d.o.admit orelse return;
         const room = try a.room(a.ptr, ctx);
@@ -286,14 +286,13 @@ const Host = struct {
         for (h.slots) |s| out.running += @intFromBool(s.job != null);
     }
 
-    fn memory(_: *anyopaque, reset_peak: bool) ?api.Memory {
-        const u = cuda.usage(reset_peak);
-        return .{ .active = u.device, .pinned = u.host, .peak = u.peak };
+    fn memory(p: *anyopaque, reset_peak: bool) ?api.Memory {
+        return dev.memory(self(p).e, reset_peak);
     }
 
     /// The worker: every request in progress takes a turn, a frame each, until none is left.
     fn run(h: *Host) void {
-        const current = if (h.e.ctx.makeCurrent()) |_| true else |_| false;
+        const current = dev.makeCurrent(h.e);
         while (true) {
             h.lock();
             var waiting = false;
@@ -320,7 +319,7 @@ const Host = struct {
             h.lock();
             h.failed = true;
             h.unlock();
-            h.e.stream.synchronize() catch {};
+            dev.settle(h.e);
             // every request in progress shared the pass
             for (h.slots) |*slot| if (slot.started) if (slot.job) |job| h.finish(slot, job, .failed, @errorName(err));
         };
@@ -347,7 +346,7 @@ const Host = struct {
                 h.lock();
                 h.failed = true;
                 h.unlock();
-                h.e.stream.synchronize() catch {};
+                dev.settle(h.e);
                 return h.finish(slot, job, .failed, @errorName(err));
             },
         } orelse return;
@@ -449,7 +448,7 @@ const Host = struct {
         }
         if (twin.len != 0) {
             if (slot.twin == null) {
-                if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, &h.e.ctx)) return error.GuidanceNeedsMoreDeviceMemory;
+                if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, dev.context(h.e))) return error.GuidanceNeedsMoreDeviceMemory;
                 slot.twin = try h.e.addLane();
             }
             h.e.use(slot.twin.?);
@@ -524,7 +523,7 @@ const Host = struct {
     fn close(p: *anyopaque) void {
         const h = self(p);
         drain(h);
-        h.e.ctx.makeCurrent() catch {};
+        _ = dev.makeCurrent(h.e);
         if (h.clip) |c| c.destroy();
         if (h.aligner) |a| a.destroy();
         h.decoders.deinit();
@@ -554,7 +553,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
     const codec = try decoders.load(gpa, io, e, rel.generator, first);
     errdefer decoders.deinit();
     for (1..o.parallel) |_| _ = try e.addLane();
-    if (cuda.usage(false).device > door.need) return error.LoadOverItsAdmission;
+    if (dev.held(e) > door.need) {
+        std.log.err("zonos3: the load holds {d} bytes on the device, over the {d} admitted", .{ dev.held(e), door.need });
+        return error.LoadOverItsAdmission;
+    }
     const slots = try gpa.alloc(Slot, o.parallel);
     errdefer gpa.free(slots);
     for (slots, 0..) |*slot, i| slot.* = .{ .index = i };
@@ -584,7 +586,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
         },
     };
     h.worker = try std.Thread.spawn(.{}, Host.run, .{h});
-    const held = cuda.usage(false).device;
+    const held = dev.held(e);
     const listed = try std.mem.join(h.rel.arena.allocator(), ", ", h.decoders.ids);
     std.log.info("zonos3: decoders {s} (the first loaded), {d} frames a request, {d} at once, speech editing {s}, {d} bytes on the device ({d} admitted)", .{ listed, b.frames, o.parallel, if (editing != 0) "on" else "off", held, door.need });
     return .{ .engine = .{ .ctx = h, .vtable = &Host.vtable }, .ctx = h, .close = Host.close };

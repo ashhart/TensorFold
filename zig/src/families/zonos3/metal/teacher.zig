@@ -47,7 +47,6 @@ const Layer = struct {
 pub const Teacher = struct {
     gpa: std.mem.Allocator,
     g: *Gpu,
-    first_slot: usize, // the device's buffers from here on are this teacher's
     bytes: usize,
     in_norm: Norm,
     projection: Linear,
@@ -68,9 +67,10 @@ pub const Teacher = struct {
         t.* = undefined;
         t.gpa = gpa;
         t.g = g;
-        t.first_slot = g.slots();
         t.bytes = 0;
-        errdefer g.releaseFrom(t.first_slot);
+        const owner = g.own(t);
+        defer _ = g.own(owner);
+        errdefer g.release(t);
         try t.loadWeights(io, dir);
         const half: [d]f32 = @splat(0.5);
         t.half = try t.device(std.mem.sliceAsBytes(&half));
@@ -85,7 +85,7 @@ pub const Teacher = struct {
     }
 
     pub fn destroy(t: *Teacher) void {
-        t.g.releaseFrom(t.first_slot);
+        t.g.release(t);
         t.gpa.destroy(t);
     }
 

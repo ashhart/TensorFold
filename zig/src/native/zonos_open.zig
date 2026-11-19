@@ -81,7 +81,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
 }
 
-/// On a Mac: one request at a time on the Metal device, the same flags refused as on CUDA.
+/// On a Mac: the Metal device, 1 to 16 requests at once, the same flags refused as on CUDA.
 pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
@@ -91,8 +91,9 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = "ZONOS3 Mini is served without guidance: serve without --cfg";
         return null;
     }
-    if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and o.lanes != 1) or (o.device != null and o.device.? != 0) or (o.segments != null and o.segments.? != 1)) {
-        problem.* = "ZONOS3 Mini serves one request at a time on the Mac's GPU: use --parallel 1, device 0 and one segment, without tensor parallelism";
+    const parallel: u32 = if (o.lanes_fixed) o.lanes else 1;
+    if (o.tp != 1 or o.rank != 0 or parallel == 0 or parallel > zonos_host.max_parallel or (o.device != null and o.device.? != 0) or (o.segments != null and o.segments.? != 1)) {
+        problem.* = "ZONOS3 Mini serves on the Mac's one GPU, without tensor parallelism, 1 to 16 requests at once: use --parallel 1 through 16, device 0 and one segment";
         return null;
     }
     if (o.silence.enabled()) {
@@ -115,7 +116,7 @@ pub fn openMetal(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = "ZONOS3 Mini does not support learned weights, speculative drafts, retained prompt caches, or text-engine policies";
         return null;
     }
-    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .max_frames = o.max_frames }) catch |e| {
+    return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .max_frames = o.max_frames, .parallel = parallel, .decoders = o.decoders }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native ZONOS3 Mini Metal engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };

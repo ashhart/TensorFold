@@ -29,7 +29,6 @@ pub const Probe = struct {
 pub const Encoder = struct {
     gpa: std.mem.Allocator,
     g: *Gpu,
-    first_slot: usize, // the device's buffers from here on are this encoder's
     w: *wts.Weights,
     audio: u64, // the clip's 44.1 kHz samples
     wave: u64, // its 44.16 kHz samples, whole frames
@@ -48,8 +47,9 @@ pub const Encoder = struct {
         e.* = undefined;
         e.gpa = gpa;
         e.g = g;
-        e.first_slot = g.slots();
-        errdefer g.releaseFrom(e.first_slot);
+        const owner = g.own(e);
+        defer _ = g.own(owner);
+        errdefer g.release(e);
         e.w = try wts.load(gpa, io, g, generator);
         errdefer {
             e.w.deinit();
@@ -71,7 +71,7 @@ pub const Encoder = struct {
     }
 
     pub fn destroy(e: *Encoder) void {
-        e.g.releaseFrom(e.first_slot);
+        e.g.release(e);
         e.w.deinit();
         e.gpa.destroy(e.w);
         e.gpa.destroy(e);
@@ -132,7 +132,7 @@ pub const Encoder = struct {
             ck.linear(g, st.in_proj, 0, x, shape.in, shape.in, shape.d, y, shape.d, rows);
             if (probe) |p| try p.at("lane.0.stage.{d}.in", .{si}, y, rows, shape.d);
             for (st.layers, 0..) |L, li| {
-                layers.layer(g, e.sc, shape, L, e.kv, y, rows, 0);
+                layers.layer(g, e.sc, shape, L, e.kv, rows, y, rows, 0);
                 if (probe) |p| try p.at("lane.0.stage.{d}.l{d}", .{ si, li }, y, rows, shape.d);
             }
             ck.linear(g, st.out_proj, 0, y, shape.d, shape.d, shape.out, x, shape.out, rows);

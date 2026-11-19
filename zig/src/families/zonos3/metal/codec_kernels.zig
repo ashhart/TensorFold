@@ -25,14 +25,15 @@ pub fn layernorm(g: *Gpu, x: u64, w: u64, b: u64, y: u64, d: usize, eps: f32, ro
     g.go(.zc_layernorm, .{ rows, 1, 1 }, 256, &.{ x, w, b, y }, A{ .D = i(d), .eps = eps });
 }
 
-pub fn attnPrep(g: *Gpu, qkv: u64, d: usize, pos0: usize, kc: u64, vc: u64, rows: usize) void {
-    const A = extern struct { D: i32, pos0: i32 };
-    g.go(.zc_attn_prep, .{ rows, d / 64, 1 }, 32, &.{ qkv, kc, vc }, A{ .D = i(d), .pos0 = i(pos0) });
+/// Rows' q and k rotated at positions pos0.., k and v into cache rows (position % cap).
+pub fn attnPrep(g: *Gpu, qkv: u64, d: usize, pos0: usize, kc: u64, vc: u64, cap: usize, rows: usize) void {
+    const A = extern struct { D: i32, pos0: i32, cap: i32 };
+    g.go(.zc_attn_prep, .{ rows, d / 64, 1 }, 32, &.{ qkv, kc, vc }, A{ .D = i(d), .pos0 = i(pos0), .cap = i(cap) });
 }
 
-pub fn attention(g: *Gpu, qkv: u64, d: usize, kc: u64, vc: u64, pos0: usize, ctx: usize, out: u64, rows: usize) void {
-    const A = extern struct { D: i32, pos0: i32, ctx: i32 };
-    g.go(.zc_attention, .{ rows, d / 64, 1 }, 128, &.{ qkv, kc, vc, out }, A{ .D = i(d), .pos0 = i(pos0), .ctx = i(ctx) });
+pub fn attention(g: *Gpu, qkv: u64, d: usize, kc: u64, vc: u64, cap: usize, pos0: usize, ctx: usize, out: u64, rows: usize) void {
+    const A = extern struct { D: i32, pos0: i32, ctx: i32, cap: i32 };
+    g.go(.zc_attention, .{ rows, d / 64, 1 }, 128, &.{ qkv, kc, vc, out }, A{ .D = i(d), .pos0 = i(pos0), .ctx = i(ctx), .cap = i(cap) });
 }
 
 /// x += scale * y per channel; scale == 0 is a plain add.

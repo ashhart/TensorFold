@@ -72,8 +72,8 @@ kernel void zc_layernorm(device const float* x [[buffer(0)]], device const float
   for (int i = tid; i < a.D; i += 256) yr[i] = (xr[i] - mean) * inv * w[i] + b[i];
 }
 
-// Rows [q | k | v] (each D = heads * 64) at pos0 + row: q and k rotate in adjacent pairs; k and v go to the cache row.
-struct ZAttnPrepArgs { int D; int pos0; };
+// Rows [q | k | v] (D = heads * 64) at pos0 + row: q and k rotate in pairs; k and v go to row (pos0 + row) % cap.
+struct ZAttnPrepArgs { int D; int pos0; int cap; };
 kernel void zc_attn_prep(device float* qkv [[buffer(0)]], device float* kc [[buffer(1)]], device float* vc [[buffer(2)]],
                          constant ZAttnPrepArgs& a [[buffer(3)]], uint2 gid [[threadgroup_position_in_grid]],
                          uint m [[thread_index_in_threadgroup]]) {
@@ -86,15 +86,15 @@ kernel void zc_attn_prep(device float* qkv [[buffer(0)]], device float* kc [[buf
   q[0] = qr * c - qi * s;
   q[1] = qr * s + qi * c;
   const float kr = q[D], ki = q[D + 1];
-  const ulong at = (ulong)(a.pos0 + t) * D + h * 64 + 2 * m;
+  const ulong at = (ulong)((a.pos0 + t) % a.cap) * D + h * 64 + 2 * m;
   kc[at] = kr * c - ki * s;
   kc[at + 1] = kr * s + ki * c;
   vc[at] = q[2 * D];
   vc[at + 1] = q[2 * D + 1];
 }
 
-// Causal local attention of (row, head) at p = pos0 + row over cache rows max(0, p - ctx + 1) .. p, in a fixed order.
-struct ZAttentionArgs { int D; int pos0; int ctx; };
+// Causal local attention of (row, head) at p = pos0 + row over positions p - ctx + 1 .. p; position j is row j % cap.
+struct ZAttentionArgs { int D; int pos0; int ctx; int cap; };
 [[max_total_threads_per_threadgroup(128)]] kernel void zc_attention(device const float* qkv [[buffer(0)]], device const float* kc [[buffer(1)]],
                          device const float* vc [[buffer(2)]], device float* out [[buffer(3)]],
                          constant ZAttentionArgs& a [[buffer(4)]], uint2 gid [[threadgroup_position_in_grid]],
@@ -111,7 +111,7 @@ struct ZAttentionArgs { int D; int pos0; int ctx; };
   for (int i = 0; i < 64; ++i) qv[i] = qr[i];
   float m = -INFINITY;
   for (int j = lo + (int)tid; j <= p; j += 128) {
-    device const float* k = kc + (ulong)j * D + h * 64;
+    device const float* k = kc + (ulong)(j % a.cap) * D + h * 64;
     float d = 0.f;
     for (int i = 0; i < 64; ++i) d = fma(qv[i], k[i], d);
     m = fmax(m, d * 0.125f);
@@ -120,8 +120,8 @@ struct ZAttentionArgs { int D; int pos0; int ctx; };
   float s_[65];
   for (int i = 0; i < 65; ++i) s_[i] = 0.f;
   for (int j = lo + (int)tid; j <= p; j += 128) {
-    device const float* k = kc + (ulong)j * D + h * 64;
-    device const float* v = vc + (ulong)j * D + h * 64;
+    device const float* k = kc + (ulong)(j % a.cap) * D + h * 64;
+    device const float* v = vc + (ulong)(j % a.cap) * D + h * 64;
     float d = 0.f;
     for (int i = 0; i < 64; ++i) d = fma(qv[i], k[i], d);
     const float e = z3_exp(d * 0.125f - m);
