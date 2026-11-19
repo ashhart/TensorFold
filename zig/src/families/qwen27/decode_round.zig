@@ -24,7 +24,6 @@ const slot_pages = @import("slot_pages.zig");
 pub const pagesOn = kv_pages.on;
 pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
-const kvp = kv_pages.kvp;
 const kv_grow = @import("kv_grow.zig");
 const kv_slots = @import("kv_slots.zig");
 
