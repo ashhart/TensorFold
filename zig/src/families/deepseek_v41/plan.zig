@@ -10,18 +10,42 @@ const Pack = @import("pack.zig").Pack;
 const Info = @import("pack.zig").Info;
 const partition = @import("partition.zig");
 const testing = std.testing;
+const release = @import("plan_release.zig");
 
-/// One EXL3 group of the rank: its stored name and the rank's part.
-pub const GroupPlan = struct {
-    proj: names.Proj,
-    prefix: []const u8,
-    split: exl3.Split,
+/// An EXL3 group as stored and the rank's part of it.
+pub const Exl3Form = struct {
     full: exl3.Group,
     part: exl3.Part,
     /// marker tensor (mul1 / mcg) whose value picks the codebook at load; null: the 3-instruction default
     marker: ?[]const u8,
+};
+
+/// The release's FP8 matrix [N][K] (E4M3, one E8M0 scale a 32x32 block) and the rank's rows and columns of it.
+pub const Fp8Form = struct { weight: Info, scale: Info, n: u32, k: u32, rows: partition.Share, cols: partition.Share };
+
+/// The release's BF16 matrix [N][K] as stored and the rank's rows and columns of it.
+pub const Bf16Form = struct { weight: Info, n: u32, k: u32, rows: partition.Share, cols: partition.Share };
+
+/// How a planned projection stores its weights.
+pub const Form = union(enum) { exl3: Exl3Form, fp8_block: Fp8Form, bf16: Bf16Form };
+
+/// One projection of the rank: its stored name, split and form.
+pub const GroupPlan = struct {
+    proj: names.Proj,
+    prefix: []const u8,
+    split: exl3.Split,
+    form: Form,
     /// wo_a: the global group index this slice is
     slice: u32 = 0,
+
+    /// The rank's bytes of this projection as stored.
+    pub fn bytes(g: *const GroupPlan) u64 {
+        return switch (g.form) {
+            .exl3 => |f| f.part.bytes(),
+            .fp8_block => |f| @as(u64, f.rows.len) * f.cols.len + @as(u64, f.rows.len / 32) * (f.cols.len / 32),
+            .bf16 => |f| 2 * @as(u64, f.rows.len) * f.cols.len,
+        };
+    }
 };
 
 pub const NativePlan = struct {
@@ -32,12 +56,38 @@ pub const NativePlan = struct {
     bytes: u64,
 };
 
-/// One routed projection: each expert's group part, their layout on the device, and the stored prefixes.
-pub const ExpertsPlan = struct {
-    proj: names.ExpertProj,
+/// Routed EXL3 experts: each expert's group part, their layout on the device, and the stored prefixes.
+pub const Exl3Experts = struct {
     parts: []exl3.Part,
     prefixes: [][]const u8,
     layout: exl3.Layout,
+};
+
+/// The release's routed experts [E][N][K/2] (E2M1 pairs, one E8M0 scale per 32 of K) and the rank's rows and columns.
+pub const Mx4Experts = struct {
+    /// the layer's experts in all
+    count: u32,
+    /// the expert ids this rank holds, in local slot order (all of them at expert degree 1)
+    ids: partition.Share,
+    n: u32,
+    k: u32,
+    rows: partition.Share,
+    cols: partition.Share,
+
+    /// The rank's bytes of every expert: codes, then one scale per 32 of its columns.
+    pub fn bytes(x: Mx4Experts) u64 {
+        const one = @as(u64, x.rows.len) * x.cols.len;
+        return @as(u64, x.ids.len) * (one / 2 + one / 32);
+    }
+};
+
+/// How a routed projection's experts are stored.
+pub const ExpertsForm = union(enum) { exl3: Exl3Experts, mxfp4: Mx4Experts };
+
+/// One routed projection of the rank.
+pub const ExpertsPlan = struct {
+    proj: names.ExpertProj,
+    form: ExpertsForm,
 };
 
 pub const LayerPlan = struct {
@@ -53,9 +103,15 @@ pub const LayerPlan = struct {
     /// Routed trellis bytes plus the shared expert's: the quant repo's `rank_bytes`.
     pub fn expertBytes(l: *const LayerPlan) u64 {
         var n: u64 = 0;
-        for (l.experts) |e| n += e.layout.trellisBytes();
-        for (l.groups) |g| switch (g.proj) {
-            .shared_w1, .shared_w2, .shared_w3 => n += g.part.trellis.bytes(),
+        for (l.experts) |e| n += switch (e.form) {
+            .exl3 => |x| x.layout.trellisBytes(),
+            .mxfp4 => |x| x.bytes(),
+        };
+        for (l.groups) |*g| switch (g.proj) {
+            .shared_w1, .shared_w2, .shared_w3 => n += switch (g.form) {
+                .exl3 => |f| f.part.trellis.bytes(),
+                else => g.bytes(),
+            },
             else => {},
         };
         return n;
@@ -64,12 +120,15 @@ pub const LayerPlan = struct {
     /// Everything the rank holds for the block as stored: trellises, suh/svh, natives.
     pub fn bytes(l: *const LayerPlan) u64 {
         var n: u64 = 0;
-        for (l.groups) |g| n += g.part.bytes();
+        for (l.groups) |*g| n += g.bytes();
         for (l.natives) |v| n += v.bytes;
-        for (l.experts) |e| {
-            n += e.layout.trellisBytes();
-            for (e.parts) |p| n += p.suh.bytes() + p.svh.bytes();
-        }
+        for (l.experts) |e| switch (e.form) {
+            .exl3 => |x| {
+                n += x.layout.trellisBytes();
+                for (x.parts) |p| n += p.suh.bytes() + p.svh.bytes();
+            },
+            .mxfp4 => |x| n += x.bytes(),
+        };
         return n;
     }
 };
@@ -98,11 +157,11 @@ pub const Plan = struct {
     }
 
     pub fn bytes(p: *const Plan) u64 {
-        var n: u64 = if (p.head) |h| h.part.bytes() else 0;
+        var n: u64 = if (p.head) |*h| h.bytes() else 0;
         for (p.top) |v| n += v.bytes;
         for (p.layers) |*l| n += l.bytes();
         if (p.dspark) |d| {
-            n += d.main_proj.part.bytes();
+            n += d.main_proj.bytes();
             for (d.natives) |v| n += v.bytes;
             if (d.confidence) |c| n += c.bytes;
         }
@@ -121,7 +180,7 @@ pub const Options = struct {
     dspark: bool = false,
 };
 
-const Builder = struct {
+pub const Builder = struct {
     a: std.mem.Allocator,
     c: *const Config,
     pack: *const Pack,
@@ -129,11 +188,11 @@ const Builder = struct {
     used: std.StringHashMapUnmanaged(void) = .empty,
     buf: [256]u8 = undefined,
 
-    fn mark(b: *Builder, name: []const u8) !void {
+    pub fn mark(b: *Builder, name: []const u8) !void {
         try b.used.put(b.a, b.pack.names.getKey(name) orelse return error.MissingTensor, {});
     }
 
-    fn dupe(b: *Builder, s: []const u8) ![]const u8 {
+    pub fn dupe(b: *Builder, s: []const u8) ![]const u8 {
         return b.a.dupe(u8, s);
     }
 
@@ -146,7 +205,8 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+        const form: Exl3Form = .{ .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .form = .{ .exl3 = form } };
     }
 
     /// The rank's part of a group: `wq_b` and `wo_b` follow the output groups, everything else whole blocks.
@@ -155,7 +215,7 @@ const Builder = struct {
         return partition.group(g, split, b.o.rank, b.o.world);
     }
 
-    fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
+    pub fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
         const info = try b.pack.need(name);
         const want = spec.dims();
         var ok = spec.store.accepts(info.dtype) and info.rank == want.len;
@@ -189,16 +249,17 @@ const Builder = struct {
             const name = try names.expertName(block, @intCast(e), proj, &nb);
             const g = try b.group(.wq_a, name, proj.split(), kn[0], kn[1]);
             // the codebook is one a projection; here the marker's presence, its value at load
-            const has = g.marker != null;
+            const has = g.form.exl3.marker != null;
             if (codebook_marker) |m| if (m != has) return error.CodebooksDiffer;
             codebook_marker = has;
-            p.* = g.part;
+            p.* = g.form.exl3.part;
             pre.* = g.prefix;
         }
-        return .{ .proj = proj, .parts = parts, .prefixes = prefixes, .layout = try exl3.Layout.of(b.a, parts) };
+        return .{ .proj = proj, .form = .{ .exl3 = .{ .parts = parts, .prefixes = prefixes, .layout = try exl3.Layout.of(b.a, parts) } } };
     }
 
     fn layer(b: *Builder, index: u32) !LayerPlan {
+        if (b.c.format == .release_fp8) return release.layer(b, index);
         var pb: [32]u8 = undefined;
         const block = try b.dupe(try names.blockPrefix(b.c, index, &pb));
         const has_shared = b.pack.has(try std.fmt.bufPrint(&b.buf, "{s}.ffn.shared_experts.w1.trellis", .{block}));
@@ -225,7 +286,7 @@ const Builder = struct {
         }
         var out: LayerPlan = .{ .index = index, .prefix = block, .mode = b.c.mode(index), .groups = groups, .natives = natives, .experts = undefined, .gate_up_mismatch = 0 };
         inline for (.{ .w1, .w2, .w3 }, 0..) |p, i| out.experts[i] = try b.experts(block, index, p);
-        for (out.experts[0].layout.words, out.experts[2].layout.words) |w1, w3| out.gate_up_mismatch += @intFromBool(w1 != w3);
+        for (out.experts[0].form.exl3.layout.words, out.experts[2].form.exl3.layout.words) |w1, w3| out.gate_up_mismatch += @intFromBool(w1 != w3);
         return out;
     }
 
@@ -247,7 +308,7 @@ const Builder = struct {
         if (b.c.mtp_layers == 0) return null;
         var fb: [160]u8 = undefined;
         const mp = (try b.findDspark(names.dspark_main_proj, &fb)) orelse return null;
-        const main_proj = try b.group(.wq_a, mp, .whole, 3 * b.c.hidden, b.c.hidden);
+        const main_proj = if (b.c.format == .release_fp8) try release.group(b, .wq_a, mp, .whole, null, null, .{ b.c.hidden, 3 * b.c.hidden }) else try b.group(.wq_a, mp, .whole, 3 * b.c.hidden, b.c.hidden);
         const specs = try names.dsparkNatives(b.c);
         const natives = try b.a.alloc(NativePlan, specs.len);
         for (specs.items(), natives) |s, *v| {
@@ -278,7 +339,7 @@ pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Opt
     if (o.world != 3 and (c.heads % o.world != 0 or c.o_groups % o.world != 0)) return error.BadWorld;
     _ = partition.outputGroups(c.o_groups, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
-    _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
+    _ = partition.expertShare(c, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     var b: Builder = .{ .a = arena.allocator(), .c = c, .pack = pack, .o = o };
@@ -296,7 +357,7 @@ pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Opt
         const tspecs = try names.topNatives(c);
         top = try b.a.alloc(NativePlan, tspecs.len);
         for (tspecs.items(), top) |s, *v| v.* = try b.native(s.suffix, s);
-        head = try b.group(.wq_a, names.head.suffix, .col, c.hidden, c.vocab);
+        head = if (c.format == .release_fp8) try release.head(&b) else try b.group(.wq_a, names.head.suffix, .col, c.hidden, c.vocab);
         if (full or o.dspark) ds = try b.dspark();
     }
     // coverage: every stored name was planned or is knowingly left (vision, image routing, bf16 copies of groups)
@@ -373,8 +434,8 @@ test "CUDA rank planning selects EXL3 over a kept dense sibling from headers alo
         defer arena.deinit();
         var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = rank, .world = 2 } };
         const g = try b.group(.wq_a, prefix, .whole, 5120, 512);
-        try testing.expectEqual(@as(u32, 10), g.full.k2());
-        try testing.expectEqual(@as(u64, 1638400), g.part.trellis.bytes());
+        try testing.expectEqual(@as(u32, 10), g.form.exl3.full.k2());
+        try testing.expectEqual(@as(u64, 1638400), g.form.exl3.part.trellis.bytes());
         try testing.expect(!b.used.contains("layers.2.attn.compressor.wkv.weight"));
         try testing.expect(names.ignored("layers.2.attn.compressor.wkv.weight", &p));
     }
