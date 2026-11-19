@@ -10,6 +10,7 @@ const routed = @import("metal_routed.zig");
 const memory = @import("metal_engram.zig");
 const engram = @import("engram.zig");
 const ihc = @import("ihc.zig");
+const index = @import("metal_index.zig");
 
 pub const Ref = dense.Ref;
 
@@ -24,12 +25,12 @@ const Block = struct {
         defer w.deinit(a);
         var attention = try dense.Attention.uploadForModel(a, device, &w, config, use_tensors);
         errdefer attention.deinit();
-        var mem = if (w.memory) |*v| try memory.Layer.upload(a, device, v, config.hidden_size, config.engram_fp8_embedding) else null;
+        var mem = if (w.memory) |*v| try memory.Layer.uploadForModel(a, device, v, config.hidden_size, config.engram_fp8_embedding, use_tensors) else null;
         errdefer if (mem) |*v| v.deinit();
         return .{
             .attention = attention,
             .feed = switch (w.feed) {
-                .dense => .{ .dense = try dense.Feed.upload(a, device, &w) },
+                .dense => .{ .dense = try dense.Feed.uploadForModel(a, device, &w, use_tensors) },
                 .routed => .{ .routed = try routed.Layer.uploadForModel(a, device, &w, config, use_tensors) },
             },
             .memory = mem,
@@ -48,12 +49,12 @@ const Block = struct {
 const Head = struct {
     owned: dense.Buffers,
     embedding: aff.Weights,
-    vocab: aff.Weights,
+    vocab: dense.Linear,
     norm: mtl.Buffer,
     merge: dense.Merge,
     lookup: mtl.Pipeline,
 
-    fn upload(a: std.mem.Allocator, device: mtl.Device, w: weights.Head) !Head {
+    fn upload(a: std.mem.Allocator, device: mtl.Device, w: weights.Head, tensors: bool) !Head {
         var b: dense.Buffers = .{ .a = a, .d = device };
         errdefer b.clear();
         const lib = try mtl.Library.fromSource(device, source.embed_norm, mtl.CompileOptions.mlx());
@@ -66,7 +67,7 @@ const Head = struct {
         var out: Head = .{
             .owned = undefined,
             .embedding = try b.matrix(w.embedding),
-            .vocab = try b.matrix(w.lm_head),
+            .vocab = try b.linear(w.lm_head, tensors),
             .norm = try b.upload(w.norm.bytes),
             .merge = try dense.Merge.upload(&b, w.merge),
             .lookup = try mtl.Pipeline.init(device, lib, name, false),
@@ -101,6 +102,8 @@ pub const Model = struct {
     common: dense.Kernels,
     routed: routed.Kernels,
     memory: memory.Kernels,
+    /// The sparse layers' compressed indexer (used when a lane cache carries index state).
+    index: index.Kernels,
 
     pub fn open(a: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8) !Model {
         var host = try load.Loaded.open(a, io, dir);
@@ -112,7 +115,9 @@ pub const Model = struct {
         errdefer route.deinit();
         var mem = try memory.Kernels.load(device);
         errdefer mem.deinit();
-        var head = try Head.upload(a, device, try weights.Head.read(&host, 1));
+        var ix = try index.Kernels.load(device);
+        errdefer ix.deinit();
+        var head = try Head.upload(a, device, try weights.Head.read(&host, 1), common.linears != null);
         errdefer head.deinit();
         const blocks = try a.alloc(Block, t.num_hidden_layers);
         errdefer a.free(blocks);
@@ -131,6 +136,7 @@ pub const Model = struct {
             .common = common,
             .routed = route,
             .memory = mem,
+            .index = ix,
         };
     }
 
@@ -139,6 +145,7 @@ pub const Model = struct {
         self.allocator.free(self.blocks);
         self.head.deinit();
         self.memory.deinit();
+        self.index.deinit();
         self.routed.deinit();
         self.common.deinit();
         self.host.close();
@@ -152,26 +159,57 @@ pub const Model = struct {
         self.embedRows(e, frame.ids, x, frame.rows * ihc.streams);
         e.barrier();
         var mem_ix: usize = 0;
-        for (self.blocks, cache) |*block, lane| {
+        // each sub-block's tail writes the next collapse's partials (an Engram layer between them recomputes them)
+        var ready = false;
+        var headed = false;
+        for (self.blocks, cache, 0..) |*block, lane, bi| {
             if (block.memory) |*m| {
                 try self.memory.forward(&self.common, e, m, &frame.memory[mem_ix], x, y, frame.rows);
                 e.barrier();
                 std.mem.swap(Ref, &x, &y);
                 mem_ix += 1;
+                ready = false;
+                headed = false;
             }
             try frame.common.bind(frame.rows, block.attention.heads, lane.key_stride);
-            try self.common.attend(e, &block.attention, &frame.common, lane.rows, x, y);
+            const feed_merge = switch (block.feed) {
+                .dense => |*w| w.merge,
+                .routed => |*w| w.merge,
+            };
+            const feed_gain = switch (block.feed) {
+                .dense => |*w| w.norm,
+                .routed => |*w| w.input_norm,
+            };
+            // decode passes run each tail with the next collapse's head in one launch
+            const fuse = dense.Kernels.fusedSeams(frame.rows);
+            var rows = lane.rows;
+            if (lane.index) |c| if (block.attention.index != null) {
+                rows.index = .{ .kernels = &self.index, .scratch = &frame.index, .cache = c };
+            };
+            try self.common.attendSeam(e, &block.attention, &frame.common, rows, x, y, .{ .ready = ready, .headed = headed, .next = feed_merge, .next_gain = if (fuse) feed_gain else null });
             e.barrier();
             std.mem.swap(Ref, &x, &y);
+            const next: ?dense.Merge = if (bi + 1 < self.blocks.len)
+                (if (self.blocks[bi + 1].memory != null) null else self.blocks[bi + 1].attention.merge)
+            else
+                self.head.merge;
+            const next_gain: ?mtl.Buffer = if (!fuse or next == null) null else if (bi + 1 < self.blocks.len) self.blocks[bi + 1].attention.norm else self.head.norm;
             switch (block.feed) {
-                .dense => |*w| try self.common.feed(e, w, &frame.common, x, y),
-                .routed => |*w| try self.routed.forward(&self.common, e, w, &frame.common, &frame.routed, x, y),
+                .dense => |*w| try self.common.feedSeam(e, w, &frame.common, x, y, .{ .ready = true, .headed = fuse, .next = next, .next_gain = next_gain }),
+                .routed => |*w| try self.routed.forwardSeam(&self.common, e, w, &frame.common, &frame.routed, x, y, .{ .ready = true, .headed = fuse, .next = next, .next_gain = next_gain }),
             }
             e.barrier();
             std.mem.swap(Ref, &x, &y);
+            ready = next != null;
+            headed = next_gain != null;
         }
-        _ = try self.common.collapse(e, x, self.head.merge, self.head.norm, &frame.common);
-        try self.readout(e, frame.common.normalized, frame.logits, frame.rows);
+        _ = try self.common.collapseSeamFrom(e, x, self.head.merge, self.head.norm, &frame.common, .{ .ready = ready, .headed = headed });
+        if (frame.last_logits) {
+            // a prompt chunk needs only its last row's logits (the same bits: rows are independent)
+            const h = self.host.config.value.text_config.hidden_size;
+            const last: Ref = .{ .buffer = frame.common.normalized.buffer, .offset = frame.common.normalized.offset + @as(usize, frame.rows - 1) * h * 2 };
+            try self.readout(e, last, frame.logits, 1);
+        } else try self.readout(e, frame.common.normalized, frame.logits, frame.rows);
         return frame.logits;
     }
 
@@ -180,26 +218,31 @@ pub const Model = struct {
     }
 
     pub fn readout(self: *const Model, e: mtl.ComputeEncoder, x: Ref, out: Ref, rows: u32) !void {
-        try self.common.project(e, self.head.vocab, x, out, rows);
+        try self.common.linear(e, self.head.vocab, x, out, rows);
     }
 };
 
-pub const LayerCache = struct { rows: dense.CacheRows, key_stride: u32 };
+/// A layer's cache rows for a pass; a sparse layer's `index` runs the compressed indexer (beyond the probe's 2,048).
+pub const LayerCache = struct { rows: dense.CacheRows, key_stride: u32, index: ?index.Cache = null };
 
 pub const Frame = struct {
     own: dense.Buffers,
     capacity: u32,
     rows: u32 = 0,
+    /// Read out only the last row's logits (a prompt chunk); they land in logits row 0.
+    last_logits: bool = false,
     streams: [2]Ref,
     ids: Ref,
     logits: Ref,
     common: dense.Scratch,
     routed: routed.Scratch,
     memory: []memory.Scratch,
+    /// The indexer's rows; the caller stages their first position with `index.stage` before a pass with index caches.
+    index: index.Scratch,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, model: *const Model, rows: u32, key_stride: u32) !Frame {
         const t = model.host.config.value.text_config;
-        if (rows == 0 or rows > routed.max_rows) return error.BadHy4MetalFrame;
+        if (rows == 0 or rows > routed.prompt_rows) return error.BadHy4MetalFrame;
         var needed: usize = 0;
         var largest = &model.blocks[0].attention;
         for (model.blocks) |*b| {
@@ -219,6 +262,8 @@ pub const Frame = struct {
         errdefer common.deinit();
         var route = try routed.Scratch.initForModel(a, device, t, rows, model.routed.tensors != null);
         errdefer route.deinit();
+        var ix = try index.Scratch.init(a, device, rows);
+        errdefer ix.deinit();
         var b: dense.Buffers = .{ .a = a, .d = device };
         errdefer b.clear();
         var out: Frame = .{
@@ -230,6 +275,7 @@ pub const Frame = struct {
             .common = common,
             .routed = route,
             .memory = memories,
+            .index = ix,
         };
         out.own = b;
         return out;
@@ -238,6 +284,7 @@ pub const Frame = struct {
     pub fn deinit(self: *Frame) void {
         self.common.deinit();
         self.routed.deinit();
+        self.index.deinit();
         for (self.memory) |*m| m.deinit();
         self.own.a.free(self.memory);
         self.own.clear();

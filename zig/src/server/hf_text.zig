@@ -42,6 +42,9 @@ pub const HfText = struct {
     eos: []const u32 = &.{},
     prefix: []const u32 = &.{}, // the post-processor's tokens before a text (add_special_tokens)
     suffix: []const u32 = &.{},
+    /// Hy4-flash spells its reasoning and tool-call tokens `<think:opensource>`, `<tool_call:opensource>`, ...: the
+    /// server reads them as the GLM spellings it parses (decoded text, marker ids, and marker strings it encodes).
+    hy4: bool = false,
 
     /// Loads ``dir``'s tokenizer.json, chat template, special tokens, eos ids; failure reason in `problem` (from `pa`).
     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, template_override: ?[]const u8, pa: Allocator, problem: *[]const u8) !*HfText {
@@ -135,6 +138,7 @@ pub const HfText = struct {
             };
         }
         if (t.tool_source.len > 0) t.tool_compiled = template.compile(gpa, t.tool_source, null) catch null;
+        t.hy4 = t.tok.specialTokenId("</think:opensource>") != null and t.tok.specialTokenId("<tool_call:opensource>") != null;
         return t;
     }
 
@@ -322,8 +326,10 @@ pub const HfText = struct {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
+    fn encodeFn(ctx: *anyopaque, a: Allocator, s_in: []const u8, add_special: bool) model_text.Error![]u32 {
         const t = self(ctx);
+        // a marker the server spells itself (a closing </think>) encodes as the model's own token
+        const s = if (t.hy4) hy4Spelling(s_in) orelse s_in else s_in;
         const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
@@ -347,11 +353,27 @@ pub const HfText = struct {
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        return self(ctx).tok.decode(a, ids, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        const t = self(ctx);
+        const raw = t.tok.decode(a, ids, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        if (!t.hy4 or std.mem.indexOf(u8, raw, ":opensource>") == null) return raw;
+        var out: std.ArrayList(u8) = .empty;
+        var at: usize = 0;
+        outer: while (at < raw.len) {
+            if (raw[at] == '<') for (hy4_spellings) |pair| if (std.mem.startsWith(u8, raw[at..], pair[0])) {
+                try out.appendSlice(a, pair[1]);
+                at += pair[0].len;
+                continue :outer;
+            };
+            try out.append(a, raw[at]);
+            at += 1;
+        }
+        return out.items;
     }
 
     fn tokenIdFn(ctx: *anyopaque, piece: []const u8) ?u32 {
-        return self(ctx).tok.specialTokenId(piece);
+        const t = self(ctx);
+        if (t.hy4) if (hy4Spelling(piece)) |own| return t.tok.specialTokenId(own);
+        return t.tok.specialTokenId(piece);
     }
 
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
@@ -597,4 +619,24 @@ test {
     _ = @import("hf_text_regex_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
+}
+
+/// Hy4-flash's marker tokens and the GLM spellings the server's reply parsing reads (the call list's wrapper drops).
+const hy4_spellings = [_][2][]const u8{
+    .{ "<think:opensource>", "<think>" },
+    .{ "</think:opensource>", "</think>" },
+    .{ "<tool_calls:opensource>", "" },
+    .{ "</tool_calls:opensource>", "" },
+    .{ "<tool_call:opensource>", "<tool_call>" },
+    .{ "</tool_call:opensource>", "</tool_call>" },
+    .{ "<arg_key:opensource>", "<arg_key>" },
+    .{ "</arg_key:opensource>", "</arg_key>" },
+    .{ "<arg_value:opensource>", "<arg_value>" },
+    .{ "</arg_value:opensource>", "</arg_value>" },
+};
+
+/// The Hy4-flash token a GLM marker spelling stands for, or null.
+fn hy4Spelling(piece: []const u8) ?[]const u8 {
+    for (hy4_spellings) |pair| if (pair[1].len > 0 and std.mem.eql(u8, piece, pair[1])) return pair[0];
+    return null;
 }
