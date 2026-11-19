@@ -15,6 +15,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadChunkSolo => "TF_QWEN35_CHUNK_SOLO: a solo prompt pass's rows, 4096 (off) or 8192",
         error.QwenSoloStage => "TF_QWEN35_CHUNK_SOLO: a pipeline stage runs 4096-row prompt chunks; unset it on stages",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
+        error.QwenKvHostShare => "TF_QWEN_KV_HOST uses the host prompt cache, not shared KV snapshots: unset TF_QWEN_KV_SHARE",
         error.QwenKvHostCap => "TF_QWEN_KV_HOST_GIB is below one full KV window including lookahead; raise the cap or lower --context",
         error.QwenKvHostNeedsPagedEngine => "TF_QWEN_KV_HOST requires TF_QWEN_KV_PAGES_ALL=1 for its single paged stream",
         error.QwenKvHostIntegrated => "TF_QWEN_KV_HOST requires a discrete GPU; integrated host and device memory share one pool",

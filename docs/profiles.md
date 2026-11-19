@@ -280,6 +280,6 @@ gathers, remaining graph nodes and timing sweeps still run. Other topologies kee
 `TF_QWEN_KV_HOST=1` is an opt-in identical-output placement switch for the dense and MoE CUDA Qwen hybrids (#2637).
 It places only KV pages in mapped pinned-host memory; state and verify runs stay on the device.
 It requires a discrete GPU, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1` and `--parallel 1`.
-Integrated GPUs, spill and disk snapshots are refused. The GiB cap is documented in [environment.md](environment.md).
+Integrated GPUs, spill, disk snapshots and `TF_QWEN_KV_SHARE` are refused. The GiB cap is documented in [environment.md](environment.md).
 Unset keeps the existing plan and device-page behavior. Host tests prove planning and allocation ownership only;
 model token equality, MTP and resumed-prompt equality still require the same-checkpoint device receipt.
