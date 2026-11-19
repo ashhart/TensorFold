@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron: the Living Weights copies left behind by the October revert are deleted and `cuda_pages` imports `living.lesson_route`, leaving one copy of the learner, pocket and lesson files (#3707). Thanks to @jschmied.
+
 - Flash Next on CUDA: after load, a mixed shard keeps only the n-gram table's pages in the page cache, and the final sweep reaches shards nested under `tensors/`, freeing about 3 GiB of page cache on the NVFP4 export with replies unchanged (#3467). Thanks to @jschmied.
 
 - CUDA: GLM's `TF_GLM_L2PF` site f now also prefetches a MoE layer's shared expert gate-up after its router within the same `TF_GLM_L2PF_MB` budget, giving about 1.0-1.2% faster decode at TP=2 on GB10 (mean of three alternating launches) with identical tokens (#3156). Thanks to @Bizuayeu.
