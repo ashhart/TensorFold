@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol on CUDA: `tf-idol` runs Idol's denoiser on GB10 (sm_121) and on RTX 50-series and RTX PRO Blackwell (sm_120) cards against a reference case, gated step by step against idol-sdk's float32 run as on Metal, and refuses other GPUs by name (#1767, for #1757). Thanks to @jayleaton, with device runs from @GustavBlack and @Nipale-ai.
+
 - Docs: the drafter training recipe gains a section on adapting an already released drafter, budgeted from a few passes over the scarcest class at a low learning rate with early checkpoints, with the Qwen3.8-27B pilot behind it (#3369, refs #2667). Thanks to @Maxrio9.
 
 - Desktop: searching the current conversation no longer carries a project picked under All saved conversations; the request, its results, filters and navigation use the scope's own project filter, and switching back restores the project (#3900, fixes #3849). Thanks to @AIFlowML.
