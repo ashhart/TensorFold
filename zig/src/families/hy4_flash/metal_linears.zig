@@ -82,7 +82,8 @@ pub const Rows = struct {
     argmax: mtl.Pipeline,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device) !Rows {
-        const text = try std.mem.concat(a, u8, &.{ affine.source(device.tensorUnits()), @import("kernel_sources").hy4_flash_rows });
+        // rows.metal builds on the wide core's tf_rp_rows on every chip, so every chip computes the same bits
+        const text = try std.mem.concat(a, u8, &.{ affine.source(true), @import("kernel_sources").hy4_flash_rows });
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
