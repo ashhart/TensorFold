@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Changelog: #3125's entry appears once, under 1.2.10; the copy in 1.2.9's section, a release published before #3125 landed, is removed (#3916, refs #3125). Thanks to @Bizuayeu.
+
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.
 
 - `tensorfold device`: a saved macOS profile is refreshed when the live GPU wired-memory limit changes, so the reported available weight bytes match the current limit (#3780, fixes #3778). Thanks to @AIFlowML.
