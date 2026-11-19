@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: changing the run, mode or redaction in the export panel clears the old preview at once and leaves `Copy JSON` and `Save…` disabled until the new selection builds successfully; a late result cannot replace another selection's preview or its feedback (#3834, fixes #3829). Thanks to @AIFlowML.
+
 - Web: the engine address may be an OpenAI base URL ending in `/v1` as well as a server root; health, the relay and Connect derive the server root with `engine_root` and append the API suffix once, and settings keeps the supplied address so a reverse-proxy prefix ending in `/v1` survives a reload (#3831, fixes #3830). Thanks to @AIFlowML.
 
 - Desktop: the library scan uses four convolution taps for Qwen3.5-2B, so the supported checkpoint is offered instead of being refused at scan time; a checkpoint with the old value still gets a geometry refusal (#3768). Thanks to @AIFlowML.
