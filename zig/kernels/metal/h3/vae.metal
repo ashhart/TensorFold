@@ -1,54 +1,63 @@
-// H3 video VAE on Metal: the ViT decoder block kernels in fp32.
-// Reference: zig/src/families/h3/vae/reference/vae_video.py (MLX port target).
-// These run beside the transformer kernels; names must not collide, hence vae_*.
+// H3 video VAE on Metal: fp32 matmul kernels for the ViT decoder's projections.
+// Reference: zig/kernels/metal/h3/h3_rows.metal (the row matmul pattern).
 
-// RMSNorm in fp32: x * rsqrt(mean(x^2) + eps) * weight. One threadgroup per row.
+// Y[r, n] = B[n] + sum_k X[r, k] W[n, k]. Threads [N, R, 1], fp32 throughout.
+[[kernel]] void h3_vae_matmul(
+  const device float* X [[buffer(0)]],   // [R, K]
+  const device float* W [[buffer(1)]],   // [N, K] (row-major, the safetensors layout)
+  const device float* B [[buffer(2)]],   // [N]
+  device float* Y [[buffer(3)]],         // [R, N]
+  constant uint* P [[buffer(4)]],        // P[0]=R, P[1]=K, P[2]=N, P[3]=row0
+  uint3 at [[thread_position_in_grid]]) {
+  const uint R = P[0], K = P[1], N = P[2], row0 = P[3];
+  if (at.x >= N || at.y >= R) return;
+  const device float* x = X + (uint)at.y * K;
+  const device float* w = W + (uint)at.x * K;
+  float sum = 0.0f;
+  for (uint k = 0; k < K; k++) sum += x[k] * w[k];
+  Y[(row0 + at.y) * N + at.x] = sum + B[at.x];
+}
+
+// SwiGLU elementwise: out[r, f] = fused[r, f + F] * silu(fused[r, f]).
+[[kernel]] void h3_vae_swiglu(
+  const device float* FUSED [[buffer(0)]],
+  device float* OUT [[buffer(1)]],
+  constant uint* P [[buffer(2)]],        // P[0] = F
+  uint3 at [[thread_position_in_grid]]) {
+  const uint F = P[0];
+  const uint r = at.y, f = at.x;
+  const float gate = FUSED[r * 2 * F + f];
+  const float value = FUSED[r * 2 * F + F + f];
+  OUT[r * F + f] = value * gate / (1.0f + exp(-gate));
+}
+
+// RMSNorm in fp32 with a learned weight: one threadgroup per row.
 [[kernel]] void h3_vae_rmsnorm(
   const device float* X [[buffer(0)]],
   const device float* W [[buffer(1)]],
   device float* Y [[buffer(2)]],
-  constant uint* P [[buffer(3)]],          // P[0] = D
+  constant uint* P [[buffer(3)]],        // P[0] = D
   uint tid [[thread_index_in_threadgroup]],
   uint tg [[threadgroup_position_in_grid]]) {
   const uint D = P[0];
   float acc = 0.0f;
   for (uint i = tid; i < D; i += 256) acc += X[tg * D + i] * X[tg * D + i];
-  // one-warp reduction through simd_sum
   acc = simd_sum(acc);
   const float inv = rsqrt(acc / float(D) + 1e-5f);
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
-// SwiGLU FFN: out = w2b applied after silu(gate) * value, elementwise part only.
-// [rows, 2F] fused (first F gate, next F value) -> [rows, F] gated output.
-[[kernel]] void h3_vae_swiglu(
-  const device float* FUSED [[buffer(0)]],
-  device float* OUT [[buffer(1)]],
-  constant uint* P [[buffer(2)]],          // P[0] = F
-  uint tid [[thread_index_in_threadgroup]],
-  uint tg [[threadgroup_position_in_grid]]) {
-  const uint F = P[0];
-  for (uint i = tid; i < F; i += 256) {
-    const float gate = FUSED[tg * 2 * F + i];
-    const float value = FUSED[tg * 2 * F + F + i];
-    OUT[tg * F + i] = value * gate / (1.0f + exp(-gate));
-  }
-}
-
-// Attention: softmax(q k^T) v in fp32 within one tile; q and k are already
-// RMS-normalized and rotated by the caller. One threadgroup z per head.
+// Full fp32 attention: softmax(q k^T / sqrt(hd)) v, one threadgroup per head-row.
+// q, k, v [heads, rows, head_dim]; the softmax runs in fp32 with max subtraction.
 [[kernel]] void h3_vae_attention(
-  const device float* Q [[buffer(0)]],     // [heads, rows, head_dim]
+  const device float* Q [[buffer(0)]],
   const device float* K [[buffer(1)]],
   const device float* V [[buffer(2)]],
-  device float* Y [[buffer(3)]],           // [heads, rows, head_dim]
-  constant uint* P [[buffer(4)]],          // P[0] = rows, P[1] = head_dim
-  uint3 tg [[threadgroup_position_in_grid]],
-  uint tid [[thread_index_in_threadgroup]],
-  uint simd_lane [[thread_index_in_simdgroup]],
-  uint simd_group [[thread_index_in_simdgroup]]) {
+  device float* Y [[buffer(3)]],
+  constant uint* P [[buffer(4)]],        // P[0]=rows, P[1]=head_dim
+  uint3 tg [[threadgroup_position_in_grid]]) {
   const uint rows = P[0], hd = P[1];
-  const uint head = tg.z, r = tg.x;
+  const uint head = tg.y, r = tg.x;
   float scores[512];
   float max_s = -1e30f;
   for (uint k = 0; k < rows; k++) {
@@ -59,9 +68,45 @@
   }
   float sum = 0.0f;
   for (uint k = 0; k < rows; k++) { scores[k] = exp(scores[k] - max_s); sum += scores[k]; }
-  for (uint i = tid; i < hd; i += 256) {
+  for (uint i = 0; i < hd; i++) {
     float out = 0.0f;
     for (uint k = 0; k < rows; k++) out += scores[k] * V[(head * rows + k) * hd + i];
     Y[(head * rows + r) * hd + i] = out / sum;
   }
+}
+
+// LayerNorm affine: mean/var in fp32, then (x - mean) / std * w + b.
+[[kernel]] void h3_vae_layernorm(
+  const device float* X [[buffer(0)]],
+  const device float* W [[buffer(1)]],
+  const device float* B [[buffer(2)]],
+  device float* Y [[buffer(3)]],
+  constant uint* P [[buffer(4)]],        // P[0] = D, P[1] = eps as bits? no: eps folded into P[1] unused; eps is compile-time 1e-5
+  uint tid [[thread_index_in_threadgroup]],
+  uint tg [[threadgroup_position_in_grid]]) {
+  const uint D = P[0];
+  float sum = 0.0f;
+  for (uint i = tid; i < D; i += 256) sum += X[tg * D + i];
+  sum = simd_sum(sum);
+  const float mean = sum / float(D);
+  float m2 = 0.0f;
+  for (uint i = tid; i < D; i += 256) { const float t = X[tg * D + i] - mean; m2 += t * t; }
+  m2 = simd_sum(m2);
+  const float std = rsqrt(m2 / float(D) + 1e-5f);
+  for (uint i = tid; i < D; i += 256) Y[tg * D + i] = (X[tg * D + i] - mean) * std * W[i] + B[i];
+}
+
+// post_quant 1x1x1 conv: out[v, o] = sum_i in[v, i] w[o, i] + b[o]. Threads [V, O, 1].
+[[kernel]] void h3_vae_postquant(
+  const device float* IN [[buffer(0)]],   // [V, 24]
+  const device float* W [[buffer(1)]],    // [24, 24]
+  const device float* B [[buffer(2)]],    // [24]
+  device float* OUT [[buffer(3)]],        // [V, 24]
+  constant uint* P [[buffer(4)]],        // P[0]=V, P[1]=C
+  uint3 at [[thread_position_in_grid]]) {
+  const uint V = P[0], C = P[1];
+  if (at.x >= C || at.y >= V) return;
+  float sum = 0.0f;
+  for (uint i = 0; i < C; i++) sum += IN[at.y * C + i] * W[at.x * C + i];
+  OUT[at.y * C + at.x] = sum + B[at.x];
 }
