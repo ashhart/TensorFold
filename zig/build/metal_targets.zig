@@ -254,7 +254,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const kimi_lib = kimiMetallib(b, &mlx_flags);
     b.getInstallStep().dependOn(&b.addInstallFile(kimi_lib, "lib/kimi.metallib").step);
     const kimi = kimiModule(b, target, optimize, metal, mods.engine, mods.lanes);
-    const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
+    const kimi_bytes = embedded(b, if (shaders) kimi_lib else no_shaders, "kimi.metallib");
     engines.addImport("kimi_k3", kimi);
     engines.addImport("kimi_metallib", kimi_bytes);
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
@@ -272,7 +272,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         });
         const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
         b.installArtifact(exe);
-        b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+        const step = b.step(p.name, p.about);
+        step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        if (no_compiler) |fail| step.dependOn(fail);
     }
 
     // Kimi's tiktoken tokenizer and its parity program (tools/zig/k3_tokenizer_parity.py).
@@ -502,7 +504,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "cluster", .module = cluster } },
     }) });
     b.installArtifact(k3_cluster);
-    b.step("tf-k3-cluster", "Kimi K3 tensor- and expert-parallel ranks against one node, through the cluster's canon").dependOn(&b.addInstallArtifact(k3_cluster, .{}).step);
+    const k3_cluster_step = b.step("tf-k3-cluster", "Kimi K3 tensor- and expert-parallel ranks against one node, through the cluster's canon");
+    k3_cluster_step.dependOn(&b.addInstallArtifact(k3_cluster, .{}).step);
+    if (no_compiler) |fail| k3_cluster_step.dependOn(fail);
     const tp2 = b.addExecutable(.{ .name = "tf-tp2-bench", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/tp2_bench.zig"),
         .target = target,
