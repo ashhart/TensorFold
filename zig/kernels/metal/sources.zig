@@ -289,3 +289,11 @@ pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
 
 /// Qwen3 embeddings' projected-head RMS norm (128-wide Q and K, V unchanged).
 pub const qwen3_heads = @embedFile("qwen3/heads.metal");
+/// GLM-5.3-Flash's DFlash2 drafter attention: Q/K rotary + normalized GQA partials and their merge.
+pub const glm_draft_attention = @embedFile("glm_draft_attention.metal");
+/// GLM-5.3-Flash's DFlash2 drafter top-k: row-wise top 16 over vocabulary logits into packed candidates.
+pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
+/// GLM-5.3-Flash's DFlash2 inline chain accept: compares verified picks against drafted tokens on the GPU.
+pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
+/// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
+pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");

@@ -3,7 +3,7 @@
 const std = @import("std");
 
 /// tf-glm-rows-check: the products at every MLX width against float64, every row's bits in every window and launch.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, test_step: *std.Build.Step) void {
     const exe = b.addExecutable(.{ .name = "tf-glm-rows-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/glm_rows_check.zig"),
         .target = target,
@@ -117,6 +117,40 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
     }) });
     b.step("tf-glm-mm-groups", "GLM-5.3-Flash's prompt experts and dense products in column groups against core/affine_mm.zig's, bit for bit, GPU time").dependOn(&b.addInstallArtifact(mgroups, .{}).step);
+    drafter(b, target, optimize, metal, engine, test_step);
+}
+
+/// The GLM DFlash2 drafter's host test (no GPU) and its synthetic device check, each under its own step.
+fn drafter(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, test_step: *std.Build.Step) void {
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } };
+    const host = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const host_run = b.addRunArtifact(host);
+    b.step("test-glm-metal-dflash-host", "GLM DFlash2 drafter on Metal: config, schedule, taps and facts on the CPU").dependOn(&host_run.step);
+    test_step.dependOn(&host_run.step);
+    const synthetic = b.addExecutable(.{ .name = "tf-glm-metal-dflash-synthetic", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_synthetic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    b.step("tf-glm-metal-dflash-synthetic", "Build the GLM DFlash2 synthetic device check").dependOn(&b.addInstallArtifact(synthetic, .{}).step);
+    b.step("test-glm-metal-dflash-synthetic", "GLM DFlash2 drafter on the GPU over synthetic weights: taps, frames, drafts").dependOn(&b.addRunArtifact(synthetic).step);
+    const speed = b.addExecutable(.{ .name = "tf-glm-dflash-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_metal_dflash_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = imports,
+    }) });
+    const about = "GLM DFlash2 drafter passes at incoai's shapes on synthetic weights: ms a pass and a stage, bf16 and 4-bit";
+    b.step("tf-glm-dflash-speed", about).dependOn(&b.addInstallArtifact(speed, .{}).step);
 }
 
 /// tf-glm-sample-check and test-glm-sampling: the real GLM sampler against its host reference, no checkpoint.

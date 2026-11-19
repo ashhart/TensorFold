@@ -63,7 +63,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
 | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
-| `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
+| `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 on CUDA, 0.5 on Metal |
 | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
 | `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use at every width (the same bits either way), also at a load that times nothing; unset or blank races the two at each timed width when a build first loads with drafts and scratch context and keeps each width's winner, else classic; read on rank 0, which chooses every rank's forms |
 | `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
@@ -122,7 +122,7 @@ An explicit `--device` or `--segments` wins over its environment value, even if 
 The carveout size is checked only when the carveout is enabled, and still rounds to framebuffer rows.
 `TF_NO_TREES` retains precedence over `TF_DRAFT_NODES`.
 Backend-specific settings are checked when that backend starts; slide settings require learning to be enabled.
-The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family.
+The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family; on Metal `TF_GLM_DRAFT_CONFIDENCE` is read and validated when GLM loads `--drafter`.
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
 
