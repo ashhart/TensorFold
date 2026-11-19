@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and an empty or blank value reads as unset; valid values and defaults are unchanged (#3749, refs #2370). Thanks to @devopsfortunato.
+
 - Tests: the Web loopback startup regression sets its stand-in past the three-second warm-up, so it passes standalone and in the full suite alike (#4086, fixes #3752).
 
 - Docs: a one-GB10 recipe serves DeepSeek-V4-Pro-Qwen3.5-9B from a locally converted MLX 4-bit checkpoint, thinking and drafts off, with its health, model-list and chat checks (#4085, fixes #3905).
@@ -93,8 +95,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on HIP: the prompt chunk fallback counts the window plan's slot bytes as used before deciding whether a smaller chunk admits more streams, where it counted them as free and could keep the larger chunk (#3419). Thanks to @gilby.
 
 - DeepSeek-V4.1 on Metal: its GPU work goes through a Metal 4 command queue by default where the Mac has one (macOS 26 and later), with the same kernels in the same order and bit-identical outputs; `TF_METAL4=0` keeps Metal 3, `TF_METAL4_TIMELINE=n` logs per-stage GPU times for n rounds of each kind, and `TF_DSV41_ROUND_PROF=1` logs decode rounds' host and GPU milliseconds (#3374).
-
-
 
 - Flash Next on HIP: the verify window holds eight rows instead of four, so a stream alone in a round can land copy drafts of up to seven tokens a round; rounds shared by several streams keep three-token copies, MTP still drafts at most three, and each stream's window snapshots take more device memory, which admission counts (#2730). Thanks to @gilby.
 
@@ -362,8 +362,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the tokenizer parity corpus adds one sentence in each of the 22 scheduled Indian languages, the canonical-composition exclusions in both forms and ZWJ/ZWNJ conjuncts, each as written, NFC and NFD (#1988). Thanks to @currencycaver29.
 
 - Flash Next on Metal: an explicit `--context` smaller than the trained one now sizes the caches and selectors to that context, with the rotary positions unchanged, so a smaller context holds less memory; tokens are unchanged (#3691, part of #3667).
-
-- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and a value that is empty or only spaces and tabs reads as unset; valid values and defaults are unchanged (#3749, part of #2370).
 
 - Server: text chat requests on engines with a prompt cache or prompt chunking record where each provable message starts in the rendered prompt, at exact token boundaries; nothing uses the starts yet, so replies are unchanged (#3679, step 0 of #3617).
 
