@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
+
 - GLM-5.3-Flash on Metal: on Macs without tensor units (before M5), prompt processing uses vectorized GLM-only matmul, KDA and indexer kernels with 32-row matmul tiles; M5 Macs and every other Metal family keep their kernels, and the author's token hashes match main (#3921, refs #3152). Thanks to @gilby.
 
 - Changelog: #3125's entry appears once, under 1.2.10; the copy in 1.2.9's section, a release published before #3125 landed, is removed (#3916, refs #3125). Thanks to @Bizuayeu.
