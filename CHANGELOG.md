@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
+
 - HIP: in multi-rank runs, a follower rank refuses a step from rank 0 whose page ids, first page index, page-copy pages, snapshot slot, Flash Next begin slot or Nemotron resume row fall outside its own pool, table or slot counts, with the same `ShortMessage` error as a short message (#3081).
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
