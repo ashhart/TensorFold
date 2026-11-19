@@ -69,6 +69,49 @@ assert.equal(nodes(tree).some((node) => node.type === 'result-fixture'), false);
 input().props.onChange({ target: { value: 'late' } }); await commit(); tickTimers(); await commit()
 find(render(), (node) => node.type === 'button' && text(node) === 'Close search').props.onClick(); await commit()
 resolve(4, 'late', [match('late', 'current')]); await settle(); assert.equal(render(), null, 'Closing search discards delayed private snippets')
+
+store.projects = [{ id: 'project-a', name: 'Project A' }, { id: 'project-b', name: 'Project B' }]
+store.threads = [{ id: 'thread-a', projectId: 'project-a' }, { id: 'current', projectId: 'project-b' }]
+const picker = (label: string) => find(render(), (node) => node.type === 'select' && node.props['aria-label'] === label)
+const nextSearch = async () => {
+  const index = pending.length
+  await commit()
+  tickTimers()
+  await commit()
+  assert.equal(pending.length, index + 1)
+  return index
+}
+events.requestConversationSearch({ scope: 'all', query: 'needle' })
+await commit()
+picker('Conversation search project').props.onChange({ target: { value: 'project-a' } })
+find(render(), (node) => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } })
+const projectSearch = await nextSearch()
+assert.equal(pending[projectSearch].request.projectId, 'project-a')
+assert.equal(pending[projectSearch].request.includeArchived, true)
+resolve(projectSearch, 'needle', [{ ...match('needle', 'thread-a'), projectId: 'project-a' }])
+await settle()
+const oldProjectRow = find(render(), (node) => node.type === 'result-fixture')
+assert.ok(oldProjectRow)
+
+picker('Conversation search scope').props.onChange({ target: { value: 'thread' } })
+assert.equal(picker('Conversation search project'), undefined, 'the project filter is hidden in current-conversation scope')
+oldProjectRow.props.onOpen()
+assert.deepEqual(opened, [], 'a cached global project result cannot navigate once the scope changes')
+const currentSearch = await nextSearch()
+const currentRequest = pending[currentSearch].request
+assert.equal(currentRequest.scope, 'thread')
+assert.equal(currentRequest.threadId, 'current')
+assert.equal(currentRequest.projectId, undefined, 'a global project filter must not restrict the current conversation')
+assert.deepEqual(find(render(), (node) => node.type === 'filter-controls').props.threads, [store.threads[1]])
+resolve(currentSearch, 'needle', [{ ...match('needle', 'current'), projectId: 'project-b' }])
+await settle()
+assert.equal(find(render(), (node) => node.type === 'result-fixture').props.match.threadId, 'current')
+
+picker('Conversation search scope').props.onChange({ target: { value: 'all' } })
+const restoredSearch = await nextSearch()
+assert.equal(picker('Conversation search project').props.value, 'project-a')
+assert.equal(pending[restoredSearch].request.projectId, 'project-a', 'returning to global scope restores the project filter')
+assert.equal(pending[restoredSearch].request.includeArchived, true)
 hooks.cleanup()
 
 const anchorHooks = harness(), windowHooks = harness(), revealed: string[] = [], focused: string[] = []
