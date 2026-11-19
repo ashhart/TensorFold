@@ -1,11 +1,11 @@
-import type { ModelBenchmarkCell, ModelBenchmarkReceipt, ModelBenchmarkSpread } from '../../../../shared/model-benchmark'
+import { BENCHMARK_SUITES, type ModelBenchmarkCell, type ModelBenchmarkReceipt, type ModelBenchmarkSpread } from '../../../../shared/model-benchmark'
 import { isRepoId } from '../paths'
 import { strictBenchmarkJson } from './strict-json'
 import { supportedBenchmarkReceiptVersion } from './version'
 
-export const BENCHMARK_SUITE_SHA = '9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be'
 export const BENCHMARK_RECEIPT_MAX_BYTES = 1024 * 1024
 export type BenchmarkFormFactor = 'Mac mini' | 'Mac Studio' | 'MacBook Pro' | 'MacBook Air' | 'iMac' | 'Mac Pro'
+export type BenchmarkDetails = Pick<ModelBenchmarkReceipt, 'runtime' | 'model' | 'hardware' | 'settings'>
 export type ParsedBenchmarkReceipt = ModelBenchmarkReceipt & { hardware: ModelBenchmarkReceipt['hardware'] & { form_factor?: BenchmarkFormFactor | null } }
 const SAMPLE_KEYS = ['fixture_id', 'temperature', 'repeat', 'seed', 'status', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'delivery_seconds', 'delivery_tps', 'ttft_seconds', 'end_to_end_seconds', 'server_decode_tps', 'server_decode_seconds', 'prefill_seconds', 'token_sha', 'error_code']
 const ERROR_CODES = new Set(['http_error', 'connection_error', 'timeout', 'cancelled', 'server_error', 'invalid_stream', 'truncated_stream', 'missing_usage', 'invalid_usage', 'empty_output', 'unexpected_finish', 'token_count_mismatch', 'unmeasured_delivery'])
@@ -22,15 +22,8 @@ function number(value: unknown, nullable = true, integer = false, max = 1e15): v
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || integer && !Number.isSafeInteger(value)) invalid()
 }
 function digest(value: unknown, sizes = [64]): void { if (value !== null && (typeof value !== 'string' || !sizes.includes(value.length) || !/^[a-f0-9]+$/.test(value))) invalid() }
-export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ParsedBenchmarkReceipt {
-  if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) invalid()
-  let value: any
-  try { value = strictBenchmarkJson(raw) } catch { invalid() }
-  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples'])
-  if (value.schema_version !== 1 || typeof value.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.run_id)) invalid()
-  if (typeof value.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(value.created_at) || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > now + 900_000 || new Date(value.created_at).toISOString().slice(0, 19) !== value.created_at.slice(0, 19)) invalid()
-  object(value.suite, ['id', 'sha256'])
-  if (value.suite.id !== 'community-v1' || value.suite.sha256 !== BENCHMARK_SUITE_SHA) invalid()
+/** The runtime, model, hardware and settings sections, each with its own shape and privacy checks. */
+function checkDetails(value: any, expected?: { model: string; serial: boolean; engineVersion?: string }): void {
   const runtime = value.runtime
   object(runtime, ['tensorfold_version', 'backend', 'python_version', 'platform', 'dependencies'])
   text(runtime.tensorfold_version); text(runtime.python_version)
@@ -54,6 +47,17 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count'])
   if (settings.tokens !== 256 || settings.repetitions !== 5 || settings.context_tokens !== 4096 || settings.managed !== true || settings.rank_count !== 1 || typeof settings.serial !== 'boolean' || !Array.isArray(settings.temperatures) || settings.temperatures.length !== 2 || settings.temperatures[0] !== 1 || settings.temperatures[1] !== 0) invalid()
   if (expected && (model.repo_id !== expected.model || settings.serial !== expected.serial)) invalid()
+}
+export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ParsedBenchmarkReceipt {
+  if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) invalid()
+  let value: any
+  try { value = strictBenchmarkJson(raw) } catch { invalid() }
+  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples'])
+  if (value.schema_version !== 1 || typeof value.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.run_id)) invalid()
+  if (typeof value.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(value.created_at) || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > now + 900_000 || new Date(value.created_at).toISOString().slice(0, 19) !== value.created_at.slice(0, 19)) invalid()
+  object(value.suite, ['id', 'sha256'])
+  if (!Object.hasOwn(BENCHMARK_SUITES, value.suite.id) || BENCHMARK_SUITES[value.suite.id as keyof typeof BENCHMARK_SUITES] !== value.suite.sha256) invalid()
+  checkDetails(value, expected)
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
   for (const sample of value.samples) {
@@ -95,4 +99,23 @@ export function benchmarkCells(receipt?: ModelBenchmarkReceipt): ModelBenchmarkC
 }
 export function benchmarkProtocolComplete(receipt: ModelBenchmarkReceipt): boolean {
   return benchmarkCells(receipt).every(cell => cell.complete) && receipt.model.revision !== null && receipt.model.config_sha256 !== null && receipt.hardware.source !== 'unavailable' && receipt.hardware.gpus.length > 0 && receipt.runtime.backend !== 'rocm'
+}
+
+/** A receipt's runtime, model, hardware and settings when those sections pass their checks, even if its samples do not. */
+export function parseBenchmarkDetails(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }): BenchmarkDetails | null {
+  try {
+    if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) return null
+    const value: any = strictBenchmarkJson(raw)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    checkDetails(value, expected)
+    return structuredClone({ runtime: value.runtime, model: value.model, hardware: value.hardware, settings: value.settings })
+  } catch { return null }
+}
+/** Saved details (runtime, model, hardware, settings) of a run without a valid receipt, re-checked; null if any fails. */
+export function checkedBenchmarkDetails(value: any): BenchmarkDetails | null {
+  try {
+    object(value, ['runtime', 'model', 'hardware', 'settings'])
+    checkDetails(value)
+    return structuredClone({ runtime: value.runtime, model: value.model, hardware: value.hardware, settings: value.settings })
+  } catch { return null }
 }

@@ -49,7 +49,7 @@
   "Use document task",
   "Use existing Codex CLI subscription logins, including GPT 5.4/5.5 with reasoning effort.",
   "Use existing folder…",
-  "Use fixed community-v1 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.",
+  "Use fixed community-v2 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.",
   "Use gateway-qualified model ids such as",
   "Use installed",
   "Use light, dark, or match your system.",

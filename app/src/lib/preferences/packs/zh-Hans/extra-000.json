@@ -106,7 +106,7 @@
   "After this change": "此次更改后",
   "All": "全部",
   "All assistant sources": "所有助手来源",
-  "All community-v1 cells meet the complete protocol.": "所有 community-v1 单元格均满足完整测试协议。",
+  "All community-v2 cells meet the complete protocol.": "所有 community-v2 单元格均满足完整测试协议。",
   "Allow Kokoro watch replies for {value0}": "允许 {value0} 接收 Kokoro 手表回复",
   "Allow private network for {value0}": "允许 {value0} 使用私有网络",
   "Allowed": "已允许",
