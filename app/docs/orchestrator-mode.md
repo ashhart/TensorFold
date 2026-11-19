@@ -77,6 +77,8 @@ Packaged builds can pass the same flag to Electron:
 open -a TensorFold --args --headless-server
 ```
 
+On macOS, a custom `VONTRA_HOME` must be a canonical absolute path. `/tmp` is a link to `/private/tmp`, so a disposable profile spelled with `/tmp/` is refused with `Workspace recovery profile is linked or unavailable.` Use the `/private/tmp/` spelling for a fresh profile, as the packaged smoke helper does.
+
 To survive reboots on the always-on Mac, install a LaunchAgent —
 `~/Library/LaunchAgents/dev.tensorfold.studio.orchestrator.plist`:
 
