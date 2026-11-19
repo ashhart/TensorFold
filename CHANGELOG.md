@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a Flash Next prompt pass holds 3,072 rows while other streams decode (it held 1,536), so a long prompt beside running streams takes half as many passes (#3726). Thanks to @BadAd84.
+
 - GLM-5.3-Flash on CUDA: the sampled draw takes its rule from the shared `cuda.sample.rule`, as MiniMax M3 does, instead of building its own copy with a fixed `near` value (#3705, part of #2680). Thanks to @jschmied.
 
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
@@ -14,13 +16,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: in multi-rank runs, a follower rank refuses a step from rank 0 whose page ids, first page index, page-copy pages, snapshot slot, Flash Next begin slot or Nemotron resume row fall outside its own pool, table or slot counts, with the same `ShortMessage` error as a short message (#3081).
 
-
-
 - Templates: `str.format()` renders positional fields (`{}`, `{N}`) and the `{{` `}}` escapes as Python does; signed or underscored indexes, keyword, attribute, conversion and spec fields are refused by name (#3816, refs #3801). Thanks to @atakann.
 
 - Qwen3.8-27B on Metal: on Macs with tensor units (M5), drafted decode rounds run two 16-row query tiles in each prefix-attention threadgroup instead of up to six, with the same kernel and the same tokens; Macs without tensor units keep six on a long cache and four otherwise (#3704). Thanks to @mrv777.
-
-
 
 - CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
 
@@ -41,8 +39,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
-
-
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
@@ -465,8 +461,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 - Metal: Baidu's Unlimited-OCR-2 is served natively from its BF16 release on M5-class Macs: page images through `serve --vision`, the family's chat template built in, its SAM and CLIP image encoders and decoder under the kernel contract; on five reference pages every departure from the release's own reply is a one-step tie (#2074). Thanks to @BobClawblaw.
-
-- Flash Next on CUDA: a prompt pass holds 3,072 rows by default while another stream decodes, twice the 1,536 it held, so a server with more than one stream runs a long prompt in about half the passes and gives a lane 3,072 prompt rows; a one-stream server keeps its 8,192-row passes, a row's sums come from the K split and the shape alone, and replies are unchanged (#3726).
 
 ## 1.2.9
 
