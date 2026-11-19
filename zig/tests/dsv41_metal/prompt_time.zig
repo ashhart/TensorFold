@@ -235,7 +235,7 @@ fn chunk(r: *Rig, layer: u32, a: u32, rows: u32, reps: u32) !void {
     const cbytes: usize = if (carry != null) 4 * D * 4 else 0;
     fillPast(r, layer, a, 7 + a);
     fillInput(r, rows, 11);
-    try r.s.writeRows(&r.c, a, rows, rows);
+    try r.s.writeRows(&r.c, a, rows, rows, 0);
     const saved = try r.a.dupe(u8, if (carry) |cb| cb.contents()[0..cbytes] else &.{});
     defer r.a.free(saved);
     if (r.class == .reuse or r.class == .r1reuse) {

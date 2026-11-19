@@ -221,7 +221,7 @@ pub const Target = struct {
         s.rows = 0;
         t.stats.prompts += 1;
         // a kept state that starts this prompt, else a cleared slot
-        const hit = if (t.cache.on()) t.cache.best(ids) else null;
+        const hit = if (t.cache.on()) t.cache.best(ids, t.replayMode()) else null;
         const at: u32 = if (hit) |e| @intCast(e.ids.len) else 0;
         if (hit) |e| {
             t.cache.restore(c, e, &s.kv, s.high, s.ring);
@@ -245,7 +245,7 @@ pub const Target = struct {
                 t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids[0..end]) catch |e| return t.fail(e);
                 const tr = t.pr.tapRows(c);
                 for (0..t.pr.taps) |i| t.ringPut(s, end - t.pr.taps + i, tr[i * tapWidth(c) ..][0..tapWidth(c)]);
-                if (end < n) t.cache.save(c, &s.kv, ids[0..end], s.ring, null) catch {};
+                if (end < n) t.cache.save(c, &s.kv, ids[0..end], s.ring, null, t.replayMode()) catch {};
             }
             const all = t.pr.logits(c);
             logits = all[(t.pr.head - 1) * V ..][0..V];
@@ -255,8 +255,12 @@ pub const Target = struct {
         s.base = n;
         s.live = true;
         s.whole = true;
-        if (t.cache.on() and at < n and kp[1] == 0) t.cache.save(c, &s.kv, ids, s.ring, logits) catch {};
+        if (t.cache.on() and at < n and kp[1] == 0) t.cache.save(c, &s.kv, ids, s.ring, logits, t.replayMode()) catch {};
         return choice;
+    }
+
+    fn replayMode(t: *const Target) bool {
+        return t.opt.prompt.replay and !t.opt.prompt.full;
     }
 
     /// Extra kept states (0: none): before the first user turn, and before a thinking prompt's closing <think>.
@@ -270,7 +274,7 @@ pub const Target = struct {
             if (u >= min_shared and u > at) out[0] = @intCast(u);
         }
         // the next turn renders this turn's <think> as </think>, so it shares the prompt but that tag
-        if (n >= 2 and ids[n - 1] == c.think_open and ids[n - 2] == c.assistant and n - 1 > @max(at, out[0])) out[1] = @intCast(n - 1);
+        if (!t.replayMode() and n >= 2 and ids[n - 1] == c.think_open and ids[n - 2] == c.assistant and n - 1 > @max(at, out[0])) out[1] = @intCast(n - 1);
         return out;
     }
 
@@ -504,7 +508,7 @@ pub const Target = struct {
         s.live = false;
         if (s.open) t.commitTaps(s, s.rows);
         s.open = false;
-        if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
+        if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null, t.replayMode()) catch {};
     }
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
