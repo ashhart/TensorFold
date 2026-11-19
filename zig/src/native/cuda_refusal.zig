@@ -57,6 +57,7 @@ pub fn place(comptime F: type, a: std.mem.Allocator, o: api.Open) !?[]const u8 {
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    if (comptime @hasDecl(F, "kvHostRefusal")) if (F.kvHostRefusal(o)) |why| return why;
     if (qwen35Tp(F, o)) |why| return why; // ahead of every flag's own refusal: no rank of this family serves yet
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";

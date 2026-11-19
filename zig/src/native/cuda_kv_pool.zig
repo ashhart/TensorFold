@@ -156,13 +156,7 @@ fn cacheWanted(comptime F: type, o: api.Open) u64 {
 fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, stream_bytes: u64) bool {
     const want = cacheWanted(F, o);
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    const kv_host: u64 = if (comptime @hasDecl(F, "kvHostRoom")) F.kvHostRoom(loaded.ctx) else 0;
-    const run_charge: u64 = if (kv_host > 0) blk: {
-        const ll = layout(loaded).?;
-        const lanes_total: u32 = if (enginePaged(loaded)) o.lanes else o.lanes -| 1;
-        break :blk @as(u64, ll.runPages()) * ll.pageBytes() * lanes_total;
-    } else 0;
-    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room -| run_charge, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null, .pages_room = kv_host });
+    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null });
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
     return room -| stream_bytes * (n -| loaded.free_streams) >= want;
 }
@@ -185,15 +179,11 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
 }
 
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
-pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize, kv_host: u64) !?Plan {
+pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    const lanes_total: u32 = if (engine_paged) o.lanes else o.lanes -| 1;
-    const run_charge: u64 = if (kv_host > 0) @as(u64, l.runPages()) * l.pageBytes() * lanes_total else 0;
-    var planned = budgetOf(F, l, room -| run_charge, o, window, host_mode, engine_paged, kept_ppm, slots);
-    planned.pages_room = kv_host;
-    return kv_pool.plan(l, planned) catch |e| {
+    return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
         problem.* = switch (e) {
-            error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages{s}, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), if (kv_host > 0) " (host-funded)" else "", toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
+            error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };
         return null;
@@ -205,6 +195,10 @@ pub fn attach(comptime F: type, a: Allocator, ctx: *anyopaque, paged: ?Plan, pla
     if (comptime !@hasDecl(F, "attach")) return true;
     const p = paged orelse return true;
     F.attach(ctx, p.lanes - 1, p.pages) catch |e| {
+        if (comptime @hasDecl(F, "kvHostRefusal")) if (F.explain(null, e)) |why| {
+            problem.* = why;
+            return false;
+        };
         problem.* = try std.fmt.allocPrint(a, "the CUDA engine could not make its {d} streams' pages ({s})", .{ p.lanes - 1, @errorName(e) });
         return false;
     };
@@ -530,7 +524,6 @@ test "CUDA cache default leaves seven full windows beside an unpaged engine" {
     explicit.prompt_cache_gib = 40;
     try std.testing.expectEqual(@as(u64, 40 * GiB), budgetOf(struct {}, l, 88 * GiB, explicit, 8192, false, false, 0, null).cache);
 }
-
 test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
     const GiB: u64 = 1 << 30;
     const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
@@ -542,7 +535,6 @@ test "CUDA cache default uses half of unpaged room when it exceeds the floor" {
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 24 * GiB), p.copied);
 }
-
 test "CUDA cache default leaves no copies when unpaged windows use all room" {
     const GiB: u64 = 1 << 30;
     const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
@@ -554,7 +546,6 @@ test "CUDA cache default leaves no copies when unpaged windows use all room" {
     try std.testing.expectEqual(@as(usize, 7 * 8192), p.pages);
     try std.testing.expectEqual(@as(u64, 0), p.copied);
 }
-
 const Promptless = struct {
     pub const keeps_no_prompts = true;
 };

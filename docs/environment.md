@@ -201,3 +201,19 @@ The profile registry reports selected arithmetic/experimental overrides; it does
 See [profiles](profiles.md) for classes, scopes and grouped slide-learning names.
 `capabilities --json` no longer advertises `TENSORFOLD_NO_UPDATE_CHECK` or `HF_HUB_OFFLINE`: the native binary reads neither.
 The command-line `--no-update-check` remains an accepted no-op.
+
+
+### Qwen mapped-host KV capacity mode
+
+`TF_QWEN_KV_HOST=1` opts the dense and MoE CUDA hybrids into mapped pinned-host KV pages (#2637).
+It requires `TF_QWEN_KV_PAGES` and `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1`, and a discrete GPU.
+State and verify runs remain on the device. Spill and disk snapshots are refused by name.
+The default path, with the switch unset, retains its existing plan, allocations and execution.
+
+| Setting | Accepted value | Default | Effect |
+|---|---|---|---|
+| `TF_QWEN_KV_HOST_GIB` | Positive whole GiB, at most 17179869183 | Unset or blank | Optional upper limit; below a whole KV window including lookahead is refused. Runs are not charged to this cap. |
+
+This is a capacity tradeoff, not a speed claim: attention reads mapped host KV over the device interconnect.
+Set `--prompt-cache-gib` explicitly to bound the separate host prompt cache.
+Host-on inference equality and performance on a discrete GPU remain device checks, not host-test results.
