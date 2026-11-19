@@ -36,21 +36,32 @@ pub const Uploader = struct {
 
     fn carve(u: *Uploader, bytes: []const u8) !u64 {
         const at = std.mem.alignForward(usize, u.slab_used, 256);
-        if (u.slab_at == null or at + bytes.len > u.slab) {
-            if (u.bufs.items.len >= u.max_buffers) return error.UploadLimit;
-            const total = std.math.add(usize, u.bytes, u.slab) catch return error.UploadLimit;
-            try u.bufs.ensureUnusedCapacity(u.gpa, 1);
-            const b = try memory.DeviceBuffer.alloc(u.d, u.slab);
-            u.bufs.appendAssumeCapacity(b);
-            u.bytes = total;
-            u.slab_at = u.bufs.items.len - 1;
-            u.slab_used = 0;
-            return u.carve(bytes);
+        if (u.slab_at != null and at + bytes.len <= u.slab) {
+            const b = u.bufs.items[u.slab_at.?];
+            b.upload(at, bytes) catch |e| return drained(u.d, e); // drain before rollback can free the slab
+            u.slab_used = at + bytes.len;
+            return b.ptr + at;
         }
-        const b = u.bufs.items[u.slab_at.?];
-        try b.upload(at, bytes);
-        u.slab_used = at + bytes.len;
-        return b.ptr + at;
+        if (u.bufs.items.len >= u.max_buffers) return error.UploadLimit;
+        const total = std.math.add(usize, u.bytes, u.slab) catch return error.UploadLimit;
+        try u.bufs.ensureUnusedCapacity(u.gpa, 1);
+        var b = try memory.DeviceBuffer.alloc(u.d, u.slab);
+        b.upload(0, bytes) catch |e| { // a new slab is kept only once its first upload succeeds
+            const err = drained(u.d, e);
+            b.free();
+            return err;
+        };
+        u.bufs.appendAssumeCapacity(b);
+        u.bytes = total;
+        u.slab_at = u.bufs.items.len - 1;
+        u.slab_used = bytes.len;
+        return b.ptr;
+    }
+
+    /// A failed upload's copy may still write its slab: drain as `DeviceBuffer.fromHost` does, then return `e`.
+    fn drained(d: *const Driver, e: anytype) @TypeOf(e) {
+        @import("completion.zig").drain(d, .{ .d = d, .handle = null }, "an upload's default stream and context did not drain");
+        return e;
     }
 
     /// One dense group: `parts` (exl3_load.Parts) and `g` (exl3_load.Group) as the Weight; the scales must be fp16.
