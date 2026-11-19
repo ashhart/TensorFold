@@ -207,7 +207,7 @@ The command-line `--no-update-check` remains an accepted no-op.
 
 `TF_QWEN_KV_HOST=1` opts the dense and MoE CUDA hybrids into mapped pinned-host KV pages (#2637).
 It requires `TF_QWEN_KV_PAGES` and `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1`, and a discrete GPU.
-State and verify runs remain on the device. Spill and disk snapshots are refused by name.
+State and verify runs remain on the device. Spill, disk snapshots and `TF_QWEN_KV_SHARE` are refused by name.
 The default path, with the switch unset, retains its existing plan, allocations and execution.
 
 | Setting | Accepted value | Default | Effect |

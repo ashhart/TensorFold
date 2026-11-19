@@ -84,4 +84,6 @@ test "kv safety: Qwen host KV cap includes lookahead but no run pages and refuse
     try t.expectError(error.QwenKvHostNeedsPagedEngine, host.checkDevice(false, 16, false));
     try t.expectError(error.QwenKvHostIntegrated, host.checkDevice(true, 16, true));
     try host.checkDevice(false, 16, true);
+    try host.checkShared(0);
+    try t.expectError(error.QwenKvHostShare, host.checkShared(1));
 }

@@ -52,7 +52,7 @@ pub fn layout(e: *const Engine, capacity: usize, tokens: usize, ring: usize, fix
 }
 
 /// One pool lane: a cache whose table maps its stream's pages, that stream's lease and its run's first page.
-const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0, idx: usize = 0 };
+const Lane = struct { cache: *Cache, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0 };
 
 pub const Pages = struct {
     gpa: std.mem.Allocator,
@@ -83,7 +83,7 @@ pub const Pages = struct {
         const total = try std.math.mul(usize, pages, page_bytes);
         const host_mode = kv_host.onHost();
         if (host_mode and streams != 1) return error.QwenKvHostParallel;
-        const run_bytes = try std.math.mul(usize, streams, try std.math.mul(usize, l.runPages(), page_bytes));
+        const run_bytes = if (host_mode) try std.math.mul(usize, streams, try std.math.mul(usize, l.runPages(), page_bytes)) else 0;
         var storage = try Storage.init(e.d, total, run_bytes, host_mode);
         errdefer storage.deinit();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .ring = ring, .pool = try kv.Pool.init(gpa, pages, page_bytes), .arena = storage.arena, .host = storage.host, .base = storage.base, .run_dev = storage.run_dev, .lanes = &.{} };
@@ -95,11 +95,11 @@ pub const Pages = struct {
             x.cache.deinit(gpa);
             gpa.destroy(x.cache);
         };
-        for (p.lanes, 0..) |*x, li| {
+        for (p.lanes) |*x| {
             const c = try gpa.create(Cache);
             errdefer gpa.destroy(c);
             c.* = try Cache.initPaged(gpa, e, mostPages(capacity, tokens), tokens, storage.base);
-            x.* = .{ .cache = c, .idx = li };
+            x.* = .{ .cache = c };
             made += 1;
         }
         errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: a failed pool initialization did not drain");
@@ -176,7 +176,7 @@ pub const Pages = struct {
         var up: Upload = .{ .p = p, .cache = x.cache };
         if (adopted.len > 0) try Upload.write(&up, x.lease.ids.items, 0);
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
-        const run_base = if (p.run_dev) |rd| rd.ptr + x.idx * @as(usize, k) * p.layout.pageBytes() else p.base + run * p.layout.pageBytes();
+        const run_base = if (p.run_dev) |rd| rd.ptr else p.base + run * p.layout.pageBytes();
         try x.cache.mapRun(p.e, run_base, p.layout.runPages() * p.layout.pageBytes(), p.ring);
         try x.cache.reset(p.e);
         x.cache.paged.?.ids = x.lease.ids.items;
