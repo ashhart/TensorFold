@@ -88,14 +88,14 @@ fn envRows(name: [*:0]const u8, default: u32) u32 {
 /// Routed-expert passes of at most this many rows (6: the lane verify widths) run every (row, pick) pair as GEMVs
 /// (TF_HY4_EXPERT_PAIRS); against the tensor gathers 4 rows 24.6 -> 23.1 ms, 5 rows 26.6 -> 24.4, 6 rows 27.8 -> 26.4.
 pub fn expertPairRows() u32 {
-    return envRows("TF_HY4_EXPERT_PAIRS", @max(decodeRows(), 6));
+    return 0; // row-invariant bits: every pass takes the tensor gathers the prompt chunks take
 }
 
 /// Attention passes of at most this many rows (4 at most) read kv_b's affine codes (TF_HY4_MLA_Q; 0: the BF16 copies).
 /// One row by default: 15.85 -> 15.29 ms a token; from two rows the fp32 dequant is compute-bound, slower than BF16
 /// on tensor units (4 rows: 23.0 -> 24.2 ms).
 pub fn mlaRows() u32 {
-    return @min(envRows("TF_HY4_MLA_Q", 1), 4);
+    return 0; // row-invariant bits: every pass reads the BF16 copies on the tensor units, as prompt chunks do
 }
 
 /// Larger passes up to this many rows (at most one router window, 16) run the grouped GEMVs (TF_HY4_EXPERT_GROUPS).
@@ -104,9 +104,7 @@ pub fn expertGroupRows() u32 {
 }
 
 pub fn decodeRows() u32 {
-    if (decode_rows_override) |v| return v;
-    const v = std.c.getenv("TF_HY4_DECODE_ROWS") orelse return 2;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2;
+    return decode_rows_override orelse 0; // row-invariant bits: the lane projection at every row count
 }
 
 pub const Linear = union(enum) {
@@ -885,6 +883,8 @@ pub const Kernels = struct {
         }
         // past 2,048 keys a sparse layer attends each row's recalled slots
         const lists = if (ix_pass) |p| p.scratch.selects() else false;
+        // rows of a pass across 2,048 keys that sit before it attend as they would in any other pass
+        const lists_from: ?u32 = if (lists and cache.ranges != null and ix_pass.?.scratch.first < index.keys_a_row) index.keys_a_row - ix_pass.?.scratch.first else null;
         const quantized: ?mla_gpu.Quantized = if (self.rows) |r| if (w.kv_q) |q| if (rows <= mlaRows() and (w.bits == 4 or w.bits == 8)) .{
             .absorb = r.absorb_q[@intFromBool(w.bits == 8)],
             .expand = r.expand_q[@intFromBool(w.bits == 8)],
@@ -912,7 +912,8 @@ pub const Kernels = struct {
                 .output = s.latent,
                 // two steps pay off from two chunks of keys; below that the one-step kernel is quicker
                 .key_scores = if (twoStep(s.shape.key_stride)) s.key_scores else null,
-                .ranges = if (lists or std.c.getenv("TF_HY4_ATTEND_LISTS") != null) null else cache.ranges,
+                .ranges = if (lists and lists_from == null) null else cache.ranges,
+                .lists_from = lists_from,
                 .flash_parts = s.flash_parts,
                 .live_keys = if (lists) index.keys_a_row else cache.live_keys,
             },
