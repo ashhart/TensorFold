@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- gpt-oss: a first host-only slice reads `openai/gpt-oss-20b`'s config and refuses unknown or unsupported fields by name, checks all 459 tensor names of the published checkpoint, and adds an MXFP4 reader for 32-value E2M1 blocks with UE8M0 scales that never rewrites checkpoint bytes; nothing is registered with the server yet (#3513).
+
 - DeepSeek-V4.1 on Metal: the prompt attention kernel widens bf16 keys through the `bfloat` type and lets two heads share one load of each key, with the per-key arithmetic unchanged, so output bits are the same (#3351).
 
 - HIP: in multi-rank runs, a follower rank refuses a step from rank 0 whose page ids, first page index, page-copy pages, snapshot slot, Flash Next begin slot or Nemotron resume row fall outside its own pool, table or slot counts, with the same `ShortMessage` error as a short message (#3081).
