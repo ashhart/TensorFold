@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: after load, a mixed shard keeps only the n-gram table's pages in the page cache, and the final sweep reaches shards nested under `tensors/`, freeing about 3 GiB of page cache on the NVFP4 export with replies unchanged (#3467). Thanks to @jschmied.
+
 - CUDA: GLM's `TF_GLM_L2PF` site f now also prefetches a MoE layer's shared expert gate-up after its router within the same `TF_GLM_L2PF_MB` budget, giving about 1.0-1.2% faster decode at TP=2 on GB10 (mean of three alternating launches) with identical tokens (#3156). Thanks to @Bizuayeu.
 
 - Desktop: the Terminal picker launches a registered Orchestrator CLI by its ID without forwarding the catalog command as a custom override, lists CLIs for the current project and host, and stops a click left stale by retargeting, project removal or a disabled host before dispatch; local custom commands and the remote refusal still apply (#3828, fixes #3824). Thanks to @AIFlowML.
