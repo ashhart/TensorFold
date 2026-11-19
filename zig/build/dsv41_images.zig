@@ -2,7 +2,9 @@
 const std = @import("std");
 const cuda_build = @import("cuda.zig");
 const list = @import("dsv41_units.zig");
-pub const Images = struct { units: [list.units.len]std.Build.LazyPath, optional: [list.optional.len]?std.Build.LazyPath };
+/// Optional images: the keyed sampler, two-tile linears and the release set; a prebuilt directory may lack them.
+const extra = list.optional ++ list.release;
+pub const Images = struct { units: [list.units.len]std.Build.LazyPath, optional: [extra.len]?std.Build.LazyPath };
 /// The images `images` resolved in this build, for the installable pair (dsv41_serve.zig); null without a source.
 pub var built: ?*const Images = null;
 pub fn images(b: *std.Build, nvcc: ?[]const u8, prebuilt: ?[]const u8) ?*const Images {
@@ -17,20 +19,20 @@ pub fn images(b: *std.Build, nvcc: ?[]const u8, prebuilt: ?[]const u8) ?*const I
             };
             path.* = b.graph.cwdRelativePath(file);
         }
-        for (list.optional, &result.optional) |unit, *path| {
+        for (extra, &result.optional) |unit, *path| {
             const file = b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{unit.name}) });
             path.* = if (std.Io.Dir.cwd().access(b.graph.io, file, .{})) |_| b.graph.cwdRelativePath(file) else |_| null;
         }
     } else if (nvcc) |compiler| {
         const version = b.addSystemCommand(&.{ compiler, "--version" }).captureStdOut(.{});
         for (list.units, &result.units) |unit, *path| path.* = cuda_build.fatbin(b, compiler, version, unit, "121");
-        for (list.optional, &result.optional) |unit, *path| path.* = cuda_build.fatbin(b, compiler, version, unit, "121");
+        for (extra, &result.optional) |unit, *path| path.* = cuda_build.fatbin(b, compiler, version, unit, "121");
     } else {
         step.dependOn(&b.addFail("fatbins-dsv41 needs -Ddsv41-nvcc=PATH or -Ddsv41-fatbins=DIR").step);
         return null;
     }
     for (list.units, result.units) |unit, path| step.dependOn(&b.addInstallFile(path, b.fmt("fatbin/{s}.fatbin", .{unit.name})).step);
-    for (list.optional, result.optional) |unit, path| if (path) |file| {
+    for (extra, result.optional) |unit, path| if (path) |file| {
         step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{unit.name})).step);
     };
     built = result;
@@ -45,7 +47,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     m.addOptions("dsv41_kernel_options", options);
     if (embedded) |im| for (list.units, im.units) |unit, path| m.addAnonymousImport(b.fmt("dsv41_fatbin_{s}", .{unit.name}), .{ .root_source_file = path });
     const empty = b.addWriteFiles().add("empty-dsv41.fatbin", "");
-    for (list.optional, 0..) |unit, i| {
+    for (extra, 0..) |unit, i| {
         const path = if (embedded) |im| im.optional[i] orelse empty else empty;
         m.addAnonymousImport(b.fmt("dsv41_fatbin_{s}", .{unit.name}), .{ .root_source_file = path });
     }

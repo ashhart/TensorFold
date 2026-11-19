@@ -413,6 +413,13 @@ the first stream's slot). Their paged attention at head dim 64 runs over shuffle
 a launch: the decode rows' chunks and merge (`tf_paged_attn_chunk_segs_64`, `tf_paged_attn_merge_segs_64`) and the
 prompt rows (`pattn_kernel<64, 8, 4, 8>`), head by head within `attention_ref`'s float64 bound (two controls: the
 decode reading its values from the neighbouring lane's dims, the prompt from the neighbouring 8 dims).
+CUDA also checks DeepSeek V4.1's release-format kernels (`release_proj.cu`, `release_glue.cu`, sm_121a only): the FP8
+activation round trip byte for byte against its reference (alone and after the reference RMSNorm), the RMSNorm rows
+against float64, and the block-scaled FP8 and BF16 projections with their fixed split tree against float64 at the
+world-4 shapes. Beyond the gates, `kernel-contract dsv41_rel` checks prompt rows
+against decode rows byte for byte, one row at every tile position, the same bytes from one CTA looping every tile and
+from stage-free warp tiles, and a cancellation across K slices against float64 (the mma's FP32 accumulation rounds
+-2^25 + 1 toward zero, so two slices give 2 where float64 gives 1, inside the bound).
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32

@@ -37,3 +37,10 @@ pub const optional = [_]cuda_build.Kernel{
     .{ .name = "dsv41_sampling", .src = "deepseek_v41/sampling", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "dsv41_lin2", .src = "exl3_block/lin2", .min_sm = 90, .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
 };
+
+/// The release-format set (release_fp8 checkpoints): sm_121a's block-scaled mma only, IEEE glue arithmetic.
+pub const release = [_]cuda_build.Kernel{
+    .{ .name = "dsv41_rel", .src = "deepseek_v41/release_proj", .min_sm = 121, .arch_specific = true, .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: FP8 and BF16 projections
+    .{ .name = "dsv41_rel_ex", .src = "deepseek_v41/release_experts", .min_sm = 121, .arch_specific = true, .flags = &.{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" } }, // ours: MXFP4 experts
+    .{ .name = "dsv41_rel_glue", .src = "deepseek_v41/release_glue", .min_sm = 121, .arch_specific = true, .flags = &.{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" } }, // ours: FP8 round trips
+};

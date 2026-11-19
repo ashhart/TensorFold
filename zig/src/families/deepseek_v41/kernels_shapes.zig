@@ -278,6 +278,8 @@ pub const rg = struct {
         maxm: c_int = 0,
         group: c_int = 0,
         prune: Prune = .{}, // R1c: the prune rule folded into the selection (on 0: off)
+        /// the weights' denominator is sum + eps: the release reference's 1e-20, EXL3's 0 (sum itself)
+        eps: f32 = 0,
     };
 
     /// router_gemv.cu Prune: [min_w, topp, scale, min_k, orig, drop, dup] (prune.fold_args) in fp32 / int, on = 1.
@@ -292,7 +294,7 @@ pub const rg = struct {
 
     comptime {
         std.debug.assert(@sizeOf(Prune) == 32);
-        std.debug.assert(@offsetOf(Args, "gid") == 96 and @offsetOf(Args, "group") == 128 and @offsetOf(Args, "prune") == 132 and @sizeOf(Args) == 168);
+        std.debug.assert(@offsetOf(Args, "gid") == 96 and @offsetOf(Args, "group") == 128 and @offsetOf(Args, "prune") == 132 and @offsetOf(Args, "eps") == 164 and @sizeOf(Args) == 168);
     }
 
     pub fn gemvSymbol(comptime rt: u32, comptime nw: u32, comptime ew: u32) [:0]const u8 {

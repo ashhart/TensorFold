@@ -172,18 +172,18 @@ test "a synthetic pack: both ranks plan every block, the parts tile the full ten
     try testing.expectEqual(@as(usize, 10), r0.layers.len);
     const l2 = &r0.layers[2];
     try testing.expectEqual(config.Mode.full, l2.mode);
-    try testing.expect(l2.experts[1].layout.kind == .ragged and l2.experts[0].layout.kind == .ragged and l2.experts[2].layout.kind == .stack);
+    try testing.expect(l2.experts[1].form.exl3.layout.kind == .ragged and l2.experts[0].form.exl3.layout.kind == .ragged and l2.experts[2].form.exl3.layout.kind == .stack);
     try testing.expectEqual(@as(u32, 1), l2.gate_up_mismatch);
-    try testing.expectEqual(@as(u32, 2), l2.experts[1].layout.widths());
-    try testing.expect(r0.layers[3].experts[1].layout.kind == .stack);
-    try testing.expectEqual(@as(usize, 4), r0.layers[8].experts[0].layout.count());
+    try testing.expectEqual(@as(u32, 2), l2.experts[1].form.exl3.layout.widths());
+    try testing.expect(r0.layers[3].experts[1].form.exl3.layout.kind == .stack);
+    try testing.expectEqual(@as(usize, 4), r0.layers[8].experts[0].form.exl3.layout.count());
     // every split part on the two ranks adds up to the stored tensor
     for (r0.layers, r1.layers) |x, y| for (x.groups, y.groups) |g0, g1| {
         if (g0.split == .whole) {
-            try testing.expectEqual(g0.full.trellisBytes(), g0.part.trellis.bytes());
-        } else try testing.expectEqual(g0.full.trellisBytes(), g0.part.trellis.bytes() + g1.part.trellis.bytes());
+            try testing.expectEqual(g0.form.exl3.full.trellisBytes(), g0.form.exl3.part.trellis.bytes());
+        } else try testing.expectEqual(g0.form.exl3.full.trellisBytes(), g0.form.exl3.part.trellis.bytes() + g1.form.exl3.part.trellis.bytes());
     };
-    try testing.expectEqual(r0.head.?.full.trellisBytes(), r0.head.?.part.trellis.bytes() + r1.head.?.part.trellis.bytes());
+    try testing.expectEqual(r0.head.?.form.exl3.full.trellisBytes(), r0.head.?.form.exl3.part.trellis.bytes() + r1.head.?.form.exl3.part.trellis.bytes());
     try testing.expectEqualStrings("mtp.1.main_proj", r0.dspark.?.main_proj.prefix);
     try testing.expect(r0.dspark.?.confidence != null);
     try testing.expectEqual(r0.bytes(), r1.bytes());
@@ -343,8 +343,8 @@ test "real pack headers (TF_DSV41_HEADERS: model.safetensors.index.json and <sha
             std.debug.print("full headers rank {d}: {d} tensors, {d} layers, {d} bytes, zero leftovers\n", .{ rank, p.names.count(), pl.layers.len, pl.bytes() });
         }
         for (pl.layers) |*l| {
-            const h = l.experts[1].layout.histogram();
-            std.debug.print("rank {d} {s} {t}: down {t} K2 4/6/8 = {d}/{d}/{d}, gate/up mismatches {d}, experts {d} B, block {d} B\n", .{ rank, l.prefix, l.mode, l.experts[1].layout.kind, h[4], h[6], h[8], l.gate_up_mismatch, l.expertBytes(), l.bytes() });
+            const h = l.experts[1].form.exl3.layout.histogram();
+            std.debug.print("rank {d} {s} {t}: down {t} K2 4/6/8 = {d}/{d}/{d}, gate/up mismatches {d}, experts {d} B, block {d} B\n", .{ rank, l.prefix, l.mode, l.experts[1].form.exl3.layout.kind, h[4], h[6], h[8], l.gate_up_mismatch, l.expertBytes(), l.bytes() });
         }
     }
 }
@@ -384,22 +384,22 @@ test "cold native headers preserve expert identity across three width classes on
     defer r1.deinit();
     for (r0.layers, r1.layers) |l0, l1| {
         for (l0.experts, l1.experts) |e0, e1| {
-            try testing.expect(e0.layout.kind == .ragged and e1.layout.kind == .ragged);
-            try testing.expectEqual(@as(u32, 3), e0.layout.widths());
-            try testing.expectEqualSlices(u16, e0.layout.words, e1.layout.words);
-            try testing.expectEqualSlices(u64, e0.layout.offsets, e1.layout.offsets);
+            try testing.expect(e0.form.exl3.layout.kind == .ragged and e1.form.exl3.layout.kind == .ragged);
+            try testing.expectEqual(@as(u32, 3), e0.form.exl3.layout.widths());
+            try testing.expectEqualSlices(u16, e0.form.exl3.layout.words, e1.form.exl3.layout.words);
+            try testing.expectEqualSlices(u64, e0.form.exl3.layout.offsets, e1.form.exl3.layout.offsets);
             var offset: u64 = 0;
-            for (e0.parts, e1.parts, e0.prefixes, e1.prefixes, 0..) |p0, p1, n0, n1, id| {
+            for (e0.form.exl3.parts, e1.form.exl3.parts, e0.form.exl3.prefixes, e1.form.exl3.prefixes, 0..) |p0, p1, n0, n1, id| {
                 try testing.expectEqualStrings(n0, n1);
                 var name: [128]u8 = undefined;
                 try testing.expectEqualStrings(try @import("names.zig").expertName(l0.prefix, @intCast(id), e0.proj, &name), n0);
                 try testing.expectEqual(@as(u32, @intCast(widths[id % widths.len])), p0.group.words);
-                try testing.expectEqual(offset, e0.layout.byteOffset(id));
+                try testing.expectEqual(offset, e0.form.exl3.layout.byteOffset(id));
                 const stored = pack.names.get(try std.fmt.bufPrint(&name, "{s}.trellis", .{n0})).?;
                 try testing.expectEqual(stored.nbytes, p0.trellis.bytes() + p1.trellis.bytes());
                 offset += p0.trellis.bytes();
             }
-            try testing.expectEqual(offset, e0.layout.trellisBytes());
+            try testing.expectEqual(offset, e0.form.exl3.layout.trellisBytes());
         }
     }
     try testing.expectEqual(@as(usize, 0), r0.leftovers.len);
