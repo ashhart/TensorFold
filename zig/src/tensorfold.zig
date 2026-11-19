@@ -160,6 +160,7 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
+pub const recurrent_workspace = @import("core/recurrent_workspace.zig");
 
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");

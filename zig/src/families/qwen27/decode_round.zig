@@ -109,7 +109,7 @@ pub const Runner = struct {
                 na += 1;
             }
         }
-        var pool = try GdnPool.init(m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
+        var pool = try GdnPool.init(a, m.device, try abi.Shape.init(m.config), ng, slots, m.frame.capacity);
         errdefer pool.deinit();
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
