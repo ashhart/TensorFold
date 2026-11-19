@@ -10,7 +10,7 @@ Only what was validated is admitted: GB10 (sm_121) at two ranks, on the 3.0 bpw 
 refused (`MimoV2RequiresSm121`), and so is one rank or any other world (`MimoV2RequiresTwoRanks`).
 Package: `zig/src/families/mimo_v2/`, kernels in `zig/kernels/cuda/mimo_v2/`.
 
-The ranks exchange through the tensor-parallel session and RoCE mailbox of Jay Leaton's two-Spark DeepSeek-V4.1
+The ranks exchange through the tensor-parallel session and RoCE mailbox of @jayleaton's two-Spark DeepSeek-V4.1
 work, whose port method (launch for launch against the Python engine, then byte checks) the family followed.
 
 ## The model
