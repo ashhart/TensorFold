@@ -4,11 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and an empty or blank value reads as unset; valid values and defaults are unchanged (#3749, refs #2370). Thanks to @devopsfortunato.
+
 - Templates: `str.format()` renders positional fields (`{}`, `{N}`) and the `{{` `}}` escapes as Python does; signed or underscored indexes, keyword, attribute, conversion and spec fields are refused by name (#3816, refs #3801). Thanks to @atakann.
 
 - Qwen3.8-27B on Metal: on Macs with tensor units (M5), drafted decode rounds run two 16-row query tiles in each prefix-attention threadgroup instead of up to six, with the same kernel and the same tokens; Macs without tensor units keep six on a long cache and four otherwise (#3704). Thanks to @mrv777.
-
-
 
 - CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
 
@@ -29,8 +29,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
-
-
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
@@ -258,8 +256,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the tokenizer parity corpus adds one sentence in each of the 22 scheduled Indian languages, the canonical-composition exclusions in both forms and ZWJ/ZWNJ conjuncts, each as written, NFC and NFD (#1988). Thanks to @currencycaver29.
 
 - Flash Next on Metal: an explicit `--context` smaller than the trained one now sizes the caches and selectors to that context, with the rotary positions unchanged, so a smaller context holds less memory; tokens are unchanged (#3691, part of #3667).
-
-- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and a value that is empty or only spaces and tabs reads as unset; valid values and defaults are unchanged (#3749, part of #2370).
 
 - Server: text chat requests on engines with a prompt cache or prompt chunking record where each provable message starts in the rendered prompt, at exact token boundaries; nothing uses the starts yet, so replies are unchanged (#3679, step 0 of #3617).
 
