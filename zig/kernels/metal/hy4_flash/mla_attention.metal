@@ -85,11 +85,7 @@ kernel void tf_hy4_attend_merge(
     for (uint j = 0; j < 4; ++j) output[row_head * lat + column + j] = hy4_bf16(precise::divide(acc[j], denom));
 }
 
-// Chunked attention in two steps. tf_hy4_attend_scores computes every retained key's score with
-// tf_hy4_attend_chunks's lane split, fma order and butterfly (so each score's bits are the same), 64 keys a
-// simdgroup and four heads a threadgroup, all keys at once. tf_hy4_attend_scored then runs each chunk's online
-// softmax over those scores in the original key order, the same recurrence step for step, and writes the same
-// partials for tf_hy4_attend_merge. Scores: [row][head][key_stride] floats.
+// Chunked attention in two steps.
 kernel void tf_hy4_attend_scores(
     const device ushort *query [[buffer(0)]],
     const device ushort *cache [[buffer(1)]],
@@ -135,8 +131,7 @@ kernel void tf_hy4_attend_scored(
     uint tid [[thread_index_in_threadgroup]],
     uint simd [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    // The threadgroup's four heads share one row's keys: all 128 threads load 16 keys' latent rows into threadgroup
-    // memory together (one memory round trip a tile, not one a key), then each head steps through the tile.
+    // The threadgroup's four heads share one row's keys
     threadgroup uint4 tile[16][64];
     const uint row = group.z, head = group.x * heads_per_group + simd, chunk = group.y;
     const bool live = head < shape.heads;
@@ -147,8 +142,7 @@ kernel void tf_hy4_attend_scored(
     float accum[16] = {}, top = -INFINITY, denom = 0.0f;
     const device uint *list = slots + ulong(row) * shape.key_stride;
     const device float *score_row = scores + (live ? row_head : 0) * shape.key_stride;
-    // 32 keys of scores a step (lane t: key j + t): running maxima by a prefix max across lanes (max is exact, so
-    // the same values as the key-by-key scan), each key's exponentials by the same formula on the same operands.
+    // 32 keys of scores a step (lane t: key j + t)
     for (uint j = start; j < end; j += 32) {
         const uint n = min(32u, end - j);
         const float score = lane < n ? score_row[j + lane] : -INFINITY;

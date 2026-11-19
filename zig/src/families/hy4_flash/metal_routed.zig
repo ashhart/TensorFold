@@ -267,15 +267,11 @@ pub const Kernels = struct {
         }, rows);
         route.logits(e, self.logits, self.shape, dense.Kernels.dref(d.normalized), w.router, s.logits, rows);
         e.barrier();
-        // the pair GEMVs need only the picks and weights: the per-row select (the same arithmetic) skips the core
-        // select's expert grouping (TF_HY4_CORE_SELECT keeps it)
-        const pairs = w.expert_weights == .tensor and rows <= dense.expertPairRows() and rows > dense.expertGroupRows() and
-            shared.rows != null and std.c.getenv("TF_HY4_EXPERT_GATHER") == null;
-        if (rows <= max_rows and !(pairs and std.c.getenv("TF_HY4_CORE_SELECT") == null)) {
+        if (rows <= max_rows) {
             route.select(e, self.select, s.logits, w.correction, w.scale, rows, .{ 0, w.size.experts }, s.select);
         } else {
             // every row's picks and weights at once; the expert grouping comes from the picks
-            const rank = w.size.experts <= 512 and std.c.getenv("TF_HY4_SELECT_LOOP") == null;
+            const rank = w.size.experts <= 512;
             e.setPipeline(if (rank) self.select_rank else self.select_rows);
             e.setBuffer(s.logits.buf, s.logits.off, 0);
             e.setBuffer(w.correction.buf, w.correction.off, 1);
@@ -295,7 +291,6 @@ pub const Kernels = struct {
         var shape = w.size;
         shape.rows = rows;
         shape.pairs = rows * s.picks;
-        var summed = false;
         switch (w.expert_weights) {
             .portable => |mat| {
                 const ops = self.experts orelse return error.Hy4ExpertKernelsMissing;
@@ -316,69 +311,7 @@ pub const Kernels = struct {
                     .output = .{ .buffer = s.pair_outputs },
                 }, shape);
             },
-            .tensor => |mat| if (rows > dense.expertPairRows() and rows <= dense.expertGroupRows() and rows <= max_rows and shared.rows != null and std.c.getenv("TF_HY4_EXPERT_GATHER") == null) {
-                // 3-16 rows: the router window's expert jobs as GEMVs, each expert's codes unpacked once for its rows
-                const r = shared.rows.?;
-                const which: usize = @intFromBool(w.precision == .q8);
-                const bound = @min(shape.pairs, shape.experts);
-                const glu_shape = [5]u32{ shape.pairs, s.picks, shape.width, shape.inner, @bitCast(shape.swiglu_limit) };
-                e.setPipeline(r.expert_glu_groups[which]);
-                e.setBuffer(s.latent.buffer, s.latent.offset, 0);
-                e.setBuffer(s.select.ids.buf, s.select.ids.off, 1);
-                e.setBuffer(s.select.members.buf, s.select.members.off, 2);
-                e.setBuffer(s.select.count.buf, s.select.count.off, 3);
-                for ([_]@import("lane_projection").Ref{ mat.gate.w, mat.gate.s, mat.gate.b, mat.up.w, mat.up.s, mat.up.b }, 4..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
-                e.setBuffer(s.pair_activations.buffer, s.pair_activations.offset, 10);
-                e.setValue(glu_shape, 11);
-                e.dispatchGroups(mtl.Size.of(shape.inner / 8, bound, 1), mtl.Size.of(128, 1, 1));
-                try shared.linear(e, w.shared_down, d.inner, s.shared, rows);
-                e.barrier();
-                const down_shape = [5]u32{ shape.pairs, s.picks, shape.inner, shape.width, @bitCast(shape.swiglu_limit) };
-                e.setPipeline(r.expert_down_groups[which]);
-                e.setBuffer(s.pair_activations.buffer, s.pair_activations.offset, 0);
-                e.setBuffer(s.select.ids.buf, s.select.ids.off, 1);
-                e.setBuffer(s.select.members.buf, s.select.members.off, 2);
-                e.setBuffer(s.select.count.buf, s.select.count.off, 3);
-                for ([_]@import("lane_projection").Ref{ mat.down.w, mat.down.s, mat.down.b }, 4..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
-                e.setBuffer(s.pair_outputs, 0, 7);
-                e.setValue(down_shape, 8);
-                e.dispatchGroups(mtl.Size.of(shape.width / 8, bound, 1), mtl.Size.of(128, 1, 1));
-            } else if (rows <= dense.expertPairRows() and shared.rows != null and std.c.getenv("TF_HY4_EXPERT_GATHER") == null) {
-                // 1-2 rows: every (row, pick) pair's expert as GEMVs (each weight read once), no grouping pass
-                const r = shared.rows.?;
-                const which: usize = @intFromBool(w.precision == .q8);
-                const glu_shape = [5]u32{ shape.pairs, s.picks, shape.width, shape.inner, @bitCast(shape.swiglu_limit) };
-                e.setPipeline(r.expert_glu[which]);
-                e.setBuffer(s.latent.buffer, s.latent.offset, 0);
-                e.setBuffer(s.select.pick.buf, s.select.pick.off, 1);
-                for ([_]@import("lane_projection").Ref{ mat.gate.w, mat.gate.s, mat.gate.b, mat.up.w, mat.up.s, mat.up.b }, 2..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
-                e.setBuffer(s.pair_activations.buffer, s.pair_activations.offset, 8);
-                e.setValue(glu_shape, 9);
-                e.dispatchGroups(mtl.Size.of(shape.inner / 8, shape.pairs, 1), mtl.Size.of(128, 1, 1));
-                try shared.linear(e, w.shared_down, d.inner, s.shared, rows);
-                e.barrier();
-                const down_shape = [5]u32{ shape.pairs, s.picks, shape.inner, shape.width, @bitCast(shape.swiglu_limit) };
-                if (std.c.getenv("TF_HY4_NO_DOWN_SUM") == null) {
-                    // down and the routed weighted sum in one launch, straight into the weighted rows
-                    e.setPipeline(r.expert_down_sum[which]);
-                    e.setBuffer(s.pair_activations.buffer, s.pair_activations.offset, 0);
-                    e.setBuffer(s.select.pick.buf, s.select.pick.off, 1);
-                    for ([_]@import("lane_projection").Ref{ mat.down.w, mat.down.s, mat.down.b }, 2..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
-                    e.setBuffer(s.weighted.buffer, s.weighted.offset, 5);
-                    e.setValue(down_shape, 6);
-                    e.setBuffer(s.select.wts.buf, s.select.wts.off, 7);
-                    e.dispatchGroups(mtl.Size.of(shape.width / 8, rows, 1), mtl.Size.of(128, 1, 1));
-                    summed = true;
-                } else {
-                    e.setPipeline(r.expert_down[which]);
-                    e.setBuffer(s.pair_activations.buffer, s.pair_activations.offset, 0);
-                    e.setBuffer(s.select.pick.buf, s.select.pick.off, 1);
-                    for ([_]@import("lane_projection").Ref{ mat.down.w, mat.down.s, mat.down.b }, 2..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
-                    e.setBuffer(s.pair_outputs, 0, 5);
-                    e.setValue(down_shape, 6);
-                    e.dispatchGroups(mtl.Size.of(shape.width / 8, shape.pairs, 1), mtl.Size.of(128, 1, 1));
-                }
-            } else {
+            .tensor => |mat| {
                 const ops = self.tensors orelse return error.Hy4ExpertKernelsMissing;
                 const tensor_scratch = s.tensors orelse return error.ShortHy4Scratch;
                 const latent: lane.Ref = .{ .buf = s.latent.buffer, .off = s.latent.offset };
@@ -398,15 +331,13 @@ pub const Kernels = struct {
             },
         }
         e.barrier();
-        if (!summed) {
-            e.setPipeline(self.sum);
-            e.setBuffer(s.pair_outputs, 0, 0);
-            e.setBuffer(s.select.wts.buf, 0, 1);
-            e.setBuffer(s.weighted.buffer, 0, 2);
-            e.setValue([2]u32{ shape.width, s.picks }, 3);
-            e.dispatchThreads(mtl.Size.of(shape.width, rows, 1), mtl.Size.of(128, 1, 1));
-            e.barrier();
-        }
+        e.setPipeline(self.sum);
+        e.setBuffer(s.pair_outputs, 0, 0);
+        e.setBuffer(s.select.wts.buf, 0, 1);
+        e.setBuffer(s.weighted.buffer, 0, 2);
+        e.setValue([2]u32{ shape.width, s.picks }, 3);
+        e.dispatchThreads(mtl.Size.of(shape.width, rows, 1), mtl.Size.of(128, 1, 1));
+        e.barrier();
         try shared.linear(e, w.up, s.weighted, s.routed, rows);
         e.barrier();
         try shared.tailTo(e, s.routed, s.shared, w.output_norm, merge.eps, x, out, d, merge, seam);

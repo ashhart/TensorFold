@@ -129,8 +129,7 @@ pub const Kernels = struct {
         tensor.gatherToMapped(e, self.pipes, act, s.act_sums, w.down, jobs.offsets, out, jobs.order, jobs.ids, pairs, count);
     }
 
-    /// A prompt chunk's grouping (more rows than one router window): job e = expert e, pairs in pair order, and the
-    /// latent's row sums. `ids` and `offsets` hold `experts` entries, `order` every pair.
+    /// A prompt chunk's grouping (more rows than one router window)
     pub fn group(self: Kernels, e: mtl.ComputeEncoder, s: Scratch, pick: Ref, ids: Ref, x: Ref, rows: u32, pairs: u32, experts: u32, width: u32) Jobs {
         e.setPipeline(self.grouping);
         for ([_]Ref{ pick, s.offsets, s.order, ids }, 0..) |ref, i| e.setBuffer(ref.buf, ref.off, i);

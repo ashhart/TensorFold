@@ -1,7 +1,4 @@
-//! Hy4-flash's compressed sparse indexer on Metal, after the reference's CompressedIndexer: every pass caches its
-//! rows' normalized token keys and re-pools the four-slot groups those rows touch (a group is read only once it
-//! closed, so a pass that wrote part of one leaves nothing stale), and from 2,048 keys on each row attends its 511
-//! best-scoring closed groups plus its own group's causal part. Slots are positions here.
+//! Hy4-flash's compressed sparse indexer on Metal, after the reference's CompressedIndexer
 const std = @import("std");
 const mtl = @import("metal");
 const source = @import("kernel_sources");
@@ -163,9 +160,7 @@ const KeysArgs = extern struct { rows: u32, capacity: u32, epsilon: f32 };
 const GroupArgs = extern struct { first: u32, count: u32, capacity_groups: u32, epsilon: f32 };
 const RecallShape = extern struct { rows: u32, score_groups: u32, group_budget: u32 };
 
-/// The indexer for the staged rows: `normalized` is the layer's input (the reference's hidden_states), `q_resid`
-/// the normalized q_a rows. Leaves the key lists in `c.tokens` and `c.counts` when the scratch selects. Ends
-/// without a trailing barrier.
+/// The indexer for the staged rows: `normalized` is the layer's input (the reference's hidden_states)
 pub fn run(p: Pass, common: *const dense.Kernels, project: mla_gpu.Projections, e: mtl.ComputeEncoder, w: *const Weights, normalized: Ref, q_resid: Ref, write_slots: Ref, positions: Ref, table: Ref, r: rope.Parameters, epsilon: f32) !void {
     encode(p, common, project, e, w, normalized, q_resid, write_slots, positions, table, r, epsilon) catch |err| {
         std.log.err("hy4 indexer: {s}", .{@errorName(err)});

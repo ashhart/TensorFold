@@ -25,7 +25,6 @@ pub const Range = struct {
 };
 
 /// Q-B and the gate own this rank's output heads. The O projection owns those same input columns.
-/// Q-A and KV-A are shared between ranks. The sink and absorbed K/V projection follow the head range.
 pub const Attention = struct {
     heads: mla.HeadRange,
     query: Affine,
