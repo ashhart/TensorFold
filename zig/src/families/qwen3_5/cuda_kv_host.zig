@@ -31,6 +31,10 @@ pub fn checkDevice(integrated: bool, pages: usize, all: bool) !void {
     if (integrated) return error.QwenKvHostIntegrated;
 }
 
+pub fn checkShared(snaps: usize) !void {
+    if (snaps > 0) return error.QwenKvHostShare;
+}
+
 /// Host capacity mode admits one stream and no disk-backed prompt snapshots.
 pub fn refusal(o: anytype) ?[]const u8 {
     if (!onHost()) return null;
