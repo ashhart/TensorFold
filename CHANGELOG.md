@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: a dense MLP (layers 0 to 2) stored as bf16 is read as bf16 in any checkpoint, not only an EXL3 one, where a ModelOpt checkpoint that left those layers unquantized was refused by the module's name; checkpoints whose dense layers are NVFP4 or MXFP8 load as before (#3680). Thanks to @Bizuayeu.
+
 - Flash Next on CUDA: `TF_FLASHNEXT_FUSED_SPLIT=1` (opt-in) runs decode projections that split K over a cluster, at 2,048 output columns or more, on the fused form, adding the K slices in the cluster's order so the bits are unchanged; unset, blank or `0` keeps the current kernels, and Metal and HIP refuse `1` at startup (#3475). Thanks to @BadAd84.
 
 - MiniMax-M3.1-Flash on CUDA: with two or more streams, the drafter takes several streams' DSpark blocks in one pass, as many as a decode window's 16 rows hold, instead of one pass a stream; drafts only choose what the target verifies, so replies are unchanged (#1426). Thanks to @BobClawblaw.
