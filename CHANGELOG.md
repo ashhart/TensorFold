@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: an EXL3 input rotation and trellis linear kernel group (`exl3/exl3.hip`) at 2 to 8 bits, the HIP side of the projection DeepSeek-V4.1's CUDA path calls for its head, Engram's `wkv` and the indexer's `wk`, with sums in a fixed order so a row's bits do not depend on the rows beside it; nothing serves through it yet (#3314, refs #2065). Thanks to @Shoestring-dev.
+
 - CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
 
 - Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
