@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
+
 - HIP on RDNA3.5: lane-round routed MoE plan buffers (`moe.planRows`) are sized to the exact window row count instead of the 16-row bucket, and rising added-row window costs are pooled within four-row tile steps (`costs.poolWindowRows`) so a tile step never prices an earlier draft step under a later one; no kernel or output token changes (#3774). Thanks to @gilby.
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
