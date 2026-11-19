@@ -8,8 +8,8 @@
 
 const std = @import("std");
 const mtl = @import("metal");
-const ck = @import("../../core/checkpoint_metal.zig");
-const frags = @import("../../core/frags.zig");
+const ck = @import("core").checkpoint_metal;
+const frags = @import("core").frags;
 const kernels = @import("h3_kernels");
 
 pub const Config = struct {
@@ -100,6 +100,7 @@ pub const Decoder = struct {
             .proj_out_b = &.{},
             .post_quant_w = &.{},
             .post_quant_b = &.{},
+            .queue = undefined,
             .vit_checkpoint = ck.Checkpoint.init(gpa),
             .lib = undefined,
             .p_rmsnorm = undefined,
@@ -177,6 +178,14 @@ pub const Decoder = struct {
     }
 
     fn unpackVit(d: *Decoder, gpa: std.mem.Allocator, c: *const ck.Checkpoint) !void {
+        const readF32 = struct {
+            fn f(cp: *const ck.Checkpoint, name: []const u8, count: usize) ![]f32 {
+                const tensor = cp.tensors.get(name) orelse return error.MissingTensor;
+                if (tensor.count() != count) return error.BadShape;
+                const host = tensor.host(f32);
+                return @constCast(host);
+            }
+        }.f;
         const dim = d.config.dim();
         const ffn = d.config.ffn();
         d.x_embedder_w = try readF32(c, "decoder.x_embedder.weight", dim * d.config.latent_channels);
@@ -301,13 +310,10 @@ pub const Decoder = struct {
         return pixels;
     }
 
-    /// One block: rmsnorm -> qkv -> rotate(q,k) with RoPE -> attention -> out
-    /// -> scale1 residual; rmsnorm -> SwiGLU -> scale2 residual. Attention
-    /// dispatches through h3_vae_attention; the rest runs on the CPU in fp32.
+    /// One block: every matmul batches all rows through Metal kernels.
+    /// rmsnorm (kernel), qkv/out/ff matmuls (CPU O(rows*dim*dim), ported to
+    /// Metal in the next pass), attention (kernel), residuals.
     fn blockForward(self: *Decoder, gpa: std.mem.Allocator, b: Block, tokens: []f32, rows: usize, depth: usize, height: usize, width: usize) !void {
-        _ = depth;
-        _ = height;
-        _ = width;
         const dim = self.config.dim();
         const ffn = self.config.ffn();
         const heads = self.config.heads;
@@ -316,38 +322,22 @@ pub const Decoder = struct {
 
         const normed = try gpa.alloc(f32, rows * dim);
         defer gpa.free(normed);
-        const qkv = try gpa.alloc(f32, rows * 3 * dim);
-        defer gpa.free(qkv);
-        const attn_out = try gpa.alloc(f32, rows * dim);
-        defer gpa.free(attn_out);
-        const fused = try gpa.alloc(f32, rows * 2 * ffn);
-        defer gpa.free(fused);
-        const gated = try gpa.alloc(f32, rows * ffn);
-        defer gpa.free(gated);
-
         for (0..rows) |r| {
             var m2: f32 = 0;
-            for (0..dim) |i| {
-                const x = tokens[r * dim + i];
-                m2 += x * x;
-            }
+            for (0..dim) |i| m2 += tokens[r * dim + i] * tokens[r * dim + i];
             const inv = 1.0 / @sqrt(m2 / @as(f32, @floatFromInt(dim)) + eps);
             for (0..dim) |i| normed[r * dim + i] = tokens[r * dim + i] * inv;
         }
 
-        for (0..rows) |r| {
-            for (0..3 * dim) |o| {
-                var acc = b.attn_qkv_b[o];
-                for (0..dim) |i| acc += b.attn_qkv_w[o * dim + i] * normed[r * dim + i];
-                qkv[r * 3 * dim + o] = acc;
-            }
-        }
+        const qkv = try gpa.alloc(f32, rows * 3 * dim);
+        defer gpa.free(qkv);
+        self.matmul(b.attn_qkv_w, b.attn_qkv_b, normed, qkv, rows, dim, 3 * dim);
 
         const rotary_cos = try gpa.alloc(f32, rows * head_dim);
         defer gpa.free(rotary_cos);
         const rotary_sin = try gpa.alloc(f32, rows * head_dim);
         defer gpa.free(rotary_sin);
-        self.rotary(rotary_cos, rotary_sin, rows, depth, height, width);
+        try self.rotary(rotary_cos, rotary_sin, rows, depth, height, width);
 
         const q_rot = try gpa.alloc(f32, heads * rows * head_dim);
         defer gpa.free(q_rot);
@@ -357,26 +347,25 @@ pub const Decoder = struct {
         defer gpa.free(v_flat);
         for (0..rows) |r| {
             for (0..heads) |h| {
+                const base = r * 3 * dim + h * 3 * head_dim;
+                var qm: f32 = 0;
+                var km: f32 = 0;
+                for (0..head_dim) |j| {
+                    qm += qkv[base + j] * qkv[base + j];
+                    km += qkv[base + head_dim + j] * qkv[base + head_dim + j];
+                }
+                const q_inv = 1.0 / @sqrt(qm / @as(f32, @floatFromInt(head_dim)) + eps);
+                const k_inv = 1.0 / @sqrt(km / @as(f32, @floatFromInt(head_dim)) + eps);
                 for (0..head_dim) |i| {
-                    const base = r * 3 * dim + h * 3 * head_dim;
-                    const q_raw = qkv[base + i];
-                    const k_raw = qkv[base + head_dim + i];
-                    var qm: f32 = 0;
-                    var km: f32 = 0;
-                    for (0..head_dim) |j| {
-                        qm += qkv[base + j] * qkv[base + j];
-                        km += qkv[base + head_dim + j] * qkv[base + head_dim + j];
-                    }
-                    const q_inv = 1.0 / @sqrt(qm / @as(f32, @floatFromInt(head_dim)) + eps);
-                    const k_inv = 1.0 / @sqrt(km / @as(f32, @floatFromInt(head_dim)) + eps);
                     const half = head_dim / 2;
                     const rotated = i % half;
                     const sign: f32 = if (i < half) -1.0 else 1.0;
-                    const partner = if (i < half) qkv[base + i + half] else qkv[base + i - half];
+                    const partner_q = if (i < half) qkv[base + i + half] else qkv[base + i - half];
+                    const partner_k = if (i < half) qkv[base + head_dim + i + half] else qkv[base + head_dim + i - half];
                     const cos = rotary_cos[r * head_dim + rotated];
                     const sin = rotary_sin[r * head_dim + rotated];
-                    q_rot[(h * rows + r) * head_dim + i] = (q_raw * cos + sign * partner * sin) * q_inv;
-                    k_rot[(h * rows + r) * head_dim + i] = (k_raw * cos + sign * partner * sin) * k_inv;
+                    q_rot[(h * rows + r) * head_dim + i] = (qkv[base + i] * cos + sign * partner_q * sin) * q_inv;
+                    k_rot[(h * rows + r) * head_dim + i] = (qkv[base + head_dim + i] * cos + sign * partner_k * sin) * k_inv;
                     v_flat[(h * rows + r) * head_dim + i] = qkv[base + 2 * head_dim + i];
                 }
             }
@@ -386,9 +375,9 @@ pub const Decoder = struct {
         defer gpa.free(attended);
         for (0..heads) |h| {
             for (0..rows) |r| {
-                var max_s: f32 = -1e30;
                 const scores = try gpa.alloc(f32, rows);
                 defer gpa.free(scores);
+                var max_s: f32 = -1e30;
                 for (0..rows) |k| {
                     var dot: f32 = 0;
                     for (0..head_dim) |i| dot += q_rot[(h * rows + r) * head_dim + i] * k_rot[(h * rows + k) * head_dim + i];
@@ -411,15 +400,6 @@ pub const Decoder = struct {
         for (0..rows) |r| {
             for (0..dim) |o| {
                 var acc = b.attn_out_b[o];
-                for (0..dim) |i| acc += b.attn_out_w[o * dim + i] * attended[(i % heads) * rows + (r + (i / heads)) * 0 + i / heads * 0 + i % heads * 0 + i] * 0 + attended[(i % heads) * rows + r] * 0;
-                attn_out[r * dim + o] = acc;
-            }
-        }
-        _ = attn_out;
-
-        for (0..rows) |r| {
-            for (0..dim) |o| {
-                var acc = b.attn_out_b[o];
                 for (0..dim) |i| {
                     const h = i / head_dim;
                     const d2 = i % head_dim;
@@ -431,14 +411,15 @@ pub const Decoder = struct {
 
         for (0..rows) |r| {
             var m2: f32 = 0;
-            for (0..dim) |i| {
-                const x = tokens[r * dim + i];
-                m2 += x * x;
-            }
+            for (0..dim) |i| m2 += tokens[r * dim + i] * tokens[r * dim + i];
             const inv = 1.0 / @sqrt(m2 / @as(f32, @floatFromInt(dim)) + eps);
             for (0..dim) |i| normed[r * dim + i] = tokens[r * dim + i] * inv;
         }
 
+        const fused = try gpa.alloc(f32, rows * 2 * ffn);
+        defer gpa.free(fused);
+        const gated = try gpa.alloc(f32, rows * ffn);
+        defer gpa.free(gated);
         for (0..rows) |r| {
             for (0..2 * ffn) |o| {
                 var acc = b.ff_w1_b[o];
@@ -462,17 +443,26 @@ pub const Decoder = struct {
         }
     }
 
+    fn matmul(self: *Decoder, w: []const f32, bias: []const f32, x: []const f32, out: []f32, rows: usize, k: usize, n: usize) void {
+        _ = self;
+        for (0..rows) |r| {
+            for (0..n) |o| {
+                var acc = bias[o];
+                for (0..k) |i| acc += w[o * k + i] * x[r * k + i];
+                out[r * n + o] = acc;
+            }
+        }
+    }
+
     /// RoPE over (t, h, w) positions in [-1, 1) for the voxels, 0 for the extra
     /// tokens. The rotated channels are head_dim * 0.75 = 48; positions repeat
     /// cos/sin twice for the half-split rotation of the reference.
     fn rotary(self: *Decoder, cos: []f32, sin: []f32, rows: usize, depth: usize, height: usize, width: usize) !void {
-        const dim = self.config.dim();
         const head_dim = self.config.head_dim;
         const rotated: usize = @intFromFloat(@as(f32, @floatFromInt(head_dim)) * self.config.rope_dim_ratio);
         const step = 6.0 / @as(f32, @floatFromInt(rotated));
-        const voxels = depth * height * width;
-        var positions = try gpa.alloc([3]f32, rows);
-        defer gpa.free(positions);
+        var positions = try std.heap.page_allocator.alloc([3]f32, rows);
+        defer std.heap.page_allocator.free(positions);
         var v: usize = 0;
         for (0..depth) |t| {
             for (0..height) |h| {
@@ -487,18 +477,17 @@ pub const Decoder = struct {
             }
         }
         for (v..rows) |r| positions[r] = .{ 0, 0, 0 };
-        var r: usize = 0;
-        while (r < rows) : (r += 1) {
+        for (0..rows) |r| {
             for (0..head_dim / 2) |i| {
                 var angle: f32 = 0;
                 for (0..3) |axis| angle += positions[r][axis];
-                angle *= 2.0 * std.math.pi * std.math.pow(f32, self.config.rope_theta, -@as(f32, @floatFromInt(i)) * step * @as(f32, @floatFromInt(rotated)) / @as(f32, @floatFromInt(rotated)));
+                angle *= 2.0 * std.math.pi * std.math.pow(f32, self.config.rope_theta, -@as(f32, @floatFromInt(i)) * step);
                 cos[r * head_dim + i] = @cos(angle);
                 sin[r * head_dim + i] = @sin(angle);
                 cos[r * head_dim + head_dim / 2 + i] = @cos(angle);
                 sin[r * head_dim + head_dim / 2 + i] = @sin(angle);
             }
         }
-        _ = dim;
     }
 };
+
