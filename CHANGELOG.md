@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
+
 - Living Weights: with `--slide` and `--slide-forget`, the server counts how often each learned fact fires in successful requests and keeps the counts and pins in the folder; `POST /v1/slide/facts/ID/pin` pins or unpins a fact, and a lesson that finds the pocket full retires the least-used unpinned fact through the checked delete before it retries; without `--slide-forget` nothing new is counted or written (#2026).
 
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
