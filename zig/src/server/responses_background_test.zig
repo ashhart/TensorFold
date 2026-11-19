@@ -197,6 +197,49 @@ fn textOf(v: json.Value) []const u8 {
 
 const long = "{\"model\":\"m\",\"input\":\"hi\",\"background\":true,\"max_output_tokens\":100000}";
 
+test "Responses owner: background jobs keep their creating key while running and after cancellation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator) };
+    try lane.start();
+    defer lane.deinit();
+    const srv = try serve(&lane);
+    defer srv.deinit();
+    const created = try send(srv, a, "POST", "/v1/responses", long, 1);
+    try t.expectEqual(@as(u16, 200), created.status);
+    const id = created.body.strField("id").?;
+    const url = try urlOf(a, id, "");
+    const cancel = try urlOf(a, id, "/cancel");
+    const request_cancel = try std.fmt.allocPrint(a, "/v1/requests/{s}/cancel", .{id});
+    const child = try std.fmt.allocPrint(a, "{{\"input\":\"x\",\"previous_response_id\":\"{s}\"}}", .{id});
+    try lane.waitFirstTokens(1);
+    for ([_]?u8{ 2, null }) |foreign| {
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "GET", url, "", foreign)).status);
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "DELETE", url, "", foreign)).status);
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "POST", cancel, "", foreign)).status);
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "POST", request_cancel, "", foreign)).status);
+        const refused = try send(srv, a, "POST", "/v1/responses", child, foreign);
+        try t.expectEqual(@as(u16, 400), refused.status);
+        try t.expect(std.mem.indexOf(u8, refused.body.get("error").?.strField("message").?, "is not stored here") != null);
+    }
+    try t.expectEqual(@as(usize, 0), lane.cancels.load(.monotonic));
+    try t.expectEqual(@as(u16, 200), (try send(srv, a, "GET", url, "", 1)).status);
+    const cancelled = try send(srv, a, "POST", cancel, "", 1);
+    try t.expectEqual(@as(u16, 200), cancelled.status);
+    try t.expectEqualStrings("cancelled", cancelled.body.strField("status").?);
+    try waitFor(idle, .{srv});
+    try t.expectEqual(@as(usize, 1), lane.cancels.load(.monotonic));
+    try t.expectEqual(@as(u16, 200), (try send(srv, a, "GET", url, "", 1)).status);
+    for ([_]?u8{ 2, null }) |foreign| {
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "GET", url, "", foreign)).status);
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "DELETE", url, "", foreign)).status);
+        try t.expectEqual(@as(u16, 404), (try send(srv, a, "POST", cancel, "", foreign)).status);
+    }
+    try t.expectEqual(@as(u16, 200), (try send(srv, a, "DELETE", url, "", 1)).status);
+    try t.expectEqual(@as(u16, 404), (try send(srv, a, "GET", url, "", 1)).status);
+}
+
 test "background Responses: optional rows keep the queued id and reply, explicit unavailable rows refuse" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
