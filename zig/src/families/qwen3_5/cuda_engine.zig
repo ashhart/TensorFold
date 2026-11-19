@@ -246,8 +246,8 @@ pub const Engine = struct {
             e.mods[i] = try cuda.Module.load(d, img);
             loaded += 1;
         }
-        if (g.loop) |c| if (c.mhc != null) {
-            e.mhc = try @import("cuda_mhc.zig").Runtime.load(d);
+        if (g.loop) |c| if (c.mhc) |m| {
+            e.mhc = try @import("cuda_mhc.zig").Runtime.load(d, m);
         };
         errdefer e.mhc.deinit();
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
