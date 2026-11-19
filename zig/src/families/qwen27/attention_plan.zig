@@ -30,15 +30,11 @@ pub const Geometry = struct {
     shared_prefix: bool = true,
     /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
     fuse_chain: bool = true,
+    /// SenseNova-Loop allows single-chain 2,048-row prompt chunks when `shared_prefix` is false (M3/M4).
+    wide_prompt: bool = false,
     /// Read the target's attention geometry; the current kernel qualification still applies.
     pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
-        const g = Geometry{
-            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
-            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
-            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
-            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
-            .shared_prefix = shared_prefix,
-        };
+        const g = Geometry{ .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape, .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape, .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape, .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape, .shared_prefix = shared_prefix, .wide_prompt = c.looped };
         try g.check();
         return g;
     }
@@ -54,13 +50,18 @@ pub const Geometry = struct {
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
-        return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
+        return @min(requested, @as(u32, if (g.fuse_chain and (g.shared_prefix or g.wide_prompt)) chain_rows else max_rows));
     }
 
     pub fn group(g: Geometry) u32 {
         return g.heads / g.kv_heads;
     }
 };
+fn isLinearChain(parents: []const i32) bool {
+    for (parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) return false;
+    return true;
+}
+
 pub const Plan = struct {
     gpa: std.mem.Allocator,
     geometry: Geometry,
@@ -88,12 +89,16 @@ pub const Plan = struct {
         var tile_count: u32 = 0;
         var ca_max: u32 = 0;
         var cb_max: u32 = 0;
-        var fused = geometry.shared_prefix and geometry.fuse_chain;
-        for (windows) |w| for (w.parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) {
-            fused = false;
+        var chains = geometry.fuse_chain;
+        for (windows) |w| if (!isLinearChain(w.parents)) {
+            chains = false;
+            break;
         };
+        const fused = geometry.shared_prefix and chains;
+        const single_chain = geometry.wide_prompt and windows.len == 1 and chains;
+        const max_plan: usize = if (fused or single_chain) chain_rows else max_rows;
         for (windows, 0..) |w, st| {
-            if (w.parents.len == 0 or w.parents.len > @as(usize, if (fused) chain_rows else max_rows) or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
+            if (w.parents.len == 0 or w.parents.len > max_plan or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
             var depths: [chain_rows]u32 = undefined;
             for (w.parents, 0..) |p, r| {
@@ -129,7 +134,7 @@ pub const Plan = struct {
             ca_max = @max(ca_max, ca);
             cb_max = @max(cb_max, cb);
         }
-        if (row_count > @as(u32, if (fused) chain_rows else max_rows)) return error.AttentionRows;
+        if (row_count > @as(u32, @intCast(max_plan))) return error.AttentionRows;
         meta[0] = @intCast(windows.len);
         meta[1] = @intCast(ca_max);
         meta[2] = @intCast(tile_count);

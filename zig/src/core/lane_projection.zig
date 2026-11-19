@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
-const frags = @import("frags.zig");
+pub const frags = @import("frags.zig");
 /// The tensor units' affine products by expert, beside the lane layouts (one module for their shared fragments).
 pub const affine_mm = @import("affine_mm.zig");
 

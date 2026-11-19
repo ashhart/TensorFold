@@ -93,7 +93,15 @@ pub const Library = struct {
     xs: ?bool = null,
     pub fn fromSource(d: Device, source: []const u8, _: CompileOptions) !Library {
         d.r.libraries += 1;
-        return .{ .xs = if (std.mem.startsWith(u8, source, "#define Q27_XS 0\n")) false else if (std.mem.startsWith(u8, source, "#define Q27_XS 1\n")) true else null };
+        const xs: ?bool = if (std.mem.startsWith(u8, source, "#define Q27_XS 0\n"))
+            false
+        else if (std.mem.startsWith(u8, source, "#define Q27_XS 64\n") or
+            std.mem.startsWith(u8, source, "#define Q27_XS 128\n") or
+            std.mem.startsWith(u8, source, "#define Q27_XS 1\n"))
+            true
+        else
+            null;
+        return .{ .xs = xs };
     }
     pub fn deinit(_: Library) void {}
 };

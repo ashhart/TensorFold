@@ -24,15 +24,18 @@ pub const Options = struct {
     context: u32,
     streams: u32, // --parallel: slots at most, fewer when their caches do not fit
     streams_fixed: bool = false, // --parallel named a number: every slot fits, or the server refuses
+    drafts: bool = true,
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null,
     drafter_bits: u8 = 0,
+    mtp_dir: ?[]const u8 = null,
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
     decode_share: ?f64 = null, // --decode-share: the reply's share of a fill step's wall time beside live decoders
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    rope_yarn: ?f64 = null,
 };
 
 pub const Host = struct {
@@ -43,6 +46,8 @@ pub const Host = struct {
     runner: q.decode_round.Runner,
     trace: ?tf.gpu_profile.Trace = null, // TF_Q27_PROFILE: rounds' class GPU times to the log, gpu_seconds in replies
     draft: ?*lb.Draft = null,
+    mtp: ?*q.sn_mtp.Mtp = null,
+    wrap: ?lanes.drafted.Drafted = null,
     back: *lb.Metal,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
@@ -103,7 +108,7 @@ pub const Host = struct {
 };
 
 /// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+pub fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -205,7 +210,7 @@ fn cap() ?[]const u8 {
 }
 
 /// Whether a new slot's `bytes` fit in `free`, once kept prompt states (never the one `restoring`) give theirs back.
-fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
+pub fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
     const held = if (cache) |c| c.held else 0;
     const ok = if (cache) |c| c.giveBack(restoring, prompt, Left{ .room = free, .store = c, .held = held, .bytes = bytes }) else free >= bytes;
     const freed = held - (if (cache) |c| c.held else 0);
@@ -225,55 +230,9 @@ const Left = struct {
     }
 };
 
-/// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
-const FakeStates = struct {
-    live: usize = 0,
-    fn bytes(_: *anyopaque, at: u32) u64 {
-        return @as(u64, at) << 16;
-    }
-    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const f: *FakeStates = @ptrCast(@alignCast(ptr));
-        f.live += 1;
-        return @ptrFromInt(@as(usize, at) << 4);
-    }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
-    fn drop(ptr: *anyopaque, _: pc.Saved) void {
-        const f: *FakeStates = @ptrCast(@alignCast(ptr));
-        f.live -= 1;
-    }
-};
-
-test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from kept states, never the one it restores" {
-    const gpa = std.testing.allocator;
-    const g: u64 = 1 << 30;
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{}, 40 * g);
-    defer store.deinit();
-    const tokens = try gpa.alloc(u32, 200_000);
-    defer gpa.free(tokens);
-    for ([_]u32{ 100_000, 150_000, 190_000 }, 0..) |at, k| { // three conversations' histories: 6.1, 9.2 and 11.6 GiB
-        for (tokens, 0..) |*t, i| t.* = @intCast(k * 1_000_000 + i);
-        try std.testing.expect(store.keep(tokens[0 .. at + 1], at, null, &.{}, &.{}));
-    }
-    const restoring = store.entries.items[2].saved; // the newest conversation's next turn resumes its state
-    const slot: u64 = 12_900_000_000; // a --context 196608 slot's K/V rows, taps ring and scratch
-    try std.testing.expect(!takeRoom(null, 4 * g, slot, null, tokens)); // without a cache to give back: LaneMemory
-    try std.testing.expect(takeRoom(&store, 4 * g, slot, restoring, tokens)); // 4 GiB free + 6.1 + 9.2 freed
-    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
-    try std.testing.expect(store.entries.items[0].saved == restoring);
-    try std.testing.expect(!takeRoom(&store, 0, 2 * slot, restoring, tokens)); // its own state never goes
-    try std.testing.expectEqual(@as(usize, 1), fake.live);
-}
-
-test "a reply's end keeps its prompt's born: newest conversations precede redundant history under pressure" {
-    var fake: FakeStates = .{};
-    const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } };
-    try @import("qwen27_reply_cache_test.zig").replyBorn(keepEnd, snapshots, &fake.live);
-}
-
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
-    const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
+    const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else if (h.mtp) |m| m.slotBytes() else 0;
     return (h.runner.slots - h.runner.ready) * (h.runner.slotBytes() + ring_bytes) + h.runner.gdn.missingBeforeBytes();
 }
 
@@ -285,9 +244,15 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
-    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
+    const model = q.model.Model.loadDeferredOpts(gpa, io, dir, 128, .{ .rope_yarn = o.rope_yarn }) catch |err| {
+        if (err == error.UnsupportedRopeScaling or err == error.RopeYarnFactor or err == error.RopeYarnConflict) {
+            why.* = try std.fmt.allocPrint(a, "--rope-yarn / rope_parameters ({s}): YaRN requires valid factor and original_max_position_embeddings matching max_position_embeddings", .{@errorName(err)});
+        }
+        return err;
+    };
     errdefer model.deinit();
     var with = o;
+    with.mtp_dir = dir;
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
@@ -344,11 +309,20 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     };
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
+    var mtp_w = if (o.drafts and drafter == null and o.drafter == null) blk: {
+        if (o.mtp_dir) |mdir| if (q.sn_mtp.Mtp.available(io, mdir, model.config)) {
+            break :blk try q.sn_mtp.Mtp.loadWeights(gpa, io, model, mdir);
+        };
+        break :blk null;
+    } else null;
+    errdefer if (mtp_w) |*mw| mw.deinit();
+    const mtp_on = mtp_w != null;
     const memory = q.prompt_memory;
-    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .planes = if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
+    const mtp_ring: usize = if (mtp_on) q.sn_mtp.Mtp.kvSlotBytes(model.config, capacity + window) else 0;
+    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else mtp_ring, .planes = if (draft_model) |d| d.graph.config.tap_count else if (mtp_on) 1 else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
     const row_policy = q.prompt_rows;
-    const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), model.config.moe(), value), row_policy.override(value) != null));
+    const rows = @max(window, try fit_prompt.choose(row_policy.requestedModel(model.device.generation(), model.config.moe(), model.config.looped, value), row_policy.override(value) != null));
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
         const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
@@ -366,6 +340,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.model = model;
     h.owns_model = false;
     h.draft = null;
+    h.mtp = null;
+    h.wrap = null;
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
@@ -381,17 +357,28 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (draft_model) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, owns_draft);
     draft_owned = false;
     errdefer if (h.draft) |d| d.deinit();
+    if (mtp_w) |mw| {
+        h.mtp = try q.sn_mtp.Mtp.initFromWeights(gpa, model, mw, slots, capacity + window);
+        mtp_w = null;
+    }
+    errdefer if (h.mtp) |m| m.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
-    h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), model.config.moe(), value)));
+    h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requestedModel(model.device.generation(), model.config.moe(), model.config.looped, value)));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
-    if (h.draft != null) try h.back.measure(io);
-    h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
+    if (h.mtp) |m| {
+        try m.warmup(io);
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), @import("sensenova_mtp_drafter.zig").drafter(m));
+    }
+    errdefer if (h.wrap) |*w| w.deinit();
+    if (h.draft != null or h.mtp != null) try h.back.measure(io);
+    const model_facts = if (h.wrap) |*w| w.facts(h.back.facts()) else h.back.facts();
+    h.cfg = try lanes.Config.init(gpa, model_facts, window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
@@ -403,7 +390,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // a reply that ends soon goes first beside a long prompt; a share someone set stays as they set it
     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
-    std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
+    std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null or h.mtp != null, h.back.copies)});
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
     const residency = tf.startup_receipt.span(.residency);
@@ -433,46 +420,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
-    std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});
+    std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.mtp != null) slots else 0, .images = o.images != null }});
     return h;
-}
-
-test "qwen27 startup: draft stream count, singular text and optional suffixes" {
-    const limit = try lb.draftSlots();
-    const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
-    try std.testing.expectEqual(@as(u32, if (limited) 1 else 8), limit);
-    // the wording: the smaller of the stream count and the draft-slot setting
-    const wording = [_]struct { streams: u32, slots: u32, want: []const u8 }{
-        .{ .streams = 1, .slots = 0, .want = "" },
-        .{ .streams = 1, .slots = 1, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 1, .slots = 8, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 1, .slots = 99, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 2, .slots = 0, .want = "" },
-        .{ .streams = 2, .slots = 1, .want = "DFlash2 drafts for 1 of 2 streams" },
-        .{ .streams = 2, .slots = 8, .want = "DFlash2 drafts for both streams" },
-        .{ .streams = 2, .slots = 99, .want = "DFlash2 drafts for both streams" },
-        .{ .streams = 4, .slots = 1, .want = "DFlash2 drafts for 1 of 4 streams" },
-        .{ .streams = 4, .slots = 8, .want = "DFlash2 drafts for all 4 streams" },
-        .{ .streams = 4, .slots = 99, .want = "DFlash2 drafts for all 4 streams" },
-        .{ .streams = 16, .slots = 1, .want = "DFlash2 drafts for 1 of 16 streams" },
-        .{ .streams = 16, .slots = 8, .want = "DFlash2 drafts for 8 of 16 streams" },
-        .{ .streams = 16, .slots = 99, .want = "DFlash2 drafts for all 16 streams" },
-    };
-    var buf: [64]u8 = undefined;
-    for (wording) |case| try std.testing.expectEqualStrings(case.want, try startup.draftWording(&buf, case.streams, case.slots));
-    // the whole line: the wording, a drafter's absence and the optional suffixes
-    const lines = [_]struct { streams: u32, slots: u32, images: bool, want: []const u8 }{
-        .{ .streams = 1, .slots = 8, .images = false, .want = "Qwen3.8-27B: 1 stream of 4096 tokens, DFlash2 drafts for the only stream" },
-        .{ .streams = 2, .slots = 8, .images = true, .want = "Qwen3.8-27B: 2 streams of 4096 tokens, DFlash2 drafts for both streams, images read" },
-        .{ .streams = 4, .slots = 8, .images = false, .want = "Qwen3.8-27B: 4 streams of 4096 tokens, DFlash2 drafts for all 4 streams" },
-        .{ .streams = 16, .slots = 8, .images = false, .want = "Qwen3.8-27B: 16 streams of 4096 tokens, DFlash2 drafts for 8 of 16 streams" },
-        .{ .streams = 2, .slots = 0, .images = false, .want = "Qwen3.8-27B: 2 streams of 4096 tokens" },
-    };
-    var actual: [192]u8 = undefined;
-    for (lines) |case| {
-        const got = try std.fmt.bufPrint(&actual, "{f}", .{StartupLine{ .streams = case.streams, .context = 4096, .draft_slots = case.slots, .images = case.images }});
-        try std.testing.expectEqualStrings(case.want, got);
-    }
 }
 
 /// TF_Q27_PROFILE's rounds between log reports, or null (off); a value it cannot read leaves profiling off.
@@ -533,11 +482,13 @@ pub fn close(ptr: *anyopaque) void {
     h.spares.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     h.core.deinit();
+    if (h.wrap) |*w| w.deinit();
     q.residency.drop(h);
     if (h.disk_stage) |b| b.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
     if (h.draft) |d| d.deinit();
+    if (h.mtp) |m| m.deinit();
     if (h.trace) |*t| t.reportRest();
     h.runner.deinit();
     if (h.vision) |v| v.deinit();
@@ -546,31 +497,5 @@ pub fn close(ptr: *anyopaque) void {
 }
 
 test {
-    _ = @import("qwen27_share_fit.zig");
-}
-
-test "Qwen27 interior state uses a guaranteed cold request cut" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tokens = try a.alloc(u32, 128 * 1024 + 64);
-    @memset(tokens, 7);
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, cacheRules(2048), 32 << 30);
-    defer store.deinit();
-    var starts: std.ArrayList(u32) = .empty;
-    var at: u32 = 2048;
-    while (at < tokens.len) : (at += 2048) try starts.append(a, at);
-    const p = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{ 16, 129024, @intCast(tokens.len - 8) }, p.marks);
-    for (p.marks) |m| try std.testing.expect(store.keep(tokens, m, null, starts.items, &.{}));
-    tokens[tokens.len - 512] += 1;
-    const followup = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqual(@as(u32, 129024), followup.from);
-    try std.testing.expect(store.held <= store.budget);
-}
-
-test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
-    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
+    _ = @import("qwen27_served_test.zig");
 }

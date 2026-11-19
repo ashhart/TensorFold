@@ -28,6 +28,12 @@ test "qwen27 rows: valid overrides stay exact and invalid ones use the chip defa
     }
 }
 
+test "qwen27 rows: looped SenseNova-Loop widens its default from generation 15" {
+    for ([_]u32{ 0, 13, 14 }) |generation| try std.testing.expectEqual(@as(u32, 512), rows.requestedModel(generation, false, true, null));
+    for ([_]u32{ 15, 16, 17, 18 }) |generation| try std.testing.expectEqual(@as(u32, 2048), rows.requestedModel(generation, false, true, null));
+    for ([_]u32{ 0, 15, 17 }) |generation| try std.testing.expectEqual(@as(u32, 1024), rows.requestedModel(generation, true, true, null));
+}
+
 const Backend = struct {
     runner: struct { slots: usize = 3 } = .{},
     chunk: usize = 2048,

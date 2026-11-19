@@ -83,7 +83,11 @@ pub const Stages = struct {
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
         s.hidden = m.frame.get(.hidden);
         s.residual = m.frame.get(.residual);
-        try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
+        if (m.weights.embed_bf16) |t| {
+            try m.glue.embeddingBf16(lane.enc, m.config.hidden, m.config.vocab, wts.ref(t), m.frame.get(.ids), s.hidden, s.rows);
+        } else {
+            try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
+        }
         lane.enc.barrier();
         if (s.images) |rows| {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
@@ -100,7 +104,12 @@ pub const Stages = struct {
         const e = lane.enc;
         const layer = m.weights.layers[index];
         const h: u32 = @intCast(m.config.hidden);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        if (m.config.mhc_roles[index] != .none) {
+            const tap: ?@import("loop.zig").TapHook = if (s.hooks.tap) |cb| .{ .ptr = s.hooks.ptr, .cb = cb } else null;
+            try @import("loop.zig").preMhc(&m.mhc.?, &m.kernels, m.config, index, layer, m.weights.mhc[m.config.exec_phys[index]], &s.hidden, &s.residual, &s.pending, f, s.rows, e, tap);
+            return;
+        }
+        try m.kernels.normShift(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, m.config.shift_norms);
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
@@ -157,9 +166,13 @@ pub const Stages = struct {
             if (s.reduce.?.broken()) return error.PairFailed;
             e.barrier();
         }
-        try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
-        e.barrier();
-        std.mem.swap(Ref, &s.hidden, &s.residual);
+        if (m.config.mhc_roles[index] != .none) {
+            try @import("loop.zig").postMhcMid(&m.mhc.?, &m.kernels, m.config, layer, m.weights.mhc[m.config.exec_phys[index]], f, s.rows, e);
+        } else {
+            try m.kernels.normShift(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, m.config.shift_norms);
+            e.barrier();
+            std.mem.swap(Ref, &s.hidden, &s.residual);
+        }
         if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, m.kernels.prompt)) {
             // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
@@ -233,6 +246,13 @@ pub const Stages = struct {
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
             lane.enc.barrier();
         }
+        if (m.config.mhc_roles[index] != .none) {
+            const tap: ?@import("loop.zig").TapHook = if (s.hooks.tap) |cb| .{ .ptr = s.hooks.ptr, .cb = cb } else null;
+            const next_l: ?wts.Layer = if (index + 1 < m.config.layers) m.weights.layers[index + 1] else null;
+            const next_ml: ?@import("loop.zig").MhcLayer = if (index + 1 < m.config.layers) m.weights.mhc[m.config.exec_phys[index + 1]] else null;
+            try @import("loop.zig").postMhcEnd(&m.mhc.?, &m.kernels, m.config, index, next_l, next_ml, &s.hidden, &s.pending, f, s.rows, lane.enc, tap);
+            return;
+        }
         s.pending = f.get(.output);
     }
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {
@@ -241,7 +261,7 @@ pub const Stages = struct {
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
         if (s.keysOnly(m.config.layers - 1)) return if (s.tail) |tail| tail.encode(tail.ptr, e);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
+        try m.kernels.normShift(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows, m.config.shift_norms);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
