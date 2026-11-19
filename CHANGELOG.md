@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and an empty or blank value reads as unset; valid values and defaults are unchanged (#3749, refs #2370). Thanks to @devopsfortunato.
+
 - App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
 
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.
@@ -224,8 +226,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the tokenizer parity corpus adds one sentence in each of the 22 scheduled Indian languages, the canonical-composition exclusions in both forms and ZWJ/ZWNJ conjuncts, each as written, NFC and NFD (#1988). Thanks to @currencycaver29.
 
 - Flash Next on Metal: an explicit `--context` smaller than the trained one now sizes the caches and selectors to that context, with the rotary positions unchanged, so a smaller context holds less memory; tokens are unchanged (#3691, part of #3667).
-
-- Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and a value that is empty or only spaces and tabs reads as unset; valid values and defaults are unchanged (#3749, part of #2370).
 
 - Server: text chat requests on engines with a prompt cache or prompt chunking record where each provable message starts in the rendered prompt, at exact token boundaries; nothing uses the starts yet, so replies are unchanged (#3679, step 0 of #3617).
 
