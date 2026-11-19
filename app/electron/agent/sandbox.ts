@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
@@ -8,7 +8,9 @@ import { approvalPolicyScope, isReadOnlyShellCommand } from './approval-policy'
 import { commandShell, commandShellArgs } from './cli-path'
 import { LinuxSandboxError, canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary } from './linux-sandbox'
 import { commandApprovalReason } from './command-policy'
-import { hostGitEnv } from './host-git-env'
+import { MAX_HASH_BYTES, captureWorkspaceSnapshot, changedWorkspacePaths } from './sandbox-workspace'
+import type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
+export type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
 import { redactCommandStreams } from './command-output-redaction'
 import { SECRET_MASK } from './security'
 import { redactSecretValues } from './secret-detection'
@@ -47,11 +49,6 @@ export interface SandboxArtifactBaseline {
   capturedAt: number
   /** Git tracked+untracked file fingerprints used only for mutation ownership. */
   workspaceSnapshot?: SandboxWorkspaceSnapshot
-}
-
-export interface SandboxWorkspaceSnapshot {
-  root: string
-  files: Array<{ path: string; fingerprint: string }>
 }
 
 export interface SandboxArtifactBundle {
@@ -130,7 +127,6 @@ const PACKAGE_INSTALL_INPUT_PATHS = [
 ]
 const ARTIFACT_SKIP_DIRS = new Set(['.git', 'node_modules'])
 const MAX_ARTIFACT_FILES = 120
-const MAX_HASH_BYTES = 10 * 1024 * 1024
 const SCREENSHOT_RE = /\.(?:png|jpe?g|webp|gif)$/i
 
 export function commandNeedsNetwork(command: string): boolean {
@@ -414,68 +410,6 @@ function attachSandboxArtifacts(command: string, cwd: string, result: SandboxedC
     artifacts: buildSandboxArtifactBundle({ cwd, command, result: sanitized, baseline }),
     changedPaths: changedWorkspacePaths(cwd, baseline.workspaceSnapshot),
   }
-}
-
-function gitOutput(args: string[], cwd: string): Buffer | null {
-  const result = spawnSync('git', args, {
-    cwd,
-    encoding: 'buffer',
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 20_000,
-    env: hostGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }),
-  })
-  return result.status === 0 && Buffer.isBuffer(result.stdout) ? result.stdout : null
-}
-
-function captureWorkspaceSnapshot(cwd: string): SandboxWorkspaceSnapshot | null {
-  const rootRaw = gitOutput(['rev-parse', '--show-toplevel'], cwd)
-  if (!rootRaw) return null
-  const rootText = rootRaw.toString('utf8').trim()
-  if (!rootText) return null
-  let root: string
-  try { root = realpathSync(rootText) } catch { return null }
-  const listed = gitOutput(['ls-files', '-c', '-o', '--exclude-standard', '-z'], root)
-  if (!listed) return null
-  const files: Array<{ path: string; fingerprint: string }> = []
-  for (const rel of listed.toString('utf8').split('\0').filter(Boolean)) {
-    if (rel.startsWith('/') || rel.split('/').includes('..')) continue
-    const full = path.join(root, ...rel.split('/'))
-    let stat
-    try { stat = lstatSync(full) } catch { continue }
-    let fingerprint: string
-    if (stat.isSymbolicLink()) {
-      try { fingerprint = `link:${workspaceContentFingerprint(readlinkSync(full))}` } catch { continue }
-    } else if (stat.isFile()) {
-      try {
-        fingerprint = stat.size <= MAX_HASH_BYTES
-          ? `file:${workspaceContentFingerprint(readFileSync(full))}`
-          : `large:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
-      } catch { continue }
-    } else {
-      continue
-    }
-    files.push({ path: rel.replace(/\\/g, '/'), fingerprint })
-  }
-  return { root, files: files.sort((a, b) => a.path.localeCompare(b.path)) }
-}
-
-function workspaceContentFingerprint(content: string | Buffer): string {
-  return createHash('sha256').update(content).digest('hex')
-}
-
-function changedWorkspacePaths(cwd: string, before: SandboxWorkspaceSnapshot | undefined): string[] {
-  if (!before) return []
-  const after = captureWorkspaceSnapshot(before.root)
-  if (!after || after.root !== before.root) return []
-  const previous = new Map(before.files.map((file) => [file.path, file.fingerprint]))
-  const current = new Map(after.files.map((file) => [file.path, file.fingerprint]))
-  const changed = new Set<string>()
-  for (const [file, fingerprint] of current) if (previous.get(file) !== fingerprint) changed.add(file)
-  for (const file of previous.keys()) if (!current.has(file)) changed.add(file)
-  return [...changed].sort().map((repoPath) => {
-    const relative = path.relative(cwd, path.join(before.root, ...repoPath.split('/')))
-    return relative.split(path.sep).join('/') || '.'
-  })
 }
 
 function collectArtifactFiles(cwd: string, roots: string[]): SandboxFileArtifact[] {
