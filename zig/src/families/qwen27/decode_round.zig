@@ -530,12 +530,11 @@ pub const Runner = struct {
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
-    /// Whether a pass at `head` runs its last layer's keys and values alone (prompt_tail.zig's facts on this runner).
+    /// Whether a pass runs only last-layer K/V; recording stages needs its stream and final norm.
     fn keysOnly(r: *const Runner, head: forward.Head) bool {
         const last = r.model.config.layers - 1;
         return @import("prompt_tail.zig").keysOnly(.{
             .keeps_none = head == .none,
-            // staged references read the last layer's stream and its final norm, as a tap on it does
             .last_tapped = (stage_planes.on and stage_planes.active != null) or (r.capture_taps and std.mem.indexOfScalar(usize, r.taps.ids[0..r.taps.count], last) != null),
             .pair = r.reduce != null,
             .ane = r.model.ane != null,
