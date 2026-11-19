@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""Interleaved A/B of main vs a route-tap head on Metal, with the tap unset.
-
-Cells match the M5 Ultra LFM2 report: chat T0 at 1 and 2 streams, code T0 at
-2 and 4 streams, code T1 at 1 and 4 streams. Two jobs in opposite orders
-(base-new-new-base, then new-base-base-new). Then tap-on vs tap-off token
-equality and a shutdown leak scan for LFM2 and, when a checkpoint is set,
-Nemotron.
-
-Run on a Metal host. Paths and binaries come from the environment (see `plan`).
-Host tests do not start a GPU server.
-
-  python3 tools/run_metal_ab.py plan
-  python3 tools/run_metal_ab.py ab
-  python3 tools/run_metal_ab.py proofs
-  python3 tools/run_metal_ab.py all
-
-Standard library plus tools/bench_concurrent.py. Python 3.11+.
-"""
+"""Interleave Metal main/candidate timing and response-text checks; see docs/route-tap.md for token-ID gates."""
 
 from __future__ import annotations
 

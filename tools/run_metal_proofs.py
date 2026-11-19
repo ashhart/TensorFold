@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""Tap-on replies equal tap-off for Metal families that blit while the tap is live.
-
-Covers GLM, GLM-DSA, Step5, MiniMax and LFM2. The blit barrier runs only when
-the tap is live. Nemotron already had a live-gated blit; this script does not
-cover it. Flash Next (`qwen4_exp`) and Qwen3.5 MoE on Metal never copy
-and are refused by name.
-
-Run this on a Metal host with the checkpoints. Host tests do not start a GPU server.
-
-  python3 tools/run_metal_proofs.py plan
-  python3 tools/run_metal_proofs.py run --family lfm2_moe
-  python3 tools/run_metal_proofs.py run --all
-
-Checkpoint paths come from the environment (see `plan`). The binary is
-`zig-out/native/bin/tensorfold-native` unless `TF_NATIVE` is set.
-"""
+"""Compare fresh Metal tap-off/on response text; exact token-ID gates are described in docs/route-tap.md."""
 
 from __future__ import annotations
 
