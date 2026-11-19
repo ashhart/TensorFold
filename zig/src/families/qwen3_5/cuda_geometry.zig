@@ -12,6 +12,8 @@ pub const dk = 128;
 pub const taps = 4;
 pub const head_dim = 256;
 pub const max_query_heads = 32;
+/// The most Sinkhorn iterations the mHC route kernel runs per row.
+pub const max_mhc_iterations = 1000;
 /// The rotary base the kernels fix (parse checks the config says so).
 pub const theta: f32 = 10000000;
 
@@ -416,10 +418,6 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         }
     }
     if (g.v_heads % g.k_heads != 0 or g.q_heads % g.kv_heads != 0 or g.q_heads > max_query_heads) return error.UnsupportedQwenGeometry;
-    if (loop_model) {
-        const types = t.get("layer_types") orelse return error.BadLoopConfig;
-        if (types != .array or types.array.items.len != g.layers) return error.BadLoopConfig;
-    }
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
@@ -428,7 +426,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
         if (t.get("mtp_num_hidden_layers")) |v| if (v != .integer or v.integer != 0) return error.SenseNovaMtp;
         if (g.pocket != 0) return error.UnsupportedLearningFormat;
         g.loop = try @import("loop_config.zig").parse(root, g.layers);
-        if (g.loop.?.mhc) |m| if (m.iterations != 20 or m.fixed_identity or m.pre_scale != 1) return error.UnsupportedSenseNovaMhc;
+        if (g.loop.?.mhc) |m| if (m.streams != 2 or m.fixed_identity or m.iterations > max_mhc_iterations or !std.math.isFinite(@as(f32, @floatCast(m.pre_scale)))) return error.UnsupportedSenseNovaMhc;
         if (g.tied) return error.UnsupportedQwenConfig;
         const plan = try @import("loop_schedule.zig").build(g.linear[0..g.layers], g.loop);
         if (plan.attentions == 0) return error.UnsupportedQwenGeometry;

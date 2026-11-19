@@ -63,7 +63,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.SenseNovaDrafter => "--drafter: SenseNova Loop supports plain decoding only",
         error.SenseNovaLearning => "SenseNova Loop does not support learning or training",
         error.SenseNovaRanks => "SenseNova Loop does not support pipeline stages or tensor-parallel ranks",
-        error.UnsupportedSenseNovaMhc => "SenseNova mHC requires 20 iterations, pre_scale 1 and fixed_identity false",
+        error.UnsupportedSenseNovaMhc => "SenseNova mHC requires 2 streams, fixed_identity false, at most 1000 iterations and a pre_scale that fits FP32",
         error.SenseNovaPocket => "SenseNova Loop CUDA does not support learned pocket shards",
         error.SenseNovaMoe => "SenseNova Loop CUDA does not support MoE checkpoints",
         error.SenseNovaMtp => "SenseNova Loop CUDA does not support MTP layers",
