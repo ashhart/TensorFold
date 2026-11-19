@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Ling-3.0-tiny's MLA layers run on Kimi's `k3_mla` kernels with three added kernels for cache and query RoPE and gate widening, registered with planted controls in the kernel contract (#3609). Thanks to @ThinkOffApp.
+
 - Nemotron: the Living Weights copies left behind by the October revert are deleted and `cuda_pages` imports `living.lesson_route`, leaving one copy of the learner, pocket and lesson files (#3707). Thanks to @jschmied.
 
 - Flash Next on CUDA: after load, a mixed shard keeps only the n-gram table's pages in the page cache, and the final sweep reaches shards nested under `tensors/`, freeing about 3 GiB of page cache on the NVFP4 export with replies unchanged (#3467). Thanks to @jschmied.
