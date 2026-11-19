@@ -452,6 +452,7 @@ pub const Model = struct {
         std.log.scoped(.dsv41).info("slots: {d} live, row windows of up to {d} rows, sessions {s}", .{ m.slots, cap, if (m.sessions != null) "on (every slot)" else "off" });
         const ss = try slots_mod.SlotSet.init(m.gpa, &m.f, m.slots);
         errdefer ss.deinit();
+        if (m.f.layer_hash != null) ss.hash_slot = &m.f.hash_slot;
         try ss.bindBases(bp);
         m.slot_set = ss;
         m.rows = try batch.Batch.init(m.gpa, &m.f, ss, cap);

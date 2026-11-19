@@ -13,9 +13,10 @@ const Fixture = struct {
     }
 };
 
-const Group = enum { switches, integers, reals, structured };
+const Group = enum { switches, integers, reals, structured, paths };
 
 fn group(r: e.Rule) Group {
+    if (r.kind == .path) return .paths;
     if (r.kind == .flag or r.kind == .toggle) return .switches;
     if (e.isReal(r.kind)) return .reals;
     return if (r.kind == .word or r.kind == .range or r.only.len > 0) .structured else .integers;
@@ -31,17 +32,18 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     }
     try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
-    try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
+    try t.expect((std.mem.indexOf(u8, why.?, raw) != null) == (e.rule(name).kind != .path));
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "DeepSeek strict env: the shared table holds all 81 settings: 48 switches, 14 integers, 16 reals and 3 structured" {
-    var counts: [4]usize = @splat(0);
+test "DeepSeek strict env: the shared table holds all 82 settings: 48 switches, 14 integers, 16 reals, 3 structured, 1 path" {
+    var counts: [5]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .dsv41) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 48, 14, 16, 3 }, counts);
+    try t.expectEqual([5]usize{ 48, 14, 16, 3, 1 }, counts);
+    try t.expectEqual(e.Kind.path, e.rule("TF_DSV41_LAYER_HASH").kind);
 }
 
 test "DeepSeek strict env: unset and blank settings both read as the caller's default" {
@@ -50,9 +52,22 @@ test "DeepSeek strict env: unset and blank settings both read as the caller's de
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
+            .paths => try t.expect(try e.path(r.name, raw) == null),
             else => if (r.kind == .range) try t.expect(try e.range(r.name, raw) == null) else try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
+}
+
+test "DeepSeek strict env: the trace path keeps text and refuses controls by name without echoing it" {
+    const name = "TF_DSV41_LAYER_HASH";
+    for ([_][]const u8{ "relative/layer-hashes", " nan ", "mistyped value" }) |raw| {
+        try check(name, raw, true);
+        try t.expectEqualStrings(raw, (try e.path(name, raw)).?);
+    }
+    for ([_][]const u8{ "private\npath", "private\x00path", "private\x1bpath", "private\x7fpath" }) |raw| {
+        try check(name, raw, false);
+        try t.expectError(error.InvalidEnvironment, e.path(name, raw));
+    }
 }
 
 test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its existing word forms" {
