@@ -1,93 +1,62 @@
 # Flash Next MTP drafter weights: main against the branch
 
-`TF_FLASHNEXT_MTP_WEIGHTS=checkpoint|mxfp8`. Unset or blank is `checkpoint`, main's load. `mxfp8` re-codes the drafter's
-BF16 linears to MXFP8 as they load; on this checkpoint the server logs `re-coded 170 MiB of the drafter's BF16 linears`.
+`TF_FLASHNEXT_MTP_WEIGHTS=checkpoint|mxfp8`. Unset or blank is `checkpoint`, main's load. `mxfp8` re-codes
+the drafter's BF16 linears to MXFP8 as they load, leaving its two fusion projections (`fc_embedding`,
+`fc_hidden`) and the layer's shared expert (gate, up, down) as the checkpoint stores them. The server states
+the split itself on every `mxfp8` boot:
+
+    info: flashnext: TF_FLASHNEXT_MTP_WEIGHTS=mxfp8 re-coded 135 MiB of the drafter's BF16 linears and left 34 MiB as stored
 
 ## Source and environment
 
-- Main: `06bcb989a277c5300d40454e68020c75c780681f`. Branch: `d3282c225db0224e472f10bc37ee25b5ae4d35d5`, this pull
-  request's commits through `19224f8` rebased onto that main. Outside `CHANGELOG.md` and this directory its changes
-  are `19224f8`'s, line for line (11 files, 169 changed lines, only the hunk offsets differ), and its tree differs
-  from `19224f8`'s only by main's own commits from `a3aecd8` to `06bcb989` (the same 334 files, byte for byte). The
-  commits after `19224f8` change no line of the pull request's CUDA drafter code: they merge main, move the Metal and
-  HIP refusals ahead of their loads, re-pin the serving files and update this text.
-- One NVIDIA GB10 (sm_121), Zig 0.17.0, CUDA 13.3.
-- Checkpoint `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300`, every arm.
-- `--parallel 4`, 131,072-token context, bf16 KV, prompt cache on, a fresh server per arm.
-- Arms, in order: M1 (main), U1 (branch, unset), X1 (branch, `mxfp8`), M2, X2, U2 (branch, set blank). The noise
-  rule's rerun: M3 U3 X3 M4 X4 U4, on the one invocation that held a slower cell.
-- Main's tools: `tools/bench_openai.py` (one stream; greedy, 3 reps; temperature 1.0, 9 reps with seeds 1234 to 1242;
-  its median decode rate) and `tools/bench_concurrent.py --alone --serial` (1, 2 and 4 streams, 256 tokens, 3 reps;
-  greedy, and temperature 1.0 with `--seed` 1234, 2234 and 3234; aggregate tok/s).
+- Main `4fda6a020605fb7accb70f36354d3fd22adb9b15`, branch `b43b10f46df555b1eb9e2b7ba19832c0d4da78f0` (this pull request's head with that main merged). Every number below is a run of these two commits, one server a side, alternated.
+- One NVIDIA GB10 (sm_121), one DGX Spark; checkpoint `/root/.cache/huggingface/hub/models--nvidia--Qwen3.8-Flash-Next-FP4-Local/snapshots/b9ce18a6887e18c089fdea8509a33e63429a3300`, every arm; bf16 KV; a fresh server per arm.
+- Decode and the exactness boots at a 32,768-token window and 8 slots (8 streams need it); the cold prompts at 131,072 and 4 slots with the prompt cache off.
+- States, in the order run (mirrored, two runs each): M1 U1 X1 M2 X2 U2; the cold pass the same with the C suffix; a rerun pass on fresh boots only if a cell flagged slower.
+- Main's own `tools/bench_openai.py` and `tools/bench_concurrent.py --alone --serial` for every arm.
 
 ## Decode speed and tokens a round
 
-`cells.csv` has every cell of every arm. `tokens_per_round` is the tools' tokens a streamed chunk (a round sends its
-accepted drafts and one verified token), `accepted_per_round` is that less one, and `server_acceptance` is the
-server's `mtp_accepted_total` over `mtp_drafted_total` across the invocation. `rule5.md` has every cell's runs and
-verdicts. Here `mxfp8` is the mean of its two runs against the mean of main's two:
+`cells.csv` has every cell of every arm; `rule5.md` has each cell's runs and every comparison's verdict. `tokens_per_round` is the tools' tokens a streamed chunk, `accepted_per_round` that less one, and `server_acceptance` the server's `tensorfold:mtp_accepted_total` over `tensorfold:mtp_drafted_total` across the invocation. `mxfp8` is the mean of its two runs against the mean of main's two:
 
-| cells | `mxfp8` against main | tokens a round, main to `mxfp8` |
-|---|---|---|
-| greedy, code, 1/2/4 streams | +2.7%, +3.9%, +3.2% | 5.22 to 5.22, 4.83 to 4.83, 4.83 to 4.83 |
-| greedy, chat, 1/2/4 streams | +0.3% (level), +3.1%, +2.8% | 2.81 to 2.75, 2.51 to 2.54, 2.51 to 2.54 |
-| greedy, one stream (`bench_openai`), code and chat | +2.8%, +0.5% (level) | 5.22 to 5.22, 2.81 to 2.75 |
-| temperature 1.0, 9 seeds, one stream (`bench_openai`), code and chat | +5.3%, +4.9% | 4.06 to 3.94, 2.56 to 2.51 |
-| temperature 1.0, seeds 2234 and 3234, code and chat, 1/2/4 streams | +2.2% to +3.6% (12 cells) | -0.12 to +0.07 |
-| temperature 1.0, seed 1234, code, 1/2/4 streams | +3.2%, +1.4%, +2.1% | 4.57 to 4.41, 3.77 to 3.77, 3.83 to 3.88 |
-| temperature 1.0, seed 1234, chat, 1/2/4 streams | -1.0% (slower), -0.6%, +0.7% | 2.39 to 2.31, 2.45 to 2.38, 2.46 to 2.42 |
+| comparison | faster | level | slower | cells |
+|---|---|---|---|---|
+| U vs M | 0 | 32 | 0 | 32 |
+| X vs M | 22 | 10 | 0 | 32 |
 
-Unset and blank are level with main in every cell (-0.3% to +2.1%), with main's tokens a round in every cell.
+The noise rule: no cell was slower in the first pair, so no rerun was taken.
 
-## The noise rule
-
-A cell is slower when both branch runs are under both main runs and the mean gap is over 1%; it gets one rerun, and a
-repeat is a loss.
-
-- Unset and blank against main: 0 of 28 cells slower.
-- `mxfp8` against main: 1 of 28 cells slower in the first pair, chat at one stream, temperature 1.0, seed 1234: 43.4 and
-  43.4 against 43.6 and 44.1 tok/s (-1.0%). Its rerun: 43.5 and 43.3 against 44.2 and 44.1 (-1.7%), slower again, so
-  this cell is a loss. In both pairs its tokens a round are 2.31 against main's 2.39 (server acceptance 0.710 against
-  0.722): at this seed the re-coded drafter's proposals are accepted less often, which costs more than its shorter draft
-  passes save. The same cell is +2.3% at seed 2234 and +2.9% at seed 3234, and chat over nine seeds at one stream is
-  +4.9%.
+Unset against main: U vs M 0 faster, 32 level, 0 slower.
 
 ## Cold prompts
 
-`ttft.py`'s cold 8k and 32k prompts, three reps an arm, thinking off: medians 4.02 to 4.07 s at 8k and 16.07 to
-16.37 s at 32k across the six arms. The drafter is not in prompt processing.
+| case | M | U | X | X vs M |
+|---|---|---|---|---|
+| cold2k-off | 1.059, 1.084 | 1.074, 1.067 | 1.066, 1.073 | +0.2% level |
+| cold8k-off | 4.021, 4.004 | 4.004, 3.999 | 3.996, 4.025 | +0.1% level |
+| cold32k-off | 16.049, 16.032 | 16.067, 16.089 | 16.038, 15.997 | +0.1% level |
+| cold64k-off | 32.947, 33.125 | 33.099, 33.167 | 33.092, 33.087 | -0.2% level |
+| first_ttft_s | 1.217, 1.231 | 1.228, 1.224 | 1.227, 1.228 | -0.3% level |
 
-## Off, on and a malformed value
+## Off, on and a refused value
 
-- U1 (unset) and U2 (the container's environment holds `TF_FLASHNEXT_MTP_WEIGHTS=` empty) log no re-coding, and every
-  reply hash their bench files record equals main's (`exactness.md`).
-- `mxfp8` logs `flashnext: TF_FLASHNEXT_MTP_WEIGHTS=mxfp8 re-coded 170 MiB of the drafter's BF16 linears`.
-- `TF_FLASHNEXT_MTP_WEIGHTS=MXFP8` stops the start before any load: `TF_FLASHNEXT_MTP_WEIGHTS="MXFP8": expected
-  checkpoint or mxfp8 (unset or blank keeps checkpoint, the rows as stored; mxfp8 re-codes the drafter's BF16 linears
-  on CUDA)`.
+- M and U log no re-coding line, and X logs it on every boot.
+- `R1`: `tensorfold: TF_FLASHNEXT_MTP_WEIGHTS="MXFP8": expected checkpoint or mxfp8 (unset or blank keeps checkpoint, the rows as stored; mxfp8 re-codes the drafter's BF16 linears on CUDA, less its two fusion projections and shared expert)`
+- `R2`: boot rc 0, no re-coding line
+- `R3`: boot rc 0, no re-coding line
 
 ## Exactness
 
-`exactness.md`: drafted against `"draft": false`, resumed against fresh and concurrent against solo, on main, the
-branch unset and the branch with `mxfp8`, each with the prompt cache on and off. Every equality holds in every arm, and
-the branch's replies equal main's.
+`exactness.md`: drafted against `"draft": false`, resumed against fresh and concurrent against solo, on every state with the prompt cache on and off, and every reply's token ids against main's.
 
 ## Resident memory
 
-The server's startup line prints `model N GiB`, the engine allocator's device bytes after the weights load
-(`zig/src/native/cuda.zig:344`, two decimals). From the receipt's own boots:
-
-| arm | boots | model, after load | left for streams after the reserve |
-|---|---|---|---|
-| main | M1, M2 | 72.73 GiB, 72.73 GiB | 28.0 GiB, 28.0 GiB |
-| branch, unset (U1) or blank (U2) | U1, U2 | 72.73 GiB, 72.73 GiB | 28.0 GiB, 28.0 GiB |
-| branch, `mxfp8` | X1, X2 | 72.65 GiB, 72.65 GiB | 28.1 GiB, 28.1 GiB |
-
-With `mxfp8` the resident model is 0.08 GiB smaller in both boots, at the line's 0.01 GiB resolution. That is the
-drafter's re-coded linears: 170 MiB of BF16 held as one E4M3 byte a weight and one scale byte a 32, about 88 MiB, so
-about 82 MiB less. The server does not print the drafter's share on its own.
+| state | boots | model GiB after load |
+|---|---|---|
+| main | 6 | 72.71, 72.71, 72.73, 72.73, 72.71, 72.71 |
+| unset | 6 | 72.71, 72.71, 72.73, 72.73, 72.71, 72.71 |
+| mxfp8 | 6 | 72.64, 72.64, 72.67, 72.67, 72.64, 72.64 |
 
 ## Not established
 
-GB10 only. Metal and HIP refusing `mxfp8`, and a CUDA drafter linear stored as anything but BF16 refusing it, are
-covered by host tests, not run on that hardware or on such a checkpoint.
+Metal and HIP refusing `mxfp8`, and a CUDA drafter linear stored as anything but BF16 refusing it, are covered by host tests on this head, not run on that hardware or on such a checkpoint: the checkpoint this window ran keeps BF16 `mtp.*` projection rows.
