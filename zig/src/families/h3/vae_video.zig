@@ -288,10 +288,8 @@ pub const Decoder = struct {
         e.setBuffer(tokens, 0, 3);
         e.setValue([4]u32{ @intCast(voxels), @intCast(channels), @intCast(dim), 0 }, 4);
         e.dispatchThreads(mtl.Size.of(dim, voxels, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-
-        // registers + zero token appended on the CPU after the GPU pass
         e.end();
+
         cb.commit(); cb.wait();
 
         const tokens_host = try gpa.alloc(f32, voxels * dim);
