@@ -4,11 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4-flash on Metal: `tensorfold-native serve` takes Tencent's Hy4-flash (`hy_v4_flash`) 4- and 8-bit MLX checkpoints with DFly2 drafts and contexts to 256K tokens (128K by default); past 2,048 tokens each sparse layer attends the 2,048 keys its compressed indexer recalls, and drafted, resumed and chunked replies equal plain ones (#3941).
+
 - Templates: `str.format()` renders positional fields (`{}`, `{N}`) and the `{{` `}}` escapes as Python does; signed or underscored indexes, keyword, attribute, conversion and spec fields are refused by name (#3816, refs #3801). Thanks to @atakann.
 
 - Qwen3.8-27B on Metal: on Macs with tensor units (M5), drafted decode rounds run two 16-row query tiles in each prefix-attention threadgroup instead of up to six, with the same kernel and the same tokens; Macs without tensor units keep six on a long cache and four otherwise (#3704). Thanks to @mrv777.
-
-
 
 - CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
 
@@ -30,8 +30,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
 
-
-
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
 - CUDA: on a GB10, the one-launch path for two to four affine-4 prompt projections (`tf_qmm_prefill_many`) works out each thread's copy addresses once, before the K loop, instead of at every stage; the copies, their order and the math are unchanged (#2825). Thanks to @GumbiiDigital.
@@ -39,7 +37,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Small: a host-only family package reads its config, checkpoint names and chat template and checks them against fixtures from the published release; nothing serves it yet (#3578, refs #3476). Thanks to @Nipale-ai.
 
 - App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
-- Hy4-flash (`hy_v4_flash`) on Metal: `tensorfold-native serve` takes Tencent's 4- and 8-bit MLX checkpoints with DFly2 drafts, contexts to 256K tokens (128K by default; the compressed indexer recalls 2,048 keys a sparse layer past 2,048 tokens), and a following prompt that starts with the last one's tokens prefills only the rest; Hy4's chat template needs `str.format()` from #3816 (Refs #3797).
 
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.
 
