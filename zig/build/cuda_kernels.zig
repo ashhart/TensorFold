@@ -147,6 +147,13 @@ pub const kernels = [_]Kernel{
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
     .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
+    .{ .name = "hy4_indexpool", .src = "hy4_flash/indexpool", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "affine_experts", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_index_recall", .src = "hy4_flash/index_recall", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_attention_sink", .src = "hy4_flash/attention_sink", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
