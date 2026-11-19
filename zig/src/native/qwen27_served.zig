@@ -345,7 +345,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
     const shared = try q.simd_attention.sharedPrefix(model.device.tensorUnits());
-    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, model.device.tensorUnits(), if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
+    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, shared, if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
     const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
