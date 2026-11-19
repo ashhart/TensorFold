@@ -280,8 +280,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
 }
 
-/// The native Metal server build is owned by the shared Metal target module.
-const nativeServer = metal_build.nativeServer;
+/// The native Metal server build is owned by its own module, like cuda.zig's.
+const nativeServer = @import("zig/build/metal_server.zig").nativeServer;
 
 /// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.
 const metalTargets = metal_build.metalTargets;
