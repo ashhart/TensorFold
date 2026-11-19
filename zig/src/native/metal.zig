@@ -340,16 +340,10 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
-pub const Qwen27Budget = @import("qwen27_reserve.zig").Budget;
-/// What a Qwen3.8-27B-class start keeps free of its working set.
-pub const qwen27_margin = tf.qwen27.prompt_memory.margin;
-
-/// `serve`'s startup charge for a Qwen3.8-27B-class `dir` (no drafter or images); null for others or a refused context.
-pub fn qwen27Budget(a: Allocator, io: std.Io, t: []const u8, dir: []const u8, weights: u64, context: ?i64, streams: u32, fixed: bool, problem: *[]const u8) !?Qwen27Budget {
-    if (!q27_eng.ownsQwen27(a, io, t, dir)) return null;
-    const n = try q27_eng.qwen27Context(a, context, problem) orelse return null;
-    return try @import("qwen27_reserve.zig").budget(a, io, dir, weights, n, streams, fixed);
-}
+const metal_qwen27 = @import("metal_qwen27.zig");
+pub const Qwen27Budget = metal_qwen27.Qwen27Budget;
+pub const qwen27_margin = metal_qwen27.qwen27_margin;
+pub const qwen27Budget = metal_qwen27.qwen27Budget;
 
 /// Qwen3.8-27B, Qwen3.5-MoE and SenseNova-Loop-9B on the lane host.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
