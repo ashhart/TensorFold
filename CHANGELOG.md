@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Code: a GPTQ reader in `core/quant` reads AutoGPTQ v1 4-bit symmetric group-128 weights as stored (`qweight`, fp16 `scales`, a `qzeros` zero point of 8) into an fp64 reference, and refuses every other GPTQ field, rule or tensor by name; host only, with no caller yet (#3611, refs #3368).
+
 - Desktop: an attachment in a saved draft keeps only its original diagnostic, and the reselection guidance is added once when the draft is rendered, so reopening and editing unrelated text no longer stores the composed message as the error; older drafts with repeated guidance show one copy and keep any surviving diagnostic (#3842, fixes #3837). Thanks to @AIFlowML.
 
 - Desktop: turning off `autoCheckUpdates` now cancels the first scheduled update check as well as the recurring interval, and scheduled callbacks recheck the saved setting before calling the feed; a manual check from Settings still works with automatic checks off (#3836, fixes #3833). Thanks to @AIFlowML.
