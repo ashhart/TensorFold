@@ -19,3 +19,4 @@ pub const Projection = m.Projection;
 pub const reg_rows = m.reg_rows;
 pub const max_reg_rows = m.max_reg_rows;
 pub const Sums = m.Sums;
+pub const regOrder8 = m.regOrder8;
