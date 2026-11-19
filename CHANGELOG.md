@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
+
 - Flash Next on HIP: the prompt chunk fallback counts the window plan's slot bytes as used before deciding whether a smaller chunk admits more streams, where it counted them as free and could keep the larger chunk (#3419). Thanks to @gilby.
 
 - DeepSeek-V4.1 on Metal: its GPU work goes through a Metal 4 command queue by default where the Mac has one (macOS 26 and later), with the same kernels in the same order and bit-identical outputs; `TF_METAL4=0` keeps Metal 3, `TF_METAL4_TIMELINE=n` logs per-stage GPU times for n rounds of each kind, and `TF_DSV41_ROUND_PROF=1` logs decode rounds' host and GPU milliseconds (#3374).
