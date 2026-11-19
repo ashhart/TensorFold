@@ -6,6 +6,7 @@ test "qwen27 bank boundary: a pending keep rejects resizing and trimming" {
     var runner: q.decode_round.Runner = undefined;
     runner.failed = false;
     runner.active = @splat(0x17);
+    runner.pending_keep = null;
     runner.gdn.before = null;
     runner.gdn.before_slots = 7;
     const round: q.round_plan.Round = undefined;
@@ -25,9 +26,11 @@ fn unusedTail(ptr: *anyopaque, _: @import("metal").ComputeEncoder) !void {
 test "qwen27 bank boundary: a verify tail cannot run on prompt heads or accepted chains" {
     var model: q.model.Model = undefined;
     model.frame.capacity = 16;
+    model.config.looped = false;
     var runner: q.decode_round.Runner = undefined;
     runner.failed = false;
     runner.active = null;
+    runner.pending_keep = null;
     runner.model = &model;
     var called = false;
     runner.tail = .{ .ptr = &called, .encode = unusedTail };
@@ -35,6 +38,9 @@ test "qwen27 bank boundary: a verify tail cannot run on prompt heads or accepted
     round.ids = @constCast(&[_]u32{0});
     try std.testing.expectError(error.BadVerifyTail, runner.verifyHead(&round, .none));
     try std.testing.expectError(error.BadVerifyTail, runner.advance(&round, .all));
+    model.config.looped = true;
+    try std.testing.expectError(error.BadVerifyTail, runner.verifyHead(&round, .none));
+    try std.testing.expectError(error.BadVerifyTail, runner.advance(&round, .none));
     try std.testing.expect(!called);
 }
 
@@ -56,6 +62,7 @@ test "qwen27 bank boundary: a rank's verify never runs a tail" {
     var runner: q.decode_round.Runner = undefined;
     runner.failed = false;
     runner.active = null;
+    runner.pending_keep = null;
     runner.model = &model;
     var called = false;
     runner.tail = .{ .ptr = &called, .encode = unusedTail };

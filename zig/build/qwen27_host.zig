@@ -10,6 +10,11 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const quant_run = b.addRunArtifact(quant_test);
     test_step.dependOn(&quant_run.step);
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
+    const loop_cfg = b.createModule(.{ .root_source_file = b.path("zig/sensenova_loop_config_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
+    loop_cfg.addImport("core", loop_cfg);
+    const loop_cfg_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_cfg, .filters = &.{"SenseNova loop config table:"} }));
+    test_step.dependOn(&loop_cfg_run.step);
+    b.step("test-sensenova-loop-config-host", "SenseNova loop config table through config reader and Metal admission without a GPU").dependOn(&loop_cfg_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
