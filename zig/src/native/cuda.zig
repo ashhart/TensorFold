@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 pub const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
+pub const requestStepFor = snaps.requestStepFor;
 const prompt_pages = @import("cuda_prompt_pages.zig");
 const slide_adapter = @import("slide_adapter.zig");
 const cuda_disk = @import("cuda_disk.zig");
