@@ -201,3 +201,19 @@ test "prompt MoE precision: every prompt piece through 128 and admitted verify w
     for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
     for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
 }
+
+/// The same scan selected by body, exposed for host launch-contract fixtures.
+pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+    const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
+        1 => e.fns.gdn_slots_1,
+        2 => e.fns.gdn_slots_2,
+        4 => e.fns.gdn_slots_4,
+        8 => e.fns.gdn_slots_8,
+        16 => e.fns.gdn_slots_16,
+        else => return error.InvalidGdnSlots,
+    };
+    const input = e.tables.ptr + @as(usize, if (record) @import("cuda_round.zig").steps_at else rowpar_at);
+    // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
+    const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
+    try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
+}
