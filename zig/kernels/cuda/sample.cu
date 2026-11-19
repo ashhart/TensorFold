@@ -267,7 +267,8 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
         sort_n = 32u;
         while (sort_n < n_near) sort_n <<= 1;
     } else {
-        const Top top = top_keys(r, C, s);
+        const unsigned want = (kw == 0u || kw > C) ? C : kw; // pick() only reads the first top_k candidates
+        const Top top = top_keys(r, want, s);
         if (t == 0) {
             s.fill[0] = 0u;
             s.fill[1] = 0u;
@@ -285,6 +286,8 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
                 s.ci[at] = i;
             }
         }
+        sort_n = 32u;
+        while (sort_n < want) sort_n <<= 1;
         n_cand = top.above + top.need;
     }
     __syncthreads();
