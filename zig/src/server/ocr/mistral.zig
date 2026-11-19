@@ -1,6 +1,7 @@
 //! POST /v1/ocr in Mistral's OCR contract: fields and document, then the page loop (docs/api.md OCR: Mistral).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("../errors.zig");
 const images = @import("../images.zig");
@@ -23,14 +24,15 @@ pub const Options = reply.Options;
 /// The most page entries a ``pages`` value may name before expansion (a range counts its length).
 pub const max_page_entries = 1024;
 
-/// What decoding needs from the server: the PDF switch, the URL fetcher and the page budget.
+/// What decoding needs from the server: the reader's geometry, the PDF switch, the URL fetcher and the page budget.
 pub const Facts = struct {
+    geometry: api.ocr.Geometry,
     pdf: bool,
     fetch: ?images.Fetch,
     pages_left: u32,
 
     pub fn of(srv: *const Server) Facts {
-        return .{ .pdf = srv.config.vision_pdf, .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, .pages_left = budget.Pages.init().left };
+        return .{ .geometry = srv.info.ocr.?.geometry, .pdf = srv.config.vision_pdf, .fetch = if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, .pages_left = budget.Pages.init().left };
     }
 };
 
@@ -98,6 +100,8 @@ pub fn decode(a: Allocator, body: Value, facts: Facts, fault: *Fault) Step!Reque
         const ok = v == .string and (std.mem.eql(u8, v.string, "word") or std.mem.eql(u8, v.string, "page") or std.mem.eql(u8, v.string, "block"));
         if (!ok) return bad(a, fault, &.{ "body", "confidence_scores_granularity" }, "confidence_scores_granularity must be \"word\", \"page\", \"block\" or null", .{});
     }
+    if (facts.geometry == .none and (o.header or o.footer))
+        return bad(a, fault, &.{ "body", if (o.header) "extract_header" else "extract_footer" }, "this model does not mark page headers or footers", .{});
     const pages: ?[]const u32 = if (body.field("pages")) |v| try pageList(a, fault, v, facts.pages_left) else null;
     const bytes = try document(a, fault, body, facts);
     const image = switch (images.sniff(bytes)) {
