@@ -3,7 +3,7 @@
 The native CUDA build serves inclusionAI's Ling-3.1-flash (`bailing_moe_v3`: 63 KDA and 9 MLA layers, 512 routed
 experts) from EXL3 packs on one GPU or on two ranks over hosts, within the checkpoint's native window of 262,144
 positions. Rank 0 serves HTTP and rank 1 follows its steps, as [GLM-5.3-Flash on CUDA](glm-5.3-flash-cuda.md) does.
-The family started from Jürgen Schmied's TP=1 port (#874) and keeps his loader, references and checks.
+The family started from @jschmied's TP=1 port (#874) and keeps his loader, references and checks.
 
 ## What it serves
 
