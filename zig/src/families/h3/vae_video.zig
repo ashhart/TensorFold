@@ -358,7 +358,7 @@ pub const Decoder = struct {
             e.setBuffer(qkv, 0, 2);
             e.setBuffer(attended, 0, 3);
             e.setValue([2]u32{ @intCast(rows), @intCast(head_dim) }, 4);
-            e.dispatchGroups(mtl.Size.of(rows, heads, 1), mtl.Size.of(256, 1, 1));
+            e.dispatchGroups(mtl.Size.of(rows * heads, 1, 1), mtl.Size.of(256, 1, 1));
             e.barrier();
 
             const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);

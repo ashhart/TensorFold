@@ -55,11 +55,11 @@
   const device float* V [[buffer(2)]],
   device float* Y [[buffer(3)]],
   constant uint* P [[buffer(4)]],
-  uint3 tg [[threadgroup_position_in_grid]],
+  uint tg [[threadgroup_position_in_grid]],
   uint tid [[thread_index_in_threadgroup]],
   uint threads [[threads_per_threadgroup]]) {
   const uint rows = P[0], hd = P[1];
-  const uint head = tg.y, r = tg.x;
+  const uint r = tg % rows; const uint head = tg / rows;
   const device float* q = Q + (head * rows + r) * hd;
   threadgroup float acc[256];
   threadgroup float bmax[1];
