@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Muse Spark Open on CUDA: served on two GB10s from a 1.8-bit EXL3 pack with the prompt cache on, on main's shared EXL3 code with its own attention, norm, router and head kernels; any other GPU or number of GPUs is refused by name, and the recipe serves it without a drafter (#1295). Thanks to @ajensenwaud.
+
 - Server: `serve --log-json` writes each request start and end as one compact JSON object on the existing log line, with no keys, headers or bodies; default logs and `/health` stay unchanged (#3195). Thanks to @mvanhorn.
 
 - Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895). Thanks to @Mirrdhyn.
