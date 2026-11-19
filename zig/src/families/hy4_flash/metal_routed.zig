@@ -2,14 +2,14 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
-const affine = @import("row_projection");
-const route = @import("moe_route");
+const affine = @import("../../core/row_projection.zig");
+const route = @import("../../core/moe_route.zig");
 const experts = @import("affine_experts_metal.zig");
 const dense = @import("metal_dense.zig");
 const weights = @import("model_weights.zig");
 const config = @import("config.zig");
 const gpu_experts = @import("metal_tensor_experts.zig");
-const lane = @import("lane_projection");
+const lane = @import("../../core/lane_projection.zig");
 
 const Ref = dense.Ref;
 const RouteRef = @import("draft_ops").Ref;
