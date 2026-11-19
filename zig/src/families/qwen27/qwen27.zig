@@ -65,7 +65,6 @@ test {
     _ = round_plan;
     _ = attention;
     _ = prompt_marks;
-    _ = prompt_tail;
     _ = config;
     _ = affine;
     _ = widths;
