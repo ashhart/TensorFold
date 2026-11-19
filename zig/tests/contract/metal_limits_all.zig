@@ -8,6 +8,8 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     problems += try @import("metal_gemma4_embed.zig").limits(a, device, only);
     problems += try @import("metal_gemma4_mixed.zig").limits(a, device, only);
     problems += try @import("metal_llama_all.zig").limits(a, device, device.tensorUnits(), only);
+    problems += try @import("metal_sensenova_mhc.zig").limits(a, io, device, offline, only);
+    problems += try @import("metal_sensenova_linear.zig").limits(a, device, only);
     return problems;
 }
 
