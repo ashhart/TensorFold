@@ -1,0 +1,40 @@
+LIMITS deviceName="Apple M1 (G13G B1)"
+LIMITS driverName="Honeykrisp" driverInfo="Mesa 26.3.0-devel (git-9323171c12)" subgroupSize=32
+LIMITS maxComputeWorkGroupInvocations=1024 maxComputeWorkGroupSize=1024,1024,64 maxComputeSharedMemorySize=32768
+LIMITS maxStorageBufferRange=2147483647 minStorageBufferOffsetAlignment=16
+PASS limits qmm_bf16: local=256x1x1 invocations=256 shared=0
+PASS limits qmm_q4_vec4: local=256x1x1 invocations=256 shared=0
+PASS limits qmm_q4_tile: local=256x1x1 invocations=256 shared=0
+PASS limits control:qmm_fmax_nonfinite: local=256x1x1 invocations=256 shared=0
+PASS limits control:atomic_sum: local=256x1x1 invocations=256 shared=0
+PASS limits control:scribble_input: local=256x1x1 invocations=256 shared=0
+PASS limits control:drop_tail: local=256x1x1 invocations=256 shared=0
+PASS limits control:fp16_accum: local=256x1x1 invocations=256 shared=0
+PASS limits control:over_limit: local=2048x1x1 invocations=2048 shared=0
+PASS nonfinite vulkan qmm_bf16 affine q4 g64 transposed: 64 non-finite and 16 finite outputs match the float64 classes
+PASS repeat vulkan qmm_bf16 affine q4 g64 transposed: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan qmm_bf16 affine q4 g64 transposed: 15 shapes within the float64 bound (worst 0.990 of the bound), 0 edges refused by the kernel
+PASS sums vulkan qmm_bf16 affine q4 g64 transposed: exact sums at k 6144, where fp16 sums would miss by 5268x and bf16 by 256x
+PASS nonfinite vulkan qmm_q4_vec4 affine q4 g64 transposed: 64 non-finite and 16 finite outputs match the float64 classes
+PASS repeat vulkan qmm_q4_vec4 affine q4 g64 transposed: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan qmm_q4_vec4 affine q4 g64 transposed: 15 shapes within the float64 bound (worst 0.990 of the bound), 0 edges refused by the kernel
+PASS sums vulkan qmm_q4_vec4 affine q4 g64 transposed: exact sums at k 6144, where fp16 sums would miss by 4902x and bf16 by 256x
+PASS nonfinite vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 64 non-finite and 16 finite outputs match the float64 classes
+PASS repeat vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 15 shapes within the float64 bound (worst 0.987 of the bound), 0 edges refused by the kernel
+PASS sums vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: exact sums at k 6144, where fp16 sums would miss by 5756x and bf16 by 256x
+FAIL nonfinite control: qmm fmax drops NaN: 1 of 5 outputs differ in class; first at 0: finite where float64 gives nan
+CONTROL control: qmm fmax drops NaN: red at nonfinite, as planted
+FAIL repeat control: atomic add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: atomic add row sum: red at repeat, as planted
+FAIL repeat control: row sum scribbles input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+CONTROL control: row sum scribbles input: red at repeat, as planted
+FAIL shapes control: row sum drops K tail: at 4x1x4097 output 0 is 8.023634e1 where float64 gives 8.094338e1: 224.57 of its bound
+CONTROL control: row sum drops K tail: red at shapes, as planted
+FAIL sums control: dot accumulates in fp16: infx over its exact-sum bound at k 4096: not fp32 sums (fp16 would miss 33554432x, bf16 16777216x)
+CONTROL control: dot accumulates in fp16: red at sums, as planted
+FAIL repeat control: qmm writes its weights: a run changed its inputs
+CONTROL control: qmm writes its weights: red at repeat, as planted
+FAIL repeat control: qmm writes its biases: a run changed its inputs
+CONTROL control: qmm writes its biases: red at repeat, as planted
+SUMMARY Apple M1 (G13G B1) 3 kernels: 3 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 32345 ms
