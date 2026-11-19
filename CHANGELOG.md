@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Intel Arc (XPU): two or four Level Zero GPUs open as peers in one context, with new peer-to-peer all-reduce collectives (FP16, BF16 and FP32; one shot up to 512 KiB, reduce-scatter then gather above) that sum in fixed rank order for exact bits, and `zig build xpu-tp-bench` builds `tf-xpu-tp-bench` to check and time them; nothing serves through them yet (#3585, part of #3583). Thanks to @supernovae.
+
 - Gemma 4 on Metal: an image input whose tower cannot load is refused cleanly instead of crashing during deinit, and a host test pins that a failed tower load leaves the model with none (#3421). Thanks to @jschmied.
 
 
