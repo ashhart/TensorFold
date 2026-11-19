@@ -176,6 +176,7 @@ test "DeepSeek chat: reply splits, whole and streamed, thinking on and off" {
     try t.expectEqualStrings("", s.content);
     // ended (EOS) before any close: its reasoning text is the answer too
     s = try probe(a, "on/no-close", &.{ .{ .text = "Plan" }, .{ .id = eos } }, true, "");
+    try t.expectEqualStrings("Plan", s.reasoning);
     try t.expectEqualStrings("Plan", s.content);
     // tools attached: a call envelope inside an unclosed block never becomes a call; the reply keeps empty content
     s = try probe(a, "on/no-close-markup", &.{ .{ .text = "Plan<tool_call>[nope" ++ "<" ++ "|tool_call_" ++ "start" ++ "|>[lookup()]" ++ "<" ++ "|tool_call_" ++ "end" ++ "|>" }, .{ .id = eos } }, true, ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}],\"max_tokens\":256");
