@@ -378,6 +378,7 @@ pub const Decoder = struct {
             e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
             e.barrier();
 
+            e.end();
             // residual: tokens += qkv * scale1 (CPU side, small)
             cb.commit(); cb.wait();
             const qkv_host = qkv.slice(f32, rows * dim);
