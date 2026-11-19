@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal before M5: decode rounds read their cached keys through the prefix kernels, as on an M5, and prompt passes size their memory the same way; `TF_QWEN27_SHARED_PREFIX=0` keeps cached keys on the tail kernel (#3677, refs #3604). Thanks to @hobbesd.
+
 - `tensorfold chat`: `tensorfold chat MODEL` starts its own `tensorfold serve` on a free loopback port with a fresh key, streams each reply in the terminal and stops the server when the chat ends, and `--url URL [MODEL]` chats with a running server instead; flags after `--` go to the started server, `/bye`, `/clear`, `/system` and `/help` work in the chat, and piped stdin is sent as one message with only the reply on stdout (#3538).
 
 - Muse Spark Open on CUDA: served on two GB10s from a 1.8-bit EXL3 pack with the prompt cache on, on main's shared EXL3 code with its own attention, norm, router and head kernels; any other GPU or number of GPUs is refused by name, and the recipe serves it without a drafter (#1295). Thanks to @ajensenwaud.
