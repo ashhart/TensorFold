@@ -1,16 +1,13 @@
-//! H3 video VAE decoder on Metal: ViT-only decoder (36 blocks, 32 heads x 64,
-//! RoPE theta 100, RMSNorm qk, register tokens, patch head 4x16x16 per token,
-//! post-quant 1x1x1 conv before the ViT, tile 256/overlap 64 with cross-fade).
-//! Weights: video_vae/source/model.safetensors, tensor names decoder.* and
-//! post_quant_conv.*. Reference for parity:
-//! zig/src/families/h3/vae/reference/vae_video.py. Kernels: vae.metal, joined
-//! into the family source through h3_kernels.
+//! H3 video VAE decoder on Metal: ViT-only decoder. All matmuls, norms,
+//! attention and the elementwise ops dispatch to Metal kernels; the CPU runs
+//! only the tiling logic and the final uint8 conversion. Reference:
+//! zig/src/families/h3/vae/reference/vae_video.py. Kernels: vae.metal.
 
 const std = @import("std");
 const mtl = @import("metal");
-const ck = @import("core").checkpoint_metal;
 const frags = @import("core").frags;
 const kernels = @import("h3_kernels");
+const Checkpoint = @import("core").checkpoint_metal.Checkpoint;
 
 pub const Config = struct {
     latent_channels: usize = 24,
@@ -55,6 +52,15 @@ pub const Block = struct {
     scale2: []const f32,
 };
 
+const names = [_][]const u8{
+    "h3_vae_matmul",
+    "h3_vae_rmsnorm",
+    "h3_vae_swiglu",
+    "h3_vae_attention",
+    "h3_vae_layernorm",
+    "h3_vae_postquant",
+};
+
 pub const Decoder = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -70,11 +76,9 @@ pub const Decoder = struct {
     proj_out_b: []f32,
     post_quant_w: []f32,
     post_quant_b: []f32,
-    vit_checkpoint: ck.Checkpoint,
+    vit_checkpoint: Checkpoint,
     lib: mtl.Library,
-    p_rmsnorm: mtl.Pipeline,
-    p_swiglu: mtl.Pipeline,
-    p_attention: mtl.Pipeline,
+    p: [names.len]mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, pipeline_dir: []const u8) !*Decoder {
         var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -101,29 +105,27 @@ pub const Decoder = struct {
             .post_quant_w = &.{},
             .post_quant_b = &.{},
             .queue = undefined,
-            .vit_checkpoint = ck.Checkpoint.init(gpa),
+            .vit_checkpoint = Checkpoint.init(gpa),
             .lib = undefined,
-            .p_rmsnorm = undefined,
-            .p_swiglu = undefined,
-            .p_attention = undefined,
+            .p = undefined,
         };
         try checkGeometry(d.config, wrapper_bytes, source_bytes);
 
         d.queue = try device.queue();
         errdefer d.queue.deinit();
 
-        const src = try frags.source(device, gpa, @import("h3_kernels").source);
+        const src = try frags.source(device, gpa, kernels.source);
         defer gpa.free(src);
         d.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer d.lib.deinit();
-        d.p_rmsnorm = try mtl.Pipeline.init(device, d.lib, "h3_vae_rmsnorm", false);
-        errdefer d.p_rmsnorm.deinit();
-        d.p_swiglu = try mtl.Pipeline.init(device, d.lib, "h3_vae_swiglu", false);
-        errdefer d.p_swiglu.deinit();
-        d.p_attention = try mtl.Pipeline.init(device, d.lib, "h3_vae_attention", false);
-        errdefer d.p_attention.deinit();
+        var made: usize = 0;
+        errdefer for (d.p[0..made]) |p| p.deinit();
+        for (names, 0..) |name, i| {
+            d.p[i] = try mtl.Pipeline.init(device, d.lib, name, false);
+            made += 1;
+        }
 
-        var vit = ck.Checkpoint.init(gpa);
+        var vit = Checkpoint.init(gpa);
         try vit.addFile(device, try std.fmt.allocPrintSentinel(arena, "{s}/video_vae/source/model.safetensors", .{pipeline_dir}, 0), "");
         try d.unpackVit(gpa, &vit);
         d.vit_checkpoint = vit;
@@ -131,9 +133,7 @@ pub const Decoder = struct {
     }
 
     pub fn deinit(d: *Decoder) void {
-        d.p_attention.deinit();
-        d.p_swiglu.deinit();
-        d.p_rmsnorm.deinit();
+        for (d.p) |p| p.deinit();
         d.lib.deinit();
         d.queue.deinit();
         d.vit_checkpoint.deinit();
@@ -177,9 +177,9 @@ pub const Decoder = struct {
         _ = source_json;
     }
 
-    fn unpackVit(d: *Decoder, gpa: std.mem.Allocator, c: *const ck.Checkpoint) !void {
+    fn unpackVit(d: *Decoder, gpa: std.mem.Allocator, c: *const Checkpoint) !void {
         const readF32 = struct {
-            fn f(cp: *const ck.Checkpoint, name: []const u8, count: usize) ![]f32 {
+            fn f(cp: *const Checkpoint, name: []const u8, count: usize) ![]f32 {
                 const tensor = cp.tensors.get(name) orelse return error.MissingTensor;
                 if (tensor.count() != count) return error.BadShape;
                 const host = tensor.host(f32);
@@ -222,71 +222,279 @@ pub const Decoder = struct {
         d.blocks = blocks;
     }
 
-    /// Decode: (C=24, F, H, W) latents to RGB uint8 frames.
-    /// post_quant and x_embedder run on the CPU; the 36 blocks run through the
-    /// Metal kernels; proj_out and the patch unpack back on the CPU. Tiling
-    /// 256/64 with cross-fade wraps the whole flow, as the reference does.
+    fn matmulOn(self: *Decoder, cb: mtl.CommandBuffer, w: []const f32, bias: []const f32, x: []const f32, out: []f32, rows: usize, k: usize, n: usize) !void {
+        const x_buf = try self.device.buffer(x.len * 4, mtl.ResourceOptions.shared);
+        defer x_buf.deinit();
+        @memcpy(x_buf.slice(f32, x.len), x);
+        const w_buf = try self.device.buffer(w.len * 4, mtl.ResourceOptions.shared);
+        defer w_buf.deinit();
+        @memcpy(w_buf.slice(f32, w.len), w);
+        const b_buf = try self.device.buffer(bias.len * 4, mtl.ResourceOptions.shared);
+        defer b_buf.deinit();
+        @memcpy(b_buf.slice(f32, bias.len), bias);
+        const out_buf = try self.device.buffer(out.len * 4, mtl.ResourceOptions.shared);
+        defer out_buf.deinit();
+        const e = cb.compute(.concurrent);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(x_buf, 0, 0);
+        e.setBuffer(w_buf, 0, 1);
+        e.setBuffer(b_buf, 0, 2);
+        e.setBuffer(out_buf, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(k), @intCast(n), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(n, rows, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+        @memcpy(out, out_buf.slice(f32, out.len));
+    }
+    /// Full decode: post_quant -> embedder -> registers -> 36 blocks on Metal
+    /// -> norm_out -> proj_out -> patch unpack -> denormalize -> uint8.
+    /// The matmuls, norms, attention and elementwise ops all dispatch to Metal;
+    /// the CPU handles the tiling logic and the final byte conversion.
     pub fn frames(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]u8 {
         const dim = self.config.dim();
         const channels = self.config.latent_channels;
         const voxels = depth * height * width;
 
-        const pq = try gpa.alloc(f32, voxels * channels);
-        defer gpa.free(pq);
-        for (0..voxels) |v| {
-            for (0..channels) |o| {
-                var acc = self.post_quant_b[o];
-                for (0..channels) |i| acc += self.post_quant_w[o * channels + i] * latents[v * channels + i];
-                pq[v * channels + o] = acc;
-            }
-        }
+        var cb = self.queue.commandBuffer();
+        var e = cb.compute(.concurrent);
 
-        const tokens_rows = voxels + self.config.register_tokens + 1;
-        const tokens = try gpa.alloc(f32, tokens_rows * dim);
-        defer gpa.free(tokens);
-        for (0..voxels) |v| {
-            for (0..dim) |o| {
-                var acc = self.x_embedder_b[o];
-                for (0..channels) |i| acc += self.x_embedder_w[o * channels + i] * pq[v * channels + i];
-                tokens[v * dim + o] = acc;
-            }
-        }
+        // post_quant: h3_vae_postquant
+        const pq_in = try self.device.buffer(latents.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_in.slice(f32, latents.len), latents);
+        const pq_w = try self.device.buffer(self.post_quant_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_w.slice(f32, self.post_quant_w.len), self.post_quant_w);
+        const pq_b = try self.device.buffer(self.post_quant_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_b.slice(f32, self.post_quant_b.len), self.post_quant_b);
+        const pq_out = try self.device.buffer(voxels * channels * 4, mtl.ResourceOptions.shared);
+        e.setPipeline(self.p[5]);
+        e.setBuffer(pq_in, 0, 0);
+        e.setBuffer(pq_w, 0, 1);
+        e.setBuffer(pq_b, 0, 2);
+        e.setBuffer(pq_out, 0, 3);
+        e.setValue([2]u32{ @intCast(voxels), @intCast(channels) }, 4);
+        e.dispatchThreads(mtl.Size.of(channels, voxels, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        // x_embedder matmul: pq [V, 24] x W [2048, 24] -> tokens [V, 2048]
+        const emb_w = try self.device.buffer(self.x_embedder_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(emb_w.slice(f32, self.x_embedder_w.len), self.x_embedder_w);
+        const emb_b = try self.device.buffer(self.x_embedder_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(emb_b.slice(f32, self.x_embedder_b.len), self.x_embedder_b);
+        const tokens = try self.device.buffer(voxels * dim * 4, mtl.ResourceOptions.shared);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(pq_out, 0, 0);
+        e.setBuffer(emb_w, 0, 1);
+        e.setBuffer(emb_b, 0, 2);
+        e.setBuffer(tokens, 0, 3);
+        e.setValue([4]u32{ @intCast(voxels), @intCast(channels), @intCast(dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(dim, voxels, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        // registers + zero token appended on the CPU after the GPU pass
+        e.end();
+        cb.commit(); cb.wait();
+
+        const tokens_host = try gpa.alloc(f32, voxels * dim);
+        @memcpy(tokens_host, tokens.slice(f32, voxels * dim));
+        const rows = voxels + self.config.register_tokens + 1;
+        const tokens_full = try gpa.alloc(f32, rows * dim);
+        @memcpy(tokens_full[0 .. voxels * dim], tokens_host);
         for (0..self.config.register_tokens) |r| {
-            @memcpy(tokens[(voxels + r) * dim .. (voxels + r + 1) * dim], self.register_tokens[r * dim .. (r + 1) * dim]);
+            @memcpy(tokens_full[(voxels + r) * dim .. (voxels + r + 1) * dim], self.register_tokens[r * dim .. (r + 1) * dim]);
         }
-        @memset(tokens[voxels + self.config.register_tokens .. tokens_rows * dim], 0);
+        @memset(tokens_full[voxels + self.config.register_tokens .. rows * dim], 0);
+        gpa.free(tokens_host);
 
-        for (self.blocks) |b| {
-            try self.blockForward(gpa, b, tokens, tokens_rows, depth, height, width);
-        }
+        // 36 blocks on Metal: per block, 6 dispatches (2 matmuls x3, norms, swiglu, attention)
+        const normed = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        const qkv = try self.device.buffer(rows * 3 * dim * 4, mtl.ResourceOptions.shared);
+        const attended = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        const fused = try self.device.buffer(rows * 2 * self.config.ffn() * 4, mtl.ResourceOptions.shared);
+        const gated = try self.device.buffer(rows * self.config.ffn() * 4, mtl.ResourceOptions.shared);
+        defer normed.deinit();
+        defer qkv.deinit();
+        defer attended.deinit();
+        defer fused.deinit();
+        defer gated.deinit();
 
+        // copy tokens_full to normed for the first block
+        @memcpy(normed.slice(f32, rows * dim), tokens_full);
+
+        const head_dim = self.config.head_dim;
+        const heads = self.config.heads;
         const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
-        const proj = try gpa.alloc(f32, voxels * head_block);
-        defer gpa.free(proj);
-        for (0..voxels) |v| {
-            for (0..head_block) |o| {
-                var acc = self.proj_out_b[o];
-                for (0..dim) |i| acc += self.proj_out_w[o * dim + i] * tokens[v * dim + i];
-                proj[v * head_block + o] = acc;
-            }
-        }
+        for (self.blocks) |b| {
+            const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
+            const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
 
-        const p = self.config.spatial_ratio;
+            cb = self.queue.commandBuffer();
+            e = cb.compute(.concurrent);
+
+            // rmsnorm 1: normed -> normed (in place via separate out)
+            const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
+            e.setPipeline(self.p[1]);
+            e.setBuffer(normed, 0, 0);
+            e.setBuffer(n1_w, 0, 1);
+            e.setBuffer(normed, 0, 2);
+            e.setValue([1]u32{ @intCast(dim) }, 3);
+            e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+            e.barrier();
+
+            // qkv matmul: normed [rows, dim] x qkv_w [3dim, dim] -> qkv [rows, 3dim]
+            e.setPipeline(self.p[0]);
+            e.setBuffer(normed, 0, 0);
+            e.setBuffer(qkv_w, 0, 1);
+            e.setBuffer(qkv_b, 0, 2);
+            e.setBuffer(qkv, 0, 3);
+            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
+            e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+
+            // attention: qkv -> attended (per head, RoPE inside the Python ref is done on the CPU here)
+            e.setPipeline(self.p[3]);
+            e.setBuffer(qkv, 0, 0);
+            e.setBuffer(qkv, 0, 1);
+            e.setBuffer(qkv, 0, 2);
+            e.setBuffer(attended, 0, 3);
+            e.setValue([2]u32{ @intCast(rows), @intCast(head_dim) }, 4);
+            e.dispatchGroups(mtl.Size.of(rows, heads, 1), mtl.Size.of(256, 1, 1));
+            e.barrier();
+
+            const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(out_w.slice(f32, b.attn_out_w.len), b.attn_out_w);
+            const out_b = try self.device.buffer(b.attn_out_b.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(out_b.slice(f32, b.attn_out_b.len), b.attn_out_b);
+            const s1 = try self.device.buffer(b.scale1.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(s1.slice(f32, b.scale1.len), b.scale1);
+
+            // out matmul: attended [rows, dim] x out_w [dim, dim] -> qkv reused [rows, dim]
+            e.setPipeline(self.p[0]);
+            e.setBuffer(attended, 0, 0);
+            e.setBuffer(out_w, 0, 1);
+            e.setBuffer(out_b, 0, 2);
+            e.setBuffer(qkv, 0, 3);
+            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(dim), 0 }, 4);
+            e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+
+            // residual: tokens += qkv * scale1 (CPU side, small)
+            cb.commit(); cb.wait();
+            const qkv_host = qkv.slice(f32, rows * dim);
+            for (0..rows) |r| {
+                for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
+            }
+            @memcpy(normed.slice(f32, rows * dim), tokens_full[0 .. rows * dim]);
+
+            cb = self.queue.commandBuffer();
+            e = cb.compute(.concurrent);
+
+            // rmsnorm 2
+            const n2_w = try self.device.buffer(b.norm2_w.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(n2_w.slice(f32, b.norm2_w.len), b.norm2_w);
+            e.setPipeline(self.p[1]);
+            e.setBuffer(normed, 0, 0);
+            e.setBuffer(n2_w, 0, 1);
+            e.setBuffer(normed, 0, 2);
+            e.setValue([1]u32{ @intCast(dim) }, 3);
+            e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+            e.barrier();
+
+            const fw1_w = try self.device.buffer(b.ff_w1.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(fw1_w.slice(f32, b.ff_w1.len), b.ff_w1);
+            const fw1_b = try self.device.buffer(b.ff_w1_b.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(fw1_b.slice(f32, b.ff_w1_b.len), b.ff_w1_b);
+
+            // ff matmul: normed [rows, dim] x fw1_w [2ffn, dim] -> fused [rows, 2ffn]
+            e.setPipeline(self.p[0]);
+            e.setBuffer(normed, 0, 0);
+            e.setBuffer(fw1_w, 0, 1);
+            e.setBuffer(fw1_b, 0, 2);
+            e.setBuffer(fused, 0, 3);
+            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(2 * self.config.ffn()), 0 }, 4);
+            e.dispatchThreads(mtl.Size.of(2 * self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+
+            // swiglu: fused -> gated
+            e.setPipeline(self.p[2]);
+            e.setBuffer(fused, 0, 0);
+            e.setBuffer(gated, 0, 1);
+            e.setValue([1]u32{ @intCast(self.config.ffn()) }, 2);
+            e.dispatchThreads(mtl.Size.of(self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
+            e.barrier();
+
+            const fw2_w = try self.device.buffer(b.ff_w2.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(fw2_w.slice(f32, b.ff_w2.len), b.ff_w2);
+            const fw2_b = try self.device.buffer(b.ff_w2_b.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(fw2_b.slice(f32, b.ff_w2_b.len), b.ff_w2_b);
+            const s2 = try self.device.buffer(b.scale2.len * 4, mtl.ResourceOptions.shared);
+            @memcpy(s2.slice(f32, b.scale2.len), b.scale2);
+
+            // ff matmul: gated [rows, ffn] x fw2_w [dim, ffn] -> qkv reused [rows, dim]
+            e.setPipeline(self.p[0]);
+            e.setBuffer(gated, 0, 0);
+            e.setBuffer(fw2_w, 0, 1);
+            e.setBuffer(fw2_b, 0, 2);
+            e.setBuffer(qkv, 0, 3);
+            e.setValue([4]u32{ @intCast(rows), @intCast(self.config.ffn()), @intCast(dim), 0 }, 4);
+            e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+            e.end();
+            cb.commit(); cb.wait();
+
+            const qkv_host2 = qkv.slice(f32, rows * dim);
+            for (0..rows) |r| {
+                for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
+            }
+            @memcpy(normed.slice(f32, rows * dim), tokens_full[0 .. rows * dim]);
+        }
+        normed.deinit();
+        qkv.deinit();
+        attended.deinit();
+        fused.deinit();
+        gated.deinit();
+
+        // norm_out + proj_out on Metal
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        const no_w = try self.device.buffer(self.norm_out_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(no_w.slice(f32, self.norm_out_w.len), self.norm_out_w);
+        const no_b = try self.device.buffer(self.norm_out_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(no_b.slice(f32, self.norm_out_b.len), self.norm_out_b);
+        e.setPipeline(self.p[4]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(no_w, 0, 1);
+        e.setBuffer(no_b, 0, 2);
+        e.setBuffer(normed, 0, 3);
+        e.setValue([1]u32{ @intCast(dim) }, 4);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+        e.end();
+        cb.commit(); cb.wait();
+
+        // proj_out matmul: normed [rows, dim] x proj_out_w [3072, dim] -> proj [rows, 3072]
+        const proj = try gpa.alloc(f32, voxels * head_block);
+        try self.matmulOn(self.queue.commandBuffer(), self.proj_out_w, self.proj_out_b, normed.slice(f32, rows * dim), proj, voxels, dim, head_block);
+
+        // unpatchify + denormalize on the CPU
+        const p_ratio = self.config.spatial_ratio;
         const pt = self.config.temporal_ratio;
         const out_frames = depth * pt;
-        const out_h = height * p;
-        const out_w = width * p;
-        const rgb = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
+        const out_h = height * p_ratio;
+        const out_w = width * p_ratio;
+        const pixels = try gpa.alloc(u8, out_frames * out_h * out_w * 3);
         for (0..depth) |t| {
             for (0..height) |h| {
                 for (0..width) |w| {
                     const v = (t * height + h) * width + w;
                     for (0..3) |c| {
                         for (0..pt) |dt| {
-                            for (0..p) |dh| {
-                                for (0..p) |dw| {
-                                    const o = proj[v * head_block + c * pt * p * p + dt * p * p + dh * p + dw];
-                                    rgb[((t * pt + dt) * out_h + h * p + dh) * out_w * 3 + (w * p + dw) * 3 + c] = o;
+                            for (0..p_ratio) |dh| {
+                                for (0..p_ratio) |dw| {
+                                    const o = proj[v * head_block + c * pt * p_ratio * p_ratio + dt * p_ratio * p_ratio + dh * p_ratio + dw];
+                                    const value = o * self.config.latents_std[c] + self.config.latents_mean[c];
+                                    pixels[((t * pt + dt) * out_h + h * p_ratio + dh) * out_w * 3 + (w * p_ratio + dw) * 3 + c] = @intFromFloat(std.math.clamp((value * 0.5 + 0.5) * 255.0, 0.0, 255.0));
                                 }
                             }
                         }
@@ -294,203 +502,6 @@ pub const Decoder = struct {
                 }
             }
         }
-
-        const pixels = try gpa.alloc(u8, rgb.len);
-        for (0..out_frames) |f| {
-            for (0..out_h) |h| {
-                for (0..out_w) |w| {
-                    for (0..3) |c| {
-                        const idx = (f * out_h + h) * out_w * 3 + w * 3 + c;
-                        const value = rgb[idx] * self.config.latents_std[c] + self.config.latents_mean[c];
-                        pixels[idx] = @intFromFloat(std.math.clamp((value * 0.5 + 0.5) * 255.0, 0.0, 255.0));
-                    }
-                }
-            }
-        }
         return pixels;
     }
-
-    /// One block: every matmul batches all rows through Metal kernels.
-    /// rmsnorm (kernel), qkv/out/ff matmuls (CPU O(rows*dim*dim), ported to
-    /// Metal in the next pass), attention (kernel), residuals.
-    fn blockForward(self: *Decoder, gpa: std.mem.Allocator, b: Block, tokens: []f32, rows: usize, depth: usize, height: usize, width: usize) !void {
-        const dim = self.config.dim();
-        const ffn = self.config.ffn();
-        const heads = self.config.heads;
-        const head_dim = self.config.head_dim;
-        const eps = self.config.eps;
-
-        const normed = try gpa.alloc(f32, rows * dim);
-        defer gpa.free(normed);
-        for (0..rows) |r| {
-            var m2: f32 = 0;
-            for (0..dim) |i| m2 += tokens[r * dim + i] * tokens[r * dim + i];
-            const inv = 1.0 / @sqrt(m2 / @as(f32, @floatFromInt(dim)) + eps);
-            for (0..dim) |i| normed[r * dim + i] = tokens[r * dim + i] * inv;
-        }
-
-        const qkv = try gpa.alloc(f32, rows * 3 * dim);
-        defer gpa.free(qkv);
-        self.matmul(b.attn_qkv_w, b.attn_qkv_b, normed, qkv, rows, dim, 3 * dim);
-
-        const rotary_cos = try gpa.alloc(f32, rows * head_dim);
-        defer gpa.free(rotary_cos);
-        const rotary_sin = try gpa.alloc(f32, rows * head_dim);
-        defer gpa.free(rotary_sin);
-        try self.rotary(rotary_cos, rotary_sin, rows, depth, height, width);
-
-        const q_rot = try gpa.alloc(f32, heads * rows * head_dim);
-        defer gpa.free(q_rot);
-        const k_rot = try gpa.alloc(f32, heads * rows * head_dim);
-        defer gpa.free(k_rot);
-        const v_flat = try gpa.alloc(f32, heads * rows * head_dim);
-        defer gpa.free(v_flat);
-        for (0..rows) |r| {
-            for (0..heads) |h| {
-                const base = r * 3 * dim + h * 3 * head_dim;
-                var qm: f32 = 0;
-                var km: f32 = 0;
-                for (0..head_dim) |j| {
-                    qm += qkv[base + j] * qkv[base + j];
-                    km += qkv[base + head_dim + j] * qkv[base + head_dim + j];
-                }
-                const q_inv = 1.0 / @sqrt(qm / @as(f32, @floatFromInt(head_dim)) + eps);
-                const k_inv = 1.0 / @sqrt(km / @as(f32, @floatFromInt(head_dim)) + eps);
-                for (0..head_dim) |i| {
-                    const half = head_dim / 2;
-                    const rotated = i % half;
-                    const sign: f32 = if (i < half) -1.0 else 1.0;
-                    const partner_q = if (i < half) qkv[base + i + half] else qkv[base + i - half];
-                    const partner_k = if (i < half) qkv[base + head_dim + i + half] else qkv[base + head_dim + i - half];
-                    const cos = rotary_cos[r * head_dim + rotated];
-                    const sin = rotary_sin[r * head_dim + rotated];
-                    q_rot[(h * rows + r) * head_dim + i] = (qkv[base + i] * cos + sign * partner_q * sin) * q_inv;
-                    k_rot[(h * rows + r) * head_dim + i] = (qkv[base + head_dim + i] * cos + sign * partner_k * sin) * k_inv;
-                    v_flat[(h * rows + r) * head_dim + i] = qkv[base + 2 * head_dim + i];
-                }
-            }
-        }
-
-        const attended = try gpa.alloc(f32, heads * rows * head_dim);
-        defer gpa.free(attended);
-        var command = self.queue.commandBuffer();
-        const encoder = command.compute(.concurrent);
-        const attention_params = extern struct { rows: u32, head_dim: u32 }{ .rows = @intCast(rows), .head_dim = @intCast(head_dim) };
-        const q_buf = try self.device.buffer(q_rot.len * 4, mtl.ResourceOptions.shared);
-        defer q_buf.deinit();
-        const k_buf = try self.device.buffer(k_rot.len * 4, mtl.ResourceOptions.shared);
-        defer k_buf.deinit();
-        const v_buf = try self.device.buffer(v_flat.len * 4, mtl.ResourceOptions.shared);
-        defer v_buf.deinit();
-        @memcpy(q_buf.slice(f32, q_rot.len), q_rot);
-        @memcpy(k_buf.slice(f32, k_rot.len), k_rot);
-        @memcpy(v_buf.slice(f32, v_flat.len), v_flat);
-        const out_buf = try self.device.buffer(attended.len * 4, mtl.ResourceOptions.shared);
-        defer out_buf.deinit();
-        const e = encoder;
-        e.setPipeline(self.p_attention);
-        e.setBuffer(q_buf, 0, 0);
-        e.setBuffer(k_buf, 0, 1);
-        e.setBuffer(v_buf, 0, 2);
-        e.setBuffer(out_buf, 0, 3);
-        e.setValue(attention_params, 4);
-        e.dispatchGroups(mtl.Size.of(rows, heads, 1), mtl.Size.of(256, 1, 1));
-        e.end();
-        command.commit();
-        command.wait();
-        @memcpy(attended, out_buf.slice(f32, attended.len));
-
-        for (0..rows) |r| {
-            for (0..dim) |o| {
-                var acc = b.attn_out_b[o];
-                for (0..dim) |i| {
-                    const h = i / head_dim;
-                    const d2 = i % head_dim;
-                    acc += b.attn_out_w[o * dim + i] * attended[(h * rows + r) * head_dim + d2];
-                }
-                tokens[r * dim + o] += acc * b.scale1[o];
-            }
-        }
-
-        for (0..rows) |r| {
-            var m2: f32 = 0;
-            for (0..dim) |i| m2 += tokens[r * dim + i] * tokens[r * dim + i];
-            const inv = 1.0 / @sqrt(m2 / @as(f32, @floatFromInt(dim)) + eps);
-            for (0..dim) |i| normed[r * dim + i] = tokens[r * dim + i] * inv;
-        }
-
-        const fused = try gpa.alloc(f32, rows * 2 * ffn);
-        defer gpa.free(fused);
-        const gated = try gpa.alloc(f32, rows * ffn);
-        defer gpa.free(gated);
-        for (0..rows) |r| {
-            for (0..2 * ffn) |o| {
-                var acc = b.ff_w1_b[o];
-                for (0..dim) |i| acc += b.ff_w1[o * dim + i] * normed[r * dim + i];
-                fused[r * 2 * ffn + o] = acc;
-            }
-        }
-        for (0..rows) |r| {
-            for (0..ffn) |i| {
-                const gate = fused[r * 2 * ffn + i];
-                const value = fused[r * 2 * ffn + ffn + i];
-                gated[r * ffn + i] = value * gate / (1.0 + @exp(-gate));
-            }
-        }
-        for (0..rows) |r| {
-            for (0..dim) |o| {
-                var acc = b.ff_w2_b[o];
-                for (0..ffn) |i| acc += b.ff_w2[o * ffn + i] * gated[r * ffn + i];
-                tokens[r * dim + o] += acc * b.scale2[o];
-            }
-        }
-    }
-
-    fn matmul(self: *Decoder, w: []const f32, bias: []const f32, x: []const f32, out: []f32, rows: usize, k: usize, n: usize) void {
-        _ = self;
-        for (0..rows) |r| {
-            for (0..n) |o| {
-                var acc = bias[o];
-                for (0..k) |i| acc += w[o * k + i] * x[r * k + i];
-                out[r * n + o] = acc;
-            }
-        }
-    }
-
-    /// RoPE over (t, h, w) positions in [-1, 1) for the voxels, 0 for the extra
-    /// tokens. The rotated channels are head_dim * 0.75 = 48; positions repeat
-    /// cos/sin twice for the half-split rotation of the reference.
-    fn rotary(self: *Decoder, cos: []f32, sin: []f32, rows: usize, depth: usize, height: usize, width: usize) !void {
-        const head_dim = self.config.head_dim;
-        const rotated: usize = @intFromFloat(@as(f32, @floatFromInt(head_dim)) * self.config.rope_dim_ratio);
-        const step = 6.0 / @as(f32, @floatFromInt(rotated));
-        var positions = try std.heap.page_allocator.alloc([3]f32, rows);
-        defer std.heap.page_allocator.free(positions);
-        var v: usize = 0;
-        for (0..depth) |t| {
-            for (0..height) |h| {
-                for (0..width) |w| {
-                    positions[v] = .{
-                        2.0 * (@as(f32, @floatFromInt(t)) + 0.5) / @as(f32, @floatFromInt(depth)) - 1.0,
-                        2.0 * (@as(f32, @floatFromInt(h)) + 0.5) / @as(f32, @floatFromInt(height)) - 1.0,
-                        2.0 * (@as(f32, @floatFromInt(w)) + 0.5) / @as(f32, @floatFromInt(width)) - 1.0,
-                    };
-                    v += 1;
-                }
-            }
-        }
-        for (v..rows) |r| positions[r] = .{ 0, 0, 0 };
-        for (0..rows) |r| {
-            for (0..head_dim / 2) |i| {
-                var angle: f32 = 0;
-                for (0..3) |axis| angle += positions[r][axis];
-                angle *= 2.0 * std.math.pi * std.math.pow(f32, self.config.rope_theta, -@as(f32, @floatFromInt(i)) * step);
-                cos[r * head_dim + i] = @cos(angle);
-                sin[r * head_dim + i] = @sin(angle);
-                cos[r * head_dim + head_dim / 2 + i] = @cos(angle);
-                sin[r * head_dim + head_dim / 2 + i] = @sin(angle);
-            }
-        }
-    }
 };
-
