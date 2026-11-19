@@ -274,8 +274,8 @@ pub const Model = struct {
             .qg = c.quant.global.group,
             .emb8 = e8,
         };
-        // embed4 and the tied head read rows below V unchecked: [V, H / 8] words, [V, H / 64] bf16 scales and biases
-        if (m.emb.w.len != V * (H / 8) * 4 or m.emb.s.len != V * (H / 64) * 2 or m.emb.b.len != m.emb.s.len) return error.UnexpectedShape;
+        // Both embedding kernels and their tied heads read rows below V unchecked; validate their packed widths.
+        if (m.emb.w.len != V * H / (if (e8) @as(usize, 1) else 2) or m.emb.s.len != V * H / (if (e8) @as(usize, 32) else 64) * 2 or m.emb.b.len != m.emb.s.len) return error.UnexpectedShape;
         m.fuse = try @import("sys").environment.read(u32, "LFM3_FUSE", m.fuse);
         m.own = try m.newSeq();
         m.seq = m.own;
