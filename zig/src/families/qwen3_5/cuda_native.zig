@@ -69,11 +69,21 @@ pub const request_starts_default_on = true;
 pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
 
 /// Message starts are the default for this family; its switch set to anything but 1 turns them off.
+/// With shared KV on, unset keeps main's behavior (starts off, no refusal); only explicit 1 refuses.
 /// Same contract as native/cuda_snaps.zig's requestStepFor; the module boundary keeps that file out
 /// of reach here, and both sides are pinned by host tests.
 pub fn requestStartsOn() bool {
-    const v = @import("core").profile.lookup(request_starts_switch) orelse return request_starts_default_on;
+    const v = @import("core").profile.lookup(request_starts_switch) orelse {
+        if (sharedKvSet()) return false;
+        return request_starts_default_on;
+    };
     return std.mem.eql(u8, v, "1");
+}
+
+fn sharedKvSet() bool {
+    const kv_share = @import("core").profile.lookup("TF_QWEN_KV_SHARE") orelse return false;
+    const snaps = std.fmt.parseInt(usize, kv_share, 10) catch return false;
+    return snaps > 0;
 }
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
