@@ -154,9 +154,11 @@ pub const Generation = struct {
         var answer = text;
         var thought: []const u8 = "";
         if (g.thinking or g.recipient != null) {
-            const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
-            const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
-            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else blk: {
+                const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
+                const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
+                break :blk try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+            };
             thought = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (thought.len > 0) try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), thought);
             answer = split.answer;
