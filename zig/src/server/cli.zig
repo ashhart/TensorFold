@@ -493,9 +493,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) {
-        out.parallel, out.parallel_named = .{ v, true };
-    } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -585,7 +583,6 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
 pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
-
 /// The CUDA build's and GPU engine's flag parsers (cli_gpu_flags.zig).
 pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
 pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;

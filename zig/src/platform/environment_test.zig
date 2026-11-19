@@ -470,4 +470,3 @@ test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank ke
         try t.expect(std.mem.indexOf(u8, why, "or auto") != null);
     }
 }
-}
