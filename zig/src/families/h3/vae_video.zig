@@ -166,6 +166,28 @@ pub const Decoder = struct {
         if (wrapper.value.object.get("vae_clip_length")) |v| {
             if (v == .integer) c.clip_length = @intCast(v.integer);
         }
+        if (wrapper.value.object.get("latents_mean")) |v| {
+            if (v == .array) {
+                const arr = v.array;
+                const mean = try arena.alloc(f32, arr.items.len);
+                for (arr.items, 0..) |item, i| {
+                    if (item == .float) mean[i] = @floatCast(item.float);
+                    if (item == .integer) mean[i] = @floatFromInt(item.integer);
+                }
+                c.latents_mean = mean;
+            }
+        }
+        if (wrapper.value.object.get("latents_std")) |v| {
+            if (v == .array) {
+                const arr = v.array;
+                const std_arr = try arena.alloc(f32, arr.items.len);
+                for (arr.items, 0..) |item, i| {
+                    if (item == .float) std_arr[i] = @floatCast(item.float);
+                    if (item == .integer) std_arr[i] = @floatFromInt(item.integer);
+                }
+                c.latents_std = std_arr;
+            }
+        }
         if (wrapper.value.object.get("vae_token_drop")) |v| {
             if (v == .integer) c.token_drop = @intCast(v.integer);
         }
@@ -349,7 +371,6 @@ pub const Decoder = struct {
 
     /// One piece (clip x tile) through the full ViT pass on Metal.
     fn decodePiece(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize, out_rgb_bytes: []u8) !void {
-        _ = out_rgb_bytes;
         const dim = self.config.dim();
         const voxels = depth * height * width;
         const rows = voxels + self.config.register_tokens + 1;
@@ -527,6 +548,7 @@ pub const Decoder = struct {
         fused.deinit();
         gated.deinit();
         std.debug.print("stage: 36 blocks done", .{});
+        const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
 
         const normed2 = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
         // Stage 5: layernorm + proj_out on Metal
@@ -548,6 +570,52 @@ pub const Decoder = struct {
         no_w.deinit(); no_b.deinit();
         std.debug.print("stage: norm_out done", .{});
 
+        // Stage 7: proj_out on device, then the GPU unpatch kernel to RGB bytes.
+        const proj_dev = try self.device.buffer(voxels * head_block * 4, mtl.ResourceOptions.shared);
+        const w_buf = try self.device.buffer(self.proj_out_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(w_buf.slice(f32, self.proj_out_w.len), self.proj_out_w);
+        const b_buf = try self.device.buffer(self.proj_out_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(b_buf.slice(f32, self.proj_out_b.len), self.proj_out_b);
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(normed2, 0, 0);
+        e.setBuffer(w_buf, 0, 1);
+        e.setBuffer(b_buf, 0, 2);
+        e.setBuffer(proj_dev, 0, 3);
+        e.setValue([4]u32{ @intCast(voxels), @intCast(dim), @intCast(head_block), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(head_block, voxels, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+        w_buf.deinit(); b_buf.deinit();
+
+        const mean_dev = try self.device.buffer(24 * 4, mtl.ResourceOptions.shared);
+        const std_dev = try self.device.buffer(24 * 4, mtl.ResourceOptions.shared);
+        const mean_h = mean_dev.slice(f32, 24);
+        const std_h = std_dev.slice(f32, 24);
+        for (0..24) |i| {
+            mean_h[i] = self.config.latents_mean[i];
+            std_h[i] = self.config.latents_std[i];
+        }
+        const out_frames = depth * 4;
+        const out_h = height * 16;
+        const out_w = width * 16;
+        const rgb_dev = try self.device.buffer(out_frames * out_h * out_w * 3, mtl.ResourceOptions.shared);
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        e.setPipeline(self.p[6]);
+        e.setBuffer(proj_dev, 0, 0);
+        e.setBuffer(mean_dev, 0, 1);
+        e.setBuffer(std_dev, 0, 2);
+        e.setBuffer(rgb_dev, 0, 3);
+        e.setValue([5]u32{ @intCast(depth), @intCast(height), @intCast(width), @intCast(out_w * 3), @intCast(head_block) }, 4);
+        e.dispatchThreads(mtl.Size.of(out_w * 3, out_h, out_frames), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+        mean_dev.deinit(); std_dev.deinit();
+        const rgb_bytes = rgb_dev.slice(u8, out_frames * out_h * out_w * 3);
+        @memcpy(out_rgb_bytes, rgb_bytes);
+        rgb_dev.deinit(); proj_dev.deinit();
         std.debug.print("gpu unpatch done", .{});
     }
 };
