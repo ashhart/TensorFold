@@ -4,13 +4,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
+
 - Build: `zig build test test-golden` runs on a Mac with only the Command Line Tools: without Xcode's offline Metal compiler it warns once and embeds empty offline metallibs for the tests, and `zig build native` and the programs that embed those libraries stop with "install Xcode" instead of building a broken binary (#3923). Thanks to @plotarmordev.
 
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
-
-
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
@@ -378,8 +378,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
 - LFM2.5 on CUDA: attention pages come from the shared KV pool and chat states are kept in the prompt cache, with the kept states' copies off the first token's path; replies are unchanged (#1503). Thanks to @jschmied.
-
-- GLM-5.3-Flash on CUDA at worlds where a rank's fused KDA input is not eight columns wide (TP=3's 8,726 and 8,341): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles instead of `tf_glm_bmm_rows`. Every byte is as before at every row count (a device check compares them); on three GB10s at TP=3 a cold 7.2K prompt's first token comes 10% sooner and a 28.8K one 11%, decode level. `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516).
 
 - Environment: the Metal Qwen KV paging and slot-resume switches and the slide checks refuse a malformed value by name, and `TF_SLIDE_TAKE_OUT_CHECK` is read once at start with `--slide` (#3018, for #2370).
 
