@@ -63,6 +63,13 @@ fn split(a: std.mem.Allocator, input: Input, count: usize) !Weights {
     return .{ .key = keys, .value = values };
 }
 
+/// Split contiguous BF16 kv_b rows for the selected heads without changing their values.
+pub fn splitBf16(a: std.mem.Allocator, raw: []const u8, count: usize) !Weights {
+    if (count == 0 or count > 64 or raw.len != count * per_head * latent * 2)
+        return error.BadHy4MlaWeight;
+    return split(a, .{ .bf16 = raw }, count);
+}
+
 /// The owning rank reads only its selected heads. DFly2 reads its own BF16 projection when sharing target KV.
 pub fn read(a: std.mem.Allocator, model: *loader.Loaded, kind: loader.Attention, layer: u32, range: HeadRange) !Weights {
     const index = try model.attentionTargetLayer(kind, layer);
@@ -88,7 +95,7 @@ pub fn read(a: std.mem.Allocator, model: *loader.Loaded, kind: loader.Attention,
         .draft => {
             const raw = try model.checkpoint.expect(weight_key, .bf16, &.{ rows, latent });
             const selected = try core.quant.slice.takeRows(a, raw, &.{span});
-            return split(a, .{ .bf16 = selected.bytes }, range.count);
+            return splitBf16(a, selected.bytes, range.count);
         },
         .target => {
             const word_count = latent * @as(usize, model.bits) / 32;
