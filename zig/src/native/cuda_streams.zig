@@ -58,10 +58,30 @@ pub fn shareSlots(share: bool, snap_bytes: u64, host_cache: bool) !?usize {
     return if (share and snap_bytes > 0 and !host_cache) try @import("core").kv_prompts.sharing() else null;
 }
 
+/// Admission grows into the room unless the family made its streams at open (`lanes`) and reserves none (`reserve`).
+fn grows(comptime F: type, comptime L: type) bool {
+    return !@hasField(F.Options, "lanes") or @hasField(L, "reserve");
+}
+
+test "admission room: lanes made at open take none, streams reserved after admission take the room" {
+    const Lanes = struct {
+        pub const Options = struct { lanes: u32 = 1 };
+    };
+    const Plain = struct {
+        pub const Options = struct { context: usize = 0 };
+    };
+    const AtOpen = struct { free_streams: u32 };
+    const Reserved = struct { free_streams: u32 = 0, reserve: *const fn (*anyopaque, u32) anyerror!void };
+    try std.testing.expect(!grows(Lanes, AtOpen));
+    try std.testing.expect(grows(Lanes, Reserved));
+    try std.testing.expect(grows(Plain, AtOpen));
+    try std.testing.expect(grows(Plain, Reserved));
+}
+
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
 pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Budget, problem: *[]const u8) !?Count {
     const free = loaded.free_streams;
-    const grow = budget.growRoom(b.room, !@hasField(F.Options, "lanes"));
+    const grow = budget.growRoom(b.room, grows(F, @TypeOf(loaded)));
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
     if (wrapped.layout) |l| {
         const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state
