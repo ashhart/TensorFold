@@ -1,6 +1,6 @@
 //! The single-reply host offers only landed prompt state to the same cancellation hook as lane backends.
 const std = @import("std");
-const lanes = @import("lanes");
+const lanes = @import("tensorfold").lanes;
 const Mark = *const fn (*anyopaque, usize) void;
 
 const Bridge = struct {
