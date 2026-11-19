@@ -4,9 +4,7 @@ const api = @import("engine_api");
 const kv_pool = @import("core").kv_pool;
 const budget = @import("cuda_memory.zig");
 const Allocator = std.mem.Allocator;
-
 pub const Plan = kv_pool.Plan;
-
 /// A family whose other streams take pages (Nemotron's) names their layout; any other allocates a window each (null).
 pub fn layout(loaded: anytype) ?kv_pool.Layout {
     return if (comptime @hasField(@TypeOf(loaded), "layout")) loaded.layout else null;
@@ -106,7 +104,6 @@ test "a wrapped family's plan: drafter buffers a stream, a first window without 
     try std.testing.expectEqual(@as(u64, 370), served(outside, 0, 500, 530, 1000, true).room);
     try std.testing.expectEqual(@as(u64, 470), served(outside, 0, 500, 530, 1000, false).room);
 }
-
 /// served() on the family's layout; a family that places a drafter's buffers itself (pagedLayout) plans it again.
 pub fn wrapped(comptime F: type, loaded: anytype, free: u32, stream_bytes: u64, room: u64) @TypeOf(served(null, 0, 0, 0, 0, false)) {
     const own = comptime @hasDecl(F, "pagedLayout");
