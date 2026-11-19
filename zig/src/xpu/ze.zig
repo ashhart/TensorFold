@@ -362,8 +362,8 @@ pub const Gpu = struct {
         try check(gpus[0].api.zeEventPoolCreate(gpus[0].context, &.{ .flags = pool_host_visible, .count = @intCast(out_events.len) }, @intCast(gpus.len), &devs, &pool));
         _ = try keep(&gpus[0].owned.pools, pool, gpus[0].api.zeEventPoolDestroy);
         for (out_events, 0..) |*e, i| {
-            // signal=1 (DEVICE), wait=1 (DEVICE): cross-GPU synchronization without host round-trips
-            try check(gpus[0].api.zeEventCreate(pool, &.{ .index = @intCast(i), .signal = 1, .wait = 1 }, e));
+            // signal=2, wait=2 (ZE_EVENT_SCOPE_FLAG_DEVICE): peer cards wait on these, without host round-trips
+            try check(gpus[0].api.zeEventCreate(pool, &.{ .index = @intCast(i), .signal = 2, .wait = 2 }, e));
             _ = try keep(&gpus[0].owned.events, e.*, gpus[0].api.zeEventDestroy);
         }
     }
