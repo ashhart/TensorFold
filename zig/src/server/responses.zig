@@ -299,11 +299,7 @@ pub const Reply = struct {
             try r.put(item, "id", .{ .string = ids.derived(r.a, r.call_ids.key, "fc_", 32, call_id) catch return error.Closed });
             try r.put(item, "type", .{ .string = "function_call" });
             try r.put(item, "call_id", .{ .string = call_id });
-            // the engine's flat name is the child's own name plus its group, as the request declared them
-            if (translate_mod.childName(r.a, r.base.get("tools"), name)) |child| {
-                try r.put(item, "name", .{ .string = child.name });
-                try r.put(item, "namespace", .{ .string = child.namespace });
-            } else try r.put(item, "name", .{ .string = name });
+            translate_mod.writeCallName(r.a, item, r.base.get("tools"), name) catch return error.Closed;
             try r.put(item, "arguments", .{ .string = "" });
             try r.put(item, "status", .{ .string = "in_progress" });
         }
