@@ -14,13 +14,10 @@ const rope = @import("rope.zig");
 
 pub const Ref = common.Ref;
 
-/// TF_HY4_DRAFT_BITS=4 or 8 quantizes DFly2's BF16 linears at load (MLX affine, groups of 64) so they run on the
-/// target's row kernels, one weight read a block. The draft only proposes: the target verifies every token, so the
-/// output is unchanged and only acceptance can move. Unset or 16 keeps BF16.
-fn draftBits() ?u8 {
-    const v = std.c.getenv("TF_HY4_DRAFT_BITS") orelse return null;
-    const bits = std.fmt.parseInt(u8, std.mem.span(v), 10) catch return null;
-    return if (bits == 4 or bits == 8) bits else null;
+/// TF_HY4_DRAFT_BITS=4 or 8 quantizes DFly2's BF16 linears at load (MLX affine
+fn draftBits() !?u8 {
+    const bits = try @import("sys").environment.read(u32, "TF_HY4_DRAFT_BITS", 16);
+    return if (bits == 16) null else @intCast(bits);
 }
 
 fn bf16Round(x: f32) u16 {
@@ -32,8 +29,7 @@ fn bf16Value(w: u16) f32 {
     return @bitCast(@as(u32, w) << 16);
 }
 
-/// MLX affine quantization of a BF16 [n, k] matrix: per group of 64 a bf16 scale and bias (the group's minimum),
-/// codes round((w - bias) / scale), packed low bits first into u32 words.
+/// MLX affine quantization of a BF16 [n, k] matrix
 fn quantize(b: *common.Buffers, bytes: []const u8, n: u32, k: u32, bits: u8) !affine.Weights {
     const group = 64;
     const groups = k / group;
@@ -83,7 +79,7 @@ const Linear = struct {
     fn upload(b: *common.Buffers, t: @import("core").checkpoint_host.Tensor) !Linear {
         const n: u32 = @intCast(t.shape[0]);
         const k: u32 = @intCast(t.shape[1]);
-        if (draftBits()) |bits| if (k % 512 == 0 and n % 8 == 0) {
+        if (try draftBits()) |bits| if (k % 512 == 0 and n % 8 == 0) {
             if (quantize(b, t.bytes, n, k, bits)) |q| return .{ .w = null, .q = q, .n = n, .k = k } else |_| {}
         };
         return .{ .w = try b.upload(t.bytes), .n = n, .k = k };

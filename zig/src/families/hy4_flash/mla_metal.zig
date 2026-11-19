@@ -42,10 +42,6 @@ pub const Nax = struct {
     }
 
     /// Flash attention over contiguous key ranges: out [rows][heads][512] from the absorbed queries and the cache.
-    /// Decode passes (one row block) split the keys over up to 8 threadgroups a head (a run of 4+ tiles each) and
-    /// join them in a second launch (TF_HY4_FLASH_SPLIT=N fixes N, 1 turns it off).
-    /// A split a 32-key tile, up to max_splits (two tiles already run faster split and joined than in one
-    /// threadgroup); with the live key count unknown, a split every 128 keys of the stride.
     fn splits(shape: attention.Shape, has_parts: bool, live_keys: u32) u32 {
         _ = .{ shape, has_parts, live_keys };
         return 1; // row-invariant bits: a split count from the pass's widest row would change other rows' sums
@@ -86,8 +82,7 @@ pub const Nax = struct {
     }
 };
 
-/// Each row's keys as one range of key indices [lo, hi) (u32 pairs), and each 32-key tile's first slot: the flash
-/// kernel's inputs when every row attends a contiguous run of keys (prompt chunks, sliding windows, short contexts).
+/// Each row's keys as one range of key indices [lo, hi) (u32 pairs), and each 32-key tile's first slot
 pub const KeyRanges = struct { ranges: Ref, tiles: Ref };
 
 pub const Projections = struct {
@@ -221,8 +216,7 @@ pub const Attention = struct {
         flash_parts: ?Ref = null,
         /// The widest row's live key count (0: unknown, the key stride sizes the split).
         live_keys: u32 = 0,
-        /// A pass across 2,048 keys: rows before this one take the flash kernel over `ranges`, as they would in any
-        /// other pass, and the rest their recalled slot lists.
+        /// A pass across 2,048 keys: rows before this one take the flash kernel over `ranges`
         lists_from: ?u32 = null,
     };
 
@@ -291,23 +285,7 @@ pub const KvInput = struct {
 };
 
 /// Decode passes (at most 4 rows): absorb and expand-and-gate as GEMVs over the checkpoint's affine kv_b codes
-/// (fp32 dequant on the fly, a quarter of the BF16 copies' bytes at 4 bits).
-pub const Quantized = struct {
-    absorb: mtl.Pipeline,
-    expand: mtl.Pipeline,
-    words: Ref,
-    scales: Ref,
-    biases: Ref,
-
-    fn bind(q: Quantized, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, input: Ref, output: Ref, rows: u32, heads: u32) void {
-        e.setPipeline(pipe);
-        for ([_]Ref{ input, q.words, q.scales, q.biases, output }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
-        e.setValue([2]u32{ rows, heads }, 5);
-    }
-};
-
 pub const MlaPass = struct {
-    quantized: ?Quantized = null,
     query: Ref,
     key_weights: Ref,
     value_weights: Ref,
@@ -328,11 +306,7 @@ pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b
     try shape.check();
     if (b.kv) |kv| try (attention.CacheWrite{ .rows = shape.rows, .capacity = kv.capacity, .epsilon = kv.epsilon }).check();
     project.rotaryTable(e, b.positions, b.rotary_table, shape.rows, p);
-    if (b.quantized) |q| {
-        if (shape.rows > 4) return error.BadHy4QuantizedMlaRows;
-        q.bind(e, q.absorb, b.query, b.attention.query, shape.rows, shape.heads);
-        e.dispatchGroups(mtl.Size.of(weights.latent / 256, shape.heads, 1), mtl.Size.of(256, 1, 1));
-    } else if (project.nax) |n|
+    if (project.nax) |n|
         Nax.run(n.absorb, e, &.{ b.query, b.key_weights, b.attention.query }, shape.rows, shape.heads, weights.latent / 128)
     else
         try project.absorb(e, b.query, b.key_weights, b.attention.query, shape.rows, shape.heads);
@@ -372,12 +346,6 @@ pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b
     } else try attend.attend(e, b.attention, shape) else try attend.attend(e, b.attention, shape);
     e.barrier();
     if (shape.heads > 64) return error.BadHy4GateShape;
-    if (b.quantized) |q| {
-        q.bind(e, q.expand, b.attention.output, b.values, shape.rows, shape.heads);
-        e.setBuffer(b.value_logits.buffer, b.value_logits.offset, 6);
-        e.dispatchGroups(mtl.Size.of(weights.value_width / 8, shape.heads, 1), mtl.Size.of(128, 1, 1));
-        return;
-    }
     if (project.nax) |n| return Nax.run(n.expand, e, &.{ b.attention.output, b.value_weights, b.values, b.value_logits }, shape.rows, shape.heads, weights.value_width / 128);
     e.setPipeline(project.expand_gated);
     for ([_]Ref{ b.attention.output, b.value_weights, b.values }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);

@@ -1,4 +1,4 @@
-//! The engine's lane_projection for the Hy4-flash family files, which import it by name (the speed probe builds it alone).
+//! The engine's lane_projection for the Hy4-flash family files
 const m = @import("tensorfold").lane_projection;
 pub const frags = m.frags;
 pub const affine_mm = m.affine_mm;

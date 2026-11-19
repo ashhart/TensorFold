@@ -117,9 +117,7 @@ kernel void tf_hy4_engram_apply(
     }
 }
 
-// Engram tables resident in GPU memory: each cell's affine code times its group's scale, plus the bias (two fp32
-// roundings, as the host's dequant does), rounded to BF16 ties-to-even as the host's gather writes it, so every
-// placement stages the same bits. rows[token * 16 + column] = table row; out [token][column][96]; a.x bits, a.y cells.
+// Engram tables resident in GPU memory: each cell's affine code times its group's scale
 inline ushort hy4_engram_round(float v) {
     const uint u = as_type<uint>(v);
     if ((u & 0x7fffffffu) > 0x7f800000u) return ushort((u >> 16) | 0x40u);

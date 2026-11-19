@@ -193,6 +193,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_QD", .scope = .dsv41, .kind = .u32, .forms = "a whole reader-thread count from 0 to 4294967295 (0 reads serially)" },
     .{ .name = "TF_DSV41_ENGRAM_READERS", .scope = .dsv41, .kind = .u32, .max = 32, .forms = "a whole reader-thread count from 0 to 32 (0 reads serially)" },
     .{ .name = "TF_DSV41_GEN_STREAMS", .scope = .dsv41, .kind = .size, .min = 1, .forms = "a whole request count from 1 to the native size maximum" },
+    .{ .name = "TF_HY4_ENGRAM", .scope = .metal, .kind = .word, .words = &.{ "nvme", "ram", "gpu" }, .forms = "nvme, ram or gpu (where Hy4-flash's Engram tables live; default nvme)" },
+    .{ .name = "TF_HY4_DRAFT_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 8, 16 }, .forms = "4, 8 or 16 (Hy4-flash's DFly2 linears quantized at load; default 16, BF16)" },
     .{ .name = "TF_DSV41_CONTEXT", .scope = .dsv41, .kind = .u64, .min = 1, .max = std.math.maxInt(i64), .forms = "a whole position count from 1 to 9223372036854775807" },
     .{ .name = "TF_DSV41_SLOTS", .scope = .dsv41, .kind = .u32, .min = 1, .max = 16, .forms = "a whole slot count from 1 to 16" },
     .{ .name = "TF_DSV41_NUCLEUS", .scope = .dsv41, .kind = .u32, .forms = "a whole candidate count from 0 to 4294967295 (0 disables the nucleus)" },

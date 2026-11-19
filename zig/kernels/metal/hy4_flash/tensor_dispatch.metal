@@ -35,11 +35,7 @@ kernel void tf_hy4_active_experts(
     for (uint i = 0; i < n; ++i) order[base + i] = members[t * shape.y + i];
 }
 
-// A prompt chunk's (row, pick) pairs grouped by expert for the gathers: job e is expert e (ids the identity), its
-// pairs in pair order, as the router's per-window grouping orders them. Every row's picks are distinct experts, so
-// a pair's rank in its expert is the earlier rows of the chunk that picked it: whole 64-row blocks by count, then
-// the pair's own block by its rows' expert bitmaps. One threadgroup of 1024 threads; a.x pairs (topk a row, rows at
-// most 512), a.y experts (at most 512), a.z topk.
+// A prompt chunk's (row, pick) pairs grouped by expert for the gathers
 kernel void tf_hy4_group_pairs(
     const device int* pick [[buffer(0)]], device int* offsets [[buffer(1)]], device int* order [[buffer(2)]],
     device int* ids [[buffer(3)]], constant uint3& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
