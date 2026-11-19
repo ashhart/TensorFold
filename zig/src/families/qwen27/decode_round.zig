@@ -38,7 +38,6 @@ pub fn setFlatGlue(on: bool) void {
     @import("core_delta").flat_glue = on;
     @import("core").tree_round_gpu.chunked_picks = on;
 }
-
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
