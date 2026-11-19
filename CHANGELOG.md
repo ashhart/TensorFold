@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on CUDA: with a 4-bit tied embedding, token rows are read from the tied head's 4-bit tiles and the stored embedding table is no longer loaded, so the table is held on the device once; other embedding widths keep the stored table, and replies are unchanged (#3471). Thanks to @jschmied.
+
 - Docs: the Qwen3.8-27B recipe pulls the checkpoint and its drafter one repository at a time, since the native `pull` takes one (#3982). Thanks to @jayleaton.
 
 - Docs: the Nemotron 3.5 recipe gives the pull and serve commands for NVIDIA's NVFP4 export of Lightning, and its CUDA section no longer says the export is not read (#3981). Thanks to @jayleaton.
