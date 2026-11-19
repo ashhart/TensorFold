@@ -273,3 +273,13 @@ On a verified four-rank verbs relay with no opposite-rank link, `tf-tp-test suit
 exchange references, including that exchange in graph replays. NCCL selects those receive ports by channel on this
 topology. The suite prints the reason, the two reference types and the number of comparisons left out; all sums,
 gathers, remaining graph nodes and timing sweeps still run. Other topologies keep the complete suite.
+
+
+### Qwen host KV placement
+
+`TF_QWEN_KV_HOST=1` is an opt-in identical-output placement switch for the dense and MoE CUDA Qwen hybrids (#2637).
+It places only KV pages in mapped pinned-host memory; state and verify runs stay on the device.
+It requires a discrete GPU, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1` and `--parallel 1`.
+Integrated GPUs, spill and disk snapshots are refused. The GiB cap is documented in [environment.md](environment.md).
+Unset keeps the existing plan and device-page behavior. Host tests prove planning and allocation ownership only;
+model token equality, MTP and resumed-prompt equality still require the same-checkpoint device receipt.

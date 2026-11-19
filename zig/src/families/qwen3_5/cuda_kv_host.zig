@@ -1,28 +1,41 @@
-//! TF_QWEN_KV_HOST=1: the pool's KV pages (and runs) in pinned host memory, mapped into the
-//! device's address space (cuMemHostAlloc PORTABLE|DEVICEMAP, as GLM's host pages). Qwen3.8's
-//! full attention reads every position every token, so a host tier is a capacity mode, not a
-//! speed mode: decode pays one PCIe read of the window's KV a token, while prefill streams
-//! writes and stays compute-bound. The kernels are untouched: one page base, host or device.
+//! Opt-in mapped-host KV pages; recurrent state and verify runs stay on the device.
 const std = @import("std");
+const environment = @import("sys").environment;
 
-/// An exact-one switch through the profile registry, which is the one reader of a registered name.
 pub fn onHost() bool {
     const v = @import("profile").get(.TF_QWEN_KV_HOST) orelse return false;
     return std.mem.eql(u8, v, "1");
 }
 
-/// TF_QWEN_KV_HOST_GIB=n caps the host pages; unset: a full window's worth plus its run.
-pub fn hostGib() ?u64 {
-    const v = std.c.getenv("TF_QWEN_KV_HOST_GIB") orelse return null;
-    const n = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return null;
-    return if (n == 0) null else n << 30;
+/// Only the explicit host path reads the GiB cap or the model's geometry.
+pub fn room(l: anytype) !u64 {
+    if (!onHost()) return 0;
+    const cap = try environment.read(u64, "TF_QWEN_KV_HOST_GIB", 0);
+    const p = @import("cuda_pages.zig");
+    const layout = p.layout(l.e, l.capacity, l.page_tokens, l.ringBytes(), l.extra);
+    return bytes(l.capacity + p.window_rows, l.page_tokens, layout.pageBytes(), if (cap == 0) null else cap << 30);
 }
 
-/// Host bytes the pool's pages need: a full window's pages plus its run, or the _GIB cap.
-pub fn hostBytes(capacity: usize, tokens: usize, page_bytes: u64, run_bytes: u64) u64 {
-    const t: usize = @intCast(tokens);
-    const window_pages = (capacity + t - 1) / t;
-    const run_pages = (run_bytes + page_bytes - 1) / page_bytes;
-    const all = (window_pages + run_pages) * page_bytes;
-    return @min(all, hostGib() orelse all);
+/// A whole window of KV pages, never state runs or unused host placeholders for them.
+pub fn bytes(rows: usize, tokens: usize, page_bytes: u64, cap: ?u64) !u64 {
+    if (tokens == 0 or page_bytes == 0) return error.QwenKvHostNeedsPages;
+    const n = try std.math.divCeil(u64, rows, tokens);
+    const total = try std.math.mul(u64, n, page_bytes);
+    if (cap) |limit| if (limit < total) return error.QwenKvHostCap;
+    return total;
+}
+
+pub fn checkDevice(integrated: bool, pages: usize, all: bool) !void {
+    if (pages == 0) return error.QwenKvHostNeedsPages;
+    if (!all) return error.QwenKvHostNeedsPagedEngine;
+    if (integrated) return error.QwenKvHostIntegrated;
+}
+
+/// Host capacity mode admits one stream and no disk-backed prompt snapshots.
+pub fn refusal(o: anytype) ?[]const u8 {
+    if (!onHost()) return null;
+    if (o.lanes != 1) return "TF_QWEN_KV_HOST supports one stream: set --parallel 1";
+    if (o.spill != .off) return "TF_QWEN_KV_HOST cannot use --spill-gib; serve without spill";
+    if (o.learn != null or o.learn_conversations) return "TF_QWEN_KV_HOST cannot use disk snapshots; serve without --learn or --learn-conversations";
+    return null;
 }

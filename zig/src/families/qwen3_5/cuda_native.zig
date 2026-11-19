@@ -147,12 +147,11 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     if (l.prefix != null and prefix_mod.fewSnapshots(l.share_snaps, streams + 1)) std.log.warn("TF_QWEN_KV_SHARE={d} keeps under 4 recurrent-state snapshots a stream at --parallel {d}: live streams evict each other's before a resume; set it to {d} or more", .{ l.share_snaps, streams + 1, 4 * (streams + 1) });
 }
 
-/// Host bytes the pool's pages need under TF_QWEN_KV_HOST (0: off or unpaged); the plan funds them there.
-pub fn kvHostRoom(p: *anyopaque) u64 {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    if (l.page_tokens == 0) return 0;
-    const pl = pages_mod.layout(l.e, l.capacity, l.page_tokens, l.ringBytes(), l.extra);
-    return kv_host_mod.hostBytes(l.capacity, l.page_tokens, pl.pageBytes(), pl.run_bytes);
+pub const kvHostRefusal = kv_host_mod.refusal;
+
+/// Host bytes are absent before any geometry or cap read when the switch is unset.
+pub fn kvHostRoom(p: *anyopaque) !u64 {
+    return kv_host_mod.room(@as(*Lanes, @ptrCast(@alignCast(p))));
 }
 
 /// The lane host's admission: the first stream's window is free, or a lane and the request's pages are.
@@ -195,7 +194,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
-    if (kv_host_mod.onHost() and page_tokens == 0) return error.QwenKvHostNeedsPages;
+    if (kv_host_mod.onHost()) try kv_host_mod.checkDevice(try ctx.attribute(.integrated) != 0, page_tokens, engine_paged);
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.grid_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
@@ -410,7 +409,7 @@ pub const Lanes = struct {
     }
 
     /// A drafter's bytes in each lane's run: DFlash2's ring, or MTP's ring and state (0: no drafter).
-    fn ringBytes(self: *const Lanes) usize {
+    pub fn ringBytes(self: *const Lanes) usize {
         if (self.draft) |d| return d.c.ringBytes();
         return if (self.mtp) |m| m.areaBytes() else 0;
     }
@@ -579,7 +578,6 @@ pub const Lanes = struct {
         if (start + count > cache.written or start + count <= held_from) return error.RowsNotHeld;
         return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }
-
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         readout.release(self, stream);
@@ -587,7 +585,6 @@ pub const Lanes = struct {
         if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
         self.endFill(stream);
     }
-
     /// Each image's first placeholder row and identity: a kept state resumes only the same images.
     pub fn seenOf(self: *Lanes, images: []const lanes.stream.Image) ![]reuse.Seen {
         const seen = try self.gpa.alloc(reuse.Seen, images.len);
@@ -595,15 +592,12 @@ pub const Lanes = struct {
         return seen;
     }
 };
-
 test "Qwen stepped prefill: cancel between host iterations retains only the last completed cut" {
     try @import("cuda_prefill_test.zig").cancelled(Lanes, Lanes.backend);
 }
-
 test "Qwen stepped prefill: a cap (the flag's or fcfs's) cuts on the 128 grid in cold chunks; marks keep at cold cuts" {
     try @import("cuda_prefill_test.zig").capped(Lanes, Lanes.backend);
 }
-
 test {
     _ = @import("cuda_admit_test.zig");
     _ = @import("cuda_mtp_budget.zig");
