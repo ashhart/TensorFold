@@ -7,6 +7,8 @@ const Span = cfg.Span;
 const Mode = cfg.Mode;
 const split = cfg.split;
 const object = cfg.object;
+const widths = @import("widths.zig");
+const affine = @import("affine.zig");
 
 const fixture =
     \\{"model_type":"qwen3_5","hidden_size":64,"intermediate_size":128,"num_hidden_layers":4,
@@ -132,14 +134,34 @@ test "a routed config refuses a rank split" {
     try std.testing.expectError(error.BadShard, split(&c, 1, 2, .mlp));
 }
 
-test "dense config refuses MoE and tied embedding heads" {
+test "dense config refuses MoE" {
     const a = std.testing.allocator;
     const moe = try edit(a, "num_experts", .{ .integer = 8 });
     defer a.free(moe);
     try std.testing.expectError(error.NotQwenDense, parse(a, moe, null));
+}
+
+test "dense config admits a tied head on qwen27 Metal and keeps the flag" {
+    const a = std.testing.allocator;
     const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
     defer a.free(tied);
-    try std.testing.expectError(error.TiedEmbeddingHead, parse(a, tied, null));
+    const c = try parse(a, tied, null);
+    try std.testing.expect(c.tied);
+    const plain = try parse(a, fixture, null);
+    try std.testing.expect(!plain.tied);
+}
+
+test "tied qwen27 takes the head width from the embedding" {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a, "{s},\"tie_word_embeddings\":true,\"quantization\":{{\"bits\":8,\"group_size\":64,\"model.embed_tokens\":{{\"bits\":4,\"group_size\":64}}}}", .{fixture[0 .. fixture.len - 1]});
+    defer a.free(text);
+    const c = try parse(a, text, null);
+    var f = try affine.Formats.init(a, text);
+    defer f.deinit();
+    var w = try widths.Widths.resolve(a, &f, c);
+    defer w.deinit();
+    try std.testing.expectEqual(@as(u8, 4), w.embed.bits);
+    try std.testing.expectEqual(@as(u8, 4), w.head.bits);
 }
 
 test "invalid scalar shapes and types fail without a cast trap" {

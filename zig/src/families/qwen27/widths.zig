@@ -106,7 +106,7 @@ pub const Widths = struct {
                 l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
             };
         }
-        return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
+        return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, if (c.tied) "model.embed_tokens" else "lm_head") };
     }
 
     /// Every module 4-bit g64, for synthetic graphs.

@@ -385,7 +385,18 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
+    const head = if (c.tied) blk: {
+        const span = s.vocabRows();
+        break :blk try b.stack(&.{.{
+            .weight = try rowView(embed.weight, span),
+            .scales = try rowView(embed.scales, span),
+            .biases = try rowView(embed.biases, span),
+            .bits = ws.embed.bits,
+            .group = ws.embed.group,
+            .gn = g.vocab,
+            .whole = g.vocab,
+        }});
+    } else try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }
