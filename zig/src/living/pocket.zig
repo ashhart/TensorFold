@@ -132,6 +132,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         retired_w: std.ArrayList(f32) = .empty, // [retired, 2, D]: their input and output weights from before
         refit_gate: std.ArrayList(f32) = .empty, // SwiGLU: [refits, D], their gate rows from before
         phase: enum { read, fit, values, check, done } = .done,
+        refreshing: bool = false, // read and refit the existing router without restarting outputs
         at: usize = 0, // the next example read, answer of a step, or held-out answer judged
         back: usize = 0, // held-out answers that came back token for token
         learned: std.ArrayList(Learned) = .empty, // every neuron a fact took, this session
@@ -283,6 +284,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         pub fn begin(p: *Self, t: *T, host: anytype, answered: []const Example, prompts: []const Example, held: []const Example, steady: []const []const Example) !void {
             try p.load(t, host);
             try p.mark();
+            p.refreshing = false;
             p.answered = answered;
             p.prompts = prompts;
             p.held = held;
@@ -317,7 +319,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         pub fn next(p: *Self, phase: @TypeOf(p.phase)) void {
             p.phase = phase;
             p.at = 0;
-            p.v.restart();
+            if (!p.refreshing) p.v.restart();
         }
 
         /// One unit: a read, the fits, an output answer or a held-out answer judged; true once the neurons are judged.
@@ -333,7 +335,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             const before = t.count;
             const done = switch (p.phase) {
                 .read => try reading.once(p, t),
-                .fit => if (try locating.once(p, t)) try @import("pocket_place.zig").all(p, t, host) else false,
+                .fit => if (p.refreshing) try @import("pocket_refresh.zig").fit(p, t, host) else if (try locating.once(p, t)) try @import("pocket_place.zig").all(p, t, host) else false,
                 .values => try values.valueOnce(p, t, host),
                 .check => try values.checkOnce(p, t, host),
                 .done => true,
@@ -345,11 +347,13 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
 
         /// Another round of outputs from where they are, then judged again.
         pub fn more(p: *Self) void {
+            p.refreshing = false;
             p.next(.values);
         }
 
         /// The open fact's neurons back to zero and free, and the earlier neurons it fitted again as they were.
         pub fn undo(p: *Self, t: *T, host: anytype) !void {
+            p.refreshing = false;
             p.restore_pending = p.snap.valid;
             if (try marks.restore(p, t, host)) {
                 p.restore_pending = false;

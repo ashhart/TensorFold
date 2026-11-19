@@ -116,7 +116,7 @@ pub fn more(l: anytype) !void {
     switch (l.method) {
         .pocket => {
             if (!l.pocketed) return error.NothingToContinue;
-            l.pockets.more();
+            if (l.lesson.refresh_wordings) try @import("pocket_refresh.zig").begin(l) else l.pockets.more();
             l.phase = .pocket;
         },
         else => {
