@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ling-3.1-flash on CUDA: `bailing_moe_v3` EXL3 packs serve on one GB10 or across two at TP=2, within the model's native 262,144-token window, with copy drafts from the prompt and kept prompt states; setups not tested, including longer contexts, are refused by name (#2340, refs #850). Thanks to @ajensenwaud.
+
 - Qwen3.8-27B on Metal: tensor-unit qk projections, flat glue kernels and Metal 4 verify passes each have their own off switch (`TF_Q27_QK=0`, `TF_Q27_FLAT_GLUE=0`, `TF_Q27_METAL4=0`) and are bit-identical to the kernels they replace; qk and Metal 4 stay off on chips without tensor units (#2342).
 
 - Qwen on CUDA: a development build for sm_110 (`-Dsm=110`, NVIDIA Thor) refuses by name, before paging or weight loading, the modes not qualified there: `--slide`, a DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES`; the default path and the DFlash2 drafter are still served, and other GPUs are unchanged (#3057, refs #2319). Thanks to @yguanrong.
