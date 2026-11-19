@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Qwen3.8-27B recipe says to serve with `--thinking-budget 4096` when thinking is on, and gives its GPQA Diamond result on TensorFold 1.2.7 and one GB10: replies cut at the limit from 78 of 198 to 0, and correct from 58.1% to 82.8% (#3373, fixes #3323).
+
 - Docs: the drafter training recipe gains a section on adapting an already released drafter, budgeted from a few passes over the scarcest class at a low learning rate with early checkpoints, with the Qwen3.8-27B pilot behind it (#3369, refs #2667). Thanks to @Maxrio9.
 
 - Desktop: searching the current conversation no longer carries a project picked under All saved conversations; the request, its results, filters and navigation use the scope's own project filter, and switching back restores the project (#3900, fixes #3849). Thanks to @AIFlowML.
