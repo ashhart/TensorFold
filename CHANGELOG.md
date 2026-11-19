@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights: with `--slide` and `--slide-forget`, the server counts how often each learned fact fires in successful requests and keeps the counts and pins in the folder; `POST /v1/slide/facts/ID/pin` pins or unpins a fact, and a lesson that finds the pocket full retires the least-used unpinned fact through the checked delete before it retries; without `--slide-forget` nothing new is counted or written (#2026).
+
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
 
 - gpt-oss: a first host-only slice reads `openai/gpt-oss-20b`'s config and refuses unknown or unsupported fields by name, checks all 459 tensor names of the published checkpoint, and adds an MXFP4 reader for 32-value E2M1 blocks with UE8M0 scales that never rewrites checkpoint bytes; nothing is registered with the server yet (#3513).
