@@ -23,6 +23,13 @@ projections and experts in groups of 32 or 64; unsupported formats are refused b
 and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint. The native engine serves the named
 checkpoint on Metal, CUDA and HIP, and NVIDIA's NVFP4 export on CUDA.
 
+On CUDA, NVIDIA's NVFP4 export serves the same way:
+
+```bash
+tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+tensorfold serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --name bench
+```
+
 On Metal the native engine also serves MLX checkpoints at a width per module (2, 3, 4, 5, 6 or 8 bits, not 7, in groups
 of 32, 64 or 128), such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`, the three
 measured. A matrix at 4-bit in groups of 64 runs on the kernels above. Any other width runs on the shared row kernels in
@@ -58,7 +65,7 @@ the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests shar
 `--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
+In 0.6.6, CUDA read this model's MLX 4-bit checkpoint only, not its NVFP4 and EXL3 exports. Its prompt matmuls
 have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
 
 Use the [CUDA container setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus). One or two
