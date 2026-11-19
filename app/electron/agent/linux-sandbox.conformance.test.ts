@@ -1,6 +1,4 @@
-// Run: TENSORFOLD_LINUX_SANDBOX=1 node .../jiti-cli.mjs electron/agent/linux-sandbox.conformance.test.ts
-// Real confinement evidence for the bubblewrap backend. Skips cleanly on hosts where bwrap cannot
-// create a namespace (nested containers), so it never claims confinement it did not observe.
+// A restricted namespace must report a skip rather than claim confinement.
 import assert from 'node:assert/strict'
 import { createServer } from 'node:net'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -35,7 +33,6 @@ if (process.platform !== 'linux') {
     assert.equal(inside.code, 0, inside.stderr)
     assert.equal(readFileSync(path.join(cwd, 'inside.txt'), 'utf8'), 'data')
 
-    // The home directory is not a mounted root, so it does not exist in the namespace at all.
     const outsideTarget = path.join(realpathSync(homedir()), 'tf-bwrap-escape.txt')
     const outside = await runSandboxedCommand(`printf escape > ${JSON.stringify(outsideTarget)}`, { cwd, profile: 'build-test' })
     assert.notEqual(outside.code, 0, 'writes outside the mounted roots fail')
@@ -53,7 +50,6 @@ if (process.platform !== 'linux') {
     assert.notEqual(gitConfig.code, 0, 'git config stays read-only under a writable profile')
     assert.equal(readFileSync(path.join(cwd, '.git', 'config'), 'utf8'), '[core]\n')
 
-    // A nested repository is pinned like the root: its hooks and config stay read-only.
     const nested = path.join(cwd, 'vendor', 'sub')
     mkdirSync(path.join(nested, '.git', 'hooks'), { recursive: true })
     writeFileSync(path.join(nested, '.git', 'config'), '[core]\n')
@@ -64,20 +60,17 @@ if (process.platform !== 'linux') {
     assert.notEqual(nestedConfig.code, 0, 'a nested repository\'s config stays read-only')
     assert.equal(readFileSync(path.join(nested, '.git', 'config'), 'utf8'), '[core]\n')
 
-    // Control files a repository does not have yet cannot be created by a writable run.
     const newConfig = await runSandboxedCommand('printf pwned > .git/config.worktree', { cwd, profile: 'build-test' })
     assert.notEqual(newConfig.code, 0, 'a missing control file cannot be created')
     assert.equal(existsSync(path.join(cwd, '.git', 'config.worktree')), true, 'the placeholder exists but stayed read-only')
     assert.equal(readFileSync(path.join(cwd, '.git', 'config.worktree'), 'utf8'), '', 'the placeholder was not written')
 
-    // A nested repository inside a dependency folder is pinned by the walk.
     const inModules = path.join(cwd, 'node_modules', 'dep')
     mkdirSync(path.join(inModules, '.git', 'hooks'), { recursive: true })
     writeFileSync(path.join(inModules, '.git', 'config'), '[core]\n')
     const moduleHook = await runSandboxedCommand('printf pwned > node_modules/dep/.git/hooks/evil', { cwd, profile: 'build-test' })
     assert.notEqual(moduleHook.code, 0, 'a repository inside node_modules stays pinned')
 
-    // An inner worktree's pointer file is frozen: a run cannot repoint the workspace.
     const innerWorktree = path.join(cwd, 'inner-worktree')
     const innerGitdir = path.join(cwd, '.git', 'worktrees', 'inner')
     mkdirSync(innerGitdir, { recursive: true })
@@ -87,7 +80,6 @@ if (process.platform !== 'linux') {
     assert.notEqual(repoint.code, 0, 'the worktree pointer stays read-only')
     assert.match(readFileSync(path.join(innerWorktree, '.git'), 'utf8'), /^gitdir: \.\.\/\.git\/worktrees\/inner/, 'the pointer was not rewritten')
 
-    // A directory the walk cannot inspect refuses before the command runs.
     const unreadable = path.join(cwd, 'unreadable-dir')
     mkdirSync(unreadable)
     chmodSync(unreadable, 0o000)
@@ -100,7 +92,6 @@ if (process.platform !== 'linux') {
       rmSync(unreadable, { recursive: true, force: true })
     }
 
-    // A worktree inside the workspace whose shared directory resolves outside it is refused.
     const sharedWorktree = path.join(cwd, 'shared-worktree')
     const sharedGitdir = path.join(cwd, '.git', 'worktrees', 'shared')
     const outsideShared = path.join(root, 'elsewhere-shared', '.git')
@@ -116,7 +107,6 @@ if (process.platform !== 'linux') {
     rmSync(path.join(cwd, '.git', 'worktrees', 'shared'), { recursive: true, force: true })
     rmSync(path.join(root, 'elsewhere-shared'), { recursive: true, force: true })
 
-    // A worktree outside the workspace is refused before the command runs.
     const outsideWorktree = path.join(root, 'outside-worktree')
     mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
     mkdirSync(outsideWorktree)
@@ -126,13 +116,11 @@ if (process.platform !== 'linux') {
     assert.equal(refusedWorktree.sandboxed, false)
     assert.match(refusedWorktree.stderr, /outside the workspace/)
 
-    // No network in build-test: a bash /dev/tcp connect to a live loopback listener must fail.
     const denied = await runSandboxedCommand(`timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port}'`, { cwd, profile: 'build-test' })
     assert.notEqual(denied.code, 0, 'build-test cannot reach a loopback listener')
     const allowed = await runSandboxedCommand(`timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port}'`, { cwd, profile: 'network-fetch' })
     assert.equal(allowed.code, 0, `network-fetch reaches the same listener: ${allowed.stderr}`)
 
-    // Cancellation must stop the sandboxed process group promptly.
     const controller = new AbortController()
     const started = Date.now()
     const pending = runSandboxedCommand('sleep 30', { cwd, profile: 'build-test', signal: controller.signal })

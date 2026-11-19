@@ -218,9 +218,7 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
   const profile = options.profile ?? sandboxProfileForCommand(command)
   const allowNetwork = sandboxProfileAllowsNetwork(profile, options.allowNetwork)
   const cwd = prepareSandboxExecutionCwd(hostCwd, profile)
-  // package-install runs in a throwaway temp dir; remove it once artifacts are captured so we
-  // don't orphan a (potentially node_modules-sized) directory per install. The host cwd is never
-  // deleted — only a sandbox-owned scratch dir that differs from it.
+  // Only sandbox-owned package-install scratch is removed after artifact capture.
   const ephemeralCwd = cwd === hostCwd ? null : cwd
   try {
     const baseline = captureSandboxArtifactBaseline(cwd, Date.now(), SANDBOX_PROFILES[profile].allowCwdWrite)
@@ -355,8 +353,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
     }
     opts.signal?.addEventListener('abort', onAbort, { once: true })
     if (opts.signal?.aborted) onAbort()
-    // Per-stream decoders buffer partial multi-byte sequences across chunk boundaries, so emoji/CJK
-    // split across two 'data' events don't decode to U+FFFD replacement chars.
+    // Streaming decoders preserve UTF-8 characters split across data events.
     const outDecoder = new StringDecoder('utf8')
     const errDecoder = new StringDecoder('utf8')
     const append = (kind: 'stdout' | 'stderr', chunk: Buffer) => {
@@ -365,12 +362,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
       else stderr = (stderr + text).slice(0, maxBuffer)
       if (stdout.length + stderr.length >= maxBuffer && !overflowed) {
         overflowed = true
-        // Cancel the unrelated timeout timer so it doesn't double-fire later, then run the same
-        // SIGTERM-now/SIGKILL-after-grace-period escalation the timeout path uses, so a child that
-        // traps/ignores SIGTERM doesn't linger until the original (possibly much longer) timeout.
-        // Note: `child.killed` reflects whether a signal was *sent*, not whether the process has
-        // actually exited yet — checking `exitCode`/`signalCode` (only set once 'exit' fires) is
-        // what correctly detects a child that is still alive after ignoring SIGTERM.
+        // A sent signal is not an exit; escalate after the grace period while the child is alive.
         clearTimeout(timer)
         terminate()
       }

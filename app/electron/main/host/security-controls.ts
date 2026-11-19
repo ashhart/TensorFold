@@ -49,8 +49,7 @@ export function securityControlSnapshot(): SecurityControlSnapshot {
     quarantinedProtectedFiles: localSecrets.quarantinedProtectedFiles,
     quarantinedProtectedPaths: localSecrets.quarantinedProtectedPaths,
     quarantineBackupPaths: localSecrets.quarantineBackupPaths,
-    // There is no plaintext-store bypass. Keep the compatibility field honest
-    // even if a stale deployment still exports the former unused variable.
+    // Legacy environment values must not advertise a plaintext-store bypass.
     unencryptedLocalStoreAllowed: false,
     strictAuditEnabled: envEnabled('VONTRA_STRICT_AUDIT'),
     auditHealthy: !getLastAuditError(),
