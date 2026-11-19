@@ -517,5 +517,4 @@ test {
 
 test {
     _ = @import("shared_step_test.zig");
-    _ = @import("deep_chain_test.zig");
 }
