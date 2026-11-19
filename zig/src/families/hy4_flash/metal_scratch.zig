@@ -1,7 +1,7 @@
 //! A Hy4-flash pass's per-row scratch, sized once at the widest layer.
 const std = @import("std");
 const mtl = @import("metal");
-const affine = @import("row_projection");
+const affine = @import("../../core/row_projection.zig");
 const cfg = @import("config.zig");
 const ihc = @import("ihc.zig");
 const ihc_gpu = @import("ihc_metal.zig");
@@ -9,7 +9,7 @@ const mla_gpu = @import("mla_metal.zig");
 const mha = @import("mla_attention.zig");
 const shape_ = @import("mla_weights.zig");
 const gpu_qkv = @import("metal_tensor_qkv.zig");
-const lane = @import("lane_projection");
+const lane = @import("../../core/lane_projection.zig");
 const dense = @import("metal_dense.zig");
 const Buffers = dense.Buffers;
 const Ref = dense.Ref;

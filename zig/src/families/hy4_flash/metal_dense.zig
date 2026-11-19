@@ -1,7 +1,7 @@
 //! The native Metal attention and dense feed-forward layer passes for Hy4-flash.
 const std = @import("std");
 const mtl = @import("metal");
-const affine = @import("row_projection");
+const affine = @import("../../core/row_projection.zig");
 const dense = @import("draft_ops");
 const core = @import("core");
 const cfg = @import("config.zig");
@@ -13,7 +13,7 @@ const shape_ = @import("mla_weights.zig");
 const weights = @import("model_weights.zig");
 const rope = @import("rope.zig");
 const gpu_qkv = @import("metal_tensor_qkv.zig");
-const lane = @import("lane_projection");
+const lane = @import("../../core/lane_projection.zig");
 const index = @import("metal_index.zig");
 
 pub const Ref = mla_gpu.Ref;

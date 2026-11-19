@@ -18,7 +18,7 @@ pub const Nax = struct {
     attend: mtl.Pipeline,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device) !Nax {
-        const text = try @import("lane_projection").frags.source(device, a, sources.hy4_flash_mla_nax);
+        const text = try @import("../../core/lane_projection.zig").frags.source(device, a, sources.hy4_flash_mla_nax);
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
