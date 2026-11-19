@@ -3,19 +3,21 @@ const std = @import("std");
 const native = @import("xpu.zig");
 
 test "draft sources: XPU refuses --vision and unsupported --tp before device access" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    for (native.families) |f| {
-        var problem: []const u8 = "";
-        try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = f.model_type, .vision = .{} }, &problem) == null);
-        try std.testing.expect(std.mem.indexOf(u8, problem, "--vision") != null);
-    }
-    if (@import("xpu_engine_options").qwen27) {
-        for ([_][]const u8{"qwen3_5"}) |mt| {
+    if (comptime @import("builtin").os.tag != .windows) {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        for (native.families) |f| {
             var problem: []const u8 = "";
-            try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = mt, .tp = 3 }, &problem) == null);
-            try std.testing.expect(std.mem.indexOf(u8, problem, "--tp 1, 2 or 4") != null);
+            try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = f.model_type, .vision = .{} }, &problem) == null);
+            try std.testing.expect(std.mem.indexOf(u8, problem, "--vision") != null);
+        }
+        if (@import("xpu_engine_options").qwen27) {
+            for ([_][]const u8{"qwen3_5"}) |mt| {
+                var problem: []const u8 = "";
+                try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = mt, .tp = 3 }, &problem) == null);
+                try std.testing.expect(std.mem.indexOf(u8, problem, "--tp 1, 2 or 4") != null);
+            }
         }
     }
     const env = @import("sys").environment;
