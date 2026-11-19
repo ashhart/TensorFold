@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Core KV pool: a host tier for the pool's pages, which refuses zero page bytes, partial host pages, zero frames and zero logical pages before it allocates (#1501, refs #1113). Thanks to @BlivionIaG.
+
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
 
 - App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
