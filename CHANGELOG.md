@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Qwen3.5-2B recipe covers CUDA as checked on one GB10 and says the prompt cache is on by default, with `--prompt-cache-gib 0` for fresh execution (#3974). Thanks to @jayleaton.
+
 - Docs: the XPU guide gives the size of a Qwen3.8-27B prompt-cache state with the DFlash2 drafter and bf16 K/V (64 KiB a prompt token plus 187 MiB), so the 2 GiB default keeps nothing past about 29,700 tokens, the log line that says so, and that a larger budget needs a smaller `--context` on one card (#3972). Thanks to @SergiioB.
 
 - Docs: the Qwen3.6 MoE recipe names the sections that belong to the Python 0.6.6 engine and links its native CUDA section, where it linked the Windows build guide (#3977). Thanks to @jayleaton.
