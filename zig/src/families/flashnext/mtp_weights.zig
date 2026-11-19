@@ -19,6 +19,15 @@ pub fn format() !Format {
     return @fromBackingInt(@intCast(try environment.read(u1, name, @backingInt(default_format))));
 }
 
+/// The drafter linears `mxfp8` leaves as stored: the fusion projections and the shared expert.
+const held = [_][]const u8{ ".fc_embedding", ".fc_hidden", ".shared_expert" };
+
+/// Whether `mxfp8` leaves the linear the loader names by `prefix`: a name covers the projections it opens.
+pub fn kept(prefix: []const u8) bool {
+    for (held) |name| if (std.mem.indexOf(u8, prefix, name) != null) return true;
+    return false;
+}
+
 /// What a backend with no MXFP8 projection for the drafter says when mxfp8 is set.
 pub fn unavailable(comptime backend: []const u8) []const u8 {
     return name ++ "=mxfp8: Flash Next on " ++ backend ++ " has no MXFP8 projection for the drafter; unset it or set checkpoint";
@@ -35,6 +44,28 @@ pub fn refuse(comptime backend: []const u8, weights: Format) !void {
 pub fn refusal(comptime backend: []const u8, weights: anyerror!Format) ?[]const u8 {
     const w = weights catch return name ++ ": expected checkpoint or mxfp8 (unset or blank keeps checkpoint)";
     return if (w == .checkpoint) null else unavailable(backend);
+}
+
+test "mxfp8 leaves the drafter's fusion projections and shared expert as stored" {
+    for ([_][]const u8{
+        "language_model.mtp.fc_embedding",
+        "language_model.mtp.fc_hidden",
+        "language_model.mtp.layers.0.mlp.shared_expert.gate_proj",
+    }) |prefix| try std.testing.expect(kept(prefix));
+    for ([_][]const u8{
+        "language_model.mtp.hyper_connection_mixer",
+        "language_model.mtp.layers.0.attn_hyper_connection",
+        "language_model.mtp.layers.0.mlp_hyper_connection",
+        "language_model.mtp.layers.0.self_attn",
+        "language_model.mtp.layers.0.self_attn.o_proj",
+    }) |prefix| try std.testing.expect(!kept(prefix));
+}
+
+test "every loader in the drafter's window packs through denseFor, and the draft rows load outside it" {
+    const load_src = @embedFile("cuda_projection_load.zig");
+    try std.testing.expectEqual(4, std.mem.count(u8, load_src, "projection.denseFor(prefix"));
+    try std.testing.expectEqual(2, std.mem.count(u8, @embedFile("cuda_prompt_wt.zig"), "projection.denseFor(prefix"));
+    try std.testing.expectEqual(1, std.mem.count(u8, @embedFile("cuda_mtp_load.zig"), "projection.dense("));
 }
 
 test "unset and blank read checkpoint, the two words read as themselves, and other text is refused" {

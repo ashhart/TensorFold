@@ -27,12 +27,25 @@ pub const Projection = struct {
 pub var recode: @import("mtp_weights.zig").Format = .checkpoint;
 /// The BF16 bytes the open window re-coded, for the drafter's startup line.
 pub var recoded: usize = 0;
+/// The BF16 bytes the open window left as the checkpoint stores them, for the same line.
+pub var kept: usize = 0;
 
 /// Under mxfp8 a drafter linear stored as anything but BF16 stops the load by name rather than loading as stored.
 pub fn recodable(prefix: []const u8, dtype: core.safetensors.DType) !void {
     if (recode == .checkpoint or dtype == .bf16) return;
     if (!@import("builtin").is_test) std.log.err("TF_FLASHNEXT_MTP_WEIGHTS=mxfp8: {s} is stored as {s}, and mxfp8 re-codes BF16 linears only; unset it or set checkpoint", .{ prefix, @tagName(dtype) });
     return error.InvalidEnvironment;
+}
+
+/// A BF16 tensor loaded for `prefix`: re-coded under mxfp8 unless `mtp_weights` leaves that linear as stored.
+pub fn denseFor(prefix: []const u8, gpa: std.mem.Allocator, driver: *const cuda.Driver, t: core.safetensors.Tensor) !Projection {
+    const held = recode;
+    if (held == .mxfp8 and @import("mtp_weights.zig").kept(prefix)) {
+        recode = .checkpoint;
+        kept += t.bytes.len;
+    }
+    defer recode = held;
+    return dense(gpa, driver, t);
 }
 
 /// Repack the checkpoint's BF16 bits without rounding or widening the resident weight.
