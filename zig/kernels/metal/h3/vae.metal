@@ -48,22 +48,23 @@
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
-// Full fp32 attention: online softmax over key blocks. One threadgroup per
-// head-row. The block max reduces through shared memory comparisons.
-[[kernel]] void h3_vae_attention(
-  const device float* Q [[buffer(0)]],
-  const device float* K [[buffer(1)]],
-  const device float* V [[buffer(2)]],
-  device float* Y [[buffer(3)]],
-  constant uint* P [[buffer(4)]],
+// Full attention reading the interleaved qkv layout directly:
+// QKV[r, h*3*hd + part*hd + i]. Softmax(q k^T / sqrt(hd)) v per head.
+// Writes attended[h][r][i] (transposed to heads-major for the out projection).
+[[kernel]] void h3_vae_attention_il(
+  const device float* QKV [[buffer(0)]],
+  device float* Y [[buffer(1)]],
+  constant uint* P [[buffer(2)]],          // P[0]=rows
   uint tg [[threadgroup_position_in_grid]],
   uint tid [[thread_index_in_threadgroup]],
   uint threads [[threads_per_threadgroup]]) {
-  const uint rows = P[0], hd = P[1];
+  const uint rows = P[0];
+  const uint hd = 64, heads = 32, dim = heads * hd;
   const uint r = tg % rows; const uint head = tg / rows;
-  const device float* q = Q + (head * rows + r) * hd;
-  threadgroup float acc[256];
-  threadgroup float bmax[1];
+  const device float* q = QKV + r * 3 * dim + head * 3 * hd;
+  const device float* kbase = QKV;
+  const device float* vbase = QKV;
+  threadgroup float acc[64];
   float run_max = -1e30f;
   float run_sum = 0.0f;
   for (uint i = tid; i < hd; i += threads) acc[i] = 0.0f;
@@ -71,11 +72,13 @@
   const uint BLOCK = 256;
   for (uint k0 = 0; k0 < rows; k0 += BLOCK) {
     const uint kend = min(k0 + BLOCK, rows);
+    threadgroup float bmax[1];
     if (tid == 0) bmax[0] = -1e30f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint k = k0 + tid; k < kend; k += threads) {
       float dot = 0.0f;
-      for (uint i = 0; i < hd; i++) dot += q[i] * K[(head * rows + k) * hd + i];
+      const device float* kk = kbase + k * 3 * dim + head * 3 * hd + hd;
+      for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
       dot *= rsqrt(float(hd));
       if (dot > bmax[0]) bmax[0] = dot;
     }
@@ -84,10 +87,12 @@
     const float rescale = exp(run_max - bm);
     for (uint k = k0 + tid; k < kend; k += threads) {
       float dot = 0.0f;
-      for (uint i = 0; i < hd; i++) dot += q[i] * K[(head * rows + k) * hd + i];
-      const float w = exp(dot * rsqrt(float(hd)) - bm);
-      run_sum += w;
-      for (uint i = 0; i < hd; i++) acc[i] += w * V[(head * rows + k) * hd + i];
+      const device float* kk = kbase + k * 3 * dim + head * 3 * hd + hd;
+      for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
+      const float wgt = exp(dot * rsqrt(float(hd)) - bm);
+      run_sum += wgt;
+      const device float* vv = vbase + k * 3 * dim + head * 3 * hd + 2 * hd;
+      for (uint i = 0; i < hd; i++) acc[i] += wgt * vv[i];
     }
     for (uint i = tid; i < hd; i += threads) acc[i] *= rescale;
     run_max = bm;
@@ -160,4 +165,20 @@
   const float o = PROJ[v * hb + c * pt * p * p + dt * p * p + dh * p + dw];
   const float value = o * STD[c] + MEAN[c];
   RGB[(f * h * p + row) * out_w + col3] = (uchar)clamp((value * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f);
+}
+
+
+// V extraction in the interleaved qkv layout: OUT[h*rows*hd + r*hd + i] =
+// QKV[r * 3*dim + h*3*hd + 2*hd + i]. One thread per output element.
+[[kernel]] void h3_vae_vextract(
+  const device float* QKV [[buffer(0)]],
+  device float* OUT [[buffer(1)]],
+  constant uint* P [[buffer(2)]],          // P[0] = rows
+  uint3 at [[thread_position_in_grid]]) {
+  const uint rows = P[0];
+  const uint hd = 64, heads = 32, dim = heads * hd;
+  const uint r = at.y;
+  const uint i = at.x % hd;
+  const uint h = at.x / hd;
+  OUT[(h * rows + r) * hd + i] = QKV[r * 3 * dim + h * 3 * hd + 2 * hd + i];
 }

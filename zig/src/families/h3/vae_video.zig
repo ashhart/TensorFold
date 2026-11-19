@@ -4,6 +4,10 @@
 //! zig/src/families/h3/vae/reference/vae_video.py. Kernels: vae.metal.
 
 const std = @import("std");
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fclose(file: *anyopaque) c_int;
+extern "c" fn fwrite(ptr: *const anyopaque, size: usize, count: usize, file: *anyopaque) usize;
 const mtl = @import("metal");
 const frags = @import("core").frags;
 const kernels = @import("h3_kernels");
@@ -56,10 +60,11 @@ const names = [_][]const u8{
     "h3_vae_matmul",
     "h3_vae_rmsnorm",
     "h3_vae_swiglu",
-    "h3_vae_attention",
     "h3_vae_layernorm",
     "h3_vae_postquant",
     "h3_vae_unpatch",
+    "h3_vae_vextract",
+    "h3_vae_attention_il",
 };
 
 pub const Decoder = struct {
@@ -419,6 +424,12 @@ pub const Decoder = struct {
         @memset(tokens_full[voxels + self.config.register_tokens .. rows * dim], 0);
         gpa.free(tokens_host);
         std.debug.print("stage: pq+embedder+registers done", .{});
+        if (getenv("DUMP_TOKENS") != null) {
+            const pathz: [*:0]const u8 = "tokens-dump.f32";
+            const fh = fopen(pathz, "wb") orelse return error.CannotWrite;
+            _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fh);
+            _ = fclose(fh);
+        }
 
         // Stage 2: one block on Metal
         const normed = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
@@ -460,13 +471,14 @@ pub const Decoder = struct {
         e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
 
-        e.setPipeline(self.p[0]);
+        // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
+        // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
+        // real attention kernel replaces this in the next stage)
+        e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
-        e.setBuffer(qkv, 0, 1);
-        e.setBuffer(qkv, 0, 2);
-        e.setBuffer(attended, 0, 3);
-        e.setValue([4]u32{ @intCast(rows), @intCast(3 * dim), @intCast(dim), 0 }, 4);
-        e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.setBuffer(attended, 0, 1);
+        e.setValue([1]u32{ @intCast(rows) }, 2);
+        e.dispatchGroups(mtl.Size.of(rows, 32, 1), mtl.Size.of(128, 1, 1));
         e.barrier();
 
         const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
@@ -544,6 +556,12 @@ pub const Decoder = struct {
             for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
         }
         n2_w.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
+        if (getenv("DUMP_BLOCK1") != null) {
+            const pathz: [*:0]const u8 = "block1-dump.f32";
+            const fh = fopen(pathz, "wb") orelse return error.CannotWrite;
+            _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fh);
+            _ = fclose(fh);
+        }
         }
         fused.deinit();
         gated.deinit();
@@ -593,9 +611,13 @@ pub const Decoder = struct {
         const std_dev = try self.device.buffer(24 * 4, mtl.ResourceOptions.shared);
         const mean_h = mean_dev.slice(f32, 24);
         const std_h = std_dev.slice(f32, 24);
+        // per-channel ImageNet normalisation of the PIXELS (the latents were
+        // denormalised BEFORE the network by the caller's std/mean multiplication)
+        const pixel_mean = [_]f32{ 0.485, 0.456, 0.406 };
+        const pixel_std = [_]f32{ 0.229, 0.224, 0.225 };
         for (0..24) |i| {
-            mean_h[i] = self.config.latents_mean[i];
-            std_h[i] = self.config.latents_std[i];
+            mean_h[i] = pixel_mean[i % 3];
+            std_h[i] = pixel_std[i % 3];
         }
         const out_frames = depth * 4;
         const out_h = height * 16;

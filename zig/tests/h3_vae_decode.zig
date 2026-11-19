@@ -35,9 +35,17 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("loaded latents, decoding...", .{});
     var decoder = try vae.Decoder.load(gpa, init.io, device, args[1]);
+    // denormalise the latents the way the transformer left them: z*std + mean
+    const mean24 = decoder.config.latents_mean;
+    const std24 = decoder.config.latents_std;
+    const denorm = try gpa.alloc(f32, latents.len);
+    defer gpa.free(denorm);
+    for (0..latents.len / 24) |v| {
+        for (0..24) |c| denorm[v * 24 + c] = latents[v * 24 + c] * std24[c] + mean24[c];
+    }
     defer decoder.deinit();
     std.debug.print("decoder loaded, calling frames", .{});
-    const pixels = try decoder.frames(gpa, latents, depth, height, width);
+    const pixels = try decoder.frames(gpa, denorm, depth, height, width);
     std.debug.print("frames done", .{});
     defer gpa.free(pixels);
 
