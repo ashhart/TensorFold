@@ -10,8 +10,12 @@ on:
 permissions:
   contents: read
 
+# 19 Nov: a landing train's PR (lead/train-*) skips these jobs. Our local CI runs the same checks on the train's
+# tip, and the hosted queue (58 runs behind ~13 jobs) held main's and contributors' checks for hours. Each
+# rider's own pull request runs these jobs, and main runs them again after the train lands.
 jobs:
   python:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     # the engine extra is not installed: TensorFold Web runs without it and the tests must too
     runs-on: ubuntu-latest
     defaults:
@@ -30,6 +34,7 @@ jobs:
       - run: pytest -q
 
   package:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     # what a user installs: the wheel must carry the page and the data files
     runs-on: ubuntu-latest
     defaults:
@@ -46,6 +51,7 @@ jobs:
           cd / && python -c "import tensorfold_web.server as s; assert (s.UI_DIST / 'index.html').is_file(), 'no page in the wheel'; import tensorfold_web.catalog"
 
   ui:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: ubuntu-latest
     defaults:
       run:
