@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: Room agents keep their own reasoning effort, and an agent without one inherits the run's default (#3514). Thanks to @AIFlowML.
+
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.
 
 - `tensorfold web`: after a PATH miss, the launcher looks in uv's tool directory for an existing Web executable before offering an install; PATH still wins and installing still needs an explicit yes (#3748, fixes #3747). Thanks to @AIFlowML.
