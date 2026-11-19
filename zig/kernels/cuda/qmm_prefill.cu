@@ -291,7 +291,7 @@ __global__ void __launch_bounds__(WM * WN * 32) prefill_kernel(
 
 } // namespace tf_qmm_prefill
 
-// One grid runs up to four projections through the shipped body with projection-local block indices.
+// One grid runs up to four projections with the same copies and math as prefill_kernel.
 extern "C" __global__ __launch_bounds__(256) void tf_qmm_prefill_many(
         const __nv_bfloat16* __restrict__ x, const __grid_constant__ tf_qmm_prefill::PrefillParts parts, int M, int K,
         int ldx, int group) {
