@@ -223,6 +223,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
 
+- GLM-5.3 on CUDA: the latent row width and cache count, the DSA indexer's pool size, key store and index rope, and 576-wide roped latent rows are read from the model instead of fixed at GLM-5.3-Flash's values (one new kernel, `tf_mla_absorb_q_192`), so full GLM-5.3's shapes (79 caches of 576-value rows, pools of 1, top 2,048, 64 roped index dims) can run on the Flash pieces; GLM-5.3-Flash's launches and replies are unchanged (#3949, part of #3063).
+
 
 ## 1.3.2
 
