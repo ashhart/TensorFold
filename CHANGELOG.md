@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP on RDNA3.5: lane-round routed MoE plan buffers (`moe.planRows`) are sized to the exact window row count instead of the 16-row bucket, and rising added-row window costs are pooled within four-row tile steps (`costs.poolWindowRows`) so a tile step never prices an earlier draft step under a later one; no kernel or output token changes (#3774). Thanks to @gilby.
+
 - Model configs: Qwen 3.5 on CUDA and HIP and Qwen3.8-27B on Metal read their config fields through one typed reader and named end-of-sequence policies, with the same refusals and stop sets as before; a refused field now logs the file and field it came from (#3716, for #2460). Thanks to @jschmied.
 
 - GLM on CUDA: the window-cost cache is keyed by `TF_GLM_KDA_PAD`, `TF_ROCE`, `TF_GLM_PDL` and `TF_GLM_DSEL` too, so changing one of them times the windows again instead of reusing prices measured under the other value (#3495, fixes #3493). Thanks to @ultradaoto.
