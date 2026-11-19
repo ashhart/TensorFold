@@ -980,34 +980,53 @@ the same threads, the same sums in the same order (a warp's butterfly is a simdg
 fp32 throughout. The metallib is compiled with safe math, precise fp32 functions and `-ffp-contract=off`, as the CUDA
 images are compiled with `--fmad=false`; the few places where a CUDA kernel's shared memory exceeds Metal's 32 KiB
 fold their sums in two halves through threadgroup memory, each value's terms still in thread order. The host side
-(prompt, sampler, generation, speech, release and voices) is the CUDA port's, unchanged.
+(prompt, sampler, generation, speech, edits, LACI, steering, release and voices) is the CUDA port's: it reaches the
+device through `native/zonos_device.zig`, which names the CUDA or Metal call for what it asks (memory counts, the
+codec, the clip encoder, the aligner). Every feature above runs on Metal: requests at once (`Engine.runLanes`, the
+codec's lanes), guidance and conditions, steering and spans that follow the reading, LACI with duration targets,
+short texts, the edit adapter, the speaker encoder (the host's, unchanged), the aligner (`metal/aligner.zig`, its
+linears on `zc_linear`), the release's extra text rows and both decoders, their attention caches as rings. Metal's
+buffers are freed by owner (`Gpu.own`, `Gpu.release`), since the parts that load on demand load in any order.
 
 `zig build zonos3-generate -Doptimize=ReleaseFast` builds the tool on a Mac; the checks are the table's above, with
-the same commands and dumps, on an M5 Ultra (256 GB, macOS 27.2):
+the same commands and dumps of the release at `2921b88`, on an M5 Ultra (256 GB, macOS 27.2). All 139 runs pass:
 
 | Check | Result on Metal |
 | --- | --- |
 | Backbone, embedding and reference prompts (109 captures each) | every row's cosine 1.0000000; worst relative difference 2.3e-6 and 5.0e-6 |
-| Greedy frames, both voices, `--max-rows` 1, 7, 64 and 256 | 78 of 78 and 80 of 80 frames identical at every chunk size |
-| Codec decoder, 171 frames | cosine 1.0000000, audio SNR 114.0 dB; in chunks bit-identical to one pass |
-| Text to audio, both voices, greedy | prompt rows equal, every frame identical, audio SNR 102.7 and 106.7 dB |
-| Teacher's features | cosine 1.0000000; largest difference 2.4e-7 |
-| Encoder, acoustic branch | every row's cosine 1.000000 |
-| SSL teacher | worst row's cosine 0.9999253 |
-| Clip to codes, one lane and four lanes | 1,450 of 1,450 and 7,100 of 7,100 codes equal |
+| Greedy frames: both voices, conditions, three guided requests, five steered ones; `--max-rows` 1, 7, 64 and 256 | every frame identical in all eleven at every chunk size |
+| Greedy frames: the pause, start-marker and pronunciation rows, and a short text with `short_text` off; `--max-rows` 1 and 64 | every frame identical |
+| Steering resolved on the host, the five steered dumps | bit-identical |
+| LACI on the model: the eleven requests and the five duration targets, prompt passes of 64 and 7 rows | every attempt's positions, masks and rows equal, and the record; centroids within 4.8e-5 |
+| Short texts on the model (`--laci-check` with the registry), two requests, 64 and 7 rows | equal, the take cut where the reference cuts it |
+| LACI replay fixtures, all eleven | pass |
+| Spans that follow the reading, six requests, 64 and 7 rows | every reading, weight, delta and frame equal |
+| Speech edit, the seven `edit_*` cases, 64 and 7 rows | plans, prompts, rows and spliced codes equal |
+| Codec decoder, `keep2_plain` and `full_mr`, 171 frames | cosine 1.0000000; audio SNR 114.0 and 111.3 dB; in chunks bit-identical to one pass |
+| Speaker encoder, 4.67 s and 17.53 s | every stage's rows at cosine 1.0000000 |
+| Aligner, 4.67 s and 17.53 s | 15 of 16 and 61 of 64 words identical, the rest within 1 ms; joint rows' cosine 0.99891 and 0.99583 |
 
-Served (`tensorfold-native serve RELEASE --parallel 1`, `native/zonos_open.zig`'s `openMetal`, the same flags and
-refusals as on CUDA), measured through the recipe harness's speech plan: the 17.8 s Rupert reply whole in 0.93 s
-(19.1 times real time) and streamed with its first byte at 0.07 s; a cloned 5.13 s reply in 1.31 s, the first
-request with a clip 9.16 s (it loads the encoder); repeated and streamed replies byte-identical; three requests at
-once answered 200, 503, 503; the refusals as on CUDA. Memory: 3,828,402,944 bytes after the load and 9,471,914,240
-with the clip encoder, each the figure the server admits in advance (Metal rounds each buffer to 256 bytes, so its
-clip figure is 608 bytes above CUDA's). The same four requests on the RTX 5090 give replies of the same lengths whose
-16-bit samples differ by at most 2 (SNR 90.5 to 98.2 dB): both draw the same codes. All six response formats answer;
-the FLAC reply decodes to the PCM reply's bytes. Text normalization on Metal, with zyphra-textnorm 0.2.0 built as a dylib on the
-Mac and found in `lib/` beside the binary: the twelve sentences above, each normalized, gave the same reply bytes as
-its spoken form with `text_normalization` off and different bytes from the sentence as typed; without the library a
-request that leaves the field out is spoken as typed and `true` gets 400.
+Served (`tensorfold-native serve RELEASE --parallel 4 --steer-bundle S --laci-heads H --short-text P`,
+`native/zonos_open.zig`'s `openMetal`, the same flags and refusals as on CUDA):
+
+- **The 35 greedy reference requests** (voices, conditions, guidance, steering, spans that follow, LACI, duration
+  targets, short texts, extra text rows, `full_mr`): each reply has the reference audio's sample count and matches
+  it at 61.9 to 76.2 dB. They repeat byte for byte, stream the same bytes, and sent four at once give each its reply
+  alone; sampled requests repeat and stream the same bytes too.
+- **The eleven served edits:** each take has the reference's length and the SNR the RTX 5090 gives (59.9 to 66.0
+  dB), and four at once give each its take alone; `/v1/audio/edit/align` answers.
+- **The rest:** all six response formats answer; with zyphra-textnorm in `lib/` a sentence with numbers gives the
+  bytes of its spoken form; an unknown voice, control or decoder, `top_k` above 4,096, malformed reference codes and
+  a `ref_audio` that is no WAV get 400 with the reason.
+- **Memory:** every part loads to exactly what it was admitted for: 4,727,824,128 bytes at `--parallel 4` with the
+  edit adapter, 5,643,511,296 more for the clip encoder, 7,116,380,416 for `full_mr` and its lanes, and the aligner
+  its 1,846,591,492 bytes of weights within its 2,383,462,404. Metal has no cuBLAS workspace and rounds each buffer to
+  256 bytes, so its figures differ from CUDA's (`native/zonos_sizes.zig`, `native/zonos_decoders.zig`): at the
+  default context and frame budget a load at `--parallel 1` is admitted 3,097,555,712 bytes against CUDA's
+  3,125,611,008, and each decoder's weights are 512 bytes over CUDA's.
+- **CUDA is unchanged:** the RTX 5090 served the same 90 requests (the greedy ones whole and streamed, three sampled,
+  the eleven edits, two clones, an alignment) from this branch and from the stack below it: every reply identical,
+  every admission the same.
 
 **Kernel contract on Metal.** `zig/tests/contract/metal_zonos3*.zig` register all 40 Metal kernels, 41 registrations
 as on CUDA, each with a planted control. The tests are the CUDA ones with Metal's launches; their ranges use the Metal
