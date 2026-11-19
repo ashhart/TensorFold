@@ -47,8 +47,8 @@
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
-// Full fp32 attention: online softmax over keys in blocks, no fixed register array.
-// One threadgroup per head-row. Works for any rows.
+// Full fp32 attention: online softmax over key blocks. One threadgroup per
+// head-row. The block max reduces through shared memory comparisons.
 [[kernel]] void h3_vae_attention(
   const device float* Q [[buffer(0)]],
   const device float* K [[buffer(1)]],
@@ -62,21 +62,21 @@
   const uint head = tg.y, r = tg.x;
   const device float* q = Q + (head * rows + r) * hd;
   threadgroup float acc[256];
+  threadgroup float bmax[1];
   float run_max = -1e30f;
   float run_sum = 0.0f;
   for (uint i = tid; i < hd; i += threads) acc[i] = 0.0f;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  const uint BLOCK = 64;
+  const uint BLOCK = 256;
   for (uint k0 = 0; k0 < rows; k0 += BLOCK) {
     const uint kend = min(k0 + BLOCK, rows);
-    threadgroup float bmax[1];
     if (tid == 0) bmax[0] = -1e30f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint k = k0 + tid; k < kend; k += threads) {
       float dot = 0.0f;
       for (uint i = 0; i < hd; i++) dot += q[i] * K[(head * rows + k) * hd + i];
       dot *= rsqrt(float(hd));
-      atomic_max(&bmax[0], dot);
+      if (dot > bmax[0]) bmax[0] = dot;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const float bm = max(bmax[0], run_max);
