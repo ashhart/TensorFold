@@ -153,7 +153,7 @@ pub const Model = struct {
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
-        m.mhc = if (shard.local.looped) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
+        m.mhc = if (shard.local.looped and shard.local.mhc_iterations != 0) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
         errdefer if (m.mhc) |*p| p.deinit();
         pipelines.end();
         const allocation = timing.span(.initial_allocation);

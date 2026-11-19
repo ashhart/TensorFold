@@ -78,7 +78,7 @@ fn isGemma4(model_type: []const u8) bool {
 }
 
 fn isSenseNova(model_type: []const u8) bool {
-    return std.mem.eql(u8, model_type, "sensenova_loop") or std.mem.eql(u8, model_type, "sensenova_loop_text");
+    return std.mem.eql(u8, model_type, "sensenova_loop");
 }
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).

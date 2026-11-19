@@ -5,9 +5,9 @@ pub const max_layers: usize = 128;
 pub const max_steps: usize = 128;
 pub const max_eos: usize = 8;
 
-pub const MhcRole = enum { none, enter, inner, exit };
+pub const MhcRole = enum { none, enter, inner, exit, both };
 pub const LoopSettings = struct { start: u8, end: u8, eval_count: u32 };
-pub const MhcConfig = struct { start: u8, end: u8, streams: u8, iterations: u32, pre_scale: f32 };
+pub const MhcConfig = struct { start: u8, end: u8, streams: u8, iterations: u32, fixed_identity: bool, pre_scale: f64 };
 pub const ExecutionStep = struct { exec: u8, phys: u8, state: u8, is_linear: bool, mhc_role: MhcRole };
 
 pub const RopeConfig = struct {
@@ -49,7 +49,7 @@ pub const Error = error{
     TooManyEos,
     InvalidLoopCount,
     TooManyExecutionSteps,
-} || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+} || @import("qwen35_layers").Error || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
 
 pub const Config = struct {
     hidden_size: u32,
@@ -86,6 +86,7 @@ pub const Config = struct {
     pub fn mhcRole(self: *const Config, phys: u8) MhcRole {
         const m = self.mhc orelse return .none;
         if (phys < m.start or phys >= m.end) return .none;
+        if (m.end - m.start == 1) return .both;
         if (phys == m.start) return .enter;
         if (phys == m.end - 1) return .exit;
         return .inner;
@@ -217,8 +218,8 @@ fn parseObjects(root: std.json.ObjectMap, tower: std.json.ObjectMap, gen: ?std.j
     try checkModelFlags(tower);
     var is_linear: [max_layers]bool = @splat(false);
     try parseLayerTypes(tower, n_layers, &is_linear);
-    const loop = try parseLoop(root, tower, n_layers);
-    const mhc = try parseMhc(root, tower, n_layers, loop);
+    const loop = try parseLoop(root, n_layers);
+    const mhc = try parseMhc(root, n_layers, loop);
     const rope = try parseRope(tower, root, head_dim, max_pos);
 
     var cfg = Config{
@@ -271,45 +272,18 @@ fn optBool(v: ?std.json.Value) Error!?bool {
 }
 
 fn parseLayerTypes(tower: std.json.ObjectMap, n_layers: u8, out: *[max_layers]bool) Error!void {
-    const interval = try parseInterval(tower.get("full_attention_interval"));
-    const list_v = tower.get("layer_types") orelse .null;
+    var full: [max_layers]bool = @splat(false);
+    try @import("qwen35_layers").read(full[0..n_layers], tower);
     var has_full = false;
-    if (list_v == .null) {
-        const iv = interval orelse 4;
-        for (0..n_layers) |i| {
-            const is_full = (i + 1) % iv == 0;
-            out[i] = !is_full;
-            if (is_full) has_full = true;
-        }
-        if (!has_full) return error.MissingFullAttention;
-        return;
-    }
-    if (list_v != .array or list_v.array.items.len != n_layers) return error.BadLayerTypes;
-    for (list_v.array.items, 0..) |item, i| {
-        if (item != .string) return error.BadLayerTypes;
-        if (std.mem.eql(u8, item.string, "linear_attention")) {
-            out[i] = true;
-        } else if (std.mem.eql(u8, item.string, "full_attention")) {
-            out[i] = false;
-            has_full = true;
-        } else return error.BadLayerTypes;
-        if (interval) |iv| if (out[i] == ((i + 1) % iv == 0)) return error.BadLayerTypes;
+    for (0..n_layers) |i| {
+        out[i] = !full[i];
+        if (full[i]) has_full = true;
     }
     if (!has_full) return error.MissingFullAttention;
 }
 
-fn parseInterval(v: ?std.json.Value) Error!?usize {
-    const x = v orelse return null;
-    return switch (x) {
-        .null => null,
-        .bool => |b| if (b) error.BadLayerTypes else null,
-        .integer => |i| if (i == 0) null else if (i > 0) @as(usize, @intCast(i)) else error.BadLayerTypes,
-        else => error.BadLayerTypes,
-    };
-}
-
-fn parseLoop(root: std.json.ObjectMap, tower: std.json.ObjectMap, n_layers: u8) Error!LoopSettings {
-    const lv = optField(root, tower, "loop_settings") orelse return error.BadLoopSettings;
+fn parseLoop(root: std.json.ObjectMap, n_layers: u8) Error!LoopSettings {
+    const lv = root.get("loop_settings") orelse return error.BadLoopSettings;
     if (lv != .object) return error.BadLoopSettings;
     const o = lv.object;
     if (o.get("use_gate")) |ug| if (ug != .bool or ug.bool) return error.BadLoopSettings;
@@ -328,8 +302,8 @@ fn parseLoop(root: std.json.ObjectMap, tower: std.json.ObjectMap, n_layers: u8) 
     return .{ .start = @intCast(sv.integer), .end = @intCast(ev.integer), .eval_count = eval_count };
 }
 
-fn parseMhc(root: std.json.ObjectMap, tower: std.json.ObjectMap, n_layers: u8, loop: LoopSettings) Error!?MhcConfig {
-    const mv = optField(root, tower, "mhc") orelse return null;
+fn parseMhc(root: std.json.ObjectMap, n_layers: u8, loop: LoopSettings) Error!?MhcConfig {
+    const mv = root.get("mhc") orelse return null;
     if (mv == .null) return null;
     if (mv != .object) return error.BadMhcConfig;
     const o = mv.object;
@@ -347,12 +321,12 @@ fn parseMhc(root: std.json.ObjectMap, tower: std.json.ObjectMap, n_layers: u8, l
     const itv = o.get("iterations") orelse return error.BadMhcConfig;
     const fiv = o.get("fixed_identity") orelse return error.BadMhcConfig;
     if (sv != .integer or ev != .integer or stv != .integer or itv != .integer) return error.BadMhcConfig;
-    if (fiv != .bool or fiv.bool) return error.BadMhcConfig;
+    if (fiv != .bool) return error.BadMhcConfig;
     if (sv.integer < 0 or ev.integer <= sv.integer or ev.integer > n_layers) return error.BadMhcConfig;
     if (stv.integer != 2 and stv.integer != 4) return error.BadMhcConfig;
     if (itv.integer < 1) return error.BadMhcConfig;
     const pre_scale_f64 = if (o.get("pre_scale")) |pv| finiteNum(pv) catch return error.BadMhcConfig else 1.0;
-    if (pre_scale_f64 <= 0 or pre_scale_f64 > std.math.floatMax(f32)) return error.BadMhcConfig;
+    if (pre_scale_f64 <= 0) return error.BadMhcConfig;
 
     const ms: u8 = @intCast(sv.integer);
     const me: u8 = @intCast(ev.integer);
@@ -364,7 +338,8 @@ fn parseMhc(root: std.json.ObjectMap, tower: std.json.ObjectMap, n_layers: u8, l
         .end = me,
         .streams = @intCast(stv.integer),
         .iterations = std.math.cast(u32, itv.integer) orelse return error.BadMhcConfig,
-        .pre_scale = @floatCast(pre_scale_f64),
+        .fixed_identity = fiv.bool,
+        .pre_scale = pre_scale_f64,
     };
 }
 
@@ -465,6 +440,7 @@ fn finiteNum(v: std.json.Value) Error!f64 {
     const f: f64 = switch (v) {
         .integer => |i| @floatFromInt(i),
         .float => |x| x,
+        .number_string => |s| std.fmt.parseFloat(f64, s) catch return error.InvalidConfig,
         else => return error.InvalidConfig,
     };
     if (!std.math.isFinite(f)) return error.InvalidConfig;
@@ -561,8 +537,27 @@ test "sensenova_loop config: --loops override, boundary refusals, top-level fall
     ;
     const fc = try Config.parse(a, flat);
     try std.testing.expectEqual(@as(u32, 1), fc.mtp_num_hidden_layers);
-    try std.testing.expectEqual(@as(f32, 0.5), fc.mhc.?.pre_scale);
+    try std.testing.expectEqual(@as(f64, 0.5), fc.mhc.?.pre_scale);
     try std.testing.expect(isSkippedTensor("model.language_model.loop_gate.logits"));
     try std.testing.expect(isSkippedTensor("loop_gate.logits"));
     try std.testing.expect(!isSkippedTensor("model.language_model.layers.4.mhc_attn.weight"));
+}
+
+test "sensenova_loop config: one-layer mHC role is .both and fixed_identity/4-stream parse" {
+    const a = std.testing.allocator;
+    const one = try std.mem.replaceOwned(u8, a, sample_cfg, "\"mhc\":{\"start\":4,\"end\":28", "\"mhc\":{\"start\":4,\"end\":5");
+    defer a.free(one);
+    const c1 = try Config.parse(a, one);
+    try std.testing.expectEqual(MhcRole.both, c1.mhcRole(4));
+    const p1 = try c1.executionPlan(a, null);
+    defer p1.deinit(a);
+    try std.testing.expectEqual(MhcRole.both, p1.steps[4].mhc_role);
+    try std.testing.expectEqual(MhcRole.none, p1.steps[5].mhc_role);
+    try std.testing.expectEqual(MhcRole.both, p1.steps[28].mhc_role);
+
+    const fi = try std.mem.replaceOwned(u8, a, sample_cfg, "\"streams\":2,\"iterations\":20,\"fixed_identity\":false", "\"streams\":4,\"iterations\":1001,\"fixed_identity\":true");
+    defer a.free(fi);
+    const c2 = try Config.parse(a, fi);
+    try std.testing.expect(c2.mhc.?.fixed_identity);
+    try std.testing.expectEqual(@as(u8, 4), c2.mhc.?.streams);
 }
