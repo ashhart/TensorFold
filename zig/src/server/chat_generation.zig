@@ -322,15 +322,15 @@ pub const Generation = struct {
             content = h.content;
             reasoning = h.reasoning;
         }
-        // An unclosed-think reply that ended on its own EOS still wrote an answer: also surface its text as content.
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
         // Recovery only when reasoning was asked: no tools, no grammar; the unclosed-think EOS text becomes content.
-        const recovered = g.recover and native == null and g.thinking and reasons and reasoning != null and
+        const recovered = g.recover and g.thinking and reasons and reasoning != null and
             reply_text.pyStrip(content).len == 0 and
             g.endedOnEos(reason, raw, stopped) and
             !g.required and m.stats.grammar == null and
             (g.calls == null or !g.calls.?.streamed) and
-            neverClosed(text, g.srv.markers, close_at) and !try g.callIn(reasoning.?);
+            (if (native) |n| n.open_think and n.calls == null else neverClosed(text, g.srv.markers, close_at)) and
+            !try g.callIn(reasoning.?);
         if (recovered) {
             log.line("warning: a reply ended inside an unclosed think block on its own end-of-sequence, so its text is returned as the answer too", .{});
             content = reasoning.?;
