@@ -49,6 +49,7 @@ export function buildPrimer(project: Project, room: Room, seat: Seat, roster: Se
     'SHARED BOARD: coordinate through it so you never duplicate a teammate\'s work:',
     'ACTION: TOOL list_tickets: see every ticket and who is working on what.',
     'ACTION: TOOL claim_ticket {"title":"..."}: claim a ticket BEFORE you start it, so teammates know it is taken.',
+    'ACTION: TOOL release_ticket {"title":"..."}: return your idle claimed ticket to Ready and keep its evidence.',
     'ACTION: TOOL create_ticket {"title":"...","body":"...","priority":"high","risk":"medium","allowedCapabilities":["read"],"requiredEvidence":["files inspected","verification result"],"acceptanceCriteria":["..."]}: add an execution ticket to the board.',
     'ACTION: TOOL add_ticket_evidence {"title":"...","kind":"file","summary":"What you found","ref":"src/file.ts"}: attach evidence to a claimed ticket.',
     'ACTION: TOOL complete_ticket {"title":"...","evidence":[{"kind":"review","summary":"Reviewed X and found Y"}]}: mark your claimed ticket complete after attaching required evidence.',
