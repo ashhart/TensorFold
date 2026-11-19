@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: tf-h3-vae-decode pipeline_dir latents.f32 depth height width out_prefix\n", .{});
         return error.BadArguments;
     }
-    const gpa = init.gpa;
+    const gpa = std.heap.page_allocator;
     const device = try mtl.Device.init();
 
     const latents_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], gpa, .limited(1 << 30));
@@ -33,9 +33,12 @@ pub fn main(init: std.process.Init) !void {
     const latents = @as([]const f32, @alignCast(std.mem.bytesAsSlice(f32, latents_bytes)));
     if (latents.len != 24 * depth * height * width) return error.BadLatentsSize;
 
+    std.debug.print("loaded latents, decoding...", .{});
     var decoder = try vae.Decoder.load(gpa, init.io, device, args[1]);
     defer decoder.deinit();
+    std.debug.print("decoder loaded, calling frames", .{});
     const pixels = try decoder.frames(gpa, latents, depth, height, width);
+    std.debug.print("frames done", .{});
     defer gpa.free(pixels);
 
     try writeBytes(gpa, pixels, "{s}.rgb", .{args[6]});

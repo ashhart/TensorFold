@@ -14,6 +14,7 @@ pub const picture_vae = @import("picture_vae.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;
+pub const vae = @import("vae_video.zig");
 pub const Checkpoint = tensors.Checkpoint;
 pub const head_dim = 128;
 pub const eps: f32 = 1e-5;

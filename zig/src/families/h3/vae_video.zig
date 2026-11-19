@@ -59,6 +59,7 @@ const names = [_][]const u8{
     "h3_vae_attention",
     "h3_vae_layernorm",
     "h3_vae_postquant",
+    "h3_vae_unpatch",
 };
 
 pub const Decoder = struct {
@@ -259,15 +260,16 @@ pub const Decoder = struct {
         const overlap_latents = self.config.tile_overlap / self.config.spatial_ratio;
         const p_ratio = self.config.spatial_ratio;
         const pt = self.config.temporal_ratio;
-
         const out_frames = depth * pt;
         const out_h = height * p_ratio;
         const out_w = width * p_ratio;
+
         const canvas = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
         @memset(canvas, 0);
         const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
         @memset(weight, 0);
 
+        std.debug.print("canvas ready", .{});
         var clip_start: usize = 0;
         while (clip_start < depth) {
             const clip_depth = @min(self.config.clip_length, depth - clip_start);
@@ -290,14 +292,23 @@ pub const Decoder = struct {
                             }
                         }
                     }
-                    const piece = try self.decodePiece(gpa, tile_lat, clip_depth, tile_h, tile_w);
+                    std.debug.print("piece decoded", .{});
+                    const piece_len_bytes = clip_depth * pt * tile_h * p_ratio * tile_w * p_ratio * 3;
+                    std.debug.print("piece alloc done", .{});
+                    const piece = try gpa.alloc(u8, piece_len_bytes);
                     defer gpa.free(piece);
+                    try self.decodePiece(gpa, tile_lat, clip_depth, tile_h, tile_w, piece);
+                    std.debug.print("piece decoded OK", .{});
                     const piece_frames = clip_depth * pt;
+                    std.debug.print("placing piece frames={d}", .{piece_frames});
                     for (0..piece_frames) |f| {
                         const gf = (clip_start * pt) + f;
+                        if (f == 0) std.debug.print("f0-enter", .{});
                         if (gf >= out_frames) break;
                         for (0..tile_h * p_ratio) |ph| {
+                            if (f == 0 and ph == 0) std.debug.print("loop ph0", .{});
                             for (0..tile_w * p_ratio) |pw| {
+                                if (f == 0 and ph == 0 and pw == 0) std.debug.print("loop pw0", .{});
                                 const gy = y * p_ratio + ph;
                                 const gx = x * p_ratio + pw;
                                 if (gy >= out_h or gx >= out_w) continue;
@@ -309,6 +320,7 @@ pub const Decoder = struct {
                             }
                         }
                     }
+                    std.debug.print("piece placed DONE", .{});
                     if (x + tile_w >= width) break;
                     x += tile_latents - overlap_latents;
                 }
@@ -336,259 +348,15 @@ pub const Decoder = struct {
     }
 
     /// One piece (clip x tile) through the full ViT pass on Metal.
-    fn decodePiece(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]f32 {
-        const dim = self.config.dim();
-        const channels = self.config.latent_channels;
-        const heads = self.config.heads;
-        const head_dim = self.config.head_dim;
+    fn decodePiece(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize, out_rgb_bytes: []u8) !void {
+        _ = out_rgb_bytes;
+        _ = latents;
         const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
         const voxels = depth * height * width;
-        const rows = voxels + self.config.register_tokens + 1;
 
-        var cb = self.queue.commandBuffer();
-        var e = cb.compute(.concurrent);
-
-        // post_quant: h3_vae_postquant
-        const pq_in = try self.device.buffer(latents.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(pq_in.slice(f32, latents.len), latents);
-        const pq_w = try self.device.buffer(self.post_quant_w.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(pq_w.slice(f32, self.post_quant_w.len), self.post_quant_w);
-        const pq_b = try self.device.buffer(self.post_quant_b.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(pq_b.slice(f32, self.post_quant_b.len), self.post_quant_b);
-        const pq_out = try self.device.buffer(voxels * channels * 4, mtl.ResourceOptions.shared);
-        e.setPipeline(self.p[5]);
-        e.setBuffer(pq_in, 0, 0);
-        e.setBuffer(pq_w, 0, 1);
-        e.setBuffer(pq_b, 0, 2);
-        e.setBuffer(pq_out, 0, 3);
-        e.setValue([2]u32{ @intCast(voxels), @intCast(channels) }, 4);
-        e.dispatchThreads(mtl.Size.of(channels, voxels, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-
-        // x_embedder matmul: pq [V, 24] x W [2048, 24] -> tokens [V, 2048]
-        const emb_w = try self.device.buffer(self.x_embedder_w.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(emb_w.slice(f32, self.x_embedder_w.len), self.x_embedder_w);
-        const emb_b = try self.device.buffer(self.x_embedder_b.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(emb_b.slice(f32, self.x_embedder_b.len), self.x_embedder_b);
-        const tokens = try self.device.buffer(voxels * dim * 4, mtl.ResourceOptions.shared);
-        e.setPipeline(self.p[0]);
-        e.setBuffer(pq_out, 0, 0);
-        e.setBuffer(emb_w, 0, 1);
-        e.setBuffer(emb_b, 0, 2);
-        e.setBuffer(tokens, 0, 3);
-        e.setValue([4]u32{ @intCast(voxels), @intCast(channels), @intCast(dim), 0 }, 4);
-        e.dispatchThreads(mtl.Size.of(dim, voxels, 1), mtl.Size.of(64, 1, 1));
-        e.end();
-
-        cb.commit(); cb.wait();
-
-        const tokens_host = try gpa.alloc(f32, voxels * dim);
-        @memcpy(tokens_host, tokens.slice(f32, voxels * dim));
-        const tokens_full = try gpa.alloc(f32, rows * dim);
-        @memcpy(tokens_full[0 .. voxels * dim], tokens_host);
-        for (0..self.config.register_tokens) |r| {
-            @memcpy(tokens_full[(voxels + r) * dim .. (voxels + r + 1) * dim], self.register_tokens[r * dim .. (r + 1) * dim]);
-        }
-        @memset(tokens_full[voxels + self.config.register_tokens .. rows * dim], 0);
-        gpa.free(tokens_host);
-
-        // 36 blocks on Metal: per block, 6 dispatches (2 matmuls x3, norms, swiglu, attention)
-        const normed = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
-        const qkv = try self.device.buffer(rows * 3 * dim * 4, mtl.ResourceOptions.shared);
-        const attended = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
-        const fused = try self.device.buffer(rows * 2 * self.config.ffn() * 4, mtl.ResourceOptions.shared);
-        const gated = try self.device.buffer(rows * self.config.ffn() * 4, mtl.ResourceOptions.shared);
-        defer normed.deinit();
-        defer qkv.deinit();
-        defer attended.deinit();
-        defer fused.deinit();
-        defer gated.deinit();
-
-        // copy tokens_full to normed for the first block
-        @memcpy(normed.slice(f32, rows * dim), tokens_full);
-
-        for (self.blocks) |b| {
-            const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
-            const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
-
-            cb = self.queue.commandBuffer();
-            e = cb.compute(.concurrent);
-
-            // rmsnorm 1: normed -> normed (in place via separate out)
-            const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
-            e.setPipeline(self.p[1]);
-            e.setBuffer(normed, 0, 0);
-            e.setBuffer(n1_w, 0, 1);
-            e.setBuffer(normed, 0, 2);
-            e.setValue([1]u32{ @intCast(dim) }, 3);
-            e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-            e.barrier();
-
-            // qkv matmul: normed [rows, dim] x qkv_w [3dim, dim] -> qkv [rows, 3dim]
-            e.setPipeline(self.p[0]);
-            e.setBuffer(normed, 0, 0);
-            e.setBuffer(qkv_w, 0, 1);
-            e.setBuffer(qkv_b, 0, 2);
-            e.setBuffer(qkv, 0, 3);
-            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
-            e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
-            e.barrier();
-
-            // attention: qkv -> attended (per head, RoPE inside the Python ref is done on the CPU here)
-            e.setPipeline(self.p[3]);
-            e.setBuffer(qkv, 0, 0);
-            e.setBuffer(qkv, 0, 1);
-            e.setBuffer(qkv, 0, 2);
-            e.setBuffer(attended, 0, 3);
-            e.setValue([2]u32{ @intCast(rows), @intCast(head_dim) }, 4);
-            e.dispatchGroups(mtl.Size.of(rows * heads, 1, 1), mtl.Size.of(256, 1, 1));
-            e.barrier();
-
-            const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(out_w.slice(f32, b.attn_out_w.len), b.attn_out_w);
-            const out_b = try self.device.buffer(b.attn_out_b.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(out_b.slice(f32, b.attn_out_b.len), b.attn_out_b);
-            const s1 = try self.device.buffer(b.scale1.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(s1.slice(f32, b.scale1.len), b.scale1);
-
-            // out matmul: attended [rows, dim] x out_w [dim, dim] -> qkv reused [rows, dim]
-            e.setPipeline(self.p[0]);
-            e.setBuffer(attended, 0, 0);
-            e.setBuffer(out_w, 0, 1);
-            e.setBuffer(out_b, 0, 2);
-            e.setBuffer(qkv, 0, 3);
-            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(dim), 0 }, 4);
-            e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
-            e.barrier();
-
-            e.end();
-            // residual: tokens += qkv * scale1 (CPU side, small)
-            cb.commit(); cb.wait();
-            qkv_w.deinit(); qkv_b.deinit(); n1_w.deinit(); s1.deinit();
-            const qkv_host = qkv.slice(f32, rows * dim);
-            for (0..rows) |r| {
-                for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
-            }
-            @memcpy(normed.slice(f32, rows * dim), tokens_full[0 .. rows * dim]);
-
-            cb = self.queue.commandBuffer();
-            e = cb.compute(.concurrent);
-
-            // rmsnorm 2
-            const n2_w = try self.device.buffer(b.norm2_w.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(n2_w.slice(f32, b.norm2_w.len), b.norm2_w);
-            e.setPipeline(self.p[1]);
-            e.setBuffer(normed, 0, 0);
-            e.setBuffer(n2_w, 0, 1);
-            e.setBuffer(normed, 0, 2);
-            e.setValue([1]u32{ @intCast(dim) }, 3);
-            e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-            e.barrier();
-
-            const fw1_w = try self.device.buffer(b.ff_w1.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(fw1_w.slice(f32, b.ff_w1.len), b.ff_w1);
-            const fw1_b = try self.device.buffer(b.ff_w1_b.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(fw1_b.slice(f32, b.ff_w1_b.len), b.ff_w1_b);
-
-            // ff matmul: normed [rows, dim] x fw1_w [2ffn, dim] -> fused [rows, 2ffn]
-            e.setPipeline(self.p[0]);
-            e.setBuffer(normed, 0, 0);
-            e.setBuffer(fw1_w, 0, 1);
-            e.setBuffer(fw1_b, 0, 2);
-            e.setBuffer(fused, 0, 3);
-            e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(2 * self.config.ffn()), 0 }, 4);
-            e.dispatchThreads(mtl.Size.of(2 * self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
-            e.barrier();
-
-            // swiglu: fused -> gated
-            e.setPipeline(self.p[2]);
-            e.setBuffer(fused, 0, 0);
-            e.setBuffer(gated, 0, 1);
-            e.setValue([1]u32{ @intCast(self.config.ffn()) }, 2);
-            e.dispatchThreads(mtl.Size.of(self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
-            e.barrier();
-
-            const fw2_w = try self.device.buffer(b.ff_w2.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(fw2_w.slice(f32, b.ff_w2.len), b.ff_w2);
-            const fw2_b = try self.device.buffer(b.ff_w2_b.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(fw2_b.slice(f32, b.ff_w2_b.len), b.ff_w2_b);
-            const s2 = try self.device.buffer(b.scale2.len * 4, mtl.ResourceOptions.shared);
-            @memcpy(s2.slice(f32, b.scale2.len), b.scale2);
-
-            // ff matmul: gated [rows, ffn] x fw2_w [dim, ffn] -> qkv reused [rows, dim]
-            e.setPipeline(self.p[0]);
-            e.setBuffer(gated, 0, 0);
-            e.setBuffer(fw2_w, 0, 1);
-            e.setBuffer(fw2_b, 0, 2);
-            e.setBuffer(qkv, 0, 3);
-            e.setValue([4]u32{ @intCast(rows), @intCast(self.config.ffn()), @intCast(dim), 0 }, 4);
-            e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
-            e.end();
-            cb.commit(); cb.wait();
-
-            const qkv_host2 = qkv.slice(f32, rows * dim);
-            for (0..rows) |r| {
-                for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
-            }
-            n2_w.deinit(); out_w.deinit(); out_b.deinit(); s2.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
-            @memcpy(normed.slice(f32, rows * dim), tokens_full[0 .. rows * dim]);
-        }
-        normed.deinit();
-        qkv.deinit();
-        attended.deinit();
-        fused.deinit();
-        gated.deinit();
-
-        // norm_out + proj_out on Metal
-        cb = self.queue.commandBuffer();
-        e = cb.compute(.concurrent);
-        const no_w = try self.device.buffer(self.norm_out_w.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(no_w.slice(f32, self.norm_out_w.len), self.norm_out_w);
-        const no_b = try self.device.buffer(self.norm_out_b.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(no_b.slice(f32, self.norm_out_b.len), self.norm_out_b);
-        e.setPipeline(self.p[4]);
-        e.setBuffer(normed, 0, 0);
-        e.setBuffer(no_w, 0, 1);
-        e.setBuffer(no_b, 0, 2);
-        e.setBuffer(normed, 0, 3);
-        e.setValue([1]u32{ @intCast(dim) }, 4);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-        e.barrier();
-        e.end();
-        cb.commit(); cb.wait();
-
-        // proj_out matmul: normed [rows, dim] x proj_out_w [3072, dim] -> proj [rows, 3072]
+        // all GPU work disabled during the crash bisection
         const proj = try gpa.alloc(f32, voxels * head_block);
-        try self.matmulOn(self.queue.commandBuffer(), self.proj_out_w, self.proj_out_b, normed.slice(f32, rows * dim), proj, voxels, dim, head_block);
-
-        // unpatchify on the CPU: raw model output, no denorm here (the tiler
-        // averages the overlapping pieces first, then converts to bytes once)
-        const p_ratio = self.config.spatial_ratio;
-        const pt = self.config.temporal_ratio;
-        const out_frames = depth * pt;
-        const out_h = height * p_ratio;
-        const out_w = width * p_ratio;
-        const rgb = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
-        for (0..depth) |t| {
-            for (0..height) |h| {
-                for (0..width) |w| {
-                    const v = (t * height + h) * width + w;
-                    for (0..3) |c| {
-                        for (0..pt) |dt| {
-                            for (0..p_ratio) |dh| {
-                                for (0..p_ratio) |dw| {
-                                    const o = proj[v * head_block + c * pt * p_ratio * p_ratio + dt * p_ratio * p_ratio + dh * p_ratio + dw];
-                                    rgb[((t * pt + dt) * out_h + h * p_ratio + dh) * out_w * 3 + (w * p_ratio + dw) * 3 + c] = o;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return rgb;
+        @memset(proj, 0.5);
+        std.debug.print("gpu unpatch done", .{});
     }
 };

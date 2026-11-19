@@ -43,6 +43,7 @@
   float acc = 0.0f;
   for (uint i = tid; i < D; i += 256) acc += X[tg * D + i] * X[tg * D + i];
   acc = simd_sum(acc);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
   const float inv = rsqrt(acc / float(D) + 1e-5f);
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
@@ -112,8 +113,9 @@
   float m2 = 0.0f;
   for (uint i = tid; i < D; i += 256) { const float t = X[tg * D + i] - mean; m2 += t * t; }
   m2 = simd_sum(m2);
-  const float std = rsqrt(m2 / float(D) + 1e-5f);
-  for (uint i = tid; i < D; i += 256) Y[tg * D + i] = (X[tg * D + i] - mean) * std * W[i] + B[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float rstd = rsqrt(m2 / float(D) + 1e-5f);
+  for (uint i = tid; i < D; i += 256) Y[tg * D + i] = (X[tg * D + i] - mean) * rstd * W[i] + B[i];
 }
 
 // post_quant 1x1x1 conv: out[v, o] = sum_i in[v, i] w[o, i] + b[o]. Threads [V, O, 1].
@@ -129,4 +131,33 @@
   float sum = 0.0f;
   for (uint i = 0; i < C; i++) sum += IN[at.y * C + i] * W[at.x * C + i];
   OUT[at.y * C + at.x] = sum + B[at.x];
+}
+
+// unpatchify + denormalize: token output [voxels, 3*4*16*16] to RGB bytes
+// [frames, H*16, W*16, 3]. One thread per output byte.
+[[kernel]] void h3_vae_unpatch(
+  const device float* PROJ [[buffer(0)]],
+  const device float* MEAN [[buffer(1)]],
+  const device float* STD [[buffer(2)]],
+  device uchar* RGB [[buffer(3)]],
+  constant uint* P [[buffer(4)]],
+  uint3 at [[thread_position_in_grid]]) {
+  const uint depth = P[0], h = P[1], w = P[2], out_w = P[3], hb = P[4];
+  const uint pt = 4, p = 16;
+  const uint f = at.z;
+  const uint t = f / pt;
+  const uint dt = f % pt;
+  const uint row = at.y;
+  const uint hh = row / p;
+  const uint dh = row % p;
+  const uint col3 = at.x;
+  const uint c = col3 % 3;
+  const uint col = col3 / 3;
+  const uint ww = col / p;
+  const uint dw = col % p;
+  if (t >= depth || hh >= h || ww >= w) return;
+  const uint v = (t * h + hh) * w + ww;
+  const float o = PROJ[v * hb + c * pt * p * p + dt * p * p + dh * p + dw];
+  const float value = o * STD[c] + MEAN[c];
+  RGB[(f * h * p + row) * out_w + col3] = (uchar)clamp((value * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f);
 }
