@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: the window-cost cache is keyed by `TF_GLM_KDA_PAD`, `TF_ROCE`, `TF_GLM_PDL` and `TF_GLM_DSEL` too, so changing one of them times the windows again instead of reusing prices measured under the other value (#3495, fixes #3493). Thanks to @ultradaoto.
+
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
 - CUDA: on a GB10, the one-launch path for two to four affine-4 prompt projections (`tf_qmm_prefill_many`) works out each thread's copy addresses once, before the K loop, instead of at every stage; the copies, their order and the math are unchanged (#2825). Thanks to @GumbiiDigital.
