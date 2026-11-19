@@ -23,10 +23,8 @@ pub const placementWeightBytes = family.placementWeightBytes;
 pub const ranks: u32 = 2;
 pub const ranks_refusal = "Ripple's CUDA path here runs on two GB10s: serve it with --tp 2 (rank 0 serves, rank 1 follows)";
 /// The server's think block rules: Ripple opens `<think>` itself or answers bare, and its markers take no budget.
-pub fn thinking(info: anytype) void {
-    info.reasoning_optional = true;
-    info.thinking_budget = false;
-}
+pub const reasoning_optional = true;
+pub const thinking_budget = false;
 
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, lanes_fixed: bool = false, room: ?Room = null, tp: u32 = 1, rank: u32 = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
