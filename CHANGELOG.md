@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines instead of waiting in a collective receive for the whole pass, so a long image pass no longer trips a net plugin's operation timeout and stops every rank; replies are unchanged (#3675, for #3614). Thanks to @ultradaoto.
+
 - Desktop: a Qwen3.8-27B checkpoint is offered and loads, where the library applied the 2B geometry to every `qwen3_5` checkpoint and rejected the supported 27B at hidden size 5,120 (#3771). Thanks to @AIFlowML.
 
 - Intel Arc (XPU): two or four Level Zero GPUs open as peers in one context, with new peer-to-peer all-reduce collectives (FP16, BF16 and FP32; one shot up to 512 KiB, reduce-scatter then gather above) that sum in fixed rank order for exact bits, and `zig build xpu-tp-bench` builds `tf-xpu-tp-bench` to check and time them; nothing serves through them yet (#3585, part of #3583). Thanks to @supernovae.
@@ -13,8 +15,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Nemotron on HIP: a checkpoint whose token table (`backbone.embeddings`) is stored bf16 beside quantized matrices, marked `false` in config.json's quantization block or stored without scales, is admitted and loads; its rows are gathered as stored, the memory plan counts them at their stored bytes, and the startup label adds `+bf16-embed`; a bf16 `lm_head`, projection or other unquantized tensor is still refused by name (#3575, refs #3061). Thanks to @gilby.
 
 - GLM-5.3-Flash on Metal: prompt index scores read each row's queries once per tile and routed-expert gathers load the next step's codes ahead, so follow-up turns reach the first token sooner with unchanged outputs (#3458).
-
-
 
 - Web: an explicit relative `--token-file` path for the service installer is anchored to the directory it is run from, so the file the installer prepares and the file the generated launcher opens are the same; the default path and symlink handling are unchanged (#3838, fixes #3835). Thanks to @AIFlowML.
 
@@ -43,8 +43,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the optimization ledger adds rows 30 to 32 (small-kernel fusion, stream-tile prefetch and the filled-item prompt grid), each `failed` for Flash Next on HIP with the measurements from #1603 (#3160, refs #1603). Thanks to @gilby.
 
 - Docs: the Qwen3.8-27B recipe says to serve with `--thinking-budget 4096` when thinking is on, and gives its GPQA Diamond result on TensorFold 1.2.7 and one GB10: replies cut at the limit from 78 of 198 to 0, and correct from 58.1% to 82.8% (#3373, fixes #3323).
-
-
 
 - Idol on CUDA: `tf-idol` runs Idol's denoiser on GB10 (sm_121) and on RTX 50-series and RTX PRO Blackwell (sm_120) cards against a reference case, gated step by step against idol-sdk's float32 run as on Metal, and refuses other GPUs by name (#1767, for #1757). Thanks to @jayleaton, with device runs from @GustavBlack and @Nipale-ai.
 
@@ -338,7 +336,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (736.3 to 570.2 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
 - CI: the no-GPU host tests run as two parallel jobs, `zig` and `zig-b`, and a build check fails if any host check is in both or neither; a local `zig build test-host` still runs all of them (#3474).
 - GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (for #3614).
-- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (#3675, for #3614).
 
 - Nemotron 3.5 Bolt on CUDA: the shared expert runs on the side stream in decode windows, as on Super, so decode on a GB10 is 2.9-3.0% faster at one stream and 1.4-2.1% at four, with identical replies (#2847, for #2840).
 
@@ -347,8 +344,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen 3.5 on CUDA reserves its forward scratch at load in its own allocation, sized to `--context` (capped at the largest prompt pass) plus the verify window, instead of always reserving the largest pass inside the weights arena, and a pass past the reservation is refused before any kernel runs; with a short `--context` the model starts on a smaller GPU (the 4B in MLX 4-bit at `--context 1024` with a 0.5 GiB memory reserve starts on a 4 GiB RTX 3050 Laptop GPU where it was refused), and on a GB10 the 27B's tokens and speed match main's (#1879, refs #1827). Thanks to @robertosantosx2.
 
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
-
-- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (#3675, for #3614).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
 - LFM2.5 on CUDA: attention pages come from the shared KV pool and chat states are kept in the prompt cache, with the kept states' copies off the first token's path; replies are unchanged (#1503). Thanks to @jschmied.
