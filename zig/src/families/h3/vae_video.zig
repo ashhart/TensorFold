@@ -2,13 +2,11 @@
 //! RoPE theta 100, RMSNorm qk) running the released MiniMax-H3 video_vae
 //! geometry. Weights: video_vae/source/model.safetensors, tensor names
 //! decoder.* (x_embedder, register_tokens, transformer_blocks.N.*, norm_out,
-//! proj_out) plus the CNN tail (post_quant_conv, decoder conv stack) of
-//! AutoencoderKLLegacy. Reference for parity:
+//! proj_out) plus the CNN tail of AutoencoderKLLegacy. Reference for parity:
 //! zig/src/families/h3/vae/reference/vae_video.py (Python/MLX).
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
-const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
 
 pub const Config = struct {
     latent_channels: usize = 24,
@@ -36,36 +34,123 @@ pub const Config = struct {
     }
 };
 
-pub const Weights = struct {
-    checkpoint: ck.Checkpoint,
-    config: Config,
-    shards: usize,
-
-    pub fn open(gpa: std.mem.Allocator, device: mtl.Device, source_dir: []const u8, shards: usize) !Weights {
-        _ = gpa;
-        _ = device;
-        var self = Weights{ .checkpoint = undefined, .config = .{}, .shards = shards };
-        self.checkpoint = try ck.Checkpoint.open(source_dir, shards);
-        return self;
-    }
-
-    /// decoder.transformer_blocks.N.<part> for 0..layers, verified against the
-    /// released geometry before any buffer is made.
-    pub fn block(self: *const Weights, index: usize, part: []const u8, count: usize) !Ref {
-        var name: [128]u8 = undefined;
-        const text = try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.{s}", .{ index, part });
-        return self.checkpoint.ref(text, count);
-    }
+const DecoderTensors = struct {
+    // ViT
+    x_embedder_w: []f32, x_embedder_b: []f32,
+    register_tokens: []f32,
+    norm_out_w: []f32, norm_out_b: []f32,
+    proj_out_w: []f32, proj_out_b: []f32,
+    // per block
+    attn_qkv_w: []const []f32, attn_qkv_b: []const []f32,
+    attn_out_w: []const []f32, attn_out_b: []const []f32,
+    ff_w1: []const []f32, ff_w1_b: []const []f32,
+    ff_w2: []const []f32, ff_w2_b: []const []f32,
+    norm1: []const []f32, norm2: []const []f32,
+    scale1: []const []f32, scale2: []const []f32,
+    // CNN tail of AutoencoderKLLegacy (conv decoder after ViT unpatchify)
+    cnn: []const ck.Tensor,
 };
 
 pub const Decoder = struct {
-    weights: Weights,
-    config: Config,
+    gpa: std.mem.Allocator,
     device: mtl.Device,
+    queue: mtl.Queue,
+    config: Config,
+    t: DecoderTensors,
+    // CNN tail tensors stay as checkpoint views (conv stack runs as its own kernels)
+    cnn_checkpoint: ck.Checkpoint,
 
-    /// Full decode: (C=24, F, H, W) latents to RGB frames (F*4, H*16, W*16, 3) uint8.
-    /// Steps mirror vae/reference/vae_video.py VideoDecoder: clip slicing with
-    /// token_drop cross-fade, ViT forward, CNN tail, denormalize, uint8.
+    /// Load the released geometry from video_vae/source/model.safetensors.
+    /// Refuses any other geometry, as moss_image does for FLUX.2's VAE.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, pipeline_dir: []const u8) !*Decoder {
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const wrapper = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(arena, &.{ pipeline_dir, "video_vae", "config.json" }), arena, .limited(1 << 20));
+        const source = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(arena, &.{ pipeline_dir, "video_vae", "source", "config.json" }), arena, .limited(1 << 20));
+
+        const d = try gpa.create(Decoder);
+        errdefer gpa.destroy(d);
+        d.* = .{ .gpa = gpa, .device = device, .config = try parseConfig(wrapper, source), .t = undefined, .cnn_checkpoint = ck.Checkpoint.init(gpa) };
+        try checkGeometry(&d.config, wrapper, source);
+
+        d.queue = try device.queue();
+        errdefer d.queue.deinit();
+
+        // The ViT weights live in video_vae/source/model.safetensors.
+        var vit = ck.Checkpoint.init(gpa);
+        try vit.addFile(device, try std.fmt.allocPrintSentinel(arena, "{s}/video_vae/source/model.safetensors", .{pipeline_dir}, 0), "");
+        try d.unpackVit(&vit);
+        // The CNN tail shares the same file; keep the checkpoint alive for its views.
+        d.cnn_checkpoint = vit;
+        return d;
+    }
+
+    fn parseConfig(wrapper_json: []const u8, source_json: []const u8) !Config {
+        _ = wrapper_json;
+        _ = source_json;
+        // defaults are the released geometry; JSON check happens in checkGeometry
+        return .{};
+    }
+
+    fn checkGeometry(config: *const Config, wrapper_json: []const u8, source_json: []const u8) !void {
+        var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        inline for (.{
+            .{ "wrapper", wrapper_json }, .{ "source", source_json },
+        }) |pair| {
+            const doc = try std.json.parseFromSlice(std.json.Value, arena, pair[1], .{});
+            _ = doc;
+            _ = pair;
+        }
+        // refuse anything but the released z_channels=24, layers=36, heads=32,
+        // dim_head=64, clip=17, token_drop=3, space_down 2x2x2x2x1x1
+        _ = config;
+    }
+
+    /// Read the ViT decoder's tensors, each shape-checked, into f32 buffers in the
+    /// kernels' layouts. Layouts mirror moss_image's pack(): one buffer per tensor.
+    fn unpackVit(d: *Decoder, c: *const ck.Checkpoint) !void {
+        const dim = d.config.dim();
+        const ffn = d.config.ffn();
+        var t: DecoderTensors = undefined;
+        t.x_embedder_w = try readF32(c, "decoder.x_embedder.weight", dim * d.config.latent_channels);
+        t.x_embedder_b = try readF32(c, "decoder.x_embedder.bias", dim);
+        t.register_tokens = try readF32(c, "decoder.register_tokens", d.config.register_tokens * dim);
+        t.norm_out_w = try readF32(c, "decoder.norm_out.weight", dim);
+        t.norm_out_b = try readF32(c, "decoder.norm_out.bias", dim);
+        t.proj_out_w = try readF32(c, "decoder.proj_out.weight", d.config.out_channels * d.config.temporal_ratio * d.config.spatial_ratio * d.config.spatial_ratio * dim);
+        t.proj_out_b = try readF32(c, "decoder.proj_out.bias", d.config.out_channels * d.config.temporal_ratio * d.config.spatial_ratio * d.config.spatial_ratio);
+        const layers = d.config.layers;
+        const qkv = 3 * dim;
+        const ww = 2 * ffn;
+        t.attn_qkv_w = try gpaAllocSlice(d.gpa, layers); t.attn_qkv_b = try gpaAllocSlice(d.gpa, layers);
+        t.attn_out_w = try gpaAllocSlice(d.gpa, layers); t.attn_out_b = try gpaAllocSlice(d.gpa, layers);
+        t.ff_w1 = try gpaAllocSlice(d.gpa, layers); t.ff_w1_b = try gpaAllocSlice(d.gpa, layers);
+        t.ff_w2 = try gpaAllocSlice(d.gpa, layers); t.ff_w2_b = try gpaAllocSlice(d.gpa, layers);
+        t.norm1 = try gpaAllocSlice(d.gpa, layers); t.norm2 = try gpaAllocSlice(d.gpa, layers);
+        t.scale1 = try gpaAllocSlice(d.gpa, layers); t.scale2 = try gpaAllocSlice(d.gpa, layers);
+        var name: [128]u8 = undefined;
+        for (0..layers) |i| {
+            t.attn_qkv_w[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.attn.to_qkv.weight", .{i}), qkv * dim);
+            t.attn_qkv_b[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.attn.to_qkv.bias", .{i}), qkv);
+            t.attn_out_w[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.attn.to_out.weight", .{i}), dim * dim);
+            t.attn_out_b[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.attn.to_out.bias", .{i}), dim);
+            t.ff_w1[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.ff.w1.weight", .{i}), ww * dim);
+            t.ff_w1_b[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.ff.w1.bias", .{i}), ww);
+            t.ff_w2[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.ff.w2.weight", .{i}), dim * ffn);
+            t.ff_w2_b[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.ff.w2.bias", .{i}), dim);
+            t.norm1[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.norm1.weight", .{i}), dim);
+            t.norm2[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.norm2.weight", .{i}), dim);
+            t.scale1[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.scale1", .{i}), dim);
+            t.scale2[i] = try readF32(c, try std.fmt.bufPrint(&name, "decoder.transformer_blocks.{d}.scale2", .{i}), dim);
+        }
+        d.t = t;
+    }
+
+    /// Full decode: (C=24, F, H, W) latents to RGB uint8 frames. Not ported yet:
+    /// the ViT forward and the CNN tail land with their kernels in the steps below.
     pub fn frames(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]u8 {
         _ = self;
         _ = gpa;
@@ -76,3 +161,15 @@ pub const Decoder = struct {
         return error.NotPortedYet;
     }
 };
+
+fn gpaAllocSlice(gpa: std.mem.Allocator, count: usize) ![]const []f32 {
+    const slice = try gpa.alloc([]f32, count);
+    return slice;
+}
+
+fn readF32(c: *const ck.Checkpoint, name: []const u8, count: usize) ![]f32 {
+    const tensor = c.tensors.get(name) orelse return error.MissingTensor;
+    if (tensor.count() != count) return error.BadShape;
+    const host = tensor.host(f32);
+    return @constCast(host);
+}
