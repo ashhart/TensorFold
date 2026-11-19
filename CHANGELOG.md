@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
+
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
 
 - dots.mocr on CUDA: the image tower (42 blocks and the 2×2 merger) is built but not yet served, so `--vision` stays refused and replies are unchanged; two GB10 runner commands check it, `tf-cuda-test dots-image` (encodes twice, compares bytes, then checks the generated page's `vision-merged` hash against its pin) and `dots-stages` (writes each stage's rows as `.npy` for the oracle) (#2770, refs #1927). Thanks to @laudney.
@@ -19,8 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
 - Server: replies in recipient-addressed messages (`to=self` … `<|eom|>`, `to=user` … `<|eot|>`, as Muse Spark Open's chat template writes them) are split into reasoning, answer and tool calls, where the whole reply, markers included, ended up in `content` (#1336). Thanks to @ajensenwaud.
-
-
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
@@ -629,8 +629,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Sessions: a saved session's chunk can be no larger than the reader's buffer, so a crafted file is refused instead of read past it, and the disk tier's folders and files are owner-only (#3030).
 
 - Server: a request body that no route reads is capped at 64 KiB, and a larger one gets HTTP 400 (#3029).
-
-- Flash Next on CUDA at `--tp 2`: a wait on the ranks' control link polls with a 50 µs timeout for its first 50 ms, then blocks as before. On two GB10s, an instrumented build showed a rank that waited out a round in a blocking poll waking 200 to 380 µs after its peer's frame arrived, its core in a deep idle state, and about 50 µs after it with the short polls. Over two alternated starts each there, drafted decode at one stream is 1.4% to 1.5% faster (chat 37.80 to 38.38 tok/s, code 51.25 to 51.98) and four streams 3.7% to 4.7% faster (chat 101.00 to 105.75, code 144.75 to 150.10); plain decode is unchanged, and so is every token. A server stops polling 50 ms after its last frame (#2971).
 
 - DeepSeek-V4.1: both ranks print the startup settings line, and its transport field now reads `comm=roce` or `comm=nccl` with its source from `TF_COMM_BACKEND`; DeepSeek says once at startup that it does not read `TF_ROCE` when that is set, where the line used to report `roce=1(set)` for `TF_ROCE=0` (#2877, for #2715).
 
