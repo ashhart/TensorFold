@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
+
 - Qwen3.8-27B on Metal before M5: decode rounds read their cached keys through the prefix kernels, as on an M5, and prompt passes size their memory the same way; `TF_QWEN27_SHARED_PREFIX=0` keeps cached keys on the tail kernel (#3677, refs #3604). Thanks to @hobbesd.
 
 - `tensorfold chat`: `tensorfold chat MODEL` starts its own `tensorfold serve` on a free loopback port with a fresh key, streams each reply in the terminal and stops the server when the chat ends, and `--url URL [MODEL]` chats with a running server instead; flags after `--` go to the started server, `/bye`, `/clear`, `/system` and `/help` work in the chat, and piped stdin is sent as one message with only the reply on stdout (#3538).
