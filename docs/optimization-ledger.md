@@ -82,6 +82,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
 | 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
+| 33. FP8 KV prefill waits | failed C[#3741] | ? | ? | ? | ? |
+| 34. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
+| 35. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
+| 36. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -118,6 +122,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? | ? |
+| 33. FP8 KV prefill waits | ? | ? | ? | ? | ? |
+| 34. Qwen normalization and head | ? | ? | ? | ? | ? |
+| 35. Text metadata uploads | ? | ? | ? | ? | ? |
+| 36. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -154,6 +162,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
+| 33. FP8 KV prefill waits | ? | ? | ? | ? |
+| 34. Qwen normalization and head | ? | ? | ? | ? |
+| 35. Text metadata uploads | ? | ? | ? | ? |
+| 36. Greedy readback | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -196,6 +208,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
+| 33. FP8 KV prefill waits | ? | ? | ? | ? |
+| 34. Qwen normalization and head | ? | ? | ? | ? |
+| 35. Text metadata uploads | ? | ? | ? | ? |
+| 36. Greedy readback | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -232,6 +248,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 31. Stream-tile prefetch | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? |
+| 33. FP8 KV prefill waits | ? | ? | ? |
+| 34. Qwen normalization and head | ? | ? | ? |
+| 35. Text metadata uploads | ? | ? | ? |
+| 36. Greedy readback | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -282,6 +302,10 @@ below; these are estimates for planning a port, not results.
 | 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
 | 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
+| 33. FP8 KV prefill waits | none | none | none | CUDA qwen3_5: +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) |
+| 34. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
+| 35. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
+| 36. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
 
 ## The optimizations
 
@@ -536,6 +560,38 @@ below; these are estimates for planning a port, not results.
     `const __restrict__`, or ptxas may place its non-coherent load above the wait; `zig build check-pdl-loads`
     checks the SASS.
 
+33. **FP8 KV prefill waits.** Experiment: FP8 KV prefill waits; Nsight showed the FP8 path executed. On one GB10
+    (SM121) it fell under the 3 % bar, so the row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+34. **Qwen normalization and head.** Experiment: Qwen normalization and head; Nsight showed standalone group-sum
+    launches removed in the normalization trace. On one GB10 (SM121) it fell under the 3 % bar, so the row is `failed`
+    ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+35. **Text metadata uploads.** Experiment: Qwen text metadata and snapshots; Nsight showed a typical Qwen
+    text-metadata upload shrink from 183,328 to 70,192 bytes. On one GB10 (SM121) it fell under the 3 % bar, so the
+    row is `failed` ([#3741]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | qwen3_5 (27B) | −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
+36. **Greedy readback.** Experiment: dots.mocr greedy readback; Nsight showed 48 four-byte device-to-host copies
+    eliminated in the dots trace. On one GB10 (SM121) the one-stream gain did not carry to four streams, so the change
+    is `failed` ([#3741]). `dots_mocr` is an OCR family named under "Not in the table" above and has no column of its
+    own, so this entry is the only place it is recorded.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | dots_mocr | +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) at one greedy stream, but −0.68 % paired at four greedy streams (absolute 52.61 → 52.26 tok/s a stream); tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
+
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
@@ -691,3 +747,4 @@ below; these are estimates for planning a port, not results.
 [#1603]: https://github.com/ashhart/TensorFold/issues/1603
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
 [#2805]: https://github.com/ashhart/TensorFold/pull/2805
+[#3741]: https://github.com/ashhart/TensorFold/issues/3741
