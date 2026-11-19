@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
+
 - CUDA and HIP: Qwen 3.5 settings go through the environment rules, so malformed text is refused at startup with the setting's name and accepted forms; names, defaults and clamps are unchanged (#3520).
 
 - Qwen3.8-27B on Metal: tensor-unit qk projections, flat glue kernels and Metal 4 verify passes each have their own off switch (`TF_Q27_QK=0`, `TF_Q27_FLAT_GLUE=0`, `TF_Q27_METAL4=0`) and are bit-identical to the kernels they replace; qk and Metal 4 stay off on chips without tensor units (#2342).
