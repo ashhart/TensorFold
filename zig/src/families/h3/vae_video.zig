@@ -528,6 +528,26 @@ pub const Decoder = struct {
         gated.deinit();
         std.debug.print("stage: 36 blocks done", .{});
 
+        const normed2 = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        // Stage 5: layernorm + proj_out on Metal
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        const no_w = try self.device.buffer(self.norm_out_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(no_w.slice(f32, self.norm_out_w.len), self.norm_out_w);
+        const no_b = try self.device.buffer(self.norm_out_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(no_b.slice(f32, self.norm_out_b.len), self.norm_out_b);
+        e.setPipeline(self.p[4]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(no_w, 0, 1);
+        e.setBuffer(no_b, 0, 2);
+        e.setBuffer(normed2, 0, 3);
+        e.setValue([1]u32{ @intCast(dim) }, 4);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+        no_w.deinit(); no_b.deinit();
+        std.debug.print("stage: norm_out done", .{});
+
         std.debug.print("gpu unpatch done", .{});
     }
 };
