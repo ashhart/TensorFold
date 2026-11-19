@@ -70,7 +70,6 @@ pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
 
 pub const Stats = @import("engine_stats.zig").Stats;
-
 /// ``done`` of a prompt's ``total`` rows are in the cache, ``cached`` of them restored from a kept prefix.
 pub const Progress = struct { done: u32, total: u32, cached: u32 };
 
