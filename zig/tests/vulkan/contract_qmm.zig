@@ -101,6 +101,8 @@ pub const Fixture = struct {
     bindings: [5]dispatch.Binding = undefined,
     /// Planted control: overwrite input buffer i (x, w, scales, biases) after dispatch; gate 2 must catch it.
     corrupt: ?usize = null,
+    /// The kernel's reported name when it is not the default qmm_bf16 spec's.
+    name: ?[]const u8 = null,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -138,7 +140,9 @@ pub const Fixture = struct {
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
         }
-        return .{ .spec = spec, .ctx = f, .vt = &vt };
+        var named = spec;
+        if (f.name) |n| named.name = n;
+        return .{ .spec = named, .ctx = f, .vt = &vt };
     }
     fn allocPoison(a: std.mem.Allocator, data_len: usize) ![]u16 {
         const extra: usize = if (data_len % 2 == 0) 16 else 17;
