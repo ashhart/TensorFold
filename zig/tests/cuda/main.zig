@@ -130,7 +130,6 @@ pub fn main(init: std.process.Init) !u8 {
     const gpu: check.Gpu = .{ .d = &driver, .ctx = &ctx, .gpa = init.gpa, .io = init.io };
     const cmd = args[1];
     const rest = args[2..];
-
     try dump.begin(init.gpa, cmd);
     run(gpu, cmd, rest) catch |e| {
         if (std.mem.eql(u8, cmd, "cached-plans-tp2")) cuda.tp_watch.fatal(@errorName(e));
