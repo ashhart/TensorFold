@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: GLM's kernels and qmmf's decode linears launch as programmatic dependent launches, so a decode token's kernels lose most of their launch gaps; experts, the router plan and the RoCE exchange stay plain launches, a prompt chunk's KDA chain launches plain from 64 rows, and `TF_GLM_PDL=0` launches everything plain (#3776, refs #3652). Thanks to @ultradaoto.
 
+
+
 - dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
 
 - Qwen3.8-27B on Metal before M5: decode rounds read their cached keys through the prefix kernels, as on an M5, and prompt passes size their memory the same way; `TF_QWEN27_SHARED_PREFIX=0` keeps cached keys on the tail kernel (#3677, refs #3604). Thanks to @hobbesd.
