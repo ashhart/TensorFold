@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
 
+
+
 - Web: the development stand-in reports native 1.3.0, in a checkout and in the built wheel, where it still said 1.2.10 (#4077, fixes #4074). Thanks to @AIFlowML.
 
 - CI: a landing train's pull request skips GitHub's hosted checks, which our own runners already run on its tip (a red local run still starts them by hand), and a newer push cancels an older Zig format run, so main's and contributors' checks no longer queue behind trains (#4106).
