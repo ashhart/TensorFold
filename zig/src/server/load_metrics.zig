@@ -61,6 +61,11 @@ pub fn render(w: *std.Io.Writer, s: ledger.Snapshot, id: Identity) !void {
     }
 }
 
+/// The admitted-client gauge: outside the ledger read, it keeps the scrape's own connection in the count.
+pub fn renderConnections(w: *std.Io.Writer, open: u32) !void {
+    try gauge(w, "open_connections", "gauge", "Client connections admitted and not yet closed, over TCP or the Unix socket, including the one serving this scrape; keep-alive idle connections count.", open);
+}
+
 /// GET /v1/load: the whole ledger as one object from one read; a group no host fills leaves its keys out.
 pub fn get(srv: anytype, conn: anytype, a: Allocator) void {
     const snap = srv.load.read();
