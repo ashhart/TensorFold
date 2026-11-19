@@ -107,9 +107,9 @@ const probes = [_]struct { []const u8, ?[]const u8, ?[]const u8 }{
 test "str.format: positional fields and escapes match Python, the fields it does not run are refused" {
     const fields = "{{ '<a{}b>'.format('X') }}|{{ '{}{}'.format(1, 'z') }}|{{ '{1}{0}'.format('a','b') }}|{{ '{{}}{}'.format(none) }}|{{ 'x'.format() }}";
     try expect(fields, shared, .{ .text = "<aXb>|1z|ba|{}None|x", .raised = null });
-    try expect("{{ '{}'.format(true) }}|{{ '{}'.format(1.5) }}|{{ '{0}{0}'.format('q') }}", shared, .{ .text = "True|1.5|qq", .raised = null });
-    // Python raises on these four
-    for ([_][]const u8{ "{{ '{}{}'.format(1) }}", "{{ '{0}{}'.format(1,2) }}", "{{ '{'.format() }}", "{{ '}'.format() }}" }) |source|
+    try expect("{{ '{}'.format(true) }}|{{ '{}'.format(1.5) }}|{{ '{0}{0}'.format('q') }}|{{ '{00}'.format('z') }}", shared, .{ .text = "True|1.5|qq|z", .raised = null });
+    // Python raises on these (the signed and underscored fields are keyword names it does not find)
+    for ([_][]const u8{ "{{ '{}{}'.format(1) }}", "{{ '{0}{}'.format(1,2) }}", "{{ '{'.format() }}", "{{ '}'.format() }}", "{{ '{+0}'.format(1) }}", "{{ '{-0}'.format(1) }}", "{{ '{0_0}'.format(1) }}" }) |source|
         try expect(source, shared, .{ .text = null, .raised = null });
     // Python renders these; the engine refuses a spec, a keyword field and a conversion by name
     for ([_][]const u8{ "{{ '{:>4}'.format(1) }}", "{{ '{a}'.format(a=1) }}", "{{ '{!r}'.format('s') }}" }) |source|

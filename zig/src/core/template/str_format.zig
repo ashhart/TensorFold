@@ -34,7 +34,9 @@ pub fn format(rt: *Rt, s: v.Str, args: []const Value, keywords: usize) Error!Val
             numbering = .auto;
             next += 1;
         } else {
-            at = std.fmt.parseInt(usize, field, 10) catch return rt.fail("str.format() field '{s}' is not supported", .{field});
+            // Python's index is decimal digits alone: '+0', '-0' and '0_0' are keyword names (parseInt takes them)
+            for (field) |ch| if (!std.ascii.isDigit(ch)) return rt.fail("str.format() field '{s}' is not supported", .{field});
+            at = std.fmt.parseInt(usize, field, 10) catch return rt.fail("Too many decimal digits in format string", .{});
             if (numbering == .auto) return rt.fail("cannot switch from automatic field numbering to manual field specification", .{});
             numbering = .manual;
         }
