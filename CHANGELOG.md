@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: searching the current conversation no longer carries a project picked under All saved conversations; the request, its results, filters and navigation use the scope's own project filter, and switching back restores the project (#3900, fixes #3849). Thanks to @AIFlowML.
+
 - Docs: GLM-5.3-Flash Jammed XSFP4 NZ5 is listed as in 1.2.10 in the supported models table and the GLM CUDA recipe, where both said "on main after 1.2.7" (#3869, refs #2894). Thanks to @Bizuayeu.
 
 - CUDA: NVFP4 expert decode streams its weights through a per-warp `cp.async` ring with the same output bits; on an RTX PRO 6000 (sm_120) with drafts off the author measured GLM-5.3 decode at 104.1 tok/s against 83.8, and on GB10 (sm_121) it is level (#2266). Thanks to @eleqtrizit.
