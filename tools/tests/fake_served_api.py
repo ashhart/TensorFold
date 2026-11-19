@@ -25,8 +25,10 @@ of ``GET /v1/load``, as a server without lanes.
 
 A request is counted in ``GET /v1/load``'s running and active chat requests while open. One that finds another in
 flight within ``PARTNER_WINDOW`` stays open ``HOLD`` seconds more; a request alone leaves after the window. While a
-client polls the census (one read within ``WATCHED`` seconds), a pair stays open until a census counts two open at
-once (at most ``WATCHED`` seconds), so however slow a census read is, one taken meanwhile sees them.
+client polls the census (two reads within ``WATCHED`` seconds, the last that recent), a request waits
+``WATCHED_WINDOW`` for a partner, as threads sent together can start a scheduler tick apart (about 16 ms on Windows),
+and a pair stays open until a census counts two open at once (at most ``COUNTED`` seconds), so however slow a census
+read is, one taken meanwhile sees them.
 
 The cached server reports five cached tokens for a later chat turn (more than one message), and for a one-message
 prompt it answered before. It keeps the prompts it
@@ -63,7 +65,9 @@ LANES = 8
 TOKEN_GAP = 0.0002  # seconds between streamed events
 PARTNER_WINDOW = 0.01  # seconds a request waits for another to share the server with
 HOLD = 0.025  # seconds a request that shares the server stays open, when no census is being read
-WATCHED = 0.25  # seconds a census read counts as watching, and the most a pair then waits to be counted
+WATCHED_WINDOW = 0.06  # seconds a request waits for a partner while a census is read
+WATCHED = 0.1  # a census read this recent, after one this close before it, is a client polling
+COUNTED = 0.5  # most seconds a pair waits for a census to count it, while watched
 
 
 def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi", tokens=4, sampling="greedy", prompt=9):
@@ -166,7 +170,7 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if self.path == "/v1/load":
             with server.lock:
                 busy, warming = server.streams + server.leaked + server.inflight, time.monotonic() < server.warm_until
-                server.census_at = time.monotonic()
+                server.census_gap, server.census_at = time.monotonic() - server.census_at, time.monotonic()
                 if busy > 1:
                     server.overlaps += 1
                     server.cond.notify_all()
@@ -210,8 +214,9 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             after_cut = key in server.cut
             server.cut.discard(key)
         try:
-            watched = time.monotonic() - server.census_at < WATCHED
-            batched = self.batched(BATCH_WINDOW if server.fault == "concurrent" else PARTNER_WINDOW)
+            watched = time.monotonic() - server.census_at < WATCHED and server.census_gap < WATCHED  # a poller
+            window = WATCHED_WINDOW if watched else PARTNER_WINDOW
+            batched = self.batched(BATCH_WINDOW if server.fault == "concurrent" else window)
             if batched:
                 self.counted() if watched else time.sleep(HOLD)
             sampled = bool(body.get("temperature")) and server.fault != "unsampled"
@@ -266,11 +271,11 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
             return server.cond.wait_for(lambda: server.inflight > 1, timeout=window)
 
     def counted(self):
-        """Wait, at most ``WATCHED`` seconds, for a ``GET /v1/load`` that counts two chat requests open at once."""
+        """Wait, at most ``COUNTED`` seconds, for a ``GET /v1/load`` that counts two chat requests open at once."""
         server = self.server
         with server.cond:
             mark = server.overlaps
-            server.cond.wait_for(lambda: server.overlaps > mark, timeout=WATCHED)
+            server.cond.wait_for(lambda: server.overlaps > mark, timeout=COUNTED)
 
     def salt(self, body, arrival, batched):
         """A planted fault changes the reply by adding a salt to its hash; None leaves it correct."""
@@ -325,7 +330,8 @@ def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_fre
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
     server.streams = server.leaked = server.lost = server.disconnects = server.overlaps = 0
-    server.warm, server.warm_until, server.lanes_free, server.census_at = warm, 0.0, lanes_free, -1e9
+    server.warm, server.warm_until, server.lanes_free = warm, 0.0, lanes_free
+    server.census_at, server.census_gap = -1e9, 1e9  # no census read yet
     server.lock, server.one = threading.Lock(), threading.Lock()
     server.cond = threading.Condition(server.lock)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
