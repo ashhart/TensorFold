@@ -25,7 +25,6 @@ pub const deviceName = metal_shared.deviceName;
 const prefillStep = metal_shared.prefillStep;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
-
 pub const backends: []const []const u8 = &.{"metal"};
 /// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
 pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
@@ -287,7 +286,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 const prompt_int8_refusal = "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";
-
 /// Flash Next's replay engine copies on the GPU from its own history: it reads no Recall record yet.
 const recall_refusal = "--recall drafts from a record in the lane engine's rounds; " ++
     "Flash Next's replay engine copies from its own history on the GPU and reads no record yet: " ++
