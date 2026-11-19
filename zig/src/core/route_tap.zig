@@ -34,7 +34,7 @@ pub const tapped = [_][]const u8{
 };
 
 pub fn envPath() ?[]const u8 {
-    const v = std.mem.span(std.c.getenv("TF_ROUTE_TAP") orelse return null);
+    const v = @import("sys").environment.Process.get(.{}, env_name) orelse return null;
     return if (v.len == 0) null else v;
 }
 
@@ -146,7 +146,7 @@ pub fn start(gpa: std.mem.Allocator, rank: u32) !void {
     if (envPath() == null) return;
     if (rank != 0) return;
     if (g_session != null) return;
-    const path = envPath().?;
+    const path = (try @import("sys").environment.path(env_name, envPath())) orelse return;
     var threaded: std.Io.Threaded = .init_single_threaded;
     const io = threaded.io();
     var file = if (std.fs.path.isAbsolute(path))
