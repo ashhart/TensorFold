@@ -3,6 +3,16 @@
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
 
+pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");
+pub const hy4_flash_index_recall = @embedFile("hy4_flash/index_recall.metal");
+pub const hy4_flash_attention_sink = @embedFile("hy4_flash/attention_sink.metal");
+pub const hy4_flash_mla_project = @embedFile("hy4_flash/mla_project.metal");
+pub const hy4_flash_mla_attention = @embedFile("hy4_flash/mla_attention.metal");
+pub const hy4_flash_ihc = @embedFile("hy4_flash/ihc.metal");
+pub const hy4_flash_engram = @embedFile("hy4_flash/engram.metal");
+pub const hy4_flash_affine_experts = @embedFile("hy4_flash/affine_experts.metal");
+pub const hy4_flash_tensor_dispatch = @embedFile("hy4_flash/tensor_dispatch.metal");
+
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
@@ -108,6 +118,8 @@ pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
+pub const elementwise = @embedFile("ops/elementwise.metal");
+pub const embed_norm = @embedFile("ops/embed_norm.metal");
 
 /// Prompt-chunk kernels (tools/zig/prefill_*.py), bit-identical to MLX 0.32.3's prefill kernels.
 pub const prefill = [_]File{
@@ -119,8 +131,8 @@ pub const prefill = [_]File{
     .{ .name = "qmm_nax", .text = @embedFile("prefill/qmm_nax.metal") },
     .{ .name = "scan", .text = @embedFile("prefill/scan.metal") },
     .{ .name = "sort", .text = @embedFile("prefill/sort.metal") },
-    .{ .name = "embed_norm", .text = @embedFile("ops/embed_norm.metal") },
-    .{ .name = "elementwise", .text = @embedFile("ops/elementwise.metal") },
+    .{ .name = "embed_norm", .text = embed_norm },
+    .{ .name = "elementwise", .text = elementwise },
     .{ .name = "route", .text = @embedFile("ops/route.metal") },
     .{ .name = "qmv", .text = @embedFile("ops/qmv.metal") },
 };
