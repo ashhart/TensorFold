@@ -47,10 +47,8 @@ pub const Nax = struct {
     /// A split a 32-key tile, up to max_splits (two tiles already run faster split and joined than in one
     /// threadgroup); with the live key count unknown, a split every 128 keys of the stride.
     fn splits(shape: attention.Shape, has_parts: bool, live_keys: u32) u32 {
-        if (!has_parts or shape.rows > 16) return 1;
-        if (std.c.getenv("TF_HY4_FLASH_SPLIT")) |v| return std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1, 1, max_splits);
-        if (live_keys > 0) return std.math.clamp((live_keys + 31) / 32, 1, max_splits);
-        return std.math.clamp(shape.key_stride / 128, 1, max_splits);
+        _ = .{ shape, has_parts, live_keys };
+        return 1; // row-invariant bits: a split count from the pass's widest row would change other rows' sums
     }
 
     fn flash(self: Nax, e: mtl.ComputeEncoder, b: Attention.Buffers, ranges: KeyRanges, shape: attention.Shape) void {
@@ -223,6 +221,9 @@ pub const Attention = struct {
         flash_parts: ?Ref = null,
         /// The widest row's live key count (0: unknown, the key stride sizes the split).
         live_keys: u32 = 0,
+        /// A pass across 2,048 keys: rows before this one take the flash kernel over `ranges`, as they would in any
+        /// other pass, and the rest their recalled slot lists.
+        lists_from: ?u32 = null,
     };
 
     pub fn load(device: mtl.Device) !Attention {
@@ -318,6 +319,10 @@ pub const MlaPass = struct {
     values: Ref,
 };
 
+fn rowsPast(r: Ref, bytes: usize) Ref {
+    return .{ .buffer = r.buffer, .offset = r.offset + bytes };
+}
+
 /// The affine projections feed this pass. The caller owns the KV leases and retained physical key list.
 pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b: MlaPass, shape: attention.Shape, p: rotary.Parameters) !void {
     try shape.check();
@@ -349,7 +354,20 @@ pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b
         .epsilon = kv.epsilon,
     });
     e.barrier();
-    if (project.nax) |n| if (b.attention.ranges) |r| {
+    if (b.attention.lists_from) |k| {
+        const n = project.nax orelse return error.Hy4ListSplitNeedsNax;
+        const r = b.attention.ranges orelse return error.Hy4ListSplitNeedsRanges;
+        if (k == 0 or k >= shape.rows) return error.BadHy4ListSplit;
+        n.flash(e, b.attention, r, try attention.Shape.init(k, shape.heads, shape.key_stride));
+        var rest = b.attention;
+        rest.ranges = null;
+        rest.lists_from = null;
+        rest.query = rowsPast(b.attention.query, k * shape.heads * weights.absorbed_stride * 2);
+        rest.slots = rowsPast(b.attention.slots, k * shape.key_stride * 4);
+        rest.counts = rowsPast(b.attention.counts, k * 4);
+        rest.output = rowsPast(b.attention.output, k * shape.heads * weights.latent * 2);
+        try attend.attend(e, rest, try attention.Shape.init(shape.rows - k, shape.heads, shape.key_stride));
+    } else if (project.nax) |n| if (b.attention.ranges) |r| {
         n.flash(e, b.attention, r, shape);
     } else try attend.attend(e, b.attention, shape) else try attend.attend(e, b.attention, shape);
     e.barrier();
