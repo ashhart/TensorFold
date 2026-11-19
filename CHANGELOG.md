@@ -5,11 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines instead of waiting in a collective receive for the whole pass, so a long image pass no longer trips a net plugin's operation timeout and stops every rank; replies are unchanged (#3675, for #3614). Thanks to @ultradaoto.
-
-- Intel Arc (XPU): two or four Level Zero GPUs open as peers in one context, with new peer-to-peer all-reduce collectives (FP16, BF16 and FP32; one shot up to 512 KiB, reduce-scatter then gather above) that sum in fixed rank order for exact bits, and `zig build xpu-tp-bench` builds `tf-xpu-tp-bench` to check and time them; nothing serves through them yet (#3585, part of #3583). Thanks to @supernovae.
-
-- Gemma 4 on Metal: an image input whose tower cannot load is refused cleanly instead of crashing during deinit, and a host test pins that a failed tower load leaves the model with none (#3421). Thanks to @jschmied.
-
+- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (for #3614).
 - Desktop: a Qwen3.8-27B checkpoint is offered and loads, where the library applied the 2B geometry to every `qwen3_5` checkpoint and rejected the supported 27B at hidden size 5,120 (#3771). Thanks to @AIFlowML.
 
 - Intel Arc (XPU): two or four Level Zero GPUs open as peers in one context, with new peer-to-peer all-reduce collectives (FP16, BF16 and FP32; one shot up to 512 KiB, reduce-scatter then gather above) that sum in fixed rank order for exact bits, and `zig build xpu-tp-bench` builds `tf-xpu-tp-bench` to check and time them; nothing serves through them yet (#3585, part of #3583). Thanks to @supernovae.
@@ -347,7 +343,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next at TP=2 on CUDA: the draft head, head-group and rollback passes replay as CUDA graphs on both ranks, and one-row split lanes skip their interleave copies; with Qwen3.8-Flash-Next NVFP4 and MTP at TP=2 on GB10s, decode is 1.2-1.4% faster and prompts 0.5-2.1% faster, with identical replies (#2837, for #2835).
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (736.3 to 570.2 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
 - CI: the no-GPU host tests run as two parallel jobs, `zig` and `zig-b`, and a build check fails if any host check is in both or neither; a local `zig build test-host` still runs all of them (#3474).
-- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (for #3614).
 
 - Nemotron 3.5 Bolt on CUDA: the shared expert runs on the side stream in decode windows, as on Super, so decode on a GB10 is 2.9-3.0% faster at one stream and 1.4-2.1% at four, with identical replies (#2847, for #2840).
 
