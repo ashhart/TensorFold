@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol on Metal: Idol's released denoiser runs as a native Metal family, `idol`, with fp16 block projections and attention inputs summed in fp32 and fp32 norms, softmax and RePo as the SDK splits them; `tf-idol` checks it step by step against idol-sdk's float32 run, and its 27 kernels are in the kernel contract with 19 planted controls. The image encoders and decoders are separate changes (#1766, for #1757). Thanks to @jayleaton.
+
 - Code: a GPTQ reader in `core/quant` reads AutoGPTQ v1 4-bit symmetric group-128 weights as stored (`qweight`, fp16 `scales`, a `qzeros` zero point of 8) into an fp64 reference, and refuses every other GPTQ field, rule or tensor by name; host only, with no caller yet (#3611, refs #3368).
 
 - Desktop: an attachment in a saved draft keeps only its original diagnostic, and the reselection guidance is added once when the draft is rendered, so reopening and editing unrelated text no longer stores the composed message as the error; older drafts with repeated guidance show one copy and keep any surviving diagnostic (#3842, fixes #3837). Thanks to @AIFlowML.
