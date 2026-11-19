@@ -15,7 +15,7 @@ function Assert-NativeProbe {
         throw 'Native capabilities identity mismatch.'
     }
     $flags = $caps['serve']['flags']
-    if ($flags -isnot [System.Collections.IDictionary] -or -not $flags.Contains('context') -or -not $flags.Contains('parallel')) {
+    if ($flags -isnot [System.Collections.IDictionary] -or -not $flags.Contains('--context') -or -not $flags.Contains('--parallel')) {
         throw 'Native serving capabilities are missing.'
     }
     if (-not $HostOnly) {

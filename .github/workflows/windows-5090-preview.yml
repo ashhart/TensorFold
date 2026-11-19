@@ -27,6 +27,9 @@ jobs:
           use-cache: false
       - name: Exercise preupload refusal controls without a GPU
         run: python -m unittest discover -s tools/cuda/cublaslt_bridge -p "test_*.py" -v
+      - name: Exercise Windows CLI smoke contracts
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/release/check_windows_smoke.ps1
       - name: Build and audit the exact Windows preview
         shell: pwsh
         env:

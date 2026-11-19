@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'smoke-windows.ps1')
 $fixtureVersion = '0.6.5'
 $caps = @{ schema = 1; engine = 'zig'; version = $fixtureVersion; backends = @('cuda');
-    families = @{ qwen3_5 = @('nvfp4') }; serve = @{ flags = @{ context = @{}; parallel = @{} } };
+    families = @{ qwen3_5 = @('nvfp4') }; serve = @{ flags = @{ '--context' = @{}; '--parallel' = @{} } };
     optional_libraries = @(@{ soname = 'tfgrammar.dll'; found = $true }) }
 $good = @{
     VersionText = "tensorfold-native $fixtureVersion"; HelpText = 'serve MODEL';
@@ -27,9 +27,9 @@ $caps.engine = 'zig'; $caps.version = '0.0.0'
 $bad = $good.Clone(); $bad.CapabilitiesText = ($caps | ConvertTo-Json -Depth 8); Refuses $bad
 $caps.version = $fixtureVersion; $caps.backends = @('metal')
 $bad = $good.Clone(); $bad.CapabilitiesText = ($caps | ConvertTo-Json -Depth 8); Refuses $bad
-$caps.backends = @('cuda'); $caps.serve.flags.Remove('parallel')
+$caps.backends = @('cuda'); $caps.serve.flags.Remove('--parallel')
 $bad = $good.Clone(); $bad.CapabilitiesText = ($caps | ConvertTo-Json -Depth 8); Refuses $bad
-$caps.serve.flags.parallel = @{}; $caps.optional_libraries[0].found = $false
+$caps.serve.flags['--parallel'] = @{}; $caps.optional_libraries[0].found = $false
 $bad = $good.Clone(); $bad.CapabilitiesText = ($caps | ConvertTo-Json -Depth 8); Refuses $bad
 Write-Output 'PASS native serving identity, legacy version protocol and nine wrong-CLI/capability refusal controls'
 
