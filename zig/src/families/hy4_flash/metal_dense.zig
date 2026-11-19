@@ -132,6 +132,8 @@ pub const Linear = union(enum) {
 pub const Linears = struct {
     shapes: [16][2]u32 = undefined,
     projections: [16]lane.Projection = undefined,
+    /// The same projections adding their own group sums (4-bit reg layouts), for small passes.
+    inlines: [16]?lane.Projection = @splat(null),
     count: usize = 0,
     sums: ?mtl.Buffer = null,
     const sum_rows = gpu_qkv.prompt_rows;
@@ -157,6 +159,7 @@ pub const Linears = struct {
         for (wanted) |nk| {
             if (out.find(nk[0], nk[1]) != null or nk[0] % 32 != 0) continue;
             out.projections[out.count] = try lane.Projection.init(a, device, gpu_qkv.denseLayout(bits, nk[0], nk[1]));
+            out.inlines[out.count] = if (gpu_qkv.withInlineSums(gpu_qkv.denseLayout(bits, nk[0], nk[1]))) |l| try lane.Projection.init(a, device, l) else null;
             out.shapes[out.count] = nk;
             out.count += 1;
             groups = @max(groups, nk[1] / 64);
@@ -167,12 +170,18 @@ pub const Linears = struct {
 
     pub fn deinit(self: *Linears) void {
         for (self.projections[0..self.count]) |p| p.deinit();
+        for (self.inlines[0..self.count]) |p| if (p) |x| x.deinit();
         if (self.sums) |b| b.deinit();
         self.count = 0;
     }
 
     fn find(self: *const Linears, n: u32, k: u32) ?*const lane.Projection {
         for (self.shapes[0..self.count], self.projections[0..self.count]) |nk, *p| if (nk[0] == n and nk[1] == k) return p;
+        return null;
+    }
+
+    fn findInline(self: *const Linears, n: u32, k: u32) ?*const lane.Projection {
+        for (self.shapes[0..self.count], self.inlines[0..self.count]) |nk, *p| if (nk[0] == n and nk[1] == k) if (p.*) |*x| return x;
         return null;
     }
 };
@@ -667,6 +676,12 @@ pub const Kernels = struct {
         }
         const all = &(self.linears orelse return error.Hy4LinearsMissing);
         const k = outs[0].w.tensor.k;
+        // small passes: the kernels that add their own group sums (the same words, no sums pass or barrier)
+        if (rows <= gpu_qkv.inline_rows) inline_sums: {
+            for (outs) |o| if (all.findInline(o.w.tensor.n, o.w.tensor.k) == null) break :inline_sums;
+            for (outs) |o| try all.findInline(o.w.tensor.n, o.w.tensor.k).?.encode(e, tref(x), o.w.tensor.w, o.w.tensor.sb, tref(o.y), rows);
+            return;
+        }
         const first = all.find(outs[0].w.tensor.n, k) orelse return error.Hy4LinearShapeMissing;
         const shared = first.reg and first.sums_pipe != null and rows <= Linears.sum_rows;
         const stride: u32 = 16 * ((rows + 15) / 16);
@@ -859,7 +874,7 @@ pub const Kernels = struct {
             .tensor => |m| {
                 const kernels = &self.tensors.?;
                 const qkv = s.qkv.?;
-                try kernels.inputs[m.flavor].encode(e, tref(s.normalized), m.qkv.w, m.qkv.sb, tref(qkv), rows);
+                try kernels.inputFor(m.flavor, rows).encode(e, tref(s.normalized), m.qkv.w, m.qkv.sb, tref(qkv), rows);
                 e.barrier();
                 if (rows == 1) {
                     q_a = qkv;
@@ -871,7 +886,7 @@ pub const Kernels = struct {
                 }
                 try self.norm(e, q_a, w.q_norm, s.query_norm, rows, w.query_rank, w.epsilon);
                 e.barrier();
-                try kernels.queries[m.flavor].encode(e, tref(s.query_norm), m.q_b.w, m.q_b.sb, tref(s.query), rows);
+                try kernels.queryFor(m.flavor, rows).encode(e, tref(s.query_norm), m.q_b.w, m.q_b.sb, tref(s.query), rows);
             },
         }
         e.barrier();
