@@ -51,12 +51,12 @@ pub const Scratch = struct {
 
     pub fn init(owner: anytype, rows: usize, picks: usize, width: usize, inner: usize) !Scratch {
         const slots = rows * picks;
-        if (slots > 256) return error.BadHy4TensorRows;
+        if (slots > 8192) return error.BadHy4TensorRows;
         const identity = try owner.alloc((picks + 1) * @sizeOf(i32));
         for (identity.slice(i32, picks + 1), 0..) |*v, i| v.* = @intCast(i);
         return .{
             .order = .{ .buf = try owner.alloc(slots * @sizeOf(i32)) },
-            .offsets = .{ .buf = try owner.alloc(slots * @sizeOf(i32)) },
+            .offsets = .{ .buf = try owner.alloc(@max(slots, 1024) * @sizeOf(i32)) },
             .identity = .{ .buf = identity },
             .latent_sums = .{ .buf = try owner.alloc(rows * (width / 64) * @sizeOf(f32)) },
             .act_sums = .{ .buf = try owner.alloc(slots * (inner / 64) * @sizeOf(f32)) },
@@ -70,6 +70,7 @@ pub const Jobs = struct { offsets: Ref, order: Ref, ids: Ref };
 pub const Kernels = struct {
     pipes: tensor.Pipes,
     compact: mtl.Pipeline,
+    grouping: mtl.Pipeline,
 
     pub fn load(a: std.mem.Allocator, d: mtl.Device, bits: u8) !Kernels {
         const text = try tensor.source(d, a, .{ .bits = bits, .group = 64, .out_f32 = true, .glu = .clipped_silu, .mapped_experts = true });
@@ -85,15 +86,19 @@ pub const Kernels = struct {
         }
         const lib_compact = try mtl.Library.fromSource(d, source, mtl.CompileOptions.mlx());
         defer lib_compact.deinit();
+        var compact = try mtl.Pipeline.init(d, lib_compact, "tf_hy4_active_experts", false);
+        errdefer compact.deinit();
         return .{
             .pipes = pipes,
-            .compact = try mtl.Pipeline.init(d, lib_compact, "tf_hy4_active_experts", false),
+            .compact = compact,
+            .grouping = try mtl.Pipeline.init(d, lib_compact, "tf_hy4_group_pairs", false),
         };
     }
 
     pub fn deinit(self: Kernels) void {
         for (self.pipes) |p| p.deinit();
         self.compact.deinit();
+        self.grouping.deinit();
     }
 
     /// For one row each expert is unique, so the pick list itself is the active-to-global map.
@@ -112,10 +117,27 @@ pub const Kernels = struct {
     }
 
     pub fn apply(self: Kernels, e: mtl.ComputeEncoder, w: Weights, s: Scratch, jobs: Jobs, x: Ref, act: Ref, out: Ref, pairs: u32, picks: u32, limit: f32) void {
-        tensor.gatherGluMapped(e, self.pipes, x, s.latent_sums, w.gate, w.up, jobs.offsets, jobs.order, act, jobs.ids, pairs, pairs, picks, limit);
+        self.applyJobs(e, w, s, jobs, x, act, out, pairs, pairs, picks, limit);
+    }
+
+    /// `apply` over `count` expert jobs (a window's pick list, or every expert for a prompt chunk's grouping).
+    pub fn applyJobs(self: Kernels, e: mtl.ComputeEncoder, w: Weights, s: Scratch, jobs: Jobs, x: Ref, act: Ref, out: Ref, pairs: u32, count: u32, picks: u32, limit: f32) void {
+        tensor.gatherGluMapped(e, self.pipes, x, s.latent_sums, w.gate, w.up, jobs.offsets, jobs.order, act, jobs.ids, pairs, count, picks, limit);
         e.barrier();
         tensor.rowSums(e, self.pipes, 64, act, s.act_sums, pairs, w.down.k);
         e.barrier();
-        tensor.gatherToMapped(e, self.pipes, act, s.act_sums, w.down, jobs.offsets, out, jobs.order, jobs.ids, pairs, pairs);
+        tensor.gatherToMapped(e, self.pipes, act, s.act_sums, w.down, jobs.offsets, out, jobs.order, jobs.ids, pairs, count);
+    }
+
+    /// A prompt chunk's grouping (more rows than one router window): job e = expert e, pairs in pair order, and the
+    /// latent's row sums. `ids` and `offsets` hold `experts` entries, `order` every pair.
+    pub fn group(self: Kernels, e: mtl.ComputeEncoder, s: Scratch, pick: Ref, ids: Ref, x: Ref, rows: u32, pairs: u32, experts: u32, width: u32) Jobs {
+        e.setPipeline(self.grouping);
+        for ([_]Ref{ pick, s.offsets, s.order, ids }, 0..) |ref, i| e.setBuffer(ref.buf, ref.off, i);
+        // Metal's uint3 has the same 16-byte ABI as uint4.
+        e.setValue([4]u32{ pairs, experts, pairs / rows, 0 }, 4);
+        e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+        tensor.rowSums(e, self.pipes, 64, x, s.latent_sums, rows, width);
+        return .{ .offsets = s.offsets, .order = s.order, .ids = ids };
     }
 };

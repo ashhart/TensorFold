@@ -75,8 +75,8 @@ const Validation = struct {
     checkpoint: *core.Checkpoint,
 
     pub fn expect(self: *Validation, name: []const u8, format: weights.DType, shape: []const usize) !void {
-        const dtype: core.checkpoint.DType = switch (format) {
-            inline else => |tag| @field(core.checkpoint.DType, @tagName(tag)),
+        const dtype: core.checkpoint_host.DType = switch (format) {
+            inline else => |tag| @field(core.checkpoint_host.DType, @tagName(tag)),
         };
         _ = try self.checkpoint.expect(name, dtype, shape);
     }

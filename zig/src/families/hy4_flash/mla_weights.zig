@@ -12,13 +12,30 @@ pub const absorbed_stride = latent + rope;
 
 pub const HeadRange = struct { first: u32, count: u32 };
 
+/// The checkpoint's own affine kv_b rows for the selected heads (per head: 192 key rows, then 256 value rows, each
+/// 512 latent values in groups of 64), for decode GEMVs that read the codes instead of the BF16 copies.
+pub const Packed = struct {
+    bits: u8,
+    words: []u8,
+    scales: []u8,
+    biases: []u8,
+
+    pub fn deinit(self: Packed, a: std.mem.Allocator) void {
+        a.free(self.words);
+        a.free(self.scales);
+        a.free(self.biases);
+    }
+};
+
 pub const Weights = struct {
     key: []u16,
     value: []u16,
+    packed_rows: ?Packed = null,
 
     pub fn deinit(self: *Weights, a: std.mem.Allocator) void {
         a.free(self.key);
         a.free(self.value);
+        if (self.packed_rows) |p| p.deinit(a);
         self.* = undefined;
     }
 };
@@ -81,9 +98,19 @@ pub fn read(a: std.mem.Allocator, model: *loader.Loaded, kind: loader.Attention,
             const scales = try model.checkpoint.expect(scale_key, .bf16, &.{ rows, latent / 64 });
             const bias_key = try std.fmt.bufPrint(&name, "{s}.biases", .{base});
             const biases = try model.checkpoint.expect(bias_key, .bf16, &.{ rows, latent / 64 });
-            const dequant = try core.quant.mlx.dequant(a, try core.quant.slice.takeRows(a, words, &.{span}), try core.quant.slice.takeRows(a, scales, &.{span}), try core.quant.slice.takeRows(a, biases, &.{span}), 64);
+            const w_rows = try core.quant.slice.takeRows(a, words, &.{span});
+            const s_rows = try core.quant.slice.takeRows(a, scales, &.{span});
+            const b_rows = try core.quant.slice.takeRows(a, biases, &.{span});
+            const dequant = try core.quant.mlx.dequant(a, w_rows, s_rows, b_rows, 64);
             defer a.free(dequant);
-            return split(a, .{ .fp32 = dequant }, range.count);
+            var out = try split(a, .{ .fp32 = dequant }, range.count);
+            errdefer out.deinit(a);
+            const pw = try a.dupe(u8, w_rows.bytes);
+            errdefer a.free(pw);
+            const ps = try a.dupe(u8, s_rows.bytes);
+            errdefer a.free(ps);
+            out.packed_rows = .{ .bits = model.bits, .words = pw, .scales = ps, .biases = try a.dupe(u8, b_rows.bytes) };
+            return out;
         },
     }
 }
