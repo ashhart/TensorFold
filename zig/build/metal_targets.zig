@@ -338,7 +338,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
     core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
-    glm_checks.targets(b, target, optimize, metal, engine, sources);
+    glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);
     flashnext_checks.targets(b, target, optimize, metal, engine);
 
     _ = metal_server.nativeServer(b, target, optimize, metal, engine, mods.living, api, engines, build_options, test_step, no_compiler);

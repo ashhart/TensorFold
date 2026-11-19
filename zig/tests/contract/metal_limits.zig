@@ -287,6 +287,18 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "nemotron geometry ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " up ")) tf.nemotron.kernels.geo_up else tf.nemotron.kernels.geo_down;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 accept ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_accept;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 follow ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_follow;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 topk ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_topk;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 attention ")) {
+        if (!assemble) return undefined;
+        text = try tf.glm.metal_dflash_attention.source(a, .{ .heads = 32, .kv_heads = 8, .dim = 128 });
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         if (!assemble) return undefined;
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];

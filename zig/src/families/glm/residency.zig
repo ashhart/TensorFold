@@ -36,7 +36,13 @@ fn skipped(err: anyerror) void {
 
 pub fn drop(e: *Engine) void {
     e.arena.follow = null;
+    if (e.dflash) |d| d.model.backend.frame.residency = null;
     if (e.residency) |*r| r.deinit();
     e.residency = null;
     e.keepalive_target = .{ .queue = e.queue };
+}
+
+/// Add `d`'s weights and model scratch buffers into `e`'s active residency set (`e.residency`).
+pub fn joinDrafter(e: *Engine, list: []const mtl.Buffer) void {
+    if (e.residency) |*r| _ = r.tryAddNow(list);
 }
