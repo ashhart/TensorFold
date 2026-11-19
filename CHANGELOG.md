@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
+
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
 
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
