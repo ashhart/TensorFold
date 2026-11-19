@@ -99,7 +99,7 @@ fn cacheRefused(o: api.Open) ?[]const u8 {
 
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
-    try checkGroup(qwen35.native, o, problem);
+    try checkGroup(F, a, o, problem);
     if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
@@ -499,27 +499,27 @@ test "the group flags: one rank source, a supported world, a master past one ran
     const a = arena.allocator();
     var problem: []const u8 = "";
     const base: api.Open = .{ .dir = "d", .model_type = "qwen3_5" };
-    try checkGroup(qwen35.native, base, &problem);
+    try checkGroup(qwen35.native, a, base, &problem);
     var two = base;
     two.tp = 2;
     two.master = "node0";
-    try checkGroup(qwen35.native, two, &problem);
+    try checkGroup(qwen35.native, a, two, &problem);
     var speed = base;
     speed.speed_up = "settings.json";
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, speed, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, speed, &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "--speed-up") != null);
     speed.tp = 2;
     speed.master = "node0";
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, speed, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, speed, &problem));
     var three = two;
     three.tp = 3;
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, three, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, three, &problem));
     var lone = two;
     lone.master = "";
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, lone, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, lone, &problem));
     var outside = two;
     outside.rank = 2;
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, outside, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, outside, &problem));
 }
 
 test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
@@ -528,13 +528,13 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     const a = arena.allocator();
     var problem: []const u8 = "";
     const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, drafted, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, drafted, &problem));
     try std.testing.expectStringStartsWith(problem, "--drafter: the HIP engine runs no DFlash2 drafter yet");
     var follower = drafted;
     follower.tp = 2;
     follower.rank = 1;
     follower.master = "node0";
-    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, follower, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, follower, &problem));
 }
 
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
