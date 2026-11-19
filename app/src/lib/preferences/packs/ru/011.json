@@ -1,5 +1,5 @@
 {
-  "Use fixed community-v1 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "Используйте фиксированные тесты кода и чата community-v1, по пять замеров в ячейке; сначала сохраните настройки и завершите локальную работу. Модель должна быть в кэше и подтверждённо подходить этому Mac.",
+  "Use fixed community-v2 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "Используйте фиксированные тесты кода и чата community-v2, по пять замеров в ячейке; сначала сохраните настройки и завершите локальную работу. Модель должна быть в кэше и подтверждённо подходить этому Mac.",
   "Use gateway-qualified model ids such as": "Используйте полные ID моделей шлюза, например",
   "Use installed": "Использовать установленное",
   "Use light, dark, or match your system.": "Светлая, тёмная или системная тема.",

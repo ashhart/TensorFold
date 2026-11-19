@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "フォルダーを削除すると、その場所の検出を停止します。モデル自体は削除しません。稼働中モデルはサーバーを停止するまで保持します。",
   "Rename": "名前を変更",
   "Render the plan panel with block progress bars and status glyphs.": "計画パネルにブロック型の進捗バーと状態アイコンを表示します。",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "この Mac のキャッシュ済みモデルで再現可能な community-v1 測定を実行します。",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "この Mac のキャッシュ済みモデルで再現可能な community-v2 測定を実行します。",
   "repeated checks": "回の繰り返しチェック",
   "Replace matching records from the backup": "一致する記録をバックアップで置き換える",
   "replaces the current instructions": "現在の指示を置き換えます",

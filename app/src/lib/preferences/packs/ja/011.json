@@ -1,5 +1,5 @@
 {
-  "Use fixed community-v1 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "固定の community-v1 コード・チャット例で各セル 5 サンプルを測ります。先に設定編集を保存しローカル作業を終えてください。モデルはキャッシュ済みで、この Mac への適合確認が必要です。",
+  "Use fixed community-v2 code/chat fixtures with five measured samples per cell; save settings edits and finish local work first, and the model must be cached and confirmed to fit this Mac.": "固定の community-v2 コード・チャット例で各セル 5 サンプルを測ります。先に設定編集を保存しローカル作業を終えてください。モデルはキャッシュ済みで、この Mac への適合確認が必要です。",
   "Use gateway-qualified model ids such as": "ゲートウェイに対応するモデル ID を使用（例）：",
   "Use installed": "インストール済みを使用",
   "Use light, dark, or match your system.": "ライト、ダーク、システムに合わせる設定が使えます。",
