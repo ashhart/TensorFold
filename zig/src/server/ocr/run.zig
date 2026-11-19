@@ -37,8 +37,8 @@ pub const PageSink = struct {
 pub const no_reader = "this model has no OCR reader; use POST /v1/chat/completions";
 /// The gate's refusal for a server started without --vision.
 pub const no_vision = "OCR needs image input; start the server with --vision";
-/// The decoded-pixel limit of one page: dots.mocr's processor input limit, the one reader family's.
-pub const max_page_pixels = picture.max_pixels;
+/// The decoded-pixel limit of one page: GLM-OCR's processor input limit, the larger of the two reader families'.
+pub const max_page_pixels = 32 << 20;
 
 /// Refuses as bad input unless the engine has an OCR reader and the server reads images.
 pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
@@ -175,10 +175,10 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
     };
     const blocks = try a.alloc(api.ocr.OcrBlock, parsed.len);
     for (parsed, blocks) |b, *o| {
-        const quad = geometry.validate(b.quad, w, h) catch {
+        const quad: ?api.ocr.Quad = if (b.quad) |q| geometry.validate(q, w, h) catch {
             log.line("{s}: page {d}: a box is not finite: {s}", .{ id, p.index, got.content });
             return fault.fail(a, .unreadable, "page {d}: the model's output has a box that is not finite", .{p.index});
-        };
+        } else null;
         o.* = .{ .content = try a.dupe(u8, b.content), .quad = quad, .kind = b.kind };
     }
     const page: OcrPage = .{ .index = p.index, .width = w, .height = h, .dpi = p.dpi, .blocks = blocks };
