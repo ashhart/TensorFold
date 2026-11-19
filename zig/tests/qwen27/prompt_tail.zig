@@ -44,6 +44,14 @@ pub fn main(init: std.process.Init) !void {
     const a = arena.allocator();
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    {
+        const device = try mtl.Device.init();
+        defer device.deinit();
+        if (!device.tensorUnits()) {
+            std.debug.print("qwen27 prompt tail: SKIP (no tensor units; prompt passes are capped at 128 rows)\n", .{});
+            return;
+        }
+    }
     const m = try graph.createLayers(a, 4);
     defer m.deinit();
     // a frame past one lane block, so a chunk can take the tail
