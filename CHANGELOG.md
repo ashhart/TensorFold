@@ -20,11 +20,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
-- CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so at 262,144 x 3 on a GB10 about 14 GiB more stays free after load (MemAvailable 40.8-41.6 GiB against 26.5-27.0). Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
+- CUDA: with `TF_FLASHNEXT_KV_PAGES` on Linux, the Flash Next page pool no longer takes its whole arena at load: its 256 MiB pieces are mapped as streams first reach them, and a helper thread maps the next ones between requests, so more memory stays free after load. Replies are unchanged; without `TF_FLASHNEXT_KV_PAGES`, and on other systems, nothing changes (#3066). Thanks to @Arminova.
 
 - Server: `serve --log-json` writes each request start and end as one compact JSON object on the existing log line, with no keys, headers or bodies; default logs and `/health` stay unchanged (#3195). Thanks to @mvanhorn.
 
-- Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895). Thanks to @Mirrdhyn.
+- Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895).
 
 - dots.mocr on CUDA: the image tower (42 blocks and the 2×2 merger) is built but not yet served, so `--vision` stays refused and replies are unchanged; two GB10 runner commands check it, `tf-cuda-test dots-image` (encodes twice, compares bytes, then checks the generated page's `vision-merged` hash against its pin) and `dots-stages` (writes each stage's rows as `.npy` for the oracle) (#2770, refs #1927). Thanks to @laudney.
 
@@ -34,7 +34,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM on CUDA: the window-cost cache is keyed by `TF_GLM_KDA_PAD`, `TF_ROCE`, `TF_GLM_PDL` and `TF_GLM_DSEL` too, so changing one of them times the windows again instead of reusing prices measured under the other value (#3495, fixes #3493). Thanks to @ultradaoto.
 
-- Server: stored Responses belong to the API key that created them. Other keys get the unknown-ID error on reads, continuations, deletion and live cancellation; keyless and single-key callers retain their own history.
+- Server: stored Responses belong to the API key that created them. Other keys get the unknown-ID error on reads, continuations, deletion and live cancellation; keyless and single-key callers retain their own history (#3756).
 
 - CUDA: `nccl.Library.open()` and the tensor-parallel config now resolve `TF_NCCL_LIB` through the shared path rule, so GLM, Flash Next's `--tp 2` collective, MiniMax M3 and TP sessions open the same library; unset, empty or blank values keep `libnccl.so.2`, and a value with control characters is refused (#3106). Thanks to @vdalesandro.
 
@@ -59,7 +59,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `tensorfold device`: a saved macOS profile is refreshed when the live GPU wired-memory limit changes, so the reported available weight bytes match the current limit (#3780, fixes #3778). Thanks to @AIFlowML.
 
 - GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines instead of waiting in a collective receive for the whole pass, so a long image pass no longer trips a net plugin's operation timeout and stops every rank; replies are unchanged (#3675, for #3614). Thanks to @ultradaoto.
-- GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines, as they do when no stream is left, instead of waiting in an NCCL receive for the whole pass, so a pass longer than a net plugin's operation timeout no longer stops every rank. On three GB10s at the mesh plugin's 30 s default, one 3840x2160 image (66 s), two 3072x1728 and fifteen 1920x1080 screenshots answer, with the same replies and short-image times (for #3614).
 - Desktop: a Qwen3.8-27B checkpoint is offered and loads, where the library applied the 2B geometry to every `qwen3_5` checkpoint and rejected the supported 27B at hidden size 5,120 (#3771). Thanks to @AIFlowML.
 
 - Intel Arc (XPU): two or four Level Zero GPUs open as peers in one context, with new peer-to-peer all-reduce collectives (FP16, BF16 and FP32; one shot up to 512 KiB, reduce-scatter then gather above) that sum in fixed rank order for exact bits, and `zig build xpu-tp-bench` builds `tf-xpu-tp-bench` to check and time them; nothing serves through them yet (#3585, part of #3583). Thanks to @supernovae.
@@ -90,17 +89,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: a two-session KV isolation test pins that kept states across spill, offload and page reuse match by tokens only, never position (#3840).
 
-- CI: the last four host checks excluded under #2031 return to the aggregate; recording fixtures initialize runner state and affine kernel handles.
 
-- Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
 
 - CUDA and HIP: Qwen 3.5 settings go through the environment rules, so malformed text is refused at startup with the setting's name and accepted forms; names, defaults and clamps are unchanged (#3520).
 
-- Qwen3.8-27B on Metal: tensor-unit qk projections, flat glue kernels and Metal 4 verify passes each have their own off switch (`TF_Q27_QK=0`, `TF_Q27_FLAT_GLUE=0`, `TF_Q27_METAL4=0`) and are bit-identical to the kernels they replace; qk and Metal 4 stay off on chips without tensor units (#2342).
 
 - Tools: the served gates (`tools/conformance.py`, the Qwen and LFM3 serve checks and the Qwen3.8-27B HTTP gate) prove they ran what they claim: drafts landed, the sampler and the prompt cache were used, and concurrent requests overlapped (#3708, follows #2460). Thanks to @jschmied.
 
-- GLM on CUDA: a decode window's EXL3 routed experts launch on the 16-pair item plan instead of the group kernel's grid of mostly idle blocks, with the same output bytes (#2044). Thanks to @BadAd84.
 
 - Docs: the optimization ledger adds rows 30 to 32 (small-kernel fusion, stream-tile prefetch and the filled-item prompt grid), each `failed` for Flash Next on HIP with the measurements from #1603 (#3160, refs #1603). Thanks to @gilby.
 
