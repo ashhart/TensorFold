@@ -70,7 +70,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .imports = &.{ .{ .name = "drama3", .module = family }, .{ .name = "drama3_metallib", .module = bytes } },
         }),
     });
-    b.step("drama3-metal-quant-check", "Build the NVFP4 Metal operator checker; does not execute GPU work").dependOn(&b.addInstallArtifact(quant_check, .{}).step);
+    const quant = b.step("drama3-metal-quant-check", "Build the NVFP4 Metal operator checker; does not execute GPU work");
+    quant.dependOn(&b.addInstallArtifact(quant_check, .{}).step);
+    if (no_compiler) |fail| quant.dependOn(fail);
     const tool = b.createModule(.{
         .root_source_file = b.path("zig/src/families/drama3/generate.zig"),
         .target = target,
