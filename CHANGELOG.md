@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
+
 - Core prompt cache: the radix store can keep a checkpoint inside a page as a writable tail, a store-held copy of that page's rows that is never written again; no family turns tails on yet, so every current store behaves as before (#3329, part of #2444). Thanks to @laudney.
 
 - CUDA: on a GB10, the one-launch path for two to four affine-4 prompt projections (`tf_qmm_prefill_many`) works out each thread's copy addresses once, before the K loop, instead of at every stage; the copies, their order and the math are unchanged (#2825). Thanks to @GumbiiDigital.
