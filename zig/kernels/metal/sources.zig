@@ -5,10 +5,14 @@ pub const dsv41 = @import("deepseek_v41/sources.zig");
 
 pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");
 pub const hy4_flash_index_recall = @embedFile("hy4_flash/index_recall.metal");
+pub const hy4_flash_index_build = @embedFile("hy4_flash/index_build.metal");
 pub const hy4_flash_attention_sink = @embedFile("hy4_flash/attention_sink.metal");
 pub const hy4_flash_mla_project = @embedFile("hy4_flash/mla_project.metal");
 pub const hy4_flash_mla_attention = @embedFile("hy4_flash/mla_attention.metal");
 pub const hy4_flash_ihc = @embedFile("hy4_flash/ihc.metal");
+pub const hy4_flash_rows = @embedFile("hy4_flash/rows.metal");
+pub const hy4_flash_mla_nax = @embedFile("hy4_flash/mla_nax.metal");
+pub const hy4_flash_route_rows = @embedFile("hy4_flash/route_rows.metal");
 pub const hy4_flash_engram = @embedFile("hy4_flash/engram.metal");
 pub const hy4_flash_affine_experts = @embedFile("hy4_flash/affine_experts.metal");
 pub const hy4_flash_tensor_dispatch = @embedFile("hy4_flash/tensor_dispatch.metal");

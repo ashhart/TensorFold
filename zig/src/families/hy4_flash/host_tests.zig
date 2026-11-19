@@ -14,8 +14,8 @@ test {
     _ = @import("forward.zig");
 }
 
-fn tensor(dtype: core.checkpoint.DType, rows: usize, width: usize, bytes: []const u8) core.checkpoint.Tensor {
-    var result: core.checkpoint.Tensor = .{ .dtype = dtype, .rank = 2, .shape = @splat(0), .bytes = bytes };
+fn tensor(dtype: core.checkpoint_host.DType, rows: usize, width: usize, bytes: []const u8) core.checkpoint_host.Tensor {
+    var result: core.checkpoint_host.Tensor = .{ .dtype = dtype, .rank = 2, .shape = @splat(0), .bytes = bytes };
     result.shape[0..2].* = .{ rows, width };
     return result;
 }

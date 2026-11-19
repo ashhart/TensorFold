@@ -10,7 +10,7 @@ const engram = @import("engram.zig");
 const engram_rows = @import("engram_rows.zig");
 const rope = @import("rope.zig");
 
-const Tensor = core.checkpoint.Tensor;
+const Tensor = core.checkpoint_host.Tensor;
 const Affine = core.quant.mlx.Host;
 const Allocator = std.mem.Allocator;
 const Rank = core.quant.Rank;
@@ -20,7 +20,7 @@ const Reader = struct {
     model: *checkpoint.Loaded,
     prefix: []const u8,
 
-    fn tensor(self: Reader, field: []const u8, format: core.checkpoint.DType, dims: []const usize) !Tensor {
+    fn tensor(self: Reader, field: []const u8, format: core.checkpoint_host.DType, dims: []const usize) !Tensor {
         var scratch: [160]u8 = undefined;
         const key = try std.fmt.bufPrint(&scratch, "{s}{s}", .{ self.prefix, field });
         return self.model.checkpoint.expect(key, format, dims);
