@@ -68,7 +68,7 @@ const Fixture = struct {
 
     /// A kept state at `at` whose bytes are a function of position and piece: a longer state extends a shorter one.
     fn kept(f: *Fixture, at: u32) !*Copy {
-        const c = try disk.blankCopy(&f.e, at);
+        const c = try disk.blankCopy(&f.e, at, null);
         const l = reuse.layoutOf(&f.e, at);
         var off: usize = 0;
         for (0..l.count()) |i| {
@@ -117,6 +117,7 @@ test "gather and scatter give back the copy byte for byte; a copy kept with imag
     const a = std.testing.allocator;
     var f: Fixture = .{ .d = undefined, .e = undefined };
     f.init(true);
+    defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
     const c = try f.kept(512);
     defer reuse.dropCopy(&f.e, c);
     c.delta = -3;
@@ -188,6 +189,7 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(kv8);
+        defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
         const short = try f.kept(512);
         defer reuse.dropCopy(&f.e, short);
         const long = try f.kept(1024);
@@ -208,6 +210,7 @@ test "kept states written to disk read back byte-equal after a restart, sharing 
         try tmp.dir.deleteTree(io, "restart");
         var f: Fixture = .{ .d = undefined, .e = undefined };
         f.init(true);
+        defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
         const short = try f.kept(512);
         defer reuse.dropCopy(&f.e, short);
         const long = try f.kept(1024);
@@ -267,6 +270,7 @@ const backend = @import("lanes").backend;
 test "the probe releases its stream once whether its prompt pass, its wait or its mark fails" {
     var f: Fixture = undefined;
     f.init(false);
+    defer f.t.spares.deinit(); // blanks and saves through the target leave their buffers on its list
     const io = std.testing.io;
     for ([_]struct { fail: bool, sync: bool, err: anyerror }{
         .{ .fail = true, .sync = false, .err = error.Injected },

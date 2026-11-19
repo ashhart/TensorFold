@@ -1,0 +1,23 @@
+# The clients and fixtures the suites read (tools/suite-*.sh's $T), by sha256 and where each comes from
+edf636290c3a63a189a974e6ee26aac810aaa03e617568b76633ffd0223bce4f  tools/bench_openai.py (the tested commit's)
+c663d05c795ab4bbc7c787043ef0749b7d46cf4f7289be8de44d0f35ba9d8855  tools/bench_concurrent.py (the tested commit's)
+502be904b7240a7928909294fec9511b19b8de7e7bd8060c1515b8370263e5c9  tools/bench_cache.py (the tested commit's)
+9e3681e5223320c4d6b72b9a58f3d0c3e35c48086a0779ef6f5a467c6427909c  tools/memory_receipts.py (the tested commit's)
+74b1b9444ac44e3109410547d0f2e5d7996c1cc4cbea3c98937c0ff707caf5fe  tools/bench_args.py (the tested commit's)
+1896120b70d0df05646870a252697e20ce84c63e09dcba88b2a4e5a55ccb3c5b  tools/bench_auth.py (the tested commit's)
+3f805de70b16f0b22273147e10990df63ce81229acb6e000ba2409fa9842acdd  tools/bench_evidence.py (the tested commit's)
+79ec9ae0995a5183c682a108c52c4c3e7577c37a478cbe5541d02886a57175e5  tools/bench_metrics.py (the tested commit's)
+c21373f710ab3c12dbc0f0a24aa24a1af6fcfb12901950197b81fc6532be0310  tools/bench_stream.py (the tested commit's)
+be1561577b66c71fd463a67a86e4b72ee73e39817eff7a58fe1abfbeba56add1  tools/bench_thinking.py (the tested commit's)
+158f636ef0b3bed460ce19ef4872b6d8607ff7a8590562d06bae8bd55e6f44ed  tools/bench_timing.py (the tested commit's)
+b44ae199fd64830124fa224087a389e96823b958d60eafefc22c78e9199c3e18  tools/bench_prompts.json (the tested commit's)
+76a0f29a77eae9213d3f72775e07c84a559d4c99f2beeb008cbf3c52424b0627  docs/receipts/glm-fp4local-80517fc3/tools/golden_http.py
+00e00510e4171616114291d32254f4c90f2ca7fa4d1ee2544398e4ea30f2009e  docs/receipts/glm-fp4local-80517fc3/tools/resume_http.py
+9ec9513e6e0f8d529e518c145e09ae41ddf07ada1ee47387cec03bc70d74fb5f  docs/receipts/glm-fp4local-80517fc3/tools/openai_aligned.py
+a3225adb5c90d6b0ba2b5486d0a3a7f079e12453266fc1c949cef02686fdb055  docs/receipts/glm-fp4local-80517fc3/tools/dc.json
+8ad11f12cee69b0e4847f5af75eb56f247c56e88a715246b16fb416d38228895  p2048.json: openai_aligned.py tokens 2048 0 dc.json p2048.json
+97e2793cfa306b7a51e1c276c339694b79e6e610d57cee3f44ef246181061112  p8192.json: openai_aligned.py tokens 8192 0 dc.json p8192.json
+b7c8ce5a2d4eb38f084e641461657dc5fa38839185d162c7ca0a9e5da77fe0e6  p9600.json: openai_aligned.py tokens 9600 0 dc.json p9600.json
+a1e170d511726b805897019d6af0334a142507d0513991f05b6dbaa5337d4d35  p32768.json: openai_aligned.py tokens 32768 0 dc.json p32768.json
+41456a6f83f7eda19c29a0b094d78bc2787a04785abd73b3c47099c209a5d1af  p38400.json: openai_aligned.py tokens 38400 2100 dc.json p38400.json
+0ce17a17a298b8593ec22d6dd64fe44b73f028f390a57cc6786fd3dcf8e5b2e6  p65536.json: openai_aligned.py tokens 65536 0 dc.json p65536.json

@@ -72,6 +72,7 @@ test {
     _ = @import("tool_required_test.zig");
     _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
+    _ = @import("grammar_compile_test.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
     _ = @import("load_metrics.zig");
@@ -119,6 +120,7 @@ test {
     _ = @import("process_resident.zig");
     _ = @import("log.zig");
     _ = @import("request_log.zig");
+    _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
@@ -238,6 +240,8 @@ test {
     _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
+    _ = @import("responses_background.zig");
+    _ = @import("responses_background_test.zig");
     _ = @import("message_starts_test.zig");
     _ = @import("message_starts_proof_test.zig");
     _ = @import("message_marks_test.zig");
@@ -313,6 +317,9 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("voice_cli.zig");
+    _ = @import("drama_voice_store.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");

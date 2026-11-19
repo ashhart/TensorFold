@@ -22,7 +22,8 @@ pub const Env = struct {
 };
 
 pub const usage =
-    \\usage: tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
+    \\usage: tensorfold config validate FILE
+    \\       tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
     \\       tensorfold cluster check --cluster FILE [--model ID] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
     \\       tensorfold cluster status --cluster FILE [--model ID] [--probe | --probes DIR]
     \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--hold SECONDS] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]

@@ -29,6 +29,17 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-llama-controls-host", "Llama's source controls plant one fault without a device or shader compiler").dependOn(&llama_controls.step);
     step.dependOn(&llama_controls.step);
+    const ling_mla_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_ling_mla_controls.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
+            .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
+        },
+    }) }));
+    b.step("test-ling-mla-controls-host", "Ling MLA source controls plant one fault without a device or shader compiler").dependOn(&ling_mla_controls.step);
+    step.dependOn(&ling_mla_controls.step);
     const mapping_tf = b.createModule(.{ .root_source_file = b.path("zig/lfm2_mapping_tf.zig"), .imports = &.{
         .{ .name = "metal", .module = mapping_stub },
         .{ .name = "kernel_sources", .module = mapping_stub },
@@ -156,6 +167,19 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     }) });
     b.step("test-ling-kda-gpu", "Ling KDA mixer on this GPU against kda.zig, using k3_kda").dependOn(&b.addRunArtifact(ling_kda_gpu).step);
+    const ling_mla_gpu = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/ling_mla_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "mla", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/mla.zig") }) },
+            .{ .name = "kimi_metallib", .module = kimi_metallib },
+            .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
+        },
+    }) });
+    b.step("test-ling-mla-gpu", "Ling MLA mixer on this GPU around k3_mla, against mla.zig").dependOn(&b.addRunArtifact(ling_mla_gpu).step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).

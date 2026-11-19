@@ -201,6 +201,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
     engineDelete: async (repo) => {
       if (status.model === repo && status.state !== 'stopped') throw new Error(`Unload ${repo} before deleting it.`)
       installed = installed.filter((m) => m.repo !== repo)
+      if (pulls.get(repo)?.state === 'done') pulls.delete(repo)
       emit({ kind: 'installed', installed })
       return installed
     },

@@ -31,7 +31,12 @@ pub fn parse(a: Allocator, bytes: []const u8) ![]const prompt.Reference {
         .ok => |v| v,
         else => return error.BadVoice,
     };
-    if (!std.mem.eql(u8, doc.strField("format") orelse "", "drama3-http-voice/1")) return error.BadVoice;
+    return parseDoc(a, doc);
+}
+
+/// A parsed voice file, or an inline voice object, checked as a catalog file is.
+pub fn parseDoc(a: Allocator, doc: json.Value) ![]const prompt.Reference {
+    if (doc != .object or !std.mem.eql(u8, doc.strField("format") orelse "", "drama3-http-voice/1")) return error.BadVoice;
     const source = doc.get("source") orelse return error.MissingAttestation;
     const kind = source.strField("kind") orelse return error.MissingAttestation;
     if (!std.mem.eql(u8, kind, "synthetic") and !std.mem.eql(u8, kind, "self") and !std.mem.eql(u8, kind, "consented")) return error.MissingAttestation;
@@ -61,10 +66,13 @@ pub fn parse(a: Allocator, bytes: []const u8) ![]const prompt.Reference {
 
 /// A checked file's optional one-line `description`, shown in the listing.
 fn describe(a: Allocator, bytes: []const u8) ![]const u8 {
-    const doc = switch (try json.parse(a, bytes)) {
+    return describeDoc(switch (try json.parse(a, bytes)) {
         .ok => |v| v,
         else => return error.BadVoice,
-    };
+    });
+}
+
+pub fn describeDoc(doc: json.Value) ![]const u8 {
     if (doc.get("description") == null) return "";
     const s = doc.strField("description") orelse return error.BadVoice;
     if (s.len > 200 or !std.unicode.utf8ValidateSlice(s)) return error.BadVoice;

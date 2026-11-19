@@ -253,4 +253,5 @@ pub const draw = draws.draw;
 
 test {
     _ = draws;
+    _ = @import("model.zig");
 }

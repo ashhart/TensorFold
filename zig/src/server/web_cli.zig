@@ -82,8 +82,10 @@ pub fn command(ctx: Context, args: []const []const u8, version: Version) !u8 {
 }
 
 fn instructions(ctx: Context, spec: []const u8, need_uv: bool) !u8 {
+    if (need_uv) try ctx.out.writeAll(
+        "Install uv and add it to PATH: https://docs.astral.sh/uv/getting-started/installation/\n",
+    );
     try ctx.out.writeAll("Run:\n");
-    if (need_uv) try ctx.out.writeAll(if (builtin.os.tag == .windows) "  py -m pip install --user uv\n" else "  python3 -m pip install --user uv\n");
     try ctx.out.print("  uv tool install \"{s}\"\nThen run tensorfold web again.\n", .{spec});
     return 1;
 }

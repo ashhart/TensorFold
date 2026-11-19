@@ -37,6 +37,16 @@ async function main() {
   assert.equal(formatName({ quantization: { bits: 4, group_size: 64 } }), 'mlx-q4g64')
   assert.equal(formatName({ quantization: { bits: 6 } }), 'mlx-q6g32', 'a missing group size is 32, as hub.zig reads it')
   assert.equal(formatName({}), null)
+  const spark = { model_type: 'spark2_5' }
+  assert.equal(formatName({ ...spark, dtype: 'bfloat16' }), 'bf16')
+  assert.equal(formatName({ ...spark, torch_dtype: 'bfloat16' }), 'bf16')
+  assert.equal(formatName({ ...spark, dtype: 'float32', text_config: { dtype: 'bfloat16' } }), 'bf16')
+  assert.equal(formatName({ ...spark, dtype: 'float32' }), null)
+  assert.equal(formatName({ ...spark, dtype: 'bfloat16', quantization: { bits: 4, group_size: 64 } }), 'mlx-q4g64')
+  assert.equal(formatName({ ...spark, dtype: 'bfloat16', quantization_config: { quant_method: 'fp8' } }), null)
+  assert.equal(formatName({ ...spark, dtype: 'bfloat16', text_config: { quantization: { bits: 4 } } }), null)
+  assert.equal(formatName({ ...spark, dtype: 'bfloat16', compression_config: {} }), null)
+  assert.equal(formatName({ model_type: 'qwen3', dtype: 'bfloat16' }), null)
   assert.equal(describeFormat('mlx-q4g64'), '4-bit, group 64')
   assert.equal(describeFormat(null), 'full precision')
 

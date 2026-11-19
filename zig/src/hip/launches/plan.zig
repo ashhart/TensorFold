@@ -96,6 +96,8 @@ pub fn tapRows(l: *const Launcher, x: u64, ring: u64, rows: usize, hidden: usize
 const score_keys = 4;
 const score_keys_short = 2;
 const score_span = 16384;
+/// Steps of its warps' keys a tf_plan_score256_* block walks (plan.hip's kScoreSteps).
+const score_steps = 8;
 
 /// One query a row (rows, heads, d) fp32 over its slot's caches up to its position; the walk covers `span` keys.
 pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64, partials: u64, p: PlanRef, layer: usize, heads: usize, kv_heads: usize, d: usize, span: usize, scale: f32, kind: c_int, s: S) Error!void {
@@ -147,8 +149,11 @@ pub fn planCausalAs(
     // four warps a block score their keys for the block's heads; short spans take fewer keys a warp to fill the card
     const long = span >= score_span;
     const keys: usize = if (long) score_keys else score_keys_short;
-    const fns = if (act) (if (long) l.plan.score_act else l.plan.score2_act) else if (long) l.plan.score else l.plan.score2;
-    try l.go(fns[which], dim(cdiv(span, 4 * keys), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
+    // d = 256 (the Qwen checkpoints) on long spans takes its own kernels, a block walking score_steps steps
+    const wide = long and d == 256;
+    const fns = if (wide) (if (act) l.plan.score256_act else l.plan.score256) else if (act) (if (long) l.plan.score_act else l.plan.score2_act) else if (long) l.plan.score else l.plan.score2;
+    const steps: usize = if (wide) score_steps else 1;
+    try l.go(fns[which], dim(cdiv(span, 4 * keys * steps), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
     var b: Args = .{};
     try b.add(scores);
     try b.add(stats);

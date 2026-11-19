@@ -181,6 +181,33 @@ def test_a_replay_stops_rather_than_erase_an_edit(tmp_path):
 
 
 
+@pytest.mark.parametrize(("fields", "expected"), [
+    ({"pinned": True, "folder": " Work "}, {"pinned": True, "folder": "Work"}),
+    ({"pinned": False, "folder": None}, {"pinned": False, "folder": None}),
+    ({}, {}),
+])
+def test_conversation_creation_keeps_optional_organization_fields(tmp_path, fields, expected):
+    from fastapi import FastAPI
+
+    from tensorfold_web import server_chat
+
+    app = FastAPI()
+    server_chat.install(app, conversations.Conversations(tmp_path / "chat.sqlite"), None, None)
+    with TestClient(app) as client:
+        response = client.post("/api/conversations", json={"title": "Planning", **fields})
+        assert response.status_code == 200
+        created = response.json()
+        stored = client.get(f"/api/conversations/{created['id']}").json()
+        row = client.get("/api/conversations").json()["conversations"][0]
+        folders = client.get("/api/conversation-folders").json()["folders"]
+
+    for doc in (created, stored):
+        assert {key: doc[key] for key in ("pinned", "folder") if key in doc} == expected
+        assert doc["title"] == "Planning" and doc["rev"] == 1
+    assert row["pinned"] is expected.get("pinned", False) and row["folder"] == expected.get("folder")
+    assert folders == ([{"name": "Work", "count": 1}] if expected.get("folder") else [])
+
+
 def test_pins_and_folders(tmp_path):
     from tensorfold_web.conversations import Conversations
 

@@ -192,7 +192,13 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
         {!snapshot ? <p role="status" className="mt-6 text-[14px] text-ink-2">{tx("Checking installed models…")}</p> : installed.length === 0 ? <div className="mt-6"><div className="rounded-xl border border-dashed border-line px-5 py-7"><h2 className="text-[16px] font-medium text-ink">{tx("Your models will appear here")}</h2><p className="mt-2 max-w-xl text-[14px] leading-relaxed text-ink-2">{tx("Download a compatible model or add a folder with models you already have.")}</p><div className="mt-4 flex flex-wrap gap-2"><Button variant="primary" icon="search" onClick={() => setTab('Discover')}>{tx("Discover models")}</Button><Button icon="folder" onClick={() => setUtility('folders')}>{tx("Add model folder")}</Button></div></div>{recommendationPanel}</div> : <>
           <p className="mt-4 text-[12px] text-ink-3">{shown.length} {tx("of ")}{installed.length} {installed.length === 1 ? tx("model") : tx("models")} {tx("on this Mac")}{favoritesOnly ? tx(" · favourites") : ''}</p>
           <div className="mt-1" aria-label={tx("Installed models")}>{shown.map((model) => <InstalledRow key={model.repo} model={model} minimal={minimal} status={status} hubCache={snapshot.hubCache ?? 'the Hugging Face cache'} onSettings={() => setEditingModel(model)} favorite={favorites.isFavorite(route(model))} favoriteDisabled={!favorites.ready} onFavorite={() => { favorites.toggle(route(model)) }} using={startingModel === model.repo} chatBlocked={learningLocked} onLoad={() => void useModel(model.repo)} onUnload={() => void unload()} onTask={showWorkers} onChat={() => void useModel(model.repo)} locked={locked} onDelete={async () => {
-            try { await api.engineDelete(model.repo) } catch (error) { if (mounted.current) setNotice({ kind: 'error', message: errorText(error) }); throw error }
+            try {
+              await api.engineDelete(model.repo)
+              await refreshEngine()
+            } catch (error) {
+              if (mounted.current) setNotice({ kind: 'error', message: errorText(error) })
+              throw error
+            }
           }} />)}</div>
           {shown.length === 0 && <div className="mt-5 rounded-xl border border-dashed border-line px-4 py-6 text-[14px] text-ink-2">{favoritesOnly && !libraryQuery.trim() ? tx("Star a model to keep it in your favourites.") : tx("No models match this search.")}</div>}
         </>}

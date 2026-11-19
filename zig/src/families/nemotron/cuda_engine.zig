@@ -136,7 +136,7 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer if (!keep_owner) gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
-        e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
+        e.trace = (@import("sys").environment.Process{}).get("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
         var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);

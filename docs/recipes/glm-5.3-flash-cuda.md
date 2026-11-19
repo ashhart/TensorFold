@@ -5,7 +5,7 @@ The native CUDA build serves GLM-5.3-Flash at tensor parallel over hosts: from N
 ([1.1.0](../../CHANGELOG.md#110), [the checkpoint](glm-5.3-flash.md#exl3)), and in [1.1.5](../../CHANGELOG.md#115) (#1050) from
 NVIDIA's FP4-Local checkpoint as stored and from XSFP4, which keeps FP4-Local's tensors outside the routed experts.
 Jammed XSFP4, in [1.2.3](../../CHANGELOG.md#123) ([#2041](https://github.com/ashhart/TensorFold/pull/2041)), holds those experts at block 32 in the `csf0_v1` form and loads the same way.
-Jammed XSFP4 NZ5, on `main` after 1.2.7 ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
+Jammed XSFP4 NZ5, in [1.2.10](../../CHANGELOG.md#1210) ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
 Rank 0 serves HTTP and the other ranks follow its steps, with MTP drafts, concurrent streams and kept prompt states.
 The [Python 0.6.6 recipe](glm-5.3-flash.md) and its `--tp`, `--rank` and `--master` flags belong to the frozen engine.
 
@@ -35,6 +35,12 @@ BF16 in the quantization ignore lists, was not among them. On shipped 1.1.0 thes
 in 302.1 s, and rank 0 reported `model 96.11 GiB; 1 stream at once, 3.16 GiB each at a 245760-token window, of 5.8 GiB
 left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
+
+FP4-Local takes the same commands with its own name: `tensorfold pull
+nvidia/GLM-5.3-Flash-FP4-Local@76348ddb2be2e35e39ecfc00e75dc07703f4f3d5`, then `nvidia/GLM-5.3-Flash-FP4-Local` on every
+rank. Its [receipt on `main`](../receipts/glm-fp4local-3a56d4eb/README.md) (`3a56d4eb92`, two GB10 at TP=2) has drafted
+replies equal to plain, concurrent to alone and resumed to cold, 90.2 GiB of model a rank, 23.9 tok/s plain and 34 to 42
+drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,536 tokens.
 
 ## Requests
 
@@ -212,6 +218,18 @@ missing link (#1971). The ring also needs these NCCL settings at start (#1971):
   driver errors with it on.
 - `NCCL_ALGO=Ring`, and a graph for each rank that receives on the port toward the previous rank and sends toward
   the next.
+
+For switchless RoCE links on separate IPv4 subnets, use NCCL 2.30.7 or later: [subnet-aware
+routing](https://github.com/NVIDIA/nccl/blob/v2.30.7-1/src/transport/net_ib/connect.cc#L61-L62)
+first shipped in [v2.30.7-1](https://github.com/NVIDIA/nccl/commit/5c1c4288e6627e9b442eda997aa6ee9136cda0bd).
+Point each rank at a newer `libnccl.so.2` with `LD_LIBRARY_PATH=/path/to/nccl/lib`, retaining other trusted library
+directories.
+Set `NCCL_IB_SUBNET_AWARE_ROUTING=1` and `NCCL_IB_SUBNET_PREFIX_LEN=24`, keeping the settings above;
+the prefix must match the links' IPv4 subnets (24 for /24).
+On every rank, check `rank N startup: entering NCCL init (..., NCCL X.Y.Z, ...)` and `NCCL_DEBUG=INFO`
+for the selected NIC and subnet-aware overrides.
+With gather prefill, replacing 2.28.9 with a build reporting 2.30.7 and enabling these settings fixed startup timeouts
+and completed requests.
 
 `TF_GLM_ROCE_MULTI=1` with `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on such a ring instead of
 NCCL (#2352, opt-in, four ranks only). Gathers up to `TF_TP_ROCE_RELAY_MAX_KB` a rank go on the wire (64 KiB by

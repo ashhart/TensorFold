@@ -45,8 +45,8 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     const slots = s.most -| promised.slots;
     if (s.reservation_guard != null) {
         const can = @import("prompt_cache_reserve.zig").evictable(s, null, prompt);
-        // with no outside promise a freed or spare buffer may take the state for less than `bytes`
-        const reuse = promised.bytes == 0 and s.family.vtable.reuses != null;
+        // Only a charged-state family can use reusable storage for less than its conservative byte estimate.
+        const reuse = promised.bytes == 0 and s.family.vtable.reuses != null and s.family.vtable.charged != null;
         if (bytes > limit or slots == 0 or (!reuse and s.held -| can.bytes + bytes > limit) or
             s.entries.items.len - can.slots >= slots) return s.fail(at, error.CachePromised);
     }
