@@ -65,12 +65,14 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
 }
 
-/// Drafts for `rows` head outputs at `out`: the norm, then shared_head.head when stored, else lm_head (drafts only).
+/// Drafts use shared_head.head when stored, else lm_head, with each row's draft_draws over the draft vocabulary.
 pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, picks: Ref) void {
     const c = x.c;
     const D = c.hidden;
     fwd.rms(x, e, out, x.w.mtp.?.norm, x.sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headWith(x, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
+    var y = x.*;
+    y.draws = x.draft_draws;
+    fwd.headWith(&y, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, x.draft_draws == null);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).

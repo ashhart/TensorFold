@@ -33,6 +33,7 @@ pub const Ctx = struct {
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
     inject: ?*const Inject = null, // a prompt pass's image rows over its placeholder embeddings
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
+    draft_draws: ?*const Draws = null, // the MTP head's rows' rules, each keyed where its draft lands (null: argmax)
 };
 
 /// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.

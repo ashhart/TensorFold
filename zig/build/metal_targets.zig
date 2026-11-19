@@ -355,6 +355,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-segments-probe", .path = "zig/tests/segments_probe.zig", .about = "A two-segment chunk behind a held first queue: the GPU watchdog without the probe, a pass with it" },
         .{ .name = "tf-weight-read-check", .path = "zig/tests/weight_read_check.zig", .about = "Check native file reads and failed-read cleanup", .c_source = "zig/tests/pread_fault.c" },
         .{ .name = "tf-glm-run", .path = "zig/tests/glm_run.zig", .about = "GLM-5.3-Flash greedy replies at each draft depth against depth 0 and reference tokens" },
+        .{ .name = "tf-glm-drafts", .path = "zig/tests/glm_drafts.zig", .about = "GLM-5.3-Flash drafted replies against plain ones, greedy and sampled, generate and served slots, on the checkpoint" },
         .{ .name = "tf-glm-vision", .path = "zig/tests/glm_vision.zig", .about = "GLM-5.3-Flash's image tower on an image or a reference dump's patches, compared with the dump" },
         .{ .name = "tf-glm-video", .path = "zig/tests/glm_video.zig", .about = "GLM-5.3-Flash's video preparation on a clip (libtfvideo), written for tools/zig/glm_video_fixtures.py" },
         .{ .name = "tf-qwen-vision", .path = "zig/tests/qwen_vision.zig", .about = "The Qwen-VL tower on picture files: patches, grids and merged rows written for a float32 reference" },

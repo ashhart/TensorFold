@@ -60,6 +60,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_QWEN27_JOIN` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `1` runs a window's rows in pairs over the keys below it in the decode tail attention (same replies); unset or blank is `1` |
 | `TF_QWEN35_METAL_KV_PAGES` | Qwen 3.5 on Metal: exactly `0` or `1`; `1` puts the streams' keys and values in core-pool pages; unset or blank is `0` |
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
+| `TF_GLM_KEYED_DRAFTS` | GLM-5.3-Flash on Metal: exactly `0` or `1`; default 1: a sampled stream's MTP drafts are drawn with the stream's own keyed rule (seed, top-k, top-p, min-p, at half its temperature) at the position each draft would fill, so a draft is often the token the target's draw there picks. `0` drafts the MTP head's argmax. Replies are the same either way |
 | `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
 | `TF_DSV41_ASSETS` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the Engram token map; unset or blank reads it beside the checkpoint |
 | `TF_DSV41_ENGRAM_DIR` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the packed Engram tables; unset or blank takes the checkpoint's `engram_table_dir` |
