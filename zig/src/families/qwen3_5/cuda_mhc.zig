@@ -11,8 +11,10 @@ pub const Runtime = struct {
     streams: u64 = 0,
     post: u64 = 0,
     mix: u64 = 0,
+    iterations: c_int = 20,
+    pre_scale: f32 = 1.0,
 
-    pub fn load(d: *const cuda.Driver) !Runtime {
+    pub fn load(d: *const cuda.Driver, m: @import("loop_config.zig").Mhc) !Runtime {
         var module = try cuda.Module.load(d, cuda.kernels.qwen35_mhc);
         errdefer module.unload();
         return .{
@@ -21,6 +23,8 @@ pub const Runtime = struct {
             .route = try module.function("qwen35_mhc_route"),
             .merge = try module.function("qwen35_mhc_merge"),
             .leave = try module.function("qwen35_mhc_leave"),
+            .iterations = @intCast(m.iterations),
+            .pre_scale = @floatCast(m.pre_scale),
         };
     }
 
@@ -40,7 +44,7 @@ pub fn enter(e: anytype, pending: bool, rows: usize, params: u64) !void {
 }
 
 pub fn route(e: anytype, weight: u64, bias: u64, rows: usize, params: u64) !void {
-    try launch(e, e.mhc.route, sig.route, rows, .{ e.mhc.streams, weight, bias, e.h, e.mhc.post, e.mhc.mix, @as(c_int, @intCast(e.g.hidden)), params });
+    try launch(e, e.mhc.route, sig.route, rows, .{ e.mhc.streams, weight, bias, e.h, e.mhc.post, e.mhc.mix, @as(c_int, @intCast(e.g.hidden)), e.mhc.iterations, e.mhc.pre_scale, params });
 }
 
 pub fn merge(e: anytype, rows: usize, params: u64) !void {

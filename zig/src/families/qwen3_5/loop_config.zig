@@ -50,7 +50,7 @@ fn known(o: std.json.ObjectMap, keys: []const []const u8) error{BadLoopConfig}!v
 
 pub fn parse(root: std.json.ObjectMap, layers: usize) error{BadLoopConfig}!Config {
     const loop = try object(root.get("loop_settings"));
-    try known(loop, &.{ "start", "end", "eval_count", "counts" });
+    if (loop.get("use_gate")) |gate| if (gate != .bool or gate.bool) return error.BadLoopConfig; // loop_gate is not loaded
     const start = try uint(loop, "start");
     const end = try uint(loop, "end");
     const count = try uint(loop, "eval_count");
@@ -73,7 +73,7 @@ pub fn parse(root: std.json.ObjectMap, layers: usize) error{BadLoopConfig}!Confi
             .float => |f| f,
             else => return error.BadLoopConfig,
         } else 1.0;
-        if (ms >= me or me > layers or streams != 2 or iterations == 0 or fixed != .bool or
+        if (ms >= me or me > layers or (streams != 2 and streams != 4) or iterations == 0 or fixed != .bool or
             !std.math.isFinite(scale) or scale <= 0) return error.BadLoopConfig;
         if (!(me <= start or (ms >= start and me <= end) or ms >= end)) return error.BadLoopConfig;
         result.mhc = .{ .start = ms, .end = me, .streams = streams, .iterations = iterations, .fixed_identity = fixed.bool, .pre_scale = scale };

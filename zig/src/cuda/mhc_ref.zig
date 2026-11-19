@@ -12,10 +12,10 @@ fn lse(a: f32, b: f32) f32 {
     const m = @max(a, b);
     return m + @log(@exp(a - m) + @exp(b - m));
 }
-pub fn sinkhorn(input: [4]f32) [4]f32 {
+pub fn sinkhorn(input: [4]f32, iterations: usize) [4]f32 {
     @setFloatMode(.strict);
     var x = input;
-    for (0..20) |_| {
+    for (0..iterations) |_| {
         for (0..2) |i| {
             const v = lse(x[i * 2], x[i * 2 + 1]);
             x[i * 2] -= v;
@@ -43,7 +43,7 @@ pub fn leave(r: []const f32, h: []f32) void {
     @setFloatMode(.strict);
     for (h, 0..) |*v, i| v.* = bf((r[i] + r[h.len + i]) * 0.5);
 }
-pub fn route(r: []const f32, w: []const f32, b: [8]f32, branch: []f32, post: *[2]f32, mix: *[4]f32) void {
+pub fn route(r: []const f32, w: []const f32, b: [8]f32, branch: []f32, post: *[2]f32, mix: *[4]f32, iterations: usize, pre_scale: f32) void {
     @setFloatMode(.strict);
     const width = r.len;
     var scratch: [256]f32 = @splat(0);
@@ -66,15 +66,16 @@ pub fn route(r: []const f32, w: []const f32, b: [8]f32, branch: []f32, post: *[2
         pre[s] = bf(1.0 / (1.0 + @exp(-logits[s])));
         post[s] = 2.0 / (1.0 + @exp(-logits[s + 2]));
     }
-    mix.* = sinkhorn(logits[4..8].*);
-    collapse(r, pre, branch);
+    mix.* = sinkhorn(logits[4..8].*, iterations);
+    collapse(r, pre, pre_scale, branch);
 }
-pub fn collapse(r: []const f32, pre: [2]f32, branch: []f32) void {
+pub fn collapse(r: []const f32, pre: [2]f32, pre_scale: f32, branch: []f32) void {
     @setFloatMode(.strict);
     for (branch, 0..) |*v, i| {
         const x = bf(pre[0]) * r[i];
         const y = bf(pre[1]) * r[branch.len + i];
         v.* = bf(x + y);
+        if (pre_scale != 1) v.* = bf(v.* * pre_scale);
     }
 }
 fn reduce(s: *[256]f32) f32 {
@@ -100,13 +101,33 @@ pub fn merge(r: []f32, branch: []const f32, post: [2]f32, mix: [4]f32) void {
 }
 
 test "sinkhorn fixture and normalization" {
-    const x = sinkhorn(.{ 1, 2, 3, 5 });
+    const x = sinkhorn(.{ 1, 2, 3, 5 }, 20);
     const fixture = [_]f32{ 0.62245935, 0.37754068, 0.37754068, 0.62245935 };
     for (x, fixture) |v, expected| try std.testing.expectApproxEqAbs(expected, v, 1e-6);
     for (0..2) |i| {
         try std.testing.expectApproxEqAbs(@as(f32, 1), x[i] + x[i + 2], 1e-6);
         try std.testing.expectApproxEqAbs(@as(f32, 1), x[2 * i] + x[2 * i + 1], 1e-6);
     }
+}
+test "sinkhorn runs the requested iteration count" {
+    const input = [4]f32{ 1, 2, 3, 5 };
+    const one = sinkhorn(input, 1);
+    const many = sinkhorn(input, 20);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), one[0] + one[2], 1e-6); // the last pass normalizes columns
+    try std.testing.expect(@abs(one[0] + one[1] - 1) > 1e-3);
+    try std.testing.expect(@abs(one[0] - many[0]) > 1e-3);
+    try std.testing.expectEqualSlices(f32, &many, &sinkhorn(input, 20));
+    try std.testing.expectApproxEqAbs(many[0], sinkhorn(input, 200)[0], 1e-6);
+}
+test "pre_scale scales the routed branch in BF16 and only when not one" {
+    const r = [_]f32{ 1, 2, 3, 4 };
+    var branch: [2]f32 = undefined;
+    collapse(&r, .{ 0.5, 0.75 }, 1, &branch);
+    try std.testing.expectEqualSlices(f32, &.{ 2.75, 4 }, &branch);
+    collapse(&r, .{ 0.5, 0.75 }, 1.5, &branch);
+    try std.testing.expectEqualSlices(f32, &.{ bf(2.75 * 1.5), 6 }, &branch);
+    collapse(&r, .{ 0.5, 0.75 }, 0.3, &branch);
+    try std.testing.expectEqual(bf(bf(2.75) * 0.3), branch[0]);
 }
 test "enter leave and residual round" {
     var h = [_]f32{ 1, -2, 0.5 };
@@ -124,7 +145,7 @@ test "route and merge fixture" {
     var branch: [2]f32 = undefined;
     var post: [2]f32 = undefined;
     var mix: [4]f32 = undefined;
-    route(&r, &w, .{ 1, -1, -2, 0, 1, 2, 3, 4 }, &branch, &post, &mix);
+    route(&r, &w, .{ 1, -1, -2, 0, 1, 2, 3, 4 }, &branch, &post, &mix, 20, 1);
     try std.testing.expectApproxEqAbs(@as(f32, 0.23840584), post[0], 1e-6);
     try std.testing.expectEqual(@as(f32, 1), post[1]);
     try std.testing.expectEqual(@as(f32, 1.5390625), branch[0]);

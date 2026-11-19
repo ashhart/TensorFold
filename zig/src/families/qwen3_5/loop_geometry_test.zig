@@ -206,17 +206,66 @@ test {
     _ = @import("cuda_mhc_test.zig");
 }
 
-test "SenseNova loop: unsupported mHC settings are refused" {
+test "SenseNova loop: engine limits on mHC settings are refused" {
     const original = try config("sensenova_loop", settings);
     defer t.allocator.free(original);
     const replacements = [_][2][]const u8{
-        .{ "\"iterations\":20", "\"iterations\":19" },
+        .{ "\"streams\":2", "\"streams\":4" },
         .{ "\"fixed_identity\":false", "\"fixed_identity\":true" },
-        .{ "\"iterations\":20", "\"iterations\":20,\"pre_scale\":2" },
+        .{ "\"iterations\":20", "\"iterations\":1001" },
+        .{ "\"iterations\":20", "\"iterations\":20,\"pre_scale\":1e39" },
     };
     for (replacements) |pair| {
         const changed = try std.mem.replaceOwned(u8, t.allocator, original, pair[0], pair[1]);
         defer t.allocator.free(changed);
         try t.expectError(error.UnsupportedSenseNovaMhc, geometry.parse(t.allocator, changed));
     }
+}
+
+test "SenseNova loop: any iteration count and pre_scale reach the loop configuration" {
+    const original = try config("sensenova_loop", settings);
+    defer t.allocator.free(original);
+    const cases = [_]struct { iterations: []const u8, scale: []const u8, want_iterations: usize, want_scale: f64 }{
+        .{ .iterations = "1", .scale = "1.0", .want_iterations = 1, .want_scale = 1 },
+        .{ .iterations = "19", .scale = "0.5", .want_iterations = 19, .want_scale = 0.5 },
+        .{ .iterations = "1000", .scale = "2", .want_iterations = 1000, .want_scale = 2 },
+    };
+    for (cases) |c| {
+        const text = try std.fmt.allocPrint(t.allocator, "\"iterations\":{s},\"pre_scale\":{s}", .{ c.iterations, c.scale });
+        defer t.allocator.free(text);
+        const changed = try std.mem.replaceOwned(u8, t.allocator, original, "\"iterations\":20", text);
+        defer t.allocator.free(changed);
+        const m = (try geometry.parse(t.allocator, changed)).loop.?.mhc.?;
+        try t.expectEqual(c.want_iterations, m.iterations);
+        try t.expectEqual(c.want_scale, m.pre_scale);
+    }
+}
+
+test "SenseNova loop: use_gate false and unknown loop keys pass, use_gate true is refused" {
+    const original = try config("sensenova_loop", settings);
+    defer t.allocator.free(original);
+    for ([_][]const u8{ ",\"use_gate\":false", ",\"unknown\":[1]" }) |extra| {
+        const text = try std.mem.concat(t.allocator, u8, &.{ "\"counts\":[2]", extra });
+        defer t.allocator.free(text);
+        const changed = try std.mem.replaceOwned(u8, t.allocator, original, "\"counts\":[2]", text);
+        defer t.allocator.free(changed);
+        _ = try geometry.parse(t.allocator, changed);
+    }
+    const gated = try std.mem.replaceOwned(u8, t.allocator, original, "\"counts\":[2]", "\"counts\":[2],\"use_gate\":true");
+    defer t.allocator.free(gated);
+    try t.expectError(error.BadLoopConfig, geometry.parse(t.allocator, gated));
+}
+
+test "SenseNova loop: a missing layer_types list falls back to the default pattern" {
+    const original = try config("sensenova_loop", settings);
+    defer t.allocator.free(original);
+    const start = std.mem.indexOf(u8, original, "\"layer_types\":[").?;
+    const stop = std.mem.indexOfPos(u8, original, start, "] ,").? + 3;
+    const without = try std.mem.concat(t.allocator, u8, &.{ original[0..start], original[stop..] });
+    defer t.allocator.free(without);
+    const g = try geometry.parse(t.allocator, without);
+    try t.expectEqual(@as(usize, 24), g.physicalDeltas());
+    const short = try std.mem.replaceOwned(u8, t.allocator, original, "\"linear_attention\",\"full_attention\"]", "\"full_attention\"]");
+    defer t.allocator.free(short);
+    try t.expectError(error.BadLayerTypes, geometry.parse(t.allocator, short));
 }

@@ -10,6 +10,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const loop_step = b.step("test-qwen35-loop-host", "Loop configuration and execution slots without devices");
     loop_step.dependOn(&loop_tests.step);
     step.dependOn(&loop_tests.step);
+    const loop_table = b.createModule(.{ .root_source_file = b.path("zig/qwen35_loop_config_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision } } });
+    const loop_table_run = b.addRunArtifact(b.addTest(.{ .root_module = loop_table, .filters = &.{"SenseNova loop config table:"} }));
+    loop_step.dependOn(&loop_table_run.step);
+    step.dependOn(&loop_table_run.step);
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);

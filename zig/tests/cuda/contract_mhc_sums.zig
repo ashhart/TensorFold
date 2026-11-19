@@ -95,6 +95,8 @@ const Case = struct {
         var args: cuda.Args = .{};
         for (self.dev[0..6]) |ptr| args.add(ptr);
         args.add(@as(c_int, d));
+        args.add(@as(c_int, 20));
+        args.add(@as(f32, 1.0));
         args.add(self.dev[6]);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.n) }, .block = .{ .x = 256 } }, self.rig.s, &args);
         try self.rig.s.synchronize();

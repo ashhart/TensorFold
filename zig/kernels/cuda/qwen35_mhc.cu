@@ -31,7 +31,7 @@ extern "C" __global__ void qwen35_mhc_enter(__nv_bfloat16* h, const __nv_bfloat1
 // Grid (rows), block (256); reduction uses fixed thread and tree order.
 extern "C" __global__ void qwen35_mhc_route(const __nv_bfloat16* r, const float* w, const float* b,
                                               __nv_bfloat16* branch, float* post, float* mix,
-                                              int d, const int* p) {
+                                              int d, int iterations, float pre_scale, const int* p) {
     int row = blockIdx.x, t = threadIdx.x, width = 2 * d;
     if (past(p, row)) return;
     const __nv_bfloat16* x = r + (size_t)row * width;
@@ -67,7 +67,7 @@ extern "C" __global__ void qwen35_mhc_route(const __nv_bfloat16* r, const float*
 #endif
         }
         float a = logits[4], b0 = logits[5], c = logits[6], d0 = logits[7];
-        for (int j = 0; j < 20; ++j) {
+        for (int j = 0; j < iterations; ++j) {
             float u = lse(a, b0), v = lse(c, d0);
             a -= u; b0 -= u; c -= v; d0 -= v;
             u = lse(a, c); v = lse(b0, d0);
@@ -77,9 +77,12 @@ extern "C" __global__ void qwen35_mhc_route(const __nv_bfloat16* r, const float*
         mix[row * 4 + 2] = expf(c); mix[row * 4 + 3] = expf(d0);
     }
     __syncthreads();
-    for (int i = t; i < d; i += 256)
-        branch[(size_t)row * d + i] = __float2bfloat16_rn(
+    for (int i = t; i < d; i += 256) {
+        __nv_bfloat16 v = __float2bfloat16_rn(
             __fadd_rn(__fmul_rn(pre[0], bf(x[i])), __fmul_rn(pre[1], bf(x[d + i]))));
+        if (pre_scale != 1.0f) v = __float2bfloat16_rn(__fmul_rn(bf(v), pre_scale));
+        branch[(size_t)row * d + i] = v;
+    }
 }
 
 // Grid (rows), block (256).
