@@ -250,10 +250,100 @@ pub const Decoder = struct {
     /// -> norm_out -> proj_out -> patch unpack -> denormalize -> uint8.
     /// The matmuls, norms, attention and elementwise ops all dispatch to Metal;
     /// the CPU handles the tiling logic and the final byte conversion.
+    /// Decode with the reference's tiling: clips of clip_length latent frames,
+    /// spatial tiles of tile/16 latents with tile_overlap/16 overlap, each piece
+    /// running the full ViT pass, cross-fades on the CPU.
     pub fn frames(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]u8 {
+        const clip_latents = self.config.clip_length - self.config.token_drop;
+        const tile_latents = self.config.tile / self.config.spatial_ratio;
+        const overlap_latents = self.config.tile_overlap / self.config.spatial_ratio;
+        const p_ratio = self.config.spatial_ratio;
+        const pt = self.config.temporal_ratio;
+
+        const out_frames = depth * pt;
+        const out_h = height * p_ratio;
+        const out_w = width * p_ratio;
+        const canvas = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
+        @memset(canvas, 0);
+        const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
+        @memset(weight, 0);
+
+        var clip_start: usize = 0;
+        while (clip_start < depth) {
+            const clip_depth = @min(self.config.clip_length, depth - clip_start);
+            var y: usize = 0;
+            while (y < height) {
+                const tile_h = @min(tile_latents, height - y);
+                var x: usize = 0;
+                while (x < width) {
+                    const tile_w = @min(tile_latents, width - x);
+                    const tile_voxels = clip_depth * tile_h * tile_w;
+                    const tile_lat = try gpa.alloc(f32, tile_voxels * self.config.latent_channels);
+                    defer gpa.free(tile_lat);
+                    var v: usize = 0;
+                    for (0..clip_depth) |t| {
+                        for (0..tile_h) |h| {
+                            for (0..tile_w) |w| {
+                                const src = ((clip_start + t) * height + (y + h)) * width + (x + w);
+                                @memcpy(tile_lat[v * 24 .. (v + 1) * 24], latents[src * 24 .. (src + 1) * 24]);
+                                v += 1;
+                            }
+                        }
+                    }
+                    const piece = try self.decodePiece(gpa, tile_lat, clip_depth, tile_h, tile_w);
+                    defer gpa.free(piece);
+                    const piece_frames = clip_depth * pt;
+                    for (0..piece_frames) |f| {
+                        const gf = (clip_start * pt) + f;
+                        if (gf >= out_frames) break;
+                        for (0..tile_h * p_ratio) |ph| {
+                            for (0..tile_w * p_ratio) |pw| {
+                                const gy = y * p_ratio + ph;
+                                const gx = x * p_ratio + pw;
+                                if (gy >= out_h or gx >= out_w) continue;
+                                const ci = (gf * out_h + gy) * out_w + gx;
+                                for (0..3) |c| {
+                                    canvas[ci * 3 + c] += piece[(f * tile_h * p_ratio + ph) * tile_w * p_ratio * 3 + pw * 3 + c];
+                                }
+                                weight[ci] += 1.0;
+                            }
+                        }
+                    }
+                    if (x + tile_w >= width) break;
+                    x += tile_latents - overlap_latents;
+                }
+                if (y + tile_h >= height) break;
+                y += tile_latents - overlap_latents;
+            }
+            if (clip_start + clip_depth >= depth) break;
+            clip_start += clip_latents;
+        }
+
+        const pixels = try gpa.alloc(u8, canvas.len);
+        for (0..out_frames) |f| {
+            for (0..out_h) |h| {
+                for (0..out_w) |w| {
+                    const ci = (f * out_h + h) * out_w + w;
+                    const wgt = weight[ci];
+                    for (0..3) |c| {
+                        const value = if (wgt > 0) canvas[ci * 3 + c] / wgt else 0;
+                        pixels[ci * 3 + c] = @intFromFloat(std.math.clamp((value * 0.5 + 0.5) * 255.0, 0.0, 255.0));
+                    }
+                }
+            }
+        }
+        return pixels;
+    }
+
+    /// One piece (clip x tile) through the full ViT pass on Metal.
+    fn decodePiece(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]f32 {
         const dim = self.config.dim();
         const channels = self.config.latent_channels;
+        const heads = self.config.heads;
+        const head_dim = self.config.head_dim;
+        const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
         const voxels = depth * height * width;
+        const rows = voxels + self.config.register_tokens + 1;
 
         var cb = self.queue.commandBuffer();
         var e = cb.compute(.concurrent);
@@ -294,7 +384,6 @@ pub const Decoder = struct {
 
         const tokens_host = try gpa.alloc(f32, voxels * dim);
         @memcpy(tokens_host, tokens.slice(f32, voxels * dim));
-        const rows = voxels + self.config.register_tokens + 1;
         const tokens_full = try gpa.alloc(f32, rows * dim);
         @memcpy(tokens_full[0 .. voxels * dim], tokens_host);
         for (0..self.config.register_tokens) |r| {
@@ -318,9 +407,6 @@ pub const Decoder = struct {
         // copy tokens_full to normed for the first block
         @memcpy(normed.slice(f32, rows * dim), tokens_full);
 
-        const head_dim = self.config.head_dim;
-        const heads = self.config.heads;
-        const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
         for (self.blocks) |b| {
             const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
             @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
@@ -478,13 +564,14 @@ pub const Decoder = struct {
         const proj = try gpa.alloc(f32, voxels * head_block);
         try self.matmulOn(self.queue.commandBuffer(), self.proj_out_w, self.proj_out_b, normed.slice(f32, rows * dim), proj, voxels, dim, head_block);
 
-        // unpatchify + denormalize on the CPU
+        // unpatchify on the CPU: raw model output, no denorm here (the tiler
+        // averages the overlapping pieces first, then converts to bytes once)
         const p_ratio = self.config.spatial_ratio;
         const pt = self.config.temporal_ratio;
         const out_frames = depth * pt;
         const out_h = height * p_ratio;
         const out_w = width * p_ratio;
-        const pixels = try gpa.alloc(u8, out_frames * out_h * out_w * 3);
+        const rgb = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
         for (0..depth) |t| {
             for (0..height) |h| {
                 for (0..width) |w| {
@@ -494,8 +581,7 @@ pub const Decoder = struct {
                             for (0..p_ratio) |dh| {
                                 for (0..p_ratio) |dw| {
                                     const o = proj[v * head_block + c * pt * p_ratio * p_ratio + dt * p_ratio * p_ratio + dh * p_ratio + dw];
-                                    const value = o * self.config.latents_std[c] + self.config.latents_mean[c];
-                                    pixels[((t * pt + dt) * out_h + h * p_ratio + dh) * out_w * 3 + (w * p_ratio + dw) * 3 + c] = @intFromFloat(std.math.clamp((value * 0.5 + 0.5) * 255.0, 0.0, 255.0));
+                                    rgb[((t * pt + dt) * out_h + h * p_ratio + dh) * out_w * 3 + (w * p_ratio + dw) * 3 + c] = o;
                                 }
                             }
                         }
@@ -503,6 +589,6 @@ pub const Decoder = struct {
                 }
             }
         }
-        return pixels;
+        return rgb;
     }
 };
