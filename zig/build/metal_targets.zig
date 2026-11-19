@@ -420,6 +420,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     core_checks.rowWidths(b, target, optimize, metal, row_mod);
+    @import("hy4_probe.zig").steps(b, target, optimize, metal, sources);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
     core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     core_checks.kvPages(b, target, optimize, metal, sources, test_step);
@@ -554,6 +555,11 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "nemotron_draft_ids", .module = draft_ids }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "living", .module = living } },
     });
+    // Hy4-flash's family files import these by name (the speed probe builds them alone): the engine's own, re-exported
+    for ([_][]const u8{ "row_projection", "lane_projection", "moe_route" }) |name| {
+        engine.addImport(name, b.createModule(.{ .root_source_file = b.path(b.fmt("zig/hy4_engine/{s}.zig", .{name})), .target = target, .optimize = optimize, .imports = &.{.{ .name = "tensorfold", .module = engine }} }));
+    }
+    engine.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
 }
 

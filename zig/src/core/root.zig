@@ -21,6 +21,7 @@ pub const exl3_load = @import("exl3_load.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const direct_gather = @import("direct_gather.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
+pub const checkpoint_host = checkpoint; // the name the engine module (tensorfold.zig) also gives it
 pub const draft_depth = @import("draft_depth.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;

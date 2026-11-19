@@ -9,6 +9,89 @@ const rotary = @import("rope.zig");
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 const Args = extern struct { rows: u32, heads: u32 };
 
+/// The BF16 absorb and expand-and-gate products on the tensor units, the same tiles at every row count.
+pub const Nax = struct {
+    absorb: mtl.Pipeline,
+    expand: mtl.Pipeline,
+    attend_split: mtl.Pipeline,
+    combine: mtl.Pipeline,
+    attend: mtl.Pipeline,
+
+    pub fn load(a: std.mem.Allocator, device: mtl.Device) !Nax {
+        const text = try @import("lane_projection").frags.source(device, a, sources.hy4_flash_mla_nax);
+        defer a.free(text);
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        var absorb = try mtl.Pipeline.init(device, lib, "tf_hy4_absorb_nax", false);
+        errdefer absorb.deinit();
+        var expand = try mtl.Pipeline.init(device, lib, "tf_hy4_expand_gated_nax", false);
+        errdefer expand.deinit();
+        var attend_split = try mtl.Pipeline.init(device, lib, "tf_hy4_attend_nax_split", false);
+        errdefer attend_split.deinit();
+        var combine = try mtl.Pipeline.init(device, lib, "tf_hy4_attend_combine", false);
+        errdefer combine.deinit();
+        return .{ .absorb = absorb, .expand = expand, .attend_split = attend_split, .combine = combine, .attend = try mtl.Pipeline.init(device, lib, "tf_hy4_attend_nax", false) };
+    }
+
+    pub fn deinit(self: Nax) void {
+        self.absorb.deinit();
+        self.expand.deinit();
+        self.attend_split.deinit();
+        self.combine.deinit();
+        self.attend.deinit();
+    }
+
+    /// Flash attention over contiguous key ranges: out [rows][heads][512] from the absorbed queries and the cache.
+    /// Decode passes (one row block) split the keys over up to 8 threadgroups a head (a run of 4+ tiles each) and
+    /// join them in a second launch (TF_HY4_FLASH_SPLIT=N fixes N, 1 turns it off).
+    /// A split a 32-key tile, up to max_splits (two tiles already run faster split and joined than in one
+    /// threadgroup); with the live key count unknown, a split every 128 keys of the stride.
+    fn splits(shape: attention.Shape, has_parts: bool, live_keys: u32) u32 {
+        if (!has_parts or shape.rows > 16) return 1;
+        if (std.c.getenv("TF_HY4_FLASH_SPLIT")) |v| return std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1, 1, max_splits);
+        if (live_keys > 0) return std.math.clamp((live_keys + 31) / 32, 1, max_splits);
+        return std.math.clamp(shape.key_stride / 128, 1, max_splits);
+    }
+
+    fn flash(self: Nax, e: mtl.ComputeEncoder, b: Attention.Buffers, ranges: KeyRanges, shape: attention.Shape) void {
+        const n = splits(shape, b.flash_parts != null, b.live_keys);
+        e.setPipeline(if (n > 1) self.attend_split else self.attend);
+        for ([_]Ref{ b.query, b.cache, ranges.ranges, ranges.tiles, b.sinks, b.output }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+        const args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 }{ .rows = shape.rows, .heads = shape.heads, .scale = attention.score_scale, .pad = n };
+        e.setValue(args, 6);
+        if (n == 1) return e.dispatchGroups(mtl.Size.of(shape.heads, (shape.rows + 15) / 16, 1), mtl.Size.of(128, 1, 1));
+        const parts = b.flash_parts.?;
+        const ml: Ref = .{ .buffer = parts.buffer, .offset = parts.offset + @as(usize, max_splits) * 16 * shape.heads * weights.latent * 4 };
+        e.setBuffer(parts.buffer, parts.offset, 7);
+        e.setBuffer(ml.buffer, ml.offset, 8);
+        e.dispatchGroups(mtl.Size.of(shape.heads, 1, n), mtl.Size.of(128, 1, 1));
+        e.barrier();
+        e.setPipeline(self.combine);
+        for ([_]Ref{ parts, ml, b.sinks, b.output }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+        e.setValue(args, 4);
+        e.dispatchGroups(mtl.Size.of(shape.heads, shape.rows, 1), mtl.Size.of(128, 1, 1));
+    }
+
+    pub const max_splits = 8;
+
+    /// Bytes of the split partials for `heads` heads (16 rows, max_splits runs, O then max and sum).
+    pub fn partBytes(heads: u32) usize {
+        return @as(usize, max_splits) * 16 * heads * (weights.latent + 2) * 4;
+    }
+
+    fn run(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, refs: []const Ref, rows: u32, heads: u32, col_blocks: u32) void {
+        e.setPipeline(pipe);
+        for (refs[0..3], 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+        e.setValue(Args{ .rows = rows, .heads = heads }, 3);
+        if (refs.len > 3) e.setBuffer(refs[3].buffer, refs[3].offset, 4);
+        e.dispatchGroups(mtl.Size.of(col_blocks, heads, (rows + 15) / 16), mtl.Size.of(128, 1, 1));
+    }
+};
+
+/// Each row's keys as one range of key indices [lo, hi) (u32 pairs), and each 32-key tile's first slot: the flash
+/// kernel's inputs when every row attends a contiguous run of keys (prompt chunks, sliding windows, short contexts).
+pub const KeyRanges = struct { ranges: Ref, tiles: Ref };
+
 pub const Projections = struct {
     absorb_pipeline: mtl.Pipeline,
     expand_pipeline: mtl.Pipeline,
@@ -16,6 +99,10 @@ pub const Projections = struct {
     rotate_pipeline: mtl.Pipeline,
     cache_pipeline: mtl.Pipeline,
     gate_pipeline: mtl.Pipeline,
+    /// expand then gate in one launch (bit-equal to the two passes).
+    expand_gated: mtl.Pipeline,
+    /// On tensor units: the absorb and expand-and-gate products there instead.
+    nax: ?Nax = null,
 
     pub fn load(device: mtl.Device) !Projections {
         const library = try mtl.Library.fromSource(device, sources.hy4_flash_mla_project, mtl.CompileOptions.mlx());
@@ -30,7 +117,10 @@ pub const Projections = struct {
         errdefer rotate_pipeline.deinit();
         var cache_pipeline = try mtl.Pipeline.init(device, library, "tf_hy4_cache_keys", false);
         errdefer cache_pipeline.deinit();
+        var expand_gated = try mtl.Pipeline.init(device, library, "tf_hy4_expand_v_gated", false);
+        errdefer expand_gated.deinit();
         return .{
+            .expand_gated = expand_gated,
             .absorb_pipeline = absorb_pipeline,
             .expand_pipeline = expand_pipeline,
             .table_pipeline = table_pipeline,
@@ -47,6 +137,8 @@ pub const Projections = struct {
         self.rotate_pipeline.deinit();
         self.cache_pipeline.deinit();
         self.gate_pipeline.deinit();
+        self.expand_gated.deinit();
+        if (self.nax) |n| n.deinit();
         self.* = undefined;
     }
 
@@ -111,6 +203,9 @@ pub const Projections = struct {
 pub const Attention = struct {
     chunks: mtl.Pipeline,
     merge: mtl.Pipeline,
+    /// Scores for every key at once, then each chunk's softmax over them (bit-equal to `chunks`).
+    scores: mtl.Pipeline,
+    scored: mtl.Pipeline,
 
     pub const Buffers = struct {
         query: Ref,
@@ -120,6 +215,14 @@ pub const Attention = struct {
         sinks: Ref,
         scratch: Ref,
         output: Ref,
+        /// [rows][heads][key_stride] floats; null runs the one-step chunks kernel.
+        key_scores: ?Ref = null,
+        /// Contiguous key ranges: the tensor units' flash kernel instead of the slot lists.
+        ranges: ?KeyRanges = null,
+        /// The flash kernel's split partials for decode passes (Nax.partBytes); null keeps one threadgroup a head.
+        flash_parts: ?Ref = null,
+        /// The widest row's live key count (0: unknown, the key stride sizes the split).
+        live_keys: u32 = 0,
     };
 
     pub fn load(device: mtl.Device) !Attention {
@@ -127,12 +230,18 @@ pub const Attention = struct {
         defer library.deinit();
         var chunks = try mtl.Pipeline.init(device, library, "tf_hy4_attend_chunks", false);
         errdefer chunks.deinit();
-        return .{ .chunks = chunks, .merge = try mtl.Pipeline.init(device, library, "tf_hy4_attend_merge", false) };
+        var merge = try mtl.Pipeline.init(device, library, "tf_hy4_attend_merge", false);
+        errdefer merge.deinit();
+        var scores = try mtl.Pipeline.init(device, library, "tf_hy4_attend_scores", false);
+        errdefer scores.deinit();
+        return .{ .chunks = chunks, .merge = merge, .scores = scores, .scored = try mtl.Pipeline.init(device, library, "tf_hy4_attend_scored", false) };
     }
 
     pub fn deinit(self: *Attention) void {
         self.chunks.deinit();
         self.merge.deinit();
+        self.scores.deinit();
+        self.scored.deinit();
         self.* = undefined;
     }
 
@@ -141,12 +250,28 @@ pub const Attention = struct {
         try shape.check();
         const length = b.scratch.buffer.length();
         if (b.scratch.offset > length or shape.scratchBytes() > length - b.scratch.offset) return error.ShortHy4AttentionScratch;
-        e.setPipeline(self.chunks);
-        const input = .{ b.query, b.cache, b.slots, b.counts, b.scratch };
-        inline for (input, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
-        e.setValue(shape, input.len);
-        e.setValue(attention.score_scale, input.len + 1);
-        e.dispatchGroups(mtl.Size.of((shape.heads + 3) / 4, shape.chunks, shape.rows), mtl.Size.of(128, 1, 1));
+        if (b.key_scores) |ks| {
+            if (ks.buffer.length() < ks.offset + @as(usize, shape.rows) * shape.heads * shape.key_stride * 4) return error.ShortHy4AttentionScratch;
+            e.setPipeline(self.scores);
+            const first = .{ b.query, b.cache, b.slots, b.counts, ks };
+            inline for (first, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+            e.setValue(shape, first.len);
+            e.setValue(attention.score_scale, first.len + 1);
+            e.dispatchGroups(mtl.Size.of((shape.heads + 3) / 4, (shape.key_stride + 63) / 64, shape.rows), mtl.Size.of(128, 1, 1));
+            e.barrier();
+            e.setPipeline(self.scored);
+            const second = .{ ks, b.cache, b.slots, b.counts, b.scratch };
+            inline for (second, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+            e.setValue(shape, second.len);
+            e.dispatchGroups(mtl.Size.of((shape.heads + 3) / 4, shape.chunks, shape.rows), mtl.Size.of(128, 1, 1));
+        } else {
+            e.setPipeline(self.chunks);
+            const input = .{ b.query, b.cache, b.slots, b.counts, b.scratch };
+            inline for (input, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+            e.setValue(shape, input.len);
+            e.setValue(attention.score_scale, input.len + 1);
+            e.dispatchGroups(mtl.Size.of((shape.heads + 3) / 4, shape.chunks, shape.rows), mtl.Size.of(128, 1, 1));
+        }
         e.barrier();
         e.setPipeline(self.merge);
         const merge_buffers = .{ b.scratch, b.sinks, b.output };
@@ -164,7 +289,24 @@ pub const KvInput = struct {
     epsilon: f32,
 };
 
+/// Decode passes (at most 4 rows): absorb and expand-and-gate as GEMVs over the checkpoint's affine kv_b codes
+/// (fp32 dequant on the fly, a quarter of the BF16 copies' bytes at 4 bits).
+pub const Quantized = struct {
+    absorb: mtl.Pipeline,
+    expand: mtl.Pipeline,
+    words: Ref,
+    scales: Ref,
+    biases: Ref,
+
+    fn bind(q: Quantized, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, input: Ref, output: Ref, rows: u32, heads: u32) void {
+        e.setPipeline(pipe);
+        for ([_]Ref{ input, q.words, q.scales, q.biases, output }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+        e.setValue([2]u32{ rows, heads }, 5);
+    }
+};
+
 pub const MlaPass = struct {
+    quantized: ?Quantized = null,
     query: Ref,
     key_weights: Ref,
     value_weights: Ref,
@@ -181,7 +323,14 @@ pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b
     try shape.check();
     if (b.kv) |kv| try (attention.CacheWrite{ .rows = shape.rows, .capacity = kv.capacity, .epsilon = kv.epsilon }).check();
     project.rotaryTable(e, b.positions, b.rotary_table, shape.rows, p);
-    try project.absorb(e, b.query, b.key_weights, b.attention.query, shape.rows, shape.heads);
+    if (b.quantized) |q| {
+        if (shape.rows > 4) return error.BadHy4QuantizedMlaRows;
+        q.bind(e, q.absorb, b.query, b.attention.query, shape.rows, shape.heads);
+        e.dispatchGroups(mtl.Size.of(weights.latent / 256, shape.heads, 1), mtl.Size.of(256, 1, 1));
+    } else if (project.nax) |n|
+        Nax.run(n.absorb, e, &.{ b.query, b.key_weights, b.attention.query }, shape.rows, shape.heads, weights.latent / 128)
+    else
+        try project.absorb(e, b.query, b.key_weights, b.attention.query, shape.rows, shape.heads);
     e.barrier();
     const input: Ref = .{ .buffer = b.query.buffer, .offset = b.query.offset + weights.nope * 2 };
     const output: Ref = .{
@@ -200,9 +349,21 @@ pub fn forward(project: Projections, attend: Attention, e: mtl.ComputeEncoder, b
         .epsilon = kv.epsilon,
     });
     e.barrier();
-    try attend.attend(e, b.attention, shape);
+    if (project.nax) |n| if (b.attention.ranges) |r| {
+        n.flash(e, b.attention, r, shape);
+    } else try attend.attend(e, b.attention, shape) else try attend.attend(e, b.attention, shape);
     e.barrier();
-    try project.expand(e, b.attention.output, b.value_weights, b.values, shape.rows, shape.heads);
-    e.barrier();
-    try project.gate(e, b.values, b.value_logits, shape.rows, shape.heads);
+    if (shape.heads > 64) return error.BadHy4GateShape;
+    if (b.quantized) |q| {
+        q.bind(e, q.expand, b.attention.output, b.values, shape.rows, shape.heads);
+        e.setBuffer(b.value_logits.buffer, b.value_logits.offset, 6);
+        e.dispatchGroups(mtl.Size.of(weights.value_width / 8, shape.heads, 1), mtl.Size.of(128, 1, 1));
+        return;
+    }
+    if (project.nax) |n| return Nax.run(n.expand, e, &.{ b.attention.output, b.value_weights, b.values, b.value_logits }, shape.rows, shape.heads, weights.value_width / 128);
+    e.setPipeline(project.expand_gated);
+    for ([_]Ref{ b.attention.output, b.value_weights, b.values }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+    e.setValue(Args{ .rows = shape.rows, .heads = shape.heads }, 3);
+    e.setBuffer(b.value_logits.buffer, b.value_logits.offset, 4);
+    e.dispatchThreads(mtl.Size.of(weights.value_width, try std.math.mul(u32, shape.rows, shape.heads), 1), mtl.Size.of(32, 1, 1));
 }
