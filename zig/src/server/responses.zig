@@ -210,7 +210,6 @@ const Wire = struct {
         w.payload = payload;
     }
 };
-
 /// A Response built from chat-completion deltas, in order: reasoning, text, calls; streamed as typed events.
 const Reply = struct {
     srv: *Server,
