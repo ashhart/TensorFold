@@ -10,6 +10,7 @@ const moe_route = @import("../../core/moe_route.zig");
 const hc_shape = @import("kernels.zig").hc_shape;
 const hc_core = @import("../../core/hc.zig");
 const wide = @import("wide.zig");
+const ordered = @import("ordered_projection.zig");
 const Ref = wts.Ref;
 /// The MoE block (moe.zig).
 pub const moe = @import("moe.zig").moe;
@@ -83,13 +84,7 @@ fn withState(x: *const Ctx, g: Seg) Ctx {
 }
 
 /// Single launches (or tight groups) for a profile that times each alone.
-pub const Part = struct {
-    pub const names = [_][]const u8{ "hc_expand", "hc_mix", "kda_in", "kda_step", "kda_out", "mla_proj", "mla_cache", "mla_absorb", "mla_select", "mla_attn", "mla_unabs", "mla_out", "r_cast", "r_router", "r_topk", "x_locpost", "x_pack", "x_unpack", "e_gateup", "e_down", "s_gateup", "s_down", "combine", "dense", "head_qmv", "head_argmax", "kda_pre", "kda_scan", "kda_post" };
-    pub fn bit(comptime name: []const u8) u32 {
-        inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return @as(u32, 1) << i;
-        @compileError("no part " ++ name);
-    }
-};
+pub const Part = @import("profile.zig").Part;
 
 pub fn on(x: *const Ctx, comptime part: []const u8) bool {
     return x.pskip & Part.bit(part) == 0;
@@ -146,6 +141,7 @@ pub fn size(w: usize, h: usize, d: usize) mtl.Size {
 
 /// x [rows, K] through a 4-bit/64 matrix (qmv_rows, MLX's one-row qmv_fast sums), else each member at its width (wide).
 pub fn qmv(x: *const Ctx, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, in: Ref, q: wts.Affine, out: Ref, rows: u32) void {
+    if (ordered.encode(x.k, e, q, .{ .in = in, .ldx = q.k, .out = out, .ldo = q.n, .rows = rows })) return;
     if (!wide.native(q)) return wide.dense(&x.k.wide.?, e, q, .{ .in = in, .ldx = q.k, .out = out, .ldo = q.n, .rows = rows });
     e.setPipeline(pipe);
     bind(e, 0, .{ in, q.w, q.s, q.b, out });
@@ -239,6 +235,7 @@ fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) 
 pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, proj: Ref, rows: u32, y: Ref) void {
     const c = x.c;
     const L = &x.s.kda[ki];
+    if (x.k.ordered != null) return @import("ordered_kda.zig").encode(x, e, ki, w, proj, c.kdaProj(), y, x.sc.kda_work, rows, st.max_rows);
     const cur = L.cur;
     const gate = wide.kdaGate(if (x.k.wide) |*p| p else null, w.f_b, w.g_b);
     var fb = [3]Ref{ w.f_b.w, w.f_b.s, w.f_b.b };
@@ -309,7 +306,7 @@ pub fn indexWeights(x: *const Ctx, e: mtl.ComputeEncoder, xp: Ref, xp_stride: u3
 }
 
 /// One stream's rows over its own cache: rows whose keys all fit index_topk attend every key (MLX's unfused attention).
-fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
+pub fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
     const c = x.c;
     const sc = x.sc;
     const H = c.mla_heads;

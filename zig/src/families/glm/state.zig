@@ -137,6 +137,7 @@ pub const Scratch = struct {
     m_picks: Ref,
     rl: Ref, // one Mac's route lists: the picks it computes, the peer's (none), their counts and the count's word
     yp: Ref, // fp32 [rows * topk, D]: expert parallel by rows, each pick's down partial
+    kda_work: Ref, // shared prep/scan/post planes for a window, including partial-acceptance replay
     apart: Ref, // fp32 decode attention blocks: values [rows, blocks, heads, rank], then maxes and sums [rows, blocks, heads]
 };
 
@@ -176,8 +177,15 @@ pub fn initState(arena: *Arena, c: *const cfg.Config, cap: u32, share: ?*const S
     return s;
 }
 
+pub const Initial = struct { state: State, scratch: Scratch };
+
 /// The sequence state for `cap` tokens and the scratch for windows of up to 16 rows.
-pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: State, scratch: Scratch } {
+pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !Initial {
+    return initOrdered(arena, c, cap, false);
+}
+
+/// The pre-M5 recurrence planes count in both dry admission and actual allocation.
+pub fn initOrdered(arena: *Arena, c: *const cfg.Config, cap: u32, ordered: bool) !Initial {
     const R: usize = max_rows;
     const D: usize = c.hidden;
     if (c.kdaWidth() > c.dense_inter) return error.ScratchTooSmall; // kdaStep puts f_b and g_b products made apart in gu
@@ -195,7 +203,8 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
         R * D * 2,                                                               R * (c.topk + 1) * c.moe_inter * 2, R * (c.topk + 1) * D * 2, R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,
         R * D * 2,                                                               R * D * 2,                          R * V * 2,                R * 4,                       R * D * 2,
         R * 2 * D * 2,                                                           R * D * 2,                          R * D * 2,                R * D * 2,                   R * D * 2,
-        R * V * 2,                                                               R * 4,                              R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,          R * c.attnBlocks() * H * (c.kv_lora + 2) * 4,
+        R * V * 2,                                                               R * 4,                              R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,          if (ordered) R * (14 * c.kdaWidth() + c.kda_heads * 4) else 0,
+        R * c.attnBlocks() * H * (c.kv_lora + 2) * 4,
     };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
@@ -221,5 +230,5 @@ fn flat(comptime i: usize) usize {
 
 test "the scratch sizes line up with its fields" {
     const n = @typeInfo(Scratch).@"struct".field_names.len;
-    try std.testing.expectEqual(@as(usize, 54), n);
+    try std.testing.expectEqual(@as(usize, 55), n);
 }

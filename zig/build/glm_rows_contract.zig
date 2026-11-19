@@ -14,5 +14,10 @@ pub fn host(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     run.has_side_effects = true;
     const step = b.step("test-glm-window-contract-host", "Register and validate actual GLM replacement operators without a GPU");
     step.dependOn(&run.step);
+    const ordered_metal = b.createModule(.{ .root_source_file = b.path("zig/glm_ordered_recording_metal.zig"), .target = b.graph.host });
+    const ordered = b.createModule(.{ .root_source_file = b.path("zig/glm_ordered_host.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = ordered_metal }, .{ .name = "kernel_sources", .module = sources } } });
+    const ordered_run = b.addRunArtifact(b.addTest(.{ .root_module = ordered, .filters = &.{"GLM ordered:"} }));
+    b.step("test-glm-ordered-host", "Pre-M5 projection strides, shared recurrence dispatch and admission without a GPU").dependOn(&ordered_run.step);
+    step.dependOn(&ordered_run.step);
     return step;
 }

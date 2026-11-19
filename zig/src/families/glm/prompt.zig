@@ -189,6 +189,7 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 
 /// y [M, N] = x [M, K] W^T for a 4-bit matrix (64x64 tiles; N rounded up to the weights' padded rows, y's row pitch).
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
+    if (@import("ordered_projection.zig").encode(p.mm, e, q, .{ .in = x, .ldx = q.k, .out = y, .ldo = std.mem.alignForward(u32, q.n, 64), .rows = M })) return;
     if (!wide.native(q)) return qmmAt(p, e, x, q.k, q, y, M);
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
     affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
@@ -197,6 +198,7 @@ fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
 fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine, y: Ref, M: u32) void {
     const pitch = std.mem.alignForward(u32, q.n, 64);
+    if (@import("ordered_projection.zig").encode(p.mm, e, q, .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M })) return;
     if (!wide.native(q)) return wide.denseMm(
         &p.mm.wide.?,
         e,
@@ -245,6 +247,7 @@ fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const 
 
 /// Shared expert, route, experts gathered by expert; by rows, this Mac's halves summed in slot order and swapped.
 fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, ep: ?*ep_mod.Ep) void {
+    if (x.k.ordered != null) return @import("ordered_prompt.zig").moe(p, x, e, w, x_in, M);
     const c = x.c;
     const k = x.k;
     const D = c.hidden;
@@ -341,6 +344,7 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
 
 /// By blocks of `kda_rows`: f_b and g_b on tensor units, prep, recurrence (state carried in place after block 1), norm.
 fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, M: u32) void {
+    if (x.k.ordered != null) return @import("ordered_kda.zig").encode(x, e, ki, w, p.proj, std.mem.alignForward(u32, x.c.kdaProj(), 64), p.y, p.yf, M, p.kda_rows);
     const c = x.c;
     const k = x.k;
     const L = &x.s.kda[ki];
@@ -431,6 +435,7 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
 
 /// MLA layer `mi` at pos..: tensor-unit projections, decode cache writes, each row's key list in the sparse kernel.
 fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, M: u32, pos: u32) void {
+    if (x.k.ordered != null) return @import("ordered_prompt.zig").mla(p, x, e, mi, w, x_in, M, pos);
     const c = x.c;
     const XP: u32 = @intCast(std.mem.alignForward(usize, c.xProj(), 64));
     const width = c.keyWidth();

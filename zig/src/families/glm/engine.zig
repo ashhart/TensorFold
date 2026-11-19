@@ -177,17 +177,19 @@ pub const Engine = struct {
             gpa.destroy(e.k);
         }
         try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives GLM's prompt and attention kernels
+        const ordered = @import("ordered_policy.zig").enabled(e.device.tensorUnits(), link != null);
+        if (ordered) try e.k.order(gpa, e.device);
         const chunked = if (platform.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
         // --vision: the image tower and its rows count against the limit beside the weights and caches
         const tower = if (vision) |lim| vision_mod.planBytes(lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArenaOrdered(gpa, &e.c, cap, chunked, ordered) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
             const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+            if (lean_bytes + tower + try load_plan.leastArenaOrdered(gpa, &lean, cap, chunked, ordered) <= limit) {
                 std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
                 e.c = lean;
                 plan_bytes = lean_bytes;
@@ -196,7 +198,7 @@ pub const Engine = struct {
         if (platform.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();
-        const both = try st.init(&e.arena, &e.c, cap);
+        const both = try st.initOrdered(&e.arena, &e.c, cap, ordered);
         e.s = both.state;
         e.sc = both.scratch;
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);

@@ -61,6 +61,9 @@ fn parse(args: []const [:0]const u8) !Opts {
 
 const Reg = affine_k.Reg;
 const common = [_]Reg{
+    .{ .v = .{ .kind = .simd_bits, .bits = 2, .group = 64 }, .name = "metal simd_qmm_bits q2 g64" },
+    .{ .v = .{ .kind = .simd_bits, .bits = 4, .group = 64 }, .name = "metal simd_qmm_bits q4 g64" },
+    .{ .v = .{ .kind = .simd_bits, .bits = 5, .group = 64 }, .name = "metal simd_qmm_bits q5 g64" },
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
     .{ .v = .{ .kind = .row, .bits = 8, .group = 64 }, .name = "metal row projection q8 g64" },

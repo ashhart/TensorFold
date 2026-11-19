@@ -1,5 +1,7 @@
 # GLM-5.3-Flash
 
+For the native pre-M5 prompt/window arithmetic change, see [the arithmetic gate](glm-ordered-metal.md).
+
 This recipe describes the Python 0.6.6 engine, available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.

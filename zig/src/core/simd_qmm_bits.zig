@@ -9,7 +9,7 @@ pub const bit_widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
 const s_values = [_]u32{ 8, 16, 32 };
 const nt_values = [_]u32{ 1, 2, 4 };
 
-pub const Args = extern struct { k: i32, n: i32, r: i32, ld: i32, one: f32 = 1.0 };
+pub const Args = extern struct { k: i32, n: i32, r: i32, ld: i32, one: f32 = 1.0, ldx: i32 = 0 };
 
 /// Pipelines built on first use from one library.
 pub const Pipelines = struct {
@@ -31,6 +31,18 @@ pub const Pipelines = struct {
         for (p.built) |a| for (a) |b| for (b) |c| for (c) |x| if (x) |y| y.deinit();
         for (p.scalar) |a| for (a) |b| for (b) |c| for (c) |x| if (x) |y| y.deinit();
         p.lib.deinit();
+    }
+
+    /// Build every admitted tile and twin before command encoding starts.
+    pub fn warm(p: *Pipelines) !void {
+        for (bit_widths) |bits| for (s_values) |s| {
+            for (nt_values) |nt| for ([_]u32{ 1, 2 }) |rt| {
+                if (s * rt * nt * 64 * 4 <= 16384) _ = try p.get(bits, s, nt, rt);
+            };
+            for (1..3) |nr| for (1..simd.max_scalar_rows + 1) |rows| {
+                _ = try p.getScalar(bits, s, nr, rows);
+            };
+        };
     }
 
     fn get(p: *Pipelines, bits: u8, s: u32, nt: u32, rt: u32) !mtl.Pipeline {
@@ -84,6 +96,14 @@ pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize,
     const sgs: usize = @min(s, if (many) p.wide else 16, pipeline.maxThreads() / 32);
     if (sgs == 0) return error.SimdThreads;
     return .{ .pipeline = pipeline, .args = args, .groups = groups, .threads = sgs * 32 };
+}
+
+/// The same arithmetic with input rows `ldx` elements apart; zero retains the contiguous ABI.
+pub fn callAt(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ldx: usize, ld: usize, scalar: bool, whole: usize) !Call {
+    if (ldx < k or ldx % 8 != 0 or ldx > std.math.maxInt(i32)) return error.UnsupportedSimdStride;
+    var c = try call(p, bits, n, k, rows, ld, scalar, whole);
+    c.args.ldx = @intCast(ldx);
+    return c;
 }
 
 /// A checkpoint's [n, k] matrix of `bits` codes: words [n][k*bits/32], scales and biases [n][k/64] bf16.
