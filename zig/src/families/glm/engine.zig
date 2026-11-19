@@ -335,12 +335,13 @@ pub const Engine = struct {
         enc.end();
         e.ev += 1;
         cb.signal(e.event, e.ev);
+        const tap_at = @import("../../core/route_tap_metal.zig").mark();
         cb.commit();
         e.committed = platform.c.mach_absolute_time();
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
         } else cb.wait();
-        if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
+        if (tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(tap_at);
         e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it

@@ -7,6 +7,9 @@ pub const env_name = format.env_name;
 pub const magic = format.magic;
 pub const version = format.version;
 pub const flag_weights = format.flag_weights;
+pub const flag_rows = format.flag_rows;
+pub const flag_truncated = format.flag_truncated;
+pub const record_bytes = format.record_bytes;
 pub const header_bytes = format.header_bytes;
 pub const ring_slots = format.ring_slots;
 pub const max_ids = format.max_ids;
@@ -31,7 +34,7 @@ pub const tapped = [_][]const u8{
 };
 
 pub fn envPath() ?[]const u8 {
-    const v = std.mem.span(std.c.getenv(env_name) orelse return null);
+    const v = std.mem.span(std.c.getenv("TF_ROUTE_TAP") orelse return null);
     return if (v.len == 0) null else v;
 }
 
@@ -152,7 +155,7 @@ pub fn start(gpa: std.mem.Allocator, rank: u32) !void {
         try std.Io.Dir.cwd().createFile(io, path, .{});
     errdefer file.close(io);
     var hdr: [header_bytes]u8 = undefined;
-    encodeHeader(&hdr, flag_weights);
+    encodeHeader(&hdr, flag_weights | flag_rows);
     try file.writeStreamingAll(io, &hdr);
     const s = try gpa.create(Session);
     errdefer gpa.destroy(s);
@@ -177,7 +180,7 @@ pub fn stop() void {
 }
 
 /// Host-side reserve of the next ring slot (ids/weights filled by the caller, including device copies).
-pub fn reserve(n_ids: u16) ?Slot {
+pub fn reserve(rows: usize, slots: usize) ?Slot {
     @branchHint(.unlikely);
     const s = g_session orelse return null;
     if (!s.step_open.load(.monotonic)) {
@@ -185,12 +188,16 @@ pub fn reserve(n_ids: u16) ?Slot {
         s.layer.store(0, .monotonic);
         s.step_open.store(true, .monotonic);
     }
-    const i = s.ring.reserve() orelse return null;
     const layer = s.layer.fetchAdd(1, .monotonic);
+    if (rows == 0 or rows > 65535 or slots == 0 or slots > 255 or slots > s.ring.max_ids) {
+        _ = s.ring.drops.fetchAdd(1, .monotonic);
+        return null;
+    }
+    const i = s.ring.reserve() orelse return null;
     var sl = s.ring.slot(i);
-    const n = @min(n_ids, s.ring.max_ids);
+    const n: u16 = @intCast(@min(rows, s.ring.max_ids / slots) * slots);
     sl.index = i;
-    sl.rec = .{ .step = s.step.load(.monotonic) - 1, .layer = layer, .n_ids = n };
+    sl.rec = .{ .step = s.step.load(.monotonic) - 1, .layer = layer, .n_ids = n, .rows = @intCast(rows), .slots = @intCast(slots), .flags = if (@as(usize, n) < rows * slots) flag_truncated else 0 };
     s.ring.recs[i] = sl.rec;
     sl.ids = sl.ids[0..n];
     sl.weights = sl.weights[0..n];
@@ -255,7 +262,8 @@ pub fn publishTo(end: u32) void {
     const s = g_session orelse return;
     const last = @min(end, s.ring.reserved.load(.monotonic));
     const cur = s.ring.published.load(.monotonic);
-    if (last > cur) s.ring.published.store(last, .release);
+    if (last <= cur) return;
+    s.ring.published.store(last, .release);
     s.step_open.store(false, .release);
 }
 
@@ -274,7 +282,7 @@ pub fn storeHost(sl: Slot, ids: []const i32, wts: []const f32) void {
 }
 
 fn writerMain(s: *Session) void {
-    var buf: [8 + max_ids * 8]u8 = undefined;
+    var buf: [record_bytes + max_ids * 8]u8 = undefined;
     while (true) {
         const stopping = s.stop.load(.acquire);
         while (s.ring.pop()) |i| {
@@ -327,19 +335,21 @@ test "ring wraparound: unread slots are not overwritten; publish/pop wrap the in
 
 test "record header and one step/layer record round-trip" {
     var hdr: [header_bytes]u8 = undefined;
-    encodeHeader(&hdr, flag_weights);
+    encodeHeader(&hdr, flag_weights | flag_rows);
     try std.testing.expectEqualStrings(magic, hdr[0..4]);
     try std.testing.expectEqual(version, std.mem.readInt(u16, hdr[4..6], .little));
-    try std.testing.expectEqual(flag_weights, std.mem.readInt(u16, hdr[6..8], .little));
+    try std.testing.expectEqual(flag_weights | flag_rows, std.mem.readInt(u16, hdr[6..8], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, hdr[8..10], .little));
-    var rec_buf: [8 + 8 + 8]u8 = undefined;
-    const rec = Rec{ .step = 3, .layer = 11, .n_ids = 2 };
+    var rec_buf: [record_bytes + 8 + 8]u8 = undefined;
+    const rec = Rec{ .step = 3, .layer = 11, .n_ids = 2, .rows = 1, .slots = 2 };
     const n = encodeRec(&rec_buf, rec, &.{ 7, 4 }, &.{ 0.5, 0.25 });
-    try std.testing.expectEqual(@as(usize, 24), n);
+    try std.testing.expectEqual(@as(usize, 28), n);
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, rec_buf[0..4], .little));
     try std.testing.expectEqual(@as(u16, 11), std.mem.readInt(u16, rec_buf[4..6], .little));
-    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, rec_buf[8..12], .little));
-    try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, rec_buf[12..16], .little));
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, rec_buf[8..10], .little));
+    try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, rec_buf[10..12]);
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, rec_buf[12..16], .little));
+    try std.testing.expectEqual(@as(i32, 4), std.mem.readInt(i32, rec_buf[16..20], .little));
 }
 
 test "tapped families are named; DeepSeek V4.1 and dense families are refused only when the env is set" {
@@ -373,7 +383,7 @@ test "named family/backend pairs that never copy are refused by name; others cop
 test "unset env keeps live() false and reserve a no-op" {
     try std.testing.expect(envPath() == null);
     try std.testing.expect(!live());
-    try std.testing.expect(reserve(8) == null);
+    try std.testing.expect(reserve(1, 8) == null);
 }
 
 test "absorbShared takes align(1) slices from Metal contents()" {
@@ -440,7 +450,7 @@ test "stop frees the session and ring under the testing allocator" {
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/route-tap.tfr1", .{tmp.sub_path}, 0);
 
-    const prev = if (std.c.getenv(env_name)) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
+    const prev = if (std.c.getenv("TF_ROUTE_TAP")) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (prev) |p| a.free(p);
     try std.testing.expectEqual(@as(c_int, 0), setenv(env_name, path, 1));
     defer {
@@ -450,7 +460,7 @@ test "stop frees the session and ring under the testing allocator" {
     try start(a, 0);
     defer stop();
     try std.testing.expect(live());
-    const sl = reserve(2) orelse return error.Reserve;
+    const sl = reserve(1, 2) orelse return error.Reserve;
     storeHost(sl, &.{ 3, 4 }, &.{ 0.5, 0.5 });
     stop();
     try std.testing.expect(!live());
@@ -465,7 +475,7 @@ test "a failed open after admit frees the ring under the testing allocator" {
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/route-tap-fail.tfr1", .{tmp.sub_path}, 0);
 
-    const prev = if (std.c.getenv(env_name)) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
+    const prev = if (std.c.getenv("TF_ROUTE_TAP")) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (prev) |p| a.free(p);
     try std.testing.expectEqual(@as(c_int, 0), setenv(env_name, path, 1));
     defer {
@@ -495,4 +505,63 @@ test "a failed open after admit frees the ring under the testing allocator" {
     try std.testing.expect(live());
     stop();
     try std.testing.expect(!live());
+}
+
+test "route tap: a dropped call still advances the layer ordinal" {
+    const a = std.testing.allocator;
+    var s: Session = .{ .gpa = a, .ring = try Ring.init(a, 2, 1), .threaded = .init_single_threaded, .file = undefined };
+    defer s.ring.deinit(a);
+    try std.testing.expect(g_session == null);
+    g_session = &s;
+    defer g_session = null;
+    _ = reserve(1, 1).?;
+    _ = reserve(1, 1).?;
+    try std.testing.expect(reserve(1, 1) == null);
+    s.ring.publish();
+    s.ring.consume();
+    const later = reserve(1, 1).?;
+    try std.testing.expectEqual(@as(u16, 3), later.rec.layer);
+}
+
+test "route tap: long records keep whole routed rows and flag the missing tail" {
+    const a = std.testing.allocator;
+    var s: Session = .{ .gpa = a, .ring = try Ring.init(a, 2, 16), .threaded = .init_single_threaded, .file = undefined };
+    defer s.ring.deinit(a);
+    try std.testing.expect(g_session == null);
+    g_session = &s;
+    defer g_session = null;
+    const sl = reserve(5, 3).?;
+    try std.testing.expectEqual(@as(u16, 15), sl.rec.n_ids);
+    try std.testing.expectEqual(@as(u8, 0), sl.rec.flags);
+    const long = reserve(10, 3).?;
+    try std.testing.expectEqual(@as(u16, 15), long.rec.n_ids);
+    try std.testing.expectEqual(@as(u16, 10), long.rec.rows);
+    try std.testing.expectEqual(@as(u8, 3), long.rec.slots);
+    try std.testing.expectEqual(flag_truncated, long.rec.flags);
+}
+
+test "route tap: one completed buffer never absorbs or publishes its future sibling" {
+    const a = std.testing.allocator;
+    var s: Session = .{ .gpa = a, .ring = try Ring.init(a, 2, 1), .threaded = .init_single_threaded, .file = undefined };
+    defer s.ring.deinit(a);
+    try std.testing.expect(g_session == null);
+    g_session = &s;
+    defer g_session = null;
+    _ = reserve(1, 1).?;
+    const first = reservedCount();
+    _ = reserve(1, 1).?;
+    const second = reservedCount();
+    var ids = [_]i32{ 3, 0 };
+    var weights = [_]f32{ 1, 0 };
+    absorbSharedTo(&ids, &weights, first);
+    publishTo(first);
+    try std.testing.expectEqual(first, publishedCount());
+    try std.testing.expectEqual(@as(i32, 0), s.ring.ids[1]);
+    ids[1] = 7;
+    weights[1] = 1;
+    absorbSharedTo(&ids, &weights, second);
+    publishTo(second);
+    try std.testing.expectEqual(@as(i32, 7), s.ring.ids[1]);
+    publishTo(first);
+    try std.testing.expectEqual(second, publishedCount());
 }

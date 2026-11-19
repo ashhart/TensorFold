@@ -7,9 +7,9 @@ Host tests cover the ring and record layout. This script is the GPU-host checkli
   python3 tools/route_tap_bench.py receipt --output receipt.json
   python3 tools/route_tap_bench.py run http://127.0.0.1:8091 MODEL --output result.json
 
-`run` needs a live server and a GPU host. It compares tokens with the tap on vs off, then decode
-speed with the variable unset, then the on-cost at 1 and 8 streams. A receipt records only the
-host RAM class and the GPU model.
+`run` repeats requests against one live server; it does not toggle the server environment.
+Use fresh server processes for tap-on/off comparisons. A receipt records the host RAM class
+and GPU model.
 
 Standard library only. Python 3.11+.
 """
@@ -30,6 +30,8 @@ if sys.version_info < (3, 11):
 MAGIC = b"TFR1"
 HEADER_BYTES = 16
 FLAG_WEIGHTS = 1
+FLAG_ROWS = 2
+RECORD_BYTES = 12
 
 
 def ram_class(kib: int | None = None) -> str:
@@ -137,20 +139,33 @@ def gpu_model() -> str:
     return "none"
 
 
+def _shape(rows: int, slots: int, n: int, truncated: bool) -> None:
+    if not 1 <= rows <= 65535 or not 1 <= slots <= 255 or not 1 <= n <= 4096:
+        raise ValueError("invalid row metadata")
+    if n % slots or n > rows * slots or truncated != (n < rows * slots):
+        raise ValueError("inconsistent row metadata")
+
+
 def decode_path(path: str) -> dict:
     with open(path, "rb") as fh:
         raw = fh.read()
     if len(raw) < HEADER_BYTES or raw[:4] != MAGIC:
         raise ValueError("not a TFR1 file")
     version, flags, top_k, reserved = struct.unpack_from("<HHHH", raw, 4)
+    if version != 1 or flags & ~(FLAG_WEIGHTS | FLAG_ROWS) or not flags & FLAG_ROWS:
+        raise ValueError("unsupported trace format: row metadata is required")
     recs = []
     at = HEADER_BYTES
-    while at + 8 <= len(raw):
-        step, layer, n = struct.unpack_from("<IHH", raw, at)
-        at += 8
-        need = n * 4
-        if flags & FLAG_WEIGHTS:
-            need *= 2
+    while at < len(raw):
+        if len(raw) - at < RECORD_BYTES:
+            raise ValueError("truncated record header")
+        step, layer, n, rows, slots, record_flags = struct.unpack_from("<IHHHBB", raw, at)
+        at += RECORD_BYTES
+        if record_flags & ~1:
+            raise ValueError("unsupported record flags")
+        truncated = bool(record_flags & 1)
+        _shape(rows, slots, n, truncated)
+        need = n * (8 if flags & FLAG_WEIGHTS else 4)
         if at + need > len(raw):
             raise ValueError("truncated record")
         ids = list(struct.unpack_from("<" + "i" * n, raw, at))
@@ -159,25 +174,28 @@ def decode_path(path: str) -> dict:
         if flags & FLAG_WEIGHTS:
             weights = list(struct.unpack_from("<" + "f" * n, raw, at))
             at += n * 4
-        if n and all(i == 0 for i in ids) and (not weights or all(w == 0.0 for w in weights)):
+        if all(i == 0 for i in ids) and (not weights or all(w == 0.0 for w in weights)):
             raise ValueError(f"all-zero record at step {step} layer {layer}")
-        recs.append({"step": step, "layer": layer, "ids": ids, "weights": weights})
-    return {
-        "version": version,
-        "flags": flags,
-        "top_k": top_k,
-        "reserved": reserved,
-        "records": recs,
-    }
+        row_records = [{"ids": ids[i:i + slots], "weights": weights[i:i + slots]}
+                       for i in range(0, n, slots)]
+        recs.append({"step": step, "layer": layer, "rows": rows, "slots": slots,
+                     "truncated": truncated, "kept_rows": n // slots,
+                     "ids": ids, "weights": weights, "row_records": row_records})
+    return {"version": version, "flags": flags, "top_k": top_k, "reserved": reserved,
+            "records": recs}
 
 
-def encode_file(path: str, records: list[dict], flags: int = FLAG_WEIGHTS) -> None:
+def encode_file(path: str, records: list[dict], flags: int = FLAG_WEIGHTS | FLAG_ROWS) -> None:
+    if not flags & FLAG_ROWS or flags & ~(FLAG_WEIGHTS | FLAG_ROWS):
+        raise ValueError("row metadata flag is required")
     buf = bytearray(HEADER_BYTES)
     struct.pack_into("<4sHHHH", buf, 0, MAGIC, 1, flags, 0, 0)
     for rec in records:
         ids = rec["ids"]
-        n = len(ids)
-        buf.extend(struct.pack("<IHH", rec["step"], rec["layer"], n))
+        n, rows, slots = len(ids), rec["rows"], rec["slots"]
+        truncated = bool(rec.get("truncated", False))
+        _shape(rows, slots, n, truncated)
+        buf.extend(struct.pack("<IHHHBB", rec["step"], rec["layer"], n, rows, slots, int(truncated)))
         buf.extend(struct.pack("<" + "i" * n, *ids))
         if flags & FLAG_WEIGHTS:
             wts = rec["weights"]
@@ -271,9 +289,9 @@ def main() -> int:
         encode_file(
             args.path,
             [
-                {"step": 0, "layer": 0, "ids": [3, 11], "weights": [0.625, 0.375]},
-                {"step": 0, "layer": 1, "ids": [7, 2], "weights": [0.5, 0.5]},
-                {"step": 1, "layer": 0, "ids": [3, 19], "weights": [0.75, 0.25]},
+                {"step": 0, "layer": 0, "rows": 1, "slots": 2, "ids": [3, 11], "weights": [0.625, 0.375]},
+                {"step": 0, "layer": 1, "rows": 1, "slots": 2, "ids": [7, 2], "weights": [0.5, 0.5]},
+                {"step": 1, "layer": 0, "rows": 1, "slots": 2, "ids": [3, 19], "weights": [0.75, 0.25]},
             ],
         )
         return 0

@@ -173,9 +173,10 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         enc.groups(.{ total, 1, 1 }, .{ 1024, 1, 1 });
     } else enc.projection(embedding, s.x, (total - 1) * c.hidden * 2, s.logits, 0, 1);
     e.end();
+    const tap_at = @import("../../core/route_tap_metal.zig").mark();
     cb.commit();
     cb.wait();
-    if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
+    if (tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(tap_at);
     gpu_seconds += cb.gpuSeconds();
     if (cb.failure()) |msg| {
         std.debug.print("LFM2 forward: {s}\n", .{msg});
@@ -353,7 +354,7 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     e.setBuffer(s.weights, 0, 4);
     enc.groups(.{ total, 1, 1 }, .{ 32, 1, 1 });
     const tap_m = @import("../../core/route_tap_metal.zig");
-    if (tap_m.live()) tap_m.blitPicks(e, s.picks, 0, s.weights, 0, @intCast(slots));
+    if (tap_m.live()) tap_m.blitPicks(e, s.picks, 0, s.weights, 0, total, c.topk);
     const t = &enc.m.kernels.tiles;
     if (!enc.prompt and enc.m.kernels.twin) {
         // Wide windows read each picked expert once for its rows (a row's own picks are distinct experts).

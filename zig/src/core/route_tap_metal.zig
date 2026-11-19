@@ -52,27 +52,27 @@ pub fn live() bool {
     return tap.live();
 }
 
-/// Copy `n` u32 picks (and the same count of fp32 weights) into the ring inside this command buffer.
-pub fn blit(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
+/// Copy whole routed rows of u32 picks and fp32 weights into this command buffer’s ring slots.
+pub fn blit(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, rows: usize, slots: usize) void {
     if (tap.live()) {
         @branchHint(.unlikely);
-        copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+        copyInto(enc, pipe, pick, pick_off, wts, wts_off, rows, slots);
     }
 }
 
 /// Same as `blit` using the tap's own copy kernel (families that have no u32 copy pipeline).
-pub fn blitPicks(enc: mtl.ComputeEncoder, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
+pub fn blitPicks(enc: mtl.ComputeEncoder, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, rows: usize, slots: usize) void {
     if (tap.live()) {
         @branchHint(.unlikely);
         const pipe = copy orelse return;
-        copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+        copyInto(enc, pipe, pick, pick_off, wts, wts_off, rows, slots);
     }
 }
 
-fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
+fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, rows: usize, slots: usize) void {
     const dest_buf = dest() orelse return;
-    if (n == 0) return;
-    const sl = tap.reserve(@intCast(n)) orelse return;
+    const sl = tap.reserve(rows, slots) orelse return;
+    const n: u32 = sl.rec.n_ids;
     const off = tap.sharedOff(sl.index);
     // Only on a live tap: concurrent encoders otherwise copy the previous layer's picks.
     enc.barrier();
@@ -88,13 +88,12 @@ fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_
     enc.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(@min(n, 256), 1, 1));
 }
 
-/// After the command buffer wait the step already does: read the shared ring, then publish.
-pub fn afterWait() void {
-    if (!tap.live()) return;
-    afterLand(tap.reservedCount());
+/// The current buffer's reservation bound, captured after encoding and before committing it.
+pub fn mark() u32 {
+    return if (tap.live()) tap.reservedCount() else 0;
 }
 
-/// Same as `afterWait`, but only slots reserved by this command buffer (pipelined submits).
+/// Publish only the bound captured for a buffer whose own wait has finished.
 pub fn afterLand(to: u32) void {
     if (!tap.live()) return;
     const dest_buf = dest() orelse {

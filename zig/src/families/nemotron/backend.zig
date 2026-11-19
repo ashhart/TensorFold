@@ -196,6 +196,11 @@ pub const Metal = struct {
 
     /// Wait for the oldest command buffer in flight and record its GPU time.
     pub fn land(self: *Metal) !void {
+        if (@import("../../core/route_tap.zig").live()) {
+            const tap_at = self.flights.items[0].tap_at;
+            defer @import("../../core/route_tap_metal.zig").afterLand(tap_at);
+            return @import("prompt_flight.zig").land(self);
+        }
         return @import("prompt_flight.zig").land(self);
     }
 

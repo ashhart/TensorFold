@@ -341,6 +341,8 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     bind(e, 3, .{ p.pick, p.wts });
     e.setValue(M, 5);
     e.dispatchThreads(size(32 * M, 1, 1), size(256, 1, 1));
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) tap_m.blit(e, k.copy_u32, p.pick.buf, p.pick.off, p.wts.buf, p.wts.off, M, c.topk);
     const blocks = (n + 255) / 256;
     e.setPipeline(p.k.get("custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t"));
     bind(e, 0, .{p.pick});

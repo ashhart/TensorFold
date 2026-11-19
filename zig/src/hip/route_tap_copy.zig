@@ -44,15 +44,22 @@ fn release() void {
     pending = 0;
 }
 
-pub fn afterSelect(r: *const runtime.Runtime, stream: abi.Stream, picks: u64, wts: u64, rows: usize, slots: usize) void {
+pub fn afterSelect(r: *const runtime.Runtime, stream: abi.Stream, picks: u64, wts: u64, rows: usize, stride: usize, slots: usize) void {
     if (!tap.live()) return;
     pin(r);
-    const n: u16 = @intCast(@min(rows * slots, tap.max_ids));
-    if (n == 0) return;
-    const sl = tap.reserve(n) orelse return;
-    const nb = @as(usize, n) * 4;
-    const ids_ok = runtime.check(r.api.hipMemcpyDtoHAsync(@ptrCast(sl.ids.ptr), @ptrFromInt(picks), nb, stream));
-    const wts_ok = runtime.check(r.api.hipMemcpyDtoHAsync(@ptrCast(sl.weights.ptr), @ptrFromInt(wts), nb, stream));
+    const sl = tap.reserve(rows, slots) orelse return;
+    var ids_ok: @TypeOf(runtime.check(0)) = {};
+    var wts_ok: @TypeOf(runtime.check(0)) = {};
+    const width = if (stride == slots) sl.rec.n_ids else slots;
+    const calls = if (stride == slots) 1 else sl.rec.n_ids / slots;
+    for (0..calls) |row| {
+        runtime.check(r.api.hipMemcpyDtoHAsync(@ptrCast(sl.ids[row * width ..].ptr), @ptrFromInt(picks + row * stride * 4), width * 4, stream)) catch |err| {
+            ids_ok = err;
+        };
+        runtime.check(r.api.hipMemcpyDtoHAsync(@ptrCast(sl.weights[row * width ..].ptr), @ptrFromInt(wts + row * stride * 4), width * 4, stream)) catch |err| {
+            wts_ok = err;
+        };
+    }
     const s = @import("stream.zig").Stream{ .r = r, .handle = stream };
     if (ev) |e| e.record(s) catch {};
     if (ids_ok) |_| {} else |_| {

@@ -324,8 +324,10 @@ pub const Metal = struct {
         try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
         self.gen +%= 1;
         const tap = @import("../../core/route_tap.zig");
-        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb, .tap_at = if (tap.live()) tap.reservedCount() else 0 }) catch |err| {
+        const tap_at = if (tap.live()) tap.reservedCount() else 0;
+        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb, .tap_at = tap_at }) catch |err| {
             cb.wait();
+            if (tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(tap_at);
             cb.release();
             return err;
         };

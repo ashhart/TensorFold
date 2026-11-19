@@ -162,9 +162,10 @@ fn embed(x: Enc, n: usize) void {
 
 fn finish(cb: mtl.CommandBuffer, x: Enc) !void {
     x.e.end();
+    const tap_at = @import("../../core/route_tap_metal.zig").mark();
     cb.commit();
     cb.wait();
-    if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
+    if (tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(tap_at);
     if (cb.failure()) |msg| {
         std.log.err("step5 forward: {s}", .{msg});
         return error.GpuFailed;
@@ -214,7 +215,7 @@ fn layer(x: Enc, cache: *st.Cache, l: wts.Layer, i: usize, start: usize, n: usiz
                     .word = b(s.route[6]),
                 });
                 const tap_m = @import("../../core/route_tap_metal.zig");
-                if (tap_m.live()) tap_m.blitPicks(x.e, s.pick, at, s.wts, at, blk * c.topk);
+                if (tap_m.live()) tap_m.blitPicks(x.e, s.pick, at, s.wts, at, blk, c.topk);
             }
             const slots = n * c.topk;
             if (n > st.window_rows) {

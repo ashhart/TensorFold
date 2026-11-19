@@ -7,6 +7,9 @@ pub const env_name = "TF_ROUTE_TAP";
 pub const magic = "TFR1";
 pub const version: u16 = 1;
 pub const flag_weights: u16 = 1;
+pub const flag_rows: u16 = 2;
+pub const flag_truncated: u8 = 1;
+pub const record_bytes = 12;
 pub const header_bytes = 16;
 /// Slots in the host ring; wrap drops the newest record when the writer lags.
 pub const ring_slots = 128;
@@ -16,7 +19,7 @@ pub const max_ids = 4096;
 pub const Header = extern struct {
     magic: [4]u8 = magic.*,
     version: u16 = version,
-    flags: u16 = flag_weights,
+    flags: u16 = flag_weights | flag_rows,
     top_k: u16 = 0, // 0: each record's n is rows × k (variable); not a fixed k
     reserved: u16 = 0,
 };
@@ -25,6 +28,9 @@ pub const Rec = struct {
     step: u32 = 0,
     layer: u16 = 0,
     n_ids: u16 = 0,
+    rows: u16 = 0,
+    slots: u8 = 0,
+    flags: u8 = 0,
 };
 
 pub const Slot = struct {
@@ -124,11 +130,14 @@ pub fn encodeHeader(out: *[header_bytes]u8, flags: u16) void {
 }
 
 pub fn encodeRec(out: []u8, rec: Rec, ids: []const i32, wts: []const f32) usize {
-    std.debug.assert(out.len >= 8 + ids.len * 4 + wts.len * 4);
+    std.debug.assert(out.len >= record_bytes + ids.len * 4 + wts.len * 4);
     std.mem.writeInt(u32, out[0..4], rec.step, .little);
     std.mem.writeInt(u16, out[4..6], rec.layer, .little);
     std.mem.writeInt(u16, out[6..8], rec.n_ids, .little);
-    var at: usize = 8;
+    std.mem.writeInt(u16, out[8..10], rec.rows, .little);
+    out[10] = rec.slots;
+    out[11] = rec.flags;
+    var at: usize = record_bytes;
     for (ids[0..rec.n_ids]) |id| {
         std.mem.writeInt(i32, out[at..][0..4], id, .little);
         at += 4;
@@ -139,4 +148,3 @@ pub fn encodeRec(out: []u8, rec: Rec, ids: []const i32, wts: []const f32) usize 
     }
     return at;
 }
-

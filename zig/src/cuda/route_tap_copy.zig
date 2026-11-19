@@ -1,5 +1,6 @@
 //! Async device-to-host copy of one layer's global top-k into a pinned host ring (rank 0, when live).
 const tap = @import("core").route_tap;
+pub const live = tap.live;
 const Event = @import("stream.zig").Event;
 const HostBuffer = @import("memory.zig").HostBuffer;
 
@@ -43,15 +44,22 @@ fn release() void {
 }
 
 /// Copy `rows * slots` int32 picks and fp32 weights from device pointers, before any localisation.
-pub fn afterPick(s: anytype, picks: u64, wts: u64, rows: usize, slots: usize) void {
+pub fn afterPick(s: anytype, picks: u64, wts: u64, rows: usize, stride: usize, slots: usize) void {
     if (!tap.live()) return;
     pin(s);
-    const n: u16 = @intCast(@min(rows * slots, tap.max_ids));
-    if (n == 0) return;
-    const sl = tap.reserve(n) orelse return;
-    const nb = @as(usize, n) * 4;
-    const ids_ok = s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(sl.ids.ptr), picks, nb, s.handle), "cuMemcpyDtoHAsync");
-    const wts_ok = s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(sl.weights.ptr), wts, nb, s.handle), "cuMemcpyDtoHAsync");
+    const sl = tap.reserve(rows, slots) orelse return;
+    var ids_ok: @TypeOf(s.d.check(0, "cuMemcpyDtoHAsync")) = {};
+    var wts_ok: @TypeOf(s.d.check(0, "cuMemcpyDtoHAsync")) = {};
+    const width = if (stride == slots) sl.rec.n_ids else slots;
+    const calls = if (stride == slots) 1 else sl.rec.n_ids / slots;
+    for (0..calls) |row| {
+        s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(sl.ids[row * width ..].ptr), picks + row * stride * 4, width * 4, s.handle), "cuMemcpyDtoHAsync") catch |err| {
+            ids_ok = err;
+        };
+        s.d.check(s.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(sl.weights[row * width ..].ptr), wts + row * stride * 4, width * 4, s.handle), "cuMemcpyDtoHAsync") catch |err| {
+            wts_ok = err;
+        };
+    }
     if (ev) |e| e.record(s) catch {};
     if (ids_ok) |_| {} else |_| {
         if (ev) |e| e.synchronize() catch {};
