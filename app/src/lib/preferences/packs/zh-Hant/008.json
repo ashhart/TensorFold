@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server." : "移除文件夾會停止在其中發現模型，絕不會刪除模型；運行中的模型會保持加載，直到你停止服務器。",
   "Rename" : "重命名",
   "Render the plan panel with block progress bars and status glyphs." : "使用塊狀進度條與狀態符號顯示計劃面板。",
-  "Repeatable community-v1 measurements for cached models on this Mac." : "在此 Mac 的已緩存模型上執行可重復的 community-v1 測量。",
+  "Repeatable community-v2 measurements for cached models on this Mac." : "在此 Mac 的已緩存模型上執行可重復的 community-v2 測量。",
   "repeated checks" : "次重復檢查",
   "Replace matching records from the backup" : "使用備份替換匹配記錄",
   "replaces the current instructions" : "替換當前指令",

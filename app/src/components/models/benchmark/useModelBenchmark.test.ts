@@ -48,7 +48,7 @@ try {
   assert.equal(timers.size, 0, 'terminal status ends the polling loop')
   await hook.controller.export(); await hook.controller.copy()
   assert.deepEqual(calls.find((call) => call[0] === 'export'), ['export', latest.id])
-  assert.match(calls.find((call) => call[0] === 'copy')[1], /community-v1/)
+  assert.match(calls.find((call) => call[0] === 'copy')[1], /community-v2/)
   assert.match(hook.controller.snapshot().notice, /copied/)
   slots.forEach((slot) => slot?.cleanup?.())
   assert.equal(calls.filter((call) => call[0] === 'cancel').length, 1, 'hook cleanup does not invoke engine cancellation')

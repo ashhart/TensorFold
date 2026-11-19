@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Bỏ thư mục chỉ ngừng tìm mô hình, không xóa mô hình. Mô hình đang nạp giữ tới khi dừng máy chủ.",
   "Rename": "Đổi tên",
   "Render the plan panel with block progress bars and status glyphs.": "Hiển thị kế hoạch bằng thanh tiến độ và biểu tượng trạng thái.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Đo community-v1 lặp lại cho mô hình đệm trên Mac.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Đo community-v2 lặp lại cho mô hình đệm trên Mac.",
   "repeated checks": "kiểm tra lặp lại",
   "Replace matching records from the backup": "Thay bản ghi khớp bằng bản sao lưu",
   "replaces the current instructions": "thay chỉ dẫn hiện tại",

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { writeProtectedJson } from '../../../store/write-infra'
 import { isProtectedJsonEnvelope, revealJsonPayload } from '../../../store/app-crypto'
 import type { ModelBenchmarkReceipt, ModelBenchmarkSnapshot } from '../../../../shared/model-benchmark'
-import { BENCHMARK_RECEIPT_MAX_BYTES, parseBenchmarkReceipt } from './receipt'
+import { BENCHMARK_RECEIPT_MAX_BYTES, parseBenchmarkDetails, parseBenchmarkReceipt, type BenchmarkDetails } from './receipt'
 import { savedBenchmarkSnapshot } from './state'
 import { strictBenchmarkJson } from './strict-json'
 
@@ -29,6 +29,10 @@ export async function benchmarkWorkspace(appHome: string): Promise<{ directory: 
 export async function readBenchmarkReceiptFile(file: string, expected: { model: string; serial: boolean }): Promise<ModelBenchmarkReceipt | null> {
   const raw = await readPrivateFile(file, BENCHMARK_RECEIPT_MAX_BYTES)
   return raw === null ? null : parseBenchmarkReceipt(raw, expected)
+}
+/** The checked details of a receipt that failed or was cut short; null when the file is missing or they fail. */
+export async function readBenchmarkDetailsFile(file: string, expected: { model: string; serial: boolean; engineVersion?: string }): Promise<BenchmarkDetails | null> {
+  try { const raw = await readPrivateFile(file, BENCHMARK_RECEIPT_MAX_BYTES); return raw === null ? null : parseBenchmarkDetails(raw, expected) } catch { return null }
 }
 async function readPrivateFile(file: string, maxBytes: number): Promise<string | null> {
   let handle: Awaited<ReturnType<typeof fs.open>>

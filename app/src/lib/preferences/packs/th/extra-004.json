@@ -165,7 +165,7 @@
   "The community page could not open; try again in your browser.": "เปิดหน้าชุมชนไม่ได้ ลองในเบราว์เซอร์",
   "The comparison could not finish.": "เปรียบเทียบไม่เสร็จ",
   "The comparison stopped before changing the engine.": "หยุดเปรียบเทียบก่อนเปลี่ยนเอนจิน",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "ไม่ผ่านขั้นตอน community-v1 ครบ เซลล์ไม่สมบูรณ์ไม่ใช่คะแนนประสิทธิภาพ",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "ไม่ผ่านขั้นตอน community-v2 ครบ เซลล์ไม่สมบูรณ์ไม่ใช่คะแนนประสิทธิภาพ",
   "The conversation could not be renamed.": "เปลี่ยนชื่อการสนทนาไม่ได้",
   "The document worker is not installed.": "ไม่ได้ติดตั้งเวิร์กเกอร์เอกสาร",
   "The download action could not complete. Try again.": "ดาวน์โหลดไม่เสร็จ ลองใหม่",

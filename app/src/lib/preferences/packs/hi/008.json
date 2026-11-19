@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "फ़ोल्डर हटाने से वहाँ खोजना बंद होता है, मॉडल नहीं मिटते। चालू मॉडल सर्वर रोकने तक लोड रहता है।",
   "Rename": "नाम बदलें",
   "Render the plan panel with block progress bars and status glyphs.": "योजना पैनल में प्रगति पट्टियाँ और स्थिति चिह्न दिखाएँ।",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "इस Mac के कैश मॉडल पर दोहराने योग्य community-v1 माप।",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "इस Mac के कैश मॉडल पर दोहराने योग्य community-v2 माप।",
   "repeated checks": "दोहराई जाँचें",
   "Replace matching records from the backup": "बैकअप से मेल खाते रिकॉर्ड बदलें",
   "replaces the current instructions": "वर्तमान निर्देश बदलता है",
