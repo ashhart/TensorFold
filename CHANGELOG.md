@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on Metal: the text-only server no longer keeps the vision tower stored between the language-model tensors in GPU memory, so the 2B holds 1.7 GiB instead of 2.3 GiB measured with `footprint` after load, with replies unchanged (#3407). Thanks to @jschmied.
+
 - Server: `TENSORFOLD_REQUEST_JOURNAL=PATH` records each chat or completion request in three JSON lines (start, prepared, finish), so a request unfinished at a crash is flagged on the next start, one in flight at two crashes is refused with 400 `request_quarantined`, and `tools/replay_request.py` replays a journaled request and compares the reply's `tensorfold.token_sha256`; off unless set (#3221).
 
 - CLI: `tensorfold config validate FILE` (source builds only, not `tensorfold-native`) reads a cluster.json with the same parser and 16 MiB limit the server uses, prints the node and model counts on success or every problem the parser collected, and exits 0, 1 or 2 without planning models or probing hosts; `cluster check` is unchanged (#3189). Thanks to @mvanhorn.
