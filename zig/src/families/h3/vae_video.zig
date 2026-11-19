@@ -399,6 +399,135 @@ pub const Decoder = struct {
         gpa.free(tokens_host);
         std.debug.print("stage: pq+embedder+registers done", .{});
 
+        // Stage 2: one block on Metal
+        const normed = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        const qkv = try self.device.buffer(rows * 3 * dim * 4, mtl.ResourceOptions.shared);
+        const attended = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        defer normed.deinit();
+        defer qkv.deinit();
+        defer attended.deinit();
+        @memcpy(normed.slice(f32, rows * dim), tokens_full);
+
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        const fused = try self.device.buffer(rows * 2 * self.config.ffn() * 4, mtl.ResourceOptions.shared);
+        const gated = try self.device.buffer(rows * self.config.ffn() * 4, mtl.ResourceOptions.shared);
+        for (self.blocks) |b| {
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+
+        const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
+        e.setPipeline(self.p[1]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(n1_w, 0, 1);
+        e.setBuffer(normed, 0, 2);
+        e.setValue([1]u32{ @intCast(dim) }, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+
+        const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
+        const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(qkv_w, 0, 1);
+        e.setBuffer(qkv_b, 0, 2);
+        e.setBuffer(qkv, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        e.setPipeline(self.p[0]);
+        e.setBuffer(qkv, 0, 0);
+        e.setBuffer(qkv, 0, 1);
+        e.setBuffer(qkv, 0, 2);
+        e.setBuffer(attended, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(3 * dim), @intCast(dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(out_w.slice(f32, b.attn_out_w.len), b.attn_out_w);
+        const out_b = try self.device.buffer(b.attn_out_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(out_b.slice(f32, b.attn_out_b.len), b.attn_out_b);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(attended, 0, 0);
+        e.setBuffer(out_w, 0, 1);
+        e.setBuffer(out_b, 0, 2);
+        e.setBuffer(qkv, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+
+        const qkv_host = qkv.slice(f32, rows * dim);
+        for (0..rows) |r| {
+            for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
+        }
+        n1_w.deinit(); qkv_w.deinit(); qkv_b.deinit(); out_w.deinit(); out_b.deinit();
+        std.debug.print("stage: block1 attn done", .{});
+
+        // Stage 3: ff half
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        @memcpy(normed.slice(f32, rows * dim), tokens_full);
+
+        const n2_w = try self.device.buffer(b.norm2_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(n2_w.slice(f32, b.norm2_w.len), b.norm2_w);
+        e.setPipeline(self.p[1]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(n2_w, 0, 1);
+        e.setBuffer(normed, 0, 2);
+        e.setValue([1]u32{ @intCast(dim) }, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+
+        const fw1_w = try self.device.buffer(b.ff_w1.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(fw1_w.slice(f32, b.ff_w1.len), b.ff_w1);
+        const fw1_b = try self.device.buffer(b.ff_w1_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(fw1_b.slice(f32, b.ff_w1_b.len), b.ff_w1_b);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(fw1_w, 0, 1);
+        e.setBuffer(fw1_b, 0, 2);
+        e.setBuffer(fused, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(2 * self.config.ffn()), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(2 * self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        e.setPipeline(self.p[2]);
+        e.setBuffer(fused, 0, 0);
+        e.setBuffer(gated, 0, 1);
+        e.setValue([1]u32{ @intCast(self.config.ffn()) }, 2);
+        e.dispatchThreads(mtl.Size.of(self.config.ffn(), rows, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        const fw2_w = try self.device.buffer(b.ff_w2.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(fw2_w.slice(f32, b.ff_w2.len), b.ff_w2);
+        const fw2_b = try self.device.buffer(b.ff_w2_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(fw2_b.slice(f32, b.ff_w2_b.len), b.ff_w2_b);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(gated, 0, 0);
+        e.setBuffer(fw2_w, 0, 1);
+        e.setBuffer(fw2_b, 0, 2);
+        e.setBuffer(qkv, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(self.config.ffn()), @intCast(dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+
+        const qkv_host2 = qkv.slice(f32, rows * dim);
+        for (0..rows) |r| {
+            for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
+        }
+        n2_w.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
+        }
+        fused.deinit();
+        gated.deinit();
+        std.debug.print("stage: 36 blocks done", .{});
+
         std.debug.print("gpu unpatch done", .{});
     }
 };
