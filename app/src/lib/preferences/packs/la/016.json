@@ -71,7 +71,7 @@
   "The community page could not open; try again in your browser.": "Pagina communitatis aperiri non potuit; in navigatore itera.",
   "The comparison could not finish.": "Comparatio perfici non potuit.",
   "The comparison stopped before changing the engine.": "Comparatio ante machinam mutandam stetit.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "Protocollo community-v1 pleno non satisfactum; cellae incompletae mensurae non sunt.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "Protocollo community-v2 pleno non satisfactum; cellae incompletae mensurae non sunt.",
   "The conversation could not be renamed.": "Colloquium renominari non potuit.",
   "The document worker is not installed.": "Operarius documentorum non institutus.",
   "The download action could not complete. Try again.": "Receptio perfici non potuit. Itera.",
