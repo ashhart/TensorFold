@@ -148,7 +148,10 @@ export class ModelBenchmarks {
       }
       // a run without a valid receipt keeps the checked hardware, engine and checkpoint details its receipt file has
       if (!job.snapshot.metadata && workspace && !checkpointChanged && this.deps.readDetails) {
-        try { job.snapshot.metadata = await this.deps.readDetails(workspace.receiptPath, { ...input, engineVersion }) } catch {}
+        try {
+          const details = await this.deps.readDetails(workspace.receiptPath, { ...input, engineVersion })
+          if (details) job.snapshot.metadata = details // a refused receipt's details fail their checks: no metadata
+        } catch {}
       }
       const finalState = job.controller.signal.aborted ? 'cancelled' : job.snapshot.error || job.snapshot.restoreError || code !== 0 || !job.snapshot.cells.every(cell => cell.complete) ? 'failed' : 'complete'
       if (finalState === 'failed' && !job.snapshot.error && !job.snapshot.restoreError) job.snapshot.error = 'The local benchmark did not complete every measured attempt.'
