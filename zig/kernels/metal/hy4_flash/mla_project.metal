@@ -132,3 +132,28 @@ kernel void tf_hy4_expand_v(
     }
     expanded[ulong(row_head) * 256 + column] = hy4_mla_round(sum);
 }
+
+// tf_hy4_expand_v then tf_hy4_gate_values in one launch: the expanded value rounded as before, then gated by the
+// rounded sigmoid of its logit exactly as the gate pass does, so the same bits without the second pass.
+kernel void tf_hy4_expand_v_gated(
+    const device ushort *latent [[buffer(0)]],
+    const device ushort *value_projection [[buffer(1)]],
+    device ushort *expanded [[buffer(2)]],
+    constant Hy4MlaProjectArgs &args [[buffer(3)]],
+    const device ushort *logits [[buffer(4)]],
+    uint2 tid [[thread_position_in_grid]]) {
+    const uint column = tid.x;
+    const uint row_head = tid.y;
+    if (column >= 256 || row_head >= ulong(args.rows) * args.heads) return;
+
+    const ulong from = ulong(row_head) * 512;
+    const ulong wv = (ulong(row_head % args.heads) * 256 + column) * 512;
+    float sum = 0.0f;
+    for (uint i = 0; i < 512; ++i) {
+        sum = fma(hy4_mla_value(latent[from + i]), hy4_mla_value(value_projection[wv + i]), sum);
+    }
+    const ulong at = ulong(row_head) * 256 + column;
+    const ushort value = hy4_mla_round(sum);
+    const float gate = 1.0f / (1.0f + precise::exp(-hy4_mla_value(logits[at])));
+    expanded[at] = hy4_mla_round(hy4_mla_value(value) * hy4_mla_value(hy4_mla_round(gate)));
+}

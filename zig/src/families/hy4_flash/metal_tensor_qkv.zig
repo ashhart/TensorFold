@@ -43,6 +43,9 @@ pub const Packed = struct {
     }
 };
 
+/// Rows one prompt chunk may hold (the routed layer's prompt_rows).
+pub const prompt_rows = 512;
+
 fn layout(bits: u8, n: usize, k: usize, sk: usize) lane.Layout {
     return .{
         .n = n,
@@ -51,7 +54,16 @@ fn layout(bits: u8, n: usize, k: usize, sk: usize) lane.Layout {
         .format = .{ .bits = bits, .group = 64 },
         .reg = bits == 4,
         .precompute_sums = bits == 4,
+        // a whole prompt chunk in one encode on the reg path (independent 16-row blocks, so the same bits)
+        .rows = prompt_rows,
+        .row_blocks = bits != 4,
     };
+}
+
+/// Any other dense projection [n, k] on tensor units: the QKV layout, with split-K by depth (2 under 2048, 4 to 4096,
+/// else 8). Every row's bits are the same however many rows share the encode (independent 16-row blocks).
+pub fn denseLayout(bits: u8, n: usize, k: usize) lane.Layout {
+    return layout(bits, n, k, if (k < 2048) 2 else if (k <= 4096) 4 else 8);
 }
 
 pub fn inputLayout(t: config.Text, bits: u8, heads: u32) lane.Layout {
