@@ -12,6 +12,8 @@ test {
     _ = @import("rank_weights.zig");
     _ = @import("index_recall.zig");
     _ = @import("forward.zig");
+    _ = @import("exl3_weights.zig");
+    if (@import("builtin").os.tag == .linux) _ = @import("bf16_rows_test.zig");
 }
 
 fn tensor(dtype: core.checkpoint_host.DType, rows: usize, width: usize, bytes: []const u8) core.checkpoint_host.Tensor {
