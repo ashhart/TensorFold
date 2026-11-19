@@ -17,6 +17,9 @@ pub fn tests(b: *std.Build) void {
     b.step("test-qwen35-cache-host", "Qwen2B retained bytes, paged images and resumed host-reference tokens").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen retained:"} })).step);
     const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "a stream's cache bytes" };
     b.step("test-qwen35-metal-host", "Qwen2B geometry, keyed draws and state sizing on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = pure })).step);
+    const topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/sampling_row_topk.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
+    const select = &.{ "bounded BF16 keys", "the blocked selection", "a non-finite word inside" };
+    b.step("test-lanes-topk-host", "Bounded top-k keys and blocked selection on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = topk, .filters = select })).step);
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
