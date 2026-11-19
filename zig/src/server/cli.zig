@@ -587,9 +587,7 @@ pub const capabilities = @import("cli_capabilities.zig").capabilities;
 pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
 pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;
 pub const ranks = @import("cli_gpu_flags.zig").ranks;
-
 const cli = @This();
-
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;
