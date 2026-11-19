@@ -190,13 +190,14 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     }
     x.e.end();
     if (out.timing) |tm| tm.encode += seconds() - t0;
+    const tap_at = @import("../../core/route_tap_metal.zig").mark();
     cb.commit();
     if (out.flight) |f| {
         f.* = cb.retain();
         return;
     }
     cb.wait();
-    if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
+    if (tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(tap_at);
     if (cb.failure()) |msg| {
         std.log.err("minimax_m3 forward: {s}", .{msg});
         return error.GpuFailed;
@@ -287,7 +288,7 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
                 x.glue(.route_pick, Args{ .rows = nr, .width = c.experts, .heads = c.topk }, &.{ b(s.logits32), t(e.bias), A, b(s.pick), b(s.wts) }, .{ n, 1, 1 }, .{ 32, 1, 1 }, true);
             } else x.glue(.route_groups, Args{ .rows = nr, .width = c.experts, .heads = c.topk }, &.{ b(s.logits32), t(e.bias), A, b(s.pick), b(s.wts), b(s.groups), b(s.members) }, .{ 1, 1, 1 }, .{ 32 * n, 1, 1 }, true);
             const tap_m = @import("../../core/route_tap_metal.zig");
-            if (tap_m.live()) tap_m.blitPicks(x.e, s.pick, 0, s.wts, 0, @intCast(n * c.topk));
+            if (tap_m.live()) tap_m.blitPicks(x.e, s.pick, 0, s.wts, 0, n, c.topk);
             const slots = n * c.topk;
             const inter: u32 = c.moe_intermediate;
             const act = Args{ .rows = @intCast(slots), .width = inter, .stride = 2 * inter, .alpha = c.swiglu_alpha, .limit = c.swiglu_limit };

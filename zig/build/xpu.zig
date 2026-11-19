@@ -375,6 +375,7 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     gemma_native.addImport("ze", ze);
     gemma_native.addImport("xpu_gemma4_kernels", empty);
     sources.addImport("gemma4_xpu", gemma_native);
+    sources.addImport("core", core);
     sources.addImport("lfm3_xpu", lfm3Module(b, b.graph.host, .debug, xpu));
     // the host test checks every family's admission, so it builds with both DPAS engines
     const source_options = b.addOptions();
