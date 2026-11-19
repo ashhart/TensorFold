@@ -52,7 +52,8 @@ test "qwen27 pair: a sampled or grammar request is refused by name at the head o
 
 test "qwen27 pair: the served chunk from promptRows fits the window" {
     // the served pass asks for the generation's rows (`model.promptRows(generation)`); a pair caps them at the window
-    const chunk = lb.pairChunk(q.model.promptRows(q.config.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 124160, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 }, 0));
+    const cfg0 = q.config.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 124160, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 };
+    const chunk = lb.pairChunk(q.model.promptRows(cfg0, 0, try q.attention_plan.Geometry.fromConfig(cfg0, true)));
     try std.testing.expect(chunk <= lb.batch_rows);
     try std.testing.expect(lb.seamBytes(chunk) <= lb.pairBytes());
     // the uncapped pass would stage a wider seam than the window, so the cap is what keeps the exchange legal
