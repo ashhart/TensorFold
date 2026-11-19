@@ -107,4 +107,3 @@ kernel void glm_scale_ref(const device bfloat* x [[buffer(0)]], device bfloat* y
   if (int(p.x) >= a.width || int(p.y) >= a.rows) return;
   y[size_t(p.y) * a.y_stride + p.x] = bfloat(float(x[size_t(p.y) * a.x_stride + p.x]) * a.eps);
 }
-
