@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
+
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
 
 - Qwen on CUDA: a development build for sm_110 (`-Dsm=110`, NVIDIA Thor) refuses by name, before paging or weight loading, the modes not qualified there: `--slide`, a DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES`; the default path and the DFlash2 drafter are still served, and other GPUs are unchanged (#3057, refs #2319). Thanks to @yguanrong.
@@ -688,8 +690,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Sessions: a saved session's chunk can be no larger than the reader's buffer, so a crafted file is refused instead of read past it, and the disk tier's folders and files are owner-only (#3030).
 
 - Server: a request body that no route reads is capped at 64 KiB, and a larger one gets HTTP 400 (#3029).
-
-- Flash Next on CUDA at `--tp 2`: a wait on the ranks' control link polls with a 50 µs timeout for its first 50 ms, then blocks as before. On two GB10s, an instrumented build showed a rank that waited out a round in a blocking poll waking 200 to 380 µs after its peer's frame arrived, its core in a deep idle state, and about 50 µs after it with the short polls. Over two alternated starts each there, drafted decode at one stream is 1.4% to 1.5% faster (chat 37.80 to 38.38 tok/s, code 51.25 to 51.98) and four streams 3.7% to 4.7% faster (chat 101.00 to 105.75, code 144.75 to 150.10); plain decode is unchanged, and so is every token. A server stops polling 50 ms after its last frame (#2971).
 
 - DeepSeek-V4.1: both ranks print the startup settings line, and its transport field now reads `comm=roce` or `comm=nccl` with its source from `TF_COMM_BACKEND`; DeepSeek says once at startup that it does not read `TF_ROCE` when that is set, where the line used to report `roce=1(set)` for `TF_ROCE=0` (#2877, for #2715).
 
