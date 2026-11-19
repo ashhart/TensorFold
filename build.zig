@@ -187,6 +187,7 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
     @import("zig/build/gemma4_backward.zig").tests(b, test_step);
+    @import("zig/build/hy4_flash.zig").tests(b, test_step);
     const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
     gemma4_host_sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-host-empty.metallib", "") });
     const gemma4_contract_host = @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
