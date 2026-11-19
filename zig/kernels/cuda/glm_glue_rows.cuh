@@ -145,6 +145,7 @@ extern "C" __global__ void tf_glm_combine(
 // tf_glm_combine with the last slot apart (#3570): y [rows][slots - 1][d], tail [rows][d], fp32; its fmas in order.
 extern "C" __global__ void tf_glm_combine_tail(
         const float* y, const float* tail, const float* wts, float* out, int64_t d, int slots) {
+  glm_pdl::enter();
   const int64_t c = glm_glue::col8();
   if (c >= d) return;
   const int64_t r = blockIdx.x;
