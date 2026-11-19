@@ -30,7 +30,6 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
 }
-
 /// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
 pub fn setFlatGlue(on: bool) void {
     @import("core_delta").flat_glue = on;
