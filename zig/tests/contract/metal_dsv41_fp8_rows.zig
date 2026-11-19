@@ -12,8 +12,8 @@ const g = contract.gates;
 const fp8 = tf.dsv41_metal.fp8_rows;
 const base = "dsv41_fp8_rows ";
 
-/// What a registration varies: the output, the split, one launch a row, the real fixture, a planted fault.
-pub const Variant = struct { out: fp8.Out = .f32, split: u32 = 1, solo: bool = false, fixture: bool = false, ctl: u8 = 0 };
+/// What a registration varies: output, split, a launch a row, the fixture, a planted fault, a one-launch block kind.
+pub const Variant = struct { out: fp8.Out = .f32, split: u32 = 1, solo: bool = false, fixture: bool = false, ctl: u8 = 0, kind: ?fp8.Kind = null };
 
 const real = [_]c.Shape{
     .{ .rows = 16, .n = 1280, .k = 5120 }, // wq_a
@@ -99,7 +99,9 @@ pub const Proj = struct {
 
     pub fn prepare(p: *Proj, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         p.drop();
-        fp8.check(.{ .k = @intCast(shape.k), .n = @intCast(shape.n), .rows = @intCast(shape.rows), .split = p.v.split }) catch return false;
+        const split = if (p.v.kind) |k| k.split() else p.v.split;
+        fp8.check(.{ .k = @intCast(shape.k), .n = @intCast(shape.n), .rows = @intCast(shape.rows), .split = split }) catch return false;
+        if (p.v.kind) |k| if (shape.n % k.columns() != 0) return false;
         const f = try ref.Fp8.init(p.a, shape);
         p.f = f;
         p.fill = fill;
@@ -125,6 +127,7 @@ pub const Proj = struct {
     pub fn encode(p: *Proj, e: anytype, rows: usize, split: u32) !void {
         const f = p.f.?;
         const es = c.size(spec(p.v, p.name).out);
+        if (p.v.kind) |k| return fp8.encodeWholeAs(&p.pipes, e, at(p.x, 0), at(p.w, 0), at(p.s, 0), at(p.y, 0), p.call(rows, k.split()), .{}, k);
         if (!p.v.solo) return fp8.encode(&p.pipes, e, at(p.x, 0), at(p.w, 0), at(p.s, 0), at(p.scratch, 0), at(p.y, 0), p.call(rows, split));
         for (0..rows) |r| try fp8.encode(&p.pipes, e, at(p.x, 2 * r * f.shape.k), at(p.w, 0), at(p.s, 0), at(p.scratch, 0), at(p.y, es * r * f.shape.n), p.call(1, split));
     }
@@ -170,6 +173,8 @@ pub const Suite = struct {
         .{ .v = .{ .out = .bf16 }, .name = base ++ "bf16 split 1" },
         .{ .v = .{ .out = .bf16, .split = 4 }, .name = base ++ "bf16 split 4" },
         .{ .v = .{ .solo = true }, .name = base ++ "one launch a row" },
+        .{ .v = .{ .kind = .e }, .name = base ++ "f32 one launch, block e" },
+        .{ .v = .{ .out = .bf16, .kind = .f }, .name = base ++ "bf16 one launch, block f" },
         .{ .v = .{ .fixture = true }, .name = base ++ "release wkv fixture" },
         .{ .v = .{ .ctl = 1 }, .name = base ++ "control: non-finite inputs flushed" },
         .{ .v = .{ .ctl = 2 }, .name = base ++ "control: tile roots added in a chain" },
@@ -224,10 +229,10 @@ pub const Suite = struct {
                 }
             };
             // the one-launch kernels: every block kind and row tier
-            for ([_]fp8.Kind{ .a, .b, .c }) |kind| for (1..17) |r| {
+            for (std.enums.values(fp8.Kind)) |kind| for (1..17) |r| {
                 @memset(p.rig.bytes(p.y, whole.len), 0xff);
                 const pass = p.rig.begin();
-                const call: fp8.Call = .{ .k = @intCast(shape.k), .n = @intCast(n), .rows = @intCast(r), .split = if (kind == .a) 1 else 4, .out = .f32 };
+                const call: fp8.Call = .{ .k = @intCast(shape.k), .n = @intCast(n), .rows = @intCast(r), .split = kind.split(), .out = .f32 };
                 try fp8.encodeWholeAs(&p.pipes, pass.e, at(p.x), at(p.w), at(p.s), at(p.y), call, .{}, kind);
                 try p.rig.finish(pass);
                 launches += 1;
@@ -238,7 +243,7 @@ pub const Suite = struct {
             };
         }
         const word = if (bad == 0) "PASS" else "FAIL";
-        std.debug.print("{s} row invariance {s}: R=1..16 at split 1 and 4 and one launch of blocks a, b and c on 3 shapes ({d} launches) byte-equal to the 16-row launch, {d} differ\n", .{ word, base, launches, bad });
+        std.debug.print("{s} row invariance {s}: R=1..16 at split 1 and 4 and one launch of every block kind on 3 shapes ({d} launches) byte-equal to the 16-row launch, {d} differ\n", .{ word, base, launches, bad });
         return bad;
     }
 
