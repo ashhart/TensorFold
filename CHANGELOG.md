@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: the model benchmark accepts the engine's community-v2 suite (and community-v1 receipts from older engines) instead of ending every run "protocol not satisfied", and a run that fails or is cut short keeps its checked hardware, engine version and checkpoint details (#4031, fixes #3942).
+
 - Desktop: an MCP server's startup diagnostics reach the Plugins preview as whole lines, masked as a whole and capped at 64 KiB, instead of one row per stderr write (#3759). Thanks to @AIFlowML.
 
 
