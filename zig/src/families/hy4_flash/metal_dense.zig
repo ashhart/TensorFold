@@ -55,15 +55,13 @@ pub const Buffers = struct {
         return view;
     }
 
-    /// A dense projection's weights: packed for the tensor units' lane projection when `tensors`, else the row kernels'.
+    /// A dense projection's weights: packed for the tensor units' lane projection when `tensors`
     pub fn linear(self: *Buffers, w: core.quant.mlx.Host, tensors: bool) !Linear {
         const n: u32 = @intCast(w.words.shape[0]);
         const k: u32 = @intCast(w.scales.shape[1] * w.group);
-        if (tensors and n % 32 == 0 and w.group == 64 and (w.bits == 4 or w.bits == 8) and std.c.getenv("TF_HY4_DENSE_ROWS") == null) {
+        if (tensors and n % 32 == 0 and w.group == 64 and (w.bits == 4 or w.bits == 8)) {
             const packed_ = try gpu_qkv.Packed.upload(self, &.{w}, gpu_qkv.denseLayout(w.bits, n, k));
-            // decode-sized passes read the checkpoint layout through the decode kernels
-            const plain = if (decodeRows() > 0) try self.matrix(w) else null;
-            return .{ .tensor = .{ .w = packed_.w, .sb = packed_.sb, .n = n, .k = k, .plain = plain } };
+            return .{ .tensor = .{ .w = packed_.w, .sb = packed_.sb, .n = n, .k = k } };
         }
         return .{ .portable = try self.matrix(w) };
     }
@@ -74,50 +72,9 @@ pub const Buffers = struct {
 };
 
 /// A dense affine projection [n, k]: the core row kernels, or the tensor units' lane projection over packed weights.
-/// Passes of at most this many rows (one-row decode, the drafter's columns) take the decode GEMV: fp32 sums, each
-/// weight read once, in a different order from the tensor units' (TF_HY4_DECODE_ROWS, default 2, where the GEMV is
-/// the faster; 0 keeps the tensor units everywhere). Quality is the same either way (fp32 sums, NLL-checked).
-/// A probe's override of decodeRows (kernel checks).
-pub var decode_rows_override: ?u32 = null;
-
-fn envRows(name: [*:0]const u8, default: u32) u32 {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch default;
-}
-
-/// Routed-expert passes of at most this many rows (6: the lane verify widths) run every (row, pick) pair as GEMVs
-/// (TF_HY4_EXPERT_PAIRS); against the tensor gathers 4 rows 24.6 -> 23.1 ms, 5 rows 26.6 -> 24.4, 6 rows 27.8 -> 26.4.
-pub fn expertPairRows() u32 {
-    return 0; // row-invariant bits: every pass takes the tensor gathers the prompt chunks take
-}
-
-/// Attention passes of at most this many rows (4 at most) read kv_b's affine codes (TF_HY4_MLA_Q; 0: the BF16 copies).
-/// One row by default: 15.85 -> 15.29 ms a token; from two rows the fp32 dequant is compute-bound, slower than BF16
-/// on tensor units (4 rows: 23.0 -> 24.2 ms).
-pub fn mlaRows() u32 {
-    return 0; // row-invariant bits: every pass reads the BF16 copies on the tensor units, as prompt chunks do
-}
-
-/// Larger passes up to this many rows (at most one router window, 16) run the grouped GEMVs (TF_HY4_EXPERT_GROUPS).
-pub fn expertGroupRows() u32 {
-    return @min(envRows("TF_HY4_EXPERT_GROUPS", 0), 16);
-}
-
-pub fn decodeRows() u32 {
-    return decode_rows_override orelse 0; // row-invariant bits: the lane projection at every row count
-}
-
 pub const Linear = union(enum) {
     portable: affine.Weights,
-    tensor: struct { w: lane.Ref, sb: lane.Ref, n: u32, k: u32, plain: ?affine.Weights = null },
-
-    /// The checkpoint-layout weights the decode kernels read, when this projection has them.
-    fn plainWeights(self: Linear) ?affine.Weights {
-        return switch (self) {
-            .portable => |w| w,
-            .tensor => |t| t.plain,
-        };
-    }
+    tensor: struct { w: lane.Ref, sb: lane.Ref, n: u32, k: u32 },
 
     pub fn outputs(self: Linear) u32 {
         return switch (self) {
@@ -127,64 +84,7 @@ pub const Linear = union(enum) {
     }
 };
 
-/// The lane projections for every dense shape a model has, made once at load, and one group-sums buffer that the
-/// projections reading the same input share (sums once, then every main kernel without a barrier between them).
-pub const Linears = struct {
-    shapes: [16][2]u32 = undefined,
-    projections: [16]lane.Projection = undefined,
-    /// The same projections adding their own group sums (4-bit reg layouts), for small passes.
-    inlines: [16]?lane.Projection = @splat(null),
-    count: usize = 0,
-    sums: ?mtl.Buffer = null,
-    const sum_rows = gpu_qkv.prompt_rows;
-
-    pub fn load(a: std.mem.Allocator, device: mtl.Device, t: cfg.Text, bits: u8) !Linears {
-        var out: Linears = .{};
-        errdefer out.deinit();
-        const v = shape_.value_width;
-        const wanted = [_][2]u32{
-            .{ t.hidden_size, t.swa_num_attention_heads * v },
-            .{ t.hidden_size, t.num_attention_heads * v },
-            .{ t.routed_expert_hidden_size, t.hidden_size },
-            .{ t.moe_intermediate_size * t.n_shared_experts, t.hidden_size },
-            .{ t.hidden_size, t.routed_expert_hidden_size },
-            .{ t.hidden_size, t.moe_intermediate_size * t.n_shared_experts },
-            .{ t.intermediate_size, t.hidden_size },
-            .{ t.hidden_size, t.intermediate_size },
-            .{ t.vocab_size, t.hidden_size },
-            // Engram's value and stream keys over a lookup row: every column's slice of the n-gram embedding
-            .{ t.hidden_size, @import("engram.zig").columns * (t.engram_n_embed_per_ngram / @import("engram.zig").heads) },
-        };
-        var groups: usize = 0;
-        for (wanted) |nk| {
-            if (out.find(nk[0], nk[1]) != null or nk[0] % 32 != 0) continue;
-            out.projections[out.count] = try lane.Projection.init(a, device, gpu_qkv.denseLayout(bits, nk[0], nk[1]));
-            out.inlines[out.count] = if (gpu_qkv.withInlineSums(gpu_qkv.denseLayout(bits, nk[0], nk[1]))) |l| try lane.Projection.init(a, device, l) else null;
-            out.shapes[out.count] = nk;
-            out.count += 1;
-            groups = @max(groups, nk[1] / 64);
-        }
-        out.sums = try device.buffer(sum_rows * groups * 4, mtl.ResourceOptions.shared);
-        return out;
-    }
-
-    pub fn deinit(self: *Linears) void {
-        for (self.projections[0..self.count]) |p| p.deinit();
-        for (self.inlines[0..self.count]) |p| if (p) |x| x.deinit();
-        if (self.sums) |b| b.deinit();
-        self.count = 0;
-    }
-
-    fn find(self: *const Linears, n: u32, k: u32) ?*const lane.Projection {
-        for (self.shapes[0..self.count], self.projections[0..self.count]) |nk, *p| if (nk[0] == n and nk[1] == k) return p;
-        return null;
-    }
-
-    fn findInline(self: *const Linears, n: u32, k: u32) ?*const lane.Projection {
-        for (self.shapes[0..self.count], self.inlines[0..self.count]) |nk, *p| if (nk[0] == n and nk[1] == k) if (p.*) |*x| return x;
-        return null;
-    }
-};
+pub const Linears = @import("metal_linears.zig").Linears;
 
 pub const Merge = struct {
     project: mtl.Buffer,
@@ -223,8 +123,6 @@ pub const Attention = struct {
     o_norm: mtl.Buffer,
     wk: mtl.Buffer,
     wv: mtl.Buffer,
-    /// kv_b's affine codes, scales and biases for the decode GEMVs (null under TF_HY4_MLA_BF16).
-    kv_q: ?[3]mtl.Buffer = null,
     bits: u8 = 4,
     sinks: mtl.Buffer,
     /// A sparse layer's compressed indexer (null on sliding layers).
@@ -270,7 +168,6 @@ pub const Attention = struct {
             .wk = try b.upload(std.mem.sliceAsBytes(w.absorbed.key)),
             .wv = try b.upload(std.mem.sliceAsBytes(w.absorbed.value)),
             .bits = if (w.absorbed.packed_rows) |p| p.bits else 4,
-            .kv_q = if (w.absorbed.packed_rows) |p| if (std.c.getenv("TF_HY4_MLA_BF16") == null) .{ try b.upload(p.words), try b.upload(p.scales), try b.upload(p.biases) } else null else null,
             .sinks = try b.upload(std.mem.sliceAsBytes(w.sinks[0..heads])),
             .index = if (w.index) |*ix| try index.Weights.upload(&b, ix, use_tensors) else null,
         };
@@ -319,235 +216,17 @@ pub const Feed = struct {
     }
 };
 
-fn withAllocation(out: anytype, b: Buffers) @TypeOf(out) {
+pub fn withAllocation(out: anytype, b: Buffers) @TypeOf(out) {
     var owned = out;
     owned.own = b;
     return owned;
 }
 
-pub const Scratch = struct {
-    own: Buffers,
-    capacity: mha.Shape,
-    shape: mha.Shape,
-    inner_capacity: u32,
-    merged: Ref,
-    ihc_partials: Ref,
-    /// A count and a generation a row for the fused seams' in-kernel barrier (zeroed; each launch leaves count 0).
-    seam_barriers: Ref,
-    qkv: ?Ref = null,
-    post: Ref,
-    normalized: Ref,
-    query_a: Ref,
-    query_norm: Ref,
-    query: Ref,
-    kv: Ref,
-    value_logits: Ref,
-    values: Ref,
-    absorbed: Ref,
-    rotary: Ref,
-    latent: Ref,
-    attention: Ref,
-    key_scores: Ref,
-    flash_parts: ?Ref = null,
-    branch: Ref,
-    gate: Ref,
-    up: Ref,
-    inner: Ref,
+pub const Scratch = @import("metal_scratch.zig").Scratch;
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, layer: *const Attention, inner: u32, keys: u32, rows: u32) !Scratch {
-        return initForModel(a, device, layer, inner, keys, rows, false);
-    }
-
-    pub fn initForModel(a: std.mem.Allocator, device: mtl.Device, layer: *const Attention, inner: u32, keys: u32, rows: u32, use_tensors: bool) !Scratch {
-        var b: Buffers = .{ .a = a, .d = device };
-        errdefer b.clear();
-        const r = rows;
-        const h = layer.hidden;
-        const heads = layer.heads;
-        const shape = try mha.Shape.init(r, heads, keys);
-        const out: Scratch = .{
-            .own = undefined,
-            .capacity = shape,
-            .shape = shape,
-            .inner_capacity = inner,
-            .merged = try b.rows(r, h),
-            .ihc_partials = .{ .buffer = try b.alloc(@as(usize, r) * ihc_gpu.partial_floats * @sizeOf(f32)) },
-            .seam_barriers = blk: {
-                const bars = try b.alloc(ihc_gpu.Kernels.seam_rows * 8);
-                @memset(bars.slice(u8, ihc_gpu.Kernels.seam_rows * 8), 0);
-                break :blk .{ .buffer = bars };
-            },
-            .qkv = if (use_tensors) try b.rows(r, layer.query_rank + shape_.absorbed_stride + heads * shape_.value_width) else null,
-            .post = .{ .buffer = try b.alloc(@as(usize, r) * ihc.streams * @sizeOf(f32)) },
-            .normalized = try b.rows(r, h),
-            .query_a = try b.rows(r, layer.query_rank),
-            .query_norm = try b.rows(r, layer.query_rank),
-            .query = try b.rows(r, heads * shape_.query_stride),
-            .kv = try b.rows(r, shape_.absorbed_stride),
-            .value_logits = try b.rows(r, heads * shape_.value_width),
-            .values = try b.rows(r, heads * shape_.value_width),
-            .absorbed = try b.rows(r, heads * shape_.absorbed_stride),
-            .rotary = try b.rows(r, shape_.rope),
-            .latent = try b.rows(r, heads * shape_.latent),
-            .attention = .{ .buffer = try b.alloc(shape.scratchBytes()) },
-            .key_scores = .{ .buffer = try b.alloc(@as(usize, r) * heads * keys * @sizeOf(f32)) },
-            .flash_parts = if (use_tensors) blk: {
-                const parts = try b.alloc(mla_gpu.Nax.partBytes(heads));
-                @memset(parts.slice(u8, mla_gpu.Nax.partBytes(heads)), 0);
-                break :blk .{ .buffer = parts };
-            } else null,
-            .branch = try b.rows(r, h),
-            .gate = try b.rows(r, inner),
-            .up = try b.rows(r, inner),
-            .inner = try b.rows(r, inner),
-        };
-        return withAllocation(out, b);
-    }
-
-    /// Keep one allocation at the widest layer and bind the current lane batch and head count before encoding.
-    pub fn bind(self: *Scratch, rows: u32, heads: u32, keys: u32) !void {
-        if (rows > self.capacity.rows or heads > self.capacity.heads or keys > self.capacity.key_stride)
-            return error.ShortHy4Scratch;
-        self.shape = try mha.Shape.init(rows, heads, keys);
-    }
-
-    pub fn deinit(self: *Scratch) void {
-        self.own.clear();
-        self.* = undefined;
-    }
-};
-
-/// Lane windows of 2-8 rows through one weight read: tf_hy4_rows, the core row projection's per-row arithmetic
-/// (bit-equal to its plain kernel at every row count) with RPS columns a simdgroup and 4 simdgroups a threadgroup.
-pub const Rows = struct {
-    q4: mtl.Pipeline,
-    q8: mtl.Pipeline,
-    rps: u32,
-    /// Greedy tokens on the GPU (first index of the largest logit), so draft columns chain without the host.
-    argmax: mtl.Pipeline,
-    /// Decode-sized passes (1-8 rows) of 4- and 8-bit group-64 matrices, each weight read once.
-    qmv4: mtl.Pipeline,
-    qmv8: mtl.Pipeline,
-    /// Output columns a decode GEMV threadgroup covers.
-    qmv_cols: u32 = 8,
-    /// 1- to 4-row decode GEMVs with four columns a simdgroup ([bits 4, 8][rows 1-4]; the same bits as qmv2,
-    /// 14.83 -> 14.23 ms a token); TF_HY4_QMV=2 keeps qmv2, TF_HY4_QMV=8 takes eight columns a simdgroup.
-    qmv3: ?[2][4]mtl.Pipeline = null,
-    qmv3_cols: u32 = 16,
-    /// Routed experts for 1-2 row passes: gate/up into the clipped SwiGLU, then down (q4, q8).
-    expert_glu: [2]mtl.Pipeline,
-    expert_down: [2]mtl.Pipeline,
-    /// Routed experts for 3-16 row passes, grouped by the router window's jobs (each expert's codes unpacked once).
-    expert_glu_groups: [2]mtl.Pipeline,
-    expert_down_groups: [2]mtl.Pipeline,
-    /// The expert down GEMVs with the routed weighted sum folded in (q4, q8; TF_HY4_NO_DOWN_SUM keeps two launches).
-    expert_down_sum: [2]mtl.Pipeline,
-    /// MLA absorb and expand-and-gate for 1-4 row passes over kv_b's affine codes (q4, q8).
-    absorb_q: [2]mtl.Pipeline,
-    expand_q: [2]mtl.Pipeline,
-    /// The expert branches' add fused into the norm that reads them (bit-equal to add then norm).
-    add_norm: mtl.Pipeline,
-
-    pub fn load(a: std.mem.Allocator, device: mtl.Device) !Rows {
-        const text = try std.mem.concat(a, u8, &.{ affine.source(device.tensorUnits()), @import("kernel_sources").hy4_flash_rows });
-        defer a.free(text);
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
-        defer lib.deinit();
-        // TF_HY4_ROWS: the variant, r2 (default), r4, r2s, r1s or r1 (columns a simdgroup; s: shared unpack)
-        const variant: []const u8 = if (std.c.getenv("TF_HY4_ROWS")) |v| std.mem.span(v) else "r2";
-        const rps: u32 = if (variant[1] == '1') 1 else if (variant[1] == '4') 4 else 2;
-        var name4: [32]u8 = undefined;
-        var name8: [32]u8 = undefined;
-        var q4 = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&name4, "tf_hy4_rows_{s}_q4", .{variant}), false);
-        errdefer q4.deinit();
-        var q8 = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&name8, "tf_hy4_rows_{s}_q8", .{variant}), false);
-        errdefer q8.deinit();
-        var argmax = try mtl.Pipeline.init(device, lib, "tf_hy4_argmax", false);
-        errdefer argmax.deinit();
-        // TF_HY4_QMV=1 keeps the first decode GEMV (four columns a simdgroup, codes unpacked a row at a time)
-        const first = if (std.c.getenv("TF_HY4_QMV")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
-        var qmv4 = try mtl.Pipeline.init(device, lib, if (first) "tf_hy4_qmv_q4" else "tf_hy4_qmv2_q4", false);
-        errdefer qmv4.deinit();
-        var qmv8 = try mtl.Pipeline.init(device, lib, if (first) "tf_hy4_qmv_q8" else "tf_hy4_qmv2_q8", false);
-        errdefer qmv8.deinit();
-        var qmv3: ?[2][4]mtl.Pipeline = null;
-        const qmv_mode: []const u8 = if (std.c.getenv("TF_HY4_QMV")) |v| std.mem.span(v) else "3";
-        const wide8 = std.mem.eql(u8, qmv_mode, "8");
-        if (std.mem.eql(u8, qmv_mode, "3") or wide8) {
-            var p3: [2][4]mtl.Pipeline = undefined;
-            const set4 = [_][4][:0]const u8{ .{ "tf_hy4_qmv3_r1_q4", "tf_hy4_qmv3_r2_q4", "tf_hy4_qmv3_r3_q4", "tf_hy4_qmv3_r4_q4" }, .{ "tf_hy4_qmv3_r1_q8", "tf_hy4_qmv3_r2_q8", "tf_hy4_qmv3_r3_q8", "tf_hy4_qmv3_r4_q8" } };
-            const set8 = [_][4][:0]const u8{ .{ "tf_hy4_qmv3x8_r1_q4", "tf_hy4_qmv3x8_r2_q4", "tf_hy4_qmv3x8_r3_q4", "tf_hy4_qmv3x8_r4_q4" }, .{ "tf_hy4_qmv3x8_r1_q8", "tf_hy4_qmv3x8_r2_q8", "tf_hy4_qmv3x8_r3_q8", "tf_hy4_qmv3x8_r4_q8" } };
-            for (if (wide8) set8 else set4, 0..) |names, bi| {
-                for (names, 0..) |name, ri| p3[bi][ri] = try mtl.Pipeline.init(device, lib, name, false);
-            }
-            qmv3 = p3;
-        }
-        errdefer if (qmv3) |p3| for (p3) |row| for (row) |pipe| pipe.deinit();
-        var experts: [14]mtl.Pipeline = undefined;
-        var made: usize = 0;
-        errdefer for (experts[0..made]) |pipe| pipe.deinit();
-        for ([_][:0]const u8{ "tf_hy4_expert_glu_q4", "tf_hy4_expert_glu_q8", "tf_hy4_expert_down_q4", "tf_hy4_expert_down_q8", "tf_hy4_expert_glu_groups_q4", "tf_hy4_expert_glu_groups_q8", "tf_hy4_expert_down_groups_q4", "tf_hy4_expert_down_groups_q8", "tf_hy4_absorb_qmv_q4", "tf_hy4_absorb_qmv_q8", "tf_hy4_expand_gated_qmv_q4", "tf_hy4_expand_gated_qmv_q8", "tf_hy4_expert_down_sum_q4", "tf_hy4_expert_down_sum_q8" }, &experts) |name, *dst| {
-            dst.* = try mtl.Pipeline.init(device, lib, name, false);
-            made += 1;
-        }
-        return .{ .q4 = q4, .q8 = q8, .rps = rps, .argmax = argmax, .qmv4 = qmv4, .qmv8 = qmv8, .qmv_cols = if (first) 16 else 8, .qmv3 = qmv3, .qmv3_cols = if (wide8) 32 else 16, .expert_glu = .{ experts[0], experts[1] }, .expert_down = .{ experts[2], experts[3] }, .expert_glu_groups = .{ experts[4], experts[5] }, .expert_down_groups = .{ experts[6], experts[7] }, .absorb_q = .{ experts[8], experts[9] }, .expand_q = .{ experts[10], experts[11] }, .expert_down_sum = .{ experts[12], experts[13] }, .add_norm = try mtl.Pipeline.init(device, lib, "tf_hy4_add_rms", false) };
-    }
-
-    pub fn deinit(self: Rows) void {
-        self.q4.deinit();
-        self.q8.deinit();
-        self.argmax.deinit();
-        self.qmv4.deinit();
-        self.qmv8.deinit();
-        if (self.qmv3) |p3| for (p3) |row| for (row) |pipe| pipe.deinit();
-        for (self.expert_glu) |pipe| pipe.deinit();
-        for (self.expert_down) |pipe| pipe.deinit();
-        for (self.expert_glu_groups) |pipe| pipe.deinit();
-        for (self.expert_down_groups) |pipe| pipe.deinit();
-        for (self.absorb_q) |pipe| pipe.deinit();
-        for (self.expand_q) |pipe| pipe.deinit();
-        for (self.expert_down_sum) |pipe| pipe.deinit();
-        self.add_norm.deinit();
-    }
-
-    /// y = norm(a + b) * gain over `rows` rows of `width`, as dense.Ops.add then dense.Ops.norm.
-    pub fn addNorm(self: Rows, e: mtl.ComputeEncoder, x: Ref, branch: Ref, gain: mtl.Buffer, y: Ref, rows: u32, width: u32, epsilon: f32) !void {
-        const p: dense.Norm = .{ .rows = rows, .heads = 1, .dim = width, .x_stride = width, .y_stride = width, .eps = epsilon };
-        const threads = try dense.normThreads(p);
-        e.setPipeline(self.add_norm);
-        e.setBuffer(x.buffer, x.offset, 0);
-        e.setBuffer(branch.buffer, branch.offset, 1);
-        e.setBuffer(gain, 0, 2);
-        e.setValue(p, 3);
-        e.setBuffer(y.buffer, y.offset, 4);
-        e.dispatchGroups(mtl.Size.of(1, rows, 1), mtl.Size.of(threads, 1, 1));
-    }
-
-    /// out[at + r] = the greedy token of logits row r, for `rows` rows of `vocab`.
-    pub fn pick(self: Rows, e: mtl.ComputeEncoder, logits: Ref, out: Ref, at: u32, rows: u32, vocab: u32) void {
-        e.setPipeline(self.argmax);
-        e.setBuffer(logits.buffer, logits.offset, 0);
-        e.setBuffer(out.buffer, out.offset, 1);
-        e.setValue([2]u32{ vocab, at }, 2);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
-    }
-
-    fn sg(self: Rows) u32 {
-        return if (self.rps == 1) 8 else 4;
-    }
-
-    fn choose(self: Rows, w: affine.Weights, rows: u32) ?mtl.Pipeline {
-        if (rows < 2 or w.sum != .f32 or w.n % (self.rps * self.sg()) != 0) return null;
-        return switch (w.bits) {
-            4 => self.q4,
-            8 => self.q8,
-            else => null,
-        };
-    }
-};
+pub const Rows = @import("metal_linears.zig").Rows;
 
 fn twoStep(keys: u32) bool {
-    if (std.c.getenv("TF_HY4_ATTEND")) |v| return std.mem.eql(u8, std.mem.span(v), "two");
     return keys >= 1024;
 }
 
@@ -609,35 +288,13 @@ pub const Kernels = struct {
         var out = try load(device);
         errdefer out.deinit();
         if (device.tensorUnits()) out.tensors = try gpu_qkv.Kernels.load(a, device, t, bits);
-        if (device.tensorUnits() and std.c.getenv("TF_HY4_DENSE_ROWS") == null) out.linears = try Linears.load(a, device, t, bits);
-        if (std.c.getenv("TF_HY4_ROWS_OFF") == null) out.rows = try Rows.load(a, device);
-        if (device.tensorUnits() and std.c.getenv("TF_HY4_MLA_FMA") == null) out.projections.nax = try mla_gpu.Nax.load(a, device);
+        if (device.tensorUnits()) out.linears = try Linears.load(a, device, t, bits);
+        out.rows = try Rows.load(a, device);
+        if (device.tensorUnits()) out.projections.nax = try mla_gpu.Nax.load(a, device);
         return out;
     }
 
     pub fn project(self: *const Kernels, e: mtl.ComputeEncoder, w: affine.Weights, x: Ref, y: Ref, rows: u32) !void {
-        if (self.rows) |r| if (r.qmv3) |p3| if (rows <= decodeRows() and rows <= 4 and w.group == 64 and w.sum == .f32 and w.n % r.qmv3_cols == 0 and w.k % 32 == 0 and (w.bits == 4 or w.bits == 8)) {
-            e.setPipeline(p3[@intFromBool(w.bits == 8)][rows - 1]);
-            e.setBuffer(x.buffer, x.offset, 0);
-            e.setBuffer(w.w, w.w_off, 1);
-            e.setBuffer(w.scales, w.s_off, 2);
-            e.setBuffer(w.biases, w.b_off, 3);
-            e.setValue([6]i32{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, 4);
-            e.setBuffer(y.buffer, y.offset, 5);
-            e.dispatchGroups(mtl.Size.of(w.n / r.qmv3_cols, 1, 1), mtl.Size.of(128, 1, 1));
-            return;
-        };
-        if (self.rows) |r| if (rows <= decodeRows() and rows <= 8 and w.group == 64 and w.sum == .f32 and w.n % r.qmv_cols == 0 and w.k % 32 == 0 and (w.bits == 4 or w.bits == 8)) {
-            e.setPipeline(if (w.bits == 4) r.qmv4 else r.qmv8);
-            e.setBuffer(x.buffer, x.offset, 0);
-            e.setBuffer(w.w, w.w_off, 1);
-            e.setBuffer(w.scales, w.s_off, 2);
-            e.setBuffer(w.biases, w.b_off, 3);
-            e.setValue([6]i32{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, 4);
-            e.setBuffer(y.buffer, y.offset, 5);
-            e.dispatchGroups(mtl.Size.of(w.n / r.qmv_cols, 1, 1), mtl.Size.of(128, 1, 1));
-            return;
-        };
         var call = try affine.call(&self.affine, w, rows, false);
         if (self.rows) |r| if (r.choose(w, rows)) |pipe| {
             call.pipeline = pipe;
@@ -661,15 +318,9 @@ pub const Kernels = struct {
 
     pub const Out = struct { w: Linear, y: Ref };
 
-    /// Every projection of the same input x: on tensor units one group-sums pass, a barrier, then each projection's
-    /// main kernel with those sums and no barrier between them (the sums are what each would have made itself).
+    /// Every projection of the same input x: on tensor units one group-sums pass, a barrier
     pub fn linearsFrom(self: *const Kernels, e: mtl.ComputeEncoder, x: Ref, outs: []const Out, rows: u32) !void {
         if (outs.len == 0) return;
-        if (rows <= decodeRows()) decode: {
-            for (outs) |o| if (o.w.plainWeights() == null) break :decode;
-            for (outs) |o| try self.project(e, o.w.plainWeights().?, x, o.y, rows);
-            return;
-        }
         if (outs[0].w == .portable) {
             for (outs) |o| try self.project(e, o.w.portable, x, o.y, rows);
             return;
@@ -724,21 +375,12 @@ pub const Kernels = struct {
         });
     }
 
-    /// Where a sub-block sits between seams: `ready` when the previous tail already wrote this collapse's partials,
-    /// `next` the collapse after this sub-block (its tail writes that one's partials).
-    /// ready: the collapse's partials are written; headed: its gates, row and norm too (a fused seam before it).
-    /// next_gain: the next sub-block's input norm, which lets the tail run that collapse's head in its launch.
+    /// Where a sub-block sits between seams: `ready` when the previous tail already wrote this collapse's partials
     pub const Seam = struct { ready: bool = false, headed: bool = false, next: ?Merge = null, next_gain: ?mtl.Buffer = null };
 
-    /// Decode passes fuse each tail with the next head (TF_HY4_SEAM_FUSE=0 keeps two launches).
+    /// Decode passes fuse each tail with the next head.
     pub fn fusedSeams(rows: u32) bool {
-        if (seamsOff() or rows > ihc_gpu.Kernels.seam_rows) return false;
-        const v = std.c.getenv("TF_HY4_SEAM_FUSE") orelse return true;
-        return !std.mem.eql(u8, std.mem.span(v), "0");
-    }
-
-    fn seamsOff() bool {
-        return std.c.getenv("TF_HY4_NO_SEAMS") != null;
+        return rows <= ihc_gpu.Kernels.seam_rows;
     }
 
     /// The collapse and input norm in two launches at most (partials unless `ready`, then gates, row and norm).
@@ -748,7 +390,6 @@ pub const Kernels = struct {
 
     pub fn collapseSeamFrom(self: *const Kernels, e: mtl.ComputeEncoder, x: Ref, w: Merge, gain: mtl.Buffer, s: *const Scratch, seam: Seam) !ihc.Shape {
         const ready = seam.ready;
-        if (seamsOff()) return self.collapse(e, x, w, gain, s);
         var shape = w.shape;
         shape.rows = s.shape.rows;
         if (seam.headed) return shape;
@@ -772,8 +413,7 @@ pub const Kernels = struct {
         return shape;
     }
 
-    /// A sub-block's end: its branch (two added, for the experts) through the output norm, mixed into `out`, and the
-    /// next collapse's partials when there is one.
+    /// A sub-block's end: its branch (two added, for the experts) through the output norm, mixed into `out`
     pub fn tail(self: *const Kernels, e: mtl.ComputeEncoder, branch: Ref, branch2: ?Ref, gain: mtl.Buffer, eps: f32, x: Ref, out: Ref, s: *const Scratch, shape: ihc.Shape, next: ?Merge) !void {
         return self.tailTo(e, branch, branch2, gain, eps, x, out, s, shape, .{ .next = next });
     }
@@ -801,13 +441,6 @@ pub const Kernels = struct {
                 .barriers = .{ .buffer = s.seam_barriers.buffer, .offset = s.seam_barriers.offset },
             }, shape.rows, shape.width, eps);
         };
-        if (seamsOff()) {
-            if (branch2) |b2| {
-                if (self.rows) |r| try r.addNorm(e, branch, b2, gain, s.normalized, shape.rows, shape.width, eps) else return error.Hy4SeamsNeedRows;
-            } else try self.norm(e, branch, gain, s.normalized, shape.rows, shape.width, eps);
-            e.barrier();
-            return self.residual(e, x, s.normalized, s.post, out, shape);
-        }
         const r = ihc_gpu.Ref;
         self.merge.tailPass(e, .{
             .branch = r{ .buffer = branch.buffer, .offset = branch.offset },
@@ -900,15 +533,7 @@ pub const Kernels = struct {
         const lists = if (ix_pass) |p| p.scratch.selects() else false;
         // rows of a pass across 2,048 keys that sit before it attend as they would in any other pass
         const lists_from: ?u32 = if (lists and cache.ranges != null and ix_pass.?.scratch.first < index.keys_a_row) index.keys_a_row - ix_pass.?.scratch.first else null;
-        const quantized: ?mla_gpu.Quantized = if (self.rows) |r| if (w.kv_q) |q| if (rows <= mlaRows() and (w.bits == 4 or w.bits == 8)) .{
-            .absorb = r.absorb_q[@intFromBool(w.bits == 8)],
-            .expand = r.expand_q[@intFromBool(w.bits == 8)],
-            .words = .{ .buffer = q[0] },
-            .scales = .{ .buffer = q[1] },
-            .biases = .{ .buffer = q[2] },
-        } else null else null else null;
         try mla_gpu.forward(self.projections, self.attention, e, .{
-            .quantized = quantized,
             .query = s.query,
             .key_weights = .{ .buffer = w.wk },
             .value_weights = .{ .buffer = w.wv },

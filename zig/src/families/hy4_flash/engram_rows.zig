@@ -65,7 +65,6 @@ pub const Table = struct {
     }
 
     /// Each window is current token first, then older tokens, padded by the caller for a new stream.
-    /// Output is raw BF16 embedding rows [token][hash head][width], before FP8 simulation or normalization.
     pub fn gather(self: Table, a: std.mem.Allocator, windows: []const [engram.order]u32, output: []u16) !void {
         const cells = try std.math.mul(usize, windows.len, self.elementsPerToken());
         if (output.len != cells) return error.BadEngramOutput;
@@ -79,8 +78,7 @@ pub const Table = struct {
             }
         }
 
-        // Ask for every row's pages at once (asynchronous read-ahead), so cold rows' faults overlap rather than queue
-        // one by one in the copies below.
+        // Ask for every row's pages at once (asynchronous read-ahead)
         for ([_]core.checkpoint_host.Tensor{ self.affine.words, self.affine.scales, self.affine.biases }) |t| willNeed(t, spans);
         const words = try core.quant.slice.takeRows(a, self.affine.words, spans);
         defer a.free(words.bytes);

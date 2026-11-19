@@ -177,8 +177,7 @@ pub fn regBlock(tiled: *const [256]u32, out: *[256]u32) void {
 
 pub const Order = struct { w: Ref, n: usize, k: usize };
 
-/// Rewrites tile-order 8-bit g64 words (host-visible) in place into the 8-bit reg layout: u32[N/32][K/64][4][32 lanes][4],
-/// a lane's codes in the 4-bit reg order a byte each (word 2w: four codes, 2w + 1: the four 16 deeper).
+/// Rewrites host-visible tile-order 8-bit g64 words in place into the 8-bit reg layout (the 4-bit reg order, bytes).
 pub fn regOrder8(words: []u32, n: usize, k: usize) !void {
     if (n == 0 or n % 32 != 0 or k == 0 or k % 64 != 0 or words.len != n * k / 4) return error.InvalidShape;
     var block: [512]u32 = undefined;

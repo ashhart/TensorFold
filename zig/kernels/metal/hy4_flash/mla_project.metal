@@ -133,8 +133,7 @@ kernel void tf_hy4_expand_v(
     expanded[ulong(row_head) * 256 + column] = hy4_mla_round(sum);
 }
 
-// tf_hy4_expand_v then tf_hy4_gate_values in one launch: the expanded value rounded as before, then gated by the
-// rounded sigmoid of its logit exactly as the gate pass does, so the same bits without the second pass.
+// tf_hy4_expand_v then tf_hy4_gate_values in one launch
 kernel void tf_hy4_expand_v_gated(
     const device ushort *latent [[buffer(0)]],
     const device ushort *value_projection [[buffer(1)]],

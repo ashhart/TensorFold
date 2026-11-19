@@ -1,5 +1,4 @@
-//! Hy4-flash served by the lane host on Metal: one stream at a time with DFly2 windows, contexts to 256K tokens
-//! (128K by default), and the last stream's caches kept for a following prompt that starts with the same tokens.
+//! Hy4-flash served by the lane host on Metal
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
