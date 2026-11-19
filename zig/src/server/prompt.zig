@@ -41,6 +41,9 @@ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Valu
 pub fn renderStarts(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool, starts: ?*[]const u32) errors.Refused![]const u32 {
     const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
     const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
+    // Flash Next's positional tool_response blocks carry no call IDs.
+    if (std.mem.eql(u8, srv.info.name, "flashnext-zig") and normalized == .array)
+        try messages_mod.orderParallelResults(cx.a, normalized.array);
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,

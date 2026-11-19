@@ -8,11 +8,12 @@ const yarn = @import("yarn.zig");
 pub const MhcRole = if (@hasDecl(@import("core"), "sensenova_loop"))
     @import("core").sensenova_loop.config.MhcRole
 else
-    enum { none, enter, inner, exit };
+    enum { none, enter, inner, exit, both };
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
 pub const max_eos = 8;
+pub const max_mhc_iterations: u32 = 1000;
 
 pub const ParseOptions = struct { rope_yarn: ?f64 = null, loops: ?u32 = null };
 
@@ -313,11 +314,11 @@ pub fn parseWithOptions(gpa: std.mem.Allocator, json: []const u8, generation: ?[
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
     const root_model = root.get("model_type");
-    const is_loop_root = root_model != null and root_model.? == .string and (std.mem.eql(u8, root_model.?.string, "sensenova_loop") or std.mem.eql(u8, root_model.?.string, "sensenova_loop_text"));
-    const model = if (is_loop_root) root_model.? else (t.get("model_type") orelse root_model orelse return error.BadConfig);
+    if (root_model) |rm| if (rm == .string and std.mem.eql(u8, rm.string, "sensenova_loop_text")) return error.NotQwenDense;
+    const looped = root_model != null and root_model.? == .string and std.mem.eql(u8, root_model.?.string, "sensenova_loop");
+    const model = if (looped) root_model.? else (t.get("model_type") orelse root_model orelse return error.BadConfig);
     const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
     if (model != .string) return error.NotQwenDense;
-    const looped = std.mem.eql(u8, model.string, "sensenova_loop") or std.mem.eql(u8, model.string, "sensenova_loop_text");
     const routed = if (looped) false else for (kinds_of, 0..) |k, i| {
         if (std.mem.eql(u8, model.string, k)) break i >= 2;
     } else return error.NotQwenDense;
@@ -381,16 +382,20 @@ pub fn parseWithOptions(gpa: std.mem.Allocator, json: []const u8, generation: ?[
         if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
             const sn_cfg = @import("core").sensenova_loop.config;
             const sn = try sn_cfg.Config.parseWithGeneration(gpa, json, generation);
-            const mhc = sn.mhc orelse return error.BadConfig;
-            if (mhc.streams != 2) return error.BadConfig;
             var step_buf: [max_layers]sn_cfg.ExecutionStep = undefined;
             const steps = try sn.fillPlan(&step_buf, opts.loops);
             c.looped = true;
             c.shift_norms = true;
             c.physical_layers = sn.num_hidden_layers;
             c.layers = steps.len;
-            c.mhc_iterations = mhc.iterations;
-            c.mhc_pre_scale = mhc.pre_scale;
+            if (sn.mhc) |mhc| {
+                const scale32: f32 = @floatCast(mhc.pre_scale);
+                if (mhc.streams != 2 or mhc.fixed_identity or mhc.iterations > max_mhc_iterations or !std.math.isFinite(scale32) or scale32 <= 0) {
+                    return error.UnsupportedSenseNovaMhc;
+                }
+                c.mhc_iterations = mhc.iterations;
+                c.mhc_pre_scale = scale32;
+            }
             for (steps, 0..) |st, exec| {
                 c.kinds[exec] = if (st.is_linear) .linear else .attention;
                 c.exec_phys[exec] = st.phys;

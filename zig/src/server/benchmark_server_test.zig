@@ -51,9 +51,9 @@ test "the child's environment drops the key, log, salt and token and turns off t
     defer arena.deinit();
     const a = arena.allocator();
     var parent: std.process.Environ.Map = .init(a);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN", "PATH" }) |k| try parent.put(k, "x");
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN", "PATH" }) |k| try parent.put(k, "x");
     const env = try server.environ(a, &parent);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| try std.testing.expect(env.get(k) == null);
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| try std.testing.expect(env.get(k) == null);
     for ([_][]const u8{ "TENSORFOLD_NO_LIVE", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HUB_OFFLINE" }) |k| try std.testing.expectEqualStrings("1", env.get(k).?);
     try std.testing.expectEqualStrings("x", env.get("PATH").?);
 }

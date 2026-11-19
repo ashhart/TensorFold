@@ -353,7 +353,7 @@ export function RoomView({ id }: { id: string }) {
           </div>
           <div className="grid grid-cols-2 gap-1.5">
             <RoomStat icon="cpu" label={tx("Seats")} value={String(room.seats.length)} />
-            <RoomStat icon="list" label={tx("Tasks")} value={`${leftToWork.length}/${roomTasks.length}`} accent={leftToWork.length > 0} />
+            <RoomStat icon="list" label={tx("Tasks")} value={`${roomTasks.length - leftToWork.length}/${roomTasks.length}`} accent={leftToWork.length > 0} />
             <RoomStat icon="file" label={tx("Files")} value={String(filesTouched.length)} />
             <RoomStat icon="message" label={tx("Asks")} value={String(pendingQuestions.length)} accent={pendingQuestions.length > 0} />
           </div>

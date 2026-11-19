@@ -86,7 +86,7 @@ pub const Model = struct {
         later: bool,
         opts: cfg.ParseOptions,
     ) !*Model {
-        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+        if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
             if (n < 16 or n > 2048 or n % 16 != 0) {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
@@ -153,7 +153,7 @@ pub const Model = struct {
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
-        m.mhc = if (shard.local.looped) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
+        m.mhc = if (shard.local.looped and shard.local.mhc_iterations != 0) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
         errdefer if (m.mhc) |*p| p.deinit();
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
@@ -177,7 +177,7 @@ pub const Model = struct {
         m.share_pending = false;
         defer m.checkpoint.closeFiles();
         const c = m.config;
-        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
         const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
@@ -230,7 +230,7 @@ pub const Model = struct {
 
 /// A prompt pass's requested rows, before the runner's frame and attention limits.
 pub fn promptRows(c: cfg.Config, generation: u32) u32 {
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
+    const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
     return @import("prompt_rows.zig").requestedModel(generation, c.moe(), c.looped, value);
 }
 

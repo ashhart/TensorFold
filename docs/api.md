@@ -49,7 +49,8 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
+`/v1/imprint`, adding or deleting voices (`--manage-voices`), another method, or a suffix alias such as `/alt/completions`
+that the server answers for a full key. The route
 is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
 `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
 or a parked model reloads. The public routes stay public.
@@ -129,6 +130,7 @@ routes still require when keys are on. Without the flag no reply carries a CORS 
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /v1/responses/{id}/cancel` | Cancel a [background response](#background-responses) that is queued or running |
 | `POST /score`, `POST /v1/score` | Text-pair scores in request order, using the configured reranker |
 | `POST /rerank`, `POST /v1/rerank` | Ranked documents; a `texts` body selects the TEI response shape |
 | `POST /v2/rerank` | Cohere-style ranked `results` over the same score hook |
@@ -776,6 +778,18 @@ The server does not silently turn a required call into `auto`. Installing the gr
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+
+A native grammar request waits at most 2,000 ms for its compile. This holds for every format, including JSON objects
+and schemas, regexes, choices, EBNF and the structural tags of tool calls. Past that the request gets HTTP 400 naming
+the limit, for example `response_format: the grammar cannot be enforced: grammar compilation exceeds the 2000 ms time
+limit`. Each model compiles at most 4 grammars at once, outside any lock other requests take, so one slow schema does
+not hold up other requests' grammars. A request that finds all 4 busy waits for one within the same 2,000 ms, then
+gets HTTP 400 naming both limits. Identical requests share one compile. A grammar compiled before is served from the
+cache with the same bytes. The last 8 that finished in time need no compile slot, and the rest come from xgrammar's
+own 256 MiB cache. xgrammar cannot stop a compile once it has started, so an abandoned one runs on in the background
+and keeps its slot until it returns. The grammar it finishes goes into xgrammar's cache, and the same request sent
+after that is served. An invalid grammar is refused with xgrammar's reason, as before. These limits are separate from
+`grammar_budget`, which bounds the tokens a constrained reply needs to complete.
 
 ### Strict tools under `tool_choice: "auto"`
 
@@ -1526,7 +1540,7 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
+others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names. `message.output_text.logprobs` asks for logprobs where the engine has them
@@ -1535,6 +1549,35 @@ remote file URLs (`input_file` parts with inline `file_data` run on a model star
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
 `web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
 strings, is refused.
+
+### Background responses
+
+`background: true` answers the POST at once with the response object, `status: "queued"`, `background: true` and no
+output; the reply is generated after the POST returns, and leaving the connection does not cancel it.
+`GET /v1/responses/{id}` polls it: `queued`, then `in_progress` (output stays empty while it runs), then the
+finished response as a request sent without `background` returns it: `completed`, `incomplete`, `failed` or
+`cancelled`. The reply runs through the same chat path as that request, so the same body and seed give the same
+tokens. A finished background response is an ordinary stored response: `previous_response_id` continues it (one still
+running is refused), and it is kept, evicted and lost on restart as every stored response is.
+
+`POST /v1/responses/{id}/cancel` (or `/responses/{id}/cancel`) cancels a queued or running one. A running reply ends
+as [Cancel a request](#cancel-a-request) ends it, with the text it had; the route waits up to 2 s for that end and
+answers 200 with the response, `status: "cancelled"`. `POST /v1/requests/{id}/cancel` with the same `resp_` id does
+the same. A second cancel answers the cancelled response again, a background response that has already ended
+otherwise answers 400, as does a response not created with `background`, and an unknown id 404.
+`DELETE /v1/responses/{id}` on a running one stops it, and nothing of it is kept.
+
+`background: true` needs `store: true` (the default) and refuses `stream: true`: there is no event stream to start
+or resume (a GET of a background response with `stream=true`, as `starting_after` resumes one, answers 400), so poll
+instead. It is an HTTP request only; a Responses socket refuses it, and a true value that is not a boolean, such as
+`1`, is refused. At most 64 background responses are queued or running at once on a server, 16 for one API key,
+holding 256 MiB of copied requests in all; past those a create answers 429 `background_limit_exceeded` before any
+work starts. Each keeps its request's place under `--max-inflight` until it is stored, and a stop gives it the drain
+window any request in progress gets.
+
+Stored responses are the server's, so with API keys only a full or `[admin]` key may create, poll or cancel one; a
+scoped key gets 403 (see [Key scopes](#key-scopes)). A server without keys takes the response's id, 128 random bits,
+as the right to read, cancel or delete it, as it does for `GET` and `DELETE`.
 
 ### WebSocket mode
 
@@ -1698,3 +1741,61 @@ streamed.
 ```bash
 curl http://127.0.0.1:8080/api/embed -d '{"model":"local-model","input":"hello"}'
 ```
+
+## Request journal and replay
+
+`TENSORFOLD_REQUEST_JOURNAL=PATH` turns on a request journal; it is off unless set, and only `PATH` and its siblings are
+written. **It holds every chat and completion prompt and reply in full**: treat it like the conversations themselves.
+Image URLs and PDF data are replaced with `<redacted>`, as in `TENSORFOLD_REQUEST_LOG`, which is unchanged. No HTTP header
+is journaled, so API keys and `Authorization` values never reach it. The server creates `PATH` and `PATH.lock`
+owner-only (0600), refuses a symbolic link or a file others can read, and holds `PATH.lock` while it runs, so a second
+server on the same journal does not start. Benchmark child servers never inherit the variable.
+
+Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
+the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
+thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
+reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+requests are journaled in the chat form they are translated to. A raw completion whose `prompt` is a list is not
+replay-exact: its per-prompt prepared records are not written, and its individual drawn seeds are not journaled.
+
+Size is bounded: a file rotates at 64 MiB to `PATH.1`, older files move up, and `PATH.3` is the last kept, so the
+journal holds at most 256 MiB. A body or reply too large for one 8 MiB record keeps its size and hash only. Each record
+is one `write` with no sync, so the journal adds three small appends to a request and nothing to its tokens; a full
+disk or a write error loses that record (the server logs it once), never the request. A record survives the server
+process crashing, not a power loss.
+
+On the next start the server reads the kept files. A request that started and never finished, with no clean stop after
+it, was in flight at a crash: a `quarantine` line flags it, and the server never retries it. Its fingerprint is SHA-256
+over the API key's label (as in the access log), the route and the whole body, so it matches only the same key sending
+the same request. One crash only flags what was in flight, since a crash can come from elsewhere (another route, the
+machine) and the requests beside it are not to blame. A request whose fingerprint was in flight at two crashes is
+refused with a 400 `request_quarantined` before the engine sees it, which ends a client's retry loop after the second
+crash. Other requests, and other keys sending the same body, are served as before; the check is one hash lookup. Without
+API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
+Ctrl-C) quarantines nothing.
+
+`tools/replay_request.py` lists, clears and replays journaled requests:
+
+```sh
+python3 tools/replay_request.py requests.jsonl --list
+python3 tools/replay_request.py requests.jsonl --id chatcmpl-example --base http://127.0.0.1:8080
+python3 tools/replay_request.py requests.jsonl --clear chatcmpl-example   # or a fingerprint, or all; server stopped
+```
+
+`--list` sends nothing. A replay sends the journaled body once to its route; when the client sent no seed, it adds the
+seed the server drew. It compares the reply's output: every choice's text, reasoning, tool calls (without their ids),
+logprobs and finish reason, the token counts, the stop sequence and `tensorfold.token_sha256`, the SHA-256 of the reply's
+token ids, so equal means the same tokens. Streams compare their joined deltas, whatever their frame boundaries. Reply
+ids, `created`, timings, `cached_tokens` and keepalives are left out; `--whole-body` compares every byte instead and
+will differ on those. A reply too large to keep is compared by its token hash. Exit 0 is equal, 1 is different, and 2
+means there was no finished reply to compare. `--body FILE` supplies the original request when images or a PDF were
+redacted or the body was too large; `--allow-quarantined` sends a quarantined request on purpose; `--key-env NAME`
+names the variable holding the API key (`TENSORFOLD_API_KEY` by default), which is sent and never written.
+
+A replay is exact on the same build, checkpoint, tokenizer, drafter and server flags, since TensorFold's decode gives the
+same tokens for the same prompt and seed with or without drafts, alone or batched. It is not exact across builds or
+checkpoints, after the server's defaults change, when a Messages request relied on the server's thinking default, when
+the body was restored with different media, or for a request whose server ran several generations for it (Cortheon)
+without a client seed or `--prompt-seed`, since only the last drawn seed is journaled.
+Unseeded prompt lists are not replay-exact either: each prompt draws its own seed, and those per-prompt prepared
+records are omitted. Send a client seed or keep the same `--prompt-seed` setting for an exact list replay.

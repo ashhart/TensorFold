@@ -61,3 +61,40 @@ test "tool turn prompt: the history mark after a tool reply is a prefix of the n
     try std.testing.expect(first.history_len > 0);
     try std.testing.expectEqualSlices(u32, first.ids[0..first.history_len], second.ids[0..first.history_len]);
 }
+
+test "Flash Next positional tool results follow call IDs across arrival orders" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try f.Fixture.init(a, 0);
+    defer fixture.deinit();
+    // The checkpoint renders result bodies in sequence without emitting their IDs.
+    try fixture.tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "chat_template.jinja",
+        .data = "{% for m in messages %}{% if m.role == 'tool' %}<tool_response>{{ m.content }}</tool_response>{% endif %}{% endfor %}",
+    });
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, std.testing.io, fixture.path, null, a, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try Server.init(a, std.testing.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    srv.info.name = "flashnext-zig";
+    var cx: errors.Cx = .{ .a = a };
+    const prefix =
+        \\[{"role":"user","content":"Read both files."},{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"read_file","arguments":{"path":"defaults.toml"}}},{"id":"b","type":"function","function":{"name":"read_file","arguments":{"path":"production.toml"}}}]},
+    ;
+    const cases = [_]struct { first: []const u8, second: []const u8, port1: []const u8, port2: []const u8, expected_first: []const u8, expected_second: []const u8 }{
+        .{ .first = "a", .second = "b", .port1 = "8080", .port2 = "9137", .expected_first = "8080", .expected_second = "9137" },
+        .{ .first = "b", .second = "a", .port1 = "9137", .port2 = "8080", .expected_first = "8080", .expected_second = "9137" },
+        .{ .first = "b", .second = "a", .port1 = "8080", .port2 = "9137", .expected_first = "9137", .expected_second = "8080" },
+        .{ .first = "b", .second = "b", .port1 = "9137", .port2 = "8080", .expected_first = "9137", .expected_second = "8080" },
+    };
+    for (cases) |case| {
+        const body = try std.fmt.allocPrint(a, "{s}{{\"role\":\"tool\",\"tool_call_id\":\"{s}\",\"content\":\"{s}\"}},{{\"role\":\"tool\",\"tool_call_id\":\"{s}\",\"content\":\"{s}\"}}]", .{ prefix, case.first, case.port1, case.second, case.port2 });
+        const msgs = (try json.parseText(a, body)).ok;
+        const ids = try prompt_mod.renderIds(srv, &cx, msgs, &.{}, false, null, true);
+        const expected = try std.fmt.allocPrint(a, "<tool_response>{s}</tool_response><tool_response>{s}</tool_response>", .{ case.expected_first, case.expected_second });
+        try std.testing.expectEqualSlices(u32, try srv.text.encode(a, expected, false), ids);
+    }
+}

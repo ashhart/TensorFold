@@ -112,3 +112,51 @@ def test_a_kill_after_a_stop_that_took_too_long_is_a_stop_too(tmp_path):
     popen.kill()
     eng._pump(child, log, False)
     assert popen.returncode == -9 and eng.exit_code == 0 and eng.status().status != "failed"
+
+
+@pytest.mark.parametrize(("initial", "appended", "expected", "tokens"), [
+    ("", "new\n", ["new"], None),
+    ("old\n", "new\n", ["old", "new"], None),
+    ("ready\n[tensorfold] context window ", "32,768 tokens\n",
+     ["ready", "[tensorfold] context window 32,768 tokens"], 32768),
+])
+def test_replay_keeps_unfinished_line(tmp_path, initial, appended, expected, tokens):
+    eng = Engine(Settings())
+    log = tmp_path / "engine.log"
+    log.write_text(initial, encoding="utf-8")
+
+    class Child:
+        pid, popen, returncode = 101, None, 0
+
+        def alive(self):
+            with log.open("a", encoding="utf-8") as writer:
+                writer.write(appended)
+            return False
+
+    eng.proc = Child()
+    eng._pump(eng.proc, log, replay=True)
+    assert [line.split(" ", 1)[1] for line in eng.log if "[web]" not in line] == expected
+    assert eng.startup.get("context_tokens") == tokens
+
+
+def test_log_truncation_discards_replayed_partial_line(tmp_path, monkeypatch):
+    eng = Engine(Settings())
+    log = tmp_path / "engine.log"
+    log.write_text("unfinished old", encoding="utf-8")
+    monkeypatch.setattr(engine_mod, "LOG_MAX_BYTES", 1)
+
+    class Child:
+        pid, popen, returncode = 101, None, 0
+        calls = 0
+
+        def alive(self):
+            self.calls += 1
+            if self.calls == 1:
+                return True
+            log.write_text("fresh\n", encoding="utf-8")
+            return False
+
+    monkeypatch.setattr(engine_mod.time, "sleep", lambda _: None)
+    eng.proc = Child()
+    eng._pump(eng.proc, log, replay=True)
+    assert [line.split(" ", 1)[1] for line in eng.log if "[web]" not in line] == ["fresh"]

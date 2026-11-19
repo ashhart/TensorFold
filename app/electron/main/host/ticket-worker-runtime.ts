@@ -63,6 +63,9 @@ export async function awaitTicketStartupStep<T>(pending: Promise<T>, revalidate:
 }
 
 interface TicketWorkerRuntimeDeps {
+  runAgent?: typeof runAgent
+  resolveWorkspaceCwd?: typeof resolveWorkspaceCwd
+  inspectGitRepository?: typeof inspectGitRepository
   persistThreads(): void
   persistTickets(): void
   emitTicket(ticket: Ticket): void
@@ -92,6 +95,9 @@ interface TicketWorkerRuntimeDeps {
 
 export function createTicketWorkerRuntime(deps: TicketWorkerRuntimeDeps): TicketWorkerRuntime {
   const {
+    runAgent: executeAgent = runAgent,
+    resolveWorkspaceCwd: resolveWorkerCwd = resolveWorkspaceCwd,
+    inspectGitRepository: inspectWorkerGit = inspectGitRepository,
     persistThreads,
     persistTickets,
     emitTicket,
@@ -178,12 +184,12 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     : await runtimeProviderWithFreshModels(routeBaseProvider, providerAccountId)
   let model = resolvedRoute.model
   assertProviderEndpoint(provider)
-  const cwd = await resolveWorkspaceCwd(roomWorkspace || project?.cwd || store.settings.defaultCwd, 'ticket workspace')
+  const cwd = await resolveWorkerCwd(roomWorkspace || project?.cwd || store.settings.defaultCwd, 'ticket workspace')
 
   assertActiveTicketWorkOwnership(ticket, project, room, existingThread)
 
   const executionBranch = await awaitTicketStartupStep(
-    inspectGitRepository(cwd, 'ticket workspace').then((repo) => repo.branch).catch(() => null),
+    inspectWorkerGit(cwd, 'ticket workspace').then((repo) => repo.branch).catch(() => null),
     () => assertActiveTicketWorkOwnership(ticket, project, room, existingThread),
   )
 
@@ -211,6 +217,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     store.threads.unshift(thread); persistThreads()
     sendToRenderer('thread:update', thread)
   }
+  const previousItemIds = new Set(thread.timeline.map((item) => item.id))
+  const runItems = new Map<string, TimelineItem>()
   ticket.threadId = thread.id
   ticket.status = 'in_progress'
   ticket.runState = 'running'
@@ -264,7 +272,21 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   emitToRenderer({ runId: '', threadId: thread.id, type: 'item_add', item: userItem })
 
   const t = thread
-  const emit = (e: AgentEvent) => { applyEventToThread(t, e); emitToRenderer(e) }
+  const emit = (e: AgentEvent) => {
+    applyEventToThread(t, e)
+    if (e.threadId === t.id && e.type === 'item_add' && !previousItemIds.has(e.item.id)) {
+      runItems.set(e.item.id, t.timeline.find((item) => item.id === e.item.id) ?? structuredClone(e.item))
+    } else if (e.threadId === t.id && (e.type === 'item_update' || e.type === 'item_delta')) {
+      const owned = runItems.get(e.id)
+      if (owned) {
+        const live = t.timeline.find((item) => item.id === e.id)
+        if (live) runItems.set(e.id, live)
+        else if (e.type === 'item_update') Object.assign(owned, structuredClone(e.patch))
+        else owned[e.field] = (owned[e.field] ?? '') + e.chunk
+      }
+    }
+    emitToRenderer(e)
+  }
   t.cwd = cwd
   t.providerId = baseProvider.id
   t.providerAccountId = providerAccountId
@@ -301,7 +323,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       fullToolContext({ thread: t, provider: route.provider, model: route.model, signal: controller.signal }),
       allowedCapabilities,
     )
-    await runAgent({
+    await executeAgent({
         responseLocale: selectedResponseLocale(store.settings.uiPreferences),
       thread: t,
       provider: route.provider,
@@ -396,7 +418,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       markUndrainedCues(t, controller.signal.aborted ? 'canceled' : 'run ended')
       aborters.delete(t.id)
       runLease.release()
-      const failed = t.timeline.some((i) => i.kind === 'error')
+      const runTimeline = [...runItems.values()]
+      const failed = runTimeline.some((i) => i.kind === 'error')
       const interrupted = controller.signal.aborted
       t.status = failed ? 'error' : 'idle'; t.updatedAt = Date.now()
       // When the run was aborted/paused (no completion), park the ticket without
@@ -406,7 +429,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       ticket.runState = settled.runState
       ticket.status = settled.status
       ticket.updatedAt = Date.now()
-      const summary = summarizeTicketWorkerOutcome(ticket, t, phase, failed, input.source?.seat ?? model)
+      const summary = summarizeTicketWorkerOutcome(ticket, { ...t, timeline: runTimeline }, phase, failed, input.source?.seat ?? model)
       if (ticket.execution) {
         ticket.execution = settleTicketExecution(ticket.execution, {
           outcome: { phase, failed, interrupted },

@@ -8,6 +8,7 @@ const affine_k = @import("metal_affine.zig");
 const gather_k = @import("metal_affine_gather.zig");
 const topk_k = @import("metal_topk.zig");
 const ling_route = @import("metal_ling_route.zig");
+const ling_mla = @import("metal_ling_mla.zig");
 const tile_k = @import("metal_tile.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
@@ -353,6 +354,9 @@ pub fn main(init: std.process.Init) !u8 {
         ling = try ling_route.Route.init(a, device, queue);
         try kernels.append(a, ling.?.kernel());
     }
+    var ling_mla_set = ling_mla.Suite{ .a = a, .device = device, .queue = queue };
+    defer ling_mla_set.deinit();
+    try ling_mla_set.collect(&kernels, o.only);
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
@@ -541,6 +545,8 @@ pub fn main(init: std.process.Init) !u8 {
     var sn_lin = @import("metal_sensenova_linear.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer sn_lin.deinit();
     try sn_lin.collect(o.only);
+    const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

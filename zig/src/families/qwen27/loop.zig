@@ -178,8 +178,9 @@ pub fn preMhc(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Config, 
     var span = profile.begin(kernels.profiler, e, .norm);
     errdefer span.cancel();
     const enc = span.encoder;
-    const need_tap = c.mhc_roles[index] == .enter and tap != null and pending.* != null;
-    if (c.mhc_roles[index] == .enter) {
+    const enters = c.mhc_roles[index] == .enter or c.mhc_roles[index] == .both;
+    const need_tap = enters and tap != null and pending.* != null;
+    if (enters) {
         try mhc_metal.enter(mhc, enc, mref(hidden.*), if (pending.*) |p| mref(p) else null, mref(f.get(.h_streams)), if (need_tap) mref(residual.*) else null, rows, h);
         enc.barrier();
         pending.* = null;
@@ -208,7 +209,7 @@ pub fn postMhcMid(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Conf
 /// Merge FFN branch into next layer's pre-norm when continuing in two streams, else mean-collapse on exit.
 pub fn postMhcEnd(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Config, index: usize, next_layer: ?wts.Layer, next_ml: ?MhcLayer, hidden: *projection.Ref, pending: *?projection.Ref, f: *Frame, rows: u32, e: mtl.ComputeEncoder, tap: ?TapHook) !void {
     const h: u32 = @intCast(c.hidden);
-    const exit = c.mhc_roles[index] == .exit;
+    const exit = c.mhc_roles[index] == .exit or c.mhc_roles[index] == .both;
     const fuse_next = !exit and next_layer != null and next_ml != null and index + 1 < c.layers and
         (c.mhc_roles[index + 1] == .inner or c.mhc_roles[index + 1] == .exit);
     var span = profile.begin(kernels.profiler, e, .norm);

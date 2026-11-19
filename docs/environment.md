@@ -51,6 +51,14 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
 | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
 | `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use (the same bits either way), also at a load that times nothing; unset or blank races the two when a build first loads with drafts and scratch context and keeps the winner, else classic; read on rank 0, which chooses every rank's form |
+| `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
+| `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
+| `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
+| `TF_GLM_WORLD` | GLM-5.3-Flash on CUDA: a whole rank count from 1 through 4294967295, set with `TF_GLM_RANK`; unset with it gives one rank |
+| `TF_NEMOTRON_RANK` | Nemotron 3.5 Super on CUDA: a whole rank index from 0 through 4294967295, set with `TF_NEMOTRON_WORLD`; unset with it gives one rank |
+| `TF_NEMOTRON_WORLD` | Nemotron 3.5 Super on CUDA: a whole rank count from 1 through 4294967295, set with `TF_NEMOTRON_RANK`; unset with it gives one rank |
+| `TF_MINIMAX_RANK` | MiniMax-M3.1-Flash on CUDA: a whole rank index, 0 or 1 at two ranks, set with `TF_MINIMAX_WORLD`; unset with it gives one rank |
+| `TF_MINIMAX_WORLD` | MiniMax-M3.1-Flash on CUDA: a whole rank count, 2 at CUDA, set with `TF_MINIMAX_RANK`; unset with it gives one rank |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
 | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; default 1, where the 4-bit expert kernels (decode, grouped and prompt gathers) read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values from fewer weight bytes, and the routed experts' stored scales and biases are not kept in memory; `0` keeps and reads the stored arrays; ignored with `--ssd-experts` |
@@ -163,6 +171,7 @@ These settings retain their existing boolean policies rather than gaining new al
 - Flash Next keeps its lenient readers where they are: `TF_FLASHNEXT_TP` and `TF_FLASHNEXT_LOGITS` take a path,
   `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence,
   and the tool-only sampling settings of the MTP check and the `FZ_` developer switches keep their semantics.
+The fabric/tp config helper keeps its runtime-name lookup instead of gaining a startup row: it carries the lenient switches above and transport names read only by tools, which no server would set.
 
 The profile registry reports selected arithmetic/experimental overrides; it does not change their parsing or defaults.
 See [profiles](profiles.md) for classes, scopes and grouped slide-learning names.
