@@ -1,8 +1,4 @@
-//! Hy4-flash text model on CUDA from an EXL3 routed-expert checkpoint with BF16 everywhere else (the
-//! LibertAIDAI layout): embedding, four hyper-connection streams, 42 decoder layers (Engram, iHC, gated MLA,
-//! dense MLP or LatentMoE with 512 `mul1` experts), the hyper head, final norm and LM head. One sequence with a
-//! contiguous per-layer KV cache; keys are causal (sparse layers, up to `index_topk`) or the 512-key window.
-//! The compressed indexer past 2,048 keys and lane serving are separate steps.
+//! Hy4-flash text model on CUDA for EXL3 routed experts with BF16 elsewhere; one sequence, causal or windowed keys.
 const std = @import("std");
 const core = @import("core");
 const cuda = @import("cuda");
@@ -228,10 +224,7 @@ pub const Model = struct {
         self.lm_head = try self.up(ck, "lm_head.weight", .{}, .bf16, &.{ V, H });
         ck.release();
         // UMA guard: device memory is not charged to the cgroup, so stop before the system runs dry.
-        const floor_gib: usize = blk: {
-            const v = std.c.getenv("TF_HY4_MEM_FLOOR_GIB") orelse break :blk 10;
-            break :blk std.fmt.parseInt(usize, std.mem.span(v), 10) catch 10;
-        };
+        const floor_gib = try @import("sys").environment.read(usize, "TF_HY4_MEM_FLOOR_GIB", 10);
         for (self.layers, 0..) |*layer, i| {
             const avail = memAvailable();
             std.debug.print("layer {d:>2}: device {d:.2} GiB, MemAvailable {d:.2} GiB\n", .{ i, gib(self.own.bytes), gib(avail) });

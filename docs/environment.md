@@ -30,6 +30,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+| `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
 | `TENSORFOLD_LFM2_KV_PAGES` | Exactly `0` or `1`, checked when the CUDA backend starts; unset leases pool pages ([profiles](profiles.md)) |

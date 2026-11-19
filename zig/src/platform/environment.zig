@@ -53,6 +53,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+    .{ .name = "TF_HY4_MEM_FLOOR_GIB", .scope = .cuda, .kind = .size, .forms = "whole GiB of MemAvailable below which the Hy4-flash CUDA loader stops (default 10)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
