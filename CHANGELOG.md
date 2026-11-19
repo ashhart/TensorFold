@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ling-3.1-flash on CUDA: `bailing_moe_v3` EXL3 packs serve on one GB10 or across two at TP=2, within the model's native 262,144-token window, with copy drafts from the prompt and kept prompt states; setups not tested, including longer contexts, are refused by name (#2340, refs #850). Thanks to @ajensenwaud.
+
 - Server: `serve --log-json` writes each request start and end as one compact JSON object on the existing log line, with no keys, headers or bodies; default logs and `/health` stay unchanged (#3195). Thanks to @mvanhorn.
 
 - Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895). Thanks to @Mirrdhyn.
