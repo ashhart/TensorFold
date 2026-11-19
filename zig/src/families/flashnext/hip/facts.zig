@@ -27,7 +27,7 @@ pub fn factsFor(exact_width: u32, streams: usize, drafting: bool, drafts: u32) l
         .hidden_rows = true,
         .batch_rows = @intCast(exact_width * streams),
         .max_streams = @intCast(streams),
-        .draft_streams = false,
+        .draft_streams = drafting,
     };
 }
 
@@ -38,4 +38,11 @@ test "the shared round's copy window: the lane core takes three copies, a lone s
     try std.testing.expectEqual(@as(u32, 3), cfg.first_copy);
     try std.testing.expectEqual(@as(u32, 7), cfg.max_copy);
     try std.testing.expectEqual(@as(u32, 4), cfg.base_width);
+}
+
+test "the extracted facts retain the loaded head drafting mode" {
+    for ([_]bool{ false, true }) |drafting| {
+        const facts = factsFor(cache.max_window, 2, drafting, 3);
+        try std.testing.expectEqual(drafting, facts.draft_streams);
+    }
 }
