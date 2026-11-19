@@ -18,6 +18,14 @@ const h3_image = struct {
     pub const bytes align(16) = @embedFile("fatbin_h3").*;
 };
 
+const h3_image_decoder = struct {
+    pub const bytes align(16) = @embedFile("fatbin_h3_image_decoder").*;
+};
+
+const h3_image_prompt = struct {
+    pub const bytes align(16) = @embedFile("fatbin_h3_image_prompt").*;
+};
+
 /// The named embedded image; only contract_controls may select the planted controls.
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
@@ -29,6 +37,8 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "mla")) return kk.mla;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     if (std.mem.eql(u8, name, "flashnext_hcn")) return kk.flashnext_hcn;
+    if (std.mem.eql(u8, name, "h3_image_decoder")) return &h3_image_decoder.bytes;
+    if (std.mem.eql(u8, name, "h3_image_prompt")) return &h3_image_prompt.bytes;
     inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple", "gemma4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "experts", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "qmm_prefill", "lane_gemv", "prompt16", "qmmf", "ck_experts", "nvfp4_experts", "nvfp4_experts_tile", "nvfp4_experts32", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "glm_ops", "glm_index", "nemotron_mamba", "sample", "qwen35", "qwen35_bf16_rows", "qwen35_keep", "qwen35_kv8", "w4a8_prefill", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention", "window_attention", "window_pages", "moe_glue", "dense_rows", "qmm", "flashnext_fact", "flashnext_hcf", "flashnext_fexp", "experts_rows", "nemotron_ops", "minimax_m3", "minimax_m3_attn", "experts_bf16", "nemo_audio", "moss_image", "glm_vision", "idol", "idol_decoder", "lfm2_moe", "lfm2", "dots_mocr", "muse_glue", "muse_attention", "muse_linear", "muse_experts2", "muse_dflash", "muse_dflash2", "ricursive", "ricursive_prep" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
