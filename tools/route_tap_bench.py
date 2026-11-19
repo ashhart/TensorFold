@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or monitor MoE routing: decode a TFR1 trace, or time a server with TF_ROUTE_TAP on and off.
-
-Host tests cover the ring and record layout. This script is the GPU-host checklist:
-
-  python3 tools/route_tap_bench.py decode docs/route-tap-sample.tfr1
-  python3 tools/route_tap_bench.py receipt --output receipt.json
-  python3 tools/route_tap_bench.py run http://127.0.0.1:8091 MODEL --output result.json
-
-`run` repeats requests against one live server; it does not toggle the server environment.
-Use fresh server processes for tap-on/off comparisons. A receipt records the host RAM class
-and GPU model.
-
-Standard library only. Python 3.11+.
-"""
+"""Decode row-aware route traces and inspect one live server; device checks are described in docs/route-tap.md."""
 
 from __future__ import annotations
 
