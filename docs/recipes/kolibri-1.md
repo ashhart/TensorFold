@@ -96,13 +96,16 @@ tensor shape that does not match the release's config, a stream opened before th
 that leaves less than the drafter's weights, scratch and caches need (computed from its config before anything is
 allocated; about 0.44 GiB with one stream).
 
-GB10, greedy, 24 prompts of 256 tokens, A-B-B-A servers, the same replies in all four:
+GB10, greedy, 24 prompts of 256 tokens. Each stream count ran alone on freshly started servers (page cache dropped
+before each start), A-B-B-A-A-B-B-A, with main's copy drafts as A; all eight servers gave the same replies:
 
-| streams | copy drafts, tok/s | with `--drafter`, tok/s | tokens a round |
-| --- | ---: | ---: | ---: |
-| 1 | 51.5 | 66.5 (+29%) | 1.08 -> 1.84 |
-| 4 | 120.4 | 127.8 (+6%) | 1.08 -> 2.05 |
-| 8 | 157.6 | 155.7 (-1%) | 1.08 -> 2.04 |
+| streams | copy drafts, tok/s | with `--drafter`, tok/s | paired median | tokens a round |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 51.2 | 65.1 | +27.0 % | 1.07 -> 1.97 |
+| 4 | 109.6 | 114.6 | +4.9 % | 1.07 -> 1.62 |
+| 8 | 142.0 | 139.5 | -1.9 % | 1.07 -> 1.65 |
 
-At 8 streams the drafter is slower: the target verifies three times the rows, and the depth rule does not yet cut the
-drafts there.
+The lane core prices a drafter round (the target's rows, timed at load, and the drafter's own pass, timed by streams
+and depth) against a round with copy drafts only, and drafts less where the drafter does not pay. At 8 streams the
+drafter is still slower in all four A-B pairs: the mean request finishes sooner, but streams whose drafts rarely
+land share the dearer drafted rounds and finish later (slowest request 18.6-20.5 s against 15.1 s).
