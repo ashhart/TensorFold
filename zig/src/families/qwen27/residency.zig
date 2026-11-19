@@ -135,6 +135,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     }
     var projections = h.model.kernels.lanes.valueIterator();
     while (projections.next()) |projection| try fields.append(h.gpa, &list, projection);
+    if (h.model.kernels.sn) |*sn| try sn.appendBuffers(h.gpa, &list);
     try appendRunner(&h.runner, h.gpa, &list);
     try fields.append(h.gpa, &list, h.back);
     for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
