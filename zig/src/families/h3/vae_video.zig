@@ -350,13 +350,55 @@ pub const Decoder = struct {
     /// One piece (clip x tile) through the full ViT pass on Metal.
     fn decodePiece(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize, out_rgb_bytes: []u8) !void {
         _ = out_rgb_bytes;
-        _ = latents;
-        const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
+        const dim = self.config.dim();
         const voxels = depth * height * width;
+        const rows = voxels + self.config.register_tokens + 1;
 
-        // all GPU work disabled during the crash bisection
-        const proj = try gpa.alloc(f32, voxels * head_block);
-        @memset(proj, 0.5);
+        var cb = self.queue.commandBuffer();
+        var e = cb.compute(.concurrent);
+
+        const pq_in = try self.device.buffer(latents.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_in.slice(f32, latents.len), latents);
+        const pq_w = try self.device.buffer(self.post_quant_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_w.slice(f32, self.post_quant_w.len), self.post_quant_w);
+        const pq_b = try self.device.buffer(self.post_quant_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(pq_b.slice(f32, self.post_quant_b.len), self.post_quant_b);
+        const pq_out = try self.device.buffer(voxels * 24 * 4, mtl.ResourceOptions.shared);
+        e.setPipeline(self.p[5]);
+        e.setBuffer(pq_in, 0, 0);
+        e.setBuffer(pq_w, 0, 1);
+        e.setBuffer(pq_b, 0, 2);
+        e.setBuffer(pq_out, 0, 3);
+        e.setValue([2]u32{ @intCast(voxels), @intCast(24) }, 4);
+        e.dispatchThreads(mtl.Size.of(24, voxels, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        const emb_w = try self.device.buffer(self.x_embedder_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(emb_w.slice(f32, self.x_embedder_w.len), self.x_embedder_w);
+        const emb_b = try self.device.buffer(self.x_embedder_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(emb_b.slice(f32, self.x_embedder_b.len), self.x_embedder_b);
+        const tokens = try self.device.buffer(voxels * dim * 4, mtl.ResourceOptions.shared);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(pq_out, 0, 0);
+        e.setBuffer(emb_w, 0, 1);
+        e.setBuffer(emb_b, 0, 2);
+        e.setBuffer(tokens, 0, 3);
+        e.setValue([4]u32{ @intCast(voxels), @intCast(24), @intCast(dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(dim, voxels, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+
+        const tokens_host = try gpa.alloc(f32, voxels * dim);
+        @memcpy(tokens_host, tokens.slice(f32, voxels * dim));
+        const tokens_full = try gpa.alloc(f32, rows * dim);
+        @memcpy(tokens_full[0 .. voxels * dim], tokens_host);
+        for (0..self.config.register_tokens) |r| {
+            @memcpy(tokens_full[(voxels + r) * dim .. (voxels + r + 1) * dim], self.register_tokens[r * dim .. (r + 1) * dim]);
+        }
+        @memset(tokens_full[voxels + self.config.register_tokens .. rows * dim], 0);
+        gpa.free(tokens_host);
+        std.debug.print("stage: pq+embedder+registers done", .{});
+
         std.debug.print("gpu unpatch done", .{});
     }
 };
