@@ -12,6 +12,7 @@ const width = 2 * d;
 // Allow FP32 rsqrt and transcendental differences; BF16 comparisons use fixed rounded pre values.
 const tol: f32 = 2e-6;
 const Kind = enum { enter, route, merge, leave };
+const Variant = enum { default, iterations, scale };
 const shapes = [_]c.Shape{
     .{ .rows = 1, .n = d, .k = width },   .{ .rows = 2, .n = d, .k = width },
     .{ .rows = 7, .n = d, .k = width },   .{ .rows = 16, .n = d, .k = width },
@@ -29,8 +30,13 @@ fn name(kind: Kind, control: bool) []const u8 {
         .leave => if (control) "control: qwen35_mhc leave drops stream" else "cuda qwen35_mhc leave",
     };
 }
-fn spec(kind: Kind, control: bool, add_enabled: bool, route_dynamic: bool) c.Spec {
-    return .{ .name = if (kind == .enter and !add_enabled) "cuda qwen35_mhc enter no add" else if (kind == .route and route_dynamic) "cuda qwen35_mhc route varying pre" else name(kind, control), .accum = .none, .depth = depth, .out = .raw, .in_place = kind == .enter or kind == .merge, .served = &shapes, .nan = .{ .stated = "BF16 host replay, NaNs by class; route post and mix within 2e-6" } };
+fn spec(kind: Kind, control: bool, add_enabled: bool, route_dynamic: bool, variant: Variant) c.Spec {
+    const route_name = switch (variant) {
+        .default => if (route_dynamic) "cuda qwen35_mhc route varying pre" else name(kind, control),
+        .iterations => "cuda qwen35_mhc route 3 iterations",
+        .scale => "cuda qwen35_mhc route pre_scale 1.75",
+    };
+    return .{ .name = if (kind == .enter and !add_enabled) "cuda qwen35_mhc enter no add" else if (kind == .route) route_name else name(kind, control), .accum = .none, .depth = depth, .out = .raw, .in_place = kind == .enter or kind == .merge, .served = &shapes, .nan = .{ .stated = "BF16 host replay, NaNs by class; route post and mix within 2e-6" } };
 }
 fn randomBf(rng: std.Random) u16 {
     return c.toBf16(@as(f32, @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 513))) - 256)) / 128.0);
@@ -55,6 +61,7 @@ const Case = struct {
     control: bool,
     add_enabled: bool = true,
     route_dynamic: bool = false,
+    variant: Variant = .default,
     rows: usize = 0,
     h: []u16 = &.{},
     add: []u16 = &.{},
@@ -67,8 +74,14 @@ const Case = struct {
     msg: [200]u8 = undefined,
     const bias = [8]f32{ 0, 1.0986123, -0.4, 0.3, -0.7, 0.2, 0.4, 0.9 };
     const vt = g.hooks(Case);
+    fn iterations(self: *const Case) c_int {
+        return if (self.variant == .iterations) 3 else 20;
+    }
+    fn scale(self: *const Case) f32 {
+        return if (self.variant == .scale) 1.75 else 1.0;
+    }
     fn kernel(self: *Case) g.Kernel {
-        return .{ .spec = spec(self.kind, self.control, self.add_enabled, self.route_dynamic), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
+        return .{ .spec = spec(self.kind, self.control, self.add_enabled, self.route_dynamic, self.variant), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
     fn free(self: *Case) void {
         const a = self.rig.gpu.gpa;
@@ -165,6 +178,10 @@ const Case = struct {
         };
         for (self.dev[0..nargs]) |ptr| a.add(ptr);
         a.add(@as(c_int, d));
+        if (self.kind == .route) {
+            a.add(self.iterations());
+            a.add(self.scale());
+        }
         a.add(self.dev[7]);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.rows + 1) }, .block = .{ .x = 256 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
@@ -209,14 +226,14 @@ const Case = struct {
                 .route => {
                     var p: [2]f32 = undefined;
                     var m: [4]f32 = undefined;
-                    ref.route(&r, self.weights, bias, &b, &p, &m);
+                    ref.route(&r, self.weights, bias, &b, &p, &m, @intCast(self.iterations()), self.scale());
                     // Each fixture chooses BF16 coefficients away from boundaries, independent of reduction order.
                     if (std.math.isFinite(r[7])) {
                         const pre = if (self.route_dynamic)
                             [2]f32{ if (r[0] > 0) 0.73046875 else 0.26953125, if (r[1] > 0) 0.890625 else 0.5234375 }
                         else
                             [2]f32{ 0.5, 0.75 };
-                        ref.collapse(&r, pre, &b);
+                        ref.collapse(&r, pre, self.scale(), &b);
                     }
                     for (b, 0..) |v, i| if (!sameBf(bfAt(out, row * d + i), v)) return self.fail(row, i, "collapse differs");
                     const pbytes = out[n * d * 2 ..];
@@ -251,7 +268,7 @@ const Case = struct {
 
 pub const Set = struct {
     module: ?cuda.Module = null,
-    cases: [10]Case = undefined,
+    cases: [12]Case = undefined,
     count: usize = 0,
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, ctl: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !void {
         self.module = try cuda.Module.load(gpu.d, cuda.kernels.qwen35_mhc);
@@ -274,6 +291,12 @@ pub const Set = struct {
         varied.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try self.module.?.function(names[1]), .kind = .route, .control = false, .route_dynamic = true };
         self.count += 1;
         try kernels.append(gpu.gpa, varied.kernel());
+        for ([_]Variant{ .iterations, .scale }) |variant| {
+            const extra = &self.cases[self.count];
+            extra.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try self.module.?.function(names[1]), .kind = .route, .control = false, .variant = variant };
+            self.count += 1;
+            try kernels.append(gpu.gpa, extra.kernel());
+        }
     }
     pub fn deinit(self: *Set) void {
         for (self.cases[0..self.count]) |*item| item.deinit();

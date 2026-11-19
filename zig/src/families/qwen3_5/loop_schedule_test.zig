@@ -54,14 +54,42 @@ test "loop config rejects malformed values" {
         ,
         \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":3,"end":5,"streams":2,"iterations":20,"fixed_identity":false}}
         ,
-        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":4,"end":28,"streams":4,"iterations":20,"fixed_identity":false}}
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":4,"end":28,"streams":3,"iterations":20,"fixed_identity":false}}
         ,
-        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2],"unknown":0}}
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2],"use_gate":true}}
+        ,
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2],"use_gate":null}}
+        ,
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":4,"end":28,"streams":2,"iterations":20,"fixed_identity":false,"unknown":0}}
     }) |input| {
         const doc = try std.json.parseFromSlice(std.json.Value, t.allocator, input, .{});
         defer doc.deinit();
         try t.expectError(error.BadLoopConfig, config.parse(doc.value.object, 32));
     }
+}
+
+test "loop config accepts use_gate false, ignores other loop keys and allows 4 streams" {
+    for ([_][]const u8{
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2],"use_gate":false}}
+        ,
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2],"unknown":0,"note":{"a":1}}}
+        ,
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":4,"end":28,"streams":4,"iterations":20,"fixed_identity":false}}
+    }) |input| {
+        const doc = try std.json.parseFromSlice(std.json.Value, t.allocator, input, .{});
+        defer doc.deinit();
+        _ = try config.parse(doc.value.object, 32);
+    }
+}
+
+test "loop config keeps any iteration count and pre_scale" {
+    const doc = try std.json.parseFromSlice(std.json.Value, t.allocator,
+        \\{"loop_settings":{"start":4,"end":28,"eval_count":2,"counts":[2]},"mhc":{"start":4,"end":28,"streams":2,"iterations":7,"fixed_identity":false,"pre_scale":1.75}}
+    , .{});
+    defer doc.deinit();
+    const m = (try config.parse(doc.value.object, 32)).mhc.?;
+    try t.expectEqual(@as(usize, 7), m.iterations);
+    try t.expectEqual(@as(f64, 1.75), m.pre_scale);
 }
 
 test "mHC decisions follow every checkpoint step and plain identity" {
