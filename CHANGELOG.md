@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Core: size KV page-retirement bookkeeping by retired pages, preserving reader fences, page reuse and trim state instead of clearing a context-sized token table on the first trim (#3852).
 
-- Server: the next turn's background prefill puts the reply's reasoning into its guess when the client sends reasoning back, so thinking requests resume from the real next prompt instead of redoing the pass from before the reply; clients whose history drops reasoning keep the old guess (#3264).
-
-- Core: size KV page-retirement bookkeeping by retired pages, preserving reader fences, page reuse and trim state instead of clearing a context-sized token table on the first trim (#3852).
-
-
-
 - HIP: an EXL3 input rotation and trellis linear kernel group (`exl3/exl3.hip`) at 2 to 8 bits, the HIP side of the projection DeepSeek-V4.1's CUDA path calls for its head, Engram's `wkv` and the indexer's `wk`, with sums in a fixed order so a row's bits do not depend on the rows beside it; nothing serves through it yet (#3314, refs #2065). Thanks to @Shoestring-dev.
 
 - Model configs: a `config.json` head count of 0 is refused by name before any division instead of panicking, for Qwen 3.5 on HIP (`ZeroHeadCount`), Nemotron, the Gemma 4 DFlash drafter on Metal and DeepSeek-V4.1's Metal vision config (#3777). Thanks to @jschmied.
