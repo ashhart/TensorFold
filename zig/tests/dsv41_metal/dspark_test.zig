@@ -323,6 +323,46 @@ test "dsv41 metal dspark: a pass of more asks than a launch holds splits into la
     try testing.expectEqual(@as(usize, 0), differ);
 }
 
+/// One launch's encodeAll in an encoder of `kind`: its logits and hf bytes (block keys rewrite the same values).
+fn launchBytes(a: std.mem.Allocator, ds: *Ds, l: *const pkg.dspark.Launch, kind: @import("metal").DispatchType) ![]u8 {
+    const c = &ds.r.c;
+    const pool = @import("metal").objc.Pool.push();
+    defer pool.pop();
+    const cb = ds.r.queue.commandBuffer();
+    const e = cb.compute(kind);
+    try ds.pass.encodeAll(e, l);
+    e.end();
+    cb.commit();
+    cb.wait();
+    const nl = l.rows * c.vocab * 4;
+    const nh = l.rows * c.hidden * 2;
+    const out = try a.alloc(u8, nl + nh);
+    @memcpy(out[0..nl], ds.pass.b.bytes(ds.pass.b.logits, nl));
+    @memcpy(out[nl..], ds.pass.b.bytes(ds.pass.b.hf, nh));
+    return out;
+}
+
+test "dsv41 metal dspark: a launch in one concurrent encoder equals it in a serial one (1 and 3 slots, 10 runs each)" {
+    const a = testing.allocator;
+    const ds = try Ds.init(a, testing.io, limit, 67, 3);
+    defer ds.deinit();
+    _ = try history(a, ds, 9);
+    const asks = [_]pkg.dspark.Ask{ Ds.ask(0, 17, 200, null), Ds.ask(1, 90, 40, null), Ds.ask(2, 33, 520, null) };
+    var differ: usize = 0;
+    for ([_]usize{ 1, 3 }) |m| {
+        const l = try ds.pass.prepare(asks[0..m]);
+        const want = try launchBytes(a, ds, &l, .serial);
+        defer a.free(want);
+        for (0..10) |_| {
+            const got = try launchBytes(a, ds, &l, .concurrent);
+            defer a.free(got);
+            for (want, got) |x, y| differ += @intFromBool(x != y);
+        }
+    }
+    std.debug.print("{s} dsv41 metal dspark concurrent launch: {d} bytes differ from the serial encoder\n", .{ if (differ == 0) "PASS" else "FAIL", differ });
+    try testing.expectEqual(@as(usize, 0), differ);
+}
+
 test "dsv41 metal dspark: refusals (rows past the taps, a position past the tables, a draft block with no drafter)" {
     const a = testing.allocator;
     const ds = try Ds.init(a, testing.io, limit, 66, 2);

@@ -170,12 +170,13 @@ pub fn stage(p: *Probe, ds: *const Ds, l: *const Launch, i: usize, x: []const u1
     try check_moe.check(p, io.pre_out, io.x_out);
 }
 
-/// The head: the last streams collapsed (hf), the drafter's norm, the shared head's logits.
+/// The head: the last streams collapsed (hf), the drafter's norm, its logits (by its FP8 head, else the shared one).
 pub fn head(p: *Probe, ds: *const Ds, x: []const u16, pre: []const f32) !void {
     const c = &p.r.c;
     const b = &ds.pass.b;
     try check_attn.hcPre(p, "hc pre (head)", x, pre, b.hf);
     try p.norm("drafter norm", b.hf, ds.w.norm, b.hfn, c.hidden, probe.all(p.rows));
+    if (ds.w.head) |h| return p.proj("head logits", b.hfn, h.fp8, b.logits, true, probe.all(p.rows));
     try p.mv("head logits", b.hfn, ds.r.top.?.head, b.logits, c.hidden, c.vocab, true, probe.all(p.rows));
 }
 

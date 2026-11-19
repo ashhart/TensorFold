@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const host = @import("dsv41");
 const weights = @import("weights.zig");
+const dspark_head = @import("dspark_head.zig");
 
 const Config = host.config.Config;
 const Pack = host.pack.Pack;
@@ -23,6 +24,8 @@ pub const Weights = struct {
     markov_head: []u16,
     /// the confidence head's projection [hidden + rank] widened to fp32, null when the release has none
     conf: ?[]f32,
+    /// the drafter's FP8 copy of the vocabulary head (the target's stays bf16), null when the shape has no 32x32 blocks
+    head: ?dspark_head.Head,
 
     pub fn deinit(w: *Weights) void {
         for (w.stages) |*s| s.deinit();
@@ -31,6 +34,7 @@ pub const Weights = struct {
         w.a.free(w.markov_embed);
         w.a.free(w.markov_head);
         if (w.conf) |v| w.a.free(v);
+        if (w.head) |*h| h.deinit();
     }
 
     /// The host half of the heads as the family's chain takes them.
@@ -124,5 +128,11 @@ pub fn load(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const P
     w.markov_head = try readHalf(a, io, pack, try std.fmt.bufPrint(&nb, "{s}.markov_head.head.weight", .{bl}), &dims);
     errdefer a.free(w.markov_head);
     w.conf = try readConf(a, io, pack, try std.fmt.bufPrint(&nb, "{s}.{s}", .{ bl, host.names.dspark_confidence }), c.hidden + c.dspark_markov_rank);
+    errdefer if (w.conf) |v| a.free(v);
+    w.head = try dspark_head.load(a, io, device, pack, c);
     return w;
+}
+
+test {
+    _ = dspark_head;
 }
