@@ -7,12 +7,12 @@ pub const head_dim = 512;
 pub const window = 128;
 pub const max_selected = 512;
 pub const rope_dims = 64;
-/// Heads a simdgroup carries, and the groups of the two launch shapes.
+/// Heads a simdgroup carries (decode, prompt), and the groups of the two launch shapes.
 pub const heads_per_sg = 1;
+pub const prompt_heads_per_sg = 2;
 pub const chunks = 5;
 pub const prompt_rows = 2;
 pub const prompt_head_groups = 4;
-pub const prompt_tile = 16;
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Out = enum { f32, bf16 };
 
@@ -25,7 +25,7 @@ const Args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 = 0 };
 const dec_names = [_][:0]const u8{ "tf_dsv41_attn_dec_f32", "tf_dsv41_attn_dec_bf16" };
 const pf_names = [_][:0]const u8{ "tf_dsv41_attn_dec_pf_f32", "tf_dsv41_attn_dec_pf_bf16" };
 /// Decode launches of at most this many rows load each step's keys a step ahead (the same math, so the same bits).
-pub const prefetch_rows = 2;
+pub const prefetch_rows = 64;
 const pre_names = [_][:0]const u8{ "tf_dsv41_attn_pre_f32", "tf_dsv41_attn_pre_bf16" };
 
 pub const Pipelines = struct {
@@ -91,6 +91,6 @@ pub fn encodePrompt(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call
     try check(c);
     e.setPipeline(p.pre[@backingInt(c.out)]);
     bind(e, b, c);
-    const per = heads_per_sg * prompt_head_groups;
+    const per = prompt_heads_per_sg * prompt_head_groups;
     e.dispatchGroups(mtl.Size.of((c.rows + prompt_rows - 1) / prompt_rows, (c.heads + per - 1) / per, 1), mtl.Size.of(32 * prompt_rows * prompt_head_groups, 1, 1));
 }
