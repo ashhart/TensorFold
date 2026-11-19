@@ -39,7 +39,6 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 }
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
-
 /// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
 pub fn setFlatGlue(on: bool) void {
     @import("core_delta").flat_glue = on;
