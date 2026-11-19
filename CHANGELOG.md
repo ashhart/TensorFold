@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: a dense MLP (layers 0 to 2) stored as bf16 is read as bf16 in any checkpoint, not only an EXL3 one, where a ModelOpt checkpoint that left those layers unquantized was refused by the module's name; checkpoints whose dense layers are NVFP4 or MXFP8 load as before (#3680). Thanks to @Bizuayeu.
+
 - MiniMax-M3.1-Flash on CUDA: with two or more streams, the drafter takes several streams' DSpark blocks in one pass, as many as a decode window's 16 rows hold, instead of one pass a stream; drafts only choose what the target verifies, so replies are unchanged (#1426). Thanks to @BobClawblaw.
 
 - Qwen3.8-27B on XPU: a sampled row with `top_k` from 1 to 64, a temperature above 0 and no grammar mask draws from its `top_k` largest logits kept on the card, instead of copying the whole row to the host, with the same tokens for the same seed (#3340, lands #2895). Thanks to @Mirrdhyn.
