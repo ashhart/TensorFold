@@ -338,8 +338,5 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
-}
-
-test {
     _ = @import("open_connections_route_test.zig");
 }
