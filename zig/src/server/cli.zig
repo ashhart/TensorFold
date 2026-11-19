@@ -529,7 +529,6 @@ pub fn parallel(text: []const u8) ?u32 {
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
 }
-
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
