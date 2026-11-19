@@ -583,7 +583,6 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
 pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
-
 /// The CUDA build's and GPU engine's flag parsers (cli_gpu_flags.zig).
 pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
 pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;
