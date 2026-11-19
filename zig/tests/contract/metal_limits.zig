@@ -282,6 +282,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = sources.moss_image;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "idol decoder ")) {
+        if (!assemble) return undefined;
         text = sources.idol_decoder;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "idol ")) {
