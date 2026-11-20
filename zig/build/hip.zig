@@ -199,7 +199,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.parse })).step);
+    const parse_host = b.addRunArtifact(b.addTest(.{ .root_module = host.parse }));
+    test_step.dependOn(&parse_host.step);
+    b.step("test-nemotron-parse-prefill-host", "Parse cancelled-prefill prefix retention without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.parse, .filters = &.{"Parse cancelled prefill"} })).step);
     const native_host_tests = b.addRunArtifact(b.addTest(.{ .root_module = host.native }));
     test_step.dependOn(&native_host_tests.step);
     b.step("test-native-hip-host", "Native HIP family offers and flags without a device").dependOn(&native_host_tests.step);
