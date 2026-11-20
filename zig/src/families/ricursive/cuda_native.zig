@@ -12,7 +12,7 @@ const dshared = @import("cuda_dflash2_shared.zig");
 const snap = be.snap;
 
 pub const model_type = "ricursive";
-pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
+pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "exl3" };
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
@@ -293,6 +293,19 @@ test "ricursive cuda native: a reply thinks or answers bare, with no thinking bu
     var info: struct { reasoning_optional: bool = false, thinking_budget: bool = true } = .{};
     thinking(&info);
     try std.testing.expect(info.reasoning_optional and !info.thinking_budget);
+}
+
+test "ricursive cuda native: capabilities offer the EXL3 format its loader admits, beside NVFP4" {
+    const gpa = std.testing.allocator;
+    const q = "\"model_type\": \"ricursive\", \"quantization_config\": {\"quant_method\": \"exl3\", \"bits\": 5.0, \"head_bits\": 8}";
+    const bytes = try std.mem.replaceOwned(u8, gpa, @embedFile("fixtures/config.json"), "\"model_type\": \"ricursive\"", q);
+    defer gpa.free(bytes);
+    try std.testing.expect((try cfg.parse(gpa, bytes)).exl3);
+    for ([_][]const u8{ "modelopt-nvfp4", "exl3" }) |want| {
+        for (formats) |f| {
+            if (std.mem.eql(u8, f, want)) break;
+        } else return error.FormatNotOffered;
+    }
 }
 
 test "ricursive cuda native: every refusal of its own is worded, the rest left to the server" {
