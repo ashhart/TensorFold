@@ -68,6 +68,16 @@ fn admitted(decision: planner.Decision) !planner.Plan {
         .refused => return error.UnexpectedRefusal,
     };
 }
+fn expectNoDraftWeights(plan: planner.Plan) !void {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try plan.describe(&out.writer);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("drafter").?.bool);
+    const weights = parsed.value.object.get("weights").?.object;
+    try std.testing.expect(weights.get("drafter").? == .null);
+}
 
 fn refused(decision: planner.Decision) !planner.Refusal {
     return switch (decision) {
@@ -136,6 +146,15 @@ test "fallback preserves dimensions before dropping a requested drafter" {
     try std.testing.expect(!plan.full_service);
     try std.testing.expectEqual(@as(u64, 0), plan.peaks.draft_device);
     try std.testing.expectEqual(@as(u64, 6000 + 2610 + 19 + 8874 + 100), plan.peaks.device_total);
+    try expectNoDraftWeights(plan);
+}
+
+test "an available but unrequested drafter has no admitted weight placement" {
+    var wanted = request();
+    wanted.drafter = false;
+    const plan = try admitted(try planner.choose(.gb16, limits(20000, 15), model(), placements()[0..1], wanted));
+    try std.testing.expect(!plan.drafter);
+    try expectNoDraftWeights(plan);
 }
 
 test "bounded fallback lowers concurrency first and context only when streams are fixed" {

@@ -150,7 +150,7 @@ pub const Plan = struct {
             .envelope = p.envelope.label(),
             .checkpoint = std.fmt.bytesToHex(p.model.checkpoint, .lower),
             .placement = p.placement.name,
-            .weights = .{ .target = p.placement.target, .drafter = if (p.model.drafter != null) p.placement.drafter else null },
+            .weights = .{ .target = p.placement.target, .drafter = if (p.drafter) p.placement.drafter else null },
             .context = p.context,
             .streams = p.streams,
             .drafter = p.drafter,
