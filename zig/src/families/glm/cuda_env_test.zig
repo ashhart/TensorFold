@@ -19,6 +19,8 @@ const switches = [_]Name{
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
+/// The rows store's staging permit, whose GiB count stands in for the priced whole image (native/glm_staging.zig).
+const gibs = [_][:0]const u8{"TF_GLM_STAGING_GIB"};
 /// The rank variables, aliases of --rank and --tp (fabric/mesh/launch.zig reads them).
 const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
@@ -61,6 +63,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (switches) |s| try t.expectEqual(e.Kind.flag, (try row(s.name)).kind);
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
+    for (gibs) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     for (added) |name| try t.expect((try row(name)).kind != .flag);
@@ -70,7 +73,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + gibs.len + windows.len + words.len + added.len + ranks.len, n);
 }
 
 test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
@@ -105,6 +108,22 @@ test "GLM strict env: the DFlash2 log takes a whole count, as its old parseInt d
         try t.expectEqual(@as(u64, std.math.maxInt(u64)), try e.value(u64, name, "18446744073709551615", 0));
         for ([_][]const u8{ "0", "16" }) |raw| try check(name, raw, true);
         for ([_][]const u8{ "all", "-1", "1.5", " 4", "0x10", "18446744073709551616" }) |raw| try check(name, raw, false);
+    }
+}
+
+test "GLM strict env: the staging permit is a whole GiB count from 1; unset or blank keeps the priced figure" {
+    for (gibs) |name| {
+        const r = try row(name);
+        try t.expectEqual(@as(u64, 1), r.min);
+        for ([_]?[]const u8{ null, "", " ", " \t\r\n" }) |raw| {
+            try t.expectEqual(@as(?u64, null), try e.value(?u64, name, raw, null));
+            if (raw) |v| try check(name, v, true);
+        }
+        for ([_][]const u8{ "1", "+4", "18446744073709551615" }) |raw| {
+            try t.expectEqual(@as(?u64, try std.fmt.parseInt(u64, raw, 10)), try e.value(?u64, name, raw, null));
+            try check(name, raw, true);
+        }
+        for ([_][]const u8{ "0", "-1", "1.5", " 4", "4 ", "0x10", "all", "18446744073709551616" }) |raw| try check(name, raw, false);
     }
 }
 
