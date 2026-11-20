@@ -18,6 +18,6 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         .link_libc = true,
     }));
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
-    b.step("test-hy4-flash-host", "Hy4-flash family package: config, layer plan, weight map, refusals, chat template and tokenizer").dependOn(&run.step);
+    b.step("test-hy4-flash-nvfp4-host", "Hy4-flash NVFP4 family package: config, layer plan, weight map, Engram hashes, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
 }
