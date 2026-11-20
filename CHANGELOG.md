@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the last four host checks excluded under #2031 return to the aggregate; recording fixtures initialize runner state and affine kernel handles.
+
 - Tests: the benchmark tests' fake server pads its first stream event past the client's 576 KiB read buffer so the two events arrive in separate reads, and two cluster bring-up tests run on a lockstep clock through a new `clock` option on `bringup.Options`, which defaults to the real clock (#3750).
 
 - Windows CUDA: the qwen3_5 prompt cache takes its budget from the host's physical memory, so `--prompt-cache-gib` works on Windows instead of the cache staying off (#3863, fixes #3860). Thanks to @davidzogg13-boop.
