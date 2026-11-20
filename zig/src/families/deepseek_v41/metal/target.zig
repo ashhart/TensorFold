@@ -267,6 +267,7 @@ pub const Target = struct {
     /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
     pub fn startPrompt(t: *Target, slot: u32, ids_in: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
+        try t.drainBehind();
         const s = &t.slots[slot];
         const c = t.env.c;
         if (s.live or s.filling) return error.SlotLive;
