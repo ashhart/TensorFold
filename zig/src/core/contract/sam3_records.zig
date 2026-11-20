@@ -113,4 +113,31 @@ pub const metal = blk: {
     .{ .name = "sam3 attention D256 split sam_attention_split_values", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 attention D256 split sam_attention_split_merge", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 attention D256 split control sam_attention_split_values", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+} ++ @import("sam3_layout_records.zig").metal ++ @import("sam3_arithmetic_records.zig").metal ++
+    @import("sam3_rotary_records.zig").metal ++ @import("sam3_rows_records.zig").metal ++
+    @import("sam3_flash_records.zig").metal ++ @import("sam3_trunk_records.zig").metal ++ tensor_ops ++ core_attention;
+
+/// The tensor library's FP32 attention at head dims 32 and 64: 128 threads, reserved in the source.
+const core_attention = blk: {
+    const functions = [_][]const u8{ "im_attention_f32_full32", "im_attention_f32_full64", "im_attention_f32_causal64" };
+    var out: [2 * functions.len]M = undefined;
+    for (functions, 0..) |f, i| {
+        out[2 * i] = .{ .name = "sam3 core attention " ++ f, .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false };
+        out[2 * i + 1] = .{ .name = "sam3 core attention control " ++ f, .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false };
+    }
+    break :blk out;
+};
+
+/// The tensor library's generic ops: groups of 256 (im_norm reserves them), heads at most 128; no M1/M2 build.
+const tensor_ops = blk: {
+    const functions = [_][]const u8{ "im_cast", "im_point", "im_norm", "im_heads", "im_gelu" };
+    var out: [2 * functions.len]M = undefined;
+    for (functions, 0..) |f, i| {
+        const threads: u32 = if (i == 3) 128 else 256;
+        const tg: u32 = if (i == 2) 144 else 0;
+        const reserved: u32 = if (i == 2) 256 else 0;
+        out[2 * i] = .{ .name = "sam3 tensor ops " ++ f, .threads = threads, .tg_memory = tg, .reserved = reserved, .offline = false };
+        out[2 * i + 1] = .{ .name = "sam3 tensor ops control " ++ f, .threads = threads, .tg_memory = tg, .reserved = reserved, .offline = false };
+    }
+    break :blk out;
 };

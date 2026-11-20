@@ -6,6 +6,7 @@ const contract = @import("contract");
 const sources = @import("kernel_sources");
 const topk_text = tf.bf16_topk_gpu.source;
 const rig_ = @import("rig.zig");
+const sam3_launch = @import("metal_sam3_launch.zig");
 
 const limits = contract.limits;
 const registry = contract.registry;
@@ -94,6 +95,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const control_text = @import("masked_value_probe.zig").control_source;
         return .{ .decl = d, .function = fun, .here = control_text, .pre_m5 = control_text };
+    }
+    if (sam3_launch.owns(d.name)) {
+        if (!assemble) return undefined;
+        const t = try sam3_launch.text(a, d.name);
+        return .{ .decl = d, .function = fun, .here = t[0], .pre_m5 = t[1] };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
         if (!assemble) return undefined;
@@ -561,7 +567,7 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     for (registry.all_metal) |d| {
         if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
         try requireMapped(d);
-        const sam3_tensor = std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ") or std.mem.startsWith(u8, d.name, "sam3 device projection ") or std.mem.startsWith(u8, d.name, "sam3 deconvolution matrix ");
+        const sam3_tensor = std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ") or std.mem.startsWith(u8, d.name, "sam3 device projection ") or std.mem.startsWith(u8, d.name, "sam3 deconvolution matrix ") or sam3_launch.tensorOnly(d.name);
         if (sam3_tensor and !@import("metal_support.zig").tensor(device.tensorUnits(), d.name)) continue;
         if (!supported(device, d)) continue;
         try list.append(a, d);

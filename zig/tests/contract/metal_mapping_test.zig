@@ -21,6 +21,7 @@ test "Metal launch map: unknown registrations stay errors on every chip" {
 
 test {
     _ = @import("metal_support.zig");
+    _ = @import("metal_sam3_trunk_norm.zig");
 }
 
 test "Metal launch map: LFM2 masked prompt follows its loader on each device class" {

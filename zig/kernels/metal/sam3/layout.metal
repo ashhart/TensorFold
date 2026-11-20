@@ -54,7 +54,8 @@ void sam3_scale(const device float *src [[buffer(0)]], device float *dst [[buffe
 void sam3_relu(const device float *src [[buffer(0)]], device float *dst [[buffer(1)]], constant uint &count [[buffer(2)]],
                uint i [[thread_position_in_grid]]) {
     if (i >= count) return;
-    dst[i] = max(src[i], 0.0f);
+    // A NaN passes through unchanged (Metal's max would return 0); every other input is max(x, 0).
+    dst[i] = (as_type<uint>(src[i]) & 0x7fffffffu) > 0x7f800000u ? src[i] : max(src[i], 0.0f);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]]
