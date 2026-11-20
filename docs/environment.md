@@ -201,7 +201,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_SHARED_DRAFTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
-| `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default on. `0` restores the five-launch read-out; Metal, HIP and an MLX affine read-out refuse an explicit `1` |
 | `TF_FLASHNEXT_KEEP_LATE` | Exactly `0` or `1`; unset or blank leaves the choice to the loader |
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; default on: two ranks split the BF16 dense projections |
