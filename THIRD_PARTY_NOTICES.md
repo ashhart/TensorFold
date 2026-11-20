@@ -638,3 +638,11 @@ in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_erni
 produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
 the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
 against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.
+## Inkling 2 DSpark drafter kernels
+
+`zig/kernels/cuda/inkling2/dspark.cu` and `zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
+`vllm/models/inkling2/nvidia/dspark.py` at commit `abb8194dc35e` of
+[vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0): the tap mix and its RMS norm in
+`Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
+The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
+own.
