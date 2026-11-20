@@ -426,12 +426,13 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
         p.sums,
     );
     var q = w.kv_b;
-    q.w = q.w.at(@as(usize, c.nope) * K / 2);
+    q.w = q.w.at(@as(usize, c.nope) * K * q.bits / 8);
     q.s = q.s.at(@as(usize, c.nope) * (K / 64) * 2);
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    affine_mm.denseBatchBm(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (p.mm.m3_fast) 32 else 64);
+    const mm = if (q.bits == 8) p.mm.wide.?.mm8 else p.mm.mm_bf16;
+    affine_mm.rowSums(e, mm, 64, p.att, p.sums, M * H, K);
+    affine_mm.denseBatchBm(e, mm, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) }, if (q.bits == 4 and p.mm.m3_fast) 32 else 64);
 }
 
 /// The index scores' tile rows: 128 (a row's queries read once for 64 blocks), 64 where that leaves the GPU half idle.
@@ -477,7 +478,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             p.sums,
         ); // mlx-lm's embed_q
     } else if (fwd.on(x, "mla_absorb")) {
-        e.setPipeline(if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax); // the row kernel's qvm, weights in three bf16 parts
+        e.setPipeline(if (w.kv_b.bits == 8) (if (c.tp > 1) x.k.absorb_nax_8b_tp else x.k.absorb_nax_8b) else if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax);
         bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, p.qp, p.ql });
         e.setValue([2]i32{ @intCast(M), @intCast(c.qrProj()) }, 5);
         e.dispatchGroups(size(c.kv_lora / 64, (M + 63) / 64, c.mla_heads), size(128, 1, 1));

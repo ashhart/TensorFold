@@ -136,10 +136,10 @@ pub const Path = enum { embed, kda_in, kda_gate, kda_out, mla_in, mla_q, kv_b, m
 /// The code widths the row kernels (glm_rows.metal, after core/row_projection.metal) unpack, in groups of 32, 64, 128.
 pub const row_bits = [_]u8{ 2, 3, 4, 5, 6, 8 };
 
-/// Whether a path's kernels read `w`: kv_b 4/64, the embedding 4/6/8 in groups of 64, the rest the row kernels' widths.
+/// Whether a path's kernels read `w`: kv_b 4/64 or 8/64, embed 4/6/8 g64, else row kernels' widths.
 pub fn reads(path: Path, w: Width) bool {
     return switch (path) {
-        .kv_b => std.meta.eql(w, quant.uniform),
+        .kv_b => w.group == 64 and (w.bits == 4 or w.bits == 8),
         .embed => w.group == 64 and (w.bits == 4 or w.bits == 6 or w.bits == 8),
         else => std.mem.indexOfScalar(u8, &row_bits, w.bits) != null and (w.group == 32 or w.group == 64 or w.group == 128),
     };
@@ -215,7 +215,8 @@ test "every device path admits 4/64; the oQ widths where their kernels read them
         for ([_]Path{ .kda_in, .kda_gate, .kda_out, .mla_in, .mla_q, .mla_out, .dense_mlp, .shared_expert, .routed_experts, .head, .eh_proj }) |p| try admit("x", p, w, 64);
     try admit("x", .embed, .{ .bits = 8, .group = 64 }, 64);
     try testing.expectError(error.UnsupportedWidth, admit("x", .embed, .{ .bits = 2, .group = 64 }, 64));
-    try testing.expectError(error.UnsupportedWidth, admit("x", .kv_b, .{ .bits = 8, .group = 64 }, 64));
+    try admit("x", .kv_b, .{ .bits = 8, .group = 64 }, 64);
+    try testing.expectError(error.UnsupportedWidth, admit("x", .kv_b, .{ .bits = 6, .group = 64 }, 64));
 }
 
 test "a matrix of another width or a split stack needs the other widths' pipelines; 4/64 and none do not" {
