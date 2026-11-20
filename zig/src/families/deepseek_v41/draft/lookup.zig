@@ -189,7 +189,9 @@ pub const SuffixIndex = struct {
                 continue;
             }
             const b = bandOf(len);
-            const avail = @min(want, (L -| length) -| end);
+            const cap = @min(want, (L -| length) -| end);
+            var avail: usize = 0;
+            while (avail < cap and t[end + avail] < vbase) avail += 1;
             if (avail == 0) continue;
             const take = best.len < min_match or b > best_band or
                 (b == best_band and (avail > best_avail or (avail == best_avail and len > best.len)));

@@ -131,6 +131,26 @@ test "copy drafter: continuation-ranked band matching prefers full continuation 
     try std.testing.expectEqualSlices(u32, &cont, ds_copy);
 }
 
+test "copy drafter: matchRanked counts only non-image continuation tokens below vbase" {
+    var idx = lookup.SuffixIndex.init(gpa, 3);
+    defer idx.deinit();
+    const span = [_]u32{ 7, 8, 9, 10, 11, 12, 13, 14 };
+    try idx.extend(&.{0});
+    try idx.extend(&span);
+    try idx.extend(&.{ 31, 32, 33, 34, 35 });
+    try idx.extend(&.{1});
+    try idx.extend(&span);
+    try idx.extend(&.{ lookup.vbase, 41, 42, 43, 44 });
+    try idx.extend(&.{2});
+    try idx.extend(&span);
+
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(gpa);
+    const len = try idx.proposeRanked(4, 4, &out);
+    try std.testing.expectEqual(@as(i64, 8), len);
+    try std.testing.expectEqualSlices(u32, &.{ 31, 32, 33, 34 }, out.items);
+}
+
 test "copy drafter: adaptive doubling grows offer width 8 -> 15 on full acceptance and resets on partial rejection" {
     // DeepSeek-V4.1 TP=2 GB10 calibration curve (`calib-1bb.json` from `fixtures/calib-golden.json`).
     var verify = [_]f64{ 22.317, 26.801, 31.500, 36.072, 40.663, 45.000, 47.801, 51.334, 57.002, 59.882, 60.790, 62.123, 68.000, 70.001, 70.500, 72.250 };
