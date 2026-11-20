@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: a bf16 language head's draft rows load as 4-bit affine groups of 32 by default, and `TF_FLASHNEXT_DRAFT_HEAD=bf16` keeps them as stored; a malformed value stops the start by name, and replies are unchanged because drafts are verified (#3477, refs #1870). Thanks to @BadAd84.
+
 - GLM-5.3-Flash on CUDA: `TF_GLM_MOE_DIRECT=1` (off by default) runs a decode window's EXL3 experts without their two row copies and the shared expert's slot write, summing the slot rows bit-equal to the default path, so replies are unchanged (#3659, for #3570). Thanks to @ultradaoto.
 
 - CUDA: with `TF_ROCE=1`, the RoCE all-gather pairs each peer's stripes with the HCA on that peer's IPv4 /24 (the rule `fabric/tp` uses, now one copy for both) when every rank's plan holds, so three GB10s cabled as a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL; a switch or two ranks keep the same-numbered pairs, and a `TF_ROCE_HCA` of more than two names is refused by name instead of cut to two (#3518, fixes #3411). Thanks to @ultradaoto.
