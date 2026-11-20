@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CLI: `tensorfold log` reads the request journal read-only while a server runs: `list` with tokens, time to first token and decode rate, `show ID` with the reply decoded, `follow` across rotations and `--json`; journal `finish` records carry the queue wait, time to first token, decode rate and token counts (#4160, part of #3666).
+
 - Engine: under SRPT scheduling, a prompt that finishes on its last fill step no longer writes its lent time to freed scheduler memory (#4159, fixes #3709).
 
 
@@ -88,7 +90,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - HIP on RDNA3.5 (gfx1151): single-round (K up to 1,024) plain fp32-output routed 4-bit stream launches whose largest item holds 3 or 4 rows skip the lane folds of rows past the item's count (`Routing.item_rows`), with the same output bytes (#3559, refs #3305). Thanks to @gilby.
 
 - DeepSeek-V4.1 on Metal: in decode launches of 2 to 16 rows, the routed experts read and decode an expert's MXFP4 weights once for all of the rows it takes (passes of 2, 4, 6 or 8 rows for gate/up and 2 or 4 for down) instead of padding every expert's rows to passes of four, so each row's bits equal the one-row kernel's one row a launch whatever other rows share the launch or their experts. On the release weights, with #2973 under it, decode is 6 to 17% faster at one and two streams and 2 to 3% faster at three and four on an M5 Ultra, and 5 to 17% and 2 to 5% faster on an M3 Ultra, with every token unchanged (#2983, part of #2984). Thanks to @gilby.
-- CLI: `tensorfold log` reads the request journal read-only while a server runs: `list` with tokens, time to first token and decode rate, `show ID` with the reply decoded, `follow` across rotations and `--json`; journal `finish` records carry the queue wait, time to first token, decode rate and token counts (#4160, part of #3666).
 
 - Qwen 3.5/3.6/3.8 on HIP: a prompt chunk before the last stops its last layer after the keys and values, and the final chunk runs that layer only over the rows that are read, through the shared prompt-tail rule CUDA and Metal use (#2845, for #2829).
 
