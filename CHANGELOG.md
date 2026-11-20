@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal with `--thinking-reserve`: the shorter-reply-first order no longer counts a reply that is still reasoning as the whole limit the reserve gave it. It estimates the reply as its answer quota plus the reasoning left, taken from the think blocks this server has seen close; until one has, and for requests without `--thinking-reserve` or with thinking off, nothing changes. Replies are the same tokens. On an M5 Ultra, once the server has seen a think block close, a reasoning chat reply beside a 110,000-token cold prompt streams 7.3 chunks a second instead of 2.0, and the prompt's fill takes 17% longer (#3371, fixes #3270). Thanks to @CodingEmil for the report.
+
 - GLM-5.3-Flash on CUDA: the load races the classic and factored expert forms, which give the same bits, at each of its ten timed decode window widths and keeps the faster one at each (classic unless factored is more than 1% faster), instead of one form for every window; a window takes the form of the narrowest timed width that holds it, and `TF_GLM_EXPERT_FORM` names one form for every width (#3249). Thanks to @Bizuayeu.
 
 - Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
