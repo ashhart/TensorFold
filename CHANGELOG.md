@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 on Metal: with `--vision`, the server loads the checkpoint's vision tower (a checkpoint without `vision.*` tensors stops at load), and chats with PNG, JPEG or WebP image parts put the tower's rows into the prompt, within `--vision-image-tokens` (4,096 by default) and `--vision-max-images` (4); an image's span is prefilled in one chunk, the prompt cache keys image rows by the image's hash, text that spells the image token stays text, and a vision config with zero heads, a zero `max_wh_ratio` or a `downsample_ratio` below 2 is refused by name (#3926, part of #1676). Thanks to @gilby.
+
 - Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
 
 - Docs: the optimization ledger adds rows 34 to 37 (FP8 KV prefill waits, Qwen normalization and head, text metadata uploads and greedy readback), each `failed` on one GB10 against the 3% served-speed bar with equal tokens, and the SM120 follow-up as inconclusive (#4054, fixes #3741). Thanks to @devopsfortunato.
@@ -34,8 +36,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
 
-
-
 - Web: the development stand-in reports native 1.3.0, in a checkout and in the built wheel, where it still said 1.2.10 (#4077, fixes #4074). Thanks to @AIFlowML.
 
 - CI: a landing train's pull request skips GitHub's hosted checks, which our own runners already run on its tip (a red local run still starts them by hand), and a newer push cancels an older Zig format run, so main's and contributors' checks no longer queue behind trains (#4106).
@@ -44,21 +44,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: a request cancelled during its prompt pass, a drafted round or a streamed reply keeps the prompt state it completed when the prompt cache has room, so a follow-up on the same conversation resumes there instead of re-reading the history; after a cancelled reply, slot 0 first rewinds to its saved prompt state, and in the shared lane core a cancelled pass gives up only its own cache reservation (#3643, for #3618).
 
-
-
 - Server: every prompt-cache lookup records why it did not resume further (for example `cold`, `evicted`, `shed`, `prompt_changed` or `reply_changed`), and `/metrics` counts them as `prompt_cache_miss_total{reason}` over a fixed list of reason names (#3706, for #3686). Thanks to @bikepresentball.
 
 - DeepSeek-V4.1 on Metal: the prompt layer's compressor, indexer key and weight, and MoE gate projections run on a new simdgroup-matrix kernel (`tf_dsv41_mv_mma`) at 16 or more rows, bit-equal to the matrix-vector kernel it replaces (#3668, refs #2984). Thanks to @gilby.
-
-
 
 - Qwen on CUDA: a development build for sm_110 (`-Dsm=110`, NVIDIA Thor) refuses by name, before paging or weight loading, the modes not qualified there: `--slide`, a DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES`; the default path and the DFlash2 drafter are still served, and other GPUs are unchanged (#3057, refs #2319). Thanks to @yguanrong.
 
 - CUDA: a Flash Next prompt pass holds 3,072 rows while other streams decode (it held 1,536), so a long prompt beside running streams takes half as many passes (#3726). Thanks to @BadAd84.
 
 - GLM-5.3-Flash on CUDA: the sampled draw takes its rule from the shared `cuda.sample.rule`, as MiniMax M3 does, instead of building its own copy with a fixed `near` value (#3705, part of #2680). Thanks to @jschmied.
-
-
 
 - Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
 
@@ -72,8 +66,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: GLM's kernels and qmmf's decode linears launch as programmatic dependent launches, so a decode token's kernels lose most of their launch gaps; experts, the router plan and the RoCE exchange stay plain launches, a prompt chunk's KDA chain launches plain from 64 rows, and `TF_GLM_PDL=0` launches everything plain (#3776, refs #3652). Thanks to @ultradaoto.
 
-
-
 - dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
 
 - Qwen3.8-27B on Metal before M5: decode rounds read their cached keys through the prefix kernels, as on an M5, and prompt passes size their memory the same way; `TF_QWEN27_SHARED_PREFIX=0` keeps cached keys on the tail kernel (#3677, refs #3604). Thanks to @hobbesd.
@@ -86,13 +78,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: an MCP server's startup diagnostics reach the Plugins preview as whole lines, masked as a whole and capped at 64 KiB, instead of one row per stderr write (#3759). Thanks to @AIFlowML.
 
-
-
 - Flash Next on HIP: the prompt chunk fallback counts the window plan's slot bytes as used before deciding whether a smaller chunk admits more streams, where it counted them as free and could keep the larger chunk (#3419). Thanks to @gilby.
 
 - DeepSeek-V4.1 on Metal: its GPU work goes through a Metal 4 command queue by default where the Mac has one (macOS 26 and later), with the same kernels in the same order and bit-identical outputs; `TF_METAL4=0` keeps Metal 3, `TF_METAL4_TIMELINE=n` logs per-stage GPU times for n rounds of each kind, and `TF_DSV41_ROUND_PROF=1` logs decode rounds' host and GPU milliseconds (#3374).
-
-
 
 - Flash Next on HIP: the verify window holds eight rows instead of four, so a stream alone in a round can land copy drafts of up to seven tokens a round; rounds shared by several streams keep three-token copies, MTP still drafts at most three, and each stream's window snapshots take more device memory, which admission counts (#2730). Thanks to @gilby.
 
@@ -198,7 +186,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the Qwen3.8-27B recipe says to serve with `--thinking-budget 4096` when thinking is on, and gives its GPQA Diamond result on TensorFold 1.2.7 and one GB10: replies cut at the limit from 78 of 198 to 0, and correct from 58.1% to 82.8% (#3373, fixes #3323).
 
 - Idol on CUDA: `tf-idol` runs Idol's denoiser on GB10 (sm_121) and on RTX 50-series and RTX PRO Blackwell (sm_120) cards against a reference case, gated step by step against idol-sdk's float32 run as on Metal, and refuses other GPUs by name (#1767, for #1757). Thanks to @jayleaton, with device runs from @GustavBlack and @Nipale-ai.
-- On Macs, DeepSeek V4.1 chats with image parts now render the vision tower's rows into the prompt (image bytes to patches, the tower merged into the stream); text that spells the image token stays request text, and a text-only build refuses the image part by name (#3926, part of #1676).
 
 - Docs: the drafter training recipe gains a section on adapting an already released drafter, budgeted from a few passes over the scarcest class at a low learning rate with early checkpoints, with the Qwen3.8-27B pilot behind it (#3369, refs #2667). Thanks to @Maxrio9.
 
