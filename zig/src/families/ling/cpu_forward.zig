@@ -159,6 +159,28 @@ pub fn Forward(comptime Source: type) type {
                 try route.checkBias(bias, shape);
                 const out = try self.alloc(c.hidden);
                 @memset(out, 0);
+                if (comptime @hasDecl(Source, "projectExpertsBatch")) if (self.count > 1 and self.isFast() and self.threads > 1 and c.hidden <= 2048 and c.moe_inter <= 1024) {
+                    var all_sel: [8][route.max_topk]route.Pick = undefined;
+                    var flat_ids: [8 * route.max_topk]u32 = undefined;
+                    for (0..self.count) |t| {
+                        const n = route.selectF32(scores[t * c.experts ..][0..c.experts], bias, all_sel[t][0..c.topk], shape);
+                        if (n != c.topk) return error.CpuRoute;
+                        for (all_sel[t][0..n], 0..) |pick, j| {
+                            picks[t * c.topk + j] = pick.id;
+                            flat_ids[t * c.topk + j] = pick.id;
+                        }
+                    }
+                    const ys = try self.a.alloc(f32, self.count * c.topk * c.hidden);
+                    try self.source.projectExpertsBatch(p, flat_ids[0 .. self.count * c.topk], self.count, c.topk, x, ys, c.hidden, c.moe_inter, c.expert_limit[layer], self.threads);
+                    for (0..self.count) |t| {
+                        for (all_sel[t][0..c.topk], 0..) |pick, j| {
+                            for (out[t * c.hidden ..][0..c.hidden], ys[(t * c.topk + j) * c.hidden ..][0..c.hidden]) |*o, v| o.* += v * pick.wt;
+                        }
+                    }
+                    const shared = try self.mlp(x, try self.name(p, "shared_experts."), c.shared_inter, c.shared_limit[layer]);
+                    for (out, shared) |*o, v| o.* = op.round(op.round(o.*) + v);
+                    return out;
+                };
                 for (0..self.count) |t| {
                     var selected: [route.max_topk]route.Pick = undefined;
                     const n = route.selectF32(scores[t * c.experts ..][0..c.experts], bias, selected[0..c.topk], shape);

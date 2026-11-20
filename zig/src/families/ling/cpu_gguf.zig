@@ -242,6 +242,68 @@ pub const File = struct {
         };
         try (try f.workers(threads)).experts(list[0..ids.len], x, hidden, inter, limit);
     }
+    /// Multi-row fast-mode routed experts grouped by expert ID across a prefill chunk (1..8 rows).
+    pub fn projectExpertsBatch(f: *File, prefix: []const u8, ids: []const u32, count: usize, topk: usize, x: []const f32, out: []f32, hidden: usize, inter: usize, limit: f32, threads: usize) !void {
+        if (!f.fast_mode or count == 0 or count > 8 or topk == 0 or topk > 16 or ids.len != count * topk or x.len != count * hidden or out.len != count * topk * hidden or hidden > 2048 or inter > 1024)
+            return error.BadLingGgufMatrix;
+        const hidden_blocks = hidden / 256;
+        const can_sdot_in = hidden % 256 == 0 and count * hidden_blocks <= 64;
+        const can_sdot_down = inter % 256 == 0 and count * (inter / 256) <= 64;
+        var groups: [128]@import("cpu_gguf_pool.zig").FastExpertGroup = undefined;
+        var group_ids: [128]u32 = undefined;
+        var n_groups: usize = 0;
+        var any_sdot = false;
+        var buf: [128]u8 = undefined;
+        for (0..count) |t| {
+            for (0..topk) |j| {
+                const eid = ids[t * topk + j];
+                const slot_out = out[(t * topk + j) * hidden ..].ptr;
+                var found: ?usize = null;
+                for (0..n_groups) |gidx| if (group_ids[gidx] == eid and groups[gidx].n_rows < 8) {
+                    found = gidx;
+                    break;
+                };
+                if (found) |gidx| {
+                    const idx = groups[gidx].n_rows;
+                    groups[gidx].rows[idx] = @intCast(t);
+                    groups[gidx].outs[idx] = slot_out;
+                    groups[gidx].n_rows += 1;
+                } else {
+                    const gm = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.gate_proj.weight", .{ prefix, eid }), hidden, inter);
+                    const um = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.up_proj.weight", .{ prefix, eid }), hidden, inter);
+                    const dm = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.down_proj.weight", .{ prefix, eid }), inter, hidden);
+                    const use_g = can_sdot_in and (gm.tensor.kind == .q4_k or gm.tensor.kind == .q6_k);
+                    const use_u = can_sdot_in and (um.tensor.kind == .q4_k or um.tensor.kind == .q6_k);
+                    const use_d = can_sdot_down and (dm.tensor.kind == .q4_k or dm.tensor.kind == .q6_k);
+                    if (use_g or use_u) any_sdot = true;
+                    group_ids[n_groups] = eid;
+                    groups[n_groups] = .{
+                        .expert = .{
+                            .gate = gm.tensor,
+                            .up = um.tensor,
+                            .down = dm.tensor,
+                            .gate_rep = if (use_g) gm.rep else null,
+                            .up_rep = if (use_u) um.rep else null,
+                            .down_rep = if (use_d) dm.rep else null,
+                            .use_sdot_gate = use_g,
+                            .use_sdot_up = use_u,
+                            .use_sdot_down = use_d,
+                            .out = slot_out,
+                        },
+                        .n_rows = 1,
+                        .rows = .{ @intCast(t), 0, 0, 0, 0, 0, 0, 0 },
+                        .outs = .{ slot_out, undefined, undefined, undefined, undefined, undefined, undefined, undefined },
+                    };
+                    n_groups += 1;
+                }
+            }
+        }
+        var acts_buf: [64]gguf_sdot.Activation256 = undefined;
+        if (any_sdot) {
+            for (0..count) |t| try gguf_sdot.quantize256(x[t * hidden ..][0..hidden], acts_buf[t * hidden_blocks ..][0..hidden_blocks], true);
+        }
+        try (try f.workers(threads)).expertsFastBatch(groups[0..n_groups], x, &acts_buf, count, hidden, inter, limit);
+    }
     pub fn embed(f: *const File, ids: []const u32, output: []f32) !void {
         try @import("cpu_gguf_values.zig").embedding(&f.source.document, ids, output);
     }
