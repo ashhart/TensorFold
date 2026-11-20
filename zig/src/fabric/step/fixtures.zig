@@ -52,8 +52,10 @@ const stop: message.Message = .{ .header = head(.stop) };
 const sample: message.Message = .{
     .header = withFamily(head(.family), 20),
     .sampling = &.{
-        .{ .stream = 0, .top_k = 50, .temperature = 0.8, .top_p = 0.95, .row0 = 3, .rows = 2 }, // DeepSeek's 7-word form
-        .{ .stream = 0, .seed = 99, .temperature = 1.0, .rows = 1, .pos0 = 12, .has = .{ .seed = true, .pos0 = true } }, // 9 words
+        // DeepSeek's 7-word form
+        .{ .stream = 0, .top_k = 50, .temperature = 0.8, .top_p = 0.95, .row0 = 3, .rows = 2 },
+        // 9 words
+        .{ .stream = 0, .seed = 99, .temperature = 1.0, .rows = 1, .pos0 = 12, .has = .{ .seed = true, .pos0 = true } },
     },
 };
 
