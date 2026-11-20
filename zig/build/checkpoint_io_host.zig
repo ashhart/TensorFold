@@ -21,6 +21,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"expert stripe"} })).step);
         if (mode == .debug) b.step("test-deployment-fit-host", "Exact low-memory resident/SSD placement and bounded fit controls")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"deployment fit"} })).step);
+        if (mode == .debug) b.step("test-low-memory-plan-host", "Measured-byte placement, exact fallback and transactional admission without devices")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/low_memory_plan.zig"), .target = target, .optimize = mode }) })).step);
         const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"Qwen shard integrity:"} })).step);
     }
