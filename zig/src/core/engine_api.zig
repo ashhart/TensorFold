@@ -124,6 +124,9 @@ pub const ocr = @import("engine_ocr.zig");
 pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
+pub const SpeechSteering = @import("speech_api.zig").SpeechSteering;
+pub const SpeechLaci = @import("speech_api.zig").SpeechLaci;
+pub const SpeechEdit = @import("speech_api.zig").SpeechEdit;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 pub const EncodeVoiceError = error{ BadWav, Closed, Failed, OutOfMemory };
 pub const ImageRequest = @import("image_api.zig").ImageRequest;
@@ -295,6 +298,8 @@ pub const Open = struct {
     model_type: []const u8,
     context: ?i64 = null,
     max_frames: ?u32 = null,
+    /// ZONOS3's audio decoders served (--decoders), comma-separated ids; null: every one the release holds.
+    decoders: ?[]const u8 = null,
     silence: speech_guard.Config = .{},
     /// Allocate an independent backbone state per speech lane; Metal Drama only.
     cfg_enabled: bool = false,

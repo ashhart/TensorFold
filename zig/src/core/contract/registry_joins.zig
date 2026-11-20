@@ -21,6 +21,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
     @import("nemo_audio_cuda_records.zig").cuda ++
     @import("idol_cuda_sets.zig").cuda ++
+    @import("zonos3_cuda_records.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
@@ -94,7 +95,8 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
-    @import("bolt_records.zig").records;
+    @import("bolt_records.zig").records ++
+    @import("zonos3_records.zig").records;
 pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++
     registry.gradient_pending ++
@@ -134,4 +136,5 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 test {
     _ = @import("mla_cuda_records.zig");
     _ = @import("inkling2_cuda_records.zig");
+    _ = @import("zonos3_cuda_records.zig");
 }

@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZONOS3 Mini test page</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1c1a; --muted:#6b6862; --line:#dcd9d2; --accent:#2f5d50; --bad:#a3312b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#171716; --panel:#201f1d; --ink:#ecebe7; --muted:#a09c94; --line:#383632; --accent:#7fb8a4; --bad:#e08a84; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:780px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.sub, p.note { color:var(--muted); margin:0 0 16px; font-size:.9rem; }
+  p.note { margin:6px 0 0; font-size:.82rem; }
+  textarea, select, input { width:100%; font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:9px; }
+  input[type=checkbox] { width:auto; margin-right:6px; }
+  textarea { min-height:130px; resize:vertical; }
+  label { display:block; font-size:.82rem; color:var(--muted); margin:12px 0 4px; }
+  label.check { display:flex; align-items:center; color:var(--ink); font-size:.9rem; margin-top:34px; }
+  .row { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:12px; }
+  button { font:inherit; font-weight:600; padding:10px 20px; border-radius:8px; border:0; background:var(--accent); color:var(--bg); cursor:pointer; margin-top:16px; }
+  button.small { font-weight:500; padding:5px 10px; margin:6px 6px 0 0; background:transparent; color:var(--accent); border:1px solid var(--line); font-size:.85rem; }
+  button:disabled { opacity:.5; cursor:default; }
+  details { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:4px 14px 12px; margin-top:14px; }
+  summary { cursor:pointer; padding:8px 0 2px; font-weight:600; }
+  .tabs { display:flex; gap:8px; margin-bottom:12px; }
+  .tabs button { margin:0; background:transparent; color:var(--ink); border:1px solid var(--line); }
+  .tabs button.on { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+  .control { display:grid; grid-template-columns:1fr 90px 1fr 34px; gap:8px; margin-top:8px; align-items:center; }
+  .control span { font-size:.82rem; color:var(--muted); overflow-wrap:anywhere; }
+  .control button { margin:0; padding:6px; background:transparent; color:var(--bad); border:1px solid var(--line); }
+  #status, #estatus { margin:12px 0 0; font-size:.9rem; color:var(--muted); min-height:1.4em; }
+  .bad { color:var(--bad) !important; }
+  .take { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; }
+  .take .meta { font-size:.82rem; color:var(--muted); margin-bottom:6px; overflow-wrap:anywhere; }
+  .take .text { font-size:.92rem; margin-bottom:8px; overflow-wrap:anywhere; }
+  audio { width:100%; }
+  .count { float:right; font-size:.78rem; color:var(--muted); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ZONOS3 Mini on TensorFold</h1>
+  <p class="sub">Speak text, steer it, or edit a recording. Cloned voices and clips stay in this browser tab only; use
+  only voices you have the right to use.</p>
+  <div class="tabs"><button id="tab-speak" class="on">Speak</button><button id="tab-edit">Edit a recording</button></div>
+
+  <section id="speak-pane">
+    <label for="text">Text <span class="count" id="count"></span></label>
+    <textarea id="text" maxlength="4096">Hello from TensorFold. This is ZONOS three mini, speaking through the speech route on one graphics card.</textarea>
+    <div>
+      <button class="small" data-insert="<0.25s>">pause 0.25 s</button><button class="small" data-insert="<0.5s>">pause 0.5 s</button>
+      <button class="small" data-insert="<1s>">pause 1 s</button><button class="small" data-insert="<2s>">pause 2 s</button>
+      <button class="small" id="pronounce">pronounce selection as phones…</button>
+    </div>
+    <p class="note">A pause goes in at the cursor as &lt;0.5s&gt; (0.25, 0.5, 1 or 2 s: the release's four lengths; others take the nearest). "Pronounce" replaces the selected text with [[phones]] you type (IPA, from the release's inventory).</p>
+
+    <div class="row">
+      <div><label for="voice">Voice</label><select id="voice"></select></div>
+      <div><label for="clip">Clone a voice from a clip (up to 60 s is used)</label><input id="clip" type="file" accept="audio/*,video/*"></div>
+    </div>
+    <div class="row">
+      <div><label for="language">Language</label><select id="language"></select></div>
+      <div><label for="normalize">Text normalization</label><select id="normalize"><option value="">server default</option><option value="true">on</option><option value="false">off</option></select></div>
+      <div><label for="seed">Seed (blank: from the text)</label><input id="seed" inputmode="numeric" placeholder="e.g. 7"></div>
+    </div>
+    <div class="row">
+      <div><label for="temperature">Temperature</label><input id="temperature" type="number" step="0.05" min="0" value="0.75"></div>
+      <div><label for="top_p">Top-p</label><input id="top_p" type="number" step="0.01" min="0.01" max="1" value="0.69"></div>
+      <div><label for="top_k">Top-k</label><input id="top_k" type="number" step="1" min="1" max="4096" value="80"></div>
+    </div>
+
+    <details>
+      <summary>Delivery and decoding</summary>
+      <div class="row">
+        <div><label for="rate">Speaking rate (the release's scale: about 6 to 29)</label><input id="rate" type="number" step="0.5" min="0" placeholder="blank: unset"></div>
+        <div><label for="loudness">Loudness (about -30 to -16)</label><input id="loudness" type="number" step="1" placeholder="blank: unset"></div>
+        <div><label for="fmax">Bandwidth fmax (about 8,400 to 20,000)</label><input id="fmax" type="number" step="100" placeholder="blank: unset"></div>
+      </div>
+      <div class="row">
+        <div><label for="guidance">Speaker guidance (1: off)</label><input id="guidance" type="number" step="0.1" min="0" value="1"></div>
+        <div><label for="decoder">Audio decoder</label><select id="decoder"></select></div>
+        <div><label for="short">Short texts</label><select id="short"><option value="">server default</option><option value="auto">auto</option><option value="off">off</option></select></div>
+      </div>
+      <div class="row">
+        <div><label for="duration">Hold to a duration (seconds, with LACI)</label><input id="duration" type="number" step="0.1" min="0.1" placeholder="blank: none"></div>
+        <label class="check"><input type="checkbox" id="fixed-rate">Only record a duration miss</label>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="laci">LACI (watch the reading, redo a skip or stall)</label>
+        <label class="check"><input type="checkbox" id="start">Start immediately</label>
+        <label class="check"><input type="checkbox" id="embedding">Voice by its embedding</label>
+      </div>
+      <p class="note">The full-size decoder loads with its first request (several seconds). Guidance and LACI cannot be combined. Voice-shaping controls need "voice by its embedding". A duration miss is retaken at another speaking rate; set a speaking rate above to let it go faster.</p>
+    </details>
+
+    <details>
+      <summary>Steering controls</summary>
+      <div class="row">
+        <div><label for="direction">Control</label><select id="direction"></select></div>
+        <div><label for="dose">Dose</label><input id="dose" type="number" step="0.5" value="1"></div>
+      </div>
+      <button class="small" id="add-whole">add for the whole reply</button><button class="small" id="add-span">add for the selected text</button>
+      <div id="controls"></div>
+      <div class="row">
+        <div><label for="follow">Spans placed by</label><select id="follow"><option value="">the character rate</option><option value="reading">the reading position (needs LACI heads)</option></select></div>
+        <div><label for="hold">Hold after the onset (blank: bundle default)</label><input id="hold" type="number" step="0.05" min="0" max="1" placeholder="0.35"></div>
+        <div><label for="cguidance">Controls guidance (1: off)</label><input id="cguidance" type="number" step="0.1" min="0" value="1"></div>
+      </div>
+      <p class="note" id="controls-note"></p>
+    </details>
+
+    <details>
+      <summary>Other request fields (JSON)</summary>
+      <textarea id="extra" style="min-height:70px" placeholder='{"control_span_lead": 2}'></textarea>
+      <p class="note">Merged into the request last: any field of /v1/audio/speech.</p>
+    </details>
+
+    <button id="speak">Speak</button>
+    <div id="status"></div>
+  </section>
+
+  <section id="edit-pane" class="hidden">
+    <div class="row">
+      <div><label for="eclip">The recording (a file, or "edit this" on a take)</label><input id="eclip" type="file" accept="audio/*,video/*"></div>
+      <div><label for="elanguage">Language</label><select id="elanguage"></select></div>
+    </div>
+    <p class="note" id="eclip-note">No recording chosen.</p>
+    <label for="original">What the recording says</label>
+    <textarea id="original" style="min-height:70px"></textarea>
+    <label for="target">What it should say</label>
+    <textarea id="target" style="min-height:70px"></textarea>
+    <div class="row">
+      <div><label for="spans">Or the seconds to replace (e.g. 1.2-1.9, 3-3.5)</label><input id="spans" placeholder="blank: from the two texts"></div>
+      <div><label for="takes-n">Takes</label><input id="takes-n" type="number" min="1" max="4" value="1"></div>
+      <div><label for="eseed">Seed (blank: from the clip)</label><input id="eseed" inputmode="numeric"></div>
+      <div><label for="edecoder">Audio decoder</label><select id="edecoder"></select></div>
+    </div>
+    <button id="align" class="small">find the words' times</button>
+    <p class="note" id="words"></p>
+    <p class="note">Pauses are dropped from an edit's texts. A [[phones]] word in the new text is always spoken anew, as in the publisher's planner.</p>
+    <button id="edit">Edit</button>
+    <div id="estatus"></div>
+  </section>
+  <div id="takes"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const say = (el, msg, bad) => { $(el).textContent = msg; $(el).classList.toggle('bad', !!bad); };
+const count = () => { $('count').textContent = $('text').value.length + ' / 4096'; };
+$('text').addEventListener('input', count); count();
+
+for (const [tab, pane] of [['tab-speak', 'speak-pane'], ['tab-edit', 'edit-pane']]) {
+  $(tab).addEventListener('click', () => {
+    for (const t of ['tab-speak', 'tab-edit']) $(t).classList.toggle('on', t === tab);
+    $('speak-pane').classList.toggle('hidden', pane !== 'speak-pane');
+    $('edit-pane').classList.toggle('hidden', pane !== 'edit-pane');
+  });
+}
+
+const LANGUAGES = 'en_us en_gb fr_fr de es it pt_br ja cmn ko ar bn bg cs da nl fi ka el gu he hi hu id kn ms ml mr no or pl pa ro ru sk sv tl ta te th tr uk ur vi'.split(' ');
+for (const sel of ['language', 'elanguage']) for (const code of LANGUAGES) $(sel).add(new Option(code, code));
+
+async function getJson(url) { const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }
+let directions = {};
+
+async function load() {
+  try {
+    const d = await getJson('/v1/voices');
+    const about = Object.fromEntries((d.details || []).map(v => [v.id, v.description]));
+    for (const name of d.voices) $('voice').add(new Option(name === 'default' ? 'default (' + (d.default || '') + ')' : name + (about[name] ? ' — ' + about[name] : ''), name));
+  } catch (e) { say('status', 'Could not load voices: ' + e, true); }
+  try {
+    const d = await getJson('/v1/audio/decoders');
+    for (const sel of ['decoder', 'edecoder']) for (const id of d.decoders) $(sel).add(new Option(id + (id === d.default ? ' (default)' : ''), id));
+  } catch (e) { for (const sel of ['decoder', 'edecoder']) $(sel).add(new Option('the server\'s', '')); }
+  try {
+    directions = (await getJson('/v1/audio/controls')).directions || {};
+    for (const [id, d] of Object.entries(directions)) $('direction').add(new Option(id + (d.space === 'speaker_embedding' ? ' (voice)' : ''), id));
+  } catch (e) { $('direction').add(new Option('no steering bundle on this server', '')); $('direction').disabled = true; }
+}
+
+// The box's <0.5s> pauses and [[phones]] as the release's markers: U+E003..U+E006, U+E000 phones U+E001.
+const PAUSES = [0.25, 0.5, 1, 2];
+const toWire = s => s
+  .replace(/<\s*(\d*\.?\d+)\s*s\s*>/g, (_, x) => String.fromCharCode(0xE003 + PAUSES.reduce((b, p, i) => Math.abs(p - x) < Math.abs(PAUSES[b] - x) ? i : b, 0)))
+  .replace(/\[\[([^\]]+)\]\]/g, (_, phones) => String.fromCharCode(0xE000) + phones.replace(/\s+/g, '') + String.fromCharCode(0xE001));
+// for an edit: no pauses, phones kept
+const toEditText = s => toWire(s.replace(/<\s*\d*\.?\d+\s*s\s*>/g, '')).replace(/ {2,}/g, ' ').trim();
+// A box position as the server counts it: code points of the text sent up to there.
+const points = (s, i) => Array.from(toWire(s.slice(0, i))).length;
+function insertAt(text) {
+  const el = $('text'); const a = el.selectionStart, b = el.selectionEnd;
+  el.value = el.value.slice(0, a) + text + el.value.slice(b); el.focus(); el.selectionStart = el.selectionEnd = a + text.length; count();
+}
+document.querySelectorAll('[data-insert]').forEach(b => b.addEventListener('click', () => insertAt(b.dataset.insert)));
+$('pronounce').addEventListener('click', () => {
+  const el = $('text'); const sel = el.value.slice(el.selectionStart, el.selectionEnd);
+  const phones = prompt('Phones (IPA) for "' + (sel || 'the cursor') + '":', '');
+  if (phones) insertAt('[[' + phones.replace(/\s+/g, '') + ']]');
+});
+
+// {id, dose, span: [start, end) in code points or null; words, and wire: the text sent when they were selected}
+const controls = [];
+function drawControls() {
+  $('controls').replaceChildren(...controls.map((c, i) => {
+    const row = document.createElement('div'); row.className = 'control';
+    const name = document.createElement('span'); name.textContent = c.id;
+    const dose = document.createElement('input'); dose.type = 'number'; dose.step = '0.5'; dose.value = c.dose;
+    dose.addEventListener('input', () => { c.dose = Number(dose.value); });
+    const where = document.createElement('span');
+    where.textContent = c.span ? `“${c.words}” [${c.span[0]}, ${c.span[1]})` : 'the whole reply';
+    const x = document.createElement('button'); x.textContent = '×'; x.title = 'remove';
+    x.addEventListener('click', () => { controls.splice(i, 1); drawControls(); });
+    row.append(name, dose, where, x); return row;
+  }));
+  const voiceControl = controls.some(c => (directions[c.id] || {}).space === 'speaker_embedding');
+  if (voiceControl) $('embedding').checked = true;
+  say('controls-note', voiceControl ? 'A voice control is on: the request uses the voice by its embedding.' : 'Spans steer only the hidden controls (not voice ones), and may not overlap.');
+}
+function addControl(span) {
+  const id = $('direction').value; if (!id) return;
+  if (span) {
+    const el = $('text'); if (el.selectionStart === el.selectionEnd) return say('status', 'Select some text first.', true);
+    span = [points(el.value, el.selectionStart), points(el.value, el.selectionEnd)];
+    var words = el.value.slice(el.selectionStart, el.selectionEnd), wire = toWire(el.value);
+  }
+  controls.push({ id, dose: Number($('dose').value), span, words, wire }); drawControls();
+}
+$('add-whole').addEventListener('click', () => addControl(false));
+$('add-span').addEventListener('click', () => addControl(true));
+drawControls();
+
+// Any file the browser can decode becomes 16-bit mono WAV at its own rate: the server takes WAV.
+async function toWav(blob, limit) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const audio = await ctx.decodeAudioData(await blob.arrayBuffer());
+  ctx.close();
+  const seconds = Math.min(audio.duration, limit);
+  const n = Math.floor(seconds * audio.sampleRate);
+  const mono = new Float32Array(n);
+  for (let c = 0; c < audio.numberOfChannels; c++) {
+    const data = audio.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += data[i] / audio.numberOfChannels;
+  }
+  const bytes = new Uint8Array(44 + 2 * n);
+  const view = new DataView(bytes.buffer);
+  const text = (at, t) => { for (let i = 0; i < t.length; i++) bytes[at + i] = t.charCodeAt(i); };
+  text(0, 'RIFF'); view.setUint32(4, 36 + 2 * n, true); text(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, audio.sampleRate, true); view.setUint32(28, 2 * audio.sampleRate, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, 2 * n, true);
+  for (let i = 0; i < n; i++) view.setInt16(44 + 2 * i, Math.round(Math.max(-1, Math.min(1, mono[i])) * 32767), true);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return { wav: btoa(binary), seconds };
+}
+
+const clones = {};  // name -> the clip as a base64 WAV, kept in this tab
+$('clip').addEventListener('change', async () => {
+  const file = $('clip').files[0]; if (!file) return;
+  say('status', 'Reading ' + file.name + '…');
+  try {
+    const d = await toWav(file, 60);
+    if (d.seconds < 0.5) throw new Error('The clip must be at least half a second long.');
+    const name = 'clone: ' + file.name;
+    if (!clones[name]) { const o = new Option(`${name} (${d.seconds.toFixed(1)} s)`, name); $('voice').prepend(o); }
+    clones[name] = d.wav; $('voice').value = name;
+    say('status', `Ready to clone from ${d.seconds.toFixed(1)} s of ${file.name}. The first cloned request loads the clip encoder (about 8 s).`);
+  } catch (e) { say('status', 'Could not read that file as audio: ' + (e.message || e), true); }
+  $('clip').value = '';
+});
+
+function speechBody() {
+  const input = toWire($('text').value);
+  const body = { model: 'zonos3-mini', input, language: $('language').value,
+    temperature: Number($('temperature').value), top_p: Number($('top_p').value), top_k: Number($('top_k').value) };
+  const voice = $('voice').value;
+  if (clones[voice]) body.ref_audio = clones[voice]; else body.voice = voice;
+  const num = id => $(id).value.trim() === '' ? null : Number($(id).value);
+  if (num('seed') !== null) body.seed = num('seed');
+  if ($('normalize').value) body.text_normalization = $('normalize').value === 'true';
+  const values = {}; for (const [id, name] of [['rate', 'speaking_rate'], ['loudness', 'loudness'], ['fmax', 'fmax']]) if (num(id) !== null) values[name] = num(id);
+  if (Object.keys(values).length) body.condition_values = values;
+  if (num('guidance') !== null && num('guidance') !== 1) body.speaker_cfg_scale = num('guidance');
+  if ($('decoder').value) body.decoder = $('decoder').value;
+  if ($('short').value) body.short_text = $('short').value;
+  if ($('laci').checked) body.laci = true;
+  if (num('duration') !== null) {
+    body.laci = true; $('laci').checked = true; body.duration_seconds = num('duration');
+    if ($('fixed-rate').checked) body.duration_adjust_rate = false;
+  }
+  if ($('start').checked) body.start_immediately = true;
+  if ($('embedding').checked) body.speaker_mode = 'embedding';
+  const whole = {}; const spans = [];
+  for (const c of controls) if (c.span) spans.push({ start: c.span[0], end: c.span[1], controls: { [c.id]: c.dose } }); else whole[c.id] = (whole[c.id] || 0) + c.dose;
+  if (Object.keys(whole).length) body.controls = whole;
+  if (spans.length) { body.control_spans = spans; if ($('follow').value) body.control_span_follow = $('follow').value; }
+  if (num('hold') !== null) body.steer_hold = num('hold');
+  if (num('cguidance') !== null && num('cguidance') !== 1) body.controls_cfg_scale = num('cguidance');
+  let extra = {};
+  if ($('extra').value.trim()) {
+    try { extra = JSON.parse($('extra').value); } catch (e) { throw new Error('Other request fields: ' + e.message); }
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('Other request fields: give a JSON object.');
+  }
+  Object.assign(body, extra);
+  // a span counts code points of the text it was selected in: a changed text would steer other words, or none
+  const stale = 'control_spans' in extra ? null : controls.find(c => c.span && c.wire !== body.input);
+  if (stale) throw new Error(`The text changed after “${stale.words}” was selected for ${stale.id}: remove that control and select the words again.`);
+  return body;
+}
+
+async function failure(r) { let msg = 'HTTP ' + r.status; try { msg = (await r.json()).error.message; } catch (_) {} return new Error(msg); }
+
+let editClip = null;  // {wav, seconds, name}
+function addTake(title, text, blob, extra) {
+  const take = document.createElement('div'); take.className = 'take';
+  const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = title;
+  const words = document.createElement('div'); words.className = 'text'; words.textContent = text;
+  const audio = document.createElement('audio'); audio.controls = true; audio.src = URL.createObjectURL(blob);
+  const use = document.createElement('button'); use.className = 'small'; use.textContent = 'edit this';
+  use.addEventListener('click', async () => {
+    const d = await toWav(blob, 60);
+    editClip = { wav: d.wav, seconds: d.seconds, name: title.split(' · ')[0] };
+    // an edit's texts take no pauses: the take's are dropped
+    const plain = text.replace(/<\s*\d*\.?\d+\s*s\s*>/g, '').replace(/ {2,}/g, ' ').trim();
+    $('original').value = plain; $('target').value = plain;
+    say('eclip-note', `Editing ${d.seconds.toFixed(1)} s from a take.`); $('tab-edit').click();
+  });
+  take.append(meta, words, audio, use);
+  if (extra) take.append(extra);
+  $('takes').prepend(take); audio.play().catch(() => {});
+}
+
+async function speak() {
+  if (!$('text').value.trim()) return say('status', 'Type some text first.', true);
+  let body; try { body = speechBody(); } catch (e) { return say('status', e.message, true); }
+  $('speak').disabled = true; say('status', 'Speaking…');
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/v1/audio/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw await failure(r);
+    const blob = await r.blob();
+    const seconds = Math.max(0, (blob.size - 44) / 2 / 44100);
+    const parts = [body.voice || 'clone', `${seconds.toFixed(1)} s of audio in ${((performance.now() - t0) / 1000).toFixed(2)} s`,
+      `temperature ${body.temperature}, top-p ${body.top_p}, top-k ${body.top_k}` + (body.seed !== undefined ? `, seed ${body.seed}` : '')];
+    if (r.headers.get('X-Decoder')) parts.push('decoder ' + r.headers.get('X-Decoder'));
+    if (body.laci) parts.push('LACI');
+    if (body.duration_seconds) parts.push(`held to ${body.duration_seconds} s`);
+    if (controls.length) parts.push(controls.map(c => `${c.id} ${c.dose}${c.span ? ' on [' + c.span + ')' : ''}`).join(', '));
+    addTake(parts.join(' · '), $('text').value, blob);
+    say('status', '');
+  } catch (e) { say('status', String(e.message || e), true); }
+  $('speak').disabled = false;
+}
+$('speak').addEventListener('click', speak);
+
+$('eclip').addEventListener('change', async () => {
+  const file = $('eclip').files[0]; if (!file) return;
+  try {
+    const d = await toWav(file, 60);
+    editClip = { wav: d.wav, seconds: d.seconds, name: file.name };
+    say('eclip-note', `${file.name}: ${d.seconds.toFixed(1)} s` + (d.seconds >= 60 ? ' (the first 60 s)' : '') + '.');
+  } catch (e) { say('eclip-note', 'Could not read that file as audio: ' + (e.message || e), true); }
+  $('eclip').value = '';
+});
+
+$('align').addEventListener('click', async () => {
+  if (!editClip || !$('original').value.trim()) return say('estatus', 'Choose a recording and type what it says first.', true);
+  say('estatus', 'Aligning (the first time loads the aligner)…');
+  try {
+    const r = await fetch('/v1/audio/edit/align', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'zonos3-mini', audio_base64: editClip.wav, text: toEditText($('original').value), language: $('elanguage').value }) });
+    if (!r.ok) throw await failure(r);
+    const d = await r.json();
+    say('words', d.words.map(w => `${w.word} ${w.start.toFixed(2)}–${w.end.toFixed(2)}`).join(' · '));
+    say('estatus', '');
+  } catch (e) { say('estatus', String(e.message || e), true); }
+});
+
+async function edit() {
+  if (!editClip) return say('estatus', 'Choose a recording first.', true);
+  const target = toEditText($('target').value); if (!target) return say('estatus', 'Type what it should say.', true);
+  const body = { model: 'zonos3-mini', audio_base64: editClip.wav, target_text: target, language: $('elanguage').value, num_takes: Number($('takes-n').value) };
+  if ($('original').value.trim()) body.original_text = toEditText($('original').value);
+  if ($('spans').value.trim()) {
+    body.spans = $('spans').value.split(',').map(s => s.split('-').map(Number));
+    if (body.spans.some(p => p.length !== 2 || p.some(isNaN))) return say('estatus', 'Write spans as start-end seconds, e.g. 1.2-1.9.', true);
+  }
+  if (!body.original_text && !body.spans) return say('estatus', 'Give what the recording says, or the seconds to replace.', true);
+  if ($('eseed').value.trim()) body.seed = Number($('eseed').value);
+  if ($('edecoder').value) body.decoder = $('edecoder').value;
+  $('edit').disabled = true; say('estatus', 'Editing (the first edit loads the clip encoder)…');
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/v1/audio/edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) throw await failure(r);
+    // seeds are 64-bit: read them from the text, as JSON numbers would round them
+    const raw = await r.text();
+    const d = JSON.parse(raw);
+    const seeds = [...raw.matchAll(/"seed":\s*(\d+)/g)].map(m => m[1]);
+    const took = ((performance.now() - t0) / 1000).toFixed(2);
+    d.takes.forEach((t, k) => {
+      const bytes = Uint8Array.from(atob(t.audio_base64), ch => ch.charCodeAt(0));
+      const where = (d.spans || []).map(s => `${s[0].toFixed(2)}–${s[1].toFixed(2)} s`).join(', ');
+      addTake(`edit of ${editClip.name} · take ${k + 1}, seed ${seeds[k] ?? t.seed} · ${t.duration.toFixed(1)} s in ${took} s · replaced ${where}` + (body.decoder ? ' · decoder ' + body.decoder : ''),
+        $('target').value.trim(), new Blob([bytes], { type: 'audio/wav' }));
+    });
+    say('estatus', '');
+  } catch (e) { say('estatus', String(e.message || e), true); }
+  $('edit').disabled = false;
+}
+$('edit').addEventListener('click', edit);
+load();
+</script>
+</body>
+</html>

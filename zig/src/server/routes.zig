@@ -1,5 +1,6 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
 const speech = @import("speech.zig");
+const speech_edit = @import("speech_edit.zig");
 const images = @import("images_generations.zig");
 const embeddings = @import("embeddings.zig");
 const std = @import("std");
@@ -92,8 +93,17 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/voices")) {
         if (srv.info.speech == null) return unknown(conn, a);
-        const value = srv.voices.listing(a) catch return;
+        const value = (if (srv.zonos) |state| @import("zonos_speech.zig").listing(a, state) else srv.voices.listing(a)) catch return;
         return sendValue(conn, a, 200, value);
+    }
+    if (std.mem.eql(u8, route, "/v1/audio/decoders")) {
+        const sp = srv.info.speech orelse return unknown(conn, a);
+        if (srv.zonos == null) return unknown(conn, a);
+        return sendValue(conn, a, 200, @import("zonos_speech.zig").decoders(a, sp) catch return);
+    }
+    if (std.mem.eql(u8, route, "/v1/audio/controls")) {
+        const bundle = (if (srv.zonos) |state| state.bundle else null) orelse return unknown(conn, a);
+        return sendValue(conn, a, 200, @import("zonos_steer.zig").document(a, bundle) catch return);
     }
     if (std.mem.eql(u8, route, "/memory") or std.mem.eql(u8, route, "/v1/memory"))
         return memory.get(srv, conn, a) catch {};
@@ -136,7 +146,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
-    const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
+    const is_edit = std.mem.eql(u8, route, speech_edit.route) or std.mem.eql(u8, route, speech_edit.align_route);
+    const is_speech = std.mem.eql(u8, route, "/v1/audio/speech") or is_edit;
     const is_voices = srv.config.voice.manage and std.mem.eql(u8, route, "/v1/voices");
     const is_images = std.mem.eql(u8, route, "/v1/images/generations");
     const is_embedding = std.mem.eql(u8, route, "/v1/embeddings");
@@ -163,6 +174,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
     if (entered.refusal) |refusal| return refuse(conn, a, is_anthropic, refusal);
+    if (is_edit) return speech_edit.post(srv, conn, a, std.mem.eql(u8, route, speech_edit.align_route)) catch {};
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_voices) return voice_routes.post(srv, conn, a);
     if (is_images) return images.post(srv, conn, a) catch {};

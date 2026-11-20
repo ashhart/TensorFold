@@ -45,6 +45,7 @@ pub const Config = struct {
     model_dir: []const u8 = "",
     /// --voices, --default-voice, --request-voices and --manage-voices; the last two off keep the startup catalog.
     voice: @import("voice_cli.zig").Config = .{},
+    zonos: @import("zonos_steer.zig").Paths = .{}, // --steer-bundle and the other ZONOS3 paths
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.
@@ -139,6 +140,7 @@ pub const Server = struct {
     text: model_text.Text,
     config: Config,
     voices: @import("drama_voice_store.zig").Store = .{},
+    zonos: ?*@import("zonos_speech.zig").State = null, // a ZONOS3 Mini release's voices, config and tokenizer
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
@@ -211,10 +213,7 @@ pub const Server = struct {
             return error.InvalidVisionMarkers;
         };
         srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
-        srv.voices = .{ .gpa = gpa, .io = io, .dir = config.voice.dir };
-        if (srv.info.speech == null and (config.voice.dir != null or config.voice.inline_voices or config.voice.manage)) return error.VoicesRequireSpeech;
-        if (config.voice.dir) |dir| try srv.voices.load(dir);
-        _ = try srv.voices.select(srv.arena.allocator(), config.voice.default, "default");
+        try @import("speech_voices.zig").open(srv, gpa, io, config);
         if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;

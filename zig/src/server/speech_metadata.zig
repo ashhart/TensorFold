@@ -8,8 +8,11 @@ pub const Metadata = struct {
     register_tripped: bool = false,
     register_redrawn: bool = false,
     cfg_gamma: ?f32 = null,
+    /// The decoder that made the audio, for a family that serves several.
+    decoder: ?[]const u8 = null,
 
     pub fn add(m: Metadata, c: *Conn) !void {
+        if (m.decoder) |d| try c.addHeader("X-Decoder", d);
         if (m.cfg_gamma) |gamma| {
             var gamma_buf: [24]u8 = undefined;
             try c.addHeader("X-Cfg-Gamma", std.fmt.bufPrint(&gamma_buf, "{d}", .{gamma}) catch unreachable);

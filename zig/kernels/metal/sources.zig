@@ -266,6 +266,15 @@ pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 pub const gemma4_affine_mm = @embedFile("gemma4/affine_mm.metal");
 pub const gemma4_lane_projection = @embedFile("gemma4/lane_projection.metal");
 
+/// ZONOS3's kernels (zonos3.metallib is built ahead of time); the kernel contract compiles them from this text.
+pub const zonos3 = struct {
+    pub const common = @embedFile("zonos3/z3_common.h");
+    pub const backbone = @embedFile("zonos3/backbone.metal");
+    pub const codec = @embedFile("zonos3/codec.metal");
+    pub const encoder = @embedFile("zonos3/encoder.metal");
+    pub const teacher = @embedFile("zonos3/teacher.metal");
+};
+
 /// Drama 3's kernels (drama3.metallib is built ahead of time); the kernel contract compiles them from this text.
 pub const drama3 = struct {
     pub const common = @embedFile("drama3/d3_common.h");
