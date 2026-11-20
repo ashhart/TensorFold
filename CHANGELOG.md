@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
+
 - Docs: the Qwen3.8-27B recipe pulls the checkpoint and its drafter one repository at a time, since the native `pull` takes one (#3982). Thanks to @jayleaton.
 
 - Docs: the Nemotron 3.5 recipe gives the pull and serve commands for NVIDIA's NVFP4 export of Lightning, and its CUDA section no longer says the export is not read (#3981). Thanks to @jayleaton.
