@@ -54,6 +54,18 @@ assert.match(markup, /Verifying checkpoint/); assert.equal(button(renderRow(veri
 assert.equal(button(renderRow(verifying), 'Resume'), null)
 reset()
 assert.match(renderToStaticMarkup(renderRow({ ...base, state: 'failed', message: 'Synthetic network unavailable' })), /Synthetic network unavailable/)
+reset()
+let retries = 0
+const failed = { ...base, state: 'failed' as const, message: 'The Hub connection timed out. Check proxy settings and retry.' }
+const retryRow = renderRow(failed, () => {}, () => { retries++ })
+markup = renderToStaticMarkup(retryRow)
+assert.match(markup, /role="alert"/)
+assert.match(markup, /aria-label="Retry download Org\/Example"/)
+button(retryRow, 'Retry').props.onClick()
+assert.equal(retries, 1, 'the visible Retry action invokes the existing download callback')
+reset()
+assert.ok(button(renderRow({ ...base, state: 'cancelled' }), 'Resume'), 'cancelled downloads keep Resume')
+reset()
 let calls = 0, reject!: (error: Error) => void
 const cancel = () => { calls++; return new Promise<void>((_resolve, no) => { reject = no }) }
 const tree = renderRow(base, cancel)
