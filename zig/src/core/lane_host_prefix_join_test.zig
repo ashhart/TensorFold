@@ -65,14 +65,16 @@ const Box = struct {
 const Hook = struct {
     fake: *lanes.fake.Fake,
     slow_ms: i64 = 0,
+    cancel: ?struct { engine: api.Engine, id: Id, at: usize } = null,
     streams: std.ArrayList(*lanes.Stream) = .empty,
     open: std.ArrayList(usize) = .empty,
 
-    fn call(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+    fn call(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
         const h: *Hook = @ptrCast(@alignCast(ctx));
         if (h.slow_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(h.slow_ms), .awake) catch {};
         h.streams.append(gpa, s) catch {};
         h.open.append(gpa, h.fake.lanes.count()) catch {};
+        if (h.cancel) |c| if (chunk == c.at) c.engine.cancel(c.id);
     }
 };
 
@@ -100,7 +102,8 @@ fn promptOf(buf: *[prompt_len]u32) []const u32 {
 }
 
 /// Every identical request queued before the host starts, so they arrive together; `budget` 0 is a fully cold cache.
-fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
+/// `cancel_at` not null cancels the leader (id 1) when a prompt pass reaches that chunk index.
+fn fanout(wait_ms: ?u32, slow_ms: i64, cancel_at: ?usize, budget: u64, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 13 };
@@ -116,6 +119,7 @@ fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
     if (wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
     const e = host.engine();
     var hook = Hook{ .fake = &target, .slow_ms = slow_ms };
+    if (cancel_at) |at| hook.cancel = .{ .engine = e, .id = 1, .at = at };
     defer {
         hook.streams.deinit(gpa);
         hook.open.deinit(gpa);
@@ -154,10 +158,10 @@ fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
 test "single-flight: identical prompts join the filling leader, whose whole fill runs alone" {
     var on: Run = .{};
     defer on.deinit();
-    try fanout(null, 1, 1 << 24, &on);
+    try fanout(null, 1, null, 1 << 24, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 1, 1 << 24, &off);
+    try fanout(0, 1, null, 1 << 24, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -182,10 +186,10 @@ test "single-flight: identical prompts join the filling leader, whose whole fill
 test "single-flight: cold cache — identical prompts join a leader with no marks and nothing kept" {
     var on: Run = .{};
     defer on.deinit();
-    try fanout(null, 1, 0, &on);
+    try fanout(null, 1, null, 0, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 1, 0, &off);
+    try fanout(0, 1, null, 0, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -205,4 +209,51 @@ test "single-flight: cold cache — identical prompts join a leader with no mark
     try std.testing.expectEqual(@as(u64, requests), off.misses);
     try std.testing.expectEqual(@as(u64, 0), off.waits);
     try std.testing.expect(off.leader_open_most > 1); // the side-by-side prefill this joins
+}
+
+test "single-flight: fail-open, the leader cancelled — every waiter prefills its own prompt and matches a solo run" {
+    const cancel_at = 2; // the leader dies on its second prompt chunk
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(null, 1, cancel_at, 1 << 24, &on);
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(0, 1, cancel_at, 1 << 24, &off);
+    // the leader's own reply is the cancellation in both runs
+    try std.testing.expectEqual(Reason.cancelled, on.reasons[0]);
+    try std.testing.expectEqual(Reason.cancelled, off.reasons[0]);
+    for (1..requests) |i| {
+        // each released waiter finished whole, token for token a no-join run's
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqual(Reason.length, off.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items);
+    }
+    // the joiners armed on identity, then the leader's cancellation released them: no bound passed
+    try std.testing.expectEqual(@as(u64, requests - 1), on.joins);
+    try std.testing.expectEqual(@as(u64, requests - 1), on.waits);
+    try std.testing.expectEqual(@as(u64, 0), on.timeouts);
+    try std.testing.expectEqual(@as(u64, 0), off.joins);
+}
+
+test "single-flight: fail-open, the bound passes — every waiter is released and prefills beside the leader" {
+    // a 1 ms bound against a leader whose chunks each take 30 ms: no waiter survives to the whole fill
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(1, 30, null, 0, &on);
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(0, 30, null, 0, &off);
+    for (0..requests) |i| {
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqual(Reason.length, off.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // released == solo
+    }
+    // each joiner armed, then the bound released it: the timeouts counter carries the releases
+    try std.testing.expectEqual(@as(u64, requests - 1), on.joins);
+    try std.testing.expectEqual(@as(u64, requests - 1), on.timeouts);
+    // a cold cache plans no mark and keeps nothing, so every released waiter prefilled from zero
+    try std.testing.expectEqual(@as(u64, requests), on.misses);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0 }, on.cached[0..requests]);
+    // the released waiters filled side by side: the bound gives back the throughput the join would have held
+    try std.testing.expect(on.leader_open_most > 1);
 }
