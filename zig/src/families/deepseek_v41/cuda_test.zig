@@ -9,6 +9,7 @@ test {
     _ = @import("glp_plan.zig");
     _ = @import("glp_agree.zig");
     _ = @import("block_glp_test.zig");
+    _ = @import("target_cache_test.zig");
     inline for (.{ @import("block.zig").Emitter, @import("block_attn.zig"), @import("block_index.zig"), @import("block_moe.zig"), @import("block_prefetch.zig"), @import("block_wide.zig"), @import("buffers.zig") }) |m| std.testing.refAllDecls(m);
     _ = @import("catalog_test.zig");
     _ = @import("cuda_format.zig");
