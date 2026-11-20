@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA contract: nvcc 13.3 resource records for 121 launches, clearing 408 stale lines on five-SM fatbins (#3953). Thanks to @Bizuayeu.
+
 - DeepSeek-V4.1 on Metal: long-prompt indexer passes skip key blocks that no row's candidate mask reaches, add up the first top-k pass's bin-3 counts per simdgroup before one atomic add, and score 128 index rows at a time instead of 64 (`ix_rows`), with the same tokens in the author's runs (#3669, refs #2984). Thanks to @gilby.
 
 - HIP on RDNA3.5 (gfx1151): single-round (K up to 1,024) plain fp32-output routed 4-bit stream launches whose largest item holds 3 or 4 rows skip the lane folds of rows past the item's count (`Routing.item_rows`), with the same output bytes (#3559, refs #3305). Thanks to @gilby.
