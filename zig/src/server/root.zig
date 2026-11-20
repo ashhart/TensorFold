@@ -269,6 +269,7 @@ test {
     _ = @import("responses_namespace_output_test.zig");
     _ = @import("responses_store.zig");
     _ = @import("responses_durable.zig");
+    _ = @import("responses_render.zig");
     _ = @import("responses_owner_test.zig");
     _ = @import("responses_owner_socket_test.zig");
     _ = @import("cortheon/cortheon.zig");
