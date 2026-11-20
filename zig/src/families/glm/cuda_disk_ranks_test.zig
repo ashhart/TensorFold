@@ -70,6 +70,7 @@ const Rig = struct {
         try x.m.init();
         x.d = fixture.H.driver();
         x.d.api.cuLaunchKernel = Wire.put;
+        x.d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Wire.put); // GLM's launches go through cuda_pdl
         x.d.api.cuCtxGetDevice = Wire.device;
         x.d.api.cuDeviceGetAttribute = Wire.attribute;
         x.lib = .{ .lib = undefined, .api = undefined };
