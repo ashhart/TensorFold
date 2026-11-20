@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
+
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
 
 - Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
