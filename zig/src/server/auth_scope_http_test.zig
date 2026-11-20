@@ -244,8 +244,10 @@ test "auth scopes HTTP: inference and read are separate grants and full keys kee
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
+    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1", "/v1/models/m", "/models/m/" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
         try expectStatus(try h.ask(a, "GET", path, key, ""), 200);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/other", "read-secret", ""), 404);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/m", "", ""), 401);
     for ([_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
         try expectStatus(try h.ask(a, "GET", path, "read-secret", ""), 200);
         try expectStatus(try h.ask(a, "GET", path, "infer-secret", ""), 403);
@@ -320,8 +322,12 @@ test "auth scopes HTTP: restricted Responses cannot read, keep or continue the s
     try expectStatus(try h.ask(a, "GET", absent, "admin-secret", ""), 404);
     try expectStatus(try h.ask(a, "GET", path, "admin-secret", ""), 200);
     const continued = try std.fmt.allocPrint(a, "{{\"input\":\"y\",\"previous_response_id\":\"{s}\",\"max_output_tokens\":1}}", .{id});
-    try expectStatus(try h.ask(a, "POST", "/v1/responses", "legacy-secret", continued), 200);
-    try expectStatus(try h.ask(a, "DELETE", path, "legacy-secret", ""), 200);
+    // another full key is a different owner: the same miss as an unknown response
+    try expectStatus(try h.ask(a, "POST", "/v1/responses", "legacy-secret", continued), 400);
+    try expectStatus(try h.ask(a, "DELETE", path, "legacy-secret", ""), 404);
+    // the key that stored the response still continues and deletes it
+    try expectStatus(try h.ask(a, "POST", "/v1/responses", "admin-secret", continued), 200);
+    try expectStatus(try h.ask(a, "DELETE", path, "admin-secret", ""), 200);
 }
 
 test "auth scopes HTTP: a keep-alive request does not inherit the previous request's full key" {
@@ -381,7 +387,8 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     defer arena.deinit();
     const a = arena.allocator();
     const cancel_ids = @import("cancel_ids.zig");
-    var e: cancel_ids.Entry = .{};
+    const admin = keys.matchIdentity(a, "Bearer admin-secret", null).?;
+    var e: cancel_ids.Entry = .{ .owner = admin.digest };
     const names = [_][]const u8{"chatcmpl-scope-held"};
     cancel_ids.registry.add(t.io, &names, &e);
     defer cancel_ids.registry.remove(t.io, &names, &e);
@@ -393,7 +400,7 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     }
     try expectStatus(try h.ask(a, "POST", path, "", ""), 401);
     try t.expect(!e.asked.load(.acquire));
-    for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), 200);
+    for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), if (std.mem.eql(u8, key, "admin-secret")) 200 else 404);
     try t.expect(e.asked.load(.acquire));
     try expectStatus(try h.ask(a, "POST", "/v1/requests/chatcmpl-nobody/cancel", "admin-secret", ""), 404);
 }

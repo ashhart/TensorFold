@@ -12,6 +12,7 @@ const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
 const g = pipelines.glue;
 const cl = @import("calls.zig");
+const round_prof = @import("round_prof.zig");
 const eng = pipelines.engram;
 const cv = ctx_.cv;
 const R = pipelines.max_rows;
@@ -215,6 +216,9 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
     var cbs: [max_buffers]mtl.CommandBuffer = undefined;
     var n: usize = 0;
     defer for (cbs[0..n]) |cb| cb.release();
+    const t0 = round_prof.begin();
+    var name: [24]u8 = undefined;
+    q.roundBegin(std.fmt.bufPrint(&name, "decode {d} rows", .{x.rows}) catch "decode");
     var lo: usize = 0;
     while (true) {
         const hi = chunkEnd(lo, m.layers.len);
@@ -234,6 +238,8 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
         lo = hi;
     }
     cbs[n - 1].wait();
+    q.roundEnd();
+    if (t0) |t| round_prof.end(t, x.rows, cbs[0], cbs[n - 1]);
     for (cbs[0..n]) |cb| if (cb.failure()) |msg| {
         std.debug.print("dsv41 metal window failed: {s}\n", .{msg});
         return error.CommandBufferFailed;

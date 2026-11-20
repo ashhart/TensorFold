@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
   # Each night builds and runs everything from nothing: what a reused pass could hide, such as a test reading a file
   # the build doesn't know of, fails here within a day.
   schedule:
@@ -20,8 +21,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
+# 19 Nov: a landing train's PR (lead/train-*) skips these jobs. Our local CI runs the same checks on the train's
+# tip, and the hosted queue (58 runs behind ~13 jobs) held main's and contributors' checks for hours. A train
+# whose local run is red starts this workflow on its branch by hand (workflow_dispatch) for GitHub's verdict.
 jobs:
   benchmark-clients:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +46,7 @@ jobs:
         run: python -m unittest discover -s tools/tests -p "test_evidence*.py" -v
   # pytest from the root, as an outside evaluator runs it, on its own runner: its five minutes no longer add to zig's.
   pytest:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -58,6 +64,7 @@ jobs:
           "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
           "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
   zig:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -71,6 +78,9 @@ jobs:
           python3 tools/zig/cuda_common_check.py
           python3 tools/zig/cuda_fragment_check.py
           python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
+      # check-pdl-loads needs nvcc; its SASS rules and planted early reads are checked here on fixtures.
+      - name: Dependent-launch SASS checker fixtures
+        run: python3 tools/test_pdl_early_loads.py -v
       # The lean rule (600-line files, one-line comments within 120 columns, no direct getenv of a setting): no problem the base branch lacks.
       - name: lean check
         if: ${{ github.event_name != 'schedule' }}
@@ -154,8 +164,8 @@ jobs:
         run: zig build -Dfixed-cpu test-golden
       # The serving pins ran only in the nightly, so a PR that touched a pinned file landed green and turned the
       # next nightly red (10-12 Nov). Run them on every PR: a changed pinned file needs its re-pin in the same PR.
-      - name: zig build test-gradient-serving test-qwen-serving-host
-        run: zig build -Dfixed-cpu test-gradient-serving test-qwen-serving-host
+      - name: zig build test-gradient-serving test-qwen-serving-host test-glm-pdl-scan
+        run: zig build -Dfixed-cpu test-gradient-serving test-qwen-serving-host test-glm-pdl-scan
       # Hostile HTTP framing, API keys and download paths, on the CPU.
       - name: zig build test-server-security test-pull-security
         run: zig build -Dfixed-cpu test-server-security test-pull-security
@@ -194,6 +204,7 @@ jobs:
   # budget. Same git inputs, Zig setup and restored cache as `zig`; no lean/fmt/python checks and no cache save (only
   # `zig` saves the shared cache). The host graph regressions still run here so a bad shard split fails both jobs.
   zig-b:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -241,6 +252,7 @@ jobs:
         run: zig build -Dfixed-cpu test-host-b --test-timeout 20m
 
   zig-windows:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -283,6 +295,7 @@ jobs:
   # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
   # Pull requests check Linux x86_64 only; main's pushes and the nightly run check all three platforms.
   release-paths:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     strategy:
       fail-fast: false
       matrix:
@@ -327,6 +340,7 @@ jobs:
           path: .zig-cache
           key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   zig-macos-dev-tools:
+    if: ${{ !startsWith(github.head_ref, 'lead/train-') }}  # a landing train's tip: see the note above jobs
     runs-on: macos-26
     timeout-minutes: 45
     steps:

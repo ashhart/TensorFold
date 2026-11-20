@@ -119,6 +119,8 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
+    @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
+    @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
@@ -207,6 +209,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
     @import("zig/build/gradient_host.zig").add(b);
+    @import("zig/build/glm_pdl_scan.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);

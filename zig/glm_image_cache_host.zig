@@ -285,6 +285,8 @@ const Device = struct {
         d.api.cuEventQuery = eventDone;
         d.api.cuEventDestroy_v2 = eventDestroy;
         d.api.cuLaunchKernel = launch;
+        d.api.cuLaunchKernelEx = @import("glm").pdl.forwardEx(launch);
+        d.func_name = null;
         return d;
     }
 };

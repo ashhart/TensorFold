@@ -23,12 +23,42 @@ pub fn code(f: Failure) suite.ErrorCode {
     };
 }
 
+/// SSE framing: ``data:`` lines joined until a blank line ends their event, each line and event at most ``max_event``.
+pub const Frames = struct {
+    data: std.ArrayList(u8) = .empty,
+    lines: usize = 0,
+    bytes: usize = 0,
+
+    /// One line with its newline: the event it ends, copied into ``a``, else null; other fields are skipped.
+    pub fn line(f: *Frames, a: Allocator, with_newline: []const u8) error{ InvalidStream, OutOfMemory }!?[]const u8 {
+        const raw = std.mem.trimEnd(u8, with_newline, "\n");
+        if (raw.len > max_event) return error.InvalidStream;
+        const text = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidStream;
+        if (text.len == 0) {
+            defer {
+                f.data.clearRetainingCapacity();
+                f.lines = 0;
+                f.bytes = 0;
+            }
+            return if (f.lines > 0) try a.dupe(u8, f.data.items) else null;
+        }
+        if (!std.mem.startsWith(u8, text, "data:")) return null;
+        var value = text[5..];
+        if (value.len > 0 and value[0] == ' ') value = value[1..];
+        if (f.lines > 0) try f.data.append(a, '\n');
+        try f.data.appendSlice(a, value);
+        f.lines += 1;
+        f.bytes += raw.len;
+        if (f.bytes > max_event) return error.InvalidStream;
+        return null;
+    }
+};
+
 /// One attempt's stream state; ``arrived`` stamps are monotonic nanoseconds.
 pub const Stream = struct {
     a: Allocator,
-    data: std.ArrayList(u8) = .empty,
-    data_lines: usize = 0,
-    event_bytes: usize = 0,
+    frames: Frames = .{},
     total: usize = 0,
     first: ?i96 = null,
     last: ?i96 = null,
@@ -48,36 +78,17 @@ pub const Stream = struct {
     pub fn line(s: *Stream, with_newline: []const u8, arrived: i96) Failure!bool {
         s.total += with_newline.len;
         if (s.total > max_stream) return error.InvalidStream;
-        const raw = std.mem.trimEnd(u8, with_newline, "\n");
-        if (raw.len > max_event) return error.InvalidStream;
-        const text = std.mem.trimEnd(u8, raw, "\r");
-        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidStream;
-        if (text.len == 0) {
-            defer {
-                s.data.clearRetainingCapacity();
-                s.data_lines = 0;
-                s.event_bytes = 0;
-            }
-            if (s.data_lines > 0) return s.event(s.data.items, arrived);
-            return false;
-        }
-        if (!std.mem.startsWith(u8, text, "data:")) return false;
-        var value = text[5..];
-        if (value.len > 0 and value[0] == ' ') value = value[1..];
-        if (s.data_lines > 0) try s.data.append(s.a, '\n');
-        try s.data.appendSlice(s.a, value);
-        s.data_lines += 1;
-        s.event_bytes += raw.len;
-        if (s.event_bytes > max_event) return error.InvalidStream;
-        return false;
+        const data = try s.frames.line(s.a, with_newline) orelse return false;
+        return s.event(data, arrived);
     }
 
+    /// ``text`` is the event's own copy, which the parsed chunk may keep slices of.
     fn event(s: *Stream, text: []const u8, arrived: i96) Failure!bool {
         if (std.mem.eql(u8, std.mem.trim(u8, text, " \t\n\r\x0b\x0c"), "[DONE]")) {
             s.done = true;
             return true;
         }
-        const chunk = switch (try json.parseText(s.a, try s.a.dupe(u8, text))) {
+        const chunk = switch (try json.parseText(s.a, text)) {
             .ok => |v| v,
             .err => return error.InvalidStream,
         };

@@ -106,7 +106,7 @@
   "After this change": "หลังเปลี่ยนนี้",
   "All": "ทั้งหมด",
   "All assistant sources": "ทุกแหล่งผู้ช่วย",
-  "All community-v1 cells meet the complete protocol.": "ทุกเซลล์ community-v1 ผ่านขั้นตอนครบ",
+  "All community-v2 cells meet the complete protocol.": "ทุกเซลล์ community-v2 ผ่านขั้นตอนครบ",
   "Allow Kokoro watch replies for {value0}": "อนุญาตคำตอบนาฬิกา Kokoro สำหรับ {value0}",
   "Allow private network for {value0}": "อนุญาตเครือข่ายส่วนตัวสำหรับ {value0}",
   "Allowed": "อนุญาตแล้ว",

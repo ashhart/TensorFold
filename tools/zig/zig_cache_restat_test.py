@@ -1,4 +1,5 @@
 """A restored build cache stays cached when only file ids changed, and still misses when contents changed."""
+import ast
 import os
 import re
 from pathlib import Path
@@ -50,9 +51,11 @@ class RestatTests(unittest.TestCase):
         (self.root / "build.zig").write_text(BUILD, newline="\n")
         for path, text in SOURCES.items():
             (self.root / path).write_text(text, newline="\n")
-        lib = Path(self.zig).resolve().parent / "lib"
+        info = self.run_zig([self.zig, "env"])
+        lib = re.search(r'^\s*\.lib_dir = ("(?:[^"\\]|\\.)*"),$', info, re.MULTILINE)
+        self.assertIsNotNone(lib, "zig env did not report .lib_dir")
         self.restat_command = [self.zig, "run", "-OReleaseFast", "-mcpu=baseline", str(TOOL), "--", str(self.cache),
-                               str(lib)]
+                               ast.literal_eval(lib[1])]
 
     def run_zig(self, command):
         result = subprocess.run(command, cwd=self.root, env=self.env, capture_output=True, text=True, timeout=300)

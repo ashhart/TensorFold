@@ -138,7 +138,7 @@ const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CACHE_EVICT, .families = cuda_cache, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = cuda_cache }, .{ .backend = "metal", .families = &.{ "nemotron_h", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "gemma4", "gemma4_unified", "spark2_5", "llama", "lfm2_moe", "lfm3", "lfm3_vl", "step5_vl", "kimi_k3", "kimi_k31" } }, .{ .backend = "xpu", .families = &.{ "nemotron_h", "lfm3", "qwen3_5", "gemma4" } } }, .class = .experimental, .syntax = .present, .report_values = &.{"decayed_resume"}, .effect = "Opt into bounded resume credit for RAM snapshot eviction", .evidence = "#3241; synthetic host rows gate; default main unchanged" },
@@ -157,7 +157,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
     .{ .id = .TF_GLM_HOST_CACHE, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep kept prompt states in pinned host memory instead of on the device", .evidence = "#2370" },
     .{ .id = .TF_GLM_VISION_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the vision tower's weights in pinned host memory, staged a unit at a time", .evidence = "#2370" },
-    .{ .id = .TF_GLM_PDL, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the matmuls' dependent launches", .evidence = "#2370" },
+    .{ .id = .TF_GLM_PDL, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the forward's dependent launches", .evidence = "#2370" },
     .{ .id = .TF_GLM_PROMPT_STEPS, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
     .{ .id = .TF_GLM_SHARED, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },
     .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },

@@ -76,8 +76,9 @@ pub const Config = struct {
     }
 
     pub fn check(c: Config) !void {
+        // the zero counts first: headDim() divides by heads
+        if (c.heads == 0 or c.layers == 0 or c.ratio == 0 or c.patch == 0 or c.inter == 0) return error.UnsupportedVision;
         if (c.headDim() != 64 or c.dim % c.heads != 0) return error.UnsupportedVision;
-        if (c.layers == 0 or c.ratio == 0 or c.patch == 0 or c.inter == 0) return error.UnsupportedVision;
     }
 };
 
@@ -214,6 +215,10 @@ test "the release's vision_config parses to the defaults" {
     const c = (try Config.parse(std.testing.allocator, text, 5120)).?;
     try std.testing.expectEqual(Config{}, c);
     try std.testing.expect((try Config.parse(std.testing.allocator, "{}", 5120)) == null);
+    // a head count of 0: refused by name before headDim() divides by it
+    const zero = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"num_attention_heads\": 16", "\"num_attention_heads\": 0");
+    defer std.testing.allocator.free(zero);
+    try std.testing.expectError(error.UnsupportedVision, Config.parse(std.testing.allocator, zero, 5120));
 }
 
 test "the 2D RoPE table: row angles first, column angles after, position 0 is the identity" {

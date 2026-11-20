@@ -165,7 +165,7 @@
   "The community page could not open; try again in your browser.": "커뮤니티 페이지를 열 수 없습니다. 브라우저에서 다시 시도하세요.",
   "The comparison could not finish.": "비교를 완료할 수 없습니다.",
   "The comparison stopped before changing the engine.": "엔진 변경 전에 비교를 중지했습니다.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "전체 community-v1 프로토콜을 충족하지 않았습니다. 불완전한 셀은 성능 점수가 아닙니다.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "전체 community-v2 프로토콜을 충족하지 않았습니다. 불완전한 셀은 성능 점수가 아닙니다.",
   "The conversation could not be renamed.": "대화 이름을 변경할 수 없습니다.",
   "The document worker is not installed.": "문서 워커가 설치되지 않았습니다.",
   "The download action could not complete. Try again.": "다운로드 작업을 완료할 수 없습니다. 다시 시도하세요.",

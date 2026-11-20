@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Quitar una carpeta detiene su descubrimiento, pero no elimina modelos. El modelo activo sigue cargado hasta detener el servidor.",
   "Rename": "Renombrar",
   "Render the plan panel with block progress bars and status glyphs.": "Mostrar el plan con barras de progreso y símbolos de estado.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Mediciones community-v1 repetibles con modelos en caché de este Mac.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Mediciones community-v2 repetibles con modelos en caché de este Mac.",
   "repeated checks": "comprobaciones repetidas",
   "Replace matching records from the backup": "Sustituir registros coincidentes por los de la copia",
   "replaces the current instructions": "sustituye las instrucciones actuales",

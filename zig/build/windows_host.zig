@@ -17,5 +17,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, api: *std.Build.Module) *st
         .link_libc = true,
     });
     b.step("compile-http-limits-windows-host", "Compile production Winsock connection admission without linking or running").dependOn(&b.addObject(.{ .name = "http-limits-windows", .root_module = limits }).step);
+    const chat = b.createModule(.{
+        .root_source_file = b.path("zig/chat_windows_compile.zig"),
+        .target = limits.resolved_target.?,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "json", .module = @import("server.zig").json(b, limits.resolved_target.?, .debug) }},
+    });
+    b.step("check-chat-windows-host", "Compile tensorfold chat's --url path for Windows without linking or running").dependOn(&b.addObject(.{ .name = "chat-windows", .root_module = chat }).step);
     return step;
 }

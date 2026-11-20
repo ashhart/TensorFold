@@ -38,9 +38,12 @@ pub fn main(init: std.process.Init, args: []const []const u8, version: Version) 
 
 pub fn command(ctx: Context, args: []const []const u8, version: Version) !u8 {
     if (try onPath(ctx, "tensorfold-web")) |app| return launch(ctx, app, args);
+    const uv = try onPath(ctx, "uv");
+    if (uv) |tool| {
+        if (try inUvToolDir(ctx, tool)) |app| return launch(ctx, app, args);
+    }
     try ctx.out.writeAll(description);
     const spec = try std.fmt.allocPrint(ctx.a, "tensorfold-web @ git+https://github.com/ashhart/TensorFold@v{s}#subdirectory=web", .{version.version});
-    const uv = try onPath(ctx, "uv");
     if (!version.is_release) {
         try ctx.out.print("Development build without a release tag; the command below targets the manifest version v{s}.\n", .{version.version});
     } else if (uv == null) {
@@ -62,19 +65,7 @@ pub fn command(ctx: Context, args: []const []const u8, version: Version) !u8 {
                 return instructions(ctx, spec, false);
             }
             if (try onPath(ctx, "tensorfold-web")) |app| return launch(ctx, app, args);
-            // uv's tool-bin directory need not already be on this process's PATH.
-            const result = std.process.run(ctx.a, ctx.io, .{
-                .argv = &.{ uv.?, "tool", "dir", "--bin" },
-                .environ_map = ctx.environ,
-                .stdout_limit = .limited(4096),
-                .stderr_limit = .limited(4096),
-            }) catch return instructions(ctx, spec, false);
-            defer ctx.a.free(result.stdout);
-            defer ctx.a.free(result.stderr);
-            const dir = std.mem.trim(u8, result.stdout, "\r\n");
-            if (exitCode(result.term) == 0 and std.fs.path.isAbsolute(dir)) {
-                if (try inDir(ctx, dir, "tensorfold-web")) |app| return launch(ctx, app, args);
-            }
+            if (try inUvToolDir(ctx, uv.?)) |app| return launch(ctx, app, args);
             try ctx.out.writeAll("uv finished, but its tensorfold-web executable could not be found.\n");
         }
     }
@@ -129,6 +120,20 @@ fn onPath(ctx: Context, name: []const u8) !?[]const u8 {
     var dirs = std.mem.splitScalar(u8, path, std.fs.path.delimiter);
     while (dirs.next()) |dir| if (try inDir(ctx, if (dir.len == 0) "." else dir, name)) |app| return app;
     return null;
+}
+
+fn inUvToolDir(ctx: Context, uv: []const u8) !?[]const u8 {
+    const result = std.process.run(ctx.a, ctx.io, .{
+        .argv = &.{ uv, "tool", "dir", "--bin" },
+        .environ_map = ctx.environ,
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer ctx.a.free(result.stdout);
+    defer ctx.a.free(result.stderr);
+    const dir = std.mem.trim(u8, result.stdout, "\r\n");
+    if (exitCode(result.term) != 0 or !std.fs.path.isAbsolute(dir)) return null;
+    return inDir(ctx, dir, "tensorfold-web");
 }
 
 fn inDir(ctx: Context, dir: []const u8, name: []const u8) !?[]const u8 {

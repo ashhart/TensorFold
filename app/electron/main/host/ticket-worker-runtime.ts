@@ -6,11 +6,12 @@ import { assertProviderEndpoint, auditPreview } from '../../agent/security'
 import { normalizeTicketCapabilities, settleTicketExecution, startTicketExecution, ticketFileRefs, ticketStateAfterRun, ticketWorkPrompt } from '../../agent/tickets'
 import { restrictTicketToolContext } from '../../agent/ticket-tool-policy'
 import type { JobPatch } from '../../agent/jobs'
-import type { AgentCue, AgentEvent, Job, Project, Provider, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
+import type { AgentCue, AgentEvent, Job, Project, Provider, ReasoningEffortSetting, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
 import { store } from '../state'
 import { auditEvent, requireSecurityRole } from './audit'
 import { ensureRoomWorktree } from './room-worktree'
 import { requireTicketDependenciesReady } from '../../../shared/ticket-dependencies'
+import { captureAgentReasoningEffort } from '../../../shared/reasoning-effort'
 import { inspectGitRepository } from './workspace'
 import { summarizeTicketWorkerOutcome } from './ticket-helpers'
 import { modelRouteAccountLabel, modelRouteAutoFailoverEnabled, modelRouteFailoverText, modelRouteResetPolicy, modelRouter, resolveProjectProvider, runtimeProviderWithFreshModels, ticketWorkOptionsWithProjectRoute } from './provider-runtime'
@@ -21,6 +22,7 @@ import { sendToRenderer } from './renderer-events'
 export interface TicketWorkerSource {
   roomId?: string | null
   seat?: string | null
+  reasoningEffort?: ReasoningEffortSetting
   onSettled?: (summary: { codeChanged: boolean; testsPassed: boolean; failed: boolean; jobId?: string | null }) => void
 }
 
@@ -140,6 +142,10 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   requireTicketDependenciesReady(ticket, store.tickets)
   if (!project) throw new Error('Restore or choose an active project before starting ticket work.')
   if (existingThread && aborters.has(existingThread.id)) throw new Error('Ticket work is already running.')
+  const roomSeat = input.source?.roomId === room?.id
+    ? room?.seats.find((seat) => seat.name === input.source?.seat) : undefined
+  const configuredEffort = input.source?.reasoningEffort === undefined ? roomSeat : input.source
+  const reasoningEffort = captureAgentReasoningEffort(configuredEffort, store.settings.reasoningEffort)
   const configuredWorkspace = room?.workspace ?? project.workspace ?? null
   if (configuredWorkspace?.kind === 'ssh') {
     throw new Error('Local ticket workers do not support SSH workspaces; run this ticket on its remote Orchestrator.')
@@ -173,7 +179,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
     localOnly: project?.localOnly === true,
     contextLimit: effectiveContextLimit(routeBaseProvider, resolvedRoute.model, requestedProviderAccountId),
-    reasoningEffort: store.settings.reasoningEffort,
+    reasoningEffort,
     budget: phase,
     source: 'ticket_worker_initial_route',
   })
@@ -233,6 +239,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     threadId: thread.id,
     startedAt: ticket.startedAt,
   })
+  ticket.execution.reasoningEffort = reasoningEffort
   ticket.updatedAt = Date.now()
   persistTickets(); emitTicket(ticket)
   if (room && input.source?.roomId) {
@@ -330,7 +337,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       model: route.model,
       approvalMode: store.settings.approvalMode === 'auto' ? 'suggest' : store.settings.approvalMode,
       temperature: store.settings.temperature,
-      reasoningEffort: store.settings.reasoningEffort,
+      reasoningEffort,
       autoCompact: store.settings.autoCompact,
       contextLimit: effectiveContextLimit(route.provider, route.model),
       toolContext,
@@ -361,7 +368,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
         allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit',
         localOnly: project?.localOnly === true,
         contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
-        reasoningEffort: store.settings.reasoningEffort,
+        reasoningEffort,
         budget: phase,
         source: 'ticket_worker_recovery',
       })

@@ -168,6 +168,7 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
 pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
+    gone.conn.id = id;
     var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
     // TENSORFOLD_REQUEST_JOURNAL: off, `observed` is `out` and the trace does nothing
     var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out };
@@ -183,7 +184,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     p.input.id = id;
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
-    var asked: cancel_ids.Entry = .{};
+    var asked: cancel_ids.Entry = .{ .owner = gone.conn.key_digest };
     const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
@@ -332,7 +333,7 @@ pub const Run = struct {
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
-        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort, reply.prompt_tokens);
+        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.reasoning, reply.thinking, reply.effort, reply.prompt_tokens);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {

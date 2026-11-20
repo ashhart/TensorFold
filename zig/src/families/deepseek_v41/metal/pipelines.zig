@@ -10,6 +10,7 @@ pub const attn = @import("csa2_attn.zig");
 pub const index = @import("index.zig");
 pub const experts = @import("experts.zig");
 pub const glue = @import("glue.zig");
+pub const mv_mma = @import("mv_mma.zig");
 pub const compress = @import("compress.zig");
 pub const engram = @import("engram.zig");
 pub const cand = @import("cand.zig");
@@ -47,6 +48,8 @@ pub const Pipelines = struct {
     index: index.Pipelines,
     experts: experts.Pipelines,
     glue: glue.Pipelines,
+    /// prompt bf16 matvecs on simdgroup MMA (bit-equal to glue.mv)
+    mv_mma: mv_mma.Pipelines,
     compress: compress.Pipelines,
     engram: engram.Pipelines,
     route: mtl.Pipeline,
@@ -77,6 +80,8 @@ pub const Pipelines = struct {
         errdefer p.experts.deinit();
         p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);
         errdefer p.glue.deinit();
+        p.mv_mma = try mv_mma.Pipelines.load(device);
+        errdefer p.mv_mma.deinit();
         p.compress = try compress.Pipelines.load(device);
         errdefer p.compress.deinit();
         p.engram = try engram.Pipelines.load(device);
@@ -109,6 +114,7 @@ pub const Pipelines = struct {
         p.index.deinit();
         p.experts.deinit();
         p.glue.deinit();
+        p.mv_mma.deinit();
         p.compress.deinit();
         p.engram.deinit();
         p.route.deinit();

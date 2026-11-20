@@ -112,8 +112,10 @@ fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contrac
 directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
 
 On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
-linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
-`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over ten registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax`, the top-k a sampled row draws from (`topk_part` and
+`topk_merge`) and `embed`, the seven planted controls (the top-k's two: a merge breaking ties the wrong way, red at
+`shapes`, and a flag read off the candidates only, red at `nonfinite`), and gate 5
 live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
 native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
@@ -369,6 +371,13 @@ HIP also checks Flash Next's indexer block score kernel (`tf_fn_idx_scores`, `co
 `hip_records_sparse.zig`): staging each tile's rows of `q` in LDS when `heads * dims <= 512`, checked against the
 fp64 relu-summed head dots with one control leaving out each row's last head (`shapes`).
 
+HIP also checks EXL3's projections for decode rows (`exl3/exl3.hip`, CUDA's `exl3_block/linear.cu`): `tf_exl3_rot_in`
+(bf16 rows times suh, rotated by 128 and rounded to fp16) and `tf_exl3_linear` at 2, 3, 4, 5, 6 and 8 bits (mul1) on 4
+and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (and its head at 8 bits) and the plan's
+8-wave edge. The linear's gate 4 is exact: all-ones trellis states give one weight (-0.651 at every width), so 6144
+terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
+and the linear reading its input rows one row late.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
@@ -523,7 +532,8 @@ the split chunks reading a rank's page z as chunk z, and the per-rank merge one 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
 `registry.cuda` holds what nvcc 13.0 compiles, the compiler of the release fatbins. `registry.cuda_sets` lists what
 each later release compiles differently from the release before it: nvcc 13.2's set holds `tf_rms_rows`, `lane_gemv`
-and its split-K form, prompt16's FP8 tile, qmmf's FP4 32-row cluster tile, five 64-row fused-slice tiles of the MXFP8
+and its split-K form, prompt16's FP8 tile, qmmf's FP4 32-row cluster tile and its FP4 and MXFP8 16-row cluster
+tiles, five 64-row fused-slice tiles of the MXFP8
 and FP32-output paths, FP8G's 32-row cluster tile with FP32 output, the common EXL3 prompt products, Super's
 decode-sized latent top-k and NVFP4 up experts, the Mamba scan and Super's NVFP4 prompt down kernels, three of
 GLM-5.3-Flash's packed matmuls and three of its DFlash2 launches, and the training launches it compiles differently,

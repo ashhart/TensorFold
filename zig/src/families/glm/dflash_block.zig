@@ -1,6 +1,7 @@
 //! DFlash2's device passes: the context ingest (taps through fc into the rings) and the block (embed to candidates).
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const mm = @import("cuda_mm.zig");
 const q4 = @import("cuda_q4.zig");
@@ -10,7 +11,7 @@ const D = df.D;
 const BLOCK = df.BLOCK;
 
 fn go(f: cuda.Function, grid: cuda.Dim3, threads: u32, e: anytype, a: *cuda.Args) !void {
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, e.stream, a);
+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, e.stream, a);
 }
 
 fn set(e: anytype) glue.Set {

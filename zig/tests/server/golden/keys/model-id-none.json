@@ -1,0 +1,28 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 401 Unauthorized",
+   "headers": [
+    [
+     "WWW-Authenticate",
+     "Bearer"
+    ],
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "128"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"A valid API key is required\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"invalid_api_key\"}}",
+   "interim": ""
+  }
+ ]
+}

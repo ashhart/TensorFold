@@ -1,6 +1,6 @@
 import { isRepoId } from '../paths'
 import type { ModelBenchmarkInput, ModelBenchmarkReceipt, ModelBenchmarkSnapshot } from '../../../../shared/model-benchmark'
-import { benchmarkCells, benchmarkProtocolComplete, parseBenchmarkReceipt } from './receipt'
+import { benchmarkCells, benchmarkProtocolComplete, parseBenchmarkReceipt, type BenchmarkDetails } from './receipt'
 import type { BenchmarkProcessHandle } from './process'
 import type { ModelBenchmarkStore, SavedModelBenchmark } from './storage'
 import { BENCHMARK_ENGINE_VERSION } from './version'
@@ -13,6 +13,7 @@ export interface ModelBenchmarkDependencies {
   workspace(): Promise<{ receiptPath: string; directory: string; remove(): Promise<void> }>
   process(input: Required<ModelBenchmarkInput>, workspace: { receiptPath: string; directory: string }, progress: (value: ModelBenchmarkSnapshot['progress']) => void, signal: AbortSignal): BenchmarkProcessHandle
   readReceipt(path: string, input: Required<ModelBenchmarkInput>): Promise<ModelBenchmarkReceipt | null>
+  readDetails?(path: string, expected: Required<ModelBenchmarkInput> & { engineVersion: string }): Promise<BenchmarkDetails | null>
   store: ModelBenchmarkStore
   changed?(snapshot: ModelBenchmarkSnapshot): void
   now?: () => number
@@ -104,11 +105,14 @@ export class ModelBenchmarks {
     let duplicate = false
     let unsafeCleanup = false
     let phase: 'validation' | 'process' | 'receipt' = 'validation'
+    let engineVersion = BENCHMARK_ENGINE_VERSION
+    let checkpointChanged = false
     const assertAllowed = () => { if (job.controller.signal.aborted || this.disposed) throw new Error('Benchmark cancelled.'); this.deps.assertAllowed() }
     try {
       const history = await this.deps.store.list()
       if (history.some(record => record.snapshot.id === input.id)) { duplicate = true; throw new Error('Duplicate benchmark identifier.') }
       assertAllowed(); const checkpoint = await this.deps.validateModel(input.model); assertAllowed()
+      engineVersion = checkpoint?.engineVersion ?? BENCHMARK_ENGINE_VERSION
       lease = await this.deps.reserve(); job.snapshot.previousModel = lease.previousModel
       assertAllowed(); await lease.pause(); assertAllowed()
       workspace = await this.deps.workspace(); assertAllowed()
@@ -124,7 +128,7 @@ export class ModelBenchmarks {
       const receipt = await this.deps.readReceipt(workspace.receiptPath, input)
       job.receipt = receipt ? parseBenchmarkReceipt(JSON.stringify(receipt), { ...input, engineVersion: checkpoint?.engineVersion ?? BENCHMARK_ENGINE_VERSION }, this.now()) : null
       if (job.receipt) {
-        if (checkpoint && (job.receipt.model.revision !== checkpoint.revision || job.receipt.model.config_sha256 !== checkpoint.configSha256)) { job.receipt = null; throw new Error('The cached checkpoint changed during the benchmark.') }
+        if (checkpoint && (job.receipt.model.revision !== checkpoint.revision || job.receipt.model.config_sha256 !== checkpoint.configSha256)) { job.receipt = null; checkpointChanged = true; throw new Error('The cached checkpoint changed during the benchmark.') }
         job.snapshot.metadata = structuredClone({ runtime: job.receipt.runtime, model: job.receipt.model, hardware: job.receipt.hardware, settings: job.receipt.settings })
         job.snapshot.cells = benchmarkCells(job.receipt)
         job.snapshot.receiptAvailable = true
@@ -141,6 +145,13 @@ export class ModelBenchmarks {
         else if (this.disposed) { job.snapshot.restored = false; job.snapshot.restoreError = 'TensorFold closed before the previous local model could be restored.' }
         else try { await lease.restore(job.restoration.signal); job.snapshot.restored = true } catch { job.snapshot.restored = false; job.snapshot.restoreError = 'The previous local model could not be restored. Reload it from My models.' }
         lease.release()
+      }
+      // a run without a valid receipt keeps the checked hardware, engine and checkpoint details its receipt file has
+      if (!job.snapshot.metadata && workspace && !checkpointChanged && this.deps.readDetails) {
+        try {
+          const details = await this.deps.readDetails(workspace.receiptPath, { ...input, engineVersion })
+          if (details) job.snapshot.metadata = details // a refused receipt's details fail their checks: no metadata
+        } catch {}
       }
       const finalState = job.controller.signal.aborted ? 'cancelled' : job.snapshot.error || job.snapshot.restoreError || code !== 0 || !job.snapshot.cells.every(cell => cell.complete) ? 'failed' : 'complete'
       if (finalState === 'failed' && !job.snapshot.error && !job.snapshot.restoreError) job.snapshot.error = 'The local benchmark did not complete every measured attempt.'

@@ -1,5 +1,6 @@
 //! The existing rank-gathered greedy pick, kept separate from engine lifetime and prompt diagnostics.
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const std = @import("std");
 const ranks = @import("cuda_ranks.zig");
 const chance = @import("cuda_mtp_chance.zig");
@@ -26,7 +27,7 @@ pub fn greedyRows(e: *Engine, logits: u64, rows: usize, out: []u32) !void {
         a.add(@as(i64, @intCast(e.share.vocab.len())));
         a.add(@as(u32, @intCast(e.share.vocab.lo)));
         a.add(mine + r * pair_bytes);
-        try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
+        try cuda_pdl.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
     }
     if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
     try e.stream.synchronize();
@@ -52,7 +53,7 @@ fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
     a.add(@as(i64, @intCast(e.share.vocab.len())));
     a.add(@as(u32, @intCast(e.share.vocab.lo)));
     a.add(e.pairs.ptr + e.share.rank * pair_bytes);
-    try cuda.launch.launch(if (sums) e.m.glue.top1_sums else e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
+    try cuda_pdl.launch(if (sums) e.m.glue.top1_sums else e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
     const mine = e.pairs.ptr + e.share.rank * pair_bytes;
     const stamp = @import("cuda_prof.zig").span(e.profiling_prompt, e.stream, .token_gather);
     if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");

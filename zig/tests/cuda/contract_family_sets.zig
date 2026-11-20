@@ -21,6 +21,8 @@ pub const Sets = struct {
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
     prompt: *Prompt,
+    muse: *@import("contract_muse.zig").Group,
+    a: std.mem.Allocator,
     joint_schema: *@import("contract_joint_schema.zig").Set,
     idol: *@import("contract_idol.zig").Set,
 
@@ -61,6 +63,8 @@ pub const Sets = struct {
         prompt.* = Prompt.init(gpu, s, prompt_lane);
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
+        const muse = try @import("contract_muse.zig").Group.create(a, gpu, s, list);
+        errdefer muse.destroy(a);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
@@ -79,12 +83,15 @@ pub const Sets = struct {
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
+            .muse = muse,
+            .a = a,
         };
     }
 
     pub fn deinit(sets: Sets) void {
         sets.idol.deinit();
         sets.joint_schema.deinit();
+        sets.muse.destroy(sets.a);
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();

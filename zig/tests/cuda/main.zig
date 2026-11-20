@@ -32,7 +32,6 @@ const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
 const glm_vision_tests = @import("glm_vision_tests.zig");
-const glm_mm_bench = @import("glm_mm_bench.zig");
 const glm_index_check = @import("glm_index_check.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
@@ -79,7 +78,6 @@ const window_pages512_tests = @import("window_pages512_tests.zig");
 const window_bench = @import("window_bench.zig");
 const moe_glue_tests = @import("moe_glue_tests.zig");
 const dense_rows_tests = @import("dense_rows_tests.zig");
-
 const experts_rows_tests = @import("experts_rows_tests.zig");
 const route_rows_tests = @import("route_rows_tests.zig");
 const flashnext_model_rank_tests = @import("flashnext_model_rank_tests.zig");
@@ -103,7 +101,6 @@ const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
 const glm_loader_gate = @import("glm_loader_gate.zig");
 const glm_fp8g_shares = @import("glm_fp8g_shares.zig");
-
 const gdn_back_tests = @import("gdn_back_tests.zig");
 const q4_back_tests = @import("q4_back_tests.zig");
 const moe_back_tests = @import("moe_back_tests.zig");
@@ -250,7 +247,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-mm-bench")) return @import("glm_mm_bench.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-pdl-order")) return @import("glm_pdl_order.zig").run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
@@ -343,6 +341,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-shared-prefix")) return @import("contract_qwen_shared_prefix.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
+    if (std.mem.startsWith(u8, cmd, "dots-")) return @import("dots_tests.zig").run(gpu, cmd, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);

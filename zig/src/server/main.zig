@@ -18,11 +18,12 @@ const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
+const chat_cli = @import("chat_cli.zig");
 const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
-    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--log-json]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
@@ -53,6 +54,9 @@ pub const serves = engines.serves;
 
 pub const std_options = engines.std_options;
 
+/// Read by the Metal wrapper at compile time: Metal 4 only in a binary whose engines use it.
+pub const tf_metal4 = engines.metal4;
+
 pub fn main(init: std.process.Init) !u8 {
     const entry = std.Io.Clock.awake.now(init.io).toNanoseconds();
     const gpa = init.gpa;
@@ -68,7 +72,7 @@ pub fn main(init: std.process.Init) !u8 {
     // help and a bare run lead with what this machine runs: the saved profile, or a quick scan with no driver
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h") or std.mem.eql(u8, argv[1], "help"))) {
         try std.Io.File.stdout().writeStreamingAll(io, device_cli.summary(init));
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "device")) return device_cli.main(init, argv[2..]);
@@ -109,8 +113,10 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         } else return benchmark.main(init, argv[2..], engines.capabilities(a));
     }
+    // a chat with a running server works on every platform; chat_cli.zig refuses its own serve child on Windows
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "chat")) return chat_cli.main(init, argv[2..]);
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
+        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | slide rollback FOLDER | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();

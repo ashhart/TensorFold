@@ -38,7 +38,8 @@ test "request starts: shared KV refuses at actual dense and MoE startup before l
     try put("TF_QWEN_REQUEST_STARTS", "1");
     try put("TF_QWEN_KV_SHARE", "32");
     try put("TF_QWEN_KV_PAGES", "256");
-    var ctx: cuda.Context = undefined;
+    var d = @import("cuda_sm110_open_test.zig").driver(121);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
     inline for (.{ native, moe }) |F| {
         try t.expectError(error.QwenRequestStartsWithSharedKv, F.open(t.allocator, t.io, &ctx, "missing-request-starts-checkpoint", null, .{ .context = 8192, .drafts = false }));
         const reason = F.explain(null, error.QwenRequestStartsWithSharedKv) orelse return error.MissingNamedRefusal;

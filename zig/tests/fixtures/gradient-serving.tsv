@@ -18,18 +18,18 @@ zig/kernels/cuda/flashnext_mtp.cu	5d213b1b4a1d0588eea3acb4633a0c8bc4d9bdf6f27485
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228	raw
 zig/kernels/cuda/glm_glue.cu	74e69a7c20827d498c190334fffaa896f2a4f05e107fdf9d2d34b09b55a1c75c	raw	#2722 (one added line, the include of glm_index_decode.cuh: the decode select's scan and merge)
-zig/kernels/cuda/glm_glue_attn.cuh	abecbecf809292c0f82294fa688e47e574fa43c8ff3b1497966f9d3dd52b9881	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs)
-zig/kernels/cuda/glm_glue_bmm.cuh	7fbaaa4517e309b17ebb41f84f94f9a939baa27a2fb5c9a6b7f5b857b5a21391	raw
-zig/kernels/cuda/glm_glue_hc.cuh	c3aa26475c6ce05d2508c300c8e88d429adea4c0c173e3909734bb0ece06da2a	raw
-zig/kernels/cuda/glm_glue_index.cuh	73fbdf6dea2cfc13275169ac2e7ea4d670611145c1e738529a05b23d63f39abf	raw
-zig/kernels/cuda/glm_glue_latent.cuh	4d4c7872b6383d5a4e2194b2ea0e477948ba3ff482c3aeb364838f3df0aa6ab5	raw
-zig/kernels/cuda/glm_glue_moe.cuh	163d542c99f6ef0432956f6341df324c85568127b623e301ad29279bbb49128c	raw
-zig/kernels/cuda/glm_glue_norm.cuh	7efd71df53fbf664d2f6d13b8aa7a9f0483f50f3d26574360d7ad8f4361cd453	raw
+zig/kernels/cuda/glm_glue_attn.cuh	a8c16ed0c54130689d19386de84217aac232c007effafdb6c7fc149ac7188051	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_bmm.cuh	6077ea47fc9f462f072a973d44ef4cab711526a3f374cfeb91f1cd65f5fad8f9	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_hc.cuh	0fc7a68598eb22884edf28d39d051399e85e2e3e13fd45953c8d3faf5defd3b8	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_index.cuh	ed61d03673005220aeebc43a1da5e5701566fcd5e89fee5d21d3830b20cf73ec	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_latent.cuh	67964ea6596deae54f52a8a365850c3a19dab75160cb9582d7bbeaff5d896f5a	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_moe.cuh	474148b5bf8f6d4d83a4a205ae90d0d347f2a40f1f8093fe1b2508282d0d86b7	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_norm.cuh	a3664d9833c17ff4718b7342c529ddd7fa958cbc51a8ffac9b7fab508afbcf92	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_router.cuh	99911df38e6ad2826491b3fa5efd47aea5e54eebb7cd83eed586ba0dd9305658	raw
-zig/kernels/cuda/glm_glue_rows.cuh	0e70ddc8f3d3d91bd09a3643599bd3dc4cf98b9959ea03f8105ee84755440b2f	raw
-zig/kernels/cuda/glm_kda.cu	73e8ed722c69447232e4a5f0edf2c5245fee82f5b9c0c550ec516a035e550b57	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions)
-zig/kernels/cuda/glm_ops.cu	3c96e09f3e650a516d2685125f5603f4fd8877f54f2a16430a44fd717c1a6667	raw
-zig/kernels/cuda/glm_quant.cu	e27379a4192be52f390ad28f678157d592989af45b69d31f830671b2c54ca028	raw
+zig/kernels/cuda/glm_glue_rows.cuh	8d22166c33ce75fb2dfe5383694a8503044613420d7a06e90e6d1a0b88c197b2	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_kda.cu	aef9f980f8a928f2b6c439c7e1eda499fba12c32a7605e39062bef83952a83d2	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_ops.cu	bf90d5eeb62c145d8a140db90e057fa53d3c1f6b77f739d14122a0e04a216b51	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); dependent-launch inputs without __restrict__ (no non-coherent load above the wait)
+zig/kernels/cuda/glm_quant.cu	e04ee0760ddd215244117bbf113f625ce2e9da3eef04345eb0741e1cd2c876ea	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_triton.cuh	8eee12f24bbf283a08a29f9396e3db5588b48fce85abe74de7f85adc12fa94f4	raw
 zig/kernels/cuda/common/glue_math.cuh	b7234684fc786b3700473358632bf10f0b2d2240e5957eefddb13254dae5d746	raw
 zig/kernels/cuda/lane_gemv.cu	dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2	raw
@@ -48,15 +48,15 @@ zig/kernels/cuda/nvfp4_experts.cu	cb54357e2c06252cc594cd1223401170dadefd995b0c67
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
 zig/kernels/cuda/prefill_attention.cu	905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged)
 zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
-zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
+zig/kernels/cuda/probe.cu	94a3118894b3066e0f0f6fc1cfc3c03828d291077cb26c437b62fcc9b177a210	raw	glm-pdl-order's slow writer, planted early reader and glm_pdl::enter() reader
 zig/kernels/cuda/prompt16.cu	2da3c4ea23de0fa9b2536db0fa66f07bb2d5b45db36c2f9cb321e039ebeac7c2	raw	#3252: the lean gate/up SwiGLU pair launch for a dense MLP prompt
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
 zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
 zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c25b004cef4e6c636e7cc1dd	raw
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
-zig/kernels/cuda/qmm_prefill.cu	45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5	raw
-zig/kernels/cuda/qmmf.cu	13a3cb0b6dec56afeb1f248f0cfe39e2d4d458f2b08272c26adb92fe3efba8fc	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical)
+zig/kernels/cuda/qmm_prefill.cu	e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6	raw	#2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel
+zig/kernels/cuda/qmmf.cu	c602528095b4e193ecb6961f518e71f7c6798cd23190d55f731ed7852f4c6c7c	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical); dependent decode launches: weights load before griddepcontrol.wait (TF_QMMF_WFIRST), Lane.pdl
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
 zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
@@ -93,19 +93,19 @@ zig/src/cuda/experts.zig	8bfc2f15a742cceba87dd7eb8e80f3f1b4e3f7eb323b557eb1bb4bf
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/kernels.zig	2cc6830d46d862d7af404611d0e108c07fcbe4504a171cd430366351e201389d	raw	main 32c4e3d8f (#3368: the fn_int4 image registered, the int4 module exported); main 42735f94f0 (#2335: the mla image registered), f35900e60c (#2709: the dots_mocr image registered), #1630 (the experts_bf16 image registered), #2914 (covers: the release SM check), #1631 (the nemo_audio image registered), #1767 (the idol image registered)
+zig/src/cuda/kernels.zig	88b54281151646d271e51d7168afb59bdb1cf2ddec8ecaec7e2a4b430a9dd924	raw	main 42735f94f0 (#2335: the mla image registered), f35900e60c (#2709: the dots_mocr image registered), #1630 (the experts_bf16 image registered), #2914 (covers: the release SM check), #1631 (the nemo_audio image registered), #1767 (the idol image registered); #1295: the six Muse Spark images registered; #3368: the fn_int4 image registered
 zig/src/cuda/launch.zig	9ec64848834d82ddcea85a6123e975c95a5ae2bf85c2a71772244794b0bcd705	raw	series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/memory.zig	7d2a91bfca8a08ae59df16ddf30d22226aba773cc814dd106930840ab344fc52	raw	commits 5dcf77d7c, f630f1a90, e9bf05ffd, 881cccaa4, a34cb6ded; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
+zig/src/cuda/memory.zig	c140f1700e0f257a3ac09b1bfaa4a0d704d1922ccbffc3d453d75be0fef4b617	raw	commits 5dcf77d7c, f630f1a90, e9bf05ffd, 881cccaa4, a34cb6ded; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate, this change (DeviceBuffer.allocVia allocates through a given hook; alloc is allocVia with the installed one, unchanged)
 zig/src/cuda/modelopt.zig	648c9ba58197af0ce905f8792383502fc44a52c45d1413fe9e21d28d04c22253	raw
 zig/src/cuda/module.zig	1f0a141cf7149a87ad456e96cb1830f0c137ad98af70071721918989b0720b92	raw
 zig/src/cuda/mxfp8.zig	2bbe9ea41b462f633b68e7a32c06814a28e34dee284383788c0a8f06e8df2af4	raw
-zig/src/cuda/nccl.zig	30abc4b904e675916e9bb8c4701ca3f1e5615472da4a5e09d2476865d81afe65	raw	commits 53abe4556, ba1a9a2bb, 05350da4c, 40dccba55, 6bdb12918, b923e554c, 7c9d845c0, 98a5dc657, 143ed758f, 6636e6964; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
+zig/src/cuda/nccl.zig	005a4dd9ed6929b6022c4daff8d8d82c0ee43ea3e468221fd4a8de9ae6dde640	raw	commits 53abe4556, ba1a9a2bb, 05350da4c, 40dccba55, 6bdb12918, b923e554c, 7c9d845c0, 98a5dc657, 143ed758f, 6636e6964; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #3106 (Library.open reads TF_NCCL_LIB through pathFrom, shared with the TP session's settings; unset, empty and blank keep libnccl.so.2)
 zig/src/cuda/norms.zig	c6ac613ff91b31257b5bce55311d8cf38a785862bfad9eb0c7bf0b2ba7b0df95	raw
 zig/src/cuda/nvfp4.zig	0556e93c12e4eb21db45d0d9d9ee7d4c1c4ab6a32a359b67edfc0b4b7fb90928	raw	#3252: launcher for the lean SwiGLU pair
 zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509c085c062f	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7f12b30	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name)
+zig/src/cuda/qmmf.zig	577b24e8dc1a00e975c75075bf9636af55d2614780d05fcb6ed488cc68d37778	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name); dependent decode launches: weights load before griddepcontrol.wait (TF_QMMF_WFIRST), Lane.pdl
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
-zig/src/cuda/root.zig	c02fe00ada13cb1585f308f8033ec5d3694946398ae08afda3b3a3dbe14e0029	raw	main 32c4e3d8f (#3368: the fn_int4 image registered, the int4 module exported and its tests listed); main 42735f94f0 (#2335: cuda.mla exported)
+zig/src/cuda/root.zig	c02fe00ada13cb1585f308f8033ec5d3694946398ae08afda3b3a3dbe14e0029	raw	main 42735f94f0 (#2335: cuda.mla exported); #3368: the int4 module exported and its tests listed
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
 zig/src/cuda/sample.zig	9e3a31bd0480284ff069148b2d3c92f1e2ba24f16c18362dae9de48ec7fc65fe	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged), #3124
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
@@ -115,8 +115,8 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
-zig/src/families/flashnext/cuda_batch_state.zig	ae9d16a76aa56cd3448b3414140cbabd2f918bfb69a094b02be82544f371603c	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
+zig/src/families/flashnext/cuda_batch.zig	eaf08f697f93041f93d2388b345e90a788398a5cf7bfa7641c63a816c6ac5946	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #XXXX: the scratch test's ceiling restated at the 3,072-row default
+zig/src/families/flashnext/cuda_batch_state.zig	7e940f58ec4ecba11a657983375e3cfec7492989c6246f037759b8051ce70129	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged; #XXXX: the default prompt chunk is 3,072 rows
 zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
@@ -129,9 +129,9 @@ zig/src/families/flashnext/cuda_hc.zig	01f897ac65d6edd2cd6ac76d97cb4d96619c25ffa
 zig/src/families/flashnext/cuda_head.zig	fc6410e8b17d559a12d81fd4bee9ab4e65f6f8b0999796c68baba58efb8fe818	raw
 zig/src/families/flashnext/cuda_images.zig	5bd8a6c06cb69440522f4392794d9ef52b3760195b97d96f2316b1acac271bd4	raw
 zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a124de2a7019041ed1f7483b2a4a2d7c99	raw
-zig/src/families/flashnext/cuda_lanes.zig	8578e64c69611c219709f48a4ba646bfd01fa02d793d788ea7e577ae03d07808	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate, #3308 (loader host test updates the named startup-refusal expectations; no runtime edit to this pinned file); #3135 (kept_disk renamed kept_view for the shared kept image; no served change)
+zig/src/families/flashnext/cuda_lanes.zig	b72cee919a557e16f001d2c6a7b77602889f6d41a225e0af4736368aff01aee6	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate, #3308 (loader host test updates the named startup-refusal expectations; no runtime edit to this pinned file); #3135 (kept_disk renamed kept_view for the shared kept image; no served change), this change (the page pool opens with the load's device and io, for its arena mapped as pages are used; a new paged stream's first prompt step waits while the arena's thread maps its pieces; paging off: unchanged)
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
-zig/src/families/flashnext/cuda_lanes_load.zig	26596c5f9bb0fb01b96cb96b50d51a70cf8ef1ef4f2af91e33e6f4a0c74a6f10	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #3467: after load a shard drops its page cache except the n-gram ranges, and the sweep reaches nested shards; tensors and replies are unchanged
+zig/src/families/flashnext/cuda_lanes_load.zig	abcfaf795d8c895ef04a01c5fd58c97ff43249a5c6cb3da460f8a23a5d5f9bf3	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #3467: after load a shard drops its page cache except the n-gram ranges, and the sweep reaches nested shards; tensors and replies are unchanged, this change (the load's device and io handed to the page pool's arena; paging off: unchanged)
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
 zig/src/families/flashnext/cuda_launch.zig	f8bebb5ed074e6c8ab8cef667cb01fa2bb1a2b2d6a4d3874a92291390278d9f7	raw	exports cuda_moe_exchange.zig for its device test; no served change; #2837 (Flash Next TP=2 graph replay)
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw

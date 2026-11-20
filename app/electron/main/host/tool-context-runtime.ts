@@ -1,3 +1,6 @@
+import type { ReadOnlySubAgentInput, ToolContextRuntime, ToolContextRuntimeDeps } from './tool-context-types'
+export type { ToolContextRuntime } from './tool-context-types'
+import { captureAgentReasoningEffort } from '../../../shared/reasoning-effort'
 import { documentEventAllowed, documentPolicySignature, scopedDocumentLibrary, scopedDocumentSettings, validateDocumentSourceIds } from '../../document-library/scope'
 import { selectedResponseLocale } from '../../agent/response-language'
 import { documentLibrary } from './document-library-runtime'
@@ -41,60 +44,12 @@ import type { ControllerActionInput } from '../../agent/controller-actions'
 import { store } from '../state'
 import { addSuggestion, type SuggestionInput } from '../../agent/suggestions'
 import { persistArtifacts, persistSuggestions } from './persistence'
-import type { SshManager } from './ssh'
 import { blindSearchToken, searchSessionIndex, saveThreads, vontraPath } from '../../store'
 import { sendToRenderer } from './renderer-events'
 import { createManagedOutputStore } from './managed-outputs'
 import { isWhatsAppEventInCurrentScope } from '../../../shared/whatsapp-event-scope'
 import { createGoogleContextMarker, createGoogleWorkspaceToolRunner } from './google-workspace-tool-runtime'
 import { googleWorkspaceService } from './google-workspace-runtime'
-
-export interface ToolContextRuntime {
-  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }): any
-  runReadOnlySubAgent(
-    agent: SubAgent,
-    provider: Provider,
-    model: string,
-    input: {
-      task: string
-      parentLabel: string
-      cwd: string
-      projectId?: string | null
-      providerAccountId?: string | null
-      project?: Project | null
-      workspace?: WorkspaceLocation | null
-      signal: AbortSignal
-      memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy
-      incognito?: boolean
-      memoryOwner?: { id: string; revision: number }
-      maxSteps?: number
-      maxWallMs?: number
-    },
-  ): Promise<{ agent: SubAgent; output: string }>
-}
-
-interface ToolContextRuntimeDeps {
-  sshManager: SshManager
-  persistSubAgents(): void
-  persistThreads(): void
-  applyEventToThread(thread: Thread, event: AgentEvent): void
-  emitToRenderer(event: AgentEvent): void
-  emitPluginEvent(event: AgentEvent): void
-  renderProjectMemoryBucket(project: Project | undefined): string
-  recordEmailDraft: any
-  recordEmailEvent: any
-  recordCalendarEvent: any
-  recordMessageEvent: any
-  runBrowserAutomation: any
-  mcpToolContext(): any
-  // Ends a thread's run; the computer-use indicator's Stop uses it.
-  cancelThreadRun(threadId: string): void
-  // Trusted repo-authored skills for a project (VST-010), served from the scan cache so
-  // this stays synchronous. Absent → global skills only.
-  projectSkills?(projectId: string | null | undefined, workspace?: WorkspaceLocation | null): Skill[]
-  // Observer hooks (VST-012): subagent lifecycle observation, fail-open.
-  observe?: (kind: 'subagent.start' | 'subagent.end', payload: Record<string, unknown>) => void
-}
 
 export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolContextRuntime {
   const {
@@ -116,21 +71,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     agent: SubAgent,
     provider: Provider,
     model: string,
-    input: {
-      task: string
-      parentLabel: string
-      cwd: string
-      projectId?: string | null
-      providerAccountId?: string | null
-      project?: Project | null
-      workspace?: WorkspaceLocation | null
-      signal: AbortSignal
-      memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy
-      incognito?: boolean
-      memoryOwner?: { id: string; revision: number }
-      maxSteps?: number
-      maxWallMs?: number
-    },
+    input: ReadOnlySubAgentInput,
   ) {
     const storedAgent = store.subAgents.find((candidate) => candidate.id === agent.id)
     if (!storedAgent) throw new Error('The owning sub-agent is unavailable; refusing to start an unregistered child.')
@@ -158,6 +99,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       }
     }
     assertRequestAllowed()
+    const reasoningEffort = captureAgentReasoningEffort(input, store.settings.reasoningEffort)
     const childThread: Thread = {
       id: `thread-${agent.id}`,
       documentSourceIds: owner?.documentSourceIds ? [...validateDocumentSourceIds(owner.documentSourceIds)!] : [],
@@ -201,7 +143,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
         model,
         approvalMode: 'readonly',
         temperature: store.settings.temperature,
-        reasoningEffort: store.settings.reasoningEffort,
+        reasoningEffort,
         emit: (event) => applyEventToThread(childThread, event),
         requestApproval: async () => 'deny',
         signal: input.signal,

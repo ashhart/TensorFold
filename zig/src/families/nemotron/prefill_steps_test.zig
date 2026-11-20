@@ -354,3 +354,32 @@ test "Nemotron Metal steps: another stream decodes between two chunks of a long 
     try t.expect(gem.empty); // no chunk's ids went into the prompt buffer while another chunk was queued
     while (engine.activeCount() > 0) try engine.step();
 }
+
+test "Nemotron Metal steps: a whole-pass cancellation keeps its completed chunks before release" {
+    const Stop = struct {
+        checks: usize = 0,
+        fn check(ptr: *anyopaque) bool {
+            const stop: *@This() = @ptrCast(@alignCast(ptr));
+            stop.checks += 1;
+            return stop.checks > 3;
+        }
+    };
+    const ids: [29]u32 = @splat(7);
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var kept: Kept = .{ .log = &log };
+    var stop: Stop = .{};
+    var s = try lanes.Stream.init(gpa, .{ .id = "whole-cancel", .prompt = &ids, .max_new = 1, .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.at } } });
+    defer s.deinit(gpa);
+    s.cancel_check = .{ .ptr = &stop, .check = Stop.check };
+    var q: Queue = .{};
+    defer q.deinit();
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .loads_on_empty = &empty };
+    try t.expectError(error.Cancelled, pass.whole(&q, ops, &s));
+    try t.expectEqual(@as(?u32, 16), kept.published);
+    try t.expectEqual(@as(u32, 16), s.fill_at.load(.monotonic));
+    try t.expectEqual(@as(usize, 0), q.flights.items.len);
+}
