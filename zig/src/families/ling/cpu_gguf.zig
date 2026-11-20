@@ -61,13 +61,19 @@ pub fn checkTensor(t: g.Tensor, n: names.Name) !void {
     }
 }
 pub const File = struct {
+    const gguf_sdot = @import("cpu_gguf_q4_sdot.zig");
+    const gguf_repack8 = @import("cpu_gguf_repack8.zig");
+    const gguf_repack_cache = @import("cpu_gguf_repack_cache.zig");
     const CachedValue = struct { data: []f32, rank: u8, shape: [4]usize };
     source: g.File,
+    path: []const u8,
     arena: std.heap.ArenaAllocator,
     plan: []names.Name,
     joined_mla: [24]?[]f32 = @splat(null),
     cached_values: std.StringHashMapUnmanaged(CachedValue) = .empty,
     validated: std.StringHashMapUnmanaged(void) = .empty,
+    repack_cache: ?gguf_repack_cache.Cache = null,
+    fast_mode: bool = false,
     io: std.Io,
     pool: ?*Pool = null,
     pub const Pool = @import("cpu_gguf_pool.zig").Pool;
@@ -77,10 +83,19 @@ pub const File = struct {
         try metadata(&source.document);
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
+        const dup_path = try arena.allocator().dupe(u8, path);
         const plan = try names.tiny(arena.allocator());
         if (source.document.tensors.len != plan.len) return error.UnexpectedLingGgufTensor;
         for (plan) |name| try checkTensor(source.document.getTensor(name.source) orelse return error.MissingLingGgufTensor, name);
-        return .{ .source = source, .arena = arena, .plan = plan, .io = io };
+        return .{ .source = source, .path = dup_path, .arena = arena, .plan = plan, .io = io };
+    }
+    /// Opt-in fast integer SDOT and 8x4 repacked weight cache; exact mode remains the default.
+    pub fn enableFastMode(f: *File) !void {
+        try gguf_sdot.checkTarget();
+        if (f.repack_cache == null) {
+            f.repack_cache = try gguf_repack_cache.Cache.openOrBuild(f.arena.child_allocator, f.io, f.path, &f.source);
+        }
+        f.fast_mode = true;
     }
     pub fn config(f: *const File) !@import("config.zig").Config {
         return @import("cpu_gguf_config.zig").tiny(&f.source.document);
@@ -145,13 +160,61 @@ pub const File = struct {
         f.pool = try Pool.create(f.arena.child_allocator, f.io, threads);
         return f.pool.?;
     }
+    fn lookupRepacked(f: *const File, t: g.Tensor) ?gguf_repack8.Repacked {
+        const cache = f.repack_cache orelse return null;
+        if (t.kind != .q4_k and t.kind != .q6_k) return null;
+        const src_off = @intFromPtr(t.bytes.ptr) - @intFromPtr(f.source.map.memory.ptr);
+        return cache.lookup(src_off, t.bytes.len, t.kind);
+    }
     pub fn project(f: *File, key: []const u8, input: []const f32, output: []f32, count: usize, width: usize, n: usize, rounded: bool, threads: usize) !void {
         const t = try f.matrix(key, width, n);
+        if (f.fast_mode and (t.kind == .q4_k or t.kind == .q6_k or t.kind == .q5_0)) {
+            if (f.lookupRepacked(t)) |rep| {
+                if (threads > 1) return (try f.workers(threads)).projectSdotRepacked(f.arena.child_allocator, rep, t, input, output, count, rounded);
+                return gguf_repack8.projectBatch(f.arena.child_allocator, rep, t, input, output, count, rounded);
+            }
+            if (threads > 1) return (try f.workers(threads)).projectSdot(f.arena.child_allocator, t, input, output, count, rounded);
+            return gguf_sdot.projectBatch(f.arena.child_allocator, t, input, output, count, rounded);
+        }
         if (threads > 1) return (try f.workers(threads)).project(t, input, output, count, rounded);
         try @import("cpu_gguf_rows.zig").projectValidatedOn(t, input, output, count, rounded, 1);
     }
     /// One row's routed experts on the workers; `out` holds each result, `hidden` values apiece, in `ids` order.
     pub fn projectExperts(f: *File, prefix: []const u8, ids: []const u32, x: []const f32, out: []f32, hidden: usize, inter: usize, limit: f32, threads: usize) !void {
+        if (f.fast_mode) {
+            var list: [16]@import("cpu_gguf_pool.zig").FastExpert = undefined;
+            if (ids.len > list.len or out.len != ids.len * hidden) return error.BadLingGgufMatrix;
+            var acts_buf: [16]gguf_sdot.Activation256 = undefined;
+            const hidden_blocks = hidden / 256;
+            const can_sdot_in = hidden % 256 == 0 and hidden_blocks <= acts_buf.len;
+            const can_sdot_down = inter % 256 == 0 and inter / 256 <= 8;
+            var any_sdot = false;
+            var buf: [128]u8 = undefined;
+            for (ids, 0..) |id, j| {
+                const gate = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.gate_proj.weight", .{ prefix, id }), hidden, inter);
+                const up = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.up_proj.weight", .{ prefix, id }), hidden, inter);
+                const down = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.down_proj.weight", .{ prefix, id }), inter, hidden);
+                const use_g = can_sdot_in and (gate.kind == .q4_k or gate.kind == .q6_k);
+                const use_u = can_sdot_in and (up.kind == .q4_k or up.kind == .q6_k);
+                const use_d = can_sdot_down and (down.kind == .q4_k or down.kind == .q6_k);
+                if (use_g or use_u) any_sdot = true;
+                list[j] = .{
+                    .gate = gate,
+                    .up = up,
+                    .down = down,
+                    .gate_rep = if (use_g) f.lookupRepacked(gate) else null,
+                    .up_rep = if (use_u) f.lookupRepacked(up) else null,
+                    .down_rep = if (use_d) f.lookupRepacked(down) else null,
+                    .use_sdot_gate = use_g,
+                    .use_sdot_up = use_u,
+                    .use_sdot_down = use_d,
+                    .out = out[j * hidden ..].ptr,
+                };
+            }
+            if (any_sdot) try gguf_sdot.quantize256(x, acts_buf[0..hidden_blocks], true);
+            try (try f.workers(threads)).expertsFast(list[0..ids.len], x, &acts_buf, hidden, inter, limit);
+            return;
+        }
         var list: [16]@import("cpu_gguf_pool.zig").Expert = undefined;
         if (ids.len > list.len or out.len != ids.len * hidden) return error.BadLingGgufMatrix;
         var buf: [128]u8 = undefined;
@@ -168,6 +231,7 @@ pub const File = struct {
     }
     pub fn close(f: *File, io: std.Io) void {
         if (f.pool) |p| p.destroy();
+        if (f.repack_cache) |*c| c.close(io);
         for (f.joined_mla) |entry| if (entry) |data| f.arena.child_allocator.free(data);
         f.arena.deinit();
         f.source.close(io);
