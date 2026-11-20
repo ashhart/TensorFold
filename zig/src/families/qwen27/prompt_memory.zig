@@ -5,7 +5,13 @@ const frame = @import("gpu_frame.zig");
 const planning = @import("attention_plan.zig");
 const Budget = @import("gdn_pool.zig").Budget;
 
-pub const margin: usize = 8 << 30;
+/// What a working set keeps free beside the model: an eighth, 1 GiB on the smallest Macs and 8 GiB from 64 GiB.
+pub fn margin(set: usize) usize {
+    return std.math.clamp(set / 8, 1 << 30, 8 << 30);
+}
+
+/// The narrowest prompt frame startup steps down to before it refuses.
+pub const least_rows: u32 = 128;
 /// RAM a suggested wired limit leaves outside the GPU for macOS and other processes.
 const floor: usize = 4 << 30;
 
@@ -65,8 +71,10 @@ pub const Fit = struct {
     }
 
     pub fn choose(f: Fit, requested: u32, explicit: bool) !u32 {
-        if (explicit or requested <= 512) return requested;
-        return if (try f.cost(requested, f.slots) <= f.left) requested else 512;
+        if (explicit) return requested;
+        var rows = if (requested <= 512 or try f.cost(requested, f.slots) <= f.left) requested else 512;
+        while (rows > least_rows and try f.cost(rows, f.slots) > f.left) rows /= 2;
+        return @max(rows, @min(requested, least_rows));
     }
 
     pub fn streams(f: Fit, rows: u32, fixed: bool) !u32 {
@@ -89,12 +97,13 @@ pub fn workingSet(real: usize, text: ?[]const u8) !usize {
 
 /// The same margin guards startup, cache growth and the first use of a later slot.
 pub fn room(real: usize, used: usize, cap: ?[]const u8) !usize {
-    return (try workingSet(real, cap)) -| used -| margin;
+    const set = try workingSet(real, cap);
+    return set -| used -| margin(set);
 }
 
 /// The iogpu.wired_limit_mb that fits `need` beside `used` and the margin while leaving the floor; null if RAM cannot.
 pub fn wiredRaise(used: usize, need: usize, ram: usize) ?usize {
-    const total = used +| need +| margin;
+    const total = used +| need +| margin(ram -| floor);
     const mb = std.math.divCeil(usize, total, 1 << 20) catch unreachable;
     return if (mb *| (1 << 20) <= ram -| floor) mb else null;
 }
@@ -117,7 +126,7 @@ pub const Advice = union(enum) {
 /// What a refusal should advise for one stream, from the set and margin the startup room counted.
 pub fn advice(real: usize, used: usize, cap: ?[]const u8, one: usize, ram: ?usize) Advice {
     const set = workingSet(real, cap) catch return .lower;
-    if (set != real or one <= set -| used -| margin) return .lower;
+    if (set != real or one <= set -| used -| margin(set)) return .lower;
     if (ram) |r| if (wiredRaise(used, one, r)) |mb| return .{ .raise = .{ .set = set, .mb = mb } };
     return .{ .no_raise = ram };
 }

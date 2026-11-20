@@ -23,6 +23,7 @@ const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
 const room = helpers.room;
+const margin = helpers.margin;
 const drafterRefusal = helpers.drafterRefusal;
 const gibBytes = helpers.gibBytes;
 
@@ -212,7 +213,7 @@ fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, 
     const ok = if (cache) |c| c.giveBack(restoring, prompt, Left{ .room = free, .store = c, .held = held, .bytes = bytes }) else free >= bytes;
     const freed = held - (if (cache) |c| c.held else 0);
     if (!builtin.is_test and freed > 0) std.log.info("Qwen3.8-27B: kept prompt states gave {d:.1} GiB back for a stream's slot", .{cache_fit.gibs(freed)});
-    if (!builtin.is_test and !ok) std.log.info("Qwen3.8-27B: a slot needs {d:.1} GiB and {d:.1} GiB is free beside the weights and an 8 GiB margin: the request waits for a stream to end", .{ cache_fit.gibs(bytes), cache_fit.gibs(free + freed) });
+    if (!builtin.is_test and !ok) std.log.info("Qwen3.8-27B: a slot needs {d:.1} GiB and {d:.1} GiB is free beside the weights and the margin: the request waits for a stream to end", .{ cache_fit.gibs(bytes), cache_fit.gibs(free + freed) });
     return ok;
 }
 
@@ -354,7 +355,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         const dev = model.device;
         const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
         const tail = memory.advice(dev.maxWorkingSet(), dev.allocated(), cap(), try fit_prompt.cost(rows, 1), ram);
-        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and an 8 GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), tail });
+        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and {s} {d:.1} GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), if (margin(dev) >= 8 << 30) "an" else "a", cache_fit.gibs(margin(dev)), tail });
         return err;
     };
     if (model.frame.capacity != rows) {
@@ -362,7 +363,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         model.frame.deinit();
         model.frame = next;
     }
-    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes", .{ rows, try memory.runnerBytesTaps(model.config, capacity + window, slots, rows, shared, fit_prompt.ring, if (fit_prompt.tap_row > 0) fit_prompt.tap_row else memory.tapRowBytes(model.config.hidden, fit_prompt.planes, false)) });
+    std.log.info("qwen27: prompt capacity={d} rows, startup stream and scratch reserve={d} bytes, working-set margin={d} bytes", .{ rows, try memory.runnerBytesTaps(model.config, capacity + window, slots, rows, shared, fit_prompt.ring, if (fit_prompt.tap_row > 0) fit_prompt.tap_row else memory.tapRowBytes(model.config.hidden, fit_prompt.planes, false)), margin(model.device) });
     h.gpa = gpa;
     h.model = model;
     h.owns_model = false;
