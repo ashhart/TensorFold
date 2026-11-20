@@ -141,7 +141,7 @@ Only `http://` proxies are supported; pull opens a CONNECT tunnel through them, 
 Credentials in the proxy URL (`http://user:password@host:port`) are sent to the proxy only; messages show `http://host:port`.
 Pull waits `TENSORFOLD_PULL_CONNECT_SECONDS` for each connection and `TENSORFOLD_PULL_STALL_SECONDS` for each next byte.
 A stalled file resumes from its `.incomplete` bytes with a range request at most 3 times, then pull stops and names the proxy in use.
-On Windows, pull does not read these settings yet.
+Windows uses the same proxy routes and timeout settings through native asynchronous sockets.
 
 ## Flash Next
 
