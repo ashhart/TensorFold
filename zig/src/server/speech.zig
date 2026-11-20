@@ -39,7 +39,7 @@ const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instru
 pub const Format = audio_out.Format;
 
 /// `rate` and `channels` are the reply's: the model's own rate and mono unless the request asked otherwise.
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, rate: u32 = 0, channels: u8 = 1, budget_s: ?f64 = null };
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, speaker: []const f32 = &.{}, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, rate: u32 = 0, channels: u8 = 1, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -134,7 +134,8 @@ const rate_list = list: {
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("speech request body must be a JSON object");
     try checkFields(cx, raw, srv.config.voice.inline_voices);
-    const sampling = try speech_sampling.parse(cx, raw);
+    const zonos = @import("zonos_speech.zig");
+    const sampling = if (srv.zonos != null) try speech_sampling.parseFrom(cx, raw, .{ .temperature = zonos.temperature, .top_p = zonos.top_p, .top_k = zonos.top_k }, zonos.max_top_k) else try speech_sampling.parse(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
         return cx.fail(.request, "model {s} is not served here: send {s}", .{ try pyrepr.repr(cx.a, .{ .string = model }), srv.config.served_name });
@@ -146,6 +147,11 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
+    if (srv.zonos) |state| {
+        const made = try zonos.plan(state, cx, srv.text, sp, input, raw.strField("voice") orelse raw.strField("speaker") orelse "default");
+        const rate, const channels = try output(cx, raw, sp, stream);
+        return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
+    }
     const refs = try voiceRefs(srv, cx, raw);
     const rate, const channels = try output(cx, raw, sp, stream);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
@@ -245,6 +251,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .reference_rows = plan.reference_rows,
         .unconditioned = guided.rows,
         .cfg_gamma = guided.gamma,
+        .speaker = plan.speaker,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();

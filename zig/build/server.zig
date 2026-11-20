@@ -80,6 +80,22 @@ pub fn addTo(
         .imports = &.{.{ .name = "json", .module = j }},
     }));
     m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
+    // the engines' own ZONOS3 family when the build has one (a file belongs to one module), else its host half alone
+    if (if (m.import_table.get("native_engines")) |engines| engines.import_table.get("zonos3") else null) |zonos3| {
+        const source = b.addWriteFiles().add("zonos_request.zig",
+            \\const r = @import("zonos3").request;
+            \\pub const config = r.config;
+            \\pub const prompt = r.prompt;
+            \\pub const release = r.release;
+            \\pub const voices = r.voices;
+            \\pub const temperature = r.temperature;
+            \\pub const top_p = r.top_p;
+            \\pub const top_k = r.top_k;
+            \\pub const silence_frames = r.silence_frames;
+            \\pub const reference_frames = r.reference_frames;
+        );
+        m.addImport("zonos_request", b.createModule(.{ .root_source_file = source, .target = target, .optimize = optimize, .imports = &.{.{ .name = "zonos3", .module = zonos3 }} }));
+    } else m.addImport("zonos_request", b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/request.zig"), .target = target, .optimize = optimize }));
     const family = if (m.import_table.get("native_engines")) |engines| engines.import_table.get("drama3") else null;
     if (family) |drama3| {
         const source = b.addWriteFiles().add("drama_prompt.zig",

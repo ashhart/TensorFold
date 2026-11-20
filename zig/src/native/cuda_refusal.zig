@@ -63,7 +63,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
     // Fish and Qwen4 open outside family(), so their --tp is refused here
-    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
+    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "zonos3") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
         if (unranked(o)) |why| return why;
     return null;
 }
@@ -158,7 +158,7 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 0, .given = .{ .tp = true, .rank = true } }) == null);
     try std.testing.expect(family(Single, .{ .dir = "d", .model_type = "m", .rank = 0, .given = .{ .rank = true } }) == null);
     try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
-    for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
+    for ([_][]const u8{ "fish_omni", "zonos3", "qwen4", "qwen4_text" }) |m| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
         try std.testing.expectEqualStrings(no_ranks, backend(.{ .dir = "d", .model_type = m, .tp = 2 }).?);
     }
