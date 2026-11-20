@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
+
 - Pull: gated and private Hugging Face repos come down with your token: `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else `~/.cache/huggingface/token`). The token goes only to the hub's own host (`huggingface.co`, or `HF_ENDPOINT`'s), never to the storage hosts downloads are redirected to, and is never printed; a repo the hub refuses is named, with whether a token is missing or lacks access (#3524).
 
 - Tests: a third stream at --parallel 2 waits with the engine_busy reason in FIFO order, then decodes in every shared round with the backend's own tokens and never takes the lone path.
