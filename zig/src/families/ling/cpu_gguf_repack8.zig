@@ -1,4 +1,4 @@
-//! 8-row interleaved layout for Q4_K and Q6_K SDOT projections (bit-identical to 1-row SDOT).
+//! 8x4 Q4_K/Q6_K SDOT layout adapted from llama.cpp (MIT, Copyright (c) 2023-2026 The ggml authors).
 const std = @import("std");
 const core = @import("core");
 const g = core.gguf;
