@@ -40,7 +40,7 @@ fn infoOf(comptime kind: Kind) Info {
     return switch (kind) {
         // the dense feed-forward's hidden rows, and an expert's for each of a row's two picks
         .mul_silu => .{ .symbol = "z3_mul_silu", .image = .backbone, .name = "cuda zonos3 z3_mul_silu", .fault = "reads its gate one value late", .served = &.{ sh(64, 2048), sh(1, 2048), sh(2, 1536), sh(128, 1536) } },
-        .combine => .{ .symbol = "z3_combine", .image = .backbone, .name = "cuda zonos3 z3_combine", .fault = "weighs each pick with the other pick's weight", .served = &.{ sh(64, 256), sh(1, 256) } },
+        .combine => .{ .symbol = "z3_combine", .image = .backbone, .name = "cuda zonos3 z3_combine", .fault = "weighs each pick with the other pick's weight", .served = &.{ sh(64, 256), sh(1, 256), sh(1, 1024) } },
         .softcap => .{ .symbol = "z3_softcap", .image = .backbone, .name = "cuda zonos3 z3_softcap (in place)", .fault = "launched one value short", .in_place = true, .served = &.{ sh(8, 40980), sh(1, 40980), sh(64, 40980) } },
         // a stage's attention and feed-forward residuals with their layer scale, and the ConvNeXt block's plain one
         .add_scaled => .{ .symbol = "zc_add_scaled", .image = .codec, .name = "cuda zonos3_codec zc_add_scaled (in place, layer scale)", .fault = "launched without its scale", .in_place = true, .served = &.{ sh(16, 768), sh(300, 1280), sh(1, 768) } },

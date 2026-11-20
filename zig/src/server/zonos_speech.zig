@@ -7,6 +7,7 @@ const pyrepr = @import("pyrepr.zig");
 const text_mod = @import("model_text.zig");
 const req = @import("zonos_request");
 const textnorm = @import("zonos_textnorm.zig");
+const steer = @import("zonos_steer.zig");
 const Allocator = std.mem.Allocator;
 
 pub const error_prefix = "ZONOS3 request:";
@@ -24,7 +25,9 @@ pub const fields = struct {
     pub const guidance = "speaker_cfg_scale";
     pub const buckets = "condition_buckets";
     pub const values = "condition_values";
-    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values };
+    pub const mode = "speaker_mode";
+    pub const embedding = "speaker_embedding";
+    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding } ++ steer.fields.all;
 };
 
 pub const State = struct {
@@ -33,9 +36,11 @@ pub const State = struct {
     silence: [req.config.codebooks]i32,
     /// The voice "default" names: --default-voice, else savannah, else the first voice.
     default: ?*const req.voices.Voice,
+    /// --steer-bundle: the directions a request's controls name; null: controls are refused.
+    bundle: ?*const req.steer_bundle.Bundle = null,
 };
 
-pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1 };
+pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null };
 
 const rate = 44100;
 /// A reference clip: at least half a second, and the first 60 s of it in whole frames of 2940 samples.
@@ -43,8 +48,8 @@ const min_clip = rate / 2;
 const max_clip = req.reference_frames * 2940;
 
 /// The state for a ZONOS3 Mini release at `dir` (from the arena `a`), or null for any other checkpoint.
-pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8) !?*State {
-    if (dir.len == 0 or !req.release.present(io, dir)) return null;
+pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8, steer_bundle: ?[]const u8) !?*State {
+    if (dir.len == 0 or !req.release.present(io, dir)) return if (steer_bundle != null) error.SteerBundleNeedsZonos else null;
     var rel = try req.release.open(a, io, dir, null);
     defer rel.deinit();
     const st = try a.create(State);
@@ -54,6 +59,11 @@ pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8
     if (st.default == null) {
         if (named) return error.UnknownDefaultVoice;
         if (st.voices.len > 0) st.default = &st.voices[0];
+    }
+    if (steer_bundle) |path| {
+        const bundle = try a.create(req.steer_bundle.Bundle);
+        bundle.* = try req.steer_bundle.load(a, io, path);
+        st.bundle = bundle;
     }
     return st;
 }
@@ -188,15 +198,40 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         return cx.fail(.request, error_prefix ++ " unsupported language code {s}; supported: " ++ textnorm.codes, .{try pyrepr.repr(cx.a, .{ .string = language.? })});
     if (normalize == true and !textnorm.available(cx.a)) return cx.refuse(textnorm.missing());
     if (own != null and clip != null) return cx.refuse(error_prefix ++ " send ref_audio or speaker_reference_codes, not both");
+    // a voice by its speaker embedding (the speaker row) in place of reference codes (a prefix)
+    const sent = raw.field(fields.embedding);
+    const by_embedding = if (raw.field(fields.mode)) |v| blk: {
+        const name = v.str() orelse return cx.refuse(error_prefix ++ " speaker_mode must be \"reference\" or \"embedding\"");
+        if (std.mem.eql(u8, name, "embedding")) break :blk true;
+        if (!std.mem.eql(u8, name, "reference")) return cx.refuse(error_prefix ++ " speaker_mode must be \"reference\" or \"embedding\"");
+        if (sent != null) return cx.refuse(error_prefix ++ " speaker_embedding needs speaker_mode \"embedding\"");
+        break :blk false;
+    } else sent != null;
+    if (by_embedding and (own != null or clip != null))
+        return cx.refuse(error_prefix ++ " speaker_mode \"embedding\" takes a voice name or speaker_embedding; a clip's embedding needs the release's speaker encoder, which is not served");
+    var vector: [req.config.speaker_dim]f32 = undefined;
+    if (sent) |value| {
+        const message = error_prefix ++ " speaker_embedding must be 192 finite numbers";
+        const list = value.items() orelse return cx.refuse(message);
+        if (list.len != vector.len) return cx.refuse(message);
+        for (&vector, list) |*x, v| {
+            x.* = @floatCast(number(v) orelse return cx.refuse(message));
+            if (!std.math.isFinite(x.*)) return cx.refuse(message);
+        }
+    }
     const audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
-    const reference: []const [req.config.codebooks]i32 = if (clip != null) &.{} else if (own) |value| try referenceCodes(cx, value) else blk: {
+    const reference: []const [req.config.codebooks]i32 = if (clip != null or sent != null) &.{} else if (own) |value| try referenceCodes(cx, value) else blk: {
         const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice) orelse if (stockVoice(voice)) st.default else null;
         const v = chosen orelse {
             if (st.voices.len == 0) return cx.refuse(error_prefix ++ " this release folder has no voices under gguf/voices");
             return cx.fail(.request, error_prefix ++ " unknown voice {s}; see /v1/voices", .{try pyrepr.repr(cx.a, .{ .string = voice })});
         };
+        vector = v.embedding;
         break :blk v.codes;
     };
+    const chars = std.unicode.utf8CountCodepoints(input) catch return cx.refuse("input must be valid UTF-8 text");
+    const steered = try steer.plan(st.bundle, cx, raw, chars, if (by_embedding) &vector else null, guidance != 1);
+    if (steered.embedding) |moved| vector = moved;
     const spoken = spokenText(cx.a, input, lang, normalize) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.NoLibrary => cx.refuse(textnorm.missing()),
@@ -206,7 +241,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this prompt"),
     };
-    const speaker: req.prompt.Speaker = if (clip != null) .none else .{ .reference = reference };
+    const speaker: req.prompt.Speaker = if (clip != null) .none else if (by_embedding) .embedding else .{ .reference = reference };
     const built = req.prompt.build(cx.a, ids, speaker, st.silence, req.silence_frames) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(error_prefix ++ " the text has nothing to speak"),
@@ -215,7 +250,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const rows = built.rows.len + if (audio.len > 0) (audio.len + 2939) / 2940 + req.config.codebooks - 1 else 0;
     if (rows > sp.max_prompt_tokens)
         return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows, sp.max_prompt_tokens });
-    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance };
+    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering };
 }
 
 pub fn listing(a: Allocator, st: *const State) !json.Value {
