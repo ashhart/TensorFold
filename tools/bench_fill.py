@@ -155,10 +155,18 @@ def together(args, key, first: tuple, second: tuple, lead_s: float) -> tuple[dic
 
 
 def read_trace(path, offset):
-    """Only complete JSON lines appended after this benchmark started."""
+    """Only complete JSON lines appended after this benchmark started; malformed evidence stays unknown."""
+    events = []
     with open(path, encoding="utf-8") as f:
         f.seek(offset)
-        return [json.loads(line) for line in f if line.strip()]
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                return None
+    return events
 
 
 def main() -> None:

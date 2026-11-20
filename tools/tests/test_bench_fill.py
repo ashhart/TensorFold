@@ -1,6 +1,7 @@
 """bench_fill's waits and exactness verdict, without a model."""
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bench_fill
@@ -94,6 +95,14 @@ class Fill(unittest.TestCase):
 
     def test_gaps_with_one_piece(self):
         self.assertEqual(bench_fill.largest_gaps([(1.0, 1)]), (None, None))
+
+    def test_partial_trace_json_is_unknown_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "native.jsonl"
+            path.write_text('{"t0_ns": 0}\n{"t0_ns":', encoding="utf-8")
+            events = bench_fill.read_trace(path, 0)
+        self.assertIsNone(events)
+        self.assertEqual(bench_fill.summary(*orders(), trace=events, long_rows=2048)["mixed_load"], "unknown")
 
 
 if __name__ == "__main__":
