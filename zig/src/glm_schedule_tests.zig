@@ -7,3 +7,11 @@ test {
 test {
     _ = @import("core/lane_host_fill_aging_test.zig");
 }
+
+test {
+    _ = @import("glm_order_tests.zig");
+}
+
+test {
+    _ = @import("families/glm/pool_size_test.zig");
+}

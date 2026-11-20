@@ -13,6 +13,7 @@ pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const pool = @import("pool.zig");
+pub const pool_size = @import("pool_size.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
@@ -40,6 +41,7 @@ test {
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
     _ = pool;
+    _ = @import("pool_size_test.zig");
     _ = @import("kept.zig");
     _ = @import("draw_test.zig");
     _ = mirror;
