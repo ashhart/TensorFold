@@ -70,9 +70,8 @@ pub fn main(init: std.process.Init) !void {
     var at: usize = 0;
     while (at < prompt.items.len) {
         const end = @min(prompt.items.len, at + 8);
-        var result = try session.run(init.gpa, prompt.items[at..end]);
-        defer result.deinit();
-        next = top(result.logits[result.logits.len - c.vocab ..]);
+        const step = try session.step(prompt.items[at..end]);
+        next = top(step.logits[step.logits.len - c.vocab ..]);
         at = end;
     }
     const prefilled = std.Io.Clock.awake.now(init.io);
@@ -87,13 +86,12 @@ pub fn main(init: std.process.Init) !void {
         try w.print(" {d}", .{next});
         try w.flush();
         made += 1;
-        var result = try session.run(init.gpa, &.{next});
-        defer result.deinit();
+        const step = try session.step(&.{next});
         if (std.mem.indexOfScalar(u32, c.eos[0..c.eos_n], next) != null) {
             stopped = true;
             break;
         }
-        next = top(result.logits);
+        next = top(step.logits);
     }
     const done = std.Io.Clock.awake.now(init.io);
     const decode_ns = prefilled.durationTo(done).toNanoseconds();
