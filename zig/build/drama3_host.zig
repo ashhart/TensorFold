@@ -43,6 +43,7 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = runtime }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = b.createModule(.{ .root_source_file = bytes }) } },
     });
+    family.addImport("tensorfold", core);
     const step = b.step("check-drama-metal-host", "Compile Drama's Metal host entry points without compiling shaders");
     compile(b, step, family, "drama_metal_host");
     native(b, step, family, core, api, null, "drama_metal_native_host");
@@ -64,7 +65,9 @@ pub fn plan(b: *std.Build, family: *std.Build.Module, core: *std.Build.Module, a
 
 /// Drama's family module over a runtime and the core; its tests run on the host with mocked CUDA waits.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+    const family = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+    family.addImport("tensorfold", core);
+    return family;
 }
 
 /// Drama's CUDA-side host steps (its tests, the owners' filter, the CUDA entry points compiled); returns its module.

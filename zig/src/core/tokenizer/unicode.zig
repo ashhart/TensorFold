@@ -73,6 +73,34 @@ pub fn isSpace(cp: u21) bool {
     return cp == 0x85 or bit(category(cp)) & separator != 0;
 }
 
+pub fn lowercase(a: std.mem.Allocator, text: []const u8) ![]u8 {
+    const mappings = @import("nfkd_data.zig");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var at: usize = 0;
+    while (at < text.len) {
+        const c = decodeAt(text, at);
+        at += c.len;
+        var lo: usize = 0;
+        var hi = mappings.lowercases.len;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (mappings.lowercases[mid].cp < c.cp) lo = mid + 1 else hi = mid;
+        }
+        if (lo < mappings.lowercases.len and mappings.lowercases[lo].cp == c.cp) {
+            const lower = mappings.lowercases[lo];
+            for (mappings.lower_sequences[lower.start..][0..lower.len]) |cp| try appendCodepoint(&out, a, cp);
+        } else try appendCodepoint(&out, a, c.cp);
+    }
+    return out.toOwnedSlice(a);
+}
+
+test "Unicode lowercase includes expanding and non-Latin mappings" {
+    const text = try lowercase(std.testing.allocator, "PERSON İ Å Σ А 𐐀");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("person i\u{307} å σ а 𐐨", text);
+}
+
 /// Code points whose simple case folding equals that of an ASCII letter, including it.
 pub fn asciiCaseVariants(c: u8, out: *[4]u21) []const u21 {
     const lower = std.ascii.toLower(c);

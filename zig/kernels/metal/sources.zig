@@ -1,5 +1,21 @@
 //! Metal kernel sources the engine compiles at run time, embedded in the executable.
 
+pub const sam3_contract = @embedFile("sam3/contract.metal");
+pub const sam3_dense_small = @embedFile("sam3/dense_small.metal");
+pub const sam3_dense_small_baseline = @embedFile("sam3/dense_small_baseline.metal");
+const sam3_common_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal");
+pub const sam3_attention_split = @import("sam3/attention_split.zig");
+pub const sam3_dense_device = @import("sam3/dense_device.zig");
+pub const sam3_dense_expansion = @import("sam3/dense_expansion.zig");
+pub const sam3_attention_device = @import("sam3/attention_device.zig");
+pub const sam3_norm = @embedFile("sam3/norm.metal");
+pub const sam3_attention_split32 = @import("sam3/attention_split32.zig");
+pub const sam3_activation = @embedFile("sam3/activation.metal");
+pub const sam3_source = sam3_common_source ++ sam3_dense_small ++ sam3_activation ++ sam3_attention_split.source ++ sam3_dense_device.source ++ sam3_dense_expansion.source ++ sam3_attention_device.source ++ sam3_norm ++ sam3_attention_split32.source;
+pub const sam3_baseline_source = sam3_common_source ++ sam3_dense_small_baseline;
+pub const sam3_deconv = @embedFile("sam3/deconv.metal");
+pub const sam3_deconv_baseline = @embedFile("sam3/deconv_baseline.metal");
+
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
 
@@ -86,6 +102,13 @@ pub const train_mixers = @embedFile("train_mixers.metal");
 
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
+pub const tensor_ops = @embedFile("tensor_ops.metal");
+pub const tensor_exact_gemm = "#define TF_NAX_STRICT_FP32\n#define TF_NAX_EXACT_B\n" ++ @embedFile("prefill/gemm_nax.metal") ++ @embedFile("tensor_exact_gemm.metal");
+pub const tensor_compact_gemm = "#define TF_NAX_STRICT_FP32\n#include \"../nax.h\"\n" ++ @embedFile("tensor_compact_gemm.metal");
+pub const tensor_attention = @embedFile("tensor_attention.metal");
+pub const tensor_attention_pv = @embedFile("tensor_attention_pv.metal");
+pub const tensor_library = @import("tensor_library.zig");
+pub const tensor_attention_passes = @import("tensor_attention_passes.zig");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");

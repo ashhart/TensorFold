@@ -46,7 +46,11 @@ inline void gemm_step(thread frag<float> (&acc)[2][2], const device T* A, const 
   for (short m = 0; m < 2; m++) {
     TF_UNROLL
     for (short k = 0; k < 2; k++) {
+#ifdef TF_NAX_EXACT_B
+      mma_16x32<TA, TB, float, T, T, true>(acc[m][0], acc[m][1], a[m][k], b[k][0], b[k][1]);
+#else
       mma_16x32<TA, TB>(acc[m][0], acc[m][1], a[m][k], b[k][0], b[k][1]);
+#endif
     }
   }
 }
