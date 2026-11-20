@@ -1775,7 +1775,11 @@ server on the same journal does not start. Benchmark child servers never inherit
 Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
 the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
 thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
-reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+reply's size and SHA-256, its `token_sha256`, the reply bytes in base64 when they fit 4 MiB, and its measures:
+`queue_ms` waiting for admission, `ttft_ms` from receipt to the first token, `decode_tps`, and `prompt_tokens`,
+`cached_tokens` and `completion_tokens`). The measures are the ones the server's `done` log line reports, taken as it
+already takes them; they are `null` for a request that ended before generating, and for a prompt list, whose prompts run
+apart, the counts are summed and the timings are the last prompt's. Responses and Messages
 requests are journaled in the chat form they are translated to. A raw completion whose `prompt` is a list is not
 replay-exact: its per-prompt prepared records are not written, and its individual drawn seeds are not journaled.
 

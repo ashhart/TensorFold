@@ -140,8 +140,13 @@ test "request journal: whole and streamed replies keep their start, resolved see
         try decoder.decode(bytes, encoded);
         try t.expectEqualStrings(wire.bytes.items, bytes);
         try t.expectEqualStrings(wire.tokens(), finish.strField("token_sha256").?);
+        // the finish carries the reply's timings and token counts: four digits of the seed come back
+        try t.expectEqual(@as(i64, 4), finish.get("completion_tokens").?.int64().?);
+        try t.expectEqual(@as(i64, 0), finish.get("cached_tokens").?.int64().?);
+        for ([_][]const u8{ "queue_ms", "ttft_ms", "decode_tps" }) |k| try t.expect(finish.get(k).?.float64().? >= 0);
         for (try records(a, path)) |r| if (std.mem.eql(u8, r.strField("id") orelse "", id)) {
             const kind = r.strField("kind").?;
+            if (std.mem.eql(u8, kind, "prepared")) try t.expectEqual(r.get("prompt_tokens").?.int64().?, finish.get("prompt_tokens").?.int64().?);
             if (std.mem.eql(u8, kind, "prepared")) try t.expectEqual(@as(i64, 1234), r.get("seed").?.int64().?);
             if (std.mem.eql(u8, kind, "start")) try t.expectEqual(@as(usize, 64), r.strField("fingerprint").?.len);
         };
