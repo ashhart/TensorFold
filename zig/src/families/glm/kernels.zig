@@ -77,6 +77,7 @@ pub const Kernels = struct {
     mla_norms: mtl.Pipeline, // an MLA layer's latent key norm, indexer key norm and indexer weights in one launch
     pool: mtl.Pipeline,
     stream_mean: mtl.Pipeline,
+    tap_mean_ring: mtl.Pipeline,
     add: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     argmax: mtl.Pipeline,
@@ -176,16 +177,16 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
 };
 
 const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
-    .{ .name = "glm_cast_f32", .field = "cast_f32" },     .{ .name = "glm_rms", .field = "rms" },
-    .{ .name = "glm_layer_norm", .field = "layer_norm" }, .{ .name = "glm_absorb", .field = "absorb" },
-    .{ .name = "glm_unabsorb", .field = "unabsorb" },     .{ .name = "glm_scale", .field = "scale" },
-    .{ .name = "glm_pool", .field = "pool" },             .{ .name = "glm_stream_mean", .field = "stream_mean" },
-    .{ .name = "glm_add", .field = "add" },               .{ .name = "glm_swiglu", .field = "swiglu" },
-    .{ .name = "glm_argmax", .field = "argmax" },         .{ .name = "glm_index_select", .field = "index_select" },
-    .{ .name = "glm_exp_f32", .field = "exp_f32" },       .{ .name = "glm_streams", .field = "streams" },
-    .{ .name = "glm_copy_u32", .field = "copy_u32" },     .{ .name = "glm_route_rows", .field = "route_rows" },
-    .{ .name = "glm_act2", .field = "act2" },             .{ .name = "glm_dense_indices", .field = "dense_indices" },
-    .{ .name = "glm_mla_norms", .field = "mla_norms" },
+    .{ .name = "glm_cast_f32", .field = "cast_f32" },           .{ .name = "glm_rms", .field = "rms" },
+    .{ .name = "glm_layer_norm", .field = "layer_norm" },       .{ .name = "glm_absorb", .field = "absorb" },
+    .{ .name = "glm_unabsorb", .field = "unabsorb" },           .{ .name = "glm_scale", .field = "scale" },
+    .{ .name = "glm_pool", .field = "pool" },                   .{ .name = "glm_stream_mean", .field = "stream_mean" },
+    .{ .name = "glm_tap_mean_ring", .field = "tap_mean_ring" }, .{ .name = "glm_add", .field = "add" },
+    .{ .name = "glm_swiglu", .field = "swiglu" },               .{ .name = "glm_argmax", .field = "argmax" },
+    .{ .name = "glm_index_select", .field = "index_select" },   .{ .name = "glm_exp_f32", .field = "exp_f32" },
+    .{ .name = "glm_streams", .field = "streams" },             .{ .name = "glm_copy_u32", .field = "copy_u32" },
+    .{ .name = "glm_route_rows", .field = "route_rows" },       .{ .name = "glm_act2", .field = "act2" },
+    .{ .name = "glm_dense_indices", .field = "dense_indices" }, .{ .name = "glm_mla_norms", .field = "mla_norms" },
 };
 
 const Job = struct {
@@ -452,4 +453,9 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.index_decode = index_out[1];
     k.select_mark = select_out[0];
     k.select_merge = select_out[1];
+}
+
+test "glm_tap_mean_ring unique source anchor in glm_glue.metal" {
+    try std.testing.expect(std.mem.indexOf(u8, sources.glm_glue, "kernel void glm_tap_mean_ring(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sources.glm_glue, "GlmTapRingArgs") != null);
 }
