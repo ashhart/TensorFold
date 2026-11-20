@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: a decode round over several streams runs each per-stream stage (window key, compressed rows and index keys, ratio-2 pooling, decode attention, index scores, candidate blocks and the top 512) as one dispatch over a table of the streams' state, with one barrier between stages instead of one a stream, and the same bits (#2954, refs #2984). Thanks to @gilby.
+
 - Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds a chunk's two pages once and picks the right one at each step, instead of looking up the page at every step; with the flag unset nothing changes (#3180, refs #1293). Thanks to @CodingEmil.
 
 - HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
