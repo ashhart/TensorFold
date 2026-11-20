@@ -5,13 +5,14 @@ const g = core.gguf;
 const rows = @import("cpu_rows.zig");
 const sdot = @import("cpu_gguf_q4_sdot.zig");
 const act_mod = @import("cpu_gguf_sdot_act.zig");
+const batch_mod = @import("cpu_gguf_repack8_batch.zig");
 
 const V = act_mod.V;
 const I = act_mod.I;
 const F4 = @Vector(4, f32);
 const sdotAcc = act_mod.sdotAcc;
 
-inline fn sdotLane(acc: I, a: V, b: V, comptime lane: u2) I {
+pub inline fn sdotLane(acc: I, a: V, b: V, comptime lane: u2) I {
     if (comptime act_mod.has_dotprod) {
         const idx = switch (lane) {
             0 => "0",
@@ -32,7 +33,7 @@ inline fn sdotLane(acc: I, a: V, b: V, comptime lane: u2) I {
     return sdotAcc(acc, a, dup);
 }
 
-inline fn loadU8Pair(p: [*]const u8) struct { lo: @Vector(4, u16), hi: @Vector(4, u16) } {
+pub inline fn loadU8Pair(p: [*]const u8) struct { lo: @Vector(4, u16), hi: @Vector(4, u16) } {
     const raw: @Vector(8, u8) = @as(*align(1) const [8]u8, @ptrCast(p)).*;
     const wide: @Vector(8, u16) = raw;
     return .{
@@ -390,7 +391,24 @@ pub fn projectRangeQ4Kx8(
             var bi: usize = 0;
             while (bi < blocks_per_row) : (bi +%= 1) {
                 const blk = &base_blk[bi];
-                for (0..batch) |b_row| {
+                var b_row: usize = 0;
+                while (b_row + 4 <= batch) : (b_row +%= 4) {
+                    const row_acts = [4]*const sdot.Activation256{
+                        &acts[(first +% b_row) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 1) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 2) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 3) *% blocks_per_row +% bi],
+                    };
+                    batch_mod.dotQ4Kx8BlockN(4, blk, row_acts, totals[b_row..][0..4]);
+                }
+                while (b_row + 2 <= batch) : (b_row +%= 2) {
+                    const row_acts = [2]*const sdot.Activation256{
+                        &acts[(first +% b_row) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 1) *% blocks_per_row +% bi],
+                    };
+                    batch_mod.dotQ4Kx8BlockN(2, blk, row_acts, totals[b_row..][0..2]);
+                }
+                while (b_row < batch) : (b_row +%= 1) {
                     dotQ4Kx8Block(blk, &acts[(first +% b_row) *% blocks_per_row +% bi], &totals[b_row]);
                 }
             }
