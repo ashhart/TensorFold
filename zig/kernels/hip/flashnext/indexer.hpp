@@ -125,12 +125,60 @@ __device__ int fn_scan(int v, int* waves, int* total) {
     return x - v + (wave > 0 ? waves[wave - 1] : 0);
 }
 
+// Keys a select thread holds in registers (a row's blocks in contiguous runs): wider rows take the global path.
+constexpr int kSelectHeld = 32;
+
+// tf_fn_idx_select's held-key cut: per pass a wave histogram, suffix-scanned over 256 bins; same cut as serial.
+__device__ __forceinline__ void fn_cut_held(const unsigned (&k)[kSelectHeld], int held, int top, int (*whist)[256],
+                                            int* hist, unsigned* cut_s, int* need_s, unsigned& prefix, int& need) {
+    const int t = threadIdx.x, lane = t & 31, wave = t >> 5;
+    unsigned mask = 0;
+    prefix = 0;
+    need = top;
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (int i = lane; i < 256; i += 32) whist[wave][i] = 0;
+        __syncthreads();
+#pragma unroll
+        for (int i = 0; i < kSelectHeld; ++i)
+            if (i < held && (k[i] & mask) == prefix) atomicAdd(&whist[wave][(k[i] >> shift) & 255u], 1);
+        __syncthreads();
+        // bins on threads 0..255: the bin's count, then the count of bins above it (a suffix scan over 8 waves)
+        int c = 0, x = 0;
+        if (t < 256) {
+#pragma unroll 4
+            for (int w = 0; w < kSelectWaves; ++w) c += whist[w][255 - t];  // t's rank from the top bin down
+            x = c;
+#pragma unroll
+            for (int off = 1; off < 32; off <<= 1) {
+                const int y = __shfl_up(x, off, 32);
+                if (lane >= off) x += y;
+            }
+            if (lane == 31) hist[wave] = x;  // the 8 waves' totals
+        }
+        __syncthreads();
+        if (t < 256) {
+            int before = 0;
+            for (int w = 0; w < wave; ++w) before += hist[w];
+            const int incl = x + before, above = incl - c;  // blocks in bins above bin 255 - t, and with it
+            if (incl >= need && above < need) {
+                *cut_s = prefix | (static_cast<unsigned>(255 - t) << shift);
+                *need_s = need - above;
+            }
+        }
+        __syncthreads();
+        prefix = *cut_s;
+        need = *need_s;
+        mask |= 255u << shift;
+    }
+}
+
 // Block r: past top complete blocks, the top best (ties: lower id) in block order, then the tail; else keys < ends.
 extern "C" __global__ void __launch_bounds__(kSelectThreads)
 tf_fn_idx_select(const float* scores, long long stride, const int* complete, const int* ends, int* keys,
                  long long key_stride, int* count, int* sparse, int top, int ratio) {
     __shared__ int hist[256];
     __shared__ int waves[kSelectWaves];
+    __shared__ int whist[kSelectWaves][256];
     __shared__ unsigned cut_s;
     __shared__ int need_s;
     const int r = blockIdx.x, t = threadIdx.x;
@@ -143,49 +191,76 @@ tf_fn_idx_select(const float* scores, long long stride, const int* complete, con
         return;
     }
     const float* sc = scores + r * stride;
-    unsigned prefix = 0, mask = 0;
-    int need = top;
-    for (int shift = 24; shift >= 0; shift -= 8) {
-        for (int i = t; i < 256; i += kSelectThreads) hist[i] = 0;
-        __syncthreads();
-        for (int b = t; b < nb; b += kSelectThreads) {
-            const unsigned k = fn_order(sc[b]);
-            if ((k & mask) == prefix) atomicAdd(&hist[(k >> shift) & 255u], 1);
-        }
-        __syncthreads();
-        if (t == 0) {
-            int above = 0, bin = 255;
-            while (above + hist[bin] < need) above += hist[bin--];
-            cut_s = prefix | (static_cast<unsigned>(bin) << shift);
-            need_s = need - above;
-        }
-        __syncthreads();
-        prefix = cut_s;
-        need = need_s;
-        mask |= 255u << shift;
-    }
     const int chunk = (nb + kSelectThreads - 1) / kSelectThreads;
     const int lo = min(nb, t * chunk), hi = min(nb, lo + chunk);
+    unsigned prefix = 0;
+    int need = top;
+    unsigned k[kSelectHeld];
+    const bool held = chunk <= kSelectHeld;
+    if (held) {
+#pragma unroll
+        for (int i = 0; i < kSelectHeld; ++i) k[i] = lo + i < hi ? fn_order(sc[lo + i]) : 0u;
+        fn_cut_held(k, hi - lo, top, whist, hist, &cut_s, &need_s, prefix, need);
+    } else {
+        unsigned mask = 0;
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            for (int i = t; i < 256; i += kSelectThreads) hist[i] = 0;
+            __syncthreads();
+            for (int b = t; b < nb; b += kSelectThreads) {
+                const unsigned kb = fn_order(sc[b]);
+                if ((kb & mask) == prefix) atomicAdd(&hist[(kb >> shift) & 255u], 1);
+            }
+            __syncthreads();
+            if (t == 0) {
+                int above = 0, bin = 255;
+                while (above + hist[bin] < need) above += hist[bin--];
+                cut_s = prefix | (static_cast<unsigned>(bin) << shift);
+                need_s = need - above;
+            }
+            __syncthreads();
+            prefix = cut_s;
+            need = need_s;
+            mask |= 255u << shift;
+        }
+    }
     int above = 0, equal = 0;
-    for (int b = lo; b < hi; ++b) {
-        const unsigned k = fn_order(sc[b]);
-        above += k > prefix;
-        equal += k == prefix;
+    if (held) {
+#pragma unroll
+        for (int i = 0; i < kSelectHeld; ++i)
+            if (lo + i < hi) { above += k[i] > prefix; equal += k[i] == prefix; }
+    } else {
+        for (int b = lo; b < hi; ++b) {
+            const unsigned kb = fn_order(sc[b]);
+            above += kb > prefix;
+            equal += kb == prefix;
+        }
     }
     int above_total = 0, equal_total = 0;
     int pa = fn_scan(above, waves, &above_total);
     int pe = fn_scan(equal, waves, &equal_total);
     int out = pa + min(pe, need);
     int* row = keys + r * key_stride;
-    for (int b = lo; b < hi; ++b) {
-        const unsigned k = fn_order(sc[b]);
-        bool take = k > prefix;
-        if (k == prefix) take = pe++ < need;
-        if (!take) continue;
-        for (int j = 0; j < ratio; ++j) row[out * ratio + j] = b * ratio + j;
-        ++out;
+    if (held) {
+#pragma unroll
+        for (int i = 0; i < kSelectHeld; ++i) {
+            if (lo + i >= hi) break;
+            bool take = k[i] > prefix;
+            if (k[i] == prefix) take = pe++ < need;
+            if (!take) continue;
+            for (int j = 0; j < ratio; ++j) row[out * ratio + j] = (lo + i) * ratio + j;
+            ++out;
+        }
+    } else {
+        for (int b = lo; b < hi; ++b) {
+            const unsigned kb = fn_order(sc[b]);
+            bool take = kb > prefix;
+            if (kb == prefix) take = pe++ < need;
+            if (!take) continue;
+            for (int j = 0; j < ratio; ++j) row[out * ratio + j] = b * ratio + j;
+            ++out;
+        }
     }
-    for (int k = nb * ratio + t; k < end; k += kSelectThreads) row[top * ratio + k - nb * ratio] = k;
+    for (int kk = nb * ratio + t; kk < end; kk += kSelectThreads) row[top * ratio + kk - nb * ratio] = kk;
     if (t == 0) {
         count[r] = top * ratio + end - nb * ratio;
         sparse[r] = 1;

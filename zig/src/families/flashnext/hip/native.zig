@@ -136,7 +136,7 @@ fn engineOf(
 }
 
 /// One rank's engine at the window every rank took, and the streams every rank's memory holds.
-const Prepared = struct { e: *Engine, window: usize, fit: usize, per: usize, room: u64 };
+const Prepared = struct { e: *Engine, window: usize, fit: usize, per: usize, room: u64, shared: bool = false };
 
 /// Every rank, in steps over the link: rank 0's window, this rank's admission and engine, then the streams that fit.
 fn prepare(
@@ -186,7 +186,8 @@ fn prepare(
             "lower --context or add ranks (--tp)",
         .{ mine.window, gibs(per), gibs(room) },
     );
-    return .{ .e = e, .window = mine.window, .fit = fit, .per = per, .room = room };
+    const shared = hip.admission.sharesHost(gpa, io, e.ctx);
+    return .{ .e = e, .window = mine.window, .fit = fit, .per = per, .room = room, .shared = shared };
 }
 
 const Owned = struct {
@@ -210,14 +211,37 @@ const Owned = struct {
     }
 };
 
+/// The prompt cache's bytes: the flag's, else 16 GiB; on shared pages no more than the room the streams leave.
+fn promptCacheBytes(flag: ?f64, shared: bool, room: u64, streams: u64) u64 {
+    if (flag) |g| return @intFromFloat(g * (1 << 30));
+    const most: u64 = 16 << 30;
+    return if (shared) @min(most, room -| streams) else most;
+}
+
+test promptCacheBytes {
+    const g: u64 = 1 << 30;
+    // a card: host RAM is apart
+    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, false, 20 * g, 16 * g));
+    // shared: what the streams leave
+    try std.testing.expectEqual(@as(u64, 4 * g), promptCacheBytes(null, true, 20 * g, 16 * g));
+    // shared, roomy: the default
+    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, true, 40 * g, 8 * g));
+    // nothing left: no cache
+    try std.testing.expectEqual(@as(u64, 0), promptCacheBytes(null, true, 16 * g, 16 * g));
+    // the flag wins
+    try std.testing.expectEqual(@as(u64, 12 * g), promptCacheBytes(12.0, true, 16 * g, 16 * g));
+}
+
 /// Rank 0's lanes over `p.e` for `streams` streams, with the server's startup line.
 fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, streams: usize) !*Owned {
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     const fx = try lanes_mod.Fx.init(gpa, p.e, streams);
     errdefer fx.deinit();
-    // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB
-    fx.keepPrompts(@intFromFloat((o.cache_gib orelse 16.0) * (1 << 30)));
+    // the first stream's caches at load: a first prompt otherwise waits on allocating and clearing them
+    try p.e.makeFirstSlot();
+    // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB (on shared pages, what the streams leave)
+    fx.keepPrompts(promptCacheBytes(o.cache_gib, p.shared, p.room, p.per * streams));
     var why: [96]u8 = undefined;
     const narrowed = if (p.e.narrowed) |n|
         std.fmt.bufPrint(&why, " ({d}-row chunks would admit fewer of the streams asked for)", .{n}) catch ""

@@ -71,6 +71,8 @@ pub const Engine = struct {
     weights: loader.Weights,
     tables: tables.Tables,
     host: forward.Host,
+    /// Where the last forward's staged span starts (its end is `host.used`): the next prompt stages past it.
+    stage_from: usize = 0,
     qk: [2]hip.DeviceBuffer,
     arena: hip.Arena,
     drawer: serve.draw.Drawer,
@@ -400,14 +402,37 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
+        return e.promptMarked(c, tokens, &.{});
+    }
+
+    /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
+    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
-        // the staging is reused: the last forward's uploads must have left it
+        // the next chunk staged while the last forward runs, in staging that forward's uploads no longer read
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
+        const len = e.host.staging.bytes.len;
+        const half = len / 2;
+        var staged: ?forward.Staged = null;
+        // with the GPU idle no forward hides the gather: it waits for the layers before the n-gram layer instead
+        const idle = try e.stream.done();
+        if (e.host.used <= half) {
+            e.host.used = half; // the last forward's span is in [stage_from, used): below half
+            e.host.limit = len;
+            staged = forward.stageWith(&e.weights.model, &e.host, &segs, false, idle) catch |err| if (err == error.StagingTooSmall) null else return err;
+        } else if (e.stage_from >= half) {
+            e.host.used = 0;
+            e.host.limit = e.stage_from;
+            staged = forward.stageWith(&e.weights.model, &e.host, &segs, false, idle) catch |err| if (err == error.StagingTooSmall) null else return err;
+        }
         try e.stream.synchronize();
-        e.host.used = 0;
+        e.host.limit = len;
         e.arena.reset();
-        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
-        const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
-        const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
+        if (staged == null) {
+            e.host.used = 0;
+            staged = try forward.stageWith(&e.weights.model, &e.host, &segs, false, true);
+        }
+        e.stage_from = staged.?.from;
+        const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged.?);
         c.len += tokens.len;
         return out;
     }
@@ -436,6 +461,8 @@ pub const Engine = struct {
         };
         try e.stream.synchronize();
         e.host.used = 0;
+        e.host.limit = e.host.staging.bytes.len;
+        e.stage_from = 0;
         e.arena.reset();
         const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
         // a window's plan words are written here, outside the graph its round may replay, which copies them up
@@ -483,6 +510,11 @@ pub const Engine = struct {
     /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
     pub fn lease(e: *Engine, slot: u32) !cache.Caches {
         return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
+    }
+
+    /// The first stream's caches made now (at load) rather than by the first prompt; later slots on their first lease.
+    pub fn makeFirstSlot(e: *Engine) !void {
+        try e.pool.make(e.gpa, 0, e.o.capacity, e);
     }
 
     /// A finished stream's caches back to their slot.

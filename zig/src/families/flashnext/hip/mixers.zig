@@ -88,31 +88,16 @@ pub fn linear(
             const st = g.c.linearAt(index);
             const conv_bytes = (d.conv - 1) * ch * 4;
             const next = try o.arena.take(conv_bytes);
-            try o.l.tf_gdn_prompt_prep(
-                @ptrFromInt(forward.at(qkv, at_row * ch).ptr),
-                @backingInt(m.act),
-                @ptrFromInt(l.conv),
-                @ptrFromInt(st.conv),
-                @ptrFromInt(next),
-                @ptrFromInt(q + at_row * kw * 4),
-                @ptrFromInt(k + at_row * kw * 4),
-                @ptrFromInt(v + at_row * vw * 4),
-                @ptrFromInt(m.qk.q),
-                @ptrFromInt(m.qk.k),
-                m.qk.eps,
-                @intCast(n),
-                @intCast(kw),
-                @intCast(vw),
-                @intCast(d.conv),
-                @ptrFromInt(forward.at(a, at_row * d.value_heads).ptr),
-                @ptrFromInt(forward.at(b, at_row * d.value_heads).ptr),
-                @ptrFromInt(l.a_log),
-                @ptrFromInt(l.dt_bias),
-                @ptrFromInt(gate + at_row * d.value_heads * 4),
-                @ptrFromInt(beta + at_row * d.value_heads * 4),
-                @intCast(d.value_heads),
-                o.stream,
-            );
+            // each kept row inside the chunk: the prep to it, its conv state aside, then on (a part's launches each)
+            var from: usize = 0;
+            var state = st.conv;
+            for (g.marks) |mk| {
+                const side = g.c.sideLinear(mk.side, index).conv;
+                try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row + from, mk.row - from, state, side);
+                from = mk.row;
+                state = side;
+            }
+            try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row + from, n - from, state, next);
             if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(@ptrFromInt(st.conv), @ptrFromInt(next), conv_bytes, o.stream));
             at_row += n;
         }
@@ -126,7 +111,16 @@ pub fn linear(
         const out = mixed + off * ch * 4;
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv, null);
+        // each kept row inside the chunk: the conv to it, its state aside, then on (the sums of chunks split there)
+        var from: usize = 0;
+        var state = st.conv;
+        for (g.marks) |mk| {
+            const side = g.c.sideLinear(mk.side, index).conv;
+            try o.convPrefill(forward.at(qkv, (off + from) * ch), l.conv, state, out + from * ch * 4, side, mk.row - from, ch, d.conv, null);
+            from = mk.row;
+            state = side;
+        }
+        try o.convPrefill(forward.at(qkv, (off + from) * ch), l.conv, state, out + from * ch * 4, next, n - from, ch, d.conv, null);
         if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
             @ptrFromInt(st.conv),
             @ptrFromInt(next),
@@ -161,6 +155,55 @@ pub fn linear(
     return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, false);
 }
 
+/// tf_gdn_prompt_prep over `n` rows from `row`: conv from `state` (its next state to `next`), split, q/k norms, gates.
+fn gdnPrep(
+    o: Ops,
+    m: *const model.Model,
+    l: model.Linear,
+    qkv: Tensor,
+    a: Tensor,
+    b: Tensor,
+    q: u64,
+    k: u64,
+    v: u64,
+    gate: u64,
+    beta: u64,
+    row: usize,
+    n: usize,
+    state: u64,
+    next: u64,
+) !void {
+    const d = m.dims;
+    const ch = d.convWidth();
+    const kw = d.key_heads * d.key_dim;
+    const vw = d.value_heads * d.value_dim;
+    try o.l.tf_gdn_prompt_prep(
+        @ptrFromInt(forward.at(qkv, row * ch).ptr),
+        @backingInt(m.act),
+        @ptrFromInt(l.conv),
+        @ptrFromInt(state),
+        @ptrFromInt(next),
+        @ptrFromInt(q + row * kw * 4),
+        @ptrFromInt(k + row * kw * 4),
+        @ptrFromInt(v + row * vw * 4),
+        @ptrFromInt(m.qk.q),
+        @ptrFromInt(m.qk.k),
+        m.qk.eps,
+        @intCast(n),
+        @intCast(kw),
+        @intCast(vw),
+        @intCast(d.conv),
+        @ptrFromInt(forward.at(a, row * d.value_heads).ptr),
+        @ptrFromInt(forward.at(b, row * d.value_heads).ptr),
+        @ptrFromInt(l.a_log),
+        @ptrFromInt(l.dt_bias),
+        @ptrFromInt(gate + row * d.value_heads * 4),
+        @ptrFromInt(beta + row * d.value_heads * 4),
+        @intCast(d.value_heads),
+        o.stream,
+    );
+}
+
 /// The delta rule a stream at a time (a window's rows each with its state kept aside), the gated norm, the out product.
 fn recur(
     o: Ops,
@@ -185,15 +228,46 @@ fn recur(
     for (segs) |g| {
         const n = g.tokens.len;
         const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
+        var from: usize = 0;
+        for (g.marks) |mk| {
+            // each kept row inside the chunk: the rule to it, its state aside, the rule on from there
+            const st = g.c.linearAt(index).state;
+            const part = o.arena.mark();
+            const p0 = off + from;
+            try o.gatedDelta(
+                q + p0 * kw * 4,
+                k + p0 * kw * 4,
+                v + p0 * vw * 4,
+                gate + p0 * d.value_heads * 4,
+                beta + p0 * d.value_heads * 4,
+                st,
+                y + p0 * vw * 4,
+                mk.row - from,
+                d.key_heads,
+                d.value_heads,
+                d.key_dim,
+                d.value_dim,
+                null,
+            );
+            o.arena.release(part); // its scratch: the next launches on the stream run after it
+            if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
+                @ptrFromInt(g.c.sideLinear(mk.side, index).state),
+                @ptrFromInt(st),
+                g.c.layout.state_bytes,
+                o.stream,
+            ));
+            from = mk.row;
+        }
+        const r0 = off + from;
         try o.gatedDelta(
-            q + off * kw * 4,
-            k + off * kw * 4,
-            v + off * vw * 4,
-            gate + off * d.value_heads * 4,
-            beta + off * d.value_heads * 4,
+            q + r0 * kw * 4,
+            k + r0 * kw * 4,
+            v + r0 * vw * 4,
+            gate + r0 * d.value_heads * 4,
+            beta + r0 * d.value_heads * 4,
             g.c.linearAt(index).state,
-            y + off * vw * 4,
-            n,
+            y + r0 * vw * 4,
+            n - from,
             d.key_heads,
             d.value_heads,
             d.key_dim,
@@ -213,6 +287,57 @@ const parts = 16;
 
 /// The rows' ends and complete blocks on the device, and the blocks a window's scores walk (see forward.Staged).
 pub const Rows = struct { ends: u64, complete: u64, bound: usize };
+
+/// `sparse`'s cache writes alone (the MTP head's prompt rows): keys, values, index keys, pooled blocks; no attention.
+pub fn sparseKeys(
+    o: Ops,
+    m: *const model.Model,
+    d: model.Dims,
+    s: model.Sparse,
+    segs: []const forward.Seg,
+    layer: usize,
+    x: Tensor,
+    rows: usize,
+    dev_pos: u64,
+) !void {
+    std.debug.assert(!o.window);
+    const hd = d.head_dim;
+    const di = d.index_dim;
+    const width = (d.index_heads + 1) * di;
+    const kind = @backingInt(m.act);
+    // a prompt's products are separate launches (projectGroup is decode only), so k, v and index keys are the same
+    std.debug.assert(o.prefill);
+    const keys = try o.project(x, s.k, rows, false);
+    const values = try o.project(x, s.v, rows, false);
+    const idx = try o.project(x, s.index, rows, false);
+    var off: usize = 0;
+    for (segs) |g| {
+        const n = g.tokens.len;
+        const kv = g.c.sparse(layer);
+        const cap = g.c.layout.cap;
+        const pos = g.pos;
+        try o.qkRope(forward.at(keys, off * d.kv_heads * hd), d.kv_heads * hd, hd, s.k_norm, d.eps, n, d.kv_heads, hd, d.rotary, d.theta, dev_pos + off * 4, null, kv.k, cap);
+        try o.kvWrite(forward.at(values, off * d.kv_heads * hd), kv.v, n, d.kv_heads, hd, cap, pos);
+        try o.copyCols(forward.at(idx, off * width), width, d.index_heads * di, kv.raw + pos * di * m.act.size(), n, di);
+        const blocks = (pos + n) / d.index_ratio;
+        const pooled = g.c.pooled;
+        if (blocks > pooled) try o.l.fn_idx_pool(
+            @ptrFromInt(kv.raw),
+            @ptrFromInt(kv.pooled + pooled * di * m.act.size()),
+            @ptrFromInt(s.ik_norm),
+            kind,
+            @intCast(pooled),
+            @intCast(blocks - pooled),
+            @intCast(di),
+            @intCast(d.index_ratio),
+            @intCast(d.rotary),
+            d.theta,
+            d.eps,
+            o.stream,
+        );
+        off += n;
+    }
+}
 
 /// The sparse attention over every segment's rows; with `staged`, a window's launches read positions from the device.
 pub fn sparse(
