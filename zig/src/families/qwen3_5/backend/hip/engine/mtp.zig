@@ -127,10 +127,15 @@ pub const Head = struct {
         return h;
     }
 
+    /// This head's launches on `s`: the engine's library and arena, and the activation kind.
+    fn ops(m: *const view.Model, lib: *const hip.Launcher, s: hip.abi.Stream, arena: *hip.Arena) Ops {
+        return .{ .l = lib, .bf16 = m.act == .bf16, .stream = s, .arena = arena };
+    }
+
     /// The arena a batch of `cap` chains takes at full depth, counted on the counting stream.
     fn scratch(h: *Head, lib: *const hip.Launcher, m: *const view.Model) !usize {
         var arena = hip.Arena.counting();
-        const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = hip.counting, .arena = &arena };
+        const o: Ops = ops(m, lib, hip.counting, &arena);
         try h.steps(o, m, h.draft_head, h.cap, max_depth, true);
         return arena.peak;
     }
@@ -171,7 +176,7 @@ pub const Head = struct {
     }
 
     fn batch(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, m: *const view.Model, jobs: []Job, graphs: bool) !void {
-        const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = stream.handle, .arena = &h.arena };
+        const o: Ops = ops(m, lib, stream.handle, &h.arena);
         h.arena.reset();
         const rows = jobs.len;
         const at = h.layout();
@@ -258,7 +263,7 @@ pub const Head = struct {
             const ids = if (n == 0) dev else drafts - 4 * h.cap;
             const logits = try h.step(o, m, head, cur, ids, rows, dev + at.slots + 4 * n, dev + at.pos + 4 * h.cap * n, n);
             try o.argmaxRows(logits, rows, head.n, drafts);
-            if (cut and n + 1 < most) try o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n);
+            try if (cut and n + 1 < most) o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n);
             cur = .{ .ptr = h.last, .kind = m.act };
         }
     }
