@@ -130,7 +130,8 @@ class Parsing(unittest.TestCase):
                     "tensorfold": {"token_sha256": "a" * 64}}
         self.assertEqual(fmt.completion_hash(json.dumps(response)), "a" * 64)
         for changed in (dict(response, error={}), dict(response, choices=[{"finish_reason": None}]),
-                        dict(response, usage={"completion_tokens": 0}), dict(response, tensorfold={"token_sha256": "short"})):
+                        dict(response, choices=[]), dict(response, usage={"completion_tokens": 0}),
+                        dict(response, tensorfold={"token_sha256": "short"})):
             with self.assertRaises(fmt.InvalidReceipt):
                 fmt.completion_hash(json.dumps(changed))
 
