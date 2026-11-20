@@ -548,13 +548,11 @@ test "--drafter on qwen3_5 passes the group check on one rank; a group, another 
     try std.testing.expectError(error.Refused, checkGroup(a, o, &problem));
     try std.testing.expectEqualStrings("--mtp-drafts 4: the HIP engine drafts at most 3", problem);
 }
-
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
     const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
     try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
     try std.testing.expect(cacheRefused(.{ .dir = "d", .model_type = "qwen3_5" }) == null);
 }
-
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
     var on: hip.Policy = .{};
     try on.apply("matrix=on");
@@ -570,18 +568,15 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
     const auto: hip.Policy = .{};
     for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(qwen35.native, auto, hip.Caps.of(name).?) == null);
 }
-
 test {
     _ = @import("draft_sources_hip_test.zig");
     _ = @import("mtp_drafts_hip_test.zig");
     _ = @import("hip_confidence_test.zig");
     _ = hip_drafter;
 }
-
 test "slide admission: hip refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").check(open, "HIP", &.{ "qwen3_5", "qwen3_5_moe", "qwen4_exp", "nemotron_h" });
 }
-
 test "slide admission: HIP followers refuse before joining ranks" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -592,7 +587,6 @@ test "slide admission: HIP followers refuse before joining ranks" {
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on HIP yet", .{f.model_type}), why);
     }
 }
-
 test "a family's offer names what it serves; one without an offer generates text in the asked window" {
     const p = fam.offerOf(.{ .streams = @as(usize, 1) });
     try std.testing.expect(p.text_generation and p.embeddings == null and p.window == null and !p.decides and p.rerank == null);
