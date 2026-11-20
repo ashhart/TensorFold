@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU: Qwen3.8 Flash Next serves with MTP and prompt snapshots on Intel Xe2, with 24 reported concurrency and sampling cells matching solo and plain decoding (#3587, fixes #3583). Thanks to @supernovae.
+
 - DeepSeek V4.1 on Metal: with `--vision`, the server loads the checkpoint's vision tower (a checkpoint without `vision.*` tensors stops at load), and chats with PNG, JPEG or WebP image parts put the tower's rows into the prompt, within `--vision-image-tokens` (4,096 by default) and `--vision-max-images` (4); an image's span is prefilled in one chunk, the prompt cache keys image rows by the image's hash, text that spells the image token stays text, and a vision config with zero heads, a zero `max_wh_ratio` or a `downsample_ratio` below 2 is refused by name (#3926, part of #1676). Thanks to @gilby.
 
 - Qwen3.8-27B on Metal with `--thinking-reserve`: the shorter-reply-first order no longer counts a reply that is still reasoning as the whole limit the reserve gave it. It estimates the reply as its answer quota plus the reasoning left, taken from the think blocks this server has seen close; until one has, and for requests without `--thinking-reserve` or with thinking off, nothing changes. Replies are the same tokens. On an M5 Ultra, once the server has seen a think block close, a reasoning chat reply beside a 110,000-token cold prompt streams 7.3 chunks a second instead of 2.0, and the prompt's fill takes 17% longer (#3371, fixes #3270). Thanks to @CodingEmil for the report.
