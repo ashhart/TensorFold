@@ -245,6 +245,12 @@ fn lanesOf(gpa: std.mem.Allocator, dev: hip.Device, o: anytype, p: Prepared, str
     return own;
 }
 
+/// The HIP backend's flag refusal for Flash Next, run on every rank before it reads the checkpoint or opens a device.
+pub fn refusal(o: anytype) ?[]const u8 {
+    _ = o;
+    return @import("../mtp_weights.zig").refusal("HIP", @import("../mtp_weights.zig").format());
+}
+
 /// The engine for `dir` on `dev`; under tensor parallelism this is rank 0, which serves.
 pub fn open(
     a: std.mem.Allocator,

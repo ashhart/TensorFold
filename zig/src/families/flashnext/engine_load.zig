@@ -45,6 +45,7 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
 
 pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, window: fz.WindowSettings) !*Engine {
     try @import("env_validate.zig").startup();
+    try @import("mtp_weights.zig").refuse("Metal", try @import("mtp_weights.zig").format());
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
     const memory = @import("flashnext_memory");

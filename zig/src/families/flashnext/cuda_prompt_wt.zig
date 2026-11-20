@@ -484,6 +484,7 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     var buf: [180]u8 = undefined;
     const down_name = try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down.weight", .{prefix});
     const down_tensor = try store.tensor(down_name);
+    try @import("cuda_projection.zig").recodable(prefix, down_tensor.dtype);
     if (down_tensor.dtype == .bf16) return loadDenseHc(gpa, driver, store, prefix, inject);
     const down = try join3(gpa, store, &buf, prefix, ".input_mix_weight_down");
     defer gpa.free(down.w);
@@ -548,11 +549,11 @@ fn loadDenseHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, pref
         if (!inj.is(.bf16, &.{ streams, wide }) or inj.bytes.len != streams * wide * 2) return error.UnexpectedTensor;
         @memcpy(data[low * wide * 2 ..], inj.bytes);
     }
-    var dq = try projection.dense(gpa, driver, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, wide, 1, 1, 1 }, .bytes = data });
+    var dq = try projection.denseFor(prefix, gpa, driver, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, wide, 1, 1, 1 }, .bytes = data });
     errdefer dq.free();
     const up = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up.weight", .{prefix}));
     if (!up.is(.bf16, &.{ wide, low })) return error.UnexpectedTensor;
-    var uq = try projection.dense(gpa, driver, up);
+    var uq = try projection.denseFor(prefix, gpa, driver, up);
     errdefer uq.free();
     const gamma = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix})));
     defer gpa.free(gamma);

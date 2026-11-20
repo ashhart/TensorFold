@@ -73,10 +73,11 @@ fn uploadMicro(a: std.mem.Allocator, d: *const cuda.Driver, value: Micro) !wt.Q4
 pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, n: usize, k: usize) !wt.Q4 {
     var buf: [512]u8 = undefined;
     const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}));
+    try projection.recodable(prefix, t.dtype);
     switch (t.dtype) {
         .bf16 => {
             if (!t.is(.bf16, &.{ n, k })) return error.UnexpectedTensor;
-            return projection.dense(a, d, t);
+            return projection.denseFor(prefix, a, d, t);
         },
         .f8_e4m3 => {
             var value = try readMicro(a, store, prefix);
@@ -100,6 +101,7 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
     if (names.len == 0) return error.UnexpectedTensor;
     var buf: [512]u8 = undefined;
     const first = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, names[0] }));
+    try projection.recodable(prefix, first.dtype);
     if (first.dtype == .f8_e4m3) {
         var value = try readStitched(a, store, prefix, names);
         defer value.deinit(a);
@@ -118,7 +120,7 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
             at += t.bytes.len;
         }
         if (at != bytes.len) return error.UnexpectedTensor;
-        return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
+        return projection.denseFor(prefix, a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
     }
     if (first.dtype != .u32) return error.UnsupportedQuantization;
     const planes = try wt.stitch(a, store, prefix, names);
@@ -161,7 +163,7 @@ pub fn loadCut(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pref
     defer a.free(bytes);
     const rows = if (axis == .rows) cut.width() else n;
     const cols = if (axis == .rows) k else cut.width();
-    var value = try projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, cols, 1, 1, 1 }, .bytes = bytes });
+    var value = try projection.denseFor(prefix, a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, cols, 1, 1, 1 }, .bytes = bytes });
     if (axis == .rows) value.native.?.sk = cuda.qmmf.splitK(n, k);
     return value;
 }
@@ -226,7 +228,7 @@ pub fn loadStitchedCut(a: std.mem.Allocator, d: *const cuda.Driver, store: anyty
     const view = try cuda.qmmf.pinned(cuda.modelopt.bf16Weight(0, n, k), sk);
     const bytes = try stitchCut(a, store, prefix, parts, ranges, n, k);
     defer a.free(bytes);
-    var p = try projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
+    var p = try projection.denseFor(prefix, a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
     p.native.?.sk = view.sk;
     return p;
 }
