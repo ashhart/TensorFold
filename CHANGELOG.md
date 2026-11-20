@@ -4,13 +4,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
+
 - Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and an empty or blank value reads as unset; valid values and defaults are unchanged (#3749, refs #2370). Thanks to @devopsfortunato.
 
 - Tests: the Web loopback startup regression sets its stand-in past the three-second warm-up, so it passes standalone and in the full suite alike (#4086, fixes #3752).
 
 - Docs: a one-GB10 recipe serves DeepSeek-V4-Pro-Qwen3.5-9B from a locally converted MLX 4-bit checkpoint, thinking and drafts off, with its health, model-list and chat checks (#4085, fixes #3905).
-
-
 
 - Qwen 3.5/3.6/3.8 on CUDA: `TF_QWEN35_CHUNK_SOLO=8192` lets a foreground prompt pass take up to 8,192 rows while no other stream decodes, back to 4,096 once one does and in background warm passes; unset or 4096 is off, and tokens match it off (#3294). Thanks to @jschmied.
 
@@ -38,8 +38,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
 
-
-
 - Web: the development stand-in reports native 1.3.0, in a checkout and in the built wheel, where it still said 1.2.10 (#4077, fixes #4074). Thanks to @AIFlowML.
 
 - CI: a landing train's pull request skips GitHub's hosted checks, which our own runners already run on its tip (a red local run still starts them by hand), and a newer push cancels an older Zig format run, so main's and contributors' checks no longer queue behind trains (#4106).
@@ -48,13 +46,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: a request cancelled during its prompt pass, a drafted round or a streamed reply keeps the prompt state it completed when the prompt cache has room, so a follow-up on the same conversation resumes there instead of re-reading the history; after a cancelled reply, slot 0 first rewinds to its saved prompt state, and in the shared lane core a cancelled pass gives up only its own cache reservation (#3643, for #3618).
 
-
-
 - Server: every prompt-cache lookup records why it did not resume further (for example `cold`, `evicted`, `shed`, `prompt_changed` or `reply_changed`), and `/metrics` counts them as `prompt_cache_miss_total{reason}` over a fixed list of reason names (#3706, for #3686). Thanks to @bikepresentball.
 
 - DeepSeek-V4.1 on Metal: the prompt layer's compressor, indexer key and weight, and MoE gate projections run on a new simdgroup-matrix kernel (`tf_dsv41_mv_mma`) at 16 or more rows, bit-equal to the matrix-vector kernel it replaces (#3668, refs #2984). Thanks to @gilby.
-
-
 
 - Qwen on CUDA: a development build for sm_110 (`-Dsm=110`, NVIDIA Thor) refuses by name, before paging or weight loading, the modes not qualified there: `--slide`, a DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES`; the default path and the DFlash2 drafter are still served, and other GPUs are unchanged (#3057, refs #2319). Thanks to @yguanrong.
 
@@ -62,10 +56,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: the sampled draw takes its rule from the shared `cuda.sample.rule`, as MiniMax M3 does, instead of building its own copy with a fixed `near` value (#3705, part of #2680). Thanks to @jschmied.
 
-
-
 - Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
-- Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
 - Server: the next turn's background prefill puts the reply's reasoning into its guess when the client sends reasoning back, so thinking requests resume from the real next prompt instead of redoing the pass from before the reply; clients whose history drops reasoning keep the old guess (#3264).
 
@@ -76,8 +67,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Model configs: a `config.json` head count of 0 is refused by name before any division instead of panicking, for Qwen 3.5 on HIP (`ZeroHeadCount`), Nemotron, the Gemma 4 DFlash drafter on Metal and DeepSeek-V4.1's Metal vision config (#3777). Thanks to @jschmied.
 
 - GLM-5.3-Flash on CUDA: GLM's kernels and qmmf's decode linears launch as programmatic dependent launches, so a decode token's kernels lose most of their launch gaps; experts, the router plan and the RoCE exchange stay plain launches, a prompt chunk's KDA chain launches plain from 64 rows, and `TF_GLM_PDL=0` launches everything plain (#3776, refs #3652). Thanks to @ultradaoto.
-
-
 
 - dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
 
@@ -90,8 +79,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop: the model benchmark accepts the engine's community-v2 suite (and community-v1 receipts from older engines) instead of ending every run "protocol not satisfied", and a run that fails or is cut short keeps its checked hardware, engine version and checkpoint details (#4031, fixes #3942).
 
 - Desktop: an MCP server's startup diagnostics reach the Plugins preview as whole lines, masked as a whole and capped at 64 KiB, instead of one row per stderr write (#3759). Thanks to @AIFlowML.
-
-
 
 - Flash Next on HIP: the prompt chunk fallback counts the window plan's slot bytes as used before deciding whether a smaller chunk admits more streams, where it counted them as free and could keep the larger chunk (#3419). Thanks to @gilby.
 
