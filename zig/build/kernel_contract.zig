@@ -191,6 +191,8 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     runner.root_module.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
     // MiniMax H3's image (the tf-h3 library's) for its kernels' registrations
     runner.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = h3 orelse b.addWriteFiles().add("h3.fatbin", "") });
+    const runner_install = b.addInstallArtifact(runner, .{});
+    b.step("install-cuda-contract-runner", "Install the CUDA contract runner without executing it").dependOn(&runner_install.step);
     const install = b.step("kernel-contract-fatbins", "Install all CUDA contract images (fatbin/)");
     if (controls) |file| install.dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     if (h3) |file| install.dependOn(&b.addInstallFile(file, "fatbin/h3.fatbin").step);

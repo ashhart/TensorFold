@@ -43,7 +43,8 @@ pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133 ++
     @import("paging_pending.zig").cuda_133 ++
     @import("experts_bf16_records.zig").cuda_133;
-pub const cuda_pending = @import("qwen_whole_records.zig").records ++
+pub const cuda_sets_after = [_]registry.CudaSet{.{ .release = .{ .major = 13, .minor = 4 }, .usage = &@import("mhc_cuda_records.zig").cuda_134 }};
+pub const cuda_pending = @import("mhc_cuda_records.zig").cuda ++ @import("qwen_whole_records.zig").records ++
     @import("flashnext_tile_records.zig").pending ++
     @import("exl3_prompt_pending.zig").records ++
     @import("nemotron_draw_records.zig").records ++

@@ -35,6 +35,13 @@ pub fn knownDrafter(config: json.Value) ?[]const u8 {
 /// The drafter's directory and the name it was given; `automatic` when serve took it from the table by itself.
 pub const Selection = struct { dir: ?[]const u8 = null, name: ?[]const u8 = null, automatic: bool = false };
 
+/// The Loop CUDA keyword selects the target's own MTP file.
+pub fn ownLoopMtp(model_type: []const u8, backend: []const u8, name: ?[]const u8, target: []const u8) ?Selection {
+    const explicit = name orelse return null;
+    if (!std.mem.eql(u8, model_type, "sensenova_loop") or !std.mem.eql(u8, backend, "cuda") or !std.mem.eql(u8, explicit, "mtp")) return null;
+    return .{ .dir = target, .name = explicit };
+}
+
 /// --drafter as given (none: no drafter), else the target's known drafter when local files hold it; null: `problem`.
 pub fn select(a: std.mem.Allocator, io: std.Io, env: ?*const std.process.Environ.Map, target: []const u8, explicit: ?[]const u8, no_drafts: bool, backend: []const u8, problem: *[]const u8) !?Selection {
     if (explicit) |name| {

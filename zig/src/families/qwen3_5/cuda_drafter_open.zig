@@ -17,9 +17,19 @@ pub const Opened = struct {
     prepare: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } = null,
 };
 
+/// Loop admits only its BF16 MTP head, at either accepted drafter-bits setting.
+pub fn loopRoute(declared: bool, bits: u8) !void {
+    if (declared) return error.SenseNovaDrafter;
+    if (bits != 0 and bits != 4) return error.DrafterBitsUnsupported;
+}
+
 /// --drafter's directory over engine `p`: a DFlash2 draft (its config's dflash_config), else the MoE's MTP layer.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.e.g.loop != null) {
+        try loopRoute(draft_config.declared(gpa, io, dir), bits);
+        return openMtp(gpa, io, p, dir, bits);
+    }
     if (!l.e.g.moe() or draft_config.declared(gpa, io, dir)) return openDFlash(gpa, io, p, dir, bits);
     return openMtp(gpa, io, p, dir, bits);
 }
@@ -42,8 +52,8 @@ fn openDFlash(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8
 
 /// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p` (qwen3_5_moe), its ring the window.
 fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
-    if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (bits != 4 and !(l.e.g.loop != null and bits == 0)) return error.DrafterBitsUnsupported;
     if (l.e.g.exl3 and l.e.g.moe()) return error.Exl3DrafterUnsupported; // a dense checkpoint drafts as an MLX one
     if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
     const d = try Mtp.init(gpa, io, l.e, dir, l.capacity);

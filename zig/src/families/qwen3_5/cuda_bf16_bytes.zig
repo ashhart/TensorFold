@@ -14,7 +14,7 @@ pub fn textWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 
     defer ck.close();
     var total: u64 = 0;
     for (ck.files.items) |*f| for (f.names.keys()) |name| {
-        total += f.get(name).?.bytes.len;
+        if (g.loop == null or @import("loop_weights.zig").loaded(g, name)) total += f.get(name).?.bytes.len;
     };
     // a tied head packs the embedding's rows a second time (cuda_weights.zig)
     if (g.tied) total += @as(u64, g.vocab) * g.hidden * 2;
@@ -24,7 +24,7 @@ pub fn textWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 
 /// A BF16 chat tower's weights and one call's scratch; 0 for other formats (files count it) and for Clef.
 pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
     const g = geometry.Geometry.read(a, io, dir) catch return 0;
-    if (!g.bf16 or @import("cuda_decide.zig").present(a, io, dir)) return 0;
+    if (!g.bf16 or g.loop != null or @import("cuda_decide.zig").present(a, io, dir)) return 0;
     const v = @import("qwen_vision");
     // a tower the CUDA tower cannot read counts nothing here: cuda_decide refuses it by name in the family's open
     const read = v.Settings.read(a, io, dir) catch |err| return if (err == error.OutOfMemory) err else 0;

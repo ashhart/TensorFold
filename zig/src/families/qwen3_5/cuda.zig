@@ -9,6 +9,7 @@ pub const prefill = @import("cuda_prefill.zig");
 pub const cache = @import("cuda_cache.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
+pub const native_loop = @import("cuda_native_loop.zig");
 pub const native_moe = @import("cuda_native_moe.zig");
 pub const mtp = @import("cuda_mtp.zig");
 pub const mtp_check = @import("cuda_mtp_check.zig");

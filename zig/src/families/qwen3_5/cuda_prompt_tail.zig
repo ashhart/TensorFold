@@ -27,7 +27,7 @@ pub const Facts = struct {
 
 /// The tail's first row for engine `e`'s prompt chunk of `total` rows in `nseg` parts, or null.
 pub fn first(e: anytype, total: usize, nseg: usize, hidden: bool) ?usize {
-    const last = e.layers.len - 1;
+    const last = e.steps[e.steps.len - 1].layer;
     var tapped = false;
     for (e.taps[0..e.n_taps]) |t| tapped = tapped or t == last;
     const f: Facts = .{
