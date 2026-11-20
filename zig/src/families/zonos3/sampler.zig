@@ -15,6 +15,8 @@ pub const Sampling = struct {
     repetition_penalty: f32 = 2.4,
     repetition_codebooks: i32 = 6,
     seed: u64 = 0,
+    /// Added to the stop id's logit in every codebook before the filters (LACI's stop boost); 0: nothing.
+    stop_bias: f32 = 0,
 
     /// The settings as every sampler applies them: a penalty of at least 1, a negative count every codebook.
     pub fn clamped(s: Sampling) Sampling {
@@ -48,6 +50,7 @@ pub fn sample(gpa: std.mem.Allocator, logits: *[C][V]f32, recent: []const [C]i32
         for (l[cfg.codebook_size..], cfg.codebook_size..) |*v, id| {
             if (id == cfg.audio_pad_id or id != stop) v.* = -std.math.inf(f32);
         }
+        if (s.stop_bias != 0 and stop >= 0 and stop < V) l[@intCast(stop)] += s.stop_bias;
         if (cb < s.repetition_codebooks) {
             var seen: [cfg.codebook_size]bool = @splat(false);
             for (recent[recent.len - window ..]) |row| {

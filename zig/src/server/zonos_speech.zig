@@ -8,6 +8,9 @@ const text_mod = @import("model_text.zig");
 const req = @import("zonos_request");
 const textnorm = @import("zonos_textnorm.zig");
 const steer = @import("zonos_steer.zig");
+const laci = @import("zonos_laci.zig");
+const tokens = @import("zonos_tokens.zig");
+const short = @import("zonos_short.zig");
 const Allocator = std.mem.Allocator;
 
 pub const error_prefix = "ZONOS3 request:";
@@ -27,7 +30,8 @@ pub const fields = struct {
     pub const values = "condition_values";
     pub const mode = "speaker_mode";
     pub const embedding = "speaker_embedding";
-    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding } ++ steer.fields.all;
+    pub const start = "start_immediately";
+    pub const all = [_][]const u8{ codes, clip, language, normalize, guidance, buckets, values, mode, embedding, laci.field, short.field, start } ++ steer.fields.all;
 };
 
 pub const State = struct {
@@ -38,9 +42,15 @@ pub const State = struct {
     default: ?*const req.voices.Voice,
     /// --steer-bundle: the directions a request's controls name; null: controls are refused.
     bundle: ?*const req.steer_bundle.Bundle = null,
+    /// --laci-heads: each language's alignment heads; null: `laci` is refused.
+    laci: ?*const laci.Table = null,
+    /// The release's phoneme, start and pause tokens; null: it has none, and their markers are refused.
+    tokens: ?tokens.Spec = null,
+    /// --short-text: what makes a text short and where its take is cut; null: no text is treated as short.
+    short: ?*const short.Config = null,
 };
 
-pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null };
+pub const Made = struct { prompt: []const u32, frames: []const [11]i32, reference_audio: []const f32 = &.{}, conditions: []const u32 = &.{}, guidance: f32 = 1, speaker: []const f32 = &.{}, steering: ?*const api.SpeechSteering = null, laci: ?*const api.SpeechLaci = null };
 
 const rate = 44100;
 /// A reference clip: at least half a second, and the first 60 s of it in whole frames of 2940 samples.
@@ -48,8 +58,8 @@ const min_clip = rate / 2;
 const max_clip = req.reference_frames * 2940;
 
 /// The state for a ZONOS3 Mini release at `dir` (from the arena `a`), or null for any other checkpoint.
-pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8, steer_bundle: ?[]const u8) !?*State {
-    if (dir.len == 0 or !req.release.present(io, dir)) return if (steer_bundle != null) error.SteerBundleNeedsZonos else null;
+pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8, steer_bundle: ?[]const u8, laci_heads: ?[]const u8, short_text: ?[]const u8) !?*State {
+    if (dir.len == 0 or !req.release.present(io, dir)) return if (steer_bundle != null) error.SteerBundleNeedsZonos else if (laci_heads != null or short_text != null) error.LaciHeadsNeedZonos else null;
     var rel = try req.release.open(a, io, dir, null);
     defer rel.deinit();
     const st = try a.create(State);
@@ -65,6 +75,9 @@ pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8
         bundle.* = try req.steer_bundle.load(a, io, path);
         st.bundle = bundle;
     }
+    if (laci_heads) |path| st.laci = try laci.load(a, io, path);
+    st.tokens = try tokens.Spec.load(a, io, rel.lm);
+    if (short_text) |path| st.short = try short.load(a, io, path);
     return st;
 }
 
@@ -232,17 +245,30 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const chars = std.unicode.utf8CountCodepoints(input) catch return cx.refuse("input must be valid UTF-8 text");
     const steered = try steer.plan(st.bundle, cx, raw, chars, if (by_embedding) &vector else null, guidance != 1);
     if (steered.embedding) |moved| vector = moved;
+    const controls_guided = if (raw.field(steer.fields.guidance)) |v| (number(v) orelse 1) != 1 else false;
     const spoken = spokenText(cx.a, input, lang, normalize) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.NoLibrary => cx.refuse(textnorm.missing()),
         else => cx.refuse("input must be valid UTF-8 text"),
     };
-    const ids = text.encode(cx.a, spoken, false) catch |e| return switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => cx.other("the tokenizer cannot encode this prompt"),
-    };
+    // start_immediately opens the text with the start marker, which asks for speech from the first frame
+    const wants_start = if (raw.field(fields.start)) |v| (if (v == .bool) v.bool else return cx.refuse(error_prefix ++ " start_immediately must be a boolean")) else false;
+    const opened = if (wants_start and !std.mem.startsWith(u8, spoken, tokens.start_marker)) try std.mem.concat(cx.a, u8, &.{ tokens.start_marker, spoken }) else spoken;
+    // a short text runs under LACI with a pause and a filler sentence after it, cut where the filler starts
+    const guided = guidance != 1 or controls_guided;
+    const brief = try short.plan(st.short, cx, raw, text, st.tokens, opened, lang.code, st.laci != null and !guided and raw.field(steer.fields.spans) == null);
+    var watched = try laci.plan(st.laci, cx, raw, lang, guided);
+    if (brief) |sh| {
+        const with = try cx.a.create(api.SpeechLaci);
+        with.* = laci.of(st.laci.?, lang).*;
+        with.short = sh.short;
+        watched = with;
+    }
+    const said = if (brief) |sh| sh.text else opened;
+    const ids = try tokens.payload(cx, text, st.tokens, said);
+    const silence_frames: usize = if (std.mem.startsWith(u8, said, tokens.start_marker)) 0 else req.silence_frames;
     const speaker: req.prompt.Speaker = if (clip != null) .none else if (by_embedding) .embedding else .{ .reference = reference };
-    const built = req.prompt.build(cx.a, ids, speaker, st.silence, req.silence_frames) catch |e| return switch (e) {
+    const built = req.prompt.build(cx.a, ids, speaker, st.silence, silence_frames) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(error_prefix ++ " the text has nothing to speak"),
     };
@@ -250,7 +276,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
     const rows = built.rows.len + if (audio.len > 0) (audio.len + 2939) / 2940 + req.config.codebooks - 1 else 0;
     if (rows > sp.max_prompt_tokens)
         return cx.fail(.request, error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ rows, sp.max_prompt_tokens });
-    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering };
+    return .{ .prompt = ids, .frames = built.rows, .reference_audio = audio, .conditions = buckets, .guidance = guidance, .speaker = if (by_embedding) try cx.a.dupe(f32, &vector) else &.{}, .steering = steered.steering, .laci = watched };
 }
 
 pub fn listing(a: Allocator, st: *const State) !json.Value {

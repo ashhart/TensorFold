@@ -13,6 +13,8 @@ records, numeric contract tests and a planted control each; the quality suite ha
 | --- | --- | --- |
 | Checkpoint | `huggingface.co/Zyphra/ZONOS3-Mini` (Apache-2.0) | revision `d2d142a86b1e6aeb4252679673c86ecd86177bf8` |
 | Reference code | `github.com/Zyphra/ZONOS3-Mini` (MIT) | commit `96d9e0ec1e39083ed336ac78f24e3dbc93721c0f` |
+| Short-text registry | the reference repo's `model/src/zonos3/registries/short_text.json` (MIT) | the same commit |
+| LACI alignment heads | the reference repo's `assets/laci_heads/*.json` (MIT) | the same commit |
 | Steering bundle | the reference repo's `assets/steering/studio_bundle_mect60k_x10.json` and the 14 set folders it names (MIT) | the same commit |
 | Reference environment | Python 3.12.3, torch 2.9.1+cu128, torchaudio 2.9.1+cu128, transformers 4.57.3 | the repo's `constraints.txt` |
 
@@ -27,6 +29,7 @@ Nothing is converted: the server reads the release folder as published.
 | `autoencoder/heads/keep2_plain/step_0050000.pt` (fp32) | the codec decoder's stages and iSTFT head | `7432e335e717417961267f2242547ce389a796cdc296a8b8d5289658e3c28936` |
 | `autoencoder/teacher/model.safetensors` (bf16) | the encoder's SSL teacher | `a15182741d6ee3cd780b8b830f49fa6b7fcce383655d451970841b24114767a5` |
 | `registries/codec_registry_keep2_plain.json`, `registries/silence_frame_*.json` | the decoder's files, the silence frame | `5437b4159b2bdbc33d3c1a27a316df7ae361b06f5ce3c9822f585402bcb4351a` (the registry) |
+| `lm/zonos3_mini/text_rows/pause_tokens_s5000.pt` (fp32), `.json` | the phoneme, start and pause tokens' text rows and their ids | `35868b0ff855081f3340a1c96644cfe9bf21b42935d9ed991ddd59ea0375e621` |
 | `gguf/voices/<language>/*.codes.npy`, `*.embedding.npy` | the default voices | |
 
 The `.pth` files are torch.save archives; `zig/src/core/torch_pth.zig` reads them without Python (stored zip
@@ -63,11 +66,14 @@ members, a pickle VM limited to the tensor allow-list, nested state dicts named 
   The clip encoder's weights load on the first request that brings a clip.
 - **Steering** (`steering.zig`, `steer_bundle.zig`, `server/zonos_steer.zig`): with `--steer-bundle`, a request's
   `controls` and `control_spans`. See "Steering controls".
+- **LACI** (`laci.zig`, `laci_detect.zig`, `laci_probe.zig`, `laci_run.zig`, `server/zonos_laci.zig`): with
+  `--laci-heads`, a request's `laci`. See "LACI".
+- **Phoneme, start and pause tokens** (`cuda/weights.zig`, `server/zonos_tokens.zig`) and **short texts**
+  (`short_text.zig`, `server/zonos_short.zig`, with `--short-text`). See the sections of those names.
 
 Refused or absent: clips in formats other than WAV, spans placed by the reading position
-(`control_span_follow: "reading"`), an embedding made from a clip (the release's speaker encoder), LACI and its
-extended speaking-rate buckets, speech editing, accent adapters, phoneme, start and pause tokens, short-text prompts, the `full_mr` decoder,
-Metal.
+(`control_span_follow: "reading"`), an embedding made from a clip (the release's speaker encoder), LACI's duration
+targets and extended speaking-rate buckets, speech editing, accent adapters, the `full_mr` decoder, Metal.
 
 ## Text normalization
 
@@ -192,6 +198,116 @@ Checked against the publisher's code with its bundle, greedy, five requests (`re
 Not measured: what the controls do to the voice. No listening test or classifier was run; the checks above say the
 port adds what the reference adds.
 
+## LACI
+
+LACI (localized attention-constrained inference, `zonos3.tts.laci`) watches where a request is in its text while
+it decodes and regenerates the part where it went wrong. `tensorfold-native serve RELEASE --laci-heads DIR` loads
+the publisher's alignment-head files (its code repository's `assets/laci_heads`: one default file and 42 by speech
+code), and `"laci": true` on a request turns it on. Without the flag the field is refused.
+
+- **The reading position.** A head file names a few attention heads (four in the default file, all in layer 7)
+  whose attention over the text follows the speech. After every generated row the host takes those heads' queries
+  from the pass and their softmax over the text rows' keys (read once from the cache), sums them, and keeps the
+  argmax and the centroid (`laci_probe.zig`).
+- **Failures** (`laci.zig`, the reference's `Detector`): a skip (the reading jumps past a bin of eight text tokens
+  that got far fewer frames than its share), a hallucination (the reading stops advancing), a truncation (the
+  model ends with two or more bins unread). The text is done once the last bin has had its share and the reading
+  has reached the last token; generation stops 15 frames later, and six rows after the text is done the sampler
+  adds 3 to the stop id's logit.
+- **A rollback** keeps the rows up to eight before the failure's onset, resets the request's lane, runs the prompt
+  and the kept rows again as a prompt, and generates on under the seed plus 1,000 times the attempt, at most eight
+  times. A streamed request only hands on rows no rollback can still reach; a whole reply holds every row until
+  the result is final. That is why a streamed LACI reply may differ from the whole one when a rollback is cut
+  short at rows already sent.
+- **ACI masks.** A regeneration starts on probation: each alignment head is recomputed over the keys it may see,
+  every key outside the text and the text keys within its radius of a centre that follows the reading forward,
+  until the reading passes the point of failure. The engine closes those keys and values up into one scratch cache
+  and runs the same attention kernel over it, so no kernel changed; the masked head's 32 values replace the
+  unmasked ones before the output projection.
+- **No guidance.** A LACI request runs one stream: `speaker_cfg_scale` and `controls_cfg_scale` other than 1 are
+  refused. Steering controls work; a regeneration's kept rows are prompt rows, which are not steered, as in the
+  reference.
+
+Not served: duration targets (the reference's studio plug-in that fits a take to a length by retrying in another
+speaking-rate bucket), and with them the extended speaking-rate buckets.
+
+Checked against the publisher's code:
+
+- **The session logic** (`zonos3-generate --laci-replay TRACE --expected EXPECTED`): the reference repository's
+  own replay fixtures (`servers/ggml/tests/fixtures/laci-replay`), which pin its three implementations. The seven
+  that need nothing unserved pass (`clean`, `early_eos`, `skip`, `slow_two_bins` and three short-text ones):
+  every drained row, mask change, continuation and the final record. Four are skipped: one needs a duration
+  target and three the span follower.
+- **On the model** (`zonos3-generate --model LM --laci-check D/gen_laci_X --laci-heads FILE`), greedy, eleven
+  requests dumped with `rows --laci-heads` (each attempt's readings, masks and rows): two voice paths, three texts
+  that might invite a failure, and six with strong steering doses, four of which the reference retried eight
+  times each (stalls, a skip, truncations). In all eleven every attempt's reading positions, masks and rows equal
+  the reference's, and so does the record (attempts, failures with their rows, the end, the final rows); 2,398
+  readings in all. The centroids differ by at most 5.5e-4 text positions (the reference's softmax and sums are
+  torch's).
+- **Served**, at `--parallel 4`, ten of those requests through `/v1/audio/speech`: each reply has the reference
+  audio's sample count. Eight match it at 64.8 to 79.2 dB, two of them after eight retries. One retried request
+  ends after a single frame of near silence (peak 0.0008), where 16-bit rounding leaves 12.6 dB, and one ends
+  before its first frame: no samples, as in the reference.
+- **Sampled, served:** a LACI request repeats byte for byte and streams the same bytes; on two requests that need
+  no retry it gives the bytes of the request without LACI, in the same time (the 17.8 s passage in 0.48 s both
+  ways). Four at once (two under LACI, one plain, one steered under LACI) each gave the bytes they give alone.
+- **Memory:** 4,458,496 bytes more at load: the probed queries on their way out and the scratch cache of a masked
+  head.
+
+Not measured: how often LACI rescues a sampled reply, or what its retries cost on real text. The checks say the
+port does what the reference does.
+
+## Phoneme, start and pause tokens
+
+The release holds 143 text rows beyond the tokenizer's (`lm/zonos3_mini/text_rows/pause_tokens_s5000.pt`), which
+the reference's own entry point appends to the text table: 138 for pronunciation groups, one start row and four
+pause rows. The engine loads them when the folder has them, and the text may then hold their markers, private-use
+characters as in the reference (`zonos3.tts.superbpe`):
+
+- **A pause** after a word: U+E003, U+E004, U+E005 or U+E006, for about 0.25, 0.5, 1 and 2 seconds.
+- **The start marker** U+E002 as the text's first character, or `"start_immediately": true`, which puts it
+  there: speech from the first generated frame, and no silence frames after the prompt.
+- **A pronunciation group**: U+E000, IPA code points of the release's 136, U+E001. Each phone is a row.
+
+The text between markers is tokenized on its own, as the reference does it. A marker the release has no row for,
+a start marker that is not first, an unclosed or empty group and a phone outside the inventory are refused.
+
+- **Exact rows.** The rows are fp32 and were trained after the table's padding row. The reference in fp32 appends
+  them as they are, so the engine does not round them into its bf16 tables: a row with such an id embeds as the
+  padding row on the device, and the host replaces that row's sum with the ten audio padding rows' sum plus the
+  fp32 row, in the reference's order of adds.
+- **Checked:** greedy frames identical to the reference's for a pause (84 frames), the start marker (74, its
+  prompt without silence rows) and a pronunciation group on a reference voice (55), at `--max-rows` 1 and 64;
+  served, the three replies have the reference audio's sample counts and match it at 68.9, 76.2 and 67.0 dB.
+  `start_immediately` gives the bytes of the typed marker.
+
+## Short texts
+
+Alone, a text of a word or two often comes out wrong or runs on: the model was trained on sentences. The
+reference (`zonos3.tts.short_text`) therefore generates such a text with a pause marker and a filler sentence
+after it, under LACI, and cuts the take where the reading reaches the filler. `tensorfold-native serve RELEASE
+--laci-heads DIR --short-text FILE` does the same, `FILE` being the reference package's
+`registries/short_text.json`; both flags are needed, and the release's pause tokens.
+
+- **What is short:** at most two whitespace-separated words whose tokens, times five, are at most twice the
+  filler's ("Seven birds flew over the quiet river." in English; a filler for each of the 44 languages), with no
+  marker of its own, in a request without guidance or control spans.
+- **The cut:** the first frame a codes-only silence classifier calls silent (ten int8 weights a frame, summed past
+  a threshold), searched from two frames before the reading reached the filler, after at least three voiced
+  frames. A take with none within 15 frames ran into the filler: it is regenerated whole, twice at most, then cut
+  where the reading reached the filler.
+- **It is on by default** once the server has the registry and the heads, as in the reference: a request of one
+  or two words is then spoken this way, and `"short_text": "off"` speaks it as before. The request is held until
+  the cut, so a streamed short text arrives at once.
+
+Checked against the reference: the three short-text replay fixtures (under "LACI"); on the model, "Hello." on an
+embedding voice and "Good morning." on a reference voice, where every reading, every row and the cut (13 and 17
+frames) equal the reference's; served, those two and "Hello." with `short_text` off have the reference audio's
+sample counts (70.7, 63.8 and 64.2 dB). Sampled and served, a short text repeats byte for byte, streams the same
+bytes and gives other bytes than with `short_text` off; four requests at once, two of them short, each gave the
+bytes they give alone.
+
 ## Requests at once
 
 `--parallel N` (1 to 16; 1 without the flag) serves N requests at once. Each has its own lane: a set of the
@@ -203,8 +319,8 @@ write and attention) run a lane at a time on that lane's state. The kernels are 
 computes a row from that row alone, so a request's arithmetic does not depend on what runs beside it.
 
 - **Memory:** each request at once past the first adds 1,236,862,976 bytes at the default context and frame budget
-  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,862,487,552 bytes at
-  `--parallel 1`, 7,573,076,480 at 4. A guided request's twin lane is still made by its slot's first guided request.
+  (10,913,792 of them the backbone's lane, the rest the decoder's), admitted with the load: 3,866,946,048 bytes at
+  `--parallel 1`, 7,577,534,976 at 4. A guided request's twin lane is still made by its slot's first guided request.
 - **Speed:** a frame of one request is about 226 small launches, 24 of them a lane's own, so the backbone's cost
   grows slowly with the lanes in a pass (1.1 ms for one row, 1.6 ms for four). Sampling on the host and the decoder
   do not share. The decoder's linear layers took 78% of its 0.19 s for a 17.8 s reply while a kernel of ours
@@ -278,6 +394,13 @@ python tools/zig/zonos3_reference.py rows LM D/requests/conditions.json D/gen_co
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_reference.json D/gen_guided_reference --device cpu
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_embedding.json D/gen_guided_embedding --device cpu
 python tools/zig/zonos3_reference.py rows LM D/requests/guided_conditions.json D/gen_guided_conditions --device cpu
+for X in tokens_pause tokens_start tokens_phonemes short_hello short_reference short_off; do
+  python tools/zig/zonos3_reference.py rows LM D/requests/$X.json D/gen_$X --device cpu --laci-heads ZONOS/assets/laci_heads \
+      --text-rows RELEASE/lm/zonos3_mini/text_rows/pause_tokens_s5000.pt
+done
+for X in embedding reference repeats digits long; do
+  python tools/zig/zonos3_reference.py rows LM D/requests/laci_$X.json D/gen_laci_$X --device cpu --laci-heads ZONOS/assets/laci_heads
+done
 for X in hidden raw spans guided reference; do
   python tools/zig/zonos3_reference.py rows LM D/requests/steer_$X.json D/gen_steer_$X --device cpu \
       --steer-bundle ZONOS/assets/steering/studio_bundle_mect60k_x10.json
@@ -438,7 +561,7 @@ The host works out what a load takes before it allocates anything and asks the p
 - **The load:** the pinned release's weights as the device holds them (2,531,483,136 bytes: the backbone's bf16 and
   the `keep2_plain` decoder's fp32), plus the backbone's and the decoder's state and workspaces, which their own
   allocation code counts without allocating (`Engine.stateBytes`, `Codec.stateBytes`). At the default
-  `--context 4096` and 2,000 frames that is 3,862,487,552 bytes (3.60 GiB), 33,554,432 of them the workspace
+  `--context 4096` and 2,000 frames that is 3,866,946,048 bytes (3.60 GiB), 33,554,432 of them the workspace
   cuBLAS is given. What cuBLAS allocates for itself is outside this count: `nvidia-smi` showed the process about
   64 MiB larger than with the earlier kernel, and the server's log shows the same
   number admitted and held after the load. A load that holds more than it was admitted for is an error.

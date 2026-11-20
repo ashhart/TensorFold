@@ -4,6 +4,7 @@ const z3 = @import("zonos3");
 const cuda = @import("cuda");
 const core = @import("core");
 const encoder_checks = @import("check_encoder.zig");
+const laci_checks = @import("check_laci.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -174,61 +175,6 @@ pub fn nowNs(io: std.Io) i128 {
     return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
 }
 
-/// A steered dump's steer.npy [frames + 1][sources][dim] and steer.json (zonos3_reference.py rows --steer-bundle).
-const Dumped = struct {
-    deltas: []f32 = &.{},
-    sources: []u32 = &.{},
-    active: []bool = &.{},
-    steer: []z3.Steer = &.{},
-    twin: bool = false,
-    count: usize = 0,
-
-    fn deinit(d: *Dumped, gpa: std.mem.Allocator) void {
-        gpa.free(d.deltas);
-        gpa.free(d.sources);
-        gpa.free(d.active);
-        gpa.free(d.steer);
-    }
-
-    fn load(d: *Dumped, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !bool {
-        const path = try std.fs.path.join(gpa, &.{ dir, "steer.npy" });
-        defer gpa.free(path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28)) catch |e| switch (e) {
-            error.FileNotFound => return false,
-            else => return e,
-        };
-        defer gpa.free(bytes);
-        const arr = try z3.npy.parse(bytes);
-        if (arr.rank != 3 or arr.shape[2] != D) return error.BadSteerDump;
-        d.deltas = try arr.floats(gpa);
-        const side = try std.fs.path.join(gpa, &.{ dir, "steer.json" });
-        defer gpa.free(side);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, side, gpa, .limited(1 << 22));
-        defer gpa.free(text);
-        var tree = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-        defer tree.deinit();
-        const o = tree.value.object;
-        const sources = o.get("sources").?.array.items;
-        const active = o.get("active").?.array.items;
-        if (sources.len != arr.shape[1] or active.len != arr.shape[0]) return error.BadSteerDump;
-        d.sources = try gpa.alloc(u32, sources.len);
-        for (d.sources, sources) |*s, v| s.* = @intCast(v.integer);
-        d.active = try gpa.alloc(bool, active.len);
-        for (d.active, active) |*a, v| a.* = v.bool;
-        d.steer = try gpa.alloc(z3.Steer, sources.len);
-        d.twin = o.get("twin_steered").?.bool;
-        return true;
-    }
-
-    fn at(ctx: *anyopaque, frame: usize) []const z3.Steer {
-        const d: *Dumped = @ptrCast(@alignCast(ctx));
-        if (frame >= d.active.len or !d.active[frame]) return &.{};
-        d.count += 1;
-        for (d.steer, d.sources, 0..) |*s, source, j| s.* = .{ .source = source, .delta = d.deltas[(frame * d.sources.len + j) * D ..][0..D] };
-        return d.steer;
-    }
-};
-
 fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, prompt: []const [W]i32, replaced: []const z3.Replace, max_frames: usize) !u8 {
     const path = try std.fs.path.join(gpa, &.{ dir, "rows.npy" });
     defer gpa.free(path);
@@ -254,13 +200,13 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
         e.swap();
     } else |_| {}
     // a steered request's dump brings the deltas the reference added, frame by frame
-    var dumped: Dumped = .{};
+    var dumped: laci_checks.Dumped = .{};
     defer dumped.deinit(gpa);
     const steered = try dumped.load(gpa, io, dir);
     const t0 = nowNs(io);
     var run = try z3.generation.Run.begin(gpa, e, prompt, replaced, twin, twin_replaced.items, scale, .{ .temperature = 0 }, max_frames);
     defer run.deinit();
-    if (steered) run.steer = .{ .ctx = &dumped, .at = Dumped.at, .twin = dumped.twin };
+    if (steered) run.steer = .{ .ctx = &dumped, .at = laci_checks.Dumped.at, .twin = dumped.twin };
     while (!try run.sample()) try run.advance(e);
     const r = try run.result();
     defer gpa.free(r.rows);
@@ -487,6 +433,11 @@ pub fn main(init: std.process.Init) !u8 {
     var frames_check: ?[]const u8 = null;
     var steer_check: ?[]const u8 = null;
     var steer_bundle: []const u8 = "";
+    var laci_replay: ?[]const u8 = null;
+    var laci_check: ?[]const u8 = null;
+    var laci_heads: []const u8 = "";
+    var expected: []const u8 = "";
+    var registry: []const u8 = "";
     var codec_check: ?[]const u8 = null;
     var encoder_check: ?[]const u8 = null;
     var features_check: ?[]const u8 = null;
@@ -502,11 +453,12 @@ pub fn main(init: std.process.Init) !u8 {
     while (i + 1 < argv.len) : (i += 2) {
         const k = argv[i];
         const v = argv[i + 1];
-        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--steer-check")) steer_check = v else if (std.mem.eql(u8, k, "--steer-bundle")) steer_bundle = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--features-check")) features_check = v else if (std.mem.eql(u8, k, "--teacher-check")) teacher_check = v else if (std.mem.eql(u8, k, "--teacher")) teacher_dir = v else if (std.mem.eql(u8, k, "--encode-check")) encode_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
+        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--steer-check")) steer_check = v else if (std.mem.eql(u8, k, "--steer-bundle")) steer_bundle = v else if (std.mem.eql(u8, k, "--laci-replay")) laci_replay = v else if (std.mem.eql(u8, k, "--laci-check")) laci_check = v else if (std.mem.eql(u8, k, "--laci-heads")) laci_heads = v else if (std.mem.eql(u8, k, "--expected")) expected = v else if (std.mem.eql(u8, k, "--short-text-registry")) registry = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--features-check")) features_check = v else if (std.mem.eql(u8, k, "--teacher-check")) teacher_check = v else if (std.mem.eql(u8, k, "--teacher")) teacher_dir = v else if (std.mem.eql(u8, k, "--encode-check")) encode_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
     }
+    if (laci_replay) |trace| return if (i == argv.len and expected.len > 0) laci_checks.replay(gpa, io, trace, expected, registry) else 2;
     if (steer_check) |dir| return if (i == argv.len and steer_bundle.len > 0) @import("check_steering.zig").run(gpa, io, dir, steer_bundle) else 2;
     if (encode_check) |dir| return if (i == argv.len and sp.checkpoint.len > 0) encoder_checks.encode(gpa, io, dir, sp.checkpoint) else 2;
     if (teacher_check) |dir| return if (i == argv.len and teacher_dir.len > 0) encoder_checks.teacher(gpa, io, dir, teacher_dir) else 2;
@@ -533,7 +485,7 @@ pub fn main(init: std.process.Init) !u8 {
         sp.max_frames = max_frames;
         return speak(gpa, io, sp);
     }
-    const dir = check orelse frames_check orelse {
+    const dir = check orelse frames_check orelse laci_check orelse {
         std.debug.print("{s}", .{usage});
         return 2;
     };
@@ -547,6 +499,7 @@ pub fn main(init: std.process.Init) !u8 {
     var replaced: std.ArrayList(z3.Replace) = .empty;
     try loadPrompt(gpa, io, e, dir, &rows, &replaced);
     if (frames_check != null) return framesCheck(gpa, io, e, dir, rows, replaced.items, max_frames);
+    if (laci_check != null) return laci_checks.engine(gpa, io, e, dir, rows, replaced.items, laci_heads, registry, max_frames);
     const Lm = struct {
         fn get(ctx: *anyopaque, ptr: u64, out: []u8) anyerror!void {
             try @as(*z3.Engine, @ptrCast(@alignCast(ctx))).download(ptr, out);
