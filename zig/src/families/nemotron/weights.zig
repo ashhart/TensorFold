@@ -163,7 +163,7 @@ pub const Builder = struct {
     }
 
     /// A tensor the kernels read as stored (norms, the router), refused unless it has this dtype and shape.
-    fn typed(self: *Builder, comptime fmt: []const u8, args: anytype, dtype: ckpt.DType, shape: []const usize) !Tensor {
+    pub fn typed(self: *Builder, comptime fmt: []const u8, args: anytype, dtype: ckpt.DType, shape: []const usize) !Tensor {
         var name: [160]u8 = undefined;
         const full = try std.fmt.bufPrint(&name, fmt, args);
         const t = try self.ck.get(full);
@@ -468,7 +468,7 @@ pub const Builder = struct {
             };
         }
         if (denseHead(c.*, b.ck)) {
-            w.head_dense = try b.dense("lm_head.weight", .{}, c.vocab, c.hidden);
+            w.head_dense = try bolt_dense.dense(b, "lm_head.weight", .{}, c.vocab, c.hidden);
             w.head = .{ .n = c.vocab, .k = c.hidden };
         } else {
             w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
