@@ -80,6 +80,12 @@ function infoCommand(repo) {
 async function pullCommand(spec) {
   const [repo, revision = 'main'] = spec.split('@')
   record({ kind: 'pull', repo, revision, args: argv, endpoint: env.HF_ENDPOINT ?? null, hasHubToken: 'HF_TOKEN' in env })
+  if (env.FAKE_PULL_STALL) {
+    record({ kind: 'pull-stalled', pid: process.pid })
+    if (env.FAKE_PULL_IGNORE_TERM) process.on('SIGTERM', () => { console.log('Still waiting for the Hub connection') })
+    console.log('Waiting for the Hub connection')
+    while (true) await sleep(50)
+  }
   if (env.FAKE_PULL_FAIL) { console.error(`${repo}: the hub's file tree is unreachable (ConnectionRefused)`); return 1 }
   const files = Number(env.FAKE_PULL_FILES ?? 3)
   const size = Number(env.FAKE_PULL_SIZE ?? 64 * 1024)
@@ -118,6 +124,7 @@ async function pullCommand(spec) {
   writeFileSync(path.join(snap, 'config.json'), JSON.stringify(config))
   writeFileSync(path.join(repoDir(repo), 'refs', 'main'), sha)
   console.log(`stored ${repo}@${sha} at ${snap}`)
+  if (env.FAKE_PULL_FINISH_FILE) while (!existsSync(env.FAKE_PULL_FINISH_FILE)) await sleep(50)
   return 0
 }
 
