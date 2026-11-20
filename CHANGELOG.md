@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a long prompt shares its steps with running replies by default: a filling prompt with more than 32,768 rows left takes a decode share of 0.25 and the 512-row chunk hint, as `--decode-share 0.25` does, while a shorter prompt fills whole as before; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings (#3486, refs #3397). Thanks to @bikepresentball.
+
 - CUDA sampler: with a small `top_k`, the fallback selects and sorts only that many candidates instead of 1,024, with the same tokens and probabilities (#4099, fixes #3712).
 
 - Qwen3.5 on CUDA: the message-start decision has its own module, and a family can declare its starts on by default; Qwen's stay opt-in, so only `TF_QWEN_REQUEST_STARTS=1` turns them on and an unset switch serves as before, shared KV included (#3896, refs #3870). Thanks to @joshuaswarren.
