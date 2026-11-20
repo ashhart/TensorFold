@@ -99,8 +99,8 @@ fn promptOf(buf: *[prompt_len]u32) []const u32 {
     return buf;
 }
 
-/// Every identical request queued before the host starts, so they arrive together, then each answered in full.
-fn fanout(wait_ms: ?u32, slow_ms: i64, out: *Run) !void {
+/// Every identical request queued before the host starts, so they arrive together; `budget` 0 is a fully cold cache.
+fn fanout(wait_ms: ?u32, slow_ms: i64, budget: u64, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 13 };
@@ -109,7 +109,7 @@ fn fanout(wait_ms: ?u32, slow_ms: i64, out: *Run) !void {
     var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
     defer core.deinit();
     const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .planned = true, .grid = 16, .chunk = 16 };
-    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, rules, 1 << 24);
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, rules, budget);
     defer store.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 8 });
     host.cache = &store;
@@ -154,10 +154,10 @@ fn fanout(wait_ms: ?u32, slow_ms: i64, out: *Run) !void {
 test "single-flight: identical prompts join the filling leader, whose whole fill runs alone" {
     var on: Run = .{};
     defer on.deinit();
-    try fanout(null, 1, &on);
+    try fanout(null, 1, 1 << 24, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 1, &off);
+    try fanout(0, 1, 1 << 24, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -177,4 +177,32 @@ test "single-flight: identical prompts join the filling leader, whose whole fill
     try std.testing.expect(off.leader_open_most > 1); // the check detects the side-by-side prefill this joins
     try std.testing.expectEqual(@as(u64, requests), off.misses); // cold: every prompt missed, none waited
     try std.testing.expectEqual(@as(u64, 1), on.misses); // only the leader's lookup missed; the joiners hit its cut
+}
+
+test "single-flight: cold cache — identical prompts join a leader with no marks and nothing kept" {
+    var on: Run = .{};
+    defer on.deinit();
+    try fanout(null, 1, 0, &on);
+    var off: Run = .{};
+    defer off.deinit();
+    try fanout(0, 1, 0, &off);
+    for (0..requests) |i| {
+        try std.testing.expectEqual(Reason.length, on.reasons[i]);
+        try std.testing.expectEqual(Reason.length, off.reasons[i]);
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // joined == solo
+    }
+    // a zero budget plans no mark and keeps nothing: every lookup missed, nothing is resumable
+    try std.testing.expectEqual(@as(u64, requests), on.misses);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0 }, on.cached[0..requests]);
+    // the join armed on prompt identity alone: each joiner waited for the leader's whole fill
+    try std.testing.expectEqual(@as(u64, requests - 1), on.joins);
+    try std.testing.expectEqual(@as(u64, requests - 1), on.waits);
+    try std.testing.expectEqual(@as(u64, 0), on.timeouts);
+    try std.testing.expectEqual(@as(usize, 0), on.queued_after);
+    // the leader's whole fill ran with no joiner's stream open beside it
+    try std.testing.expectEqual(@as(usize, 1), on.leader_open_most);
+    // off (TENSORFOLD_PREFIX_WAIT_MS=0): the same cold cache, every prompt fills side by side
+    try std.testing.expectEqual(@as(u64, requests), off.misses);
+    try std.testing.expectEqual(@as(u64, 0), off.waits);
+    try std.testing.expect(off.leader_open_most > 1); // the side-by-side prefill this joins
 }
