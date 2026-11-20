@@ -18,8 +18,10 @@ pub const Copies = struct {
     adapters: std.AutoHashMapUnmanaged(usize, core.affine4_lane.Adapter) = .empty,
     tiled: std.AutoHashMapUnmanaged(usize, Tiled) = .empty,
     simd: ?simd.Pipelines = null,
+    opt: ?@import("metal_dflash_opt.zig").Opt = null,
 
     pub fn deinit(c: *Copies) void {
+        if (c.opt) |*o| o.deinit();
         var adapters = c.adapters.valueIterator();
         while (adapters.next()) |a| a.deinit();
         c.adapters.deinit(c.gpa);
@@ -32,6 +34,7 @@ pub const Copies = struct {
     /// Device bytes the copies hold.
     pub fn bytes(c: *const Copies) usize {
         var n: usize = 0;
+        if (c.opt) |*o| n += o.bytes();
         var adapters = c.adapters.valueIterator();
         while (adapters.next()) |a| n += a.words.length() + a.metadata.length();
         var tiled = c.tiled.valueIterator();
@@ -40,10 +43,15 @@ pub const Copies = struct {
     }
 
     pub fn appendBuffers(c: *const Copies, out: *std.ArrayList(mtl.Buffer)) !void {
+        if (c.opt) |*o| try o.appendBuffers(out);
         var adapters = c.adapters.valueIterator();
         while (adapters.next()) |a| try out.appendSlice(c.gpa, &.{ a.words, a.metadata });
         var tiled = c.tiled.valueIterator();
         while (tiled.next()) |t| try out.appendSlice(c.gpa, &.{ t.w, t.scales, t.biases });
+    }
+
+    pub fn prepareOpt(c: *Copies, device: mtl.Device, checkpoint: *core.checkpoint_metal.Checkpoint, cfg: @import("../qwen27/dflash/config.zig").Config) !void {
+        c.opt = try @import("metal_dflash_opt.zig").Opt.init(c.gpa, device, checkpoint, cfg);
     }
 
     /// The copies of `checkpoint`'s linears, `linear_count` of them, on `device`; any other count is refused.
