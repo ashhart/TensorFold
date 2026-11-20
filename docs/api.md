@@ -1760,8 +1760,9 @@ same handler and engine path. A response has that chat completion's prompt and t
 `incomplete_details.reason: "max_output_tokens"`. `usage` has `input_tokens` (with `input_tokens_details.cached_tokens`),
 `output_tokens` (with `output_tokens_details.reasoning_tokens`) and `total_tokens`.
 
-A stream sends typed events, each with a `sequence_number`: `response.created` and `response.in_progress`; for each
-output item `response.output_item.added`, `response.content_part.added` where the item has content parts, its deltas
+A stream sends typed events, each with a `sequence_number`: `response.created` and `response.in_progress`; a background
+response waiting on prefill emits `response.prefill` before any output or terminal event; for each output item
+`response.output_item.added`, `response.content_part.added` where the item has content parts, its deltas
 (`response.reasoning_text.delta`, `response.output_text.delta`, `response.function_call_arguments.delta` or
 `response.custom_tool_call_input.delta`), their `.done` events, applicable `response.content_part.done` and
 `response.output_item.done`; and exactly one terminal `response.completed`, `response.incomplete` or `response.failed`.
@@ -1802,8 +1803,9 @@ otherwise answers 400, as does a response not created with `background`, and an 
 
 `background: true` needs `store: true` (the default) and refuses `stream: true` on its POST. A later
 `GET /v1/responses/{id}?stream=true` replays its typed response events as SSE; `starting_after=N` takes the events after
-that sequence number. A queued response has `response.created` before any output event. Replay is a snapshot of the
-journal, not a connection held open for future events. Each journal is capped at 1 MiB, and completed journals share a
+that sequence number. A queued response has `response.created` before any output event. Each prefill keepalive adds one
+contiguous `response.prefill` to the journal until output, cancellation, deletion or shutdown ends that phase. Replay is a
+snapshot of the journal, not a connection held open for future events. Each journal is capped at 1 MiB, and completed journals share a
 64-response / 64 MiB archive. A truncated journal or an evicted archive answers 410 rather than claiming a complete
 replay; a malformed, repeated or future cursor answers 400. The background POST remains HTTP-only: a Responses socket
 refuses it, and a true value that is not a boolean, such as `1`, is refused. At most 64 background responses are queued

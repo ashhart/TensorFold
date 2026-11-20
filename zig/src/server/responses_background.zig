@@ -226,6 +226,7 @@ const Job = struct {
     state: State = .queued, // state, cancelled and deleted change under the manager's mutex
     cancelled: bool = false, // a cancel was answered: the end is kept as "cancelled"
     deleted: bool = false,
+    emit_prefill: bool = true,
     dropped: std.atomic.Value(bool) = .init(false), // the gone hook: the turn stops and keeps nothing
 
     fn make(srv: *Server, a: Allocator, body: Value, t: translate.Request, key: ?[32]u8) !*Job {
@@ -288,7 +289,7 @@ const Job = struct {
         j.t.stream = true;
         j.t.chat.object.put(cx.a, "stream", .{ .bool = true }) catch return null;
         j.base.put(cx.a, "status", .{ .string = "in_progress" }) catch return null;
-        const sink: Sink = .{ .ctx = j, .vt = &.{ .open = quiet, .event = heard, .keepalive = quiet } };
+        const sink: Sink = .{ .ctx = j, .vt = &.{ .open = quiet, .event = heard, .keepalive = prefilled } };
         return switch (responses.turn(j.srv, cx.a, &conn, cx, .null, j.t, sink, .{ .base = j.base })) {
             .whole => |v| v,
             .streamed => |v| v,
@@ -340,11 +341,35 @@ const Job = struct {
 
     fn quiet(_: *anyopaque) error{Closed}!void {}
 
-    fn heard(ctx: *anyopaque, _: Allocator, _: []const u8, payload: *json.Object) error{Closed}!void {
+    fn prefilled(ctx: *anyopaque) error{Closed}!void {
         const j: *Job = @ptrCast(@alignCast(ctx));
         const m = &j.srv.background_jobs;
         m.mutex.lockUncancelable(j.srv.io);
         defer m.mutex.unlock(j.srv.io);
+        if (!j.emit_prefill or j.state != .in_progress or j.cancelled or j.deleted or m.closed) return;
+        const a = j.arena.allocator();
+        const payload = json.newObject(a) catch return error.Closed;
+        payload.put(a, "type", .{ .string = "response.prefill" }) catch return error.Closed;
+        const next = (j.log.last orelse return) + 1;
+        payload.put(a, "sequence_number", json.intValue(a, next) catch return error.Closed) catch return error.Closed;
+        payload.put(a, "response", .{ .object = j.base }) catch return error.Closed;
+        j.log.record(payload) catch {
+            j.log.truncated = true;
+            return error.Closed;
+        };
+    }
+
+    fn heard(ctx: *anyopaque, a: Allocator, kind: []const u8, payload: *json.Object) error{Closed}!void {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        const m = &j.srv.background_jobs;
+        m.mutex.lockUncancelable(j.srv.io);
+        defer m.mutex.unlock(j.srv.io);
+        if (!std.mem.eql(u8, kind, "response.created") and !std.mem.eql(u8, kind, "response.in_progress")) j.emit_prefill = false;
+        if (j.log.last) |last| {
+            const raw = payload.get("sequence_number") orelse return error.Closed;
+            const sequence = std.fmt.parseInt(u64, raw.int, 10) catch return error.Closed;
+            if (sequence <= last) payload.put(a, "sequence_number", json.intValue(a, last + 1) catch return error.Closed) catch return error.Closed;
+        }
         j.log.record(payload) catch {
             j.log.truncated = true;
             return error.Closed;

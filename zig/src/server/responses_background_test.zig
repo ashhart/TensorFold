@@ -15,7 +15,10 @@ const Lane = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     output_ready: std.Io.Condition = .init,
+    release_ready: std.Io.Condition = .init,
     first_tokens: usize = 0,
+    hold_first: bool = false,
+    release_first: bool = false,
     jobs: std.ArrayList(Job) = .empty,
     asked: std.ArrayList(api.Id) = .empty,
     taken: std.ArrayList([]const u8) = .empty, // each request's prompt, max_tokens and sampling, as text
@@ -32,6 +35,10 @@ const Lane = struct {
 
     fn deinit(l: *Lane) void {
         l.stop.store(true, .release);
+        l.mutex.lockUncancelable(l.io);
+        l.release_first = true;
+        l.release_ready.broadcast(l.io);
+        l.mutex.unlock(l.io);
         if (l.worker) |w| w.join();
         l.jobs.deinit(t.allocator);
         l.asked.deinit(t.allocator);
@@ -66,6 +73,8 @@ const Lane = struct {
             return;
         };
         l.asked.append(t.allocator, id) catch {};
+        l.release_first = true;
+        l.release_ready.broadcast(l.io);
         l.mutex.unlock(l.io);
     }
     fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
@@ -79,6 +88,13 @@ const Lane = struct {
         l.mutex.lockUncancelable(l.io);
         defer l.mutex.unlock(l.io);
         return l.taken.items.len >= n;
+    }
+
+    fn releaseFirst(l: *Lane) void {
+        l.mutex.lockUncancelable(l.io);
+        l.release_first = true;
+        l.release_ready.broadcast(l.io);
+        l.mutex.unlock(l.io);
     }
 
     fn waitFirstTokens(l: *Lane, n: usize) !void {
@@ -105,6 +121,11 @@ const Lane = struct {
                 continue;
             };
             j.sink.event(j.sink.ctx, j.id, &.{ .prefilled = 0 });
+            if (l.hold_first) {
+                l.mutex.lockUncancelable(l.io);
+                while (!l.release_first and !l.stop.load(.acquire)) l.release_ready.waitUncancelable(l.io, &l.mutex);
+                l.mutex.unlock(l.io);
+            }
             var reason: api.Reason = if (j.max <= 64) .stop else .length;
             for (0..if (j.max <= 64) j.max / 2 else j.max) |i| {
                 if (l.askedFor(j.id)) {
@@ -169,13 +190,20 @@ fn sendRaw(srv: *Server, a: Allocator, path: []const u8, key: ?u8) !RawAnswer {
     return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = out[at + 4 ..] };
 }
 
-fn eventSequences(a: Allocator, body: []const u8) !std.ArrayList(u64) {
-    var result: std.ArrayList(u64) = .empty;
+fn events(a: Allocator, body: []const u8) !std.ArrayList(json.Value) {
+    var result: std.ArrayList(json.Value) = .empty;
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "data: ")) continue;
-        const parsed = (try json.parse(a, line["data: ".len..])).ok;
-        const number = parsed.get("sequence_number") orelse return error.MissingSequence;
+        try result.append(a, (try json.parse(a, line["data: ".len..])).ok);
+    }
+    return result;
+}
+
+fn eventSequences(a: Allocator, body: []const u8) !std.ArrayList(u64) {
+    var result: std.ArrayList(u64) = .empty;
+    for ((try events(a, body)).items) |one| {
+        const number = one.get("sequence_number") orelse return error.MissingSequence;
         try result.append(a, try std.fmt.parseInt(u64, number.int, 10));
     }
     return result;
@@ -187,6 +215,31 @@ fn post(srv: *Server, a: Allocator, body: []const u8) !Answer {
 
 fn urlOf(a: Allocator, id: []const u8, tail: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "/v1/responses/{s}{s}", .{ id, tail });
+}
+
+fn hasPrefill(srv: *Server, a: Allocator, id: []const u8) !bool {
+    const got = try sendRaw(srv, a, try urlOf(a, id, "?stream=true"), null);
+    return got.status == 200 and std.mem.indexOf(u8, got.body, "\"response.prefill\"") != null;
+}
+
+fn expectSettled(srv: *Server, a: Allocator, id: []const u8, terminal_kind: []const u8) !void {
+    const path = try urlOf(a, id, "?stream=true");
+    const before = try sendRaw(srv, a, path, null);
+    const journal = try events(a, before.body);
+    var terminals: usize = 0;
+    var terminal = false;
+    for (journal.items) |one| {
+        const kind = one.strField("type").?;
+        if (std.mem.eql(u8, kind, "response.prefill")) try t.expect(!terminal);
+        if (std.mem.startsWith(u8, kind, "response.") and (std.mem.eql(u8, kind, "response.completed") or std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "response.incomplete"))) {
+            terminals += 1;
+            terminal = true;
+        }
+    }
+    try t.expectEqual(@as(usize, 1), terminals);
+    try t.expectEqualStrings(terminal_kind, journal.items[journal.items.len - 1].strField("type").?);
+    std.Io.sleep(t.io, .fromMilliseconds(5), .awake) catch {};
+    try t.expectEqualStrings(before.body, (try sendRaw(srv, a, path, null)).body);
 }
 
 /// Polls until the response's status is `want`, which it returns.
@@ -291,6 +344,7 @@ test "background Responses: optional rows keep the queued id and reply, explicit
     try t.expectEqualStrings("invalid_prompt", failed.get("error").?.strField("code").?);
     try waitFor(idle, .{srv});
     try t.expectEqual(@as(usize, 2), lane.taken.items.len);
+    try expectSettled(srv, a, failed.strField("id").?, "response.failed");
 }
 
 test "background Responses: queued at once, then completed with the reply the same request gets in the foreground" {
@@ -446,35 +500,71 @@ test "background Responses: the server's stop cancels a running one and waits fo
     try t.expectEqual(@as(usize, 1), lane.cancels.load(.monotonic));
 }
 
-test "background Responses: replay resumes after its cursor and refuses stale or foreign cursors" {
+test "background Responses: prefill is contiguous before output and replay resumes exactly once" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator) };
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator), .hold_first = true };
     try lane.start();
     defer lane.deinit();
     const srv = try serve(&lane);
     defer srv.deinit();
+    srv.config.sse_keepalive_s = 0.001;
     const id = (try post(srv, a, "{\"model\":\"m\",\"input\":\"hi\",\"background\":true,\"max_output_tokens\":8}")).body.strField("id").?;
-    try lane.waitFirstTokens(1);
-    const live_path = try urlOf(a, id, "?stream=true");
-    try t.expectEqual(@as(u16, 200), (try sendRaw(srv, a, live_path, null)).status);
+    try waitFor(hasPrefill, .{ srv, a, id });
+    const early = try events(a, (try sendRaw(srv, a, try urlOf(a, id, "?stream=true"), null)).body);
+    try t.expect(early.items.len >= 3);
+    try t.expectEqualStrings("response.created", early.items[0].strField("type").?);
+    try t.expectEqualStrings("response.in_progress", early.items[1].strField("type").?);
+    try t.expectEqualStrings("response.prefill", early.items[2].strField("type").?);
+    for (early.items[0..3]) |one| {
+        try t.expectEqualStrings(id, one.get("response").?.strField("id").?);
+        try t.expectEqualStrings("in_progress", one.get("response").?.strField("status").?);
+    }
+    lane.releaseFirst();
     _ = try waitStatus(srv, a, id, "completed");
+    try waitFor(idle, .{srv});
+    const live_path = try urlOf(a, id, "?stream=true");
     const whole = try sendRaw(srv, a, live_path, null);
-    try t.expectEqual(@as(u16, 200), whole.status);
+    const journal = try events(a, whole.body);
     const sequences = try eventSequences(a, whole.body);
-    try t.expect(sequences.items.len > 2);
     for (sequences.items, 0..) |sequence, i| try t.expectEqual(@as(u64, @intCast(i)), sequence);
-    try t.expect(std.mem.indexOf(u8, whole.body, "\"response.completed\"") != null);
-    const cursor = sequences.items[sequences.items.len / 2];
-    const resumed_path = try urlOf(a, id, try std.fmt.allocPrint(a, "?stream=true&starting_after={d}", .{cursor}));
-    const resumed = try sendRaw(srv, a, resumed_path, null);
-    try t.expectEqual(@as(u16, 200), resumed.status);
-    const suffix = try eventSequences(a, resumed.body);
-    try t.expectEqualSlices(u64, sequences.items[@as(usize, @intCast(cursor + 1))..], suffix.items);
+    var output_at: usize = 2;
+    while (output_at < journal.items.len and std.mem.eql(u8, journal.items[output_at].strField("type").?, "response.prefill")) output_at += 1;
+    try t.expect(output_at > 2 and output_at < journal.items.len);
+    for (journal.items[output_at..]) |one| try t.expect(!std.mem.eql(u8, one.strField("type").?, "response.prefill"));
+    try expectSettled(srv, a, id, "response.completed");
+    try t.expectEqual(@as(usize, 1), lane.taken.items.len);
+    const resumed = try sendRaw(srv, a, try urlOf(a, id, "?stream=true&starting_after=1"), null);
+    const suffix = try events(a, resumed.body);
+    try t.expectEqual(journal.items.len - 2, suffix.items.len);
+    for (journal.items[2..], suffix.items) |want, got| try t.expect(json.equal(want, got));
     const future_path = try urlOf(a, id, "?stream=true&starting_after=999999");
     try t.expectEqual(@as(u16, 400), (try sendRaw(srv, a, future_path, null)).status);
     try t.expectEqual(@as(u16, 404), (try sendRaw(srv, a, live_path, 2)).status);
+}
+
+test "background Responses: cancellation stops delayed prefill without output or later progress" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator), .hold_first = true };
+    try lane.start();
+    defer lane.deinit();
+    const srv = try serve(&lane);
+    defer srv.deinit();
+    srv.config.sse_keepalive_s = 0.001;
+    const id = (try post(srv, a, long)).body.strField("id").?;
+    try waitFor(hasPrefill, .{ srv, a, id });
+    const cancelled = try send(srv, a, "POST", try urlOf(a, id, "/cancel"), "", null);
+    try t.expectEqual(@as(u16, 200), cancelled.status);
+    try t.expectEqualStrings("cancelled", cancelled.body.strField("status").?);
+    try waitFor(idle, .{srv});
+    try expectSettled(srv, a, id, "response.incomplete");
+    const replay = try sendRaw(srv, a, try urlOf(a, id, "?stream=true"), null);
+    try t.expect(std.mem.indexOf(u8, replay.body, "\"response.prefill\"") != null);
+    try t.expect(std.mem.indexOf(u8, replay.body, "output_text.delta") == null);
+    try t.expectEqual(@as(usize, 1), lane.taken.items.len);
 }
 
 test "background Responses: replay reports a queued turn before any visible generation" {
