@@ -101,6 +101,18 @@ const Slot = struct {
     run: z3.generation.Run = undefined,
     audio: Audio = undefined,
     cloned: [][W]i32 = &.{}, // a clip's reference prefix and the request's rows
+    steering: z3.steering.Plan = .{}, // the request's controls, over its request's own slices
+    delta: []f32 = &.{}, // a frame's delta, then scratch of the same length
+    steer: []z3.Steer = &.{}, // that delta by bank source
+    spans: []z3.steering.Span = &.{},
+    twin_steered: bool = false, // a speaker twin takes the deltas too; a controls twin is the prompt without them
+
+    /// The deltas of the forward that takes generated row `frame`; none when the frame is not steered.
+    fn steerAt(s: *Slot, frame: usize) []const z3.Steer {
+        if (s.steer.len == 0) return &.{};
+        const half = s.delta.len / 2;
+        return if (s.steering.at(frame, s.delta[0..half], s.delta[half..])) s.steer else &.{};
+    }
 };
 
 /// The backbone as one slot's generation sees it: its lane, and its twin's between swaps.
@@ -229,6 +241,7 @@ const Host = struct {
         }
         const layout = Layout.of(r.frames) catch return false;
         if (r.cfg_gamma != 1 and layout.condition_row == 0 and r.reference_audio.len == 0) return false;
+        if (r.steering) |st| if (!z3.steering.valid(st, r.cfg_gamma != 1)) return false;
         return true;
     }
 
@@ -341,10 +354,11 @@ const Host = struct {
         try slot.audio.row(slot.run.rows.items, slot.run.eos_frame, finished);
         if (finished) return if (slot.run.eos_frame != null) .stop else .length;
         const row = slot.run.lastRow();
-        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits) };
+        const steer = slot.steerAt(slot.run.rows.items.len);
+        h.turns[n.*] = .{ .lane = slot.index, .row = row, .out = @ptrCast(slot.run.logits), .steer = steer };
         n.* += 1;
         if (slot.run.unconditional) |out| {
-            h.turns[n.*] = .{ .lane = slot.twin.?, .row = row, .out = out };
+            h.turns[n.*] = .{ .lane = slot.twin.?, .row = row, .out = out, .steer = if (slot.twin_steered) steer else &.{} };
             n.* += 1;
         }
         return null;
@@ -391,8 +405,21 @@ const Host = struct {
             u.row = c;
             @memcpy(&u.vec, h.e.w.conditions[c][h.e.c.buckets[c] * cfg.dim ..][0..cfg.dim]);
         }
-        // speaker_cfg_twin: the prompt without its reference prefix or speaker row, every condition unknown
-        const twin: []const [W]i32 = if (r.cfg_gamma != 1) rows[layout.condition_row..] else &.{};
+        // a speaker twin: the prompt without its voice, every condition unknown; a controls twin: the prompt, unsteered
+        const controls_scale: f32 = if (r.steering) |st| st.guidance else 1;
+        const twin: []const [W]i32 = if (r.cfg_gamma != 1) rows[layout.condition_row..] else if (controls_scale != 1) rows else &.{};
+        const twin_replaced: []const z3.Replace = if (r.cfg_gamma != 1) &unknown else replaced[0..n];
+        const scale = if (r.cfg_gamma != 1) r.cfg_gamma else controls_scale;
+        slot.twin_steered = r.cfg_gamma != 1;
+        if (r.steering) |st| {
+            const width = st.sources.len * cfg.dim;
+            slot.delta = try gpa.alloc(f32, 2 * width);
+            slot.steer = try gpa.alloc(z3.Steer, st.sources.len);
+            for (slot.steer, st.sources, 0..) |*s, source, j| s.* = .{ .source = source, .delta = slot.delta[j * cfg.dim ..][0..cfg.dim] };
+            slot.spans = try gpa.alloc(z3.steering.Span, st.spans.len);
+            for (slot.spans, st.spans) |*to, from| to.* = .{ .start = from.start, .end = from.end, .ramp = from.ramp, .delta = from.delta };
+            slot.steering = .{ .sources = st.sources, .constant = st.constant, .released = st.released, .release = .{ .onset = st.onset, .ramp = st.ramp, .hold = st.hold }, .spans = slot.spans };
+        }
         if (twin.len != 0) {
             if (slot.twin == null) {
                 if (h.admit) |a| if (twinBytes(h.e.o) > try a.room(a.ptr, &h.e.ctx)) return error.GuidanceNeedsMoreDeviceMemory;
@@ -406,13 +433,20 @@ const Host = struct {
         try h.e.reset();
         try h.codec.reset();
         slot.audio = .{ .h = h, .job = job, .prefill = rows[rows.len - layout.prefill ..] };
-        slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, @as([]const z3.Replace, &unknown), r.cfg_gamma, sampling, r.max_frames);
+        slot.run = try z3.generation.Run.begin(gpa, Guarded{ .h = h, .slot = slot }, rows, @as([]const z3.Replace, replaced[0..n]), twin, twin_replaced, scale, sampling, r.max_frames);
         slot.started = true;
     }
 
     fn finish(h: *Host, slot: *Slot, job: Job, reason: api.Reason, message: []const u8) void {
         if (slot.started) slot.run.deinit();
         h.gpa.free(slot.cloned);
+        h.gpa.free(slot.delta);
+        h.gpa.free(slot.steer);
+        h.gpa.free(slot.spans);
+        slot.spans = &.{};
+        slot.delta = &.{};
+        slot.steer = &.{};
+        slot.steering = .{};
         h.lock();
         if (reason == .stop or reason == .length) job.request.result.samples = slot.audio.samples;
         job.request.result.reason = reason;
@@ -502,7 +536,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !ap
 test "need: the weights, then state that grows with the context and with the frame budget" {
     const t = std.testing;
     const base = need(4096, 2000);
-    try t.expectEqual(@as(u64, 3_861_963_008), base);
+    try t.expectEqual(@as(u64, 3_862_487_552), base);
     try t.expect(need(8192, 2000) > base and need(4096, 1000) < base);
     // two attention layers keep a key row and a value row a position
     try t.expectEqual(@as(u64, 2 * 2 * 4096 * cfg.kv_width * 4), need(8192, 2000) - base);
