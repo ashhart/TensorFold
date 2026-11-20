@@ -355,6 +355,16 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;
+    } else if (std.mem.startsWith(u8, d.name, "glm sh8 ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_glm_sh8.zig").buildSources(a);
+        defer for (t) |x| a.free(x);
+        const idx: usize = if (std.mem.indexOf(u8, d.name, " pick ") != null)
+            (if (std.mem.endsWith(u8, d.name, "_pick") and std.mem.indexOf(u8, d.name, "down") != null) 5 else 4)
+        else if (std.mem.indexOf(u8, d.name, " two ") != null)
+            (if (std.mem.indexOf(u8, d.name, "down") != null) 3 else 2)
+        else if (std.mem.indexOf(u8, d.name, "down") != null) 1 else 0;
+        return .{ .decl = d, .function = fun, .here = try a.dupe(u8, t[idx]), .pre_m5 = try a.dupe(u8, t[idx]) };
     } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ") or std.mem.startsWith(u8, d.name, "glm moe rows ")) {
         if (!assemble) return undefined;
         text = tf.glm.wide.gather_source;
