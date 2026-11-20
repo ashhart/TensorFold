@@ -18,7 +18,7 @@ test "pull proxy: each scheme takes its own variable, lower case first, ALL_PROX
     try std.testing.expectEqual(@as(u16, 2), s.https.?.port);
     try std.testing.expectEqualStrings("https_proxy", s.https.?.from);
     try std.testing.expectEqualStrings("all.example", s.http.?.host);
-    try std.testing.expectEqualStrings("ALL_PROXY", s.http.?.from);
+    try std.testing.expectEqualStrings(if (@import("builtin").os.tag == .windows) "all_proxy" else "ALL_PROXY", s.http.?.from);
     try std.testing.expectEqual(@as(u32, 30), s.connect_s);
     try std.testing.expectEqual(@as(u32, 60), s.stall_s);
     var none = try env(a, &.{});
@@ -49,7 +49,8 @@ test "pull proxy: credentials go to the proxy as Basic and never into what pull 
     try std.testing.expectEqualStrings("Basic YW5hOnMzY3JldA==", p.auth.?);
     var out: std.Io.Writer.Allocating = .init(a);
     try route.proxyInUse(&out.writer);
-    try std.testing.expectEqualStrings("https through http://proxy.example:3128 (from HTTPS_PROXY)", out.written());
+    const name = if (@import("builtin").os.tag == .windows) "https_proxy" else "HTTPS_PROXY";
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "https through http://proxy.example:3128 (from {s})", .{name}), out.written());
     const io = std.testing.io;
     route.fail(io, .{ .proxy_status = .{ .proxy = p, .status = 407 } });
     defer route.reset(io);
@@ -71,7 +72,9 @@ test "pull proxy: an unusable proxy or timeout names its variable, never the val
         const err = if (route.fromEnv(a, &m)) |_| return error.TestUnexpectedResult else |e| e;
         var out: std.Io.Writer.Allocating = .init(a);
         try route.refusal(&out.writer, err);
-        try std.testing.expect(std.mem.startsWith(u8, out.written(), c.name));
+        if (@import("builtin").os.tag == .windows) {
+            try std.testing.expect(std.ascii.startsWithIgnoreCase(out.written(), c.name));
+        } else try std.testing.expect(std.mem.startsWith(u8, out.written(), c.name));
         try std.testing.expect(std.mem.indexOf(u8, out.written(), c.says) != null);
         try std.testing.expect(std.mem.indexOf(u8, out.written(), "s3cret") == null);
     }
