@@ -46,6 +46,7 @@ fn replyOf(a: Allocator, base: *json.Object, cx: *errors.Cx, key: *const ids.Key
         .sink = sink,
         .base = base,
         .streaming = streaming,
+        .owner = null,
         .keep = false,
         .added = &.{},
         .cx = cx,
@@ -175,7 +176,7 @@ test "store: a namespaced call in a stored output replays as the flattened tool 
     var cx: errors.Cx = .{ .a = a };
     var s: store_mod.Store = .{ .gpa = testing.allocator };
     defer s.deinit();
-    const h: store_mod.History = .{ .store = &s, .io = io };
+    const h: store_mod.History = .{ .store = &s, .io = io, .owner = null };
     const user = (try json.parse(a, "{\"role\":\"user\",\"content\":\"hi\"}")).ok;
     var one = [_]Value{user};
     const final = (try json.parse(a, "{\"id\":\"resp_n\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"get_weather\",\"namespace\":\"weather\",\"arguments\":\"{}\"}]}")).ok;
