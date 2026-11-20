@@ -339,7 +339,7 @@ test "Qwen prefill opening: a failed reset propagates out of the opening" {
 
 /// A 32K fill: every chunk but the last is unread, and a reader on the last layer keeps every chunk's rows.
 fn unread() !void {
-    const m = @import("cuda_engine.zig").max_rows;
+    const m = @import("cuda_engine.zig").grid_rows;
     const prompt = try t.allocator.alloc(u32, 8 * m);
     defer t.allocator.free(prompt);
     @memset(prompt, 3);
