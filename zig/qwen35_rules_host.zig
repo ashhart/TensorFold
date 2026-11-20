@@ -116,9 +116,12 @@ test "qwen35 rules: every row and value through every entry point admits as main
     defer arena.deinit();
     const a = arena.allocator();
     var cases: usize = 0;
+    var tied_2b_cases: usize = 0;
     var words: usize = 0;
-    for (try layers_host.bases(a)) |base| for (std.enums.values(rules.Backend)) |b| {
+    for (try layers_host.bases(a), 0..) |base, i| for (std.enums.values(rules.Backend)) |b| {
         entry(b, base) catch continue; // this base is another backend's model
+        const tied_2b = b == .metal27 and i == 0;
+        if (tied_2b) try t.expect((try metal27.parse(t.allocator, base, null)).tied);
         for (rules.rows) |row| for (values) |value| {
             const json = try variant(a, base, row.key, value);
             var doc = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{});
@@ -130,11 +133,12 @@ test "qwen35 rules: every row and value through every entry point admits as main
                 try t.expectEqual(@as(anyerror, row.refusal), e);
                 words += @intFromBool(if (was) |_| false else |w| w != e);
             }
-            cases += 1;
+            if (tied_2b) tied_2b_cases += 1 else cases += 1;
         };
     };
     // 2B: Metal's 2B, HIP, CUDA; 27B widths: Metal's 27B, HIP, CUDA; six rows of ten values each
     try t.expectEqual(@as(usize, 6 * 6 * values.len), cases);
+    try t.expectEqual(@as(usize, rules.rows.len * values.len), tied_2b_cases);
     try t.expect(words > 0); // the refusals whose word the table changed (CUDA's, the 2B's, two of Metal's 27B)
 }
 
@@ -186,18 +190,22 @@ test "qwen35 rules: a head count of 0 is refused by name at every entry point, b
     defer arena.deinit();
     const a = arena.allocator();
     var cases: std.EnumArray(rules.Backend, usize) = .initFill(0);
+    var tied_cases: [std.enums.values(layers_host.TiedMetal).len]usize = @splat(0);
     var derived: usize = 0;
+    var tied_derived: usize = 0;
     for (try layers_host.reals(a)) |r| for ([_]bool{ true, false }) |declared| {
         // without head_dim the width is hidden / num_attention_heads, the division a 0 reached on main
         const base = if (declared) r.json else try variant(a, r.json, "head_dim", null);
         for (std.enums.values(rules.Backend)) |b| {
             entry(b, base) catch continue; // another backend's model, or a width this backend does not run
-            derived += @intFromBool(!declared);
+            const tied = if (b == .metal27) layers_host.tiedMetal(r) else null;
+            if (b == .metal27) try t.expectEqual(tied != null, (try metal27.parse(t.allocator, base, null)).tied);
+            if (tied != null) tied_derived += @intFromBool(!declared) else derived += @intFromBool(!declared);
             for (head_counts) |key| {
                 const got = entry(b, try variant(a, base, key, "0"));
                 errdefer std.debug.print("{s} on {s}, head_dim {}: {s} = 0 gave {any}\n", .{ @tagName(b), r.file, declared, key, got });
                 try t.expectError(zeroWord(b), got);
-                cases.getPtr(b).* += 1;
+                if (tied) |row| tied_cases[@backingInt(row)] += 1 else cases.getPtr(b).* += 1;
             }
         }
     };
@@ -205,4 +213,6 @@ test "qwen35 rules: a head count of 0 is refused by name at every entry point, b
     // four zeros on each admitted base: CUDA 7, Metal 27B 8, Metal 2B 1, HIP 18 (13 of all without head_dim)
     try t.expectEqual([_]usize{ 4 * 7, 4 * 8, 4 * 1, 4 * 18 }, cases.values);
     try t.expectEqual(@as(usize, 13), derived);
+    try t.expectEqual([_]usize{ 8, 8, 8, 8, 8 }, tied_cases);
+    try t.expectEqual(@as(usize, 5), tied_derived);
 }

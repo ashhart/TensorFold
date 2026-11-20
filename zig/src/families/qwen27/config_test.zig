@@ -153,7 +153,7 @@ test "dense config admits a tied head on qwen27 Metal and keeps the flag" {
 
 test "tied qwen27 takes the head width from the embedding" {
     const a = std.testing.allocator;
-    const text = try std.fmt.allocPrint(a, "{s},\"tie_word_embeddings\":true,\"quantization\":{{\"bits\":8,\"group_size\":64,\"model.embed_tokens\":{{\"bits\":4,\"group_size\":64}}}}", .{fixture[0 .. fixture.len - 1]});
+    const text = try std.fmt.allocPrint(a, "{s},\"tie_word_embeddings\":true,\"quantization\":{{\"bits\":8,\"group_size\":64,\"model.embed_tokens\":{{\"bits\":4,\"group_size\":64}}}}}}", .{fixture[0 .. fixture.len - 1]});
     defer a.free(text);
     const c = try parse(a, text, null);
     var f = try affine.Formats.init(a, text);
