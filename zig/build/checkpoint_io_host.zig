@@ -17,6 +17,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"gptq:"} })).step);
         if (mode == .debug) b.step("test-artifact-resolution-host", "Pinned target/proposal tuple resolution before model replacement")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"artifact resolution"} })).step);
+        if (mode == .debug) b.step("test-expert-stripes-host", "Multi-disk expert stripes, exact fallback and restart accounting without a GPU")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"expert stripe"} })).step);
         const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"Qwen shard integrity:"} })).step);
     }

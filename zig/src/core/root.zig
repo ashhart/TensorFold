@@ -13,6 +13,7 @@ pub const eaq_container = @import("eaq_container.zig");
 pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const artifact_resolution = @import("artifact_resolution.zig");
+pub const expert_strip = @import("expert_strip.zig");
 pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const dfloat11_config = @import("dfloat11_config.zig");
@@ -130,6 +131,7 @@ test {
     _ = @import("checkpoint_coded_test.zig");
     _ = checkpoint_identity;
     _ = artifact_resolution;
+    _ = @import("expert_strip_test.zig");
     _ = direct_io;
     _ = direct_gather;
     _ = frame_rounds;
