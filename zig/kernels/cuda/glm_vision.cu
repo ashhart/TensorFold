@@ -114,6 +114,7 @@ extern "C" __global__ void glm_vis_qkv(const __nv_bfloat16* __restrict__ qkv, co
 extern "C" __global__ void glm_vis_qk(__nv_bfloat16* qkv, const __nv_bfloat16* __restrict__ qn,
                                       const __nv_bfloat16* __restrict__ kn, const int* __restrict__ pos,
                                       const float* __restrict__ inv_freq, int N, int H, float eps) {
+    glm_pdl::enter();
     glm_vis_rows::qk<true>(qkv, qn, kn, pos, inv_freq, N, H, eps);
 }
 
