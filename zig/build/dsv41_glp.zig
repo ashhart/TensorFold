@@ -1,14 +1,8 @@
-//! Host-only steps for the DeepSeek-V4.1 GLPv3 additive CUDA primitives: the immutable plan and its policy words, the
-//! launch checks and ABI of glp_ops.zig, the contract's host fixtures and models, and the registry rows. No nvcc,
-//! no device: the kernels (zig/kernels/cuda/deepseek_v41/glp.cu, glp_controls.cu) are built by the family's
-//! `fatbins-dsv41` / `dsv41-test` steps as the optional images `dsv41_glp_add` and `dsv41_glp_add_controls`
-//! (zig/build/dsv41_units.zig) and proven on a device by `tf-dsv41-test glp <fatbin dir>` and
-//! `tf-cuda-test kernel-contract glp`.
-//!
-//! Format and paired-site concept: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868); the
-//! additive convention is llama.cpp's; Arditi et al. (NeurIPS 2024) is background only.
+//! Host-only steps for the GLPv3 additive CUDA primitives; the device proof is `tf-dsv41-test glp <fatbin dir>`.
 
+// Format and paired site: Matt Suiche/weightless, spec b181a07d3980fc48abe39d95ddb044459dd0b868.
 const std = @import("std");
+// The additive convention is llama.cpp's; Arditi et al. (NeurIPS 2024) is background only.
 const family = @import("dsv41_cuda.zig");
 
 /// The aggregate `test-dsv41-glp-host` step, returned so the caller can also hang it on a larger host step.

@@ -1,8 +1,8 @@
 //! Production-image GLPv3 additive device proof: FP64/FP32 refs, strides, controls, alias refusals and graph lifetime.
-//! GLP format and paired site: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868); additive
-//! convention: llama.cpp; Arditi et al. (NeurIPS 2024) is background only. Run: `tf-dsv41-test glp <fatbin dir>`.
 
+// Format and paired site: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868).
 const std = @import("std");
+// Additive convention: llama.cpp; Arditi et al. (NeurIPS 2024) is background only. Run `tf-dsv41-test glp <dir>`.
 const cuda = @import("cuda");
 const dsv41 = @import("dsv41_kernels");
 const check = @import("../check.zig");

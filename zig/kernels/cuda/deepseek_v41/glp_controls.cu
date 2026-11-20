@@ -1,7 +1,4 @@
-// Planted GLPv3 additive faults, built into their own image that no serve loads: a tail column left unedited, an
-// FP16 sum, nonfinite inputs flushed to zero, a tap that sums instead of averaging, a writer that adds its ranks
-// last to first, and truncation in place of round to nearest even. Each must go red at its declared gate while the
-// production entry points of glp.cu stay green on the same inputs; the contract and credits are in glp.cuh.
+// Planted GLPv3 additive faults in an image no serve loads; each must go red at its gate while glp.cu stays green.
 
 #include "glp.cuh"
 
