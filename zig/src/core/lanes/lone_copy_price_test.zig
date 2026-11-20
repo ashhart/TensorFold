@@ -207,7 +207,7 @@ fn digest(got: Run) [5]u64 {
     return .{ got.rounds, got.drafted, got.accepted, got.copies[0] + got.copies[1], got.copy_rows };
 }
 
-/// Values from main e7e24243d, before lone copies were priced; re-pinned where the depth margin holds a depth (#3468).
+/// Values from main e7e24243d, before lone copies were priced (the same configurations, clocks and copier).
 fn pinned(expected: [5]u64, got: Run) !void {
     try std.testing.expectEqual(expected, digest(got));
 }
@@ -215,14 +215,14 @@ fn pinned(expected: [5]u64, got: Run) !void {
 test "lone copy price: head windows without a copy proposed keep main's depths" {
     var silent = hip(true);
     silent.copy_drafts = false; // no copy is ever proposed
-    try pinned(.{ 40, 84, 55, 0, 0 }, try run(silent, long_context, .{}, 1, 96));
-    try pinned(.{ 39, 139, 56, 0, 0 }, try run(silent, short_context, .{}, 1, 96));
+    try pinned(.{ 40, 82, 55, 0, 0 }, try run(silent, long_context, .{}, 1, 96));
+    try pinned(.{ 39, 138, 56, 0, 0 }, try run(silent, short_context, .{}, 1, 96));
 }
 
 test "lone copy price: root copies and GLM's own copy rates stay as on main" {
     var root = hip(true);
     root.root_copies = true;
-    try pinned(.{ 52, 423, 43, 26, 366 }, try run(root, long_context, .{}, 1, 96));
+    try pinned(.{ 52, 424, 43, 26, 365 }, try run(root, long_context, .{}, 1, 96));
     var glm = root; // lanes/../glm/cuda_copy_policy.zig: root and context copies priced by each stream's own rate
     glm.context_copies = true;
     glm.own_copy_rates = true;
@@ -458,7 +458,7 @@ test "lone copy price: kept copy prices need two timed copies on a lone stream, 
 }
 
 test "lone copy price: engines that leave copies unpriced decide two requests in a row as before" {
-    // e5478c4ab: two requests in a row on one engine, hashed, copy gate off; re-pinned for the depth margin (#3468)
+    // e5478c4ab: the trail of two requests in a row on one engine, hashed, where the copy gate is off
     var tile = hip(true);
     tile.lone_cost_tile = 2; // CUDA's lone window prices, which keep their own calibration (lanes/lone_costs.zig)
     var head = hip(true);
@@ -466,8 +466,8 @@ test "lone copy price: engines that leave copies unpriced decide two requests in
     var copies = hip(false);
     copies.copy_guard = false;
     const cases = [_]struct { m: cfgs.Model, expected: [2]u64 }{
-        .{ .m = tile, .expected = .{ 14952552964951112534, 75 } },
-        .{ .m = head, .expected = .{ 2990995193398607308, 69 } },
+        .{ .m = tile, .expected = .{ 14840352178686162370, 75 } },
+        .{ .m = head, .expected = .{ 12942564931587194512, 69 } },
         .{ .m = copies, .expected = .{ 14652143946053147409, 62 } },
     };
     for (cases) |c| {
