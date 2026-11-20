@@ -19,7 +19,7 @@ fn sharedPrefix(gpu: check.Gpu) !void {
     return @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});
 }
 
-/// The served, paged, shared-prefix, pending, learning and lane suites of a full run.
+/// The served, paged, shared-prefix, pending, learning, lane and SwiGLU pair suites of a full run.
 const served = [_]back.Suite{
     back.entry("qwen-served", @import("contract_qwen_served.zig").run),
     back.entry("qwen-pages", @import("contract_qwen_pages.zig").run),
@@ -27,6 +27,7 @@ const served = [_]back.Suite{
     back.entry("qwen-pending", @import("contract_qwen_pending.zig").run),
     back.entry("qwen-learning", @import("contract_qwen_learning.zig").numerical),
     back.entry("fn-lanes", @import("contract_fn_lanes.zig").run),
+    back.entry("prompt-swiglu", @import("contract_prompt_swiglu.zig").run),
 };
 
 pub const Part = enum { back, after };

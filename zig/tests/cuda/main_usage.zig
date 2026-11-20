@@ -139,7 +139,7 @@ pub const usage =
     \\  qwen35-tp-cut PACK [STEP]  the 27B's EXL3 weights cut for two ranks at the whole plan: each rank's columns, one run's bytes
     \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time; DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
-    \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
+    \\  kernel-contract [WORD...] [--jobs N | --shard K/N [--device D]]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so; --help
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
