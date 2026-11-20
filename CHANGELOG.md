@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `logit_bias` is applied on Qwen3.8-27B and Qwen3.5-MoE on CUDA, Qwen3.5-2B on Metal and Nemotron Parse on HIP: before each draw, greedy or sampled, a listed token's logit gains its value (-100 to 100, at most 300 entries) and exactly -100 bans the token, and drafted replies equal undrafted ones; other engines now refuse a non-empty `logit_bias` with 400 instead of ignoring it, and each `/v1/models` entry's capabilities report `logit_bias` (#3146, closes #3110).
+
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
 
 - Windows: the native CUDA product compiles again: Muse Spark, which needs two TP ranks over the POSIX-only TP fabric, is refused by name on Windows (TP across ranks runs on Linux only) instead of breaking the build, and CI now type-checks the Windows CUDA product (`zig build compile-native-cuda-windows`, #4171, fixes #4105).
