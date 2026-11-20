@@ -1,5 +1,7 @@
-//! Pull's TCP connects on macOS wait for completion after an interrupt, without connecting the same socket again.
+//! Pull's sockets: a bounded connect, reads that give up after the stall timeout, and proxied names as tunnels.
 const std = @import("std");
+const builtin = @import("builtin");
+const route = @import("pull_route.zig");
 const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
@@ -12,6 +14,8 @@ const threaded_vtable = blk: {
 const vtable = blk: {
     var table = threaded_vtable.*;
     table.netConnectIp = connectIp;
+    table.netLookup = lookup;
+    table.operate = operate;
     break :blk table;
 };
 
@@ -19,26 +23,75 @@ pub fn client(a: std.mem.Allocator, io: Io) std.http.Client {
     return .{ .allocator = a, .io = forClient(io) };
 }
 
+/// The threaded I/O with pull's connector, lookups and reads; macOS also waits out an interrupted connect.
 pub fn forClient(io: Io) Io {
-    if (@import("builtin").os.tag != .macos or io.vtable != threaded_vtable) return io;
+    if (builtin.os.tag == .windows or io.vtable != threaded_vtable) return io;
     return .{ .userdata = io.userdata, .vtable = &vtable };
+}
+
+fn inner(userdata: ?*anyopaque) Io {
+    return .{ .userdata = userdata, .vtable = threaded_vtable };
 }
 
 fn connectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) Error!net.Socket {
     if (options.mode != .stream or (options.protocol != null and options.protocol != .tcp) or options.timeout != .none)
         return threaded_vtable.netConnectIp(userdata, address, options);
-    return connectWith(Posix, .{ .userdata = userdata, .vtable = threaded_vtable }, address);
+    const io = inner(userdata);
+    if (route.tunnelOf(io, address)) |t| return @import("pull_tunnel.zig").open(.{ .userdata = userdata, .vtable = &vtable }, t);
+    return timed(io, address, null);
 }
 
-pub fn connectWith(comptime Ops: type, io: Io, address: *const net.IpAddress) Error!net.Socket {
+/// A TCP connect bounded by the pull connect timeout; `via` names the proxy it reaches, if any.
+pub fn timed(io: Io, address: *const net.IpAddress, via: ?route.Proxy) Error!net.Socket {
+    const limit_ms = @as(u64, route.settings.connect_s) * 1000;
+    return connectWith(Posix, inner(io.userdata), address, limit_ms) catch |err| {
+        if (err == error.Timeout) route.fail(io, .{ .connect_timeout = via });
+        return err;
+    };
+}
+
+/// A proxied host's name stands for a tunnel: it is not resolved here (the proxy resolves it).
+fn lookup(userdata: ?*anyopaque, name: net.HostName, results: *Io.Queue(net.HostName.LookupResult), options: net.HostName.LookupOptions) net.HostName.LookupError!void {
+    const io = inner(userdata);
+    const stand_in = route.standIn(io, name.bytes, options.port) orelse return threaded_vtable.netLookup(userdata, name, results, options);
+    defer results.close(io);
+    results.putOneUncancelable(io, .{ .address = stand_in }) catch {};
+    results.putOneUncancelable(io, .{ .canonical_name = name }) catch {};
+}
+
+/// A socket read waits for bytes at most the stall timeout, then fails as timed out instead of waiting on.
+fn operate(userdata: ?*anyopaque, op: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    if (op == .net_read and !ready(op.net_read.socket_handle, route.settings.stall_s)) {
+        route.stalled();
+        return .{ .net_read = error.ConnectionTimedOut };
+    }
+    return threaded_vtable.operate(userdata, op);
+}
+
+fn ready(fd: posix.socket_t, seconds: u32) bool {
+    const ms: c_int = @intCast(@min(@as(u64, seconds) * 1000, std.math.maxInt(c_int)));
+    var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    while (true) {
+        const rc = std.c.poll(&fds, 1, ms);
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return rc != 0; // an error or a ready socket: the read itself reports it
+    }
+}
+
+/// Connects without connecting the same socket again after an interrupt; error.Timeout after `limit_ms`.
+pub fn connectWith(comptime Ops: type, io: Io, address: *const net.IpAddress, limit_ms: u64) Error!net.Socket {
     try io.checkCancel();
+    const start = Io.Clock.awake.now(io);
     const fd = try Ops.open(io, address);
     errdefer Ops.close(fd);
     switch (Ops.begin(fd, address)) {
         .SUCCESS => {},
         .INTR, .INPROGRESS, .ALREADY => while (true) {
             try io.checkCancel();
-            if (!try Ops.wait(io, fd)) continue;
+            if (!try Ops.wait(io, fd)) {
+                if (start.durationTo(Io.Clock.awake.now(io)).toNanoseconds() >= @as(i96, limit_ms) * std.time.ns_per_ms) return error.Timeout;
+                continue;
+            }
             try check(try Ops.finish(io, fd));
             break;
         },
@@ -165,4 +218,5 @@ const Posix = struct {
 
 test {
     _ = @import("pull_http_test.zig");
+    _ = @import("pull_proxy_test.zig");
 }
