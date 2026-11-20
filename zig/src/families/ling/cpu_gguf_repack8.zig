@@ -187,6 +187,7 @@ pub const Repacked = union(enum) {
 };
 
 pub fn releaseSourcePages(bytes: []const u8) void {
+    if (comptime @import("builtin").os.tag == .windows or @TypeOf(std.posix.MADV) == void) return;
     const page: usize = std.heap.page_size_min;
     const start = @intFromPtr(bytes.ptr);
     const end = start + bytes.len;
