@@ -16,7 +16,7 @@ fn rewrite() !bool {
         var buf: [1024]u8 = undefined;
         const bytes = try f.build(&buf);
         var name: [4096]u8 = undefined;
-        const path = try std.fmt.bufPrint(&name, "{s}{c}{s}", .{ std.mem.span(dir), std.fs.path.sep, f.name });
+        const path = try std.fmt.bufPrint(&name, "{s}{c}{s}", .{ dir, std.fs.path.sep, f.name });
         try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = path, .data = bytes });
     }
     return true;
