@@ -158,6 +158,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
+    .{ .name = "inkling2_attn", .src = "inkling2/attention", .flags = &.{"-O3"} }, // ours: Inkling 2's relative-bias attention
+    .{ .name = "inkling2_pattn", .src = "inkling2/prompt_attention", .flags = &.{"-O3"} }, // ours: Inkling 2's global-layer prompt attention
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
