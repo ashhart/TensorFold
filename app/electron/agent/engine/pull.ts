@@ -150,7 +150,9 @@ export function startPull(opts: PullOptions): PullHandle {
     const onLines = (records: string[]) => {
       let changed = false
       for (const raw of records) {
-        const line = redactPullDiagnostic(raw, env).trim().slice(-MAX_LINE_CHARS)
+        // A line past the cap is dropped whole, never cut: a cut can keep a fragment of a URL's path or credentials.
+        if (raw.length > MAX_LINE_CHARS) continue
+        const line = redactPullDiagnostic(raw, env).trim()
         if (!line) continue
         lines.push(line)
         if (lines.length > KEEP_LINES) lines.shift()
