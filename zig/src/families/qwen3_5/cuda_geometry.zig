@@ -547,6 +547,7 @@ test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head 
 test {
     _ = @import("cuda_quant_admission_test.zig");
     _ = @import("cuda_modelopt_moe_test.zig");
+    _ = @import("cuda_modelopt_dense_admission_test.zig");
     _ = @import("cuda_modelopt_experts.zig");
     _ = @import("cuda_modelopt.zig");
     _ = @import("cuda_exl3_admission_test.zig");
