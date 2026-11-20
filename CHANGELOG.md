@@ -4,8 +4,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
-
 - Lanes: an optional normalized-row view of the prompt features, whose `null` default keeps every existing drafter path as it is (#4132, refs #2485). Thanks to @tacosta.
 
 - App: only the owner token resolves a tool approval on the remote-control server (#3034).
@@ -15,6 +13,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
+
+- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
 
 
 
