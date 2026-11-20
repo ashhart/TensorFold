@@ -562,18 +562,21 @@ test "required tools: with thinking on, a required or named call closes a think 
     const close = [_]u32{ 97, 98 };
     for ([_]bool{ false, true }) |response| for ([_][]const u8{ "\"required\"", "named", "\"auto\"" }) |kind| {
         var text: Text = .{};
-        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .default_max_tokens = 300, .enable_thinking = true, .use_drafts = false }, null);
         defer srv.deinit();
         srv.info.structures = @import("qwen27_masks").supported;
+        srv.info.thinking_budget = true;
+        srv.think_close = &close;
+        srv.think_close_end = 98;
         srv.grammars = &compiler;
         var cx: errors.Cx = .{ .a = g };
         const named = std.mem.eql(u8, kind, "named");
         const choice = if (!named) kind else if (response) "{\"type\":\"function\",\"name\":\"now\"}" else "{\"type\":\"function\",\"function\":{\"name\":\"now\"}}";
         const input = try openai.chatInput(srv, &cx, try body(&cx, response, choice));
         const required = if (input.fields.get("tool_call_required")) |v| v.truthy() else false;
-        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 300 };
-        try srv.checkFeatures(&cx, input.fields, true, false, &.{1}, input.tools, &request);
-        @import("tool_think.zig").apply(&request, required, &close, 98);
+        const prepared = try @import("chat.zig").prepare(srv, &cx, input, @import("rerank_test.zig").Present{});
+        defer srv.release(prepared.preparing, prepared.request);
+        const request = prepared.request;
         try std.testing.expectEqual(!std.mem.eql(u8, kind, "\"auto\""), required);
         if (!required) {
             try std.testing.expect(request.think_budget == 0 and request.think_end == null);
