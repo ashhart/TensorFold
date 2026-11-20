@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a long prompt shares its steps with running replies by default: a filling prompt with more than 32,768 rows left takes a decode share of 0.25 and the 512-row chunk hint, as `--decode-share 0.25` does, while a shorter prompt fills whole as before; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings (#3486, refs #3397). Thanks to @bikepresentball.
+
 - Qwen3.8-27B and 9B on Metal (M1 to M4): the default prompt frame is sized to the 128-row passes these chips run, instead of 512 rows, so the frame, attention and GDN scratch no longer hold room that is never used (#2797, refs #2089).
 
 - DeepSeek-V4.1 on Metal: a decode round over several streams runs each per-stream stage (window key, compressed rows and index keys, ratio-2 pooling, decode attention, index scores, candidate blocks and the top 512) as one dispatch over a table of the streams' state, with one barrier between stages instead of one a stream, and the same bits (#2954, refs #2984). Thanks to @gilby.
