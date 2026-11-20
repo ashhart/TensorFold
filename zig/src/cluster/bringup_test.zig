@@ -218,6 +218,7 @@ test "the node at the other end of a link must be the one the cluster file puts 
     const ac = [_][]const u8{ "a", "c" };
     try p.init(.{ "a", "c" }, .{ &ab, &ac }, .{ 0x51, 0x51 }, .{ .leave, .leave });
     defer p.deinit();
+    p.lockstepped();
     try p.go(true);
     try std.testing.expectEqual(@as(?anyerror, error.WrongPeer), p.ranks[0].err);
     try std.testing.expectEqualStrings("c", p.ranks[0].live.culprit.name.str());
@@ -300,9 +301,13 @@ test "security: a member's lies add no node, make no leader and end no other mem
         msgs[2] = try forgedLeave(a, other);
         lies.* = msgs;
     }
+    // All three on the lockstep clock: a descheduled watcher cannot out-age the liar's goodbye on a busy runner.
+    var ls: Lockstep = .{ .running = 3 };
     for (&ranks, 0..) |*r, i| {
         const t = if (i == 2) liar.transport() else r.link.transport();
         r.live = bringup.Live.init(gpa, .{ .id = ids[i], .name = .of(abc[i]) }, t, &abc, 0x51, quick);
+        r.live.opts.clock = ls.clock();
+        r.lockstep = &ls;
     }
     defer for (&ranks) |*r| r.live.deinit();
     const ta = try std.Thread.spawn(.{}, Rank.run, .{&ranks[0]});
@@ -314,6 +319,7 @@ test "security: a member's lies add no node, make no leader and end no other mem
         _ = try ranks[2].live.watch(300 * ms);
     } else |_| {}
     ranks[2].live.leave();
+    ls.done(); // rank 2 ran inline, so Rank.run's defer never marked its clock share done
     ta.join();
     tb.join();
     for (ranks[0..2]) |r| {
