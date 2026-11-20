@@ -7,6 +7,7 @@ const fake = @import("fake.zig");
 const Stream = @import("stream.zig").Stream;
 const Engine = @import("engine.zig").Engine;
 const Config = @import("config.zig").Config;
+const stale = @import("shared_price.zig").stale;
 
 const plain_ms = 20.0; // a warm all-plain round of four streams
 const warmup_ms = 4.0; // what the first all-plain round of four streams pays once
@@ -149,7 +150,8 @@ test "shared prices: a slow first plain trial is dropped, so near-even drafts gi
         var got = try exact(case, sampled);
         defer got.deinit();
         try t.expect(got.rounds_after > 200);
-        try t.expectEqual(@as(usize, 0), got.drafted_after);
+        // plain rounds win; drafting is re-probed at most once a `stale` window, when the drafted point goes stale
+        try t.expect(got.drafted_after <= got.rounds_after / stale + 1);
         try t.expectEqualSlices(u64, &.{ 64, 128 }, got.trials[0..got.count]);
     }
 }

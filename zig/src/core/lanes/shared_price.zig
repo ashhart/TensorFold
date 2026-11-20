@@ -49,10 +49,10 @@ pub const Prices = struct {
 
     /// No drafting round moves the plain point; a count's first plain trial is a warm-up, each later one replaces it.
     pub fn observe(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, sampled: bool, plain: bool, calibration: bool) !void {
-        return p.observeHead(a, streams, rows, residual, 0, sampled, plain, calibration, false);
+        return p.observeHead(a, streams, rows, residual, 0, sampled, plain, calibration);
     }
 
-    pub fn observeHead(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, head: f64, sampled: bool, plain: bool, calibration: bool, block: bool) !void {
+    pub fn observeHead(p: *Prices, a: Allocator, streams: usize, rows: u64, residual: f64, head: f64, sampled: bool, plain: bool, calibration: bool) !void {
         const b = try p.get(a, streams, sampled);
         b.rounds +|= 1;
         if (calibration) b.last_probe = b.rounds;
@@ -65,7 +65,10 @@ pub const Prices = struct {
         } else if (plain and rows == streams) {
             blend(&b.plain, point);
         } else if (rows > streams) {
-            if (block and b.draft != null and b.rounds -| b.draft.?.at >= stale) b.draft = null;
+            // A drafted point no drafted round refreshed for `stale` rounds is replaced, not blended onto.
+            if (b.draft) |v| if (b.rounds -| v.at >= stale) {
+                b.draft = null;
+            };
             blend(&b.draft, point);
         }
     }
@@ -80,12 +83,12 @@ pub const Prices = struct {
         return .{ .plain = plain.residual, .fixed = if (draft) |v| v.residual else fixed, .row = row, .head = if (draft) |v| v.head else head };
     }
 
-    /// Copy and chained-head models keep the measured row feedback, with head steps priced separately.
+    /// Copy and chained-head models keep the measured row feedback, head steps priced apart, until it goes `stale`.
     pub fn price(p: *const Prices, streams: usize, sampled: bool, row: f64) ?Price {
         const b = p.buckets.items[p.find(streams, sampled) orelse return null];
         const plain = b.plain orelse return null;
         var out: Price = .{ .plain = plain.residual, .fixed = plain.residual, .row = row };
-        if (b.draft) |draft| if (draft.rows > plain.rows) {
+        if (b.draft) |draft| if (draft.rows > plain.rows and b.rounds -| draft.at < stale) {
             out.row = @max(0, (draft.residual - plain.residual) / (draft.rows - plain.rows));
         };
         return out;

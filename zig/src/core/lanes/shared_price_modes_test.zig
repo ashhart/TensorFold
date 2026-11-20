@@ -147,13 +147,13 @@ test "shared price modes: a stale expensive block can be measured again without 
     const prices = @import("shared_price.zig");
     var p: prices.Prices = .{};
     defer p.deinit(a);
-    try p.observeHead(a, 4, 4, 2, 0, false, true, false, true);
-    try p.observeHead(a, 4, 8, 200, 4, false, false, false, true);
-    for (0..prices.stale - 1) |_| try p.observeHead(a, 4, 4, 2, 0, false, true, false, true);
+    try p.observeHead(a, 4, 4, 2, 0, false, true, false);
+    try p.observeHead(a, 4, 8, 200, 4, false, false, false);
+    for (0..prices.stale - 1) |_| try p.observeHead(a, 4, 4, 2, 0, false, true, false);
     try t.expectEqual(@as(f64, 200), p.blockPrice(4, false, 2, 0, 0).?.fixed);
-    try p.observeHead(a, 4, 4, 2, 0, false, true, false, true);
+    try p.observeHead(a, 4, 4, 2, 0, false, true, false);
     try t.expect(p.blockPrice(4, false, 2, 0, 0) == null);
-    try p.observeHead(a, 4, 8, 10, 2, false, false, false, true);
+    try p.observeHead(a, 4, 8, 10, 2, false, false, false);
     try t.expectEqual(@as(f64, 10), p.blockPrice(4, false, 2, 0, 0).?.fixed);
     try t.expectEqual(@as(f64, 2), p.blockPrice(4, false, 2, 0, 0).?.head);
 }

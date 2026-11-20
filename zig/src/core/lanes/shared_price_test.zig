@@ -67,7 +67,8 @@ fn run(sampled: bool, row_ms: f64, plain_only: bool) ![2][800]u32 {
     }
     if (!plain_only) {
         try t.expect(drafted_before > 32);
-        if (row_ms > 5) try t.expectEqual(@as(usize, 0), drafted_after) else {
+        // plain wins; a drafted point that goes `stale` stops pricing rows, so drafting is re-probed once a window
+        if (row_ms > 5) try t.expect(drafted_after >= 1 and drafted_after <= round / prices.stale) else {
             try t.expect(drafted_after > 200);
             try t.expect(probes >= 2 and probes <= (round + 63) / 64);
         }
@@ -132,6 +133,33 @@ test "shared prices: drafted work at plain width cannot update the intercept; tw
     try t.expectEqual(@as(f64, 2), v.row);
     try t.expect(p.price(4, true, 0) == null);
     try t.expect(p.price(2, false, 0) == null);
+}
+
+test "shared prices: a drafted point with no drafted round for `stale` rounds stops pricing rows" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    try t.expectEqual(@as(f64, 2), p.price(4, false, 99).?.row);
+    for (0..prices.stale - 1) |_| try p.observe(a, 4, 4, 2, false, true, false);
+    try t.expectEqual(@as(f64, 2), p.price(4, false, 99).?.row);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    const v = p.price(4, false, 99).?;
+    try t.expectEqual(@as(f64, 99), v.row);
+    try t.expectEqual(@as(f64, 2), v.plain);
+    try t.expectEqual(@as(f64, 2), v.fixed);
+}
+
+test "shared prices: a drafted round after a stale point replaces it instead of blending onto it" {
+    var p: prices.Prices = .{};
+    defer p.deinit(a);
+    try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    for (0..prices.stale) |_| try p.observe(a, 4, 4, 2, false, true, false);
+    try p.observe(a, 4, 8, 6, false, false, false);
+    try t.expectEqual(@as(f64, 1), p.price(4, false, 99).?.row);
+    try p.observe(a, 4, 8, 10, false, false, false);
+    try t.expectApproxEqAbs(@as(f64, 1.2), p.price(4, false, 99).?.row, 1e-12);
 }
 
 test "shared prices: the round observer subtracts modeled heads before fitting rows" {
