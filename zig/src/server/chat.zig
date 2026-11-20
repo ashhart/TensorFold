@@ -21,6 +21,7 @@ const Mailbox = @import("mailbox.zig").Mailbox;
 const StopHook = @import("stop_hook.zig").StopHook;
 const engine_refusal = @import("engine_refusal.zig");
 const witness_reply = @import("witness_reply.zig");
+const workspace = @import("workspace.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -35,6 +36,7 @@ pub const Input = struct {
     messages: Value = .{ .array = &.{} },
     tools: []const Value = &.{},
     prompt: ?Prompt = null,
+    workspace: ?workspace.Request = null,
     max_tokens: ?i64 = null,
     temperature: f64 = 0,
     /// The sampling fields: the request's own (``k in body``), its thinking switches and ``tool_call_required``.
@@ -149,8 +151,10 @@ pub const Prepared = struct {
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
-pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepared {
+pub fn prepare(srv: *Server, cx: *Cx, initial: Input, gone: anytype) Failure!Prepared {
     const a = cx.a;
+    var input = initial;
+    if (initial.workspace != null and srv.config.compact_at != null) return cx.refuse("workspace completions cannot be used with --compact-at");
     const io = srv.io;
     const received = nowNs(io);
     const f = input.fields;
@@ -164,6 +168,12 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
+    if (input.workspace) |*call| {
+        const base = if (call.op == .warm) "" else input.prompt.?.text;
+        const revision = try workspace.resolve(srv, cx, call.*, base, gone);
+        call.revision = revision;
+        input.prompt = .{ .ids = revision.manifest.prompt };
+    }
     const thinking = input.prompt == null and (fields_mod.flag(f, "enable_thinking") orelse srv.config.enable_thinking);
     const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
     const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
@@ -187,6 +197,10 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     var shared: std.ArrayList(u32) = .empty;
     if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
         if (cut >= 512) try shared.append(a, @intCast(cut));
+    };
+    if (input.workspace) |call| if (call.revision) |revision| {
+        if (revision.manifest.base_prefix_end > 0) try shared.append(a, revision.manifest.base_prefix_end);
+        for (revision.manifest.files) |file| try shared.append(a, file.prompt_end);
     };
     const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids, instruct);
     const draft_field = f.get("draft");
@@ -302,6 +316,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     if (input.trace) |trace| trace.timed(reply);
     if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
+    if (input.workspace) |call| if (call.revision) |revision| try workspace.metadata(a, &reply, revision);
     return reply;
 }
 

@@ -156,6 +156,29 @@ eight prompts run at once, and one at a time under `--max-inflight` or `--max-in
 holds one place. A one-string list, a list of token IDs, a list of token-ID lists and a mixed list keep their
 one-prompt meaning (lists inside are decoded and joined with a newline).
 
+### Workspace completion prefixes
+
+`tensorfold serve MODEL --workspace DIR --workspace-state DIR` enables source-bound raw completions. Both flags are
+required together. The workspace root must exist; the state directory is created mode 0700 when absent, and an existing
+state directory accessible to group or other users is refused. Startup binds the namespace to the full checkpoint and
+tokenizer bytes, the template source and stable cache geometry. The workspace root is the outermost file boundary;
+inference keys share it and the manifest, with no per-key file ACL.
+
+`POST /v1/completions` with `"workspace": {"op":"cold","sources":["src/main.zig","README.md"]}` creates a manifest;
+`op: "edit"` captures another revision, and `op: "warm"` uses the persisted IDs without tokenizing sources again. Cold
+and edit need one string `prompt` and 1–4096 unique relative source paths; warm takes neither `prompt` nor `sources`.
+The base prompt is encoded first, then each source independently with no added special tokens, in lexical path order
+with no invented labels or separators. Paths must stay beneath the root without traversal or symlinks; sources must be
+regular UTF-8 files. Reads bind token IDs to byte length and SHA-256, check file stability, and reverify before atomic
+publication. Workspace is not offered on chat, Responses, prompt lists or token-ID prompts.
+Workspace requests are refused when `--compact-at` is enabled; they never publish a partially compacted manifest.
+
+Base/file token boundaries become shared-prefix marks for the ordinary lane prompt cache. `tensorfold.workspace` in a
+finished reply carries `provenance`, `manifest_reused_tokens` and `changed_files`. `manifest_reused_tokens` is manifest
+bookkeeping only: `usage.prompt_tokens_details.cached_tokens` comes solely from the engine's resumed prompt event. A
+warm request after restart submits the same full IDs but reports zero cached tokens when the new engine has no kept or
+disk-backed state. Without prompt-cache support, workspace requests still compute the exact full prompt.
+
 `/tokenize` takes vLLM's fields: a `prompt` string (`add_special_tokens`, default true), or `messages` with the
 chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and

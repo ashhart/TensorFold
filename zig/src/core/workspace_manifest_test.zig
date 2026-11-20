@@ -262,3 +262,47 @@ test "workspace manifest corruption is not admitted as warm state" {
     try dir.writeFile(io, .{ .sub_path = wm.manifest_name, .data = bytes });
     try std.testing.expectError(error.ManifestCorrupt, f.store.warm(id, null));
 }
+
+test "workspace source reads bind exact bytes and digest for cold and edit verification" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    const text = try f.store.readSource(a, "a.txt", null);
+    defer a.free(text.bytes);
+    try std.testing.expectEqualStrings("alpha", text.bytes);
+    var expected: wm.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash("alpha", &expected, .{});
+    try std.testing.expectEqualSlices(u8, &expected, &text.sha256);
+    const bound: wm.Source = .{
+        .path = "a.txt",
+        .tokens = &.{2},
+        .size = @intCast(text.bytes.len),
+        .sha256 = text.sha256,
+    };
+    var cold = try f.store.cold(id, &.{1}, &.{bound}, null);
+    defer cold.deinit();
+    var edited = try f.store.edit(id, &.{1}, &.{bound}, null);
+    defer edited.deinit();
+    try f.write("a.txt", "Alpha");
+    try std.testing.expectError(error.WorkspaceFileChanged, f.store.warm(id, null));
+}
+
+test "workspace source reads refuse traversal nonregular files and symlinks" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDirPath(io, "repo/dir");
+    try std.testing.expectError(error.InvalidRelativePath, f.store.readSource(a, "../outside.txt", null));
+    try std.testing.expectError(error.WorkspaceFileNotRegular, f.store.readSource(a, "dir", null));
+    if (@import("builtin").os.tag != .windows) {
+        try f.tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "outside" });
+        try f.tmp.dir.symLink(io, "../outside.txt", "repo/link.txt", .{});
+        try std.testing.expectError(error.WorkspacePathRefused, f.store.readSource(a, "link.txt", null));
+    }
+}
+
+test "workspace source reads honor cancellation" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    try std.testing.expectError(error.Cancelled, f.store.readSource(a, "a.txt", stop()));
+}

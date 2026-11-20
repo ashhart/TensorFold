@@ -33,7 +33,6 @@ fn servedBy(list: []const []const u8, name: []const u8) bool {
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
 const cuda_build = builtin.os.tag == .linux;
-
 /// Python serve flags plus this binary's native-only flags; supported flags are marked native.
 pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
@@ -105,6 +104,8 @@ pub const flags = [_]Flag{
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .path = true, .native = true },
     .{ .name = "--media-jobs-dir", .path = true, .native = true },
+    .{ .name = "--workspace", .path = true, .native = true },
+    .{ .name = "--workspace-state", .path = true, .native = true },
     .{ .name = "--slide", .kind = .store_true, .native = true },
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
     .{ .name = "--slide-graph", .path = true, .native = true },
@@ -237,6 +238,8 @@ pub const Args = struct {
     compact_keep: ?u32 = null,
     compact_memory: ?[]const u8 = null,
     media_jobs_dir: ?[]const u8 = null,
+    workspace: ?[]const u8 = null,
+    workspace_state: ?[]const u8 = null,
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null, // retained before hub resolution for the engine's serving line
     drafter_bits: u8 = 4,
@@ -279,17 +282,14 @@ pub const Args = struct {
 };
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
-
 pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
 }
-
 pub fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{ Usage, OutOfMemory } {
     u.message = try std.fmt.allocPrint(a, fmt, args);
     return error.Usage;
 }
-
 /// ``serve`` arguments as the switch passes them: the model and full flag names.
 pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, OutOfMemory }!Args {
     var out: Args = .{};
@@ -350,6 +350,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
     var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
     if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
+    if ((out.workspace == null) != (out.workspace_state == null)) return fail(u, a, "--workspace and --workspace-state must be given together", .{});
     try spillWith(u, a, out);
     return out;
 }
@@ -455,6 +456,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (try @import("admission_cli.zig").apply(a, &out.admission, name, v, u)) return;
     if (try @import("connection_cli.zig").apply(a, &out.connections, name, v, u)) return;
+    if (is(name, "--workspace") or is(name, "--workspace-state")) {
+        if (is(name, "--workspace")) out.workspace = v else out.workspace_state = v;
+        return;
+    }
     if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
@@ -517,7 +522,6 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
-
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
 pub fn parallel(text: []const u8) ?u32 {
     const t = std.mem.trim(u8, text, " ");

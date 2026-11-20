@@ -28,6 +28,7 @@ const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HO
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
+    " [--workspace DIR --workspace-state DIR]" ++
     " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
@@ -205,6 +206,11 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     _ = receipt.span(.server_setup);
     log.line("chat template: {s}", .{up.text.renderer()});
+    const workspace_model: ?[32]u8 = if (args.workspace != null) blk: {
+        const checkpoint = try @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
+        const tokenizer = try up.text.identity(a);
+        break :blk try @import("workspace.zig").modelIdentity(a, io, dir, checkpoint, tokenizer);
+    } else null;
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
     var closer: Closer = .{ .opened = up.engine };
@@ -225,6 +231,7 @@ pub fn main(init: std.process.Init) !u8 {
         .recall = record,
         .model_dir = dir,
         .model_type = model_type,
+        .workspace_model = workspace_model,
         .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args, model_type),
         .instruct = instruct,

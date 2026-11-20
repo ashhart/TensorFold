@@ -161,6 +161,7 @@ pub const Server = struct {
     background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
     ws_cache_bytes: std.atomic.Value(usize) = .init(0), // Responses socket cache bytes (ws_cache.zig)
     media_jobs: @import("media_job_service.zig").Service = .{},
+    workspace: ?*@import("workspace.zig").Service = null,
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
@@ -260,7 +261,6 @@ pub const Server = struct {
         }
         return srv;
     }
-
     pub fn stopKeepalive(srv: *Server) void {
         if (srv.keepalive) |k| k.stop();
         srv.keepalive = null;
@@ -268,6 +268,7 @@ pub const Server = struct {
 
     pub fn deinit(srv: *Server) void {
         srv.media_jobs.deinit();
+        if (srv.workspace) |workspace| workspace.deinit();
         srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();

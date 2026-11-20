@@ -5,6 +5,11 @@ const types = @import("workspace_manifest_types.zig");
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+pub const SourceText = struct {
+    bytes: []u8,
+    sha256: types.Digest,
+};
+
 fn openWorkspace(io: Io, workspace: []const u8) !Io.Dir {
     return Io.Dir.cwd().openDir(io, workspace, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => error.WorkspaceFileMissing,
@@ -46,7 +51,15 @@ fn sameVersion(a: Io.File.Stat, b: Io.File.Stat) bool {
         a.ctime.toNanoseconds() == b.ctime.toNanoseconds();
 }
 
-fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const types.File, out: *types.File, stop: ?types.Stop) !void {
+fn readFile(
+    gpa: ?std.mem.Allocator,
+    io: Io,
+    root: Io.Dir,
+    relative: []const u8,
+    expected: ?*const types.File,
+    out: *types.File,
+    stop: ?types.Stop,
+) !?[]u8 {
     try types.checkStop(stop);
     const file = try openRelative(io, root, relative);
     defer file.close(io);
@@ -54,15 +67,18 @@ fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const type
     if (before.kind != .file) return error.WorkspaceFileNotRegular;
     if (before.size > types.max_file_bytes) return error.WorkspaceFileTooLarge;
     if (expected) |old| if (old.size != before.size) return error.WorkspaceFileChanged;
+    const bytes = if (gpa) |allocator| try allocator.alloc(u8, @intCast(before.size)) else null;
+    errdefer if (bytes) |value| gpa.?.free(value);
     var hash = Sha256.init(.{});
     var buffer: [64 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (offset < before.size) {
         try types.checkStop(stop);
         const wanted: usize = @intCast(@min(buffer.len, before.size - offset));
-        const n = try file.readPositionalAll(io, buffer[0..wanted], offset);
+        const target = if (bytes) |value| value[@intCast(offset)..][0..wanted] else buffer[0..wanted];
+        const n = try file.readPositionalAll(io, target, offset);
         if (n == 0) return error.WorkspaceFileChanged;
-        hash.update(buffer[0..n]);
+        hash.update(target[0..n]);
         offset += n;
     }
     var extra: [1]u8 = undefined;
@@ -76,6 +92,19 @@ fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const type
     if (expected) |old| if (!std.mem.eql(u8, &old.sha256, &digest)) return error.WorkspaceFileChanged;
     out.size = before.size;
     out.sha256 = digest;
+    return bytes;
+}
+
+fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const types.File, out: *types.File, stop: ?types.Stop) !void {
+    _ = try readFile(null, io, root, relative, expected, out, stop);
+}
+
+pub fn readSource(gpa: std.mem.Allocator, io: Io, workspace: []const u8, relative: []const u8, stop: ?types.Stop) !SourceText {
+    const root = try openWorkspace(io, workspace);
+    defer root.close(io);
+    var file: types.File = undefined;
+    const bytes = (try readFile(gpa, io, root, relative, null, &file, stop)).?;
+    return .{ .bytes = bytes, .sha256 = file.sha256 };
 }
 
 pub fn verify(io: Io, workspace: []const u8, m: *const types.Manifest, stop: ?types.Stop) !void {

@@ -18,6 +18,7 @@ pub const Config = server.Config;
 
 test {
     _ = @import("cache_flush.zig");
+    _ = @import("workspace_test.zig");
     _ = @import("drafter_test.zig");
     _ = @import("media_job.zig");
     _ = @import("media_job_routes.zig");

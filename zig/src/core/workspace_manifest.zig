@@ -10,6 +10,7 @@ pub const Revision = types.Revision;
 pub const Source = types.Source;
 pub const Stop = types.Stop;
 pub const manifest_name = types.manifest_name;
+pub const SourceText = disk.SourceText;
 
 pub const Store = struct {
     gpa: std.mem.Allocator,
@@ -31,6 +32,9 @@ pub const Store = struct {
         s.* = undefined;
     }
 
+    pub fn readSource(s: *Store, gpa: std.mem.Allocator, path: []const u8, stop: ?Stop) !SourceText {
+        return disk.readSource(gpa, s.io, s.workspace, path, stop);
+    }
     pub fn cold(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
         var m = try disk.capture(s.gpa, s.io, s.workspace, id, base_prompt, sources, stop);
         errdefer m.deinit();
