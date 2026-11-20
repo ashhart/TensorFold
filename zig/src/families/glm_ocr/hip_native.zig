@@ -75,7 +75,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     errdefer gpa.destroy(own);
     const startup = try std.fmt.allocPrint(gpa, "GLM-OCR BF16 on HIP {s}, device {d}; {d} shared lanes at context {d}; exact verification through 32 rows; full-shape prompt cache {d} bytes in at most {d} slots", .{ hip.kernels.arch, dev.index, e.streams, e.window, e.cache_bytes, e.cache_slots });
     own.* = .{ .gpa = gpa, .e = e, .h = h, .startup = startup };
-    const vision: ?api.Vision = if (o.vision) |v| .{ .ctx = own, .prepare = prepare, .image_token = c.image_token, .markers = &markers, .part_type = "image", .image_tokens = if (v.image_tokens_set) v.image_tokens else 6144, .max_images = v.max_images, .explain = @import("sys").optional_libraries.explain } else null;
+    const vision: ?api.Vision = if (o.vision) |v| .{ .ctx = own, .prepare = prepare, .image_token = c.image_token, .markers = &markers, .part_type = "image", .image_tokens = if (v.image_tokens_set) v.image_tokens else 6144, .max_images = v.max_images, .image_share = v.image_share, .explain = @import("sys").optional_libraries.explain } else null;
     return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .offer = .{
         .vision = vision,
         .ocr = ocr.reader,
