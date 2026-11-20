@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the dots.mocr CUDA recipe covers images with `--vision` (14,400 merged image tokens a request by default, set by `--vision-image-tokens`; each lane holds its request's image rows, so fewer lanes fit; JPEG needs libjpeg-turbo 3.1.4.1; video is refused), the oracle's SDPA image references and `stages`, and the `dots-image` and `dots-text` checks; the README and recipe index list CUDA for images and text (#2773, refs #1927). Thanks to @laudney.
+
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
 - Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
 
