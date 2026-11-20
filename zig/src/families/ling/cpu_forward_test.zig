@@ -192,3 +192,26 @@ test "fast mode forward with head-parallel KDA and MLA gives identical bytes at 
         try std.testing.expectEqualSlices(u8, last(want, c.vocab), last(got, c.vocab));
     }
 }
+
+test "session step reuses its output buffers and matches run byte for byte" {
+    const a = std.testing.allocator;
+    var source = Synthetic{ .arena = std.heap.ArenaAllocator.init(a), .hidden = 64 };
+    defer source.deinit();
+    const c = tiny();
+    var ref = try Forward.Session.init(a, &source, c, 16, 1);
+    defer ref.deinit();
+    var reuse = try Forward.Session.init(a, &source, c, 16, 1);
+    defer reuse.deinit();
+    const chunks = [_][]const u32{ &.{ 3, 17, 5 }, &.{40}, &.{9}, &.{22} };
+    var first_logits_ptr: ?[*]f32 = null;
+    var first_picks_ptr: ?[*]u32 = null;
+    for (chunks) |chunk| {
+        var want = try ref.run(a, chunk);
+        defer want.deinit();
+        const got = try reuse.step(chunk);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want.logits), std.mem.sliceAsBytes(got.logits));
+        try std.testing.expectEqualSlices(u32, want.picks, got.picks);
+        if (first_logits_ptr) |p| try std.testing.expectEqual(p, got.logits.ptr) else first_logits_ptr = got.logits.ptr;
+        if (first_picks_ptr) |p| try std.testing.expectEqual(p, got.picks.ptr) else first_picks_ptr = got.picks.ptr;
+    }
+}
