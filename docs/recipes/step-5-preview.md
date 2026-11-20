@@ -31,9 +31,10 @@ release archives ship it; from source, `zig build grammar -Dxgrammar=DIR` with a
   `STEP5_LOAD_LIMIT_GB` sets another limit. With MTP and vision, 15.8 GiB is left for caches on a 256 GB Mac: up to
   227,025 tokens of context by default, or `--context` for less. The model supports 1M tokens; a Mac's caches reach
   what the limit leaves. A 212k-token prompt ran with free memory never below 19%.
-- **Prompts** run in 2,048-row chunks on the tensor units: 917, 901, 872 and 835 tokens a second at 4k, 8k, 16k and
-  32k tokens (the server's prefill time, prompt cache off). A 129k-token prompt took about 200 s and a 212k-token one
-  about 376 s on the build before TensorFold 1.0.12, whose 4k-32k prompts ran 2-3% slower.
+- **Prompts** run in 2,048-row chunks on the tensor units, one a lane visit so other streams' rounds run between
+  chunks: 917, 901, 872 and 835 tokens a second at 4k, 8k, 16k and 32k tokens (the server's prefill time, prompt
+  cache off). A 129k-token prompt took about 200 s and a 212k-token one about 376 s on the build before TensorFold
+  1.0.12, whose 4k-32k prompts ran 2-3% slower.
 - **MTP drafts** (`--mtp` checkpoints): three chained drafts a round, verified in one window. Replies are the same as
   undrafted ones. Greedy replies of 200-400 tokens, timed with their prompt: 41.2 tokens a second on code (25.8
   undrafted), 36.6 on prose (27.0), 48.8 on math (26.9).

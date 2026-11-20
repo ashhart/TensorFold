@@ -5,7 +5,7 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module,
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/step5.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const filter = b.option([]const u8, "step5-filter", "One Step-5 host regression");
     const check = b.step("test-step5-host", "Step-5 geometry and owned prompt-cache callback fixtures without GPU work");
-    const family = b.createModule(.{ .root_source_file = b.path("zig/step5_family_tests.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = engine.import_table.get("kernel_sources").? } } });
+    const family = b.createModule(.{ .root_source_file = b.path("zig/step5_family_tests.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = engine.import_table.get("kernel_sources").? }, .{ .name = "lanes", .module = lanes } } });
     for ([_]*std.Build.Module{ family, host }) |module| {
         const tests = b.addTest(.{ .root_module = module, .filters = &.{ "step5 host: imports", filter orelse "step5 host:" } });
         const run = b.addRunArtifact(tests);
