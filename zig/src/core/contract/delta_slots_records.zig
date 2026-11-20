@@ -21,3 +21,21 @@ test "all five DeltaNet register-slot pipelines are in the live and offline coll
         try std.testing.expectEqual(@as(usize, 0), try registry.checkMetal(std.testing.allocator, &.{record}, true));
     }
 }
+
+/// Column launches reserve their SIMD group in source; offline compile receipts remain device work.
+pub const columns = [_]limits.MetalLaunch{
+    .{ .name = "core deltanet tf_delta_gdn_columns_1", .threads = 32, .tg_memory = 2048, .reserved = 32 },
+    .{ .name = "core deltanet tf_delta_gdn_columns_2", .threads = 32, .tg_memory = 4096, .reserved = 32 },
+    .{ .name = "core deltanet tf_delta_gdn_columns_4", .threads = 32, .tg_memory = 8192, .reserved = 32 },
+};
+
+test "q27 stack: all column replacements are active exactly once" {
+    for (columns) |record| {
+        var count: usize = 0;
+        for (registry.all_metal) |active| if (std.mem.eql(u8, record.name, active.name)) {
+            try std.testing.expectEqualDeep(record, active);
+            count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+}

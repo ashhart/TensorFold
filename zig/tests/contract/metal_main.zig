@@ -185,6 +185,9 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    var q27_mixed: @import("metal_q27_mixed.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer q27_mixed.deinit();
+    try q27_mixed.collect(o.only);
     var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);
@@ -210,6 +213,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, mixed.kernel().spec.name)) {
         if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     }
+    var picks: @import("metal_tree_round_picks.zig").Suite = .{};
+    defer picks.deinit(a);
+    try picks.collect(a, device, queue, o.only, &kernels);
+    var q27_stack: @import("metal_q27_stack.zig").Suite = .{};
+    defer q27_stack.deinit(a);
+    try q27_stack.collect(a, device, queue, o.only, &kernels);
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
