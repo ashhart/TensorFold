@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3-1.7B on CUDA: the ModelOpt NVFP4 text export (`LiquidAI/LFM3-1.7B-NVFP4`) is served weight-only (the FFN's FP4 weights as stored, bf16 activations), and `TENSORFOLD_LFM3_KV_PAGES=0` gives each stream fixed pages; the MLX affine and FP8 exports are refused by name on CUDA for now, Metal and the Intel GPU engine refuse the NVFP4 export by name before reading weights, and LFM2.5-24B-A2B on CUDA moves to the same shared Liquid backend (#1508, part of #1491). Thanks to @jschmied.
+
 - GLM-5.3-Flash on CUDA: with `--learn-conversations`, conversation states are kept on disk through the rows store, so after an eviction or a restart the next turn reads its state back instead of prefilling the whole conversation; at TP>1 every rank's part goes to rank 0's disk, so a state is read back on every rank or none (#1411, fixes #1312). Thanks to @wojo.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_MTP_WEIGHTS=mxfp8` (opt-in) re-codes the MTP drafter's BF16 linears to MXFP8 as they load, so a draft pass reads about half their bytes; replies are unchanged because the verify forward checks every draft. `checkpoint`, the default (also unset or blank), keeps the rows as stored; any other value, `mxfp8` on Metal or HIP, or a drafter linear stored as anything but BF16 stops the start naming the setting (#3218, refs #3162). Thanks to @BadAd84.
