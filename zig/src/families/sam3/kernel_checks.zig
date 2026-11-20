@@ -108,7 +108,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
         std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--baseline-gemm | --mps-ndarray | --compensated | --compensated-baseline]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
         std.debug.print("tf-sam3-kernels --replay-text CHECKPOINT REFERENCE.safetensors RECEIPT.json [--compensated-mlp]\n", .{});
-        std.debug.print("tf-sam3-kernels --replay-decoder CHECKPOINT REFERENCE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-normalization CAPTURE.safetensors RECEIPT.json [--compensated]\nProjection backends also accept --tensor-device[-compensated], --tensor-device-nn[-compensated], --tensor-device-gelu[-baseline] and --tensor-planes[-gelu][-compensated].\ntf-sam3-kernels --benchmark-planes | --benchmark-device-attention\nAttention operator backends accept --split-keys, --tensor32, --tensor64, --split32 and --split64.\n", .{});
+        std.debug.print("tf-sam3-kernels --replay-decoder CHECKPOINT REFERENCE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-normalization CAPTURE.safetensors RECEIPT.json [--compensated]\nProjection backends also accept --tensor-device[-compensated], --tensor-device-nn[-compensated], --tensor-device-gelu[-baseline], --tensor-planes[-gelu][-compensated] and --tensor-wide[-compensated | -gelu].\ntf-sam3-kernels --replay-trunk CHECKPOINT TRACE_DIR RECEIPT.json [ROLE=LAYOUT | only=TEXT]... | --calibrate-trunk CAPTURE.safetensors\ntf-sam3-kernels --benchmark-planes | --benchmark-device-attention\nAttention operator backends accept --split-keys, --tensor32, --tensor64, --split32 and --split64.\n", .{});
         return;
     }
     const text_replay = (args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "--replay-text");
@@ -121,8 +121,10 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     const projection_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-projection");
     const operator_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-operator");
     const mps_check = args.len == 3 and std.mem.eql(u8, args[1], "--check-mps-ndarray");
+    const trunk_replay = args.len >= 5 and std.mem.eql(u8, args[1], "--replay-trunk");
+    const trunk_calibration = args.len == 3 and std.mem.eql(u8, args[1], "--calibrate-trunk");
     const normalization_replay = (args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "--replay-normalization");
-    if (!normalization_replay and !decoder_replay and !text_replay and !replay and !projections and !planes_benchmark and !attention_benchmark and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
+    if (!trunk_replay and !trunk_calibration and !normalization_replay and !decoder_replay and !text_replay and !replay and !projections and !planes_benchmark and !attention_benchmark and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     const small_baseline = projection_replay and args.len == 5 and std.mem.eql(u8, args[4], "--compensated-baseline");
@@ -130,6 +132,8 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     defer g.deinit();
     g.guards = true;
     g.buffer_cache_limit = 32 << 20;
+    if (trunk_replay) return @import("trunk_replay.zig").run(init, &g, args[2..]);
+    if (trunk_calibration) return @import("trunk_replay.zig").calibrate(init, &g, args[2]);
     if (normalization_replay) return @import("normalization_replay.zig").run(init, &g, args[2..]);
     if (decoder_replay) return @import("decoder_replay.zig").run(init, &g, args[2..]);
     if (text_replay) return @import("text_replay.zig").run(init, &g, args[2..]);
@@ -144,6 +148,7 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2) return benchmark(&g);
     try checkGeluTails(&g);
     try checkProjectionDomains(&g);
+    try @import("wide_checks.zig").checkFlushedProducts(&g);
     try checkExpansionTinyInput(&g);
     try @import("planes_checks.zig").run(&g);
     try checkExactWeightProducts(&g);

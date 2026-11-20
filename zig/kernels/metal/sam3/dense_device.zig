@@ -1,4 +1,4 @@
-pub const source = @embedFile("dense_device.metal");
+pub const source = @embedFile("dense_device.metal") ++ @embedFile("dense_wide.metal");
 pub const names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device", "sam_dense_device_fallback" };
 pub const half_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_half_domain", "sam_dense_device_plan", "sam_dense_half_weight", "sam_dense_half_fallback" };
 pub const gelu_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_gelu", "sam_dense_device_gelu_fallback" };
@@ -6,6 +6,9 @@ pub const gelu_linear_names = [_][]const u8{ "sam_dense_device_clear", "sam_dens
 pub const compensated_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_compensated", "sam_dense_device_fallback" };
 pub const nn_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_nn", "sam_dense_device_nn_fallback" };
 pub const nn_compensated_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_nn_compensated", "sam_dense_device_nn_fallback" };
+pub const wide_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_wide_domain", "sam_dense_device_plan", "sam_dense_wide_plain", "sam_dense_device_fallback" };
+pub const wide_compensated_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_wide_domain", "sam_dense_device_plan", "sam_dense_wide_compensated", "sam_dense_device_fallback" };
+pub const wide_gelu_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_wide_domain", "sam_dense_device_plan", "sam_dense_wide_gelu", "sam_dense_device_gelu_fallback" };
 
 pub fn encode(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline, refs: anytype, shape: [3]u32, fallback: bool) void {
     const rows: usize = shape[0];
@@ -36,4 +39,37 @@ pub fn encode(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline,
         e.dispatchIndirect(refs[4].buffer, refs[4].offset + 16, mtl.Size.of(128, 1, 1));
         e.barrier();
     }
+}
+
+pub const operands_name = "sam_dense_wide_operands";
+pub const cached_names = [_][]const u8{ "sam_dense_wide_seed", "sam_dense_wide_rows" };
+
+/// Wide layout with cached weight flags: pipes seed, rows, plan, product, fallback; refs x, w, b, out, domain, flags.
+pub fn encodeCached(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [5]mtl.Pipeline, refs: anytype, shape: [3]u32) void {
+    const count: u32 = shape[0] * shape[2];
+    e.setPipeline(pipes[0]);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 0);
+    e.setBuffer(refs[5].buffer, refs[5].offset, 1);
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(32, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[1]);
+    e.setBuffer(refs[0].buffer, refs[0].offset, 0);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 1);
+    e.setValue(count, 2);
+    e.dispatchThreads(mtl.Size.of(@min(@max(count / 4, 4), 1 << 18), 1, 1), mtl.Size.of(256, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[2]);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 0);
+    e.setValue(shape, 1);
+    e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(128, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[3]);
+    for (0..4) |i| e.setBuffer(refs[i].buffer, refs[i].offset, i);
+    e.setValue(shape, 4);
+    e.setBuffer(refs[4].buffer, refs[4].offset, 5);
+    e.dispatchIndirect(refs[4].buffer, refs[4].offset + 4, mtl.Size.of(128, 1, 1));
+    e.barrier();
+    e.setPipeline(pipes[4]);
+    e.dispatchIndirect(refs[4].buffer, refs[4].offset + 16, mtl.Size.of(128, 1, 1));
+    e.barrier();
 }

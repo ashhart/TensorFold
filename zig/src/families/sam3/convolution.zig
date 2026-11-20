@@ -3,6 +3,7 @@ const gpu = @import("tensor_metal");
 const abi = @import("kernel_abi.zig");
 const runtime = @import("runtime.zig");
 const dense_device = @import("dense_device.zig");
+const projection = @import("projection.zig");
 const elementwise = @import("elementwise.zig");
 const Runtime = runtime.Runtime;
 const Routes = runtime.Routes;
@@ -174,6 +175,11 @@ pub fn upsample2(s: Scope, leaf: []const u8, x: FeatureMap) !FeatureMap {
     const start = rt.mark();
     const product = if (denseDeconv(rt.routes, out, in)) blk: {
         const zeros = try elementwise.hostFill(rt, 4 * out, 0);
+        if (info.dtype != .f16) {
+            if (rt.observer != null) try rt.observe(try rt.print("{s}.deconv.input", .{scope.path}), x.tensor, &.{ pixels, in });
+            const flags = try projection.wideFlags(scope, weight, zeros, 4 * out, in);
+            break :blk try rt.hold(try dense_device.runCached(rt.gpu, x.tensor, weight, zeros, flags, pixels, 4 * out, in, .wide));
+        }
         const into = try rt.deviceTensor(pixels * 4 * out, .f32);
         try dense_device.into(rt.gpu, x.tensor, weight, zeros, into, pixels, 4 * out, in, .nk);
         break :blk into;

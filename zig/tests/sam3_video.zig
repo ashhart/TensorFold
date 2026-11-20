@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
-            \\  --trace-layers (also capture each vision block)
+            \\  --trace-layers (also capture each vision block, and FP32 trunk projection inputs one file each)
             \\Reference comparisons exclude the seed frame and require one unchanged object.
             \\Default: exact binary masks. Approximate comparisons require --min-frame-iou.
             \\

@@ -69,7 +69,8 @@ pub const Trace = struct {
 
 fn check(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape: []const usize) !void {
     const self: *Trace = @ptrCast(@alignCast(context));
-    if (std.mem.startsWith(u8, name, "tracker.") or std.mem.startsWith(u8, name, "prompt.") or std.mem.startsWith(u8, name, "decoder.")) {
+    const input = self.layers and std.mem.endsWith(u8, name, ".input") and !std.mem.startsWith(u8, name, "tracker.");
+    if (input or std.mem.startsWith(u8, name, "tracker.") or std.mem.startsWith(u8, name, "prompt.") or std.mem.startsWith(u8, name, "decoder.")) {
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const a = arena.allocator();
@@ -78,8 +79,11 @@ fn check(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape
             .f16 => "F16",
             .bf16 => "BF16",
         }, .shape = shape, .bytes = value.slice(u8, value.count * value.dtype.size()) }});
-        const path = try std.fmt.allocPrint(a, "frame-{d:0>6}-stage-{d:0>3}-{s}.safetensors", .{ self.current_frame, self.stage, name });
-        self.stage += 1;
+        const path = if (input)
+            try std.fmt.allocPrint(a, "frame-{d:0>6}-{s}.safetensors", .{ self.current_frame, name })
+        else
+            try std.fmt.allocPrint(a, "frame-{d:0>6}-stage-{d:0>3}-{s}.safetensors", .{ self.current_frame, self.stage, name });
+        self.stage += @intFromBool(!input);
         const file = try self.dir.createFile(self.io, path, .{ .exclusive = true });
         defer file.close(self.io);
         try file.writeStreamingAll(self.io, bytes);
@@ -91,6 +95,7 @@ const Context = struct { a: std.mem.Allocator, entries: *std.ArrayList(fixture.E
 
 fn record(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape: []const usize) !void {
     const sink: *Context = @ptrCast(@alignCast(context));
+    if (std.mem.endsWith(u8, name, ".input")) return;
     try tensor(sink.a, sink.entries, name, value, shape);
 }
 

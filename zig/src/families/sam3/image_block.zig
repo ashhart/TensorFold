@@ -56,12 +56,14 @@ fn runFp32(rt: *Runtime, block: Scope, x: Tensor, full_grid: bool, table: rotary
     var n1 = try norms.trunkPlanes(block, "norm1", x, norm_eps, qkv_planes, tiled) orelse
         try norms.layerNorm(block, "norm1", x, norm_eps, .trunk);
     if (tiled and n1.dtype == .f32) n1 = try spatial.tiles(rt, n1, width, .into_tiles);
+    try observeInput(block, "attn.qkv", n1, width);
     const z = if (qkv_planes)
         try projection.trunkPlanes(block, "attn.qkv", n1, .qkv, null, false)
     else
         try projection.trunkFp32(block, "attn.qkv", n1, .qkv);
     const q, const k, const v = try rotary.splitRotate(rt, z, table, .f32);
     const o = try attention.trunk(rt, q, k, v, full_grid);
+    try observeInput(block, "attn.proj", o, width);
     const x1 = if (try projection.takesPlanes(block, "attn.proj", .attention_out))
         try projection.trunkPlanes(block, "attn.proj", o, .attention_out, x, tiled)
     else
@@ -71,13 +73,22 @@ fn runFp32(rt: *Runtime, block: Scope, x: Tensor, full_grid: bool, table: rotary
     const fc1_planes = fc2_planes and try projection.takesPlanes(block, "mlp.fc1", .expand);
     const n2 = try norms.trunkPlanes(block, "norm2", x1, norm_eps, fc1_planes, false) orelse
         try norms.layerNorm(block, "norm2", x1, norm_eps, .trunk);
+    try observeInput(block, "mlp.fc1", n2, width);
     const e = if (fc1_planes)
         try projection.trunkPlanes(block, "mlp.fc1", n2, .expand, null, false)
     else
         try projection.trunkFp32(block, "mlp.fc1", n2, .expand);
     if (fc2_planes) return projection.trunkPlanes(block, "mlp.fc2", e, .contract, x1, false);
+    try observeInput(block, "mlp.fc2", e, rt.config.vision_mlp);
     const contracted = try projection.trunkFp32(block, "mlp.fc2", e, .contract);
     return elementwise.add(rt, x1, contracted);
+}
+
+// Under an observer, records an FP32 trunk projection's input as `<leaf key>.input`.
+fn observeInput(block: Scope, leaf: []const u8, x: Tensor, width: usize) !void {
+    const rt = block.rt;
+    if (rt.observer == null or x.dtype != .f32) return;
+    try rt.observe(try rt.print("{s}.{s}.input", .{ block.path, leaf }), x, &.{ x.count / width, width });
 }
 
 fn attentionOut(rt: *Runtime, block: Scope, o: Tensor, x: Tensor, tiled: bool) !Tensor {

@@ -69,14 +69,27 @@ const TrunkKernel = enum { affine, affine_gelu, dense, dense_half, dense_gelu, d
 
 fn trunkKernel(exact_device: bool, weight_f16: bool, operand_exact: bool, role: TrunkRole) TrunkKernel {
     if (!exact_device) return if (role == .expand) .affine_gelu else .affine;
-    if (!weight_f16) return switch (role) {
-        .qkv, .attention_out, .contract => .dense,
-        .expand => .dense_gelu,
-    };
+    if (!weight_f16) return .dense;
     return switch (role) {
         .qkv, .attention_out => .dense_half,
         .expand => if (operand_exact) .exact_expansion else .dense_gelu,
         .contract => .dense_compensated,
+    };
+}
+
+/// The weight and bias domain flags of the wide layouts for the weight under `p`, computed once and kept.
+pub fn wideFlags(p: Scope, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
+    const name = try p.rt.print("wide-operands.{s}", .{try p.key("weight")});
+    if (p.rt.constant(name)) |flags| return flags;
+    return p.rt.adoptConstant(name, try dense_device.operandFlags(p.rt.gpu, weight, bias, cols, depth));
+}
+
+/// The device layout of a trunk projection whose checkpoint weight is not FP16.
+pub fn fp32WeightLayout(role: TrunkRole) dense_device.Layout {
+    return switch (role) {
+        .qkv, .attention_out => .wide,
+        .expand => .wide_gelu,
+        .contract => .wide_compensated,
     };
 }
 
@@ -104,7 +117,7 @@ pub fn trunkFp32(s: Scope, leaf: []const u8, x: Tensor, role: TrunkRole) !Tensor
     const weight = full orelse if (kernel == .dense_half) try rt.paramAs(try p.key("weight"), .f16) else try p.param("weight");
     const g = rt.gpu;
     return rt.hold(try switch (kernel) {
-        .dense => dense_device.run(g, x, weight, bias, rows, cols, depth, .nk),
+        .dense => dense_device.runCached(g, x, weight, bias, try wideFlags(p, weight, bias, cols, depth), rows, cols, depth, fp32WeightLayout(role)),
         .dense_half => dense_device.run(g, x, weight, bias, rows, cols, depth, .nk_half),
         .dense_gelu => dense_device.run(g, x, weight, bias, rows, cols, depth, .nk_gelu),
         .dense_compensated => dense_device.run(g, x, weight, bias, rows, cols, depth, .nk_compensated),
@@ -170,11 +183,12 @@ test "SAM trunk projection route follows the exact device route, weight dtype an
         try expect(TrunkKernel.dense_half, trunkKernel(true, true, exact, .qkv));
         try expect(TrunkKernel.dense_half, trunkKernel(true, true, exact, .attention_out));
         try expect(TrunkKernel.dense_compensated, trunkKernel(true, true, exact, .contract));
-        try expect(TrunkKernel.dense, trunkKernel(true, false, exact, .qkv));
-        try expect(TrunkKernel.dense, trunkKernel(true, false, exact, .attention_out));
-        try expect(TrunkKernel.dense_gelu, trunkKernel(true, false, exact, .expand));
-        try expect(TrunkKernel.dense, trunkKernel(true, false, exact, .contract));
+        for ([_]TrunkRole{ .qkv, .attention_out, .expand, .contract }) |role| try expect(TrunkKernel.dense, trunkKernel(true, false, exact, role));
     }
+    try expect(dense_device.Layout.wide, fp32WeightLayout(.qkv));
+    try expect(dense_device.Layout.wide, fp32WeightLayout(.attention_out));
+    try expect(dense_device.Layout.wide_gelu, fp32WeightLayout(.expand));
+    try expect(dense_device.Layout.wide_compensated, fp32WeightLayout(.contract));
     try expect(TrunkKernel.exact_expansion, trunkKernel(true, true, true, .expand));
     try expect(TrunkKernel.dense_gelu, trunkKernel(true, true, false, .expand));
 }
