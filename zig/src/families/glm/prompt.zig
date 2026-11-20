@@ -449,7 +449,7 @@ fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: us
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, p.sscore });
     e.setValue([5]u32{ p0, c.qrProj(), c.i_heads, s_stride, n }, 4);
     const rows = if (x.k.m3_fast) 32 else scoreRows(most, n);
-    e.dispatchGroups(size((most + 63) / 64, (n + rows - 1) / rows, 1), size(2 * rows, 1, 1));
+    e.dispatchGroups(size((most + 63) / 64, (n + rows - 1) / rows, 1), size(if (x.k.m3_fast) 128 else 2 * rows, 1, 1));
     e.setPipeline(x.k.index_select);
     bind(e, 0, .{ p.sscore, indices });
     e.setValue([5]u32{ p0, c.i_topk / c.kpool, c.keyWidth(), s_stride, c.keyWidth() }, 2);
