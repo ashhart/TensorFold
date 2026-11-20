@@ -48,6 +48,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM tests: the shared-window check sizes its comparison buffers and per-stream arrays from the engine's window_rows instead of a literal row count, so a stream bringing more rows into a shared verify is reported rather than written past the arrays (#5394). Thanks to @BadAd84.
 
 
+- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
+
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
@@ -1129,7 +1131,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: a one-GB10 recipe serves DeepSeek-V4-Pro-Qwen3.5-9B from a locally converted MLX 4-bit checkpoint, thinking and drafts off, with its health, model-list and chat checks (#4085, fixes #3905).
 
 - Qwen 3.5/3.6/3.8 on CUDA: `TF_QWEN35_CHUNK_SOLO=8192` lets a foreground prompt pass take up to 8,192 rows while no other stream decodes, back to 4,096 once one does and in background warm passes; unset or 4096 is off, and tokens match it off (#3294). Thanks to @jschmied.
-- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
 
 - Docs: the Flash Next CUDA recipe pulls the checkpoint and serves it by name, and supported models gives it as a 105.5 GiB download of which 73.3 GiB goes to the GPU (#4024). Thanks to @jayleaton.
 
