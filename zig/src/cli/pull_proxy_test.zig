@@ -267,8 +267,8 @@ test "pull proxy: http_proxy carries the hub request and the storage redirect ho
     defer ps.finish();
     const r = try runPull(a, io, &.{
         .{ "HF_ENDPOINT", try std.fmt.allocPrint(a, "http://hub.test:{d}", .{hs.port()}) },
-        .{ "http_proxy", try std.fmt.allocPrint(a, "http://ana:s3cret@127.0.0.1:{d}", .{ps.port()}) },
         .{ "HTTP_PROXY", try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{try closedPort(io)}) },
+        .{ "http_proxy", try std.fmt.allocPrint(a, "http://ana:s3cret@127.0.0.1:{d}", .{ps.port()}) },
     });
     defer Io.Dir.cwd().deleteTree(io, r.root) catch {};
     try std.testing.expectEqual(@as(u8, 0), r.code);
@@ -303,7 +303,8 @@ test "pull proxy: HTTPS_PROXY carries an https hub request, and a refusal says w
         try std.testing.expectEqual(@as(u8, 1), r.code);
         try std.testing.expect(https_proxy.saw("CONNECT hub.test:8443 HTTP/1.1"));
         try std.testing.expectEqual(@as(usize, 0), http_proxy.count);
-        const says = try std.fmt.allocPrint(a, "the proxy http://127.0.0.1:{d} (from HTTPS_PROXY) {s}", .{ ps.port(), c[1] });
+        const name = if (@import("builtin").os.tag == .windows) "https_proxy" else "HTTPS_PROXY";
+        const says = try std.fmt.allocPrint(a, "the proxy http://127.0.0.1:{d} (from {s}) {s}", .{ ps.port(), name, c[1] });
         if (std.mem.indexOf(u8, r.err, says) == null) {
             std.debug.print("pull said: {s}\n", .{r.err});
             return error.TestUnexpectedResult;
