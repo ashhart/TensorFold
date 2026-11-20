@@ -129,7 +129,7 @@ pub const usage =
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
-    \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
+    \\  kernel-contract [WORD...] [--jobs N | --shard K/N [--device D]]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so; --help
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
