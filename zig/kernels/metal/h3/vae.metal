@@ -72,17 +72,22 @@
   const uint BLOCK = 256;
   for (uint k0 = 0; k0 < rows; k0 += BLOCK) {
     const uint kend = min(k0 + BLOCK, rows);
-    threadgroup float bmax[1];
-    if (tid == 0) bmax[0] = -1e30f;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // per-thread local max first, then a tree reduction through shared memory
+    float local_max = -1e30f;
     for (uint k = k0 + tid; k < kend; k += threads) {
       float dot = 0.0f;
       const device float* kk = kbase + k * 3 * dim + head * 3 * hd + hd;
       for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
       dot *= rsqrt(float(hd));
-      if (dot > bmax[0]) bmax[0] = dot;
+      if (dot > local_max) local_max = dot;
     }
+    threadgroup float bmax[256];
+    bmax[tid] = local_max;
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threads / 2; stride > 0; stride /= 2) {
+      if (tid < stride) bmax[tid] = max(bmax[tid], bmax[tid + stride]);
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
     const float bm = max(bmax[0], run_max);
     const float rescale = exp(run_max - bm);
     for (uint k = k0 + tid; k < kend; k += threads) {
@@ -98,7 +103,19 @@
     run_max = bm;
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  for (uint i = tid; i < hd; i += threads) Y[(head * rows + r) * hd + i] = acc[i] / run_sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // reduce run_sum across the threadgroup (each thread holds a partial sum)
+  threadgroup float sums[256];
+  sums[tid] = run_sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = threads / 2; stride > 0; stride /= 2) {
+    if (tid < stride) sums[tid] += sums[tid + stride];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const float total = sums[0];
+  for (uint i = tid; i < hd; i += threads) {
+    Y[r * dim + head * hd + i] = total > 0.0f ? acc[i] / total : 0.0f;
+  }
 }
 
 // LayerNorm affine: mean/var in fp32, then (x - mean) / std * w + b.

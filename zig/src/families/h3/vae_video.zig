@@ -474,10 +474,44 @@ pub const Decoder = struct {
         // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
         // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
         // real attention kernel replaces this in the next stage)
+        const rope = try self.device.buffer(rows * 48 * 2 * 4, mtl.ResourceOptions.shared);
+        const rope_h = rope.slice(f32, rows * 48);
+        const rope_s = rope.slice(f32, rows * 48)[rows * 48 ..];
+        var pos: usize = 0;
+        for (0..depth) |t| {
+            for (0..height) |h| {
+                for (0..width) |w| {
+                    const pt = 2.0 * (@as(f32, @floatFromInt(t)) + 0.5) / @as(f32, @floatFromInt(depth)) - 1.0;
+                    const ph = 2.0 * (@as(f32, @floatFromInt(h)) + 0.5) / @as(f32, @floatFromInt(height)) - 1.0;
+                    const pw = 2.0 * (@as(f32, @floatFromInt(w)) + 0.5) / @as(f32, @floatFromInt(width)) - 1.0;
+                    const pos_val = [3]f32{ pt, ph, pw };
+                    var k2: usize = 0;
+                    for (0..3) |axis| {
+                        for (0..8) |f| {
+                            const inv = std.math.pow(f32, 100.0, -@as(f32, @floatFromInt(f)) * 0.125);
+                            const a = pos_val[axis] * inv;
+                            rope_h[pos * 48 + k2] = @cos(a);
+                            rope_s[pos * 48 + k2] = @sin(a);
+                            rope_h[pos * 48 + 24 + k2] = @cos(a);
+                            rope_s[pos * 48 + 24 + k2] = @sin(a);
+                            k2 += 1;
+                        }
+                    }
+                    pos += 1;
+                }
+            }
+        }
+        for (pos..rows) |rr| {
+            for (0..48) |k2| {
+                rope_h[rr * 48 + k2] = 1.0;
+                rope_s[rr * 48 + k2] = 0.0;
+            }
+        }
         e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
         e.setBuffer(attended, 0, 1);
-        e.setValue([1]u32{ @intCast(rows) }, 2);
+        e.setBuffer(rope, 0, 2);
+        e.setValue([1]u32{ @intCast(rows) }, 3);
         e.dispatchGroups(mtl.Size.of(rows, 32, 1), mtl.Size.of(128, 1, 1));
         e.barrier();
 
