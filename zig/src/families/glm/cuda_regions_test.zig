@@ -58,6 +58,7 @@ const Rig = struct {
     fn init(r: *Rig) void {
         r.d = undefined;
         r.d.api.cuLaunchKernel = Rec.run;
+        r.d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Rec.run);
         r.d.api.cuModuleGetFunction = Rec.function;
         inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(r.ks, name) = .{ .d = &r.d, .handle = @ptrFromInt(10) };
         r.ks.lat_write.handle = @ptrFromInt(Rec.lat_write);

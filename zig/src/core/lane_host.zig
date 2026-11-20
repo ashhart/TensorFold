@@ -354,7 +354,6 @@ pub const LaneHost = struct {
         const began = h.setup(job) orelse return true;
         return h.launch(job, began);
     }
-
     pub const Taken = union(enum) { none, failed, job: *Job };
 
     /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
@@ -363,7 +362,7 @@ pub const LaneHost = struct {
         // a request past a whole class is refused first: no lane need free; else none free, or a pool's head waits
         const at = admit.refused(h) orelse admit.pick(h) orelse {
             h.unlock();
-            return .none;
+            return .none; // no lane free, or none may go: a shared cache pool's head waits for room
         };
         if (ledger.never(h, h.queued.items[at])) |why| { // past the budget alone or a class: no release makes it fit
             const job = h.queued.orderedRemove(at);

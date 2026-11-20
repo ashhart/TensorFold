@@ -1,7 +1,12 @@
 //! How an engine admits a request beside its running streams: a fit check, or a byte budget it promises from.
 const kv_ledger = @import("kv_ledger.zig");
 
-pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
+pub const Admit = struct {
+    ctx: *anyopaque,
+    fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
+    /// The owner classes a request's pages need (kv_ledger.classes.Need); null: the family is not class-aware.
+    need: ?*const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) kv_ledger.classes.Need = null,
+};
 
 /// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
 pub const Ledger = struct {
