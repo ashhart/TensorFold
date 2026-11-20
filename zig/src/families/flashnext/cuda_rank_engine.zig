@@ -8,6 +8,7 @@ const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const verify_rows = @import("cuda_rank_verify.zig");
+const telemetry = @import("cuda_prompt_telemetry.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -202,7 +203,7 @@ pub const Session = struct {
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
         if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
         try tokenIds(ids);
-        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
+        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .arg = telemetry.forwardArg(s.engine.telemetry, q.fed), .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
         errdefer s.poison();
         try s.engine.forward(Tri, tri, q, ids, hooks);
         try s.ack(h);
@@ -264,6 +265,7 @@ pub const Session = struct {
         kept.rank_id = s.next_object;
         s.next_object = std.math.add(u64, s.next_object, 1) catch return error.BadRankFrame;
         const h = try s.command(.{ .kind = .save, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+        errdefer s.poison();
         try s.ack(h);
         return kept;
     }
@@ -335,6 +337,8 @@ pub const Session = struct {
                 defer s.gpa.free(ids);
                 for (ids, 0..) |*v, i| v.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
                 try tokenIds(ids);
+                const telemetry_scope = s.engine.telemetry.enter(try telemetry.phaseFromArg(h.arg));
+                defer telemetry_scope.restore();
                 try s.engine.forward(Tri, tri, q, ids, .{ .logits = @fromBackingInt(@intCast(h.flags)) });
             },
             .round => {
@@ -392,6 +396,7 @@ pub const Session = struct {
             .restore => {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
+                s.engine.round_graph.clear();
                 try snaps.restore(s.engine.stream.*, q, null, kept);
                 if (s.windows.getPtr(h.object)) |w| w.reset(); // its pending rows were the old state's
             },
@@ -432,7 +437,10 @@ pub fn shape(h: wire.Header) !void {
     switch (h.kind) {
         .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .media => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 64) return error.BadRankFrame,
-        .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
+        .forward => {
+            _ = try telemetry.phaseFromArg(h.arg);
+            if (h.object == 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame;
+        },
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .verify_many => if (h.object != 0 or h.flags != 0 or h.arg == 0 or h.arg > verify_rows.max_windows or h.bytes < 16 * h.arg or h.bytes > verify_rows.max_bytes) return error.BadRankFrame,

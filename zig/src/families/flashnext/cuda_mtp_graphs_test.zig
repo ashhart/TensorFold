@@ -96,7 +96,10 @@ const Draft = struct {
     keep: parts.Keep = .{},
 };
 
-const Scratch = struct { s: *const parts.Scratch };
+const Scratch = struct {
+    s: *const parts.Scratch,
+    m: struct { layers: []const @import("cuda_prompt_load.zig").Layer = &.{} } = .{},
+};
 
 const Piece = struct {
     o: struct { e: *Engine },
