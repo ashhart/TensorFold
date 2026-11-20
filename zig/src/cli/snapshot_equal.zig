@@ -73,5 +73,10 @@ fn sameLink(io: Io, staged: Dir, cached: Dir, name: []const u8) !bool {
     var right_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const left_len = try staged.readLink(io, name, &left_buffer);
     const right_len = try cached.readLink(io, name, &right_buffer);
-    return std.mem.eql(u8, left_buffer[0..left_len], right_buffer[0..right_len]);
+    if (!std.mem.eql(u8, left_buffer[0..left_len], right_buffer[0..right_len])) return false;
+    return sameFile(io, staged, cached, name) catch |err| switch (err) {
+        // Download staging can omit blobs until its links are relocated into the cache layout.
+        error.FileNotFound => true,
+        else => err,
+    };
 }

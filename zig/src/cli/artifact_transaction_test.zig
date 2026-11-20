@@ -360,3 +360,32 @@ test "restart refuses a receipt that no longer describes its immutable pinned tu
     tx.deinit();
     try std.testing.expectError(error.BadTransactionReceipt, transaction.recover(a, io, root, p.resolved.id));
 }
+
+test "cached snapshot equality compares relative symlink target bytes" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "staged", "cached" }) |root| {
+        const snapshot = try std.fs.path.join(a, &.{ root, "snapshot" });
+        defer a.free(snapshot);
+        try tmp.dir.createDirPath(io, snapshot);
+        const blob_dir = try std.fs.path.join(a, &.{ root, "blobs" });
+        defer a.free(blob_dir);
+        try tmp.dir.createDirPath(io, blob_dir);
+        const blob = try std.fs.path.join(a, &.{ root, "blobs/weight" });
+        defer a.free(blob);
+        const config = try std.fs.path.join(a, &.{ root, "snapshot/config.json" });
+        defer a.free(config);
+        try tmp.dir.writeFile(io, .{ .sub_path = config, .data = "{}" });
+        const link = try std.fs.path.join(a, &.{ root, "snapshot/weight" });
+        defer a.free(link);
+        try tmp.dir.symLink(io, "../blobs/weight", link, .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = blob, .data = if (std.mem.eql(u8, root, "staged")) "staged" else "cached" });
+    }
+    const staged = try tmp.dir.realPathFileAlloc(io, "staged/snapshot", a);
+    defer a.free(staged);
+    const cached = try tmp.dir.realPathFileAlloc(io, "cached/snapshot", a);
+    defer a.free(cached);
+    try std.testing.expect(!try @import("snapshot_equal.zig").equal(io, staged, cached));
+}
