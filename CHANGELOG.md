@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the last real-clock multi-rank bring-up tests run on the lockstep clock, so a busy CI runner cannot change their outcome (#4193).
+
 - CUDA contract: nvcc 13.3 resource records for 121 launches, clearing 408 stale lines on five-SM fatbins (#3953). Thanks to @Bizuayeu.
 
 
@@ -77,7 +79,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
 
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
-- Tests: the last real-clock multi-rank bring-up tests run on the lockstep clock, so a busy CI runner cannot change their outcome (#4193).
 
 - Server: a reply that ends on its own end-of-sequence inside a think block it never closed now returns that text as its answer only when the request asked for reasoning and no tool call was required, no grammar applied and no call was streamed, and the server logs a warning when it does (#3721, refs #3687). Thanks to @joshuaswarren.
 
