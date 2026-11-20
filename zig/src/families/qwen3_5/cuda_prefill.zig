@@ -72,6 +72,17 @@ test "a yielded pass keeps its completed prefix and stops before the next chunk,
     const FakeEngine = struct {
         scratch_rows: usize = 2 * E.grid_rows, // TF_QWEN35_CHUNK_SOLO=8192
         forwards: usize = 0,
+        layers: [2]void = .{ {}, {} },
+        taps: [1]u32 = undefined,
+        n_taps: usize = 0,
+        learning: ?*const anyopaque = null,
+        mlp: ?*const anyopaque = null,
+        pockets: struct {
+            pub fn any(_: *const @This()) bool {
+                return false;
+            }
+        } = .{},
+        int8: struct { on: bool = false } = .{},
         fn forward(self: *@This(), parts: []const E.Part, ids_: []const u32, _: E.Keep) !void {
             self.forwards += 1;
             parts[0].cache.len += ids_.len;
