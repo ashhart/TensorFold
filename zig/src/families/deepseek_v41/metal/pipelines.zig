@@ -57,6 +57,7 @@ pub const Pipelines = struct {
     route_dspark: ?mtl.Pipeline,
     topk512: mtl.Pipeline,
     cand: mtl.Pipeline,
+    cand_segs: mtl.Pipeline,
     xmma: xmma.Pipelines,
     fused: fused.Pipelines,
     hc: hc.Pipelines,
@@ -94,6 +95,8 @@ pub const Pipelines = struct {
         errdefer p.topk512.deinit();
         p.cand = try cand.load(device);
         errdefer p.cand.deinit();
+        p.cand_segs = try cand.loadSegs(device);
+        errdefer p.cand_segs.deinit();
         p.xmma = try xmma.Pipelines.load(a, device);
         errdefer p.xmma.deinit();
         p.fused = try fused.Pipelines.load(device);
@@ -121,6 +124,7 @@ pub const Pipelines = struct {
         if (p.route_dspark) |r| r.deinit();
         p.topk512.deinit();
         p.cand.deinit();
+        p.cand_segs.deinit();
         p.xmma.deinit();
         p.fused.deinit();
         p.hc.deinit();

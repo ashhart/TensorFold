@@ -46,6 +46,8 @@ jobs:
         id: runtime
         env:
           TF_ENGINE_TAG: ${{ inputs.tag || 'latest' }}
+          # read-only token: shared hosted macOS runners hit GitHub's unauthenticated API limit (1.3.2: HTTP 403)
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           for attempt in 1 2 3; do

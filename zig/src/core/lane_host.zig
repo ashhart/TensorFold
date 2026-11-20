@@ -107,7 +107,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = fill.decodeShare.resolved(info_.decode_share, info_.default_decode_share), .decode_cap = fill.decodeShare.capped(info_.decode_share, info_.default_decode_share), .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
