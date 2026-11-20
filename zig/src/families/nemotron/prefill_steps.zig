@@ -9,8 +9,9 @@ pub const Steps = struct {
     at: std.AutoHashMapUnmanaged(*Stream, usize) = .empty,
     ids: ?*Stream = null,
 
-    /// A retired stream cannot remain the shared prompt buffer's owner, even if its address is reused.
-    pub fn forget(steps: *Steps, s: *Stream) void {
+    /// A retired stream cannot remain the shared prompt buffer's owner, even if its address is reused; its pass ends.
+    pub fn forget(steps: *Steps, ops: anytype, s: *Stream) void {
+        ops.end(s, false);
         _ = steps.at.remove(s);
         if (steps.ids == s) steps.ids = null;
     }
@@ -23,19 +24,21 @@ pub fn absorbed(at: usize, rows: usize, n: usize) usize {
 
 /// One chunk from `at` at today's cut (`flight.rows`), submitted on `b`; the row after it.
 pub fn chunk(b: anytype, ops: anytype, s: *Stream, at: usize, next: *usize) !usize {
-    const rows = flight.rows(s, at, ops.cap(), ops.decision(s), next);
+    const rows = flight.rows(s, at, ops.cap(), ops.decision(s), ops.marks(s), next);
     if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
     try ops.grow(s, at + rows);
     try flight.submit(b, s, ops.body(s, at, rows));
     const end = at + rows;
     s.fill_at.store(@intCast(at), .monotonic); // landed tokens only: the newest chunk is still queued on the GPU
     if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
+    ops.mark(s, end);
     return end;
 }
 
 /// The whole pass (the vtable's `prefill`), as before: one chunk queued while the next is encoded.
 pub fn whole(b: anytype, ops: anytype, s: *Stream) !void {
     var at = try ops.open(s);
+    errdefer ops.end(s, false);
     var next: usize = 0;
     while (at < s.prompt_len) at = chunk(b, ops, s, at, &next) catch |err| {
         if (err == error.Cancelled) try retain(b, s, at);
@@ -53,6 +56,7 @@ pub fn step(b: anytype, ops: anytype, s: *Stream) !bool {
         return e;
     };
     errdefer _ = map.remove(s);
+    errdefer ops.end(s, false);
     // Another prompt's ids may replace the shared buffer only after all its readers have landed.
     if (ops.steps().ids != s) {
         try b.drain();
@@ -80,6 +84,7 @@ pub fn cancel(b: anytype, ops: anytype, s: *Stream) !void {
 
 fn retain(b: anytype, s: *Stream, at: usize) !void {
     try b.drain();
+    ops.end(s, false); // adopted pages the lane never took go back, the marks are freed
     s.fill_at.store(@intCast(at), .monotonic);
     s.keepInterruptedPrefill(@intCast(at));
 }

@@ -8,6 +8,7 @@ const kv_pages = @import("kv_pages.zig");
 const lesson_route = @import("living").lesson_route;
 const layers = @import("layers.zig");
 const snapshot = @import("snapshot.zig");
+const prompt_pages = @import("prompt_pages.zig");
 const pass = @import("prefill_steps.zig");
 const Metal = backend.Metal;
 
@@ -51,7 +52,7 @@ const Chunks = struct {
 };
 
 /// The device side of a pass for prefill_steps.zig: a stream's cache, the shared prompt buffer, each chunk's encode.
-const Ops = struct {
+pub const Ops = struct {
     m: *Metal,
 
     pub fn steps(o: Ops) *pass.Steps {
@@ -93,10 +94,13 @@ const Ops = struct {
             self.gpa.destroy(old);
             _ = self.caches.remove(s);
         }
-        const c = try @import("residency.zig").openCache(self, s, rows_needed);
+        o.end(s, false); // a pass of this stream left open goes with its old cache
+        var p = try prompt_pages.Pass.begin(self, s);
+        errdefer p.end(self, s, false);
+        const c = try @import("residency.zig").openCache(self, s, rows_needed, p.held());
         o.load(s);
         s.cached = 0;
-        var at: usize = 0;
+        var at = try p.resume_(self, s, c); // TF_KV_SHARE: the store's kept pages and state
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
@@ -105,11 +109,27 @@ const Ops = struct {
             s.cached = @intCast(at);
             s.reuse_failed = at == 0;
         }
+        if (p.on) try self.passes.put(self.gpa, s, p); // the pass lives across prefill_step calls
         s.fill_at.store(@intCast(at), .monotonic); // a restored prefix is done the moment it is restored
         return at;
     }
 
+    /// TF_KV_SHARE: the store's marks for this pass, where a chunk must end (none without the store).
+    pub fn marks(o: Ops, s: *lanes.Stream) []const u32 {
+        return if (o.m.passes.getPtr(s)) |p| p.marks else &.{};
+    }
+    /// A chunk ended at `at`: at one of the store's marks the store keeps the stream's pages and state.
+    pub fn mark(o: Ops, s: *lanes.Stream, at: usize) void {
+        if (o.m.passes.getPtr(s)) |p| p.mark(o.m, s, o.cache(s), at);
+    }
+    /// The pass's store plan ends (once): its line when `ok`, pages it never adopted back, its marks freed.
+    pub fn end(o: Ops, s: *lanes.Stream, ok: bool) void {
+        var kv = o.m.passes.fetchRemove(s) orelse return;
+        kv.value.end(o.m, s, ok);
+    }
+
     pub fn finish(o: Ops, s: *lanes.Stream) !void {
+        o.end(s, true);
         const c = o.cache(s);
         if (o.m.trace and c.decide != lesson_route.none) try traceLessons(o.m, c);
     }

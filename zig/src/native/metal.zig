@@ -16,14 +16,14 @@ const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
-const nemo_disk = @import("nemotron_disk.zig");
+const prompt_pages = @import("cuda_prompt_pages.zig"); // the family-side store adapter, over the core pool as on CUDA
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
 const metal_shared = @import("metal_shared.zig");
 pub const chip = metal_shared.chip;
 pub const deviceName = metal_shared.deviceName;
 const prefillStep = metal_shared.prefillStep;
-const modelContext = metal_shared.modelContext;
+const modelContext = @import("cuda_window.zig").modelContext; // the window from config.json, as CUDA reads it
 const gibBytes = metal_shared.gibBytes;
 
 pub const backends: []const []const u8 = &.{"metal"};
@@ -94,6 +94,7 @@ const Host = struct {
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: prompts kept as the pool's pages (no `cache` then)
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
 
@@ -119,6 +120,7 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
         if (h.learned) |*m| m.deinit();
+        if (h.prompts) |x| x.close(); // the store's pages back before the pool goes
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         nemotron.residency.drop(h);
@@ -239,14 +241,24 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return e;
     };
     h.host.info_.prompt_cache_plan = plan;
-    if (plan.budget_bytes > 0) {
+    const share = paged != null and try tf.kv_prompts.sharing() > 0; // TF_KV_SHARE: prompts kept as pool pages
+    if (share and o.learn_conversations) {
+        problem.* = "--learn-conversations writes the host prompt cache's states, and TF_KV_SHARE keeps prompts as pool pages instead: serve with one of the two";
+        return error.KvShareLearns;
+    }
+    h.prompts = null;
+    if (share and plan.budget_bytes > 0) {
+        h.prompts = try prompt_pages.Adapter.openOnGrid(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), @intCast(h.metal.o.chunk), a, problem);
+        h.host.info_.prompt_cache = true;
+    } else if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &nemo_disk.image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &@import("nemotron_disk.zig").image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
+    errdefer if (h.prompts) |x| x.close();
     h.learned = null;
     if (o.learn) |root| {
         const id = @import("metal_identity.zig").learned(a, io, o.dir, h.metal) catch |e| {
@@ -310,31 +322,12 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
-/// Whether `dir` opens on the Qwen3.8-27B-class engine: the 27B-class qwen3_5 checkpoints, and Qwen3.5-MoE.
-fn ownsQwen27(a: Allocator, io: std.Io, t: []const u8, dir: []const u8) bool {
-    return (std.mem.eql(u8, t, "qwen3_5") and @import("qwen27_engine.zig").owns(a, io, dir)) or std.mem.eql(u8, t, "qwen3_5_moe");
-}
-
-/// The context a Qwen3.8-27B-class start serves (--context, else 32,768); null with `problem` set past 1 to 262,144.
-fn qwen27Context(a: Allocator, context: ?i64, problem: *[]const u8) !?u32 {
-    const n = context orelse 32768;
-    if (n <= 0 or n > 262144) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside this Qwen checkpoint's 1 to 262,144 tokens", .{n});
-        return null;
-    }
-    return @intCast(n);
-}
-
-pub const Qwen27Budget = @import("qwen27_reserve.zig").Budget;
-/// What a Qwen3.8-27B-class start keeps free of its working set.
-pub const qwen27_margin = tf.qwen27.prompt_memory.margin;
-
-/// `serve`'s startup charge for a Qwen3.8-27B-class `dir` (no drafter or images); null for others or a refused context.
-pub fn qwen27Budget(a: Allocator, io: std.Io, t: []const u8, dir: []const u8, weights: u64, context: ?i64, streams: u32, fixed: bool, problem: *[]const u8) !?Qwen27Budget {
-    if (!ownsQwen27(a, io, t, dir)) return null;
-    const n = try qwen27Context(a, context, problem) orelse return null;
-    return try @import("qwen27_reserve.zig").budget(a, io, dir, weights, n, streams, fixed);
-}
+const metal_qwen27 = @import("metal_qwen27.zig"); // the Qwen3.8-27B-class start's checks and charge
+const ownsQwen27 = metal_qwen27.ownsQwen27;
+const qwen27Context = metal_qwen27.qwen27Context;
+pub const Qwen27Budget = metal_qwen27.Qwen27Budget;
+pub const qwen27_margin = metal_qwen27.qwen27_margin;
+pub const qwen27Budget = metal_qwen27.qwen27Budget;
 
 /// Qwen3.8-27B and Qwen3.5-MoE on the lane host: shared rounds, DFlash2 drafts for up to TF_Q27_DRAFT_SLOTS streams.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
