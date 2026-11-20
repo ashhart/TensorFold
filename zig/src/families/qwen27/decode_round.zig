@@ -14,6 +14,7 @@ const GdnPool = @import("gdn_pool_gpu.zig").Pool;
 const GdnHook = @import("gdn_hook.zig").Hook;
 const GdnPlan = @import("gdn_plan.zig").Plan;
 const Round = @import("round_plan.zig").Round;
+const fingerprint = @import("round_fingerprint.zig").fingerprint;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
@@ -591,21 +592,3 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
-
-fn fingerprint(round: *const Round) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update(std.mem.sliceAsBytes(round.ids));
-    hash.update(std.mem.sliceAsBytes(round.slots));
-    hash.update(std.mem.sliceAsBytes(round.feed_positions));
-    hash.update(std.mem.sliceAsBytes(round.draw_positions));
-    hash.update(std.mem.sliceAsBytes(round.firsts));
-    for (round.windows) |window| {
-        hash.update(std.mem.asBytes(&window.start));
-        hash.update(std.mem.asBytes(&window.taps));
-        hash.update(std.mem.sliceAsBytes(window.parents));
-        hash.update(std.mem.sliceAsBytes(window.conv));
-    }
-    var out: [32]u8 = undefined;
-    hash.final(&out);
-    return out;
-}
