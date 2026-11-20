@@ -224,7 +224,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
             request.think_close = srv.think_close;
             request.think_end = srv.think_close_end;
         }
-        @import("tool_think.zig").apply(&request, srv.info.capability(.thinking_budget) and (fields_mod.flag(f, "tool_call_required") orelse false), srv.think_close, srv.think_close_end);
+        @import("tool_think.zig").apply(&request, srv.config.tool_think_close and srv.info.capability(.thinking_budget) and (fields_mod.flag(f, "tool_call_required") orelse false), srv.think_close, srv.think_close_end);
         // The answer quota is separate only on engines that enforce it.
         if (srv.info.capability(.answer_limit)) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }

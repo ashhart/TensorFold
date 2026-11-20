@@ -75,6 +75,7 @@ test {
     _ = @import("tool_grammar_lfm2.zig");
     _ = @import("tool_grammar_lfm2_test.zig");
     _ = @import("tool_required_test.zig");
+    _ = @import("tool_think_test.zig");
     _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
     _ = @import("grammar_compile_test.zig");

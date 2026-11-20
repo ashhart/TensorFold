@@ -807,6 +807,10 @@ Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
 uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
 whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
 starts after the think-end token. A reply cut short by `max_tokens` can remain incomplete and ends as `length`.
+With `--tool-think-close` (off by default), a required or named call on an engine that takes `thinking_budget` gets a
+think budget of `max_tokens - max(256, max_tokens / 4)`, or the request's own `thinking_budget` when that is smaller,
+so the think block closes with room left for the call instead of ending as `length`. It changes the reply of any such
+call whose thinking would have run past that point. `"auto"`, `"none"` and requests without tools are unchanged.
 Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
