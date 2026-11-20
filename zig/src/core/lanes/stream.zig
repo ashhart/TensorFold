@@ -25,7 +25,6 @@ pub const Reason = enum {
 };
 
 pub const Mode = enum { pipe, drain, verify, exit };
-
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
 pub const loop_warm_in: usize = 64;
