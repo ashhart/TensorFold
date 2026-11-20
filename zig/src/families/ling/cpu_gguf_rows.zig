@@ -6,7 +6,7 @@ const rows = @import("cpu_rows.zig");
 const q4k = @import("cpu_gguf_q4k.zig");
 const q6k_q50 = @import("cpu_gguf_q6k_q50.zig");
 
-fn supported(kind: g.TensorKind) !void {
+pub fn supported(kind: g.TensorKind) !void {
     switch (kind) {
         .q4_k, .q6_k, .q5_0 => {},
         else => return error.UnsupportedLingGgufQuant,
@@ -94,7 +94,7 @@ pub fn projectReference(t: g.Tensor, input: []const f32, output: []f32, count: u
     }
 }
 
-fn dispatchRange(kind: g.TensorKind, bytes: [*]const u8, input: [*]const f32, output: [*]f32, count: usize, width: usize, n: usize, rounded: bool, lo: usize, hi: usize) void {
+pub fn dispatchRange(kind: g.TensorKind, bytes: [*]const u8, input: [*]const f32, output: [*]f32, count: usize, width: usize, n: usize, rounded: bool, lo: usize, hi: usize) void {
     switch (kind) {
         .q4_k => q4k.projectQ4KRange(bytes, input, output, count, width, n, rounded, lo, hi),
         .q6_k => q6k_q50.projectQ6KRange(bytes, input, output, count, width, n, rounded, lo, hi),

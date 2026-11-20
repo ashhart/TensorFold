@@ -16,7 +16,7 @@ pub const Result = struct {
     }
 };
 
-/// A source gives values, project and embed; KDA rates are stored positive, exp(A_log), as in the GGUF.
+/// A source gives values, project, embed and optionally projectExperts; KDA rates are stored as exp(A_log).
 pub fn Forward(comptime Source: type) type {
     return struct {
         const Run = struct {
@@ -134,6 +134,16 @@ pub fn Forward(comptime Source: type) type {
                     const n = route.selectF32(scores[t * c.experts ..][0..c.experts], bias, selected[0..c.topk], shape);
                     if (n != c.topk) return error.CpuRoute;
                     for (selected[0..n], 0..) |pick, j| picks[t * c.topk + j] = pick.id;
+                    if (comptime @hasDecl(Source, "projectExperts")) if (self.threads > 1) {
+                        var ids: [route.max_topk]u32 = undefined;
+                        for (selected[0..n], 0..) |pick, j| ids[j] = pick.id;
+                        const ys = try self.a.alloc(f32, n * c.hidden);
+                        try self.source.projectExperts(p, ids[0..n], x[t * c.hidden ..][0..c.hidden], ys, c.hidden, c.moe_inter, c.expert_limit[layer], self.threads);
+                        for (selected[0..n], 0..) |pick, j| {
+                            for (out[t * c.hidden ..][0..c.hidden], ys[j * c.hidden ..][0..c.hidden]) |*o, v| o.* += v * pick.wt;
+                        }
+                        continue;
+                    };
                     const one = Run{ .a = self.a, .source = self.source, .c = c, .threads = self.threads, .count = 1 };
                     for (selected[0..n]) |pick| {
                         const prefix = try std.fmt.allocPrint(self.a, "{s}experts.{d}.", .{ p, pick.id });

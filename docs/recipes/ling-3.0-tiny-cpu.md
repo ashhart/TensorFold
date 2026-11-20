@@ -57,14 +57,23 @@ Decoding stops early, with `finish stop`, at the GGUF's end-of-sequence tokens. 
 in 4,096 positions. The tool does not tokenize: take the IDs from any tokenizer for Ling-3.0-tiny, for example
 llama.cpp's `llama-tokenize` on the same file.
 
-- **Exact.** Every projection equals a scalar block-decode reference bit for bit, and threads split output rows
-  only, so 1 to 8 threads give the same token IDs. Activations round to BF16 where the reference model does.
+- **Exact.** Every projection equals a scalar block-decode reference bit for bit, and threads split output rows or
+  whole experts only, so 1 to 8 threads give the same token IDs. Activations round to BF16 where the reference
+  model does.
 - **Prompt rows.** The prompt runs 8 rows a call; whole, chunked and one-row prompts give the same logits.
-- **Speed.** Not yet measured from this tool. The integer-dot path that trades exactness for speed is a separate
-  change.
+- **Speed.** Modest: exact mode decodes every 4-bit block to F32 inside each dot, which is slower than integer-dot
+  kernels. On an eight-core board: [board numbers: tokens a second at 1 and 4 threads]. The integer-dot path that
+  trades exactness for speed is a separate change.
+- **Threads.** Persistent workers share each projection's rows and each token's eight routed experts, so more threads
+  help up to the number of fast cores. Rows are claimed in chunks, so a slower core takes fewer, but an expert on a
+  slow core is still waited for: start with the count of the board's fastest cores and try one more or fewer. Workers
+  spin between projections and sleep only when idle, so while decoding each thread keeps a core busy; leave a core
+  free if the board has other work. The engine does not pin threads to cores; on a board with mixed cores,
+  `taskset -c LIST ling-cpu-decode ...` keeps the run on the cores in `LIST`.
 
 ## Checks
 
 `zig build test-ling-cpu-host` runs the reader, kernel and forward checks on any host: decoded blocks against the
 independent FP64 source definition, projections against expanded weights at 1 to 8 threads, and the forward on a
-small synthetic model, whose whole, chunked and one-row prompts and 1 and 3 threads give the same bytes.
+small synthetic model, whose whole, chunked and one-row prompts at 1, 2, 3, 4 and 8 threads give the same bytes; the
+workers' rows and experts are also checked against the one-thread bytes at those thread counts.
