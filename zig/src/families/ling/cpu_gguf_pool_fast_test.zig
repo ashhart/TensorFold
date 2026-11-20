@@ -116,3 +116,93 @@ test "extractAllowedCpus reads sparse affinity masks in ascending order without 
     try std.testing.expectEqual(@as(usize, 5), pool_mod.extractAllowedCpus(&mask, &all));
     try std.testing.expectEqual(@as(usize, @bitSizeOf(usize) + 2), all[4]);
 }
+
+test "expertsFastBatch grouped multi-row experts match 1-row expertsFast byte for byte across thread counts" {
+    if (!@import("cpu_gguf_sdot_act.zig").has_dotprod) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const hidden: usize = 256;
+    const inter: usize = 256;
+    const count: usize = 6;
+    const gate_m = try makeMatrix(a, .q4_k, hidden, inter, 11);
+    defer a.free(gate_m.bytes);
+    const up_m = try makeMatrix(a, .q4_k, hidden, inter, 22);
+    defer a.free(up_m.bytes);
+    const down_m = try makeMatrix(a, .q6_k, inter, hidden, 33);
+    defer a.free(down_m.bytes);
+    const gate_rep = (try repack8.repack(a, gate_m.tensor)).?;
+    defer gate_rep.deinit(a);
+    const up_rep = (try repack8.repack(a, up_m.tensor)).?;
+    defer up_rep.deinit(a);
+    const down_rep = (try repack8.repack(a, down_m.tensor)).?;
+    defer down_rep.deinit(a);
+
+    var x: [count * hidden]f32 = undefined;
+    for (&x, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13) % 31)) - 15)) / 7.0;
+    var acts: [count]sdot.Activation256 = undefined;
+    for (0..count) |t| try sdot.quantize256(x[t * hidden ..][0..hidden], acts[t .. t + 1], true);
+
+    var want: [count * hidden]f32 = undefined;
+    const p1 = try pool_mod.Pool.create(a, io, 1);
+    defer p1.destroy();
+    for (0..count) |t| {
+        const one = [_]pool_mod.FastExpert{.{
+            .gate = gate_m.tensor,
+            .up = up_m.tensor,
+            .down = down_m.tensor,
+            .gate_rep = gate_rep,
+            .up_rep = up_rep,
+            .down_rep = down_rep,
+            .use_sdot_gate = true,
+            .use_sdot_up = true,
+            .use_sdot_down = true,
+            .out = want[t * hidden ..].ptr,
+        }};
+        try p1.expertsFast(&one, x[t * hidden ..][0..hidden], acts[t .. t + 1].ptr, hidden, inter, 7.0);
+    }
+
+    var got: [count * hidden]f32 = undefined;
+    const grp = [_]pool_mod.FastExpertGroup{
+        .{
+            .expert = .{
+                .gate = gate_m.tensor,
+                .up = up_m.tensor,
+                .down = down_m.tensor,
+                .gate_rep = gate_rep,
+                .up_rep = up_rep,
+                .down_rep = down_rep,
+                .use_sdot_gate = true,
+                .use_sdot_up = true,
+                .use_sdot_down = true,
+                .out = got[0..].ptr,
+            },
+            .n_rows = 5,
+            .rows = .{ 0, 1, 2, 3, 4, 0, 0, 0 },
+            .outs = .{ got[0..].ptr, got[hidden..].ptr, got[2 * hidden ..].ptr, got[3 * hidden ..].ptr, got[4 * hidden ..].ptr, undefined, undefined, undefined },
+        },
+        .{
+            .expert = .{
+                .gate = gate_m.tensor,
+                .up = up_m.tensor,
+                .down = down_m.tensor,
+                .gate_rep = gate_rep,
+                .up_rep = up_rep,
+                .down_rep = down_rep,
+                .use_sdot_gate = true,
+                .use_sdot_up = true,
+                .use_sdot_down = true,
+                .out = got[5 * hidden ..].ptr,
+            },
+            .n_rows = 1,
+            .rows = .{ 5, 0, 0, 0, 0, 0, 0, 0 },
+            .outs = .{ got[5 * hidden ..].ptr, undefined, undefined, undefined, undefined, undefined, undefined, undefined },
+        },
+    };
+    for ([_]usize{ 1, 2, 3, 4, 8 }) |threads| {
+        const pool = try pool_mod.Pool.create(a, io, threads);
+        defer pool.destroy();
+        @memset(&got, 0);
+        try pool.expertsFastBatch(&grp, &x, &acts, count, hidden, inter, 7.0);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want), std.mem.sliceAsBytes(&got));
+    }
+}
