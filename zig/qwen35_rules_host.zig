@@ -222,7 +222,7 @@ test "qwen35 rules: a head count of 0 is refused by name at every entry point, b
         }
     };
     errdefer std.debug.print("cases {any}, without head_dim {d}\n", .{ cases.values, derived });
-    // four zeros on each admitted base: CUDA 7, Metal 27B 8, Metal 2B 1, HIP 18 (13 of all without head_dim)
-    try t.expectEqual([_]usize{ 4 * 7, 4 * 8, 4 * 1, 4 * 18 }, cases.values);
-    try t.expectEqual(@as(usize, 13), derived);
+    // four zeros on each admitted base: CUDA 7, Metal 27B 10, Metal 2B 1, HIP 20 (15 of all without head_dim)
+    try t.expectEqual([_]usize{ 4 * 7, 4 * 10, 4 * 1, 4 * 20 }, cases.values);
+    try t.expectEqual(@as(usize, 15), derived);
 }
