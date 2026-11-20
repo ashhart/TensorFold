@@ -2,10 +2,16 @@
 const std = @import("std");
 const fixtures = @import("fixtures.zig");
 const t = std.testing;
+const out_env = "TF_STEP_FIXTURES_OUT";
 
-/// The fixtures written into the directory TF_STEP_FIXTURES_OUT names, when it is set; true if they were.
+/// The directory named by the fixture-output variable, when it is set.
+fn outDir() ?[]const u8 {
+    return if (std.c.getenv(out_env)) |dir| std.mem.span(dir) else null;
+}
+
+/// The fixtures written into that directory, when it is set; true if they were.
 fn rewrite() !bool {
-    const dir = std.c.getenv("TF_STEP_FIXTURES_OUT") orelse return false;
+    const dir = outDir() orelse return false;
     inline for (fixtures.all) |f| {
         var buf: [1024]u8 = undefined;
         const bytes = try f.build(&buf);
