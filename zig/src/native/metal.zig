@@ -30,7 +30,6 @@ pub const backends: []const []const u8 = &.{"metal"};
 pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib" };
 const spill = @import("metal_spill.zig");
-
 /// Every checkpoint-wide MLX affine width the per-module readers take (oQ quants): 2-8 bits but 7, groups 32-128.
 const affine_widths = blk: {
     var out: [18][]const u8 = undefined;
@@ -40,7 +39,6 @@ const affine_widths = blk: {
     const done = out;
     break :blk &done;
 };
-
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
 
@@ -426,7 +424,6 @@ test {
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).
 const glm_window: i64 = 131072;
-
 fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse @min(glm_window, if (native > 0) native else glm_window);

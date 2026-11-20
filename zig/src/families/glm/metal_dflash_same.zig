@@ -37,7 +37,7 @@ pub fn encode(m: *Model, kernel: *const follow.Follow, frame: u64, aheads: []con
     for (aheads, 0..) |x, k| {
         caches[k] = x.context.caches;
         windows[k] = .{ .begin = x.context.session.context.begin, .first = x.first, .rows = x.rows };
-        streams[k] = .{ .context = x.context.session.context, .anchor = 0 }; // the block reads the follow buffers instead
+        streams[k] = .{ .context = x.context.session.context, .anchor = 0 }; // read anchors from follow buffers
     }
     const p = try follow.plan(c, windows[0..n], block, ring(c));
     b.batch = caches[0..n];

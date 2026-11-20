@@ -24,7 +24,7 @@ pub fn plan(c: cfg.Config, windows: []const Window, block: u32, ring: u32) !Plan
     var p: Plan = .{ .args = .{ .block = block, .streams = @intCast(windows.len), .trained = c.block, .window = c.window, .mask_token = c.mask, .mask_stride = 0, .rows = @intCast(windows.len * block) }, .streams = undefined, .keys = undefined };
     for (windows, 0..) |w, k| {
         if (w.rows == 0 or w.begin > w.first) return error.BadFollowPlan;
-        const lo = @max(w.begin, (w.first + 1) -| (@as(u64, c.window) - 1)); // the context's start when no draft is kept
+        const lo = @max(w.begin, (w.first + 1) -| (@as(u64, c.window) - 1)); // context start with zero kept drafts
         const context: u32 = @intCast(w.first + w.rows - lo);
         if (context > ring) return error.BadFollowPlan;
         p.streams[k] = .{ .first = w.first, .lo = lo, .begin = w.begin, .context = context, .keys = context + block };

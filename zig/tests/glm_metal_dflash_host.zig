@@ -370,3 +370,18 @@ test "the draft head runs on tensor units at 4 or 8 bits in groups of 64, and on
     q.n = 154880 + 32;
     try std.testing.expectEqual(backend.HeadPath.rows, backend.headPath(true, q, true));
 }
+
+test "heldBytes includes the tap-stage buffer beside drafter model bytes" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const ring = try device.buffer(64 * 5 * 512 * 2, mtl.ResourceOptions.shared);
+    defer ring.deinit();
+    var taps = try tf.glm.metal_dflash_taps.Taps.init(device, ring, 64, 512, std.testing.allocator, 1);
+    defer taps.deinit(std.testing.allocator);
+    var m: tf.glm.metal_dflash_model.Model = undefined;
+    m.bytes = 1024;
+    var d: tf.glm.metal_dflash_load.Drafter = .{ .gpa = std.testing.allocator, .model = &m, .taps = &taps, .target = undefined };
+    var e: tf.glm.engine.Engine = undefined;
+    e.dflash = &d;
+    try std.testing.expectEqual(@as(u64, 1024 + taps.stage.length()), tf.glm.metal_dflash_load.heldBytes(&e));
+}
