@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `--learn-conversations`, conversation states are kept on disk through the rows store, so after an eviction or a restart the next turn reads its state back instead of prefilling the whole conversation; at TP>1 every rank's part goes to rank 0's disk, so a state is read back on every rank or none (#1411, fixes #1312). Thanks to @wojo.
+
 - Flash Next on CUDA: `TF_FLASHNEXT_MTP_WEIGHTS=mxfp8` (opt-in) re-codes the MTP drafter's BF16 linears to MXFP8 as they load, so a draft pass reads about half their bytes; replies are unchanged because the verify forward checks every draft. `checkpoint`, the default (also unset or blank), keeps the rows as stored; any other value, `mxfp8` on Metal or HIP, or a drafter linear stored as anything but BF16 stops the start naming the setting (#3218, refs #3162). Thanks to @BadAd84.
 
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
