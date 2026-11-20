@@ -198,6 +198,7 @@ pub fn Backend(comptime F: type) type {
         const vtable: be.Backend.VTable = .{
             .prefill = prefillFn,
             .prefill_step = prefillStepFn,
+            .cancel_prefill = if (@hasField(F, "prefix")) cancelPrefillFn else null,
             .first = firstFn,
             .first_masked = firstMaskedFn,
             .held = heldTokensFn,
@@ -223,6 +224,14 @@ pub fn Backend(comptime F: type) type {
         /// The whole prompt pass, chunk by chunk (a driver of its own, with no rounds between).
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
             while (!try prefillStepFn(ptr, s, 0)) {} // whole prompts: the 512-row cap would cut where this driver never does
+        }
+
+        fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+            const h = of(ptr);
+            const lane = try h.streams.get(s);
+            const f = lane.fill orelse return;
+            if (s.readout != null or f.at <= s.cached) return;
+            try h.keepCut(lane, s.prompt(), f.at);
         }
 
         /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.

@@ -192,7 +192,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
+    const nemotron_host = b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron }));
+    test_step.dependOn(&nemotron_host.step);
+    b.step("test-nemotron-hip-host", "Nemotron HIP prompt adapters and cancelled-prefix snapshots without GPU execution").dependOn(&nemotron_host.step);
     const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
