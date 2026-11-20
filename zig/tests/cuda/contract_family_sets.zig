@@ -25,6 +25,7 @@ pub const Sets = struct {
     a: std.mem.Allocator,
     joint_schema: *@import("contract_joint_schema.zig").Set,
     idol: *@import("contract_idol.zig").Set,
+    vonly: *@import("contract_window_vonly.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -68,6 +69,7 @@ pub const Sets = struct {
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
+        const vonly = try @import("contract_window_vonly.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -83,6 +85,7 @@ pub const Sets = struct {
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
+            .vonly = vonly,
             .muse = muse,
             .a = a,
         };
@@ -90,6 +93,7 @@ pub const Sets = struct {
 
     pub fn deinit(sets: Sets) void {
         sets.idol.deinit();
+        sets.vonly.deinit();
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();

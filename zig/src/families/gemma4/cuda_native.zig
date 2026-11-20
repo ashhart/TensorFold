@@ -13,6 +13,7 @@ const tw = @import("cuda_tower.zig");
 const kv = @import("core").kv_pool;
 const shared = @import("cuda_shared.zig");
 const dfl = @import("cuda_dflash.zig");
+const vonly = @import("cuda_vonly.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
 pub fn Family(comptime name: []const u8) type {
@@ -54,7 +55,7 @@ const native = @This();
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, a drafter or env =0: linear.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true, learn_conversations: bool = false };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -91,10 +92,12 @@ const Plan = struct {
     /// What open allocates beside the streams: the vision workspace and the drafter's weights.
     beside: u64,
     paged: bool,
+    v_only: bool = false,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openPagedBytes(o.gpa, p.d, o.s, &o.w, p.context, n, p.paged) + be.Gemma.openBytes(if (p.paged) be.round_rows else n) + p.beside;
+        const streams = try fwd.Model.openPagedBytes(o.gpa, p.d, o.s, &o.w, p.context, n, p.paged, p.v_only);
+        return streams + be.Gemma.openBytes(if (p.paged) be.round_rows else n) + p.beside;
     }
 };
 
@@ -133,12 +136,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
     // TF_KV_SHARE keeps prompts as the pool's pages, so it pages too; otherwise the default, unless turned off
     const paged = try @import("core").kv_prompts.sharing() > 0 or pagesOn(o);
+    // TF_GEMMA4_V_ONLY's refusals from the config alone, before a kernel, weight or stream exists (cuda_vonly.zig)
+    const kv_share = try @import("core").kv_prompts.sharing() > 0;
+    const v_only = try vonly.gate(gpa, io, dir, paged, kv_share, o.drafts and o.drafter != null, o.learn_conversations);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .w = undefined, .k = undefined, .s = undefined, .m = undefined, .gb = undefined };
     own.k = try kern.Kernels.load(ctx);
     errdefer own.k.deinit();
     if (paged) try own.k.win.loadPages(ctx.d);
+    if (v_only) own.k.vo = try cuda.window_vonly.VOnly.load(ctx.d);
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
     own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null, o.vision != null);
@@ -147,7 +154,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (try @import("core").kv_prompts.sharing() > 0 and own.w.config.geo.shared_layers > 0) return error.SharedCacheOwnersNotServed;
     const context = @min(positions(o.context), own.w.config.context);
     const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside, .paged = paged };
+    const plan: Plan = .{
+        .own = own,
+        .d = ctx.d,
+        .context = context,
+        .beside = beside,
+        .paged = paged,
+        .v_only = v_only,
+    };
     own.room = o.room;
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
     const n = (if (paged) fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan)) catch |e| {
@@ -157,7 +171,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         }
         return e;
     };
-    own.m = try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, context, n, paged);
+    own.m = try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, context, n, paged, v_only);
     errdefer own.m.deinit();
     const most = own.m.prompt_most;
     const busy = fwd.prompt_rows;
@@ -173,11 +187,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         own.v = v;
         own.gb.vision = v;
     }
+    const keys = if (v_only) vonly.keyBytes(own.w.config.geo, own.w.layers.len, context) else 0;
     return .{
         .backend = own.gb.backend(),
         .facts = own.gb.facts(),
         .rows = be.max_window,
-        .stream_bytes = fwd.Model.streamBytes(own.w.config.geo, own.w.layers.len, context, own.m.ringRows()),
+        .stream_bytes = fwd.Model.streamBytes(own.w.config.geo, own.w.layers.len, context, own.m.ringRows()) - keys,
         .free_streams = @intCast(n),
         .ctx = own,
         .deinit = release,
@@ -272,7 +287,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves less room than the drafter's weights need after the streams: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         error.BadChunkSolo => "TF_GEMMA4_CHUNK_SOLO: a solo prompt pass's rows, a multiple of 512 up to 4096",
         error.NoStreamFits => "the CUDA memory budget fits no Gemma 4 stream after the weights: lower --context, free device memory, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
-        else => null,
+        else => vonly.explain(err),
     };
 }
 
