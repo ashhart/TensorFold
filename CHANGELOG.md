@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: EXL3 Flash Next checkpoints load and decode on a single rank with offloaded experts, which main refuses with `UnsupportedCheckpoint`; the new EXL3 expert and prompt kernels carry sm_120 kernel contracts, and expert sums run in float64 and round once to float32 (#1441, part of #1113). Thanks to @BlivionIaG.
+
 - Server: `/v1/metrics` reports a `tensorfold:open_connections` gauge, the client connections admitted over TCP or the Unix socket and not yet closed, including idle keep-alive ones (#3925). Thanks to @plotarmordev.
 
 - Tools: served checks reject unexercised draft, seed, cache, cancellation and logit comparisons, covered by 11 served and constraint regression tests, and benchmark receipts name vacuous comparisons (#3772, refs #2460). Thanks to @jschmied.
