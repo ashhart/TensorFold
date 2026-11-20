@@ -390,6 +390,8 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_dflash_follow: @import("metal_glm_dflash_follow.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_dflash_follow.deinit();
     try glm_dflash_follow.collect(o.only);
+    var glm_mtp_opt = try @import("metal_glm_mtp_opt.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer glm_mtp_opt.destroy();
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);

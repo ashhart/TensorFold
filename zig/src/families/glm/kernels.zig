@@ -18,6 +18,8 @@ pub const igate_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 128, .top
 pub const hc_shape: hc.Shape = .{ .width = 4096, .sinkhorn = 20, .eps_e9 = 1000, .topk = route_shape.topk };
 
 pub const max_rows = 16;
+pub const MtpPrepArgs = extern struct { rows: u32, width: u32, eps: f32 };
+pub const HeadTop1Args = extern struct { k: u32, n: u32, rows: u32, pairs: u32 };
 
 pub const Kernels = struct {
     source_hash: u64, // every compiled source, hashed: part of a learned prompt state's identity
@@ -115,6 +117,11 @@ pub const Kernels = struct {
     sparse_split: mtl.Pipeline, // decode rows' sparse MLA over key blocks on the tensor units
     sparse_combine: mtl.Pipeline, // and the blocks combined in order
     absorb_nax: mtl.Pipeline, // and its absorb (glm_absorb_nax.metal)
+    mtp_prep_4b: mtl.Pipeline, // fused embed + enorm + hnorm (glm_mtp_opt.metal)
+    mtp_prep_8b: mtl.Pipeline,
+    head_top1_4b_one: mtl.Pipeline, // fused 4/64 greedy LM head + local top-1 + reduce
+    head_top1_4b: mtl.Pipeline,
+    reduce_top1: mtl.Pipeline,
     sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
     absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
@@ -301,6 +308,38 @@ fn pickSources(gpa: std.mem.Allocator, route_core: []const u8, gu: []const u8, d
 
 const m16_names = affine_mm.names ++ mm_groups.names;
 
+pub fn mtpPrep(k: *const Kernels, e: mtl.ComputeEncoder, bits: u8, ids: anytype, emb: anytype, we: anytype, wh: anytype, h: anytype, out: anytype, rows: u32, width: u32, eps: f32) void {
+    e.setPipeline(if (bits == 4) k.mtp_prep_4b else k.mtp_prep_8b);
+    inline for (.{ ids, emb.w, emb.s, emb.b, we, wh, h, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(MtpPrepArgs{ .rows = rows, .width = width, .eps = eps }, 8);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(((width + 3) / 4 + 31) / 32 * 32, 1, 1));
+}
+
+pub fn headTop1_4b(k: *const Kernels, e: mtl.ComputeEncoder, in: anytype, q: anytype, n: u32, scratch_pairs: anytype, picks: anytype, rows: u32) void {
+    const pairs: u32 = if (rows == 1) (n + 7) / 8 else (n + 3) / 4;
+    const args = HeadTop1Args{ .k = q.k, .n = n, .rows = rows, .pairs = pairs };
+    e.setPipeline(if (rows == 1) k.head_top1_4b_one else k.head_top1_4b);
+    inline for (.{ in, q.w, q.s, q.b }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(args, 4);
+    e.setBuffer(scratch_pairs.buf, scratch_pairs.off, 5);
+    e.dispatchGroups(mtl.Size.of(pairs, 1, 1), mtl.Size.of(if (rows == 1) 128 else 32 * rows, 1, 1));
+    e.setPipeline(k.reduce_top1);
+    e.setBuffer(scratch_pairs.buf, scratch_pairs.off, 0);
+    e.setBuffer(picks.buf, picks.off, 1);
+    e.setValue(args, 2);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
+}
+
+pub fn canHeadTop1(allow: bool, tp: u32, m_row: u32, n: u32, hw: anytype, rows: u32) bool {
+    return allow and tp == 1 and m_row == 0 and n % 4 == 0 and hw.more == 0 and hw.bits == 4 and hw.group == 64 and hw.k >= 512 and hw.k % 512 == 0 and rows > 0 and rows <= max_rows;
+}
+
+pub fn tryHeadTop1(k: *const Kernels, e: mtl.ComputeEncoder, in: anytype, hw: anytype, logits: anytype, picks: anytype, rows: u32, n: u32, tp: u32, m_row: u32, allow: bool) bool {
+    if (!canHeadTop1(allow, tp, m_row, n, hw, rows)) return false;
+    headTop1_4b(k, e, in, hw, n, logits, picks, rows);
+    return true;
+}
+
 /// Compile every library on worker threads.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
@@ -319,7 +358,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.wide = null;
     const m3_fast = !device.tensorUnits();
     k.m3_fast = m3_fast;
-    var jobs: [generated.len + 28]Job = undefined;
+    var jobs: [generated.len + 29]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -430,11 +469,13 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 23] = .{ .device = device, .source = sources.glm_select, .names = &.{ "glm_select_mark", "glm_select_merge" }, .out = &select_out };
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
+    var mtp_out: [5]mtl.Pipeline = undefined;
+    jobs[generated.len + 27] = .{ .device = device, .source = sources.glm_mtp_opt, .names = &.{ "glm_mtp_prep_4b", "glm_mtp_prep_8b", "glm_head_top1_4b_one", "glm_head_top1_4b", "glm_reduce_top1" }, .out = &mtp_out };
 
     const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true, .exact_nonfinite = true }) else try gpa.dupe(u8, "");
     defer gpa.free(m3_src);
     var m3_out: affine_mm.Pipes = undefined;
-    if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
+    if (m3_fast) jobs[generated.len + 28] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
     const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
         for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
@@ -489,6 +530,11 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.index_decode = index_out[1];
     k.select_mark = select_out[0];
     k.select_merge = select_out[1];
+    k.mtp_prep_4b = mtp_out[0];
+    k.mtp_prep_8b = mtp_out[1];
+    k.head_top1_4b_one = mtp_out[2];
+    k.head_top1_4b = mtp_out[3];
+    k.reduce_top1 = mtp_out[4];
 }
 
 test "glm_tap_mean_ring unique source anchor in glm_glue.metal" {
