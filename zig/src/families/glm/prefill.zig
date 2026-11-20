@@ -8,7 +8,10 @@ pub const State = struct { stream: *Stream, slot: u32, at: u32 = 0, next: usize 
 
 /// `b` is the real backend or a fake engine at the same prepare/chunk/finish boundary. `_: u32` keeps its 2048 grid.
 pub fn step(b: anytype, s: *Stream, _: u32) !bool {
-    errdefer b.abortPrompt(s);
+    errdefer {
+        if (s.isCancelled()) if (b.filling.get(s)) |p| s.keepInterruptedPrefill(p.at);
+        b.abortPrompt(s);
+    }
     if (s.isCancelled()) return error.Cancelled;
     if (!b.filling.contains(s)) {
         const begun = try b.beginPrompt(s);
