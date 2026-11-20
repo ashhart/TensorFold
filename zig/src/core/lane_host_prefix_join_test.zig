@@ -101,8 +101,7 @@ fn promptOf(buf: *[prompt_len]u32) []const u32 {
     return buf;
 }
 
-/// Every identical request queued before the host starts, so they arrive together; `budget` 0 is a fully cold cache.
-/// `cancel_at` not null cancels the leader (id 1) when a prompt pass reaches that chunk index.
+/// Identical requests queued before the host starts (together); `budget` 0 is a cold cache; `cancel_at` cancels.
 fn fanout(wait_ms: ?u32, slow_ms: i64, cancel_at: ?usize, budget: u64, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -183,7 +182,7 @@ test "single-flight: identical prompts join the filling leader, whose whole fill
     try std.testing.expectEqual(@as(u64, 1), on.misses); // only the leader's lookup missed; the joiners hit its cut
 }
 
-test "single-flight: cold cache — identical prompts join a leader with no marks and nothing kept" {
+test "single-flight: cold cache — nothing will be kept, so the join does not arm and the prompts run side by side" {
     var on: Run = .{};
     defer on.deinit();
     try fanout(null, 1, null, 0, &on);
@@ -193,22 +192,15 @@ test "single-flight: cold cache — identical prompts join a leader with no mark
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
-        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // joined == solo
+        try std.testing.expectEqualSlices(u32, off.boxes[i].tokens.items, on.boxes[i].tokens.items); // == solo
     }
     // a zero budget plans no mark and keeps nothing: every lookup missed, nothing is resumable
     try std.testing.expectEqual(@as(u64, requests), on.misses);
     try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0 }, on.cached[0..requests]);
-    // the join armed on prompt identity alone: each joiner waited for the leader's whole fill
-    try std.testing.expectEqual(@as(u64, requests - 1), on.joins);
-    try std.testing.expectEqual(@as(u64, requests - 1), on.waits);
-    try std.testing.expectEqual(@as(u64, 0), on.timeouts);
-    try std.testing.expectEqual(@as(usize, 0), on.queued_after);
-    // the leader's whole fill ran with no joiner's stream open beside it
-    try std.testing.expectEqual(@as(usize, 1), on.leader_open_most);
-    // off (TENSORFOLD_PREFIX_WAIT_MS=0): the same cold cache, every prompt fills side by side
-    try std.testing.expectEqual(@as(u64, requests), off.misses);
-    try std.testing.expectEqual(@as(u64, 0), off.waits);
-    try std.testing.expect(off.leader_open_most > 1); // the side-by-side prefill this joins
+    // the join did not arm: with nothing kept a joiner would wait out the whole fill, then prefill from the start
+    try std.testing.expectEqual(@as(u64, 0), on.joins);
+    try std.testing.expectEqual(@as(u64, 0), on.waits);
+    try std.testing.expect(on.leader_open_most > 1); // every prompt's stream open beside the leader's
 }
 
 test "single-flight: fail-open, the leader cancelled — every waiter prefills its own prompt and matches a solo run" {
@@ -239,10 +231,10 @@ test "single-flight: fail-open, the bound passes — every waiter is released an
     // a 1 ms bound against a leader whose chunks each take 30 ms: no waiter survives to the whole fill
     var on: Run = .{};
     defer on.deinit();
-    try fanout(1, 30, null, 0, &on);
+    try fanout(1, 30, null, 1 << 24, &on);
     var off: Run = .{};
     defer off.deinit();
-    try fanout(0, 30, null, 0, &off);
+    try fanout(0, 30, null, 1 << 24, &off);
     for (0..requests) |i| {
         try std.testing.expectEqual(Reason.length, on.reasons[i]);
         try std.testing.expectEqual(Reason.length, off.reasons[i]);
@@ -251,7 +243,7 @@ test "single-flight: fail-open, the bound passes — every waiter is released an
     // each joiner armed, then the bound released it: the timeouts counter carries the releases
     try std.testing.expectEqual(@as(u64, requests - 1), on.joins);
     try std.testing.expectEqual(@as(u64, requests - 1), on.timeouts);
-    // a cold cache plans no mark and keeps nothing, so every released waiter prefilled from zero
+    // each released waiter left before the leader's first keep and does not re-lookup: it prefilled from zero
     try std.testing.expectEqual(@as(u64, requests), on.misses);
     try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0 }, on.cached[0..requests]);
     // the released waiters filled side by side: the bound gives back the throughput the join would have held

@@ -47,8 +47,8 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
-        // a single-flight join: the leader's prompt is the waiter's own, by identity alone
-        if (joinable(h, r, spans, l) and room(h, job, l)) {
+        // a single-flight join: the leader's prompt is the waiter's own; armed only when its fill keeps anything
+        if (joinable(h, r, spans, l) and room(h, job, l) and l.marks.len > 0 and store.most != 0) {
             best = .{ .leader = l, .id = l.id, .whole = true };
             break; // filling order: the oldest leader
         }
