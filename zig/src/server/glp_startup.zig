@@ -14,17 +14,17 @@ pub const flags = [_]cli.Flag{
     .{ .name = "--glp-alpha", .native = true },
 };
 
-/// The model type of the family that takes a control vector: Qwen3.8-27B.
+/// The model type of the family a residual vector steers: Qwen3.8-27B, on the Metal engine.
 const steer_type = "qwen3_5";
 
-/// The hidden size of that family: Qwen3.8-27B is 5120 wide.
+/// The model type of the family a paired vector steers: DeepSeek-V4.1, whose EXL3 checkpoints the CUDA engine serves.
+pub const deepseek_type = "deepseek_v41";
+
+/// The hidden size of Qwen3.8-27B: it is 5120 wide.
 const steer_hidden: usize = 5120;
 
-/// The bytes a control vector file may hold; a 64-layer 5120-wide vector is about 1.3 MiB.
-const file_limit: usize = 64 << 20;
-
-/// The key a file that claims its own content digest carries.
-const digest_key = "glp.content_sha256";
+/// The copies of the stream DeepSeek-V4.1 carries: a paired vector is applied to every one of them.
+const hc_copies: usize = 4;
 
 /// What the --glp flags hold: the file the operator named, the strength and the vector the file carries.
 pub const Vec = struct {
