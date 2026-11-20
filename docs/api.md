@@ -615,7 +615,7 @@ are the exception: absent both, replies take 0.8 of that time and a filling prom
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--thinking-reserve`, a reply that is still reasoning counts as its answer quota plus the reasoning still expected, from the think blocks this server has seen close; before the first has closed it counts as its limit left (its `max_tokens` plus the reserve, less what it has emitted). With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
 hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
 steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
 Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
@@ -947,7 +947,7 @@ on those engines; with thinking disabled, the budget is not applied.
 server adds N to the reply's limit, capped by the context window, and the engine ends the reply when the tokens
 after the closing think marker reach the request's `max_tokens` (`finish_reason` `length`). Reasoning shorter than
 N leaves the answer its full `max_tokens`; longer reasoning counts against it. Lane engines apply it; on other
-engines, and with thinking disabled, `max_tokens` limits the whole reply as before.
+engines, and with thinking disabled, `max_tokens` limits the whole reply as before. Beside a long prompt, `TENSORFOLD_PREFILL_ORDER=srpt` counts a reply that is still reasoning as its `max_tokens` plus the reasoning it is still expected to need, from a moving average of the think blocks this server has seen close, and never more than its limit left (its `max_tokens` plus N, less what it has emitted); until the first has closed it counts as that.
 
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
@@ -1775,7 +1775,11 @@ server on the same journal does not start. Benchmark child servers never inherit
 Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
 the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
 thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
-reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+reply's size and SHA-256, its `token_sha256`, the reply bytes in base64 when they fit 4 MiB, and its measures:
+`queue_ms` waiting for admission, `ttft_ms` from receipt to the first token, `decode_tps`, and `prompt_tokens`,
+`cached_tokens` and `completion_tokens`). The measures are the ones the server's `done` log line reports, taken as it
+already takes them; they are `null` for a request that ended before generating, and for a prompt list, whose prompts run
+apart, the counts are summed and the timings are the last prompt's. Responses and Messages
 requests are journaled in the chat form they are translated to. A raw completion whose `prompt` is a list is not
 replay-exact: its per-prompt prepared records are not written, and its individual drawn seeds are not journaled.
 
@@ -1794,6 +1798,23 @@ refused with a 400 `request_quarantined` before the engine sees it, which ends a
 crash. Other requests, and other keys sending the same body, are served as before; the check is one hash lookup. Without
 API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
 Ctrl-C) quarantines nothing.
+
+`tensorfold log` reads the journal in the terminal. It reads `PATH.3`, `PATH.2`, `PATH.1` and then `PATH`, oldest
+first, and never writes, locks or truncates them, so it works while a server runs; a torn last line is left for the
+next read. `PATH` defaults to `$TENSORFOLD_REQUEST_JOURNAL`.
+
+```sh
+tensorfold log list [PATH] [--last N] [--route chat|completions] [--model M]   # one line a request
+tensorfold log show chatcmpl-example [PATH]   # the request as journaled and its reply, decoded
+tensorfold log follow [PATH]                  # each newly finished request as it lands, across rotations
+```
+
+A `list` line holds the start time (UTC), reply id, route, model, status and outcome, prompt and completion tokens,
+time to first token and decode rate; a request with no `finish` shows as in flight, and one a crash left open as
+quarantined. `show` prints the messages or prompt (image and PDF data stay `<redacted>`), then the reply's text,
+reasoning, tool calls and finish reason, joined from the stream's deltas for a streamed reply, with its tokens and
+timings; a reply too large to keep shows its size and SHA-256. `--json` prints each request's records as journaled, one
+object a line. Ctrl-C ends `follow`.
 
 `tools/replay_request.py` lists, clears and replays journaled requests:
 

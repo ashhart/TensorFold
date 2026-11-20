@@ -185,6 +185,12 @@ Sampling defaults come from the checkpoint's `generation_config.json`, then serv
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 `TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
 
+## Reading the request journal
+
+With `TENSORFOLD_REQUEST_JOURNAL=PATH` set on `serve`, `tensorfold log list`, `tensorfold log show ID` and
+`tensorfold log follow` read what each request asked, what it got back, its token counts and its timings, while the
+server runs; see [the API's request journal section](api.md#request-journal-and-replay).
+
 ## Other ways to run
 
 ### Mac app

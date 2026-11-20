@@ -15,10 +15,6 @@ EXCLUDED = (
     "check-release-paths",
     "test-startup-states-timing",
     "test-imprint-ops-timing",
-    "test-metal-residency-owners-host",
-    "test-qwen35-draft-frame-host",
-    "test-qwen35-frame-invalidation-host",
-    "test-gradient-serving",
 )
 
 

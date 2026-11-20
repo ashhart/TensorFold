@@ -207,6 +207,7 @@ export interface Ticket {
   projectId: string
   roomId?: string | null
   executionMode?: TicketExecutionMode
+  botId?: string | null
   title: string
   body: string
   type: 'epic' | 'task' | 'subticket' | 'bug'

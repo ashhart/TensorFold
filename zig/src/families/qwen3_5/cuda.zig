@@ -25,6 +25,7 @@ test {
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");
+    _ = @import("cuda_solo.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
@@ -91,8 +92,14 @@ test "Qwen pages default: the learner's and the prefix share's refusals stop bef
     try @import("cuda_admit_test.zig").refusals();
 }
 
+pub const shard = @import("cuda_shard.zig");
+pub const shard_plan = @import("cuda_shard_plan.zig");
+/// The EXL3 tensor checks the loader and the cut-plan runner share.
+pub const exl3_admit = @import("cuda_exl3_admit.zig");
+
 test {
-    _ = @import("cuda_shard.zig");
+    _ = shard;
+    _ = shard_plan;
 }
 
 test "the shard plan's head widths are the kernels'" {

@@ -13,6 +13,8 @@ const copy_price = @import("copy_price.zig");
 pub const State = struct {
     p: []f64,
     rounds: u64 = 0,
+    last: ?i64 = null, // the depth this rule last chose: another must beat it by depth_margin
+    probe: ?i64 = null, // a probe's depth for the next round (a lone window keeps it)
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
@@ -173,18 +175,33 @@ pub const Rule = struct {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
             return @max(1, @min(most, want));
         }
-        var best = (try r.bestRows(who, p, most, false)).rows;
-        const st = &who.state.*.?;
+        const st = try r.state(who);
+        var best = (try r.bestRows(who, p, most, false, st.last)).rows;
         st.rounds += 1;
-        if (best == 0) return @intFromBool(r.probePlain(st));
+        if (best == 0) {
+            st.last = null; // plain holds no depth: the next drafted depth is chosen fresh
+            st.probe = null;
+            return @intFromBool(r.probePlain(st));
+        }
         st.plain = 0;
         st.wait = r.k.depth_probe_every;
-        if (best < most and st.rounds % r.k.depth_probe_every == 0) best += 1;
+        st.last = best;
+        st.probe = null;
+        if (best < most and st.rounds % r.k.depth_probe_every == 0) {
+            best += 1;
+            st.probe = best;
+        }
         return best;
     }
 
-    /// The rows with the most expected tokens a ms (0: plain) and the best of one or more, from each row's chance.
-    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool) !struct { rows: i64, drafted: i64 } {
+    /// The stream's estimate state, allocated from its prior on first use.
+    fn state(r: *Rule, who: Who) !*State {
+        _ = try r.rates(who);
+        return &who.state.*.?;
+    }
+
+    /// The rows with the most expected tokens a ms (0: plain); `hold` stays unless another beats it by depth_margin.
+    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool, hold: ?i64) !struct { rows: i64, drafted: i64 } {
         var best: i64 = 1;
         var best_rate: f64 = -1.0;
         if (copy or r.plain_guard) {
@@ -197,6 +214,7 @@ pub const Rule = struct {
         }
         var drafted: i64 = 1;
         var drafted_rate: f64 = -1.0;
+        var held_rate: f64 = -1.0;
         var expected: f64 = 1.0;
         var run: f64 = 1.0;
         var d: i64 = 1;
@@ -205,14 +223,20 @@ pub const Rule = struct {
             const at: usize = @intCast(d - 1);
             run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
             expected += run;
-            if (expected / cost > best_rate) {
+            const rate = expected / cost;
+            if (hold != null and d == hold.?) held_rate = rate;
+            if (rate > best_rate) {
                 best = d;
-                best_rate = expected / cost;
+                best_rate = rate;
             }
-            if (expected / cost > drafted_rate) {
+            if (rate > drafted_rate) {
                 drafted = d;
-                drafted_rate = expected / cost;
+                drafted_rate = rate;
             }
+        }
+        // a noisy round must not flip a held depth: another wins it only by depth_margin
+        if (hold) |h| {
+            if (best != 0 and h >= 1 and h <= most and h != best and held_rate >= 0.0 and best_rate < held_rate * r.k.depth_margin) best = h;
         }
         return .{ .rows = best, .drafted = drafted };
     }
@@ -236,7 +260,7 @@ pub const Rule = struct {
     pub fn copyRows(r: *Rule, who: Who, chances: []const f64, rows: i64, take: bool) !i64 {
         if (rows <= 0 or !r.copy_guard or r.family_costs.empty()) return rows;
         if ((try copy_price.plain(r, who)) == null) return rows;
-        const best = try r.bestRows(who, chances, rows, true);
+        const best = try r.bestRows(who, chances, rows, true, null);
         const st = &who.state.*.?;
         if (best.rows > 0) {
             if (take) {

@@ -250,6 +250,8 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, p.kernel());
         }
     }
+    const bolt_suite = try @import("metal_bolt_main.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer bolt_suite.destroy();
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();
@@ -545,6 +547,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer dsv41_suites.destroy();
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
+    const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_decoder.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

@@ -1,3 +1,4 @@
+import { restrictTicketToolContext } from '../../agent/ticket-tool-policy'
 import { selectedResponseLocale } from '../../agent/response-language'
 import { RunRecoveryTracker } from '../../agent/run-recovery/tracker'
 import { assertThreadMemoryTransport, canContributeThreadMemory } from '../../../shared/thread-memory-policy'
@@ -93,7 +94,9 @@ export function createThreadRouteRunner(input: ThreadRouteContext) {
     // undefined backend) could reinterpret the remote path as a local lookalike.
     if (thread.bot && (activeProvider.id !== thread.bot.providerId || route.providerAccountId !== thread.bot.providerAccountId || runModel !== thread.bot.model)) throw new Error('Bots keep their captured model and account; start a new bot chat to change them.')
     const baseToolContext = botVm ? { cwd: '/workspace', signal: controller.signal, currentThread: thread } : fullToolContext({ thread, provider: activeProvider, model: runModel, signal: controller.signal, memoryPolicy })
-    const toolContext = scopeBotToolContext(thread.bot, botVm ? createBotVmToolContext(vmHost!, thread.bot!.presetId, baseToolContext) : baseToolContext)
+    let toolContext = scopeBotToolContext(thread.bot, botVm ? createBotVmToolContext(vmHost!, thread.bot!.presetId, baseToolContext) : baseToolContext)
+    const botTicket = thread.bot ? store.tickets.find((ticket) => ticket.threadId === thread.id && !ticket.archivedAt) : undefined
+    if (botTicket) toolContext = restrictTicketToolContext(toolContext, botTicket.allowedCapabilities) as typeof toolContext
     toolContext.memoryPolicy = memoryPolicy
     assertThreadMemoryTransport(thread, activeProvider, memoryPolicy)
     if (restrictedBot) toolContext.botToolScopeGuard = () => {

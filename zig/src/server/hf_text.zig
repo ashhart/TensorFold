@@ -324,7 +324,7 @@ pub const HfText = struct {
 
     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
         const t = self(ctx);
-        const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+        const ids = t.tok.encode(a, if (@import("hf_hy4.zig").active(&t.tok)) @import("hf_hy4.zig").spelling(s) orelse s else s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
     }
@@ -347,11 +347,11 @@ pub const HfText = struct {
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        return self(ctx).tok.decode(a, ids, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        return @import("hf_hy4.zig").mapped(&self(ctx).tok, a, self(ctx).tok.decode(a, ids, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}"));
     }
 
     fn tokenIdFn(ctx: *anyopaque, piece: []const u8) ?u32 {
-        return self(ctx).tok.specialTokenId(piece);
+        return self(ctx).tok.specialTokenId(if (@import("hf_hy4.zig").active(&self(ctx).tok)) @import("hf_hy4.zig").spelling(piece) orelse piece else piece);
     }
 
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {

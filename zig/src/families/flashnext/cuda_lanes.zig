@@ -104,7 +104,7 @@ pub fn Namespace(comptime Tri: type) type {
             return bytes.placementWeightBytes(gpa, io, dir, world, rank, drafts);
         }
 
-        /// The tower's weights and one call's scratch, which rank zero holds beside the text weights with --vision.
+        pub const worlds = bytes.worlds; // refused by name before admission and open, which take no others
         pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
             return bytes.visionBytes(a, io, dir);
         }

@@ -203,6 +203,11 @@ HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite resul
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
 registered at all six supported bit widths and groups of 32, 64 and 128, with no known finding.
 
+HIP's routed item-rows stream tile (`Routing.item_rows` on plain fp32-output `affine_dot2_stream`, 4-bit, 4 rows,
+enabled on RDNA3.5 for single-round `K <= 1024` plans), whose rows past an item's count leave the lane fold, replaces
+`item_rows = 0` byte for byte when the largest item holds 3 or 4 rows. Its controls run over items one row short and go
+red at gate 3.
+
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
@@ -288,7 +293,7 @@ and six geometry pipelines of each projection bit-equal to them (two controls: m
 w3's x sums without their bf16 steps).
 Metal also checks DeepSeek V4.1's routed experts at hidden 5120, width 2304, rows 1 to 16: the gate/up (`tf_dsv41_xp_up`:
 fp8 act_quant of the input, bf16 projections, clamped SwiGLU, route weight, bf16, act_quant of the result) against an
-oracle in the kernel's fp32 order whose silu may move by exp's error, and the down (`tf_dsv41_xp_down_one`/`_multi`, a
+oracle in the kernel's fp32 order whose silu may move by exp's error, and the down (`tf_dsv41_xp_down_one`/`_rows`, a
 DeepSeek-only copy of Kimi K3's chains with the full E8M0 scale range) against its bytes (also over the release's real
 FP4 expert bytes), each with four controls. The copied plan and combine (`tf_dsv41_route_plan`, `tf_dsv41_xp_combine`)
 are checked end to end through the GPU's own plan, and every launch is recorded for gate 5.
@@ -300,6 +305,11 @@ the row kernel one row a launch on every dense FP8 shape the decode forward runs
 and 1 to 15 from row 1 at every form, the 16/17 seam and a three-launch batch, with NaN and Inf planted. Four controls
 go red: non-finite inputs flushed, group and slice roots added in a chain, group roots rounded to fp16, and writes past
 its output.
+The decode gate/up and down for an expert's slot of 2 to 16 rows (`tf_dsv41_xp_upc_rows`, `tf_dsv41_xp_down_rows`)
+decode its weights once for every row of a pass, each row in the one-row kernel's order: both run with every row on
+the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
+alone at 1 to 16 rows on the same, disjoint and random experts, with NaN and Inf planted. Rows that read their pass's
+first row are a control in the registrations (red at shapes) and in the probe.
 The row-split seam's four kernels (`pair_rows.metal`, launched by `pair_rows.zig`) move bf16 frames, never sums:
 `pair_stage` copies this rank's half of a frame row into the slot the relay sends, and `pair_gather` writes both halves
 of every row, its own natively and the peer's from the relayed frame. `pair_argmax` flags a row whose logits are not
@@ -387,6 +397,10 @@ and the exact sums of gate 4.
 Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
 `id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
 angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
+Its decoders' own kernels (`metal_idol_decoder*.zig`) are checked too: the point embedding, the stem's fp16 cast,
+`to_kv`, the heads' RMS norm, the attention's four forms (P V as fp16 P hi + lo) and its fp32 short form. Each is checked
+at idol-sdk's fp32 and fp16 points, with 15 controls. One drops P's lo half and must go red on heads built so that O is
+P's fp16 remainder alone.
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.

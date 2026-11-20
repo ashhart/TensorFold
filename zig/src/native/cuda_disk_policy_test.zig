@@ -176,6 +176,9 @@ test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expe
         try changed.append(t.allocator, try flashKey(&x, &c));
         @field(k.forms, field) = 64;
     }
+    k.forms.readout_fused = true; // TF_FLASHNEXT_READOUT_FUSED=1: a prompt pass's BF16 read-out on the fused tiles
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.forms.readout_fused = false;
     k.expert_tile = .{ .mod = undefined, .fns = undefined, .resident = .{ 64, 64 }, .selection = .up };
     const up = try flashKey(&x, &c);
     k.expert_tile.?.selection = .both; // the same grids: the selection alone moves the key
@@ -216,7 +219,7 @@ test "disk identity: Flash Next CUDA prompt forms take each setting's value at l
     const env = @import("sys").env;
     const Engine = @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child;
     const Forms = @FieldType(@FieldType(Engine, "batch_k"), "forms");
-    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS" };
+    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS", "TF_FLASHNEXT_READOUT_FUSED" };
     for (names) |n| _ = env.unsetenv(n);
     defer for (names) |n| {
         _ = env.unsetenv(n);
@@ -229,6 +232,8 @@ test "disk identity: Flash Next CUDA prompt forms take each setting's value at l
     _ = env.setenv("TF_FLASHNEXT_FACT_ROWS", "32", 1);
     try t.expectEqual(@as(usize, 128), Forms.resolve().readout_rows);
     try t.expectEqual(@as(usize, 32), Forms.resolve().fact_rows);
+    _ = env.setenv("TF_FLASHNEXT_READOUT_FUSED", "1", 1);
+    try t.expect(Forms.resolve().readout_fused);
 }
 
 const nemotron = @import("nemotron");

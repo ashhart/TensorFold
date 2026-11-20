@@ -14,9 +14,10 @@ const Cache = caches.Cache;
 pub fn sharing() !usize {
     const v = @import("core").profile.given(.TF_QWEN_KV_SHARE) orelse return 0;
     const snaps = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenKvShare;
-    if (snaps > 0) if (@import("core").profile.get(.TF_QWEN_REQUEST_STARTS)) |starts| {
+    if (snaps > 0) {
+        const starts = @import("core").profile.lookup("TF_QWEN_REQUEST_STARTS") orelse return snaps;
         if (std.mem.eql(u8, starts, "1")) return error.QwenRequestStartsWithSharedKv;
-    };
+    }
     return snaps;
 }
 
@@ -150,7 +151,7 @@ pub const Prefix = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(x.gpa);
         for (plan.marks) |m| {
-            const g = m - m % engine.max_rows;
+            const g = m - m % engine.grid_rows;
             if (g > plan.from and (out.items.len == 0 or out.items[out.items.len - 1] != g)) try out.append(x.gpa, g);
         }
         return out.toOwnedSlice(x.gpa);

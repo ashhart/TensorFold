@@ -200,6 +200,7 @@ pub fn Pass(comptime Tri: type) type {
             const act = s.act + r0 * low * 2;
             const xs_act = s.xs_act + r0 * (low / 32) * 4;
             if (hc_w.down.native != null) {
+                if (std.meta.eql(keep, HcKeep{}) and hc.promptFused(self, hc_w, n)) return tiles.readoutFused(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
                 try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
                 return hc.readoutNative(self, hc_w, r0, n);
             }

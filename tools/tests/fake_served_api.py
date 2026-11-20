@@ -19,6 +19,9 @@ A clean fake passes every gate. Each fault breaks one property the kit gates, an
 - serial: the server takes one request at a time, so requests sent together never overlap in it.
 - empty: every reply is empty (no tokens), so every pair of replies hashes the same.
 
+``running(..., prefill=S)`` holds each JSON chat request ``S`` seconds before its reply, as a long prefill; a client
+that leaves meanwhile is counted as a disconnect (the cancel faults apply), and the request gets no reply.
+
 ``running(..., warm=S)`` keeps the server busy (one running, more waiting) for ``S`` seconds after each reply, as a
 server that prefills the chat's next turn in the background; ``lanes_free=False`` leaves ``capacity.lanes_free`` out
 of ``GET /v1/load``, as a server without lanes.
@@ -52,6 +55,8 @@ import contextlib
 import hashlib
 import http.server
 import json
+import select
+import socket
 import threading
 import time
 
@@ -72,7 +77,9 @@ COUNTED = 0.5  # most seconds a pair waits for a census to count it, while watch
 
 def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi", tokens=4, sampling="greedy", prompt=9):
     """A chat completion body carrying the fields the kit reads."""
-    return {"choices": [{"message": {"content": text}}], "tensorfold": {"token_sha256": sha, "sampling": sampling},
+    runtime = {"token_sha256": sha, "token_sha": sha[:12] if isinstance(sha, str) else sha, "sampling": sampling,
+               "tokens_per_second": 50.0}
+    return {"choices": [{"message": {"content": text}}], "tensorfold": runtime,
             "speculative": {"rounds": int(drafted > 0), "accepted": accepted, "drafted": drafted},
             "usage": {"prompt_tokens": prompt, "completion_tokens": tokens,
                       "prompt_tokens_details": {"cached_tokens": cached}}}
@@ -97,7 +104,12 @@ def messages_of(body) -> list:
 
 
 def text_of(body) -> str:
-    return " ".join(m.get("content", "") for m in messages_of(body))
+    """The messages' text; a list content's text parts, and its other parts (images, videos) as JSON."""
+    parts = []
+    for m in messages_of(body):
+        content = m.get("content") or ""
+        parts += [content] if isinstance(content, str) else [c.get("text") or json.dumps(c) for c in content]
+    return " ".join(parts)
 
 
 def event(chunk: dict) -> bytes:
@@ -193,6 +205,8 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
         if error:
             return self.reply(400, {"error": {"message": error, "type": "invalid_request_error"}})
         key = json.dumps({k: v for k, v in body.items() if k not in ("stream", "stream_options")}, sort_keys=True)
+        if server.prefill and not body.get("stream") and self.left(server.prefill):
+            return
         with server.one if server.fault == "serial" else contextlib.nullcontext():
             payload = self.answer(body, key)
             # Out of flight before the reply is written: the client's next request must not find this one counted.
@@ -233,6 +247,31 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
                            text="", tokens=0)
             return doc(sha=sha, cached=cached, accepted=accepted, drafted=accepted, text="r" + sha[:6],
                        sampling="exact" if sampled else "greedy", prompt=max(9, len(text_of(body)) // 4))
+        finally:
+            with server.lock:
+                server.inflight -= 1
+
+    def left(self, seconds: float) -> bool:
+        """Holds the request ``seconds`` in flight; True, a disconnect counted, when its client leaves meanwhile."""
+        server = self.server
+        with server.lock:
+            server.inflight += 1
+        try:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if select.select([self.connection], [], [], 0.01)[0]:
+                    try:
+                        gone = not self.connection.recv(1, socket.MSG_PEEK)
+                    except OSError:
+                        gone = True
+                    if gone:
+                        with server.lock:
+                            server.disconnects += 1
+                            server.leaked += server.fault == "cancel_lane"
+                            server.lost += server.fault == "cancel_free"
+                        self.close_connection = True
+                        return True
+            return False
         finally:
             with server.lock:
                 server.inflight -= 1
@@ -324,13 +363,13 @@ class FakeEngine(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True):
+def running(cache=False, fault=None, linger=0.0, steps=None, warm=0.0, lanes_free=True, prefill=0.0):
     """One fake on 127.0.0.1 port 0, yielding its base URL; stopped on exit."""
     server = FixtureHTTPServer(("127.0.0.1", 0), FakeEngine)
     server.cache, server.fault, server.seen, server.inflight, server.linger = cache, fault, {}, 0, linger
     server.steps, server.kept, server.evicted, server.cut = steps, collections.OrderedDict(), set(), set()
     server.streams = server.leaked = server.lost = server.disconnects = server.overlaps = 0
-    server.warm, server.warm_until, server.lanes_free = warm, 0.0, lanes_free
+    server.warm, server.warm_until, server.lanes_free, server.prefill = warm, 0.0, lanes_free, prefill
     server.census_at, server.census_gap = -1e9, 1e9  # no census read yet
     server.lock, server.one = threading.Lock(), threading.Lock()
     server.cond = threading.Condition(server.lock)
@@ -350,7 +389,7 @@ def fake(cache, fault=None, linger=0.0, **shape):
     # linger: seconds each handler stays alive after its reply, widening any window between reply and exit.
     if fault not in (None, *FAULTS):
         raise ValueError(f"unknown fault {fault}")
-    # shape: warm and lanes_free, see ``running``.
+    # shape: warm, lanes_free and prefill, see ``running``.
     with running(cache, fault, linger, **shape) as url:
         yield url
 

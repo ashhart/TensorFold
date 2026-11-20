@@ -42,18 +42,22 @@ pub fn family(model_type: []const u8) ?Family {
     return null;
 }
 
+/// The value of `name` in `env`, or null when it is unset or there is no environment.
+pub fn envValue(env: ?*const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    return if (env) |m| m.get(name) else null;
+}
+
+/// The home directory: HOME, else USERPROFILE (Windows sets USERPROFILE, not HOME).
+pub fn homeDir(env: ?*const std.process.Environ.Map) ?[]const u8 {
+    return envValue(env, "HOME") orelse envValue(env, "USERPROFILE");
+}
+
 /// HF_HUB_CACHE, or HF_HOME/hub, or the default cache under the home directory.
 pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[]const u8) ![]const u8 {
     if (override) |o| return o;
-    const get = struct {
-        fn f(e: ?*const std.process.Environ.Map, name: []const u8) ?[]const u8 {
-            return if (e) |m| m.get(name) else null;
-        }
-    }.f;
-    if (get(env, "HF_HUB_CACHE")) |c| return c;
-    const home = get(env, "HOME") orelse get(env, "USERPROFILE") orelse ""; // Windows sets USERPROFILE, not HOME
-    if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
-    return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
+    if (envValue(env, "HF_HUB_CACHE")) |c| return c;
+    if (envValue(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
+    return std.fs.path.join(a, &.{ homeDir(env) orelse "", ".cache", "huggingface", "hub" });
 }
 
 /// The repo's cache folder name: models--org--name.

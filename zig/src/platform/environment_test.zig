@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -40,6 +40,8 @@ const valid = [_]Case{
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
@@ -102,10 +104,16 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
+    .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "32", .n = 32 },
+    .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "8192", .n = 8192 },
+    .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "6144", .n = 6144 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "0", .n = 0 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "1000", .n = 1000 },
@@ -137,6 +145,21 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
+    .{ .name = "XPU_TP", .raw = "1", .n = 1 },
+    .{ .name = "XPU_TP", .raw = "2", .n = 2 },
+    .{ .name = "XPU_TP", .raw = "4", .n = 4 },
+    .{ .name = "XPU_DUMP_H", .raw = "/tmp/qwen27_h.bin", .n = 0 },
+    .{ .name = "XPU_CTX", .raw = "16384", .n = 16384 },
+    .{ .name = "XPU_MTP", .raw = "0", .n = 0 },
+    .{ .name = "XPU_MTP", .raw = "1", .n = 1 },
+    .{ .name = "XPU_MTP_DEPTH", .raw = "6", .n = 6 },
+    .{ .name = "XPU_MTP_CONF", .raw = "-0.4", .n = @bitCast(@as(f64, -0.4)) },
+    .{ .name = "XPU_VERIFY_TEST", .raw = "0", .n = 0 },
+    .{ .name = "XPU_VERIFY_TEST", .raw = "1", .n = 1 },
+    .{ .name = "XPU_FLASHNEXT_WARM", .raw = "0", .n = 0 },
+    .{ .name = "XPU_FLASHNEXT_WARM", .raw = "1", .n = 1 },
+    .{ .name = "XPU_DEVICE_ID", .raw = "0xe223", .n = 0xe223 },
+    .{ .name = "XPU_DEVICE_ID", .raw = "57891", .n = 57891 },
     .{ .name = "LFM3_FUSE", .raw = "7", .n = 7 },
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "auto", .n = 0 },
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "reply", .n = 1 },
@@ -162,10 +185,15 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .raw = "full", .n = 1 },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_API_KEY", .raw = " example-key-1, example-key-2\n", .n = 0 },
+    .{ .name = "HF_TOKEN", .raw = " hf_Example\n", .n = 0 },
+    .{ .name = "HUGGING_FACE_HUB_TOKEN", .raw = "hf_Example", .n = 0 },
+    .{ .name = "HF_TOKEN_PATH", .raw = "/srv/hf/token", .n = 0 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TF_HY4_ENGRAM", .raw = "gpu", .n = 2 },
+    .{ .name = "TF_HY4_DRAFT_BITS", .raw = "8", .n = 8 },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
@@ -191,25 +219,29 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
-        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },   .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
-        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" }, .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
-        .{ "TF_CUDA_SEGMENTS", "0" },           .{ "TF_CUDA_SEGMENTS", "5" },
-        .{ "TF_CUDA_CARVEOUT", "true" },        .{ "TF_CUDA_CARVEOUT", "01" },
-        .{ "TF_CUDA_CARVEOUT_MIB", "0" },       .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
-        .{ "TF_ROCE_GID_INDEX", "2147483648" }, .{ "TF_PROMPT_ROWS", "16" },
-        .{ "TF_PROMPT_ROWS", "129" },           .{ "TF_PROMPT_ROWS", "2064" },
-        .{ "TF_PROMPT_ROWS", " 512" },          .{ "XPU_A8_BITS", "04" },
-        .{ "XPU_A8_BITS", "16" },               .{ "TF_SLIDE_POCKET_KEY", "AUTO" },
-        .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },  .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" },
-        .{ "TF_DSPINE_WINDOW", "0" },           .{ "TF_DSPINE_WINDOW", "15" },
-        .{ "TF_DSPINE_WINDOW", "8193" },        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },
-        .{ "TF_QWEN_KV_PAGE_TEST", "0" },       .{ "TF_Q27_GEMM", "wide" },
-        .{ "TF_Q27_GEMM", "NARROW" },           .{ "TF_Q27_TAIL", "on" },
-        .{ "TF_Q27_TAIL", "OFF" },              .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },
-        .{ "TF_QWEN_KEEP_LATE", "2" },          .{ "TF_TIMING", "2" },
-        .{ "TF_NO_TREES", "true" },             .{ "TF_MTP_TREES", "yes" },
-        .{ "TF_MTP_BATCH", "off" },             .{ "TF_QWEN_POOL_LOG", "true" },
-        .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
+        .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
+        .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
+        .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
+        .{ "TF_CUDA_CARVEOUT_MIB", "0" },              .{ "TF_CUDA_CARVEOUT_MIB", "18446744073709551615" },
+        .{ "TF_ROCE_GID_INDEX", "2147483648" },        .{ "TF_PROMPT_ROWS", "16" },
+        .{ "TF_PROMPT_ROWS", "129" },                  .{ "TF_PROMPT_ROWS", "2064" },
+        .{ "TF_PROMPT_ROWS", " 512" },                 .{ "XPU_A8_BITS", "04" },
+        .{ "XPU_A8_BITS", "16" },                      .{ "XPU_TP", "0" },
+        .{ "XPU_TP", "3" },                            .{ "XPU_TP", " 4" },
+        .{ "XPU_CTX", "0" },                           .{ "XPU_CTX", "262145" },
+        .{ "XPU_MTP_DEPTH", "0" },                     .{ "XPU_MTP_DEPTH", "16" },
+        .{ "XPU_DEVICE_ID", "0" },                     .{ "XPU_DEVICE_ID", "0xzz" },
+        .{ "TF_SLIDE_POCKET_KEY", "AUTO" },            .{ "TF_DRAMA_PREFILL_ROWS", "4096x" },
+        .{ "TF_DRAMA_REFERENCE_CACHE", "4294967296" }, .{ "TF_DSPINE_WINDOW", "0" },
+        .{ "TF_DSPINE_WINDOW", "15" },                 .{ "TF_DSPINE_WINDOW", "8193" },
+        .{ "TF_QWEN_KV_PAGE_TEST", "2147483648" },     .{ "TF_QWEN_KV_PAGE_TEST", "0" },
+        .{ "TF_Q27_GEMM", "wide" },                    .{ "TF_Q27_GEMM", "NARROW" },
+        .{ "TF_Q27_TAIL", "on" },                      .{ "TF_Q27_TAIL", "OFF" },
+        .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },       .{ "TF_QWEN_KEEP_LATE", "2" },
+        .{ "TF_TIMING", "2" },                         .{ "TF_NO_TREES", "true" },
+        .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
+        .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
@@ -390,4 +422,29 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+}
+
+test "rank aliases name their flag and refuse from their retirement release" {
+    const Row = struct { name: [:0]const u8, scope: e.Scope, flag: []const u8 };
+    const rows = [_]Row{
+        .{ .name = "TF_GLM_RANK", .scope = .glm, .flag = "--rank" },            .{ .name = "TF_GLM_WORLD", .scope = .glm, .flag = "--tp" },
+        .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .flag = "--rank" }, .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .flag = "--tp" },
+        .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .flag = "--rank" },  .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .flag = "--tp" },
+    };
+    for (rows) |row| {
+        const name = row.name;
+        try t.expectEqual(row.scope, e.rule(name).scope);
+        try t.expectEqualStrings(row.flag, e.rule(name).flag.?);
+        try t.expectEqualStrings(e.alias_retire, e.rule(name).retire.?);
+        var buf: [64]u8 = undefined;
+        try t.expect(e.retired(name, "0.0.1") == null);
+        try t.expect(e.retired(name, try std.fmt.bufPrint(&buf, "{s}-rc.1", .{e.alias_retire})) == null); // a pre-release is before it
+        try t.expect(e.retired(name, e.alias_retire) != null);
+        try t.expect(e.retired(name, "999.0.0") != null);
+        try t.expectEqual(@as(?u64, 2), try e.parse(name, "+2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, " 2"));
+        try t.expectError(error.InvalidEnvironment, e.parse(name, "4294967296"));
+    }
+    try t.expect(e.retired("TF_GLM_PROF", "9.9.9") == null);
+    try t.expect(e.retired("TF_NOT_A_ROW", "9.9.9") == null);
 }

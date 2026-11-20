@@ -1,5 +1,6 @@
 //! `tf-qwen35-cuda <model> <step|window|tree|prompt|state|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const core = @import("core");
 const q = @import("qwen35");
@@ -21,6 +22,7 @@ const usage =
     \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
     \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
     \\       tf-qwen35-cuda <model dir> stage <out> [fp8]: a scenario's logits, one engine or a ring of stages (RFC #2005)
+    \\stage and pipe require POSIX.
     \\stage: without TF_STAGE_RANK one engine; with TF_STAGE_RANK, _WORLD, _PEERS, _SECRET_FILE and TF_STAGE_LAYOUT
     \\(first:end a rank, e.g. 0:32,32:64) each process loads its layers only and rank 0 writes <out>. The scenario: a
     \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
@@ -58,6 +60,7 @@ pub fn main(init: std.process.Init) !u8 {
         return code;
     }
     if (args.len >= 4 and std.mem.eql(u8, args[2], "stage")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
         const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
         if (args.len > 5 or (args.len == 5 and !fp8)) {
             std.debug.print("{s}", .{usage});
@@ -66,6 +69,7 @@ pub fn main(init: std.process.Init) !u8 {
         return @import("qwen35_stage.zig").run(init, a, args[1], args[3], fp8);
     }
     if (args.len >= 4 and std.mem.eql(u8, args[2], "pipe")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
         const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
         if (args.len > 5 or (args.len == 5 and !fp8)) {
             std.debug.print("{s}", .{usage});

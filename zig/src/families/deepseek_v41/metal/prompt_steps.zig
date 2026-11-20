@@ -74,6 +74,9 @@ fn begun(t: *Target, slot: u32, ids: []const u32) !*Slot {
 /// A begun prompt ends unfinished (released, cancelled or failed): nothing of it is kept, the slot is free again.
 pub fn abandon(t: *Target, s: *Slot) void {
     t.pr.forget(&s.tail);
+    t.pr.images = null;
+    if (s.image_rows) |*r| r.deinit();
+    s.image_rows = null;
     s.filling = false;
     s.hit_on = false;
     s.whole = false;

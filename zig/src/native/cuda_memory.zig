@@ -89,9 +89,11 @@ pub fn counting(m: MemInfo, zones: ?[]const u8) MemInfo {
 
 /// Pinned host-cache room, after the CUDA streams when memory is unified.
 pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64, room: u64, streams: u64, unified: bool) u64 {
-    const text = procText(a, io, "/proc/meminfo") orelse return 0;
-    const zones = procText(a, io, "/proc/zoneinfo");
-    const m = counting(meminfo(text) orelse return 0, zones);
+    const m = if (@import("builtin").os.tag == .windows) windowsMem() orelse return 0 else blk: {
+        const text = procText(a, io, "/proc/meminfo") orelse return 0;
+        const zones = procText(a, io, "/proc/zoneinfo");
+        break :blk counting(meminfo(text) orelse return 0, zones);
+    };
     return hostCacheBudget(asked, m.available, room, streams, unified);
 }
 
@@ -109,6 +111,28 @@ pub fn hostCacheBudget(asked: ?f64, available: u64, room: u64, streams: u64, uni
     }
     return if (unified) automaticCache(left, 8 << 30) else @min(8 << 30, available / 2);
 }
+
+/// What GlobalMemoryStatusEx says about physical memory, in bytes (Windows; null where the call fails).
+fn windowsMem() ?MemInfo {
+    var s: MemoryStatusEx = std.mem.zeroes(MemoryStatusEx);
+    s.dwLength = @sizeOf(MemoryStatusEx);
+    if (GlobalMemoryStatusEx(&s) == 0) return null;
+    return .{ .total = s.ullTotalPhys, .available = s.ullAvailPhys };
+}
+
+const BOOL = c_int;
+const MemoryStatusEx = extern struct {
+    dwLength: u32,
+    dwMemoryLoad: u32,
+    ullTotalPhys: u64,
+    ullAvailPhys: u64,
+    ullTotalPageFile: u64,
+    ullAvailPageFile: u64,
+    ullTotalVirtual: u64,
+    ullAvailVirtual: u64,
+    ullAvailExtendedVirtual: u64,
+};
+extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) BOOL;
 
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
 pub fn procText(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
@@ -286,6 +310,13 @@ test "this host's /proc/meminfo reads whole and parses (Linux)" {
     const text = procText(a, std.testing.io, "/proc/meminfo") orelse return error.Unreadable;
     defer a.free(text);
     try std.testing.expect(meminfo(text) != null);
+}
+
+test "this host's physical memory reads (Windows)" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const m = windowsMem() orelse return error.SkipZigTest;
+    try std.testing.expect(m.total > 0 and m.available <= m.total);
+    try std.testing.expect(hostCacheBytes(std.testing.allocator, std.testing.io, null, 0, 0, false) > 0);
 }
 
 test "meminfo: total and available in bytes" {

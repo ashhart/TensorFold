@@ -134,7 +134,8 @@ pub const flags = [_]Flag{
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
-    .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
+    .{ .name = "--tp", .native = served("--tp") }, // 1 to 64; each family admits its own worlds
+    .{ .name = "--pp", .native = served("--tp") }, // 1 until pipeline stages serve (#2005)
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
@@ -256,6 +257,8 @@ pub const Args = struct {
     spill_gib: ?f64 = null, // disk for states evicted from the prompt cache, every model together (null or 0: off)
     tp: u32 = 1,
     rank: u32 = 0,
+    tp_given: bool = false, // --tp named on the command line (a family's rank aliases fill it otherwise)
+    rank_given: bool = false,
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
@@ -527,7 +530,6 @@ pub fn parallel(text: []const u8) ?u32 {
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
 }
-
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
@@ -570,13 +572,13 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .keep = args.checkpoint_slots,
         .tp = args.tp,
         .rank = args.rank,
+        .given = .{ .tp = args.tp_given, .rank = args.rank_given },
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
         .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
     });
 }
-
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
 pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
@@ -585,9 +587,7 @@ pub const capabilities = @import("cli_capabilities.zig").capabilities;
 pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
 pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;
 pub const ranks = @import("cli_gpu_flags.zig").ranks;
-
 const cli = @This();
-
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;

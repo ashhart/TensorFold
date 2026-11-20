@@ -82,6 +82,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "qmm_prefill", .flags = &.{"-O3"} },
     .{ .name = "flashnext_fact", .flags = &.{"-O3"} }, // ours: prompt rows on qmm.cu's factored arithmetic
     .{ .name = "flashnext_hcf", .flags = glue }, // ours: the hyper-connection read-out's prompt tiles, fn_hc's bits
+    .{ .name = "flashnext_hcn", .flags = glue }, // ours: the BF16 read-out's prompt tiles, the normalize folded in
     .{ .name = "flashnext_fexp", .flags = &.{"-O3"} }, // ours: prompt pairs' experts on expert_rows' factored arithmetic
     .{ .name = "w4a8_prefill", .flags = &.{"-O3"} }, // ours: prompt matmuls, int8 activations on MLX affine 4-bit weights
     .{ .name = "experts", .flags = &.{"-O3"} }, // cuda/experts.py, tensorfold_experts_v7
@@ -147,6 +148,13 @@ pub const kernels = [_]Kernel{
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
     .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
+    .{ .name = "hy4_indexpool", .src = "hy4_flash/indexpool", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "affine_experts", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_index_recall", .src = "hy4_flash/index_recall", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_attention_sink", .src = "hy4_flash/attention_sink", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention

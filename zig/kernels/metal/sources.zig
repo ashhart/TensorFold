@@ -3,6 +3,20 @@
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
 
+pub const hy4_flash_indexpool = @embedFile("hy4_flash/indexpool.metal");
+pub const hy4_flash_index_recall = @embedFile("hy4_flash/index_recall.metal");
+pub const hy4_flash_index_build = @embedFile("hy4_flash/index_build.metal");
+pub const hy4_flash_attention_sink = @embedFile("hy4_flash/attention_sink.metal");
+pub const hy4_flash_mla_project = @embedFile("hy4_flash/mla_project.metal");
+pub const hy4_flash_mla_attention = @embedFile("hy4_flash/mla_attention.metal");
+pub const hy4_flash_ihc = @embedFile("hy4_flash/ihc.metal");
+pub const hy4_flash_rows = @embedFile("hy4_flash/rows.metal");
+pub const hy4_flash_mla_nax = @embedFile("hy4_flash/mla_nax.metal");
+pub const hy4_flash_route_rows = @embedFile("hy4_flash/route_rows.metal");
+pub const hy4_flash_engram = @embedFile("hy4_flash/engram.metal");
+pub const hy4_flash_affine_experts = @embedFile("hy4_flash/affine_experts.metal");
+pub const hy4_flash_tensor_dispatch = @embedFile("hy4_flash/tensor_dispatch.metal");
+
 /// Nemotron's generated kernels (tools/zig/gen_nemotron_kernels.py).
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
@@ -108,6 +122,8 @@ pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };
+pub const elementwise = @embedFile("ops/elementwise.metal");
+pub const embed_norm = @embedFile("ops/embed_norm.metal");
 
 /// Prompt-chunk kernels (tools/zig/prefill_*.py), bit-identical to MLX 0.32.3's prefill kernels.
 pub const prefill = [_]File{
@@ -119,10 +135,11 @@ pub const prefill = [_]File{
     .{ .name = "qmm_nax", .text = @embedFile("prefill/qmm_nax.metal") },
     .{ .name = "scan", .text = @embedFile("prefill/scan.metal") },
     .{ .name = "sort", .text = @embedFile("prefill/sort.metal") },
-    .{ .name = "embed_norm", .text = @embedFile("ops/embed_norm.metal") },
-    .{ .name = "elementwise", .text = @embedFile("ops/elementwise.metal") },
+    .{ .name = "embed_norm", .text = embed_norm },
+    .{ .name = "elementwise", .text = elementwise },
     .{ .name = "route", .text = @embedFile("ops/route.metal") },
     .{ .name = "qmv", .text = @embedFile("ops/qmv.metal") },
+    .{ .name = "gemv_ops", .text = @embedFile("ops/gemv.metal") },
 };
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
@@ -159,6 +176,8 @@ pub const uocr = @embedFile("uocr/vision.metal");
 pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
+/// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
+pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.

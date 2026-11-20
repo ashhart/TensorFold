@@ -1,3 +1,6 @@
+import { botInstructions, botRunApprovalMode } from '../../../shared/bot-policy'
+import { scopeBotToolContext } from '../../agent/bot-tool-scope'
+import { captureTicketBot, assertTicketBotReady, sameTicketBot } from './ticket-bot'
 import { selectedResponseLocale } from '../../agent/response-language'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -146,6 +149,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     ? room?.seats.find((seat) => seat.name === input.source?.seat) : undefined
   const configuredEffort = input.source?.reasoningEffort === undefined ? roomSeat : input.source
   const reasoningEffort = captureAgentReasoningEffort(configuredEffort, store.settings.reasoningEffort)
+  const bot = input.source?.roomId ? undefined : captureTicketBot(ticket, phase, store.settings)
+  if (bot) assertTicketBotReady(bot, store.settings)
   const configuredWorkspace = room?.workspace ?? project.workspace ?? null
   if (configuredWorkspace?.kind === 'ssh') {
     throw new Error('Local ticket workers do not support SSH workspaces; run this ticket on its remote Orchestrator.')
@@ -160,7 +165,10 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   let reservedController: AbortController | null = null
   let launched = false
   try {
-  const opts = ticketWorkOptionsWithProjectRoute(project, requestedOpts, phase === 'review' ? 'ticket_review' : 'ticket_build')
+  const routeOptions = bot
+    ? { ...requestedOpts, providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model }
+    : requestedOpts
+  const opts = ticketWorkOptionsWithProjectRoute(project, routeOptions, phase === 'review' ? 'ticket_review' : 'ticket_build')
   const roomWorkspace = project && room
     ? await awaitTicketStartupStep(ensureRoomWorktree(project, room), () => assertActiveTicketWorkOwnership(ticket, project, room, existingThread))
     : null
@@ -168,6 +176,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     throw new Error('Room ticket work must run in an isolated room worktree, not the base project folder.')
   }
   const resolvedRoute = resolveProjectProvider(project, opts?.providerAccountId, opts?.model, opts?.providerId)
+  if (bot && (resolvedRoute.baseProvider.id !== bot.providerId || resolvedRoute.providerAccountId !== bot.providerAccountId || resolvedRoute.model !== bot.model)) throw new Error('The assigned bot model is unavailable for this project.')
   const baseProvider = resolvedRoute.baseProvider
   const routeBaseProvider = store.settings.providers.find((p) => p.id === baseProvider.id) ?? baseProvider
   const requestedProviderAccountId = resolvedRoute.providerAccountId
@@ -176,7 +185,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     provider: routeBaseProvider,
     model: resolvedRoute.model,
     requestedAccountId: requestedProviderAccountId,
-    allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
+    allowFailover: !bot && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
     localOnly: project?.localOnly === true,
     contextLimit: effectiveContextLimit(routeBaseProvider, resolvedRoute.model, requestedProviderAccountId),
     reasoningEffort,
@@ -202,10 +211,12 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   let thread = ticket.threadId ? store.threads.find((t) => t.id === ticket.threadId) : null
   assertActiveTicketWorkOwnership(ticket, project, room, thread)
   if (thread && aborters.has(thread.id)) throw new Error('Ticket work is already running.')
+  if (!sameTicketBot(thread?.bot, bot)) thread = null
   const isNewThread = !thread
   if (!thread) {
     thread = {
       documentSourceIds: [],
+      ...(bot ? { bot } : {}),
       id: randomUUID(), title: ticket.title, kind: 'task', projectId: ticket.projectId ?? null,
       cwd,
       providerId: baseProvider.id, providerAccountId, model,
@@ -229,7 +240,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   ticket.status = 'in_progress'
   ticket.runState = 'running'
   ticket.startedAt = Date.now()
-  ticket.assignee = input.source?.seat || ticket.assignee || model
+  ticket.assignee = input.source?.seat || bot?.name || (!existingThread?.bot && ticket.assignee) || model
   // Execution tracking (VST-018): branch / engine / run, stamped at start, settled below.
   ticket.execution = startTicketExecution({
     target: input.source?.roomId ? 'room' : (ticket.executionMode === 'frontier' || ticket.executionMode === 'cli') ? ticket.executionMode : 'solo',
@@ -325,9 +336,12 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   }
   let activeRoute = { provider, providerAccountId, model }
   const runTicketWithRoute = async (route: { provider: Provider; providerAccountId: string | null; model: string }) => {
+    if (bot) assertTicketBotReady(bot, store.settings)
     const timelineStart = t.timeline.length
+    const context = fullToolContext({ thread: t, provider: route.provider, model: route.model, signal: controller.signal })
+    if (bot) context.botToolScopeGuard = () => assertTicketBotReady(bot, store.settings)
     const toolContext = restrictTicketToolContext(
-      fullToolContext({ thread: t, provider: route.provider, model: route.model, signal: controller.signal }),
+      context,
       allowedCapabilities,
     )
     await executeAgent({
@@ -335,12 +349,13 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       thread: t,
       provider: route.provider,
       model: route.model,
-      approvalMode: store.settings.approvalMode === 'auto' ? 'suggest' : store.settings.approvalMode,
+      ...(bot ? { personaBlock: botInstructions(bot) } : {}),
+      approvalMode: botRunApprovalMode(t, store.settings.agentPresets, store.settings.providers, store.settings.approvalMode === 'auto' ? 'suggest' : store.settings.approvalMode),
       temperature: store.settings.temperature,
       reasoningEffort,
       autoCompact: store.settings.autoCompact,
       contextLimit: effectiveContextLimit(route.provider, route.model),
-      toolContext,
+      toolContext: scopeBotToolContext(bot, toolContext),
       drainCues: () => drainThreadCues(t.id),
       waitForCue: (timeoutMs, signal) => waitForThreadCue(t.id, timeoutMs, signal),
       maxSteps: 40,
@@ -365,7 +380,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
         accountId: activeRoute.providerAccountId,
         model: activeRoute.model,
         error: err,
-        allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit',
+        allowFailover: !bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit'),
         localOnly: project?.localOnly === true,
         contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
         reasoningEffort,

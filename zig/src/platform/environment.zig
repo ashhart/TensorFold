@@ -3,8 +3,11 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat };
+pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+/// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
+pub const alias_retire = "1.4.0";
+
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -16,6 +19,7 @@ pub const Rule = struct {
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
+    base: u8 = 10,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
@@ -24,6 +28,10 @@ pub const Rule = struct {
     alias_of: ?[:0]const u8 = null,
     /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
     no_word: bool = true,
+    /// A rank variable kept as an alias of this server flag (fabric/mesh/launch.zig resolves it).
+    flag: ?[]const u8 = null,
+    /// The release from which the server refuses this alias, naming `flag`.
+    retire: ?[]const u8 = null,
 };
 
 pub fn isReal(kind: Kind) bool {
@@ -73,6 +81,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
+    .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
@@ -98,6 +107,15 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .scope = .metal, .kind = .word, .words = &.{ "sample", "full" }, .forms = "sample or full (full also checks every byte of the Engram tables at boot)" },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .scope = .metal, .kind = .u32, .forms = "a whole Engram record count a layer from 0 to 4294967295 (default 65536)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
+    .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
+    .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },
+    .{ .name = "XPU_CTX", .scope = .xpu, .kind = .positive, .min = 1, .max = 262144, .forms = "a whole context length from 1 to 262144" },
+    .{ .name = "XPU_MTP", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 disables MTP drafting; default 1)" },
+    .{ .name = "XPU_MTP_DEPTH", .scope = .xpu, .kind = .u32, .min = 1, .max = 15, .forms = "a whole draft depth from 1 to 15 (default 6)" },
+    .{ .name = "XPU_MTP_CONF", .scope = .xpu, .kind = .signed_real, .forms = "a finite cumulative log-probability cut (default -0.4)" },
+    .{ .name = "XPU_VERIFY_TEST", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (1 runs stand-in verify checks)" },
+    .{ .name = "XPU_FLASHNEXT_WARM", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 skips host PLE warmup; 1 forces it)" },
+    .{ .name = "XPU_DEVICE_ID", .scope = .xpu, .kind = .positive, .base = 0, .forms = "a nonzero PCI device id in decimal or 0x hex" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },
     .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
@@ -105,6 +123,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 takes every kept lesson out again to check the facts before it come back)" },
     .{ .name = "TF_SLIDE_TAP_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 checks tapped rows against a fresh run's)" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
+    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
+    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -117,7 +141,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
     // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
     .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
-    .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored (unset races the two when a build first loads)" },
+    .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -169,6 +193,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ENGRAM_QD", .scope = .dsv41, .kind = .u32, .forms = "a whole reader-thread count from 0 to 4294967295 (0 reads serially)" },
     .{ .name = "TF_DSV41_ENGRAM_READERS", .scope = .dsv41, .kind = .u32, .max = 32, .forms = "a whole reader-thread count from 0 to 32 (0 reads serially)" },
     .{ .name = "TF_DSV41_GEN_STREAMS", .scope = .dsv41, .kind = .size, .min = 1, .forms = "a whole request count from 1 to the native size maximum" },
+    .{ .name = "TF_HY4_ENGRAM", .scope = .metal, .kind = .word, .words = &.{ "nvme", "ram", "gpu" }, .forms = "nvme, ram or gpu (where Hy4-flash's Engram tables live; default nvme)" },
+    .{ .name = "TF_HY4_DRAFT_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 8, 16 }, .forms = "4, 8 or 16 (Hy4-flash's DFly2 linears quantized at load; default 16, BF16)" },
     .{ .name = "TF_DSV41_CONTEXT", .scope = .dsv41, .kind = .u64, .min = 1, .max = std.math.maxInt(i64), .forms = "a whole position count from 1 to 9223372036854775807" },
     .{ .name = "TF_DSV41_SLOTS", .scope = .dsv41, .kind = .u32, .min = 1, .max = 16, .forms = "a whole slot count from 1 to 16" },
     .{ .name = "TF_DSV41_NUCLEUS", .scope = .dsv41, .kind = .u32, .forms = "a whole candidate count from 0 to 4294967295 (0 disables the nucleus)" },
@@ -212,8 +238,11 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SHARED_DRAFTS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARED_SIDE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_HC_FUSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_KEEP_LATE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (unset or blank leaves it unset)" },
     .{ .name = "TF_FLASHNEXT_DECODE_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_ATTN_LANES", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_WARM_AHEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_TABLE_WARM", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
@@ -231,16 +260,23 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
     .{ .name = "TF_FLASHNEXT_PROMPT", .scope = .flashnext, .kind = .word, .words = &.{"rows"}, .forms = "rows for the rows path (unset or blank keeps the plain path)" },
     .{ .name = "TENSORFOLD_API_KEY", .scope = .chat, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "API keys split by commas, without control characters (checked here by tensorfold chat --url)" },
+    .{ .name = "HF_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
+    .{ .name = "HUGGING_FACE_HUB_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
+    .{ .name = "HF_TOKEN_PATH", .scope = .hub, .kind = .path, .forms = "a path without control characters to the Hugging Face token file (pull only)" },
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
-    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_GLM_WORLD gives one rank)" },
-    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_GLM_RANK gives one rank)" },
-    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_NEMOTRON_WORLD gives one rank)" },
-    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_NEMOTRON_RANK gives one rank)" },
-    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_MINIMAX_WORLD gives one rank)" },
-    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank count, 2 on CUDA (unset with TF_MINIMAX_RANK gives one rank)" },
 };
+
+/// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
+pub fn retired(name: []const u8, version: []const u8) ?Rule {
+    for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
+        const at = std.SemanticVersion.parse(r.retire orelse return null) catch return null;
+        const now = std.SemanticVersion.parse(version) catch return null;
+        return if (now.order(at) != .lt) r else null;
+    };
+    return null;
+}
 
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
@@ -283,7 +319,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         const b: []const u8 = if (r.kind == .flag) "1" else "8";
         if (!std.mem.eql(u8, text, a) and !std.mem.eql(u8, text, b)) return error.InvalidEnvironment;
     }
-    const n = std.fmt.parseInt(u64, text, 10) catch return error.InvalidEnvironment;
+    const n = std.fmt.parseInt(u64, text, r.base) catch return error.InvalidEnvironment;
     const max: u64 = switch (r.kind) {
         .u32, .positive, .device => std.math.maxInt(u32),
         .percent => 100,
@@ -411,6 +447,7 @@ pub const Flags = struct {
     nemotron: bool = false,
     minimax_m3: bool = false,
     chat: bool = false,
+    hub: bool = false,
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
@@ -431,6 +468,7 @@ pub const Flags = struct {
             .nemotron => f.nemotron,
             .minimax_m3 => f.minimax_m3,
             .chat => f.chat,
+            .hub => f.hub,
         };
     }
 };

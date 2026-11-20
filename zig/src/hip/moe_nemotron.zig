@@ -105,7 +105,7 @@ pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRow
                 o.stream,
             );
         }
-        try o.moeRoute(local, pairs, plan_experts, tile, members, items, cap);
+        try o.moeRoute(local, pairs, plan_experts, tile, null, tile, members, items, cap);
         if (!l.whole()) try o.moeForeignItems(items, cap, l.own);
     }
     const act: Tensor = .{ .ptr = try o.arena.take(pairs * ni * kind.size()), .kind = kind };

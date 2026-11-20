@@ -49,6 +49,7 @@ const usage =
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
+    \\       tensorfold log [list|show ID|follow] [PATH] [--json]   (the request journal, read-only)
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
     \\       tensorfold config validate FILE

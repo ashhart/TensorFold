@@ -69,6 +69,7 @@ test "Verify width calibration: actual DeltaNet dispatch selects its register va
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     var e: q.engine.Engine = undefined;
+    e.scratch_rows = q.engine.grid_rows;
     e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
@@ -104,6 +105,7 @@ test "Verify width calibration: actual keep launches carry the complete 64-row p
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     var e: q.engine.Engine = undefined;
+    e.scratch_rows = q.engine.grid_rows;
     e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };

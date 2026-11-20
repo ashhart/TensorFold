@@ -12,6 +12,11 @@ const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
 const tree_ = @import("tree.zig");
 const steps = @import("prompt_steps.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
+const vt = @import("vision_tower.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -31,7 +36,11 @@ pub const Env = struct {
     s: *const scratch.Scratch,
     model: forward.Model,
     lookup: ?forward.Lookup,
+    /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
+    vision: ?VisionRefs = null,
 };
+
+pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
 
 pub const Options = struct {
     slots: u32,
@@ -47,38 +56,7 @@ pub const Options = struct {
 /// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
 pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
 
-/// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
-pub const Slot = struct {
-    kv: kv.Slot,
-    tail: prompt.Tail,
-    hist: std.ArrayList(u32) = .empty,
-    /// the last window: its first position and rows; `open` until its keep
-    base: u64 = 0,
-    rows: u32 = 0,
-    open: bool = false,
-    /// the taps of the last `ring rows` committed positions, position p at row p % ring rows
-    ring: []u16,
-    /// the taps `taps` names after a prompt: its last rows in order
-    ptaps: mtl.Buffer,
-    ptaps_rows: u32 = 0,
-    after_prompt: bool = false,
-    /// the most positions any request wrote here since the slot was last cleared
-    high: u64 = 0,
-    live: bool = false,
-    /// every launch since the request began completed (a release keeps only a whole state)
-    whole: bool = false,
-    /// the rows the last prompt took from kept state
-    resumed: u32 = 0,
-    /// a prompt begun in pieces (prompt_steps.zig) and not yet finished: its rows from `tail.end` are still to run
-    filling: bool = false,
-    /// a begun prompt's choice logits when a kept state held the whole prompt (its entry may go before `finish`)
-    hit: std.ArrayList(f32) = .empty,
-    hit_on: bool = false,
-    /// when the begun prompt began (its wall time on the profile line)
-    began: u64 = 0,
-    /// the target's launches when the begun prompt's last piece ran (Stats.most_between: other slots' rounds between)
-    mark: u64 = 0,
-};
+pub const Slot = @import("target_slot.zig").Slot;
 
 pub const Target = struct {
     a: Allocator,
@@ -95,6 +73,8 @@ pub const Target = struct {
     joined: bool = false,
     /// draft trees: the branches' shadow slots and the open tree window (tree.zig)
     tree: tree_.Tree = .{},
+    /// the ViT and aligner, when the environment has a tower
+    tower: ?vt.Tower = null,
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -126,6 +106,7 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        if (env.vision) |v| t.tower = vt.Tower.init(a, env.device, env.queue, v.kit, v.w);
         t.joinResident() catch {};
         return t;
     }
@@ -162,6 +143,8 @@ pub const Target = struct {
         a.free(s.ring);
         s.hist.deinit(a);
         s.hit.deinit(a);
+        a.free(s.images);
+        if (s.image_rows) |*r| r.deinit();
     }
 
     pub fn deinit(t: *Target) void {
@@ -172,6 +155,7 @@ pub const Target = struct {
             t.ownBuffers(&bufs) catch {};
             for (bufs.items) |b| t.opt.resident.?.remove(b);
         }
+        if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
@@ -191,7 +175,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn } };
     }
 
     pub fn self(ptr: *anyopaque) *Target {
@@ -212,31 +196,67 @@ pub const Target = struct {
 
     // prompts ------------------------------------------------------------------------------------------------------
 
+    /// The images of the slot's next prompt, their pixels borrowed until `prefill` returns.
+    pub fn setImages(t: *Target, slot: u32, images: []const vrows.Image) !void {
+        if (slot >= t.slots.len) return error.NoSlot;
+        const s = &t.slots[slot];
+        if (images.len > 0 and t.tower == null) return error.NoVision;
+        const copy = try t.a.dupe(vrows.Image, images);
+        t.a.free(s.images);
+        s.images = copy;
+    }
+
+    fn imagesFn(ptr: *anyopaque, slot: u32, images: []const vrows.Image) anyerror!void {
+        return self(ptr).setImages(slot, images);
+    }
+
     fn resumedFn(ptr: *anyopaque, slot: u32) u64 {
         const t = self(ptr);
         return if (slot < t.slots.len) t.slots[slot].resumed else 0;
+    }
+
+    /// `ids` with each image position replaced by its virtual id (the prompt cache's and the Engram hash's view of it).
+    fn withVids(t: *Target, ids: []const u32, images: []const vrows.Image) ![]u32 {
+        const out = try t.a.dupe(u32, ids);
+        errdefer t.a.free(out);
+        for (images) |im| {
+            if (@as(u64, im.at) + im.tokens > ids.len) return error.BadImageSpan;
+            for (0..im.tokens) |p| out[im.at + p] = prep.vid(im.hash, @intCast(p));
+        }
+        return out;
     }
 
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
         const s = st.s;
-        if (st.hit) |e| if (e.ids.len == ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
+        const prompt_ids = s.hist.items; // image positions carry their virtual ids
+        if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
         // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
-        for (t.keepPoints(ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
-        t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
+        for (t.keepPoints(prompt_ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
+        t.pr.run(t.promptEnv(), &s.kv, &s.tail, prompt_ids) catch |e| return t.fail(e);
         return t.endPrompt(s, null, smp, draw);
     }
 
     /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
-    pub fn startPrompt(t: *Target, slot: u32, ids: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
+    pub fn startPrompt(t: *Target, slot: u32, ids_in: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         const c = t.env.c;
         if (s.live or s.filling) return error.SlotLive;
-        if (ids.len == 0) return error.EmptyPrompt;
-        if (ids.len >= t.opt.limit) return error.PastLimit;
-        for (ids) |id| if (id >= c.vocab) return error.BadToken;
+        if (ids_in.len == 0) return error.EmptyPrompt;
+        if (ids_in.len >= t.opt.limit) return error.PastLimit;
+        const images = s.images;
+        s.images = &.{};
+        defer t.a.free(images);
+        var vids: ?[]u32 = null;
+        defer if (vids) |v| t.a.free(v);
+        if (images.len > 0) {
+            if (t.tower == null) return error.NoVision;
+            vids = try t.withVids(ids_in, images);
+        }
+        const ids: []const u32 = vids orelse ids_in;
+        for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
         s.whole = false;
         s.open = false;
@@ -244,14 +264,21 @@ pub const Target = struct {
         s.hit_on = false;
         t.pr.forget(&s.tail);
         t.stats.prompts += 1;
-        // a kept state that starts this prompt, else a cleared slot
-        const hit = if (t.cache.on()) t.cache.best(ids) else null;
+        // a kept state that starts this prompt (not one that ends inside an image's span), else a cleared slot
+        var hit = if (t.cache.on()) t.cache.best(ids) else null;
+        if (hit) |e| for (images) |im| if (e.ids.len > im.at and e.ids.len < im.at + im.tokens) {
+            hit = null;
+        };
         const at: u32 = if (hit) |e| @intCast(e.ids.len) else 0;
         if (hit) |e| {
             t.cache.restore(c, e, &s.kv, s.high, s.ring);
             t.stats.hits += 1;
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
+        if (images.len > 0) {
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, ids.len, t.opt.prompt.chunk, at);
+            t.pr.images = if (s.image_rows) |*r| r else null;
+        }
         s.resumed = at;
         s.tail.end = at;
         s.tail.done = at;
@@ -278,6 +305,9 @@ pub const Target = struct {
     /// The prompt's rows are in (`hit`: a kept state's logits, else the prompt head's): taps, choice, the slot live.
     pub fn endPrompt(t: *Target, s: *Slot, hit: ?[]const f32, smp: ?lanes.Sampling, draw: u64) !u32 {
         const c = t.env.c;
+        t.pr.images = null;
+        if (s.image_rows) |*r| r.deinit();
+        s.image_rows = null;
         const n: u32 = @intCast(s.hist.items.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;

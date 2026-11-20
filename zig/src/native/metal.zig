@@ -52,6 +52,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
+    .{ .model_type = "nemotron_h_puzzle", .formats = affine_widths },
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
@@ -65,6 +66,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
+    .{ .model_type = "hy_v4_flash", .formats = &.{ "mlx-q4g64", "mlx-q8g64" } },
     .{ .model_type = "qwen3", .formats = &.{"bf16"} },
     .{ .model_type = "llama", .formats = &.{ "bf16", "compressed-tensors-int4-g32" } },
     .{ .model_type = "flint", .formats = &.{"mlx-q4g64"} },
@@ -147,6 +149,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return @import("kimi_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("qwen3_metal.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "hy_v4_flash")) return @import("hy4_metal.zig").open(a, gpa, io, o, problem);
     const dense = ownsQwen27(a, io, o.model_type, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
@@ -170,8 +173,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
-    if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
-        problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
+    if (!std.mem.eql(u8, o.model_type, "nemotron_h") and !std.mem.eql(u8, o.model_type, "nemotron_h_puzzle")) {
+        problem.* = try @import("no_backend.zig").message(a, o.model_type);
         return null;
     }
     if (try metal_slide.refusal(nemotron, a, io, o)) |why| {
@@ -297,7 +300,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.prompt_int8) return prompt_int8_refusal;
     if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), Gemma 4 dense, Flint (DFlash2 on M5) and Llama (a smaller Llama on the same tokenizer)";
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (spill.refusal(o)) |why| return why;
@@ -324,7 +327,6 @@ fn qwen27Context(a: Allocator, context: ?i64, problem: *[]const u8) !?u32 {
     }
     return @intCast(n);
 }
-
 pub const Qwen27Budget = @import("qwen27_reserve.zig").Budget;
 /// What a Qwen3.8-27B-class start keeps free of its working set.
 pub const qwen27_margin = tf.qwen27.prompt_memory.margin;
@@ -499,7 +501,7 @@ test "--spill-gib with --checkpoint-slots opens the four families with a disk st
     try std.testing.expectStringStartsWith((try refusal(a, .{ .dir = "d", .model_type = "glm5_next", .keep = 2 }, false)) orelse "", "--checkpoint-slots");
 }
 
-test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and not by the two-Mac families" {
+test "--speed-up is refused by Nemotron, Bolt, the 27B and the 2B before any load, and not by the two-Mac families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -508,6 +510,7 @@ test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and
     try std.testing.expectStringEndsWith((try refusal(a, two, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.8-27B"}));
     try std.testing.expectStringEndsWith((try refusal(a, two, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-2B"}));
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron"}));
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h_puzzle", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron 3.5 Bolt"}));
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5_moe", .speed_up = "pair.json" }, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-MoE"}));
     try std.testing.expectEqualStrings("--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve Qwen3.5-MoE without --learn, --learn-dir or --learn-gib", (try refusal(a, .{ .dir = "d", .model_type = "qwen3_5_moe", .learn = "/x" }, true)) orelse "");
     for ([_][]const u8{ "qwen4_exp", "glm5_next", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .speed_up = "pair.json" }, false)) == null);

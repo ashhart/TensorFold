@@ -1,5 +1,6 @@
 //! Nemotron-H dimensions from config.json, one Config for every backend, checked against the shapes our kernels serve.
 const std = @import("std");
+const bolt_checks = @import("config_bolt.zig");
 
 pub const Kind = enum { mamba, moe, attention };
 
@@ -208,7 +209,7 @@ pub const Config = struct {
     }
 };
 
-fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
+pub fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
     const v = obj.get(key) orelse {
         std.log.err("config.json has no {s}", .{key});
         return error.BadConfig;
@@ -237,7 +238,7 @@ fn float(obj: std.json.ObjectMap, key: []const u8) !f32 {
     return @floatCast(try number(obj.get(key) orelse return error.BadConfig));
 }
 
-fn kindOf(name: []const u8) !Kind {
+pub fn kindOf(name: []const u8) !Kind {
     if (std.mem.eql(u8, name, "mamba") or std.mem.eql(u8, name, "M")) return .mamba;
     if (std.mem.eql(u8, name, "moe") or std.mem.eql(u8, name, "E")) return .moe;
     if (std.mem.eql(u8, name, "attention") or std.mem.eql(u8, name, "*")) return .attention;
@@ -435,7 +436,7 @@ pub fn parseWith(allocator: std.mem.Allocator, text: []const u8, why: *Why, allo
         if (v.integer < 0) return error.BadConfig; // a width: refused before the cast, as the latent checks below would
         c.latent = @intCast(v.integer);
     };
-    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try puzzle(&c, v.array.items, why);
+    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try bolt_checks.puzzle(&c, v.array.items, why);
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
     if (c.layers == 0) if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
         if (v.string.len > max_layers) return error.BadConfig;
@@ -539,46 +540,22 @@ fn eos(c: *Config, e: std.json.Value) void {
     };
 }
 
-/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
-fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
-    if (blocks.len > max_layers) {
-        why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, max_layers });
-        return error.BadConfig;
-    }
-    c.bolt = true;
-    c.experts = 0;
-    c.expert_width = 0;
-    for (blocks, 0..) |b, i| {
-        if (b != .object) return error.BadConfig;
-        c.kinds[i] = try kindOf((b.object.get("block_type") orelse return error.BadConfig).string);
-        if (c.kinds[i] != .moe) continue;
-        const m: Moe = .{ .experts = try int(b.object, "n_routed_experts"), .width = try int(b.object, "moe_intermediate_size") };
-        const k = try int(b.object, "num_experts_per_tok");
-        if (c.top_k == 0) c.top_k = k;
-        if (k != c.top_k) {
-            why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
-            return error.BadConfig;
-        }
-        c.moe[i] = m;
-        c.experts = @max(c.experts, m.experts);
-        c.expert_width = @max(c.expert_width, m.width);
-    }
-    c.layers = blocks.len;
-}
-
 pub fn checkShapes(c: Config) !void {
-    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
-        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
-        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (c.format == .modelopt) {
         std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
         return error.UnsupportedQuantization;
     }
+    if (c.bolt) return bolt_checks.shapes(c);
+    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
+        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
+        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (!ok) {
         std.log.err("this Nemotron-H's shapes differ from the kernels built for Nemotron 3.5 Lightning 30B-A3B", .{});
         return error.UnsupportedShapes;
     }
 }
+
+pub const checkDevice = bolt_checks.device;
 
 pub const lightning =
     \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,

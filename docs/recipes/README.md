@@ -8,7 +8,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Family | Recipe |
 | --- | --- |
 | dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
-| dots.mocr | [Native CUDA text decoder, BF16, one GPU](dots-mocr-cuda.md) |
+| dots.mocr | [Native CUDA, images and text, BF16, one GPU](dots-mocr-cuda.md) |
 | Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
@@ -24,6 +24,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Gemma 4 31B | [Native Metal and CUDA, affine 4-bit](gemma-4-native.md) |
 | Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
+| DeepSeek-V4-Pro-Qwen3.5-9B on a DGX Spark | [MLX 4-bit on one GB10, thinking and drafts off](deepseek-v4-pro-qwen35-9b-cuda.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 | Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
 | MiniMax-M3.1-Flash | [Native Metal on one 256 GB Mac: affine 3/4-bit experts, exact bf16 cache, DFlash2 drafts, images](minimax-m3.1-flash.md) |
