@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
+
 - Pull: gated and private Hugging Face repos come down with your token: `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else `~/.cache/huggingface/token`). The token goes only to the hub's own host (`huggingface.co`, or `HF_ENDPOINT`'s), never to the storage hosts downloads are redirected to, and is never printed; a repo the hub refuses is named, with whether a token is missing or lacks access (#3524).
 
 - Windows: when a checkpoint load releases the pages it has finished with, the process's working set is trimmed too, so those pages stop crowding a unified-memory budget; Linux and macOS are unchanged (#3866). Thanks to @ElderOrb.
@@ -17,8 +19,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
 
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
-
-
 
 - Server: a reply that ends on its own end-of-sequence inside a think block it never closed now returns that text as its answer only when the request asked for reasoning and no tool call was required, no grammar applied and no call was streamed, and the server logs a warning when it does (#3721, refs #3687). Thanks to @joshuaswarren.
 
@@ -587,7 +587,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: a fact graph save whose final rename fails no longer leaves its temporary file behind (#3096).
 
 - Cluster: a pull plan asks for each file's safetensors header, and a file read in full is fetched whole, so its manifest hash is checked (#3095).
-- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name, decoded on the host at load to the bf16 bytes it was coded from; before, such a checkpoint was refused by the missing tensor's name. GLM-5.3-Flash on CUDA is the one loader that attaches it, with the same tokens as the plain checkpoint and a longer load (38 to 40 s for 12 GB of coded bf16 on GB10s). A structurally damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649).
 
 - Tests: the macOS dashboard test no longer looks for a paged prefix cache tile the page never had; the paged store publishes no status (#3094).
 
