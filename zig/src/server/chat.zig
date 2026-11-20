@@ -86,6 +86,10 @@ pub const Reply = struct {
     probability_rows: ?@import("logprob_parts.zig").Capture = null,
     /// For a token stream, each ``logprobs`` entry's raw token position, in the same shape; null otherwise.
     logprob_positions: ?Value = null,
+    /// The request journal's timings (never sent): admission wait, receipt to first token, decode tokens a second.
+    queued_s: f64 = 0,
+    ttft_s: ?f64 = null,
+    decode_tps: f64 = 0,
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
@@ -279,7 +283,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         gen.loop(gone) catch |e| break :blk e;
         break :blk gen.finish(cx, prepared.prompt_len, received, prepared.thinking, prepared.reasoning, effort, prepared.sampled, prepared.drafts);
     };
-    if (result) |_| {} else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
+    if (result) |r| {
+        if (input.trace) |trace| trace.timed(r);
+    } else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
     return result;
 }
 

@@ -408,7 +408,7 @@ pub const Generation = struct {
             .err => {},
         };
         const think_end: ?u32 = if (reasons) g.srv.text.tokenId(g.srv.markers.close) else null;
-        const reply: Reply = .{
+        var reply: Reply = .{
             .content = content,
             .stop_sequence = g.stops.matched(raw),
             .reasoning = reasoning,
@@ -440,6 +440,9 @@ pub const Generation = struct {
         var seed_text: [32]u8 = undefined;
         const seed = if (g.seed) |v| std.fmt.bufPrint(&seed_text, " seed={d}", .{v}) catch unreachable else "";
         const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
+        reply.queued_s = s.queued_seconds;
+        reply.ttft_s = if (g.first_ns != null) ttft_s else null;
+        reply.decode_tps = rate;
         log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
         return reply;
     }
