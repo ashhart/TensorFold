@@ -142,6 +142,7 @@ fn startPocket(l: anytype) !void {
     l.stay = .{ l.owned.keep, l.owned.near, try liveReplay(l), l.owned.unasked, l.extra.items };
     l.pockets.lesson = l.last_lesson;
     l.pockets.against = l.owned.against;
+    l.pockets.reuse_deleted = l.owned.reuse_deleted;
     l.pockets.replay_lessons = l.live_of.items;
     try l.pockets.begin(l.trainer.?, hooks(l), l.answers, l.owned.asked, l.owned.held, &l.stay);
     l.pocketed = true;

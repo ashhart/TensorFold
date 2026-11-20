@@ -84,6 +84,7 @@ const Fake = struct {
     }
     fn engine(ctx: *const cuda.Context, d: *const cuda.Driver) Engine {
         var e: Engine = undefined;
+        e.usage = null;
         e.gpa = a;
         e.ctx = ctx;
         e.stream = .{ .d = d, .handle = @ptrFromInt(2) };

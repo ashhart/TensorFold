@@ -36,11 +36,12 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
     if (from >= prompt.len) return error.BadReuse;
     if (prompt.len + state.max_rows > e.cap()) return error.ContextFull;
     if (from == 0) {
+        if (e.usage) |u| u.trace.restore(0, .{});
         try e.reset();
         if (head) |h| try h.reset();
     } else if (e.pos != from) return error.BadReuse;
     const waited = e.heat_gate.waited_s;
-    if (from == 0 and keep == null and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
+    if (from == 0 and keep == null and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and e.usage == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
         try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
     } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
     if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
@@ -71,6 +72,7 @@ pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
 /// The prompt's chunks one after another on the engine's stream, starting at `from`.
 pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !void {
     var f = e.forward(dump);
+    f.usage = e.usage;
     const shared = e.lessons();
     if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
     const wide = dump == null and shared == null and e.decide == lesson_route.none; // passes of up to pass_rows (rows equal at any cut)
@@ -89,6 +91,7 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
         const chunk = prompt[s..end];
         e.last_chunk = s;
+        if (e.usage) |u| try u.trace.start(s, chunk.len);
         if (keep) |k| arm(e, k, s, end);
         defer e.armed.n = 0;
         f.captures = e.armed.marks();

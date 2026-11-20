@@ -11,7 +11,6 @@ const Penalties = @import("sampling.zig").Penalties;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
-
 pub const Reason = enum {
     none,
     stop,
@@ -192,6 +191,7 @@ pub const Stream = struct {
     decode_spans: []const [2]u32 = &.{},
     decide: ?u32 = null,
     untaught: bool = false,
+    pocket_usage: ?@import("pocket_usage.zig").Masks = null,
     images: []const Image = &.{},
     key: []const u32 = &.{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)

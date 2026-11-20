@@ -102,3 +102,36 @@ disturbed access-word facts, changed prior-correction tokens, acceptance, lesson
 The runner queries each wording greedily and in three seeded default-sampler draws, retains raw replies and events,
 then deletes accepted corrections in reverse order. A reported deletion with different original tokens aborts the run.
 `corrections.json` records eligibility, graph entries, sampled replies and deletion receipts for each fixture.
+
+## Pins, usage and capacity
+
+Keep `--slide-graph` set to retain pins, request counts and history across restarts. Without it these remain in memory,
+as the fact graph does. Pin a learned fact with `POST /v1/slide/facts/ID/pin` and `{ "pinned": true }`; an empty body
+also pins it. Send `{ "pinned": false }` to unpin. Missing IDs, unfinished facts and graph write failures refuse.
+The native CLI provides `tensorfold slide pin ID` and `tensorfold slide unpin ID`, with `--server URL` and
+`--api-key-file FILE` when needed. Pinning uses the server's current graph. A pinned fact cannot be explicitly deleted,
+automatically retired or replaced by a later lesson until it is unpinned.
+
+The graph's `uses` counts completed external requests once per firing fact, even if several owned neurons fired.
+Nemotron's pocket path on Metal and CUDA reads products from its ordinary prompt pass. As in `slide audit`, firing
+means a finite absolute activation strictly above 0.0001 on any rendered prompt row. This is a firing measure, not
+an ablation proving that the final answer changed. It adds no probe forward. Writer, check, background, untaught,
+failed, cancelled and zero-token requests do not count. Several generations in one HTTP request count each fact once.
+Counts are recorded before the engine can start another lesson, so an eviction cannot reassign their neurons first.
+
+Live prompt-cache snapshots retain their prefix's firing union, including interior CUDA marks and warm-pass ends.
+An older disk prompt state has no firing receipt. Using one marks counts incomplete and disables automatic retirement,
+including after restart. It does not change the reply or guess that its cached neurons did not fire. Pins still work.
+The graph records `usage_complete: false` when a receipt is missing. This version has no automatic reset of an
+incomplete observation period. Retain the graph and keep automatic forgetting disabled in that case. A failed count write remains pending and prevents retirement until it can be saved.
+
+`--slide-forget` permits one least-used unpinned fact to leave when a lesson reports a full pocket. Lower fact ID
+breaks usage ties. The normal exact delete transaction checks every retained fact and restores a failed cut.
+A successful retirement stays in history with its count, and the new lesson is written again against what remains.
+Only that retry can reuse silent, unowned interior neurons; a failed fit restores their exact deleted state.
+If it still cannot fit, the lesson refuses and no second fact is retired. Without the flag, a full pocket refuses.
+
+Automatic retirement requires measured pocket activity. Nemotron's routed legacy lessons and other engines refuse it.
+With `--slide` off no observer, capture allocation, product readback or additional GPU operation is enabled.
+With it on, CUDA waits for each observed layer's product readback and Metal waits at observed prompt chunk boundaries.
+Host controls and compilation cover these paths; device token equality and the readback cost still need qualification.
