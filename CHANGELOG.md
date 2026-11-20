@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
 
+
+
 - Server: a reply that ends on its own end-of-sequence inside a think block it never closed now returns that text as its answer only when the request asked for reasoning and no tool call was required, no grammar applied and no call was streamed, and the server logs a warning when it does (#3721, refs #3687). Thanks to @joshuaswarren.
 
 - MiniMax-M3.1-Flash on CUDA: with two or more streams, the drafter takes several streams' DSpark blocks in one pass, as many as a decode window's 16 rows hold, instead of one pass a stream; drafts only choose what the target verifies, so replies are unchanged (#1426). Thanks to @BobClawblaw.
