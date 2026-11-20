@@ -114,6 +114,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
     const workspace = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "workspace completions", "workspace warm", "workspace source", "workspace CLI", "workspace tokenizer", "workspace compaction" } }));
     b.step("test-workspace-server-host", "Exact workspace prompt IDs, cache reuse, restart and source refusals").dependOn(&workspace.step);
+    const durable = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"durable Responses"} }));
+    b.step("test-responses-durable-host", "Owner-bound durable Responses restart, retry and exact history recovery").dependOn(&durable.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
