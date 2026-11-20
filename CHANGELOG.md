@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
+
 - Windows: the native CUDA product compiles again: Muse Spark, which needs two TP ranks over the POSIX-only TP fabric, is refused by name on Windows (TP across ranks runs on Linux only) instead of breaking the build, and CI now type-checks the Windows CUDA product (`zig build compile-native-cuda-windows`, #4171, fixes #4105).
 
 - Qwen3.5/3.8 and Flash Next on CUDA: `--vision` loads a tower whose linears ModelOpt stores as MXFP8 or NVFP4, as `nvidia/Qwen3.8-Flash-Next-FP4-Local` does, where it stopped at the first quantized linear; they are decoded to bf16 on the host at load, one linear at a time, so the tower runs in bf16 as before, and a floating-point tower is still read as stored (#3727). Thanks to @BadAd84.
