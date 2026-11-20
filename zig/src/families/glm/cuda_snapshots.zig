@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const types = @import("cuda_engine_types.zig");
 pub const pages = @import("cuda_snapshot_pages.zig");
 pub const layout = @import("cuda_snapshot_layout.zig");
+const carry = @import("cuda_kv_carry.zig");
 
 pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
 
@@ -46,7 +47,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
-    var lease = try pool.take(plan.len);
+    // TF_GLM_KV_SPLIT: every rank leases the home's size (its latent rows counted), so no rank's pool runs out alone
+    var lease = try pool.take(if (e.cur.st.owner != null) @max(plan.len, bytes(e, e.cur.st.pos)) else plan.len);
     errdefer {
         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
         pool.give(&lease);
@@ -55,25 +57,80 @@ pub fn keepAs(e: anytype, id: u64) !void {
     errdefer e.gpa.free(cur);
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .home = e.cur.st.owner });
+}
+
+/// A disk read's state: `at`'s pages leased under rank 0's id on each rank, refused by `restore` until `seal`.
+pub fn blankAs(e: anytype, id: u64, at: usize, owner: ?u32) !void {
+    if (owner) |h| if (h >= e.share.world) return error.BadStep; // TF_GLM_KV_SPLIT: the read's home
+    if (e.snaps.contains(id)) return error.StateKept;
+    const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    var lease = try pool.take(bytes(e, at));
+    errdefer pool.give(&lease);
+    const cur = try e.gpa.alloc(u1, e.cur.st.cur.len);
+    @memset(cur, 0);
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = 0, .pos = at, .mtp_len = 0, .cur = cur, .bases = .{ 0, 0 }, .home = owner });
+}
+
+/// Whether an index ring of `rows` rows based at `base` holds every row up to `len`, as the image's ring bytes do.
+fn ringHolds(base: usize, len: usize, rows: usize) bool {
+    return base <= len and len - base <= rows;
+}
+
+/// A blank state made whole from its image's words (its bytes are in or follow): a restore takes it from here.
+pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !void {
+    const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len != 0) return error.StateKept;
+    if (s.cur.len > 64 or (s.cur.len < 64 and cur >> @intCast(s.cur.len) != 0)) return error.DiskWords;
+    const head = if (e.mtp) @min(e.capacity, s.pos + @import("cuda_state.zig").window_rows) else 0;
+    if (mtp_len > head) return error.DiskWords;
+    const rows = e.cur.st.ring_rows;
+    if (!ringHolds(bases[0], s.pos, rows) or !ringHolds(bases[1], mtp_len, rows)) return error.DiskWords;
+    const whole = try layout.Plan.sized(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
+    const n = carry.kept(&whole, if (s.home) |h| h == e.share.rank else true); // the home's copy alone has latent rows
+    if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
+    for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
+    s.len = n;
+    s.mtp_len = mtp_len;
+    s.bases = bases;
 }
 
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
+    if (s.len == 0) return error.UnsealedState;
+    if ((s.home == null) != (e.cur.st.owner == null)) return error.KvSplitAway; // a split state on an unsplit stream
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
-    if (plan.len != s.len) return error.SnapshotSize;
+    const here = if (s.home) |h| h == e.share.rank else true; // this copy holds its latent rows
+    if (carry.kept(&plan, here) != s.len) return error.SnapshotSize;
     errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
-    try pool.move(e.stream, &s.lease, &plan, false);
+    try pool.moveParts(e.stream, &s.lease, &plan, false, here);
+    if (s.home != e.cur.st.owner) try carryRows(e, &plan, s, pool); // kept off the stream's owner: its rows go there
     try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
     e.cur.in_head = 0;
     try e.stream.synchronize();
 }
 
+/// TF_GLM_KV_SPLIT: kept state `s`'s latent rows from its home's copy to the stream's owner, through the room.
+fn carryRows(e: anytype, plan: *const layout.Plan, s: *const types.Snap, pool: *const pages.Pool) !void {
+    const owner = e.cur.st.owner.?;
+    const side = carry.role(s.home.?, owner, e.share.rank);
+    if (side == .none) return;
+    const room = if (e.room) |*r| r else return error.KvSplitNoRoom;
+    const base = (pool.arena orelse return error.NoSnapshotRoom).ptr();
+    const g: carry.Gpu = .{ .d = e.d, .stream = e.stream, .lib = room.lib, .comm = room.comm };
+    _ = try carry.run(g, plan, side, if (side == .send) owner else s.home.?, s.lease.ids.items, base, room.buf.ptr, room.buf.len);
+}
+
 /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
 fn heldPages(e: anytype, at: usize) usize {
     return if (e.share_pages) at / @import("cuda_state.zig").page_rows else 0;
+}
+
+/// TF_GLM_KV_SPLIT: the owner class kept state `id` was kept on (null: unsplit, or not held).
+pub fn home(e: anytype, id: u64) ?u32 {
+    return (e.snaps.get(id) orelse return null).home;
 }
 
 pub fn holds(e: anytype, id: u64) bool {

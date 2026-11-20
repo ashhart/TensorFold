@@ -28,7 +28,10 @@ pub fn lease(pool: *kv.Pool, bytes: usize) !kv.Lease {
 pub fn Walk(comptime Live: type, comptime at: fn (Live, usize) Live) type {
     return struct {
         /// `len` bytes at `live`, or on a sequence's pages: `span` bytes a page, `page` bytes apart, from byte `from`.
-        pub const Part = struct { live: Live, len: usize, span: usize = 0, page: u64 = 0, from: usize = 0 };
+        pub const Part = struct { live: Live, len: usize, span: usize = 0, page: u64 = 0, from: usize = 0, alt: bool = false };
+
+        /// `alt` parts' pages (GLM's split latent rows); `kept`: the kept bytes hold their place, with no `ids`: a gap.
+        pub const Alt = struct { ids: []const u32 = &.{}, kept: bool = true };
 
         /// Where a part's bytes from `done` on lie (`ids`: the sequence's pages in row order), as many as lie in a row.
         pub fn piece(ids: []const u32, part: Part, done: usize) Part {
@@ -54,12 +57,25 @@ pub fn Walk(comptime Live: type, comptime at: fn (Live, usize) Live) type {
             ctx: anytype,
             comptime f: fn (@TypeOf(ctx), Live, u64, usize) anyerror!void,
         ) !void {
+            return eachAlt(parts, ids, .{}, kept, ctx, f);
+        }
+
+        /// `each`, with `alt` parts on `alt.ids`: left out where `alt.kept` is false, a gap where it has no ids.
+        pub fn eachAlt(
+            parts: []const Part,
+            ids: []const u32,
+            alt: Alt,
+            kept: Kept,
+            ctx: anytype,
+            comptime f: fn (@TypeOf(ctx), Live, u64, usize) anyerror!void,
+        ) !void {
             var off: usize = 0;
             for (parts) |part| {
-                var done: usize = 0;
+                if (part.alt and !alt.kept) continue;
+                var done: usize = if (part.alt and alt.ids.len == 0) part.len else 0;
                 while (done < part.len) {
                     const o = off + done;
-                    const live = piece(ids, part, done);
+                    const live = piece(if (part.alt) alt.ids else ids, part, done);
                     if (kept.ids.len == 0) {
                         try f(ctx, live.live, kept.base + o, live.len);
                         done += live.len;
@@ -125,6 +141,25 @@ test "parts walk onto one buffer whole, onto kept pages split at each page's end
     try testing.expectEqual([3]u64{ (1 << 20) + 3 * 4096 + 20, (1 << 30) + 9 * 64 + 30, 34 }, got.items[1]);
     const short: Kept = .{ .ids = &.{ 9, 4 }, .size = 64 };
     try testing.expectError(error.PastKept, Device.each(&parts, &ids, short, Runs{ .got = &got }, Runs.add));
+}
+
+test "alt parts walk on their own pages, a gap where the kept bytes hold no rows of theirs, or left out" {
+    var got: std.ArrayList([3]u64) = .empty;
+    defer got.deinit(testing.allocator);
+    const parts = [_]Device.Part{
+        .{ .live = 1000, .len = 30 },
+        .{ .live = 1 << 20, .len = 150, .span = 100, .page = 4096, .alt = true },
+        .{ .live = 2000, .len = 10 },
+    };
+    try Device.eachAlt(&parts, &.{ 7, 7 }, .{ .ids = &.{ 2, 5 } }, .{ .base = 7 }, Runs{ .got = &got }, Runs.add);
+    const on = [_][3]u64{ .{ 1000, 7, 30 }, .{ (1 << 20) + 2 * 4096, 37, 100 }, .{ (1 << 20) + 5 * 4096, 137, 50 }, .{ 2000, 187, 10 } };
+    try testing.expectEqualSlices([3]u64, &on, got.items);
+    got.clearRetainingCapacity();
+    try Device.eachAlt(&parts, &.{}, .{}, .{ .base = 7 }, Runs{ .got = &got }, Runs.add);
+    try testing.expectEqualSlices([3]u64, &.{ .{ 1000, 7, 30 }, .{ 2000, 187, 10 } }, got.items);
+    got.clearRetainingCapacity();
+    try Device.eachAlt(&parts, &.{}, .{ .ids = &.{ 2, 5 }, .kept = false }, .{ .base = 7 }, Runs{ .got = &got }, Runs.add);
+    try testing.expectEqualSlices([3]u64, &.{ .{ 1000, 7, 30 }, .{ 2000, 37, 10 } }, got.items);
 }
 
 test "a walk over a buffer-and-offset address (Metal's Ref) resolves the same pieces as over pointers" {

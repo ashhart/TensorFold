@@ -58,12 +58,31 @@ pub fn piecesOf(e: *const Engine, b: *const fw.Buffers) ?*const fw.Pieces {
     return if (b == &p.bp) &p.pieces else null;
 }
 
+/// Whether a TF_GLM_KV_SPLIT chunk may pair: each rank attends its own heads, on a twin (`attends` null) or a fetch.
+pub fn ownHeads(attends: ?u32, fetches: bool) bool {
+    return attends == null or fetches;
+}
+
+/// Whether both chunks of a step at `start` (`ra` rows, then `rb`) attend their own heads; always without the split.
+fn splitPairs(e: *const Engine, start: usize, ra: usize, rb: usize) bool {
+    const room = if (e.room) |*r| r else return true;
+    const owner = e.cur.st.attends();
+    const fetch = @import("cuda_owner_fetch.zig");
+    const cap = fetch.roomRows(room.buf.len, room.lw);
+    for ([_][2]usize{ .{ start, ra }, .{ start + ra, rb } }) |c| {
+        const fetches = owner != null and fetch.fetches(true, owner, c[0], c[1], cap, room.away(owner.?));
+        if (!ownHeads(owner, fetches)) return false;
+    }
+    return true;
+}
+
 /// Rank 0's choice for the step at `start` (the others take the ids it sends); not with a drafter, prompt rows or prof.
 pub fn pairedAt(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
     if (e.pair == null or !e.settings.pair or e.drafter != null or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
     if (e.cur.cuts.items.len > 0) return false; // a paired step would step over a request start
     if (e.pieces.count == 1 and !e.settings.split) return false; // run takes such a chunk whole
     if (!takesTwo(start, len, e.share.world, if (marks) |m| m.at else &.{})) return false;
+    if (!splitPairs(e, start, fw.prefill_rows, @min(len - start - fw.prefill_rows, fw.prefill_rows))) return false;
     // a resumed step restores its kept state, and the rings' base, after this choice
     const base = if (from) |r| (e.snaps.get(r.id) orelse return false).bases[0] else e.cur.st.base;
     return ringsAgree(base, e.cur.st.ring_rows, start, @min(len - start - fw.prefill_rows, fw.prefill_rows));
@@ -77,6 +96,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     const pair = if (e.pair) |*p| p else return error.BadChunk;
     if (rb < e.share.world or part.len != @min(len - start, ra + rb + 1) or e.drafter != null or e.prompt_logprobs != null) return error.BadChunk;
     if (!ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rb)) return error.BadChunk; // pairedAt's rule, every rank
+    if (!splitPairs(e, start, ra, rb)) return error.BadChunk; // likewise
     if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
     e.gate(cancel) catch |err| {
         if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));

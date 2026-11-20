@@ -11,6 +11,10 @@ const probeStart = ranks.probeStart;
 const mediaFingerprint = ranks.mediaFingerprint;
 const artifact = ranks.artifact;
 
+test {
+    _ = @import("cuda_ranks_split_test.zig"); // TF_GLM_KV_SPLIT's reading and agreement
+}
+
 fn fake(name: [:0]const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "TF_GLM_PREFILL_REDUCE")) return "gather";
     if (std.mem.eql(u8, name, "TF_GLM_OVERLAP_PIECES")) return "2";
@@ -190,7 +194,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "kv_live_half", "pieces", "solo", "pair", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "roce_wide", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "kv_split", "split", "kda_wide", "kda_pad", "kv_live_half", "pieces", "solo", "pair", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "roce_wide", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);

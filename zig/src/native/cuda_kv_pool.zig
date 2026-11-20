@@ -160,7 +160,6 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
     return room -| stream_bytes * (n -| loaded.free_streams) >= want;
 }
-
 /// Plan streams first, then half their remaining room with a 16 GiB floor, unless the cache was explicit.
 pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) kv_pool.Budget {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
@@ -169,27 +168,29 @@ pub fn budgetOf(comptime F: type, l: kv_pool.Layout, room: u64, o: api.Open, win
     if (out.asked or host_mode or comptime keepsNoPrompts(F)) return out;
     var probe = out;
     probe.cache = std.math.maxInt(u64);
-    const all = kv_pool.plan(l, probe) catch return out;
+    const w = if (l.classes > 1 and l.whole_bytes > 0) kv_pool.Layout{ .fixed_bytes = l.fixed_bytes, .token_bytes = l.whole_bytes, .page_tokens = l.page_tokens, .snap_bytes = l.snap_bytes, .run_bytes = l.run_bytes, .full_layers = l.full_layers, .window = l.window, .whole_bytes = l.whole_bytes } else l;
+    const all = kv_pool.plan(w, probe) catch return out;
     const left = if (!engine_paged and out.window > 0)
-        room -| (@as(u64, all.lanes - 1) *| (l.fixed_bytes +| (l.pages(out.window) + l.runPages()) *| l.pageBytes()))
+        room -| (@as(u64, all.lanes - 1) *| (w.fixed_bytes +| (w.pages(out.window) + w.runPages()) *| w.pageBytes()))
     else
-        all.snaps * l.snap_bytes + all.copied + all.kept;
+        all.snaps * w.snap_bytes + all.copied + all.kept;
     out.cache = budget.cacheBytes(null, left, 0);
-    return out;
+    out.asked = w.classes != l.classes; // before every window but the engine's own, as --prompt-cache-gib would be
+    return if (out.asked) kv_pool.fitClasses(l, out) else out;
 }
-
 /// The pool beside the engine's own sequence (in `model`: a window, or on pages its fixed part); null: see `problem`.
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32, slots: ?usize) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
+    const b = budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots);
+    return kv_pool.planClasses(l, b) catch |e| {
         problem.* = switch (e) {
+            error.ClassTooSmall => try std.fmt.allocPrint(a, "the KV pages split into {d} owner classes of {d} pages, and one stream at a {d}-token window takes {d}, and the trash page one more: lower --context or --prompt-cache-gib, raise --parallel to {d} or more, or serve without TF_GLM_KV_SPLIT", .{ l.classes, (kv_pool.plan(l, b) catch unreachable).pages / l.classes, window, l.pages(window + rows), l.classes }),
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
         };
         return null;
     };
 }
-
 /// The planned streams' sequences and pages made now; false: `problem` says why they could not be.
 pub fn attach(comptime F: type, a: Allocator, ctx: *anyopaque, paged: ?Plan, planned: ?kv_pool.Budget, problem: *[]const u8) !bool {
     if (comptime !@hasDecl(F, "attach")) return true;
@@ -471,11 +472,11 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
     if (taken > 0) return log.warn(short ++ "the KV pool's windows past the engine's own took {d:.3} GiB of it first, and --prompt-cache-gib N keeps N GiB before them", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes), toGib(taken) });
     log.warn(short ++ "lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
-
 test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
     _ = @import("cuda_keep_others_test.zig");
+    _ = @import("cuda_kv_pool_classes_test.zig");
 }
 
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const kv = @import("kv_pool.zig");
 const Pool = kv.Pool;
+const owners = @import("kv_pool_classes.zig");
 const Lease = kv.Lease;
 
 /// A lease entry that names no page: retired, or below a resume's window; every loop over a table skips it.
@@ -83,8 +84,7 @@ pub fn freeOrPend(p: *Pool, id: u32) void {
     const r = &p.retired;
     if (r.token(id) > r.settled) return r.pending.appendAssumeCapacity(id); // reserved before its mark
     clear(p, id);
-    p.free[p.nfree] = id;
-    p.nfree += 1;
+    owners.push(p, id);
 }
 
 /// The forwards up to `token` are done: pages they read become free, then each retired page's promise goes back.
@@ -100,8 +100,7 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
             keep += 1;
         } else {
             clear(p, id);
-            p.free[p.nfree] = id;
-            p.nfree += 1;
+            owners.push(p, id);
         }
     }
     r.pending.shrinkRetainingCapacity(keep);

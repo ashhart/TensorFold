@@ -13,6 +13,7 @@ pub fn open(io: std.Io, p: anytype, text: ?[]const u8, initial: anytype, watch: 
 fn resolved(p: anytype, text: ?[]const u8, initial: anytype, args: anytype, comptime after: anytype, comptime report: anytype) @typeInfo(@TypeOf(after)).@"fn".return_type.? {
     var settings = initial;
     settings.pages = try paging(text, p.world, settings.kv8);
+    settings.kv_split = try splitting(settings.kv_split, p.world, settings.pages, settings.kv_host != 0);
     report(args, Report{ .text = text, .rank = p.rank, .world = p.world, .kv8 = settings.kv8, .pages = settings.pages });
     return after(args, settings);
 }
@@ -48,6 +49,20 @@ pub fn pagesText() ?[:0]const u8 {
     return @import("core").profile.given(.TF_KV_PAGES);
 }
 
+/// TF_GLM_KV_SPLIT at `world` ranks: refused at one rank (first: auto pages are off there), off pages, host pages.
+pub fn splitting(on: bool, world: usize, pages: bool, host: bool) !bool {
+    if (!on) return false;
+    if (world < 2) return error.KvSplitNeedsRanks;
+    if (!pages) return error.KvSplitNeedsPages;
+    if (host) return error.KvSplitOnHost;
+    return true;
+}
+
+/// TF_GLM_KV_SPLIT with TF_KV_SHARE is refused: the shared store's pages would be of any owner's class.
+pub fn sharing(split: bool, share: usize) !void {
+    if (split and share > 0) return error.KvSplitShare;
+}
+
 /// TF_KV_PAGES keeps FP8 on whole windows; explicit pages with FP8 are refused on every rank.
 pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     const v = text orelse "auto";
@@ -55,4 +70,20 @@ pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     if (std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off")) return false;
     if (kv8) return error.Fp8OnPages;
     return true;
+}
+
+/// TF_GLM_KV_SPLIT's refusals in the server's words (`cuda_native.explain` asks here for the errors it does not name).
+pub fn explain(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.KvSplitNeedsRanks => "TF_GLM_KV_SPLIT splits rows over ranks: it needs TF_GLM_WORLD 2 or more",
+        error.KvSplitNeedsPages => "TF_GLM_KV_SPLIT needs KV pages: unset TF_KV_PAGES or set it to auto or on (fp8 KV keeps windows)",
+        error.KvSplitOnHost => "TF_GLM_KV_SPLIT keeps the KV pages on the device: unset TF_GLM_KV_HOST",
+        error.KvSplitShare => "TF_GLM_KV_SPLIT books each stream's pages from its owner's class, and TF_KV_SHARE's pages come from any: unset one",
+        error.KvSplitAway, error.KvSplitCarry, error.KvSplitAbsent => "TF_GLM_KV_SPLIT: a kept state's latent rows were asked of a rank that does not hold them (a bug: the log names the state)",
+        error.KvSplitRoom, error.KvSplitNoRoom, error.KvSplitLocal => "TF_GLM_KV_SPLIT: a forward over owner-only rows had no room to exchange them (a bug: the log names the step)",
+        error.ClassTooSmall => "TF_GLM_KV_SPLIT: one owner class of the KV pages holds less than one stream's window (the log gives the numbers): lower --context, raise --parallel, or serve without TF_GLM_KV_SPLIT",
+        error.ResidueMismatch => "a rank was sent a KV page of another owner's class (a bug: the ranks' books disagree)",
+        error.BadClasses => "the KV pages do not split into the owner classes (a multiple of the ranks, at most 16)",
+        else => null,
+    };
 }

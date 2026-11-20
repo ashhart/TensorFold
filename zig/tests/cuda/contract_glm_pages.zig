@@ -18,6 +18,30 @@ const pools_a_page = rows_a_page / 4;
 pub const part_bytes = rows_a_page * lw * 2 + pools_a_page * dk * 2;
 /// The tests' pages hold two caches' parts and test the second, so a cache's rows sit past its page's start.
 pub const page_bytes = 2 * part_bytes;
+/// A cache's latent rows on a page, and its pooled keys.
+pub const lat_part = rows_a_page * lw * 2;
+pub const pk_part = pools_a_page * dk * 2;
+
+/// The tested cache's place in an arena of `n` pages: interleaved, or TF_GLM_KV_SPLIT's regions (pooled keys first).
+pub const Geometry = struct {
+    regions: bool,
+    n: usize,
+
+    pub fn latStride(x: Geometry) usize {
+        return if (x.regions) 2 * lat_part else page_bytes;
+    }
+    pub fn pkStride(x: Geometry) usize {
+        return if (x.regions) 2 * pk_part else page_bytes;
+    }
+    /// The cache's latent rows in page 0, from the arena's start.
+    pub fn latAt(x: Geometry) usize {
+        return if (x.regions) x.n * 2 * pk_part + lat_part else part_bytes;
+    }
+    /// The cache's pooled keys in page 0, from the arena's start.
+    pub fn pkAt(x: Geometry) usize {
+        return if (x.regions) pk_part else part_bytes + lat_part;
+    }
+};
 
 /// Page ids for `n` pages: `n` of 0 .. n + 2 in shuffled order, so the table is out of order and skips some.
 pub fn shuffled(a: std.mem.Allocator, rng: std.Random, n: usize) ![]i32 {
@@ -35,6 +59,23 @@ pub fn uploadTable(r: *rig_.Rig, ids: []const i32, wrong: bool) !u64 {
     defer r.gpu.gpa.free(bad);
     for (bad) |*id| id.* = @intCast((@as(usize, @intCast(id.*)) + 1) % (ids.len + 3));
     return r.input(std.mem.sliceAsBytes(bad));
+}
+
+/// The table a launch takes; a regions control takes the other region's, its own shuffle differing at every entry.
+pub fn tableFor(r: *rig_.Rig, rng: std.Random, ids: []const i32, wrong: bool, regions: bool) !u64 {
+    if (!regions or !wrong) return uploadTable(r, ids, wrong);
+    const other = try otherTable(r.gpu.gpa, rng, ids);
+    defer r.gpu.gpa.free(other);
+    return r.input(std.mem.sliceAsBytes(other));
+}
+
+/// The other region's table over the same pages: a second shuffle, no entry equal to `ids`' there.
+pub fn otherTable(a: std.mem.Allocator, rng: std.Random, ids: []const i32) ![]i32 {
+    const other = try shuffled(a, rng, ids.len);
+    for (other, ids) |*o, id| if (o.* == id) {
+        o.* = @intCast((@as(usize, @intCast(id)) + 1) % (ids.len + 3));
+    };
+    return other;
 }
 
 /// The first row a call writes: a decode window across a page edge, a prompt chunk across four.
@@ -78,6 +119,8 @@ pub const LatWrite = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     wrong_table: bool = false,
+    regions: bool = false, // TF_GLM_KV_SPLIT: the latent region's table and stride; its control, the pooled table
+    geo: Geometry = .{ .regions = false, .n = 0 },
     shape: c.Shape = undefined,
     lat: []u16 = &.{},
     ids: []i32 = &.{},
@@ -103,7 +146,8 @@ pub const LatWrite = struct {
 
     pub fn kernel(self: *LatWrite) g.Kernel {
         var declared = spec(.lat_write);
-        if (self.wrong_table) declared.name = "control: GLM paged latent write uses a swapped table";
+        if (self.regions) declared.name = "cuda glm tf_glm_lat_write on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM latent write in two regions takes the pooled table" else "control: GLM paged latent write uses a swapped table";
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
@@ -126,7 +170,8 @@ pub const LatWrite = struct {
         const p: i32 = @intCast(self.at);
         self.in = try self.rig.input(std.mem.sliceAsBytes(self.lat));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
+        self.geo = .{ .regions = self.regions, .n = pages + 3 };
         self.arena = try self.rig.scratch((pages + 3) * page_bytes);
         self.out = try self.rig.output(shape.rows * lw * 2);
         return true;
@@ -134,14 +179,15 @@ pub const LatWrite = struct {
 
     pub fn run(self: *LatWrite) !void {
         var a: cuda.Args = .{};
-        inline for (.{ self.in, @as(i64, lw), self.arena + part_bytes, self.pos, @as(i64, lw), self.pt, @as(i64, page_bytes) }) |v| a.add(v);
+        const lc = self.arena + self.geo.latAt();
+        inline for (.{ self.in, @as(i64, lw), lc, self.pos, @as(i64, lw), self.pt, @as(i64, @intCast(self.geo.latStride())) }) |v| a.add(v);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows) }, .block = .{ .x = 128 } }, self.rig.s, &a);
         var r: usize = 0;
         while (r < self.shape.rows) { // the rows back from their pages, a page's run at a time
             const row = self.at + r;
             const n = @min(self.shape.rows - r, rows_a_page - row % rows_a_page);
             const page: u64 = @intCast(self.ids[row / rows_a_page]);
-            try copy(&self.rig, self.out + r * lw * 2, self.arena + part_bytes + page * page_bytes + (row % rows_a_page) * lw * 2, n * lw * 2);
+            try copy(&self.rig, self.out + r * lw * 2, lc + page * self.geo.latStride() + (row % rows_a_page) * lw * 2, n * lw * 2);
             r += n;
         }
         try self.rig.s.synchronize();
@@ -207,6 +253,8 @@ pub const PoolKeys = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     wrong_table: bool = false,
+    regions: bool = false, // TF_GLM_KV_SPLIT: the pooled region's table and stride; its control, the latent table
+    geo: Geometry = .{ .regions = false, .n = 0 },
     shape: c.Shape = undefined,
     ik: []u16 = &.{},
     ig: []u16 = &.{},
@@ -238,7 +286,8 @@ pub const PoolKeys = struct {
 
     pub fn kernel(self: *PoolKeys) g.Kernel {
         var declared = spec(.pool_keys);
-        if (self.wrong_table) declared.name = "control: GLM paged pooled keys use a swapped table";
+        if (self.regions) declared.name = "cuda glm tf_glm_pool_keys on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM pooled keys in two regions take the latent table" else "control: GLM paged pooled keys use a swapped table";
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
@@ -275,7 +324,8 @@ pub const PoolKeys = struct {
         const p: i32 = @intCast(self.at);
         inline for (.{ self.ik, self.ig, self.ape }, 0..) |x, i| self.in[i] = try self.rig.input(std.mem.sliceAsBytes(x));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
+        self.geo = .{ .regions = self.regions, .n = pages + 3 };
         self.arena = try self.rig.scratch((pages + 3) * page_bytes);
         self.out = try self.rig.output(self.pools * dk * 2);
         return true;
@@ -283,15 +333,16 @@ pub const PoolKeys = struct {
 
     pub fn run(self: *PoolKeys) !void {
         var a: cuda.Args = .{};
-        const pk = self.arena + part_bytes + rows_a_page * lw * 2; // the cache's pooled keys in page 0
-        inline for (.{ self.in[0], self.in[1], self.in[2], pk, self.pos, @as(i64, @intCast(self.shape.rows)), self.pt, @as(i64, page_bytes) }) |v| a.add(v);
+        const pk = self.arena + self.geo.pkAt(); // the cache's pooled keys in page 0
+        const step = self.geo.pkStride();
+        inline for (.{ self.in[0], self.in[1], self.in[2], pk, self.pos, @as(i64, @intCast(self.shape.rows)), self.pt, @as(i64, @intCast(step)) }) |v| a.add(v);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows / 4 + 2) }, .block = .{ .x = 32 } }, self.rig.s, &a);
         var i: usize = 0;
         while (i < self.pools) { // the pools back from their pages, a page's run at a time
             const p = self.first + i;
             const n = @min(self.pools - i, pools_a_page - p % pools_a_page);
             const page: u64 = @intCast(self.ids[p / pools_a_page]);
-            try copy(&self.rig, self.out + i * dk * 2, pk + page * page_bytes + (p % pools_a_page) * dk * 2, n * dk * 2);
+            try copy(&self.rig, self.out + i * dk * 2, pk + page * step + (p % pools_a_page) * dk * 2, n * dk * 2);
             i += n;
         }
         try self.rig.s.synchronize();

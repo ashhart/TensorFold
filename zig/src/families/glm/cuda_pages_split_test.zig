@@ -1,0 +1,545 @@
+//! TF_GLM_KV_SPLIT on a driver of addresses alone: the two regions and tables, each owner's ids, a follower's checks.
+const std = @import("std");
+const cuda = @import("cuda");
+const weights = @import("cuda_weights.zig");
+const shard = @import("cuda_shard.zig");
+const state = @import("cuda_state.zig");
+const pages_mod = @import("cuda_pages.zig");
+const Engine = @import("cuda_engine.zig").Engine;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const gpa = std.testing.allocator;
+
+/// The driver: each allocation a fresh address, every table write and NaN fill kept in order.
+const F = struct {
+    var next: u64 = 1 << 30;
+    var live: usize = 0;
+    var puts: usize = 0;
+    var at: [16]u64 = @splat(0); // a table's address, and its words below
+    var words: [16][32]u32 = undefined;
+    var fills: std.ArrayList([2]u64) = .empty; // (address, words) of each NaN fill
+    fn alloc(out: *u64, n: usize) callconv(.c) cuda.abi.Result {
+        out.* = next;
+        next += std.mem.alignForward(u64, n + 1, 1 << 20);
+        live += 1;
+        return 0;
+    }
+    fn free(_: u64) callconv(.c) cuda.abi.Result {
+        live -= 1;
+        return 0;
+    }
+    fn clear(_: u64, _: u8, _: usize) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
+    fn fill(p: u64, v: c_uint, n: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        if (v == 0xFFFF_FFFF) fills.append(gpa, .{ p, n }) catch return 2;
+        return 0;
+    }
+    var lazy = false; // as GB10 copies a pageable upload over 128 bytes: the source is read after the call returns
+    var later: std.ArrayList(struct { u64, ?*const anyopaque, usize }) = .empty;
+    fn put(dst: u64, src: ?*const anyopaque, n: usize) callconv(.c) cuda.abi.Result {
+        if (lazy) {
+            later.append(gpa, .{ dst, src, n }) catch return 2;
+            return 0;
+        }
+        return copy(dst, src, n);
+    }
+    /// The lazy uploads, read from their sources now.
+    fn settle() void {
+        lazy = false;
+        for (later.items) |x| _ = copy(x[0], x[1], x[2]);
+        later.clearAndFree(gpa);
+    }
+    fn copy(dst: u64, src: ?*const anyopaque, n: usize) cuda.abi.Result {
+        const ids: [*]const u32 = @ptrCast(@alignCast(src.?));
+        puts += 1;
+        for (&at, &words) |*a, *w| if (a.* == 0 or (dst >= a.* and dst < a.* + 128)) {
+            if (a.* == 0) a.* = dst;
+            @memcpy(w[(dst - a.*) / 4 ..][0 .. n / 4], ids[0 .. n / 4]);
+            return 0;
+        };
+        return 1;
+    }
+    fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
+    /// The first `n` words written to the table at `t`.
+    fn table(t: u64, n: usize) []const u32 {
+        for (at, &words) |a, *w| if (a == t) return w[0..n];
+        return &.{};
+    }
+};
+
+/// An engine with what the pages read: TP=2's shapes on a KDA, a DSA and a KDA layer, 4,096 rows (8 pages a window).
+pub const Fake = struct {
+    d: cuda.Driver,
+    layers: [3]weights.Layer,
+    e: Engine,
+
+    pub fn init(f: *Fake, split: bool) !void {
+        return f.initAt(split, 0, 2);
+    }
+
+    /// `init` as rank `rank` of `world`: an owner class a rank.
+    pub fn initAt(f: *Fake, split: bool, rank: usize, world: usize) !void {
+        F.live = 0;
+        F.puts = 0;
+        F.at = @splat(0);
+        F.fills.clearRetainingCapacity();
+        F.lazy = false;
+        f.d = undefined;
+        f.d.api.cuMemAlloc_v2 = F.alloc;
+        f.d.api.cuMemFree_v2 = F.free;
+        f.d.api.cuMemsetD8_v2 = F.clear;
+        f.d.api.cuMemsetD32Async = F.fill;
+        f.d.api.cuMemcpyHtoD_v2 = F.put;
+        f.d.api.cuStreamSynchronize = F.wait;
+        for (&f.layers, [_]bool{ false, true, false }) |*l, mla| l.mixer = if (mla) .{ .mla = undefined } else .{ .kda = undefined };
+        f.e = undefined;
+        f.e.gpa = gpa;
+        f.e.d = &f.d;
+        f.e.stream = .{ .d = &f.d, .handle = null };
+        f.e.capacity = 4096;
+        f.e.seqs = .empty;
+        f.e.pages = null;
+        f.e.images = null;
+        f.e.settings = .{ .kv_split = split };
+        f.e.w = undefined;
+        f.e.w.config = .{};
+        f.e.w.share = try shard.Share.of(&f.e.w.config, rank, world);
+        f.e.w.layers = &f.layers;
+        f.e.share = f.e.w.share; // rank 0 of two: an owner class each
+    }
+
+    pub fn deinit(f: *Fake, p: ?*pages_mod.Pages) void {
+        if (p) |q| q.deinit();
+        for (f.e.seqs.items) |q| if (q) |s| {
+            s.st.deinit();
+            f.e.gpa.destroy(s);
+        };
+        f.e.seqs.deinit(f.e.gpa);
+        F.fills.clearAndFree(gpa);
+    }
+
+    /// The engine's own sequence, then `pages` pages for `streams` (split: planned with the trash page's share too).
+    pub fn pool(f: *Fake, streams: usize, pages: usize, leader: bool) !*pages_mod.Pages {
+        try pages_mod.ownSequence(&f.e);
+        const l = try pages_mod.layout(gpa, &f.e, 0);
+        return pages_mod.Pages.init(gpa, &f.e, l, streams, pages + if (l.classes > 1) l.classes else 0, leader);
+    }
+
+    pub fn st(f: *Fake, slot: usize) *state.State {
+        return &f.e.seqs.items[slot].?.st;
+    }
+};
+
+test "GLM KV split: a page's pooled keys and latent rows lie in two regions, each cache at its part, two tables a stream" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const off = blk: {
+        var g: Fake = undefined;
+        try g.init(false);
+        defer g.deinit(null);
+        break :blk try pages_mod.layout(gpa, &g.e, 0);
+    };
+    const l = try pages_mod.layout(gpa, &f.e, 0);
+    try expectEqual(off.fixed_bytes + 256, l.fixed_bytes); // the latent table, 8 entries as the arena rounds them
+    const p = try f.pool(3, 16, true);
+    defer f.deinit(p);
+    const pooled = state.pkPageBytes(&f.e.w);
+    const latent = state.latentPageBytes(&f.e.w);
+    try expectEqual(state.pageBytes(&f.e.w), pooled + latent);
+    try expectEqual(off.pageBytes(), pooled + latent); // a whole page unsplit (#2444); split, the latent rows' half
+    try expectEqual(l.pageBytes(), pooled + latent / 2);
+    try expectEqual(@as(usize, 16), p.pool.total()); // 18 planned: a page of each class gave way to the trash page
+    try expectEqual(16 * pooled + 9 * latent, p.arena.?.len); // every pooled key, this rank's 8 latent pages and the trash
+    try expectEqual(@as(u64, 2 * 128 * 256), pooled); // a DSA layer and the head: 128 pooled keys of 256 bytes each
+    const base = p.arena.?.ptr;
+    for (0..3) |slot| {
+        const st = f.st(slot); // the engine's own (placed after the pool) and the two made with it
+        try expectEqual(st.table + 256, st.ltable); // after the table, so a kept state's tail still ends at it
+        for (st.caches, 0..) |c, j| {
+            try expectEqual(base + 16 * pooled + j * 512 * 1024, c.lc);
+            try expectEqual(base + j * 128 * 256, c.pk);
+            try expect(c.pt == st.ltable and c.ps == latent and c.pkt == st.table and c.pks == pooled);
+        }
+        const h = st.mtp_caches; // the head's latent rows are a cache of the latent region like the others
+        try expectEqual(base + 16 * pooled + st.caches.len * 512 * 1024, h.lc);
+        try expectEqual(base + st.caches.len * 128 * 256, h.pk);
+        try expect(h.pt == st.ltable and h.ps == latent and h.pkt == st.table and h.pks == pooled);
+    }
+}
+
+test "GLM KV split: off, one table and the interleaved page, as before the split" {
+    var f: Fake = undefined;
+    try f.init(false);
+    const p = try f.pool(2, 8, true);
+    defer f.deinit(p);
+    const st = f.st(1);
+    try expectEqual(@as(u64, 0), st.ltable);
+    const c = st.caches[0];
+    try expect(c.pt == st.table and c.pkt == 0 and c.pks == 0 and c.ps == state.pageBytes(&f.e.w));
+    try expectEqual(c.lc + 512 * 1024, c.pk);
+    _ = try p.open(1, 600, 100);
+    try expectEqual(@as(usize, 1), F.puts); // one table written
+}
+
+test "GLM KV split: a stream's ids reach both tables, the latent one its owner's region places and elsewhere the trash" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    const ids = try p.open(1, 1500, 100); // class 0, this rank's
+    try expectEqual(@as(usize, 2), F.puts);
+    try std.testing.expectEqualSlices(u32, ids, F.table(f.st(1).table, ids.len));
+    for (ids, F.table(f.st(1).ltable, ids.len)) |id, local| try expectEqual(id / 2, local);
+    try expectEqual(@as(?u32, 0), f.st(1).owner);
+    try std.testing.expectEqualSlices(u32, F.table(f.st(1).ltable, ids.len), f.st(1).lpages); // a kept state's places
+    const other = try p.openOn(2, 1500, 100, 1); // class 1: rank 1 holds its latent rows
+    try std.testing.expectEqualSlices(u32, other, F.table(f.st(2).table, other.len));
+    for (F.table(f.st(2).ltable, other.len)) |local| try expectEqual(@as(u32, 8), local); // the trash page, past 8
+    try expectEqual(@as(?u32, 1), f.st(2).owner);
+    try expectEqual(@as(usize, 0), f.st(2).lpages.len); // none of its latent rows here, so no kept state reads them
+    p.close(2);
+    p.close(1);
+    try expectEqual(@as(?u32, null), f.st(2).owner);
+    try expectEqual(@as(usize, 0), f.st(1).lpages.len);
+}
+
+/// Fills a stack frame where an upload's source would have been, so a source that did not outlive its call shows.
+noinline fn clobber() u32 {
+    var junk: [1024]u32 = undefined;
+    @memset(&junk, 0xEEEE_EEEE);
+    std.mem.doNotOptimizeAway(&junk);
+    return junk[7];
+}
+
+test "GLM KV split: the latent table's upload reads a source that outlives the call, as a copy read later would" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    _ = try p.open(1, 600, 100); // a stream before, as the served one came after another
+    p.close(1);
+    F.lazy = true;
+    const ids = try p.openOn(2, 3000, 100, 0); // 7 pages of this rank's class
+    _ = clobber();
+    F.settle();
+    try std.testing.expectEqualSlices(u32, ids, F.table(f.st(2).table, ids.len));
+    for (ids, F.table(f.st(2).ltable, ids.len)) |id, local| try expectEqual(id / 2, local);
+}
+
+test "GLM KV split: TF_KV_POISON fills a stream's pooled keys, and its latent rows only on the rank that holds them" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(3, 16, true);
+    defer f.deinit(p);
+    p.poison = true;
+    const ids = try p.open(1, 600, 100);
+    const pooled = state.pkPageBytes(&f.e.w);
+    const latent = state.latentPageBytes(&f.e.w);
+    const base = p.arena.?.ptr;
+    try expectEqual(2 * ids.len, F.fills.items.len);
+    for (ids, 0..) |id, i| {
+        try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, F.fills.items[2 * i]);
+        try expectEqual([2]u64{ base + 16 * pooled + id / 2 * latent, latent / 4 }, F.fills.items[2 * i + 1]);
+    }
+    F.fills.clearRetainingCapacity();
+    const other = try p.openOn(2, 600, 100, 1); // another rank's latent rows: this rank fills only their pooled keys
+    try expectEqual(other.len, F.fills.items.len);
+    for (other, F.fills.items) |id, x| try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, x);
+}
+
+test "GLM KV split: rank 0 books each stream from the roomiest owner class, every id of it, and every class idle after" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class, a window each
+    defer f.deinit(p);
+    try expectEqual(@as(u32, 2), p.pool.classes);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, try p.open(1, 600, 100)); // all tie: class 0
+    try expectEqual(@as(u32, 0), p.leases[1].owner);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 5 }, try p.open(2, 1000, 100)); // class 1 has more
+    try expectEqual(@as(u32, 1), p.leases[2].owner);
+    try expectEqual(@as(u32, 0), p.pool.roomiest()); // 6 against 5
+    const third = try p.open(3, 600, 100);
+    for (third) |id| try expectEqual(@as(u32, 0), id % 2);
+    p.close(3); // a stream ended before its first decode (a cancel): its class's pages back at once
+    try expectEqual(@as(usize, 6), p.pool.classFree(0));
+    p.close(1);
+    p.close(2);
+    try expect(p.pool.idle());
+    for (0..2) |c| try expect(p.pool.classFree(@intCast(c)) == 8 and p.pool.classPromised(@intCast(c)) == 0);
+    try expectEqual(@as(u32, 0), p.leases[2].owner); // finish resets the lease
+    try std.testing.expectEqualSlices(u32, &.{ 5, 3 }, try p.openOn(1, 600, 100, 1)); // a pinned owner, last ids back first
+    try std.testing.expectError(error.BadStep, p.openOn(2, 600, 100, 2));
+    try expect(!p.used[2] and p.pool.classPromised(0) == 0);
+}
+
+test "GLM KV split: a resume opens on its kept state's home class when it has the pages, else on the roomiest" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class
+    defer f.deinit(p);
+    _ = try p.openOn(1, 1000, 100, 1); // class 1: 5 left, class 0 the roomiest
+    for (try p.openNear(2, 600, 100, &.{}, 1)) |id| try expectEqual(@as(u32, 1), id % 2); // home, though not roomiest
+    try expectEqual(@as(u32, 1), p.leases[2].owner);
+    p.close(2);
+    for (try p.openNear(2, 3000, 100, &.{}, 1)) |id| try expectEqual(@as(u32, 0), id % 2); // 7 pages: home lacks them
+    p.close(2);
+    _ = try p.openNear(2, 600, 100, &.{}, 2); // a home past the classes: the roomiest
+    try expectEqual(@as(u32, 0), p.leases[2].owner);
+    p.close(2);
+    _ = try p.openNear(2, 600, 100, &.{}, null); // none: the owner rule
+    try expectEqual(@as(u32, 0), p.leases[2].owner);
+}
+
+test "GLM KV split: a class runs out alone: admission waits for its pages though the other class has them" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    _ = try p.openOn(1, 3000, 100, 0); // 7 of class 0's 8
+    _ = try p.openOn(2, 3000, 100, 1); // 7 of class 1's
+    try expectEqual(@as(usize, 2), p.pool.available());
+    try expect(p.fits(100, 100) and !p.fits(600, 100)); // one page fits a class; two do not, though two are free
+    try std.testing.expectError(error.LaneMemory, p.open(3, 600, 100));
+    try expect(!p.used[3] and p.pool.availableIn(0) == 1 and p.pool.availableIn(1) == 1);
+}
+
+test "GLM KV split: a follower maps rank 0's ids of the stream's owner, refusing another class or owner before mapping" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(3, 16, false);
+    defer f.deinit(p);
+    try std.testing.expectError(error.ResidueMismatch, p.mapOwned(1, &.{ 1, 4, 5 }, 0, 1));
+    try std.testing.expectError(error.BadStep, p.mapOwned(1, &.{ 2, 4 }, 0, 2)); // owner past the classes
+    try expect(F.puts == 0 and !p.used[1] and f.st(1).capacity == 0); // nothing mapped or uploaded
+    try p.mapOwned(1, &.{ 5, 1, 7 }, 0, 1);
+    try expectEqual(@as(u32, 1), p.leases[1].owner);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1, 7 }, F.table(f.st(1).table, 3));
+    try std.testing.expectEqualSlices(u32, &.{ 8, 8, 8 }, F.table(f.st(1).ltable, 3)); // rank 1's rows: the trash here
+    try expectEqual(@as(?u32, 1), f.st(1).owner);
+    p.close(1);
+    try expectEqual(@as(u32, 0), p.leases[1].owner);
+    try p.map(1, &.{ 2, 0 }, 0); // `map` is owner 0's
+}
+
+test "GLM KV split: a follower whose switch differs from rank 0's pool step is refused, and makes no pool" {
+    for ([_]bool{ true, false }) |mine| {
+        var f: Fake = undefined;
+        try f.init(mine);
+        defer f.deinit(null);
+        try pages_mod.ownSequence(&f.e);
+        const live = F.live;
+        const page = (try pages_mod.layout(gpa, &f.e, 0)).pageBytes();
+        try std.testing.expectError(error.RankMismatch, pages_mod.Pages.followFlagged(gpa, &f.e, 3, 18, page, !mine));
+        try expectEqual(live, F.live);
+        const p = try pages_mod.Pages.followFlagged(gpa, &f.e, 3, 18, page, mine);
+        p.deinit();
+    }
+}
+
+test "GLM KV split: a class shorter than a stream's window is refused before anything is made; off builds as before" {
+    {
+        var g: Fake = undefined; // off: 14 pages build as before
+        try g.init(false);
+        g.deinit(try g.pool(3, 14, true));
+    }
+    var f: Fake = undefined;
+    try f.init(true);
+    defer f.deinit(null);
+    try pages_mod.ownSequence(&f.e);
+    const l = try pages_mod.layout(gpa, &f.e, 0);
+    const live = F.live;
+    try std.testing.expectError(error.ClassTooSmall, pages_mod.Pages.init(gpa, &f.e, l, 3, 14, true)); // 12 funded: 6 < 8
+    try std.testing.expectError(error.ClassTooSmall, pages_mod.Pages.followFlagged(gpa, &f.e, 3, 14, l.pageBytes(), true));
+    try std.testing.expectError(error.ClassTooSmall, pages_mod.Pages.init(gpa, &f.e, l, 3, 17, true)); // 14 funded: 7 < 8
+    try expectEqual(live, F.live);
+}
+
+test "GLM KV split: a request longer than a class fits admission and is refused by name, never as LaneMemory" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(3, 16, true);
+    defer f.deinit(p);
+    f.e.capacity = 8192; // as a table longer than a class would be, were it not refused at init
+    try expect(p.fits(5000, 100)); // 11 pages: past a class of 8, so the lane host does not wait for it
+    try std.testing.expectError(error.ClassTooSmall, p.open(1, 5000, 100));
+    try expect(!p.used[1] and p.pool.idle());
+}
+
+test "GLM KV split twins: a fresh pass borrows the other class's pages, every rank attends its own; first decode gives them back" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class; rank 0 of two
+    defer f.deinit(p);
+    const w = try p.openTwinned(1, 1500, 100, 1); // class 1's stream: rank 1 owns it, rank 0 borrows a twin
+    const n = w.len / 2;
+    const m = pages_mod.need(p.layout, 1500, 0); // the prompt's pages: the twin goes back before a reply row is written
+    try expect(n == 4 and m == 3);
+    for (w[0..n]) |id| try expectEqual(@as(u32, 1), id % 2);
+    for (w[n..][0..m]) |id| try expectEqual(@as(u32, 0), id % 2); // the twin: rank 0's class
+    try std.testing.expectEqualSlices(u32, w[m..n], w[n + m ..]); // past the prompt: the stream's own ids
+    try std.testing.expectEqualSlices(u32, w[0..n], F.table(f.st(1).table, n)); // the pooled keys' table: its ids
+    for (w[n..][0..m], F.table(f.st(1).ltable, m)) |id, local| try expectEqual(id / 2, local); // the latent rows: the twin's
+    try expectEqual(@as(u32, 8), F.table(f.st(1).ltable, n)[m]); // and the reply's on the trash page, as untwinned
+    try expect(f.st(1).twin and f.st(1).attends() == null and f.st(1).owner.? == 1);
+    const fetch = @import("cuda_owner_fetch.zig"); // twinned: no history fetch, each rank attends its own rows
+    const away: fetch.Away = .{ .heads = 32, .to = 1 };
+    try expect(!fetch.fetches(true, f.st(1).attends(), 4096, 512, 1 << 20, away) and fetch.fetches(true, f.st(1).owner, 4096, 512, 1 << 20, away));
+    try expectEqual(@as(usize, 0), f.st(1).lpages.len); // a kept state still takes its latent rows from the owner
+    try expectEqual(@as(usize, 8 - m), p.pool.classFree(0)); // the reply's page stays free for another stream
+    try std.testing.expectEqualSlices(u32, w, @import("cuda_pages_twin.zig").wire(p, 1, w[0..n]));
+    try p.giveTwin(1); // the first decode round, on every rank
+    for (F.table(f.st(1).ltable, n)) |local| try expectEqual(@as(u32, 8), local); // the trash page again
+    try expect(!f.st(1).twin and f.st(1).attends().? == 1);
+    try expect(fetch.fetches(true, f.st(1).attends(), 4096, 512, 1 << 20, away)); // given back: the fetch, as part 3
+    try expectEqual(@as(usize, 8), p.pool.classFree(0));
+    try p.giveTwin(1); // later rounds: nothing to give
+    p.close(1);
+    try expect(p.pool.idle());
+}
+
+test "GLM KV split twins: none when a class lacks the pages or a pass resumes a kept state; a cancel gives them back" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    _ = try p.openOn(1, 3000, 100, 0); // 7 of class 0's 8
+    const lone = try p.openTwinned(2, 1500, 100, 1); // a twin needs 3 of class 0: none
+    try expect(lone.len == 4 and !f.st(2).twin);
+    p.close(2);
+    p.close(1);
+    const resumed = try p.openNear(2, 1500, 100, &.{}, 1); // a resume restores at home or carries: no twin
+    try expect(resumed.len == 4 and !f.st(2).twin);
+    p.close(2);
+    const fresh = try p.openNear(2, 1500, 100, &.{}, null); // a fresh pass on the roomiest: twinned
+    try expect(fresh.len == 8 and f.st(2).twin);
+    p.close(2); // ended in its prompt pass: its pages and its twin back
+    try expect(p.pool.idle() and !f.st(2).twin);
+    for (0..2) |c| try expectEqual(@as(usize, 8), p.pool.classFree(@intCast(c)));
+}
+
+test "GLM KV split twins: a follower maps a twinned begin, its own class's twin, refusing another class or a short wire" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, false); // rank 0 as a follower of another leader
+    defer f.deinit(p);
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 5, 7 }, 0, 1, true)); // a twin of class 1
+    try std.testing.expectError(error.BadStep, p.mapBegin(1, &.{ 1, 3, 4 }, 0, 1, true));
+    try p.mapBegin(1, &.{ 1, 3, 6, 2 }, 0, 1, true);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3 }, F.table(f.st(1).table, 2));
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1 }, F.table(f.st(1).ltable, 2)); // ids 6 and 2 at places 3 and 1
+    try expect(f.st(1).twin and f.st(1).attends() == null);
+    try p.giveTwin(1);
+    try std.testing.expectEqualSlices(u32, &.{ 8, 8 }, F.table(f.st(1).ltable, 2));
+    p.close(1);
+    try p.mapBegin(1, &.{ 0, 2 }, 0, 0, true); // its own class's stream: no twin here, but every rank attends its own
+    try std.testing.expectEqualSlices(u32, &.{0}, F.table(f.st(1).table, 1));
+    try expect(f.st(1).twin and f.st(1).attends() == null);
+    p.close(1);
+    try p.mapBegin(1, &.{ 1, 3, 6, 3 }, 0, 1, true); // a twin of the prompt's page, then the stream's id: the trash page
+    try std.testing.expectEqualSlices(u32, &.{ 3, 8 }, F.table(f.st(1).ltable, 2));
+    p.close(1);
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 6, 1 }, 0, 1, true)); // not the stream's id there
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 6, 5 }, 0, 1, true));
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 1, 3 }, 0, 1, true)); // no page of its class
+    try expect(!p.used[1]);
+}
+
+test "GLM KV split twins: TF_KV_POISON fills a twin's latent rows on the rank that borrows it, before its pass" {
+    var pooled: u64 = 0;
+    var latent: u64 = 0;
+    {
+        var f: Fake = undefined;
+        try f.init(true);
+        const p = try f.pool(4, 16, true);
+        defer f.deinit(p);
+        p.poison = true;
+        const w = try p.openTwinned(1, 1500, 100, 1); // rank 1's stream: rank 0 fills its pooled keys, then its twin's rows
+        const n = w.len / 2;
+        const m = pages_mod.need(p.layout, 1500, 0);
+        pooled = state.pkPageBytes(&f.e.w);
+        latent = state.latentPageBytes(&f.e.w);
+        const base = p.arena.?.ptr;
+        try expectEqual(n + m, F.fills.items.len);
+        for (w[0..n], F.fills.items[0..n]) |id, x| try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, x);
+        for (w[n..][0..m], F.fills.items[n..]) |id, x| try expectEqual([2]u64{ base + 16 * pooled + id / 2 * latent, latent / 4 }, x);
+    }
+    var g: Fake = undefined; // a follower of rank 1's stream: its twin's rows filled as rank 0's were
+    try g.init(true);
+    const q = try g.pool(4, 16, false);
+    defer g.deinit(q);
+    q.poison = true;
+    try q.mapBegin(1, &.{ 1, 3, 6, 3 }, 0, 1, true);
+    try expectEqual(@as(usize, 3), F.fills.items.len); // two pages' pooled keys and the twin page's latent rows
+    try expectEqual([2]u64{ q.arena.?.ptr + 16 * pooled + 3 * latent, latent / 4 }, F.fills.items[2]);
+}
+
+test "GLM KV split twins: a shared window's parts give each stream's twin back before its forward" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    f.e.pages = p;
+    defer f.e.pages = null;
+    _ = try p.openTwinned(1, 600, 100, 1); // 2 pages, both the prompt's: a twin of 2 on class 0
+    _ = try p.openOn(2, 600, 100, 0);
+    try expect(f.st(1).twin and p.pool.classFree(0) == 4);
+    const engine = @import("cuda_engine.zig");
+    var segs: [engine.max_shared]@import("cuda_forward.zig").Seg = undefined;
+    var ids: [engine.shared_rows]u32 = undefined;
+    var out: [3]u32 = undefined;
+    const parts = [_]engine.Part{ .{ .slot = 2, .ids = &.{9}, .out = out[0..1] }, .{ .slot = 1, .ids = &.{ 7, 8 }, .out = out[1..3] } };
+    try expectEqual(@as(usize, 3), try f.e.sharedParts(&parts, &segs, &ids)); // as verifyShared calls it
+    try std.testing.expectEqualSlices(u32, &.{ 9, 7, 8 }, ids[0..3]);
+    try expect(segs[1].st == f.st(1) and segs[1].row0 == 1 and segs[1].rows == 2);
+    try expect(!f.st(1).twin and f.st(1).attends().? == 1 and !@import("cuda_pages_twin.zig").twinned(p, 1));
+    try expectEqual(@as(usize, 6), p.pool.classFree(0)); // the twin's pages back: only slot 2's two are out
+    for (F.table(f.st(1).ltable, 2)) |local| try expectEqual(@as(u32, 8), local);
+    try std.testing.expectError(error.SlotTwice, f.e.sharedParts(&.{ parts[0], parts[0] }, &segs, &ids));
+    p.close(1);
+    p.close(2);
+}
+
+test "GLM KV split twins at three ranks: each owner's wire carries the other two classes' twins, and each rank maps its own" {
+    for (0..3) |o| {
+        const owner: u32 = @intCast(o);
+        var wire: [12]u32 = undefined;
+        {
+            var f: Fake = undefined;
+            try f.initAt(true, 0, 3);
+            const p = try f.pool(4, 24, true); // 8 pages a class
+            defer f.deinit(p);
+            try expectEqual(@as(u32, 3), p.pool.classes);
+            const w = try p.openTwinned(1, 1500, 100, owner);
+            try expectEqual(wire.len, w.len); // its 4 ids, then a twin a class: 3 pages and the reply's id
+            @memcpy(&wire, w);
+            for (0..3) |k| try expectEqual(@as(usize, if (k == o) 4 else 5), p.pool.classFree(@intCast(k)));
+            try p.giveTwin(1);
+            for (0..3) |k| try expectEqual(@as(usize, if (k == o) 4 else 8), p.pool.classFree(@intCast(k)));
+        }
+        for (wire[0..4]) |id| try expectEqual(owner, id % 3);
+        for (0..3) |r| {
+            var f: Fake = undefined;
+            try f.initAt(true, r, 3);
+            const p = try f.pool(4, 24, false); // rank r following rank 0's begin
+            defer f.deinit(p);
+            try p.mapBegin(1, &wire, 0, owner, true);
+            try std.testing.expectEqualSlices(u32, wire[0..4], F.table(f.st(1).table, 4));
+            const lt = F.table(f.st(1).ltable, 4);
+            if (r == o) {
+                for (wire[0..4], lt) |id, local| try expectEqual(id / 3, local); // the owner: its own places
+            } else {
+                const twin = wire[4 * (1 + if (r < o) r else r - 1) ..][0..4]; // class order, the owner's left out
+                for (twin[0..3], lt[0..3]) |id, local| try expect(id % 3 == r and local == id / 3);
+                try expect(twin[3] == wire[3] and lt[3] == 8); // past the prompt: the stream's id, the trash page
+            }
+            try expect(f.st(1).twin and f.st(1).attends() == null);
+            try p.giveTwin(1);
+            if (r != o) for (F.table(f.st(1).ltable, 4)) |local| try expectEqual(@as(u32, 8), local);
+            try expect(!f.st(1).twin and f.st(1).attends().? == owner);
+            p.close(1);
+        }
+    }
+}

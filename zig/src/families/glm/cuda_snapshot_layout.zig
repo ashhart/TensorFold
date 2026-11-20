@@ -28,6 +28,7 @@ pub const Plan = struct {
     count: usize = 0,
     len: usize = 0,
     ids: []const u32 = &.{}, // a paged sequence's pages in row order
+    lat_ids: []const u32 = &.{}, // TF_GLM_KV_SPLIT: its latent rows' places in this rank's region (none: not here)
     sizing: bool = false, // `size`: the rows counted, not read, so no page need be mapped
     shared: usize = 0, // a paged sequence's first pages a page-sharing store holds: their rows stay on them
     half: ?u1 = null, // TF_GLM_KV_LIVE_HALF: the KDA half the plan carries (null: both, the arena head whole)
@@ -49,16 +50,21 @@ pub const Plan = struct {
 
     /// A prefix's bytes at `at`, rows to `capacity` counted held or not (a paged sequence holds its request's alone).
     pub fn size(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize, shared: usize) !usize {
+        return (try sized(st, c, capacity, at, head, shared)).len;
+    }
+
+    /// `size`'s plan: its parts' lengths, none read.
+    pub fn sized(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize, shared: usize) !Plan {
         var whole = st.*;
         whole.capacity = capacity;
-        return (try make(&whole, c, at, head, shared, true, halfOf(st.cur, st.kda_layers, liveHalfEnabled()))).len;
+        return make(&whole, c, at, head, shared, true, halfOf(st.cur, st.kda_layers, liveHalfEnabled()));
     }
 
     fn make(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, sizing: bool, half: ?u1) !Plan {
         if (at > st.capacity or st.caches.len > @import("config.zig").max_layers) return error.SnapshotShape;
         if (st.rings.len != 2 * (st.caches.len + 1)) return error.SnapshotShape;
         if (shared > 0 and (st.table == 0 or shared * page_rows > at)) return error.SnapshotShape; // pages below `at` only
-        var p: Plan = .{ .ids = st.pages, .sizing = sizing, .shared = shared, .half = half };
+        var p: Plan = .{ .ids = st.pages, .lat_ids = st.lpages, .sizing = sizing, .shared = shared, .half = half };
         // a paged sequence's caches are its pages: its fields up to them end at its first ring
         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
         if (first < st.arena.buf.ptr) return error.SnapshotShape;
@@ -87,27 +93,34 @@ pub const Plan = struct {
         const latent = try std.math.mul(usize, at, @as(usize, c.kv_lora) * @as(usize, if (x.ls == 0) 2 else 1));
         const ring = try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row);
         const pooled = try std.math.mul(usize, @min(at / sparse.pool + 2, x.pk_rows), @as(usize, c.i_dim) * 2);
-        try p.addCache(st, x, x.lc, latent, page_rows * @as(usize, c.kv_lora) * 2, x.ps);
+        try p.addCache(st, x, x.lc, latent, page_rows * @as(usize, c.kv_lora) * 2, x.ps, x.pkt != 0);
         if (x.ls != 0) try p.add(st, x.ls, try std.math.mul(usize, at, @sizeOf(f32)));
         try p.add(st, st.rings[2 * j], ring);
         try p.add(st, st.rings[2 * j + 1], ring);
-        try p.addCache(st, x, x.pk, pooled, page_rows / sparse.pool * @as(usize, c.i_dim) * 2, if (x.pks != 0) x.pks else x.ps);
+        try p.addCache(st, x, x.pk, pooled, page_rows / sparse.pool * @as(usize, c.i_dim) * 2, if (x.pks != 0) x.pks else x.ps, false);
     }
 
-    /// A cache's rows: in the arena, or on the sequence's pages, `span` bytes a page (past the store's `shared`).
-    fn addCache(p: *Plan, st: *const State, x: cache.Caches, live: u64, len: usize, span: usize, page: u64) !void {
+    /// A cache's rows: in the arena, or on its pages `span` bytes a page past `shared` (`lat`: through `lat_ids`).
+    fn addCache(p: *Plan, st: *const State, x: cache.Caches, live: u64, len: usize, span: usize, page: u64, lat: bool) !void {
         if (x.pt == 0) return p.add(st, live, len);
         const from = @min(len, p.shared * span);
         if (len == from) return;
-        if ((!p.sizing and (len - 1) / span >= p.ids.len) or p.count == p.parts.len) return error.SnapshotShape;
-        p.len = try std.math.add(usize, p.len, len - from);
-        p.parts[p.count] = .{ .live = live, .len = len - from, .span = span, .page = page, .from = from };
+        const read = !lat or p.lat_ids.len > 0; // another rank holds them: this rank neither reads nor counts them
+        const n = if (lat) p.lat_ids.len else p.ids.len;
+        if ((!p.sizing and read and (len - 1) / span >= n) or p.count == p.parts.len) return error.SnapshotShape;
+        if (read or p.sizing) p.len = try std.math.add(usize, p.len, len - from);
+        p.parts[p.count] = .{ .live = live, .len = len - from, .span = span, .page = page, .from = from, .alt = lat };
         p.count += 1;
+    }
+
+    /// Whether this rank holds `part`'s rows: every part but split latent rows another rank holds.
+    pub fn holds(p: *const Plan, part: Part) bool {
+        return !part.alt or p.lat_ids.len > 0;
     }
 
     /// Where a part's bytes from `done` on sit, as many as lie in a row there.
     pub fn piece(p: *const Plan, part: Part, done: usize) Part {
-        return walk.piece(p.ids, part, done);
+        return walk.piece(if (part.alt) p.lat_ids else p.ids, part, done);
     }
 
     fn add(p: *Plan, st: *const State, live: u64, len: usize) !void {
