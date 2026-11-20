@@ -117,8 +117,7 @@ pub fn Namespace(comptime Tri: type) type {
         }
 
         pub fn healthy(ptr: *anyopaque) bool {
-            if (of(ptr).ranks) |r| return r.healthy();
-            return true;
+            return if (of(ptr).ranks) |r| r.healthy() else true;
         }
 
         pub fn benchmark(ptr: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
@@ -129,14 +128,12 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
             const own = of(ptr);
             const room = @import("exl3/pack/exl3_startup_memory.zig").laneRoom(local, own.graph_reservation);
-            if (own.ranks) |r| return if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, room, own.stream_bytes) else r.room(room);
-            return room;
+            return if (own.ranks) |r| (if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, room, own.stream_bytes) else r.room(room)) else room;
         }
 
         /// A request this engine refuses, in words; with no engine (cuda.zig's open), a load it refuses.
         pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
-            const words = @import("cuda_lanes_explain.zig");
-            return if (ctx == null) words.open(err) else words.explain(err);
+            return if (ctx == null) @import("cuda_lanes_explain.zig").open(err) else @import("cuda_lanes_explain.zig").explain(err);
         }
         pub const explains_open = true;
 

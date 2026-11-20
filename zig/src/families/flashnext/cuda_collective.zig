@@ -386,4 +386,3 @@ test "exl3: graph rendezvous failure aborts the communicator and disconnects its
     _ = try peer.receiveHeader(wire.deadline(1000));
     try std.testing.expectError(error.RankDisconnected, peer.checkPeer());
 }
-

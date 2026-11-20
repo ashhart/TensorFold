@@ -97,7 +97,7 @@ const Shard = struct {
     }
 };
 
-fn runtimePage(name: []const u8) bool {
+pub fn runtimePage(name: []const u8) bool {
     return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null;
 }
 
@@ -286,11 +286,10 @@ pub const Store = struct {
 
     fn shard(self: *Store, key: []const u8) ![]const u8 {
         const wm = self.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
-        const v = wm.object.get(key) orelse {
+        return (wm.object.get(key) orelse {
             std.debug.print("missing {s}\n", .{key});
             return error.MissingTensor;
-        };
-        return v.string;
+        }).string;
     }
 
     /// `file` (relative to the checkpoint) opened, its header parsed, with its own copy of the name.
@@ -331,8 +330,7 @@ pub const Store = struct {
 
     /// An EXL3 pack's dense F16 weight as the BF16 the loaders read (exact or refused); any other tensor as stored.
     fn dense(self: *Store, key: []const u8, t: Tensor) !Tensor {
-        if (!exl3_store.widens(key, t)) return t;
-        return exl3_store.widen(self.gpa, key, t, &self.widened);
+        return if (!exl3_store.widens(key, t)) t else exl3_store.widen(self.gpa, key, t, &self.widened);
     }
 
     /// Check the exact or compatibility name without mapping its shard.
@@ -599,10 +597,4 @@ pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: 
 
 test {
     _ = @import("cuda_prompt_wt_test.zig");
-}
-
-test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
-    try std.testing.expect(runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
-    try std.testing.expect(!runtimePage("language_model.model.norm.weight"));
-    try std.testing.expect(!runtimePage("language_model.mtp.norm.weight"));
 }
