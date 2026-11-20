@@ -57,6 +57,16 @@ pub fn absorb(m: *Model, frame: u64, aheads: []const Ahead) !void {
     }
     const pos = positions[0..total];
     const mode = m.preparation.mode;
+    if (mode != .bf16_reference) if (b.copies) |*cp| if (cp.opt) |*o| {
+        const opt_mod = @import("metal_dflash_opt.zig");
+        var sp: [8]opt_mod.StreamPos = undefined;
+        var row0: u32 = 0;
+        for (aheads, 0..) |x, k| {
+            sp[k] = .{ .first = x.first, .row0 = row0, .rows = x.rows };
+            row0 += x.rows;
+        }
+        return o.absorbFromTaps(b, ops, g, frame, taps, sp[0..aheads.len], b.batch, total);
+    };
     const fusion = try ops.vtable.project(ops.ptr, frame, taps, g.fusion, mode);
     const hidden = try ops.vtable.norm(ops.ptr, frame, fusion, .{ .weight = g.hidden_norm, .eps = c.eps, .heads = 1, .head_dim = c.hidden });
     for (g.layers, 0..) |layer, i| {
