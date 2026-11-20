@@ -71,6 +71,8 @@
 {"name":"pre_scale 1.75","set":{"mhc":{"pre_scale":1.75}},"expect":"accept"},
 {"name":"pre_scale 0","set":{"mhc":{"pre_scale":0}},"expect":"config"},
 {"name":"pre_scale negative","set":{"mhc":{"pre_scale":-1.0}},"expect":"config"},
+{"name":"pre_scale 1e-30 (a normal f32)","set":{"mhc":{"pre_scale":1e-30}},"expect":"accept"},
+{"name":"pre_scale 1e-50 rounds to f32 zero","set":{"mhc":{"pre_scale":1e-50}},"expect":"admission"},
 {"name":"pre_scale a string","set":{"mhc":{"pre_scale":"1"}},"expect":"config"},
 {"name":"pre_scale null","set":{"mhc":{"pre_scale":null}},"expect":"config"},
 {"name":"layer_types absent","remove":["text_config.layer_types"],"expect":"accept"},
