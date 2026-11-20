@@ -30,7 +30,9 @@ const cam_n = cfg.camera_channels;
 const f1_n = cfg.cond_rows * cfg.cond_channels;
 const f2_n = cfg.cond_rows * cfg.cond2_channels;
 const noise_n = vae.latent * vae.latent * id.vae_weights.latent_channels;
-const side = vae.size;
+comptime {
+    std.debug.assert(id.picture.side == vae.size); // the picture the encoders read is the one the VAE encodes
+}
 const rescale: f64 = 3.0;
 
 /// torch's CPU generator: mt19937 seeded as CPUGeneratorImpl seeds it.
@@ -161,28 +163,14 @@ fn maybe(a: std.mem.Allocator, f: *const tf.safetensors.File, name: []const u8, 
     return out;
 }
 
-/// The picture as [3, 1024, 1024] (DINOv3's input) and [1024, 1024, 3] (the VAE's).
+/// The picture as [3, 1024, 1024] (DINOv3's input) and [1024, 1024, 3] (the VAE's), each name in its own layout only.
 fn picture(a: std.mem.Allocator, io: std.Io, path: []const u8) ![2][]f32 {
     var f = try tf.safetensors.File.open(a, io, path);
     defer f.close(io);
-    const n = 3 * side * side;
-    const chw = try a.alloc(f32, n);
-    const hwc = try a.alloc(f32, n);
-    if (try maybe(a, &f, "pixels", n)) |p| {
-        @memcpy(chw, p);
-        for (0..side * side) |i| for (0..3) |c| {
-            hwc[i * 3 + c] = p[c * side * side + i];
-        };
-    } else if (try maybe(a, &f, "image", n)) |p| {
-        @memcpy(hwc, p);
-        for (0..side * side) |i| for (0..3) |c| {
-            chw[c * side * side + i] = p[i * 3 + c];
-        };
-    } else {
-        std.debug.print("{s} holds neither `pixels` [3, 1024, 1024] nor `image` [1024, 1024, 3]\n", .{path});
-        return error.MissingTensor;
-    }
-    return .{ chw, hwc };
+    return tf.idol.picture.layouts(a, f.get("pixels"), f.get("image")) catch |e| {
+        std.debug.print("{s}: {s}\n", .{ path, tf.idol.picture.explain(e) });
+        return e;
+    };
 }
 
 fn print(list: *std.ArrayList(u8), a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
