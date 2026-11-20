@@ -65,7 +65,8 @@ GLM-5.3-Flash command in the older recipe is for Python 0.6.6, not this release.
 For the NVFP4 path, see [GLM-5.3-Flash on CUDA](recipes/glm-5.3-flash-cuda.md) and what
 [the contributed run](https://github.com/ashhart/TensorFold/issues/1040) on two GB10s covered.
 
-DeepSeek checkpoints are **not served yet** by any release binary: whole-model gate [#827](https://github.com/ashhart/TensorFold/pull/827) is still open.
+DeepSeek checkpoints are not served by any release CUDA binary. Native Metal support remains experimental and requires
+explicit opt-in.
 MiMo's native backend is not in a release yet. Bonsai's ternary pack and Gemma 4 26B-A4B remain Python-only;
 they are not native download recommendations. [Known issues](known-issues.md) lists current limits,
 including Flash Next shared-session cache/performance behavior and the 27B's drafter limits.

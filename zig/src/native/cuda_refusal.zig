@@ -3,7 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const nemotron = @import("nemotron");
 const qwen35 = @import("qwen35");
-pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
+pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its native Metal path remains experimental";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
 /// Flags refused whatever the family; null when `o` may open.
