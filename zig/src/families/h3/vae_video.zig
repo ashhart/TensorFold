@@ -512,9 +512,8 @@ pub const Decoder = struct {
         e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
         e.setBuffer(attended, 0, 1);
-        e.setBuffer(rope, 0, 2);
-        e.setValue([1]u32{ @intCast(rows) }, 3);
-                e.dispatchGroups(mtl.Size.of(voxels, 32, 1), mtl.Size.of(1, 1, 1));
+        e.setValue([1]u32{ @intCast(rows) }, 2);
+        e.dispatchGroups(mtl.Size.of(voxels, 32, 1), mtl.Size.of(1, 1, 1));
         e.barrier();
 
         const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
