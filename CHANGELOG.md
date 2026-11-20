@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5/3.8 and Flash Next on CUDA: `--vision` loads a tower whose linears ModelOpt stores as MXFP8 or NVFP4, as `nvidia/Qwen3.8-Flash-Next-FP4-Local` does, where it stopped at the first quantized linear; they are decoded to bf16 on the host at load, one linear at a time, so the tower runs in bf16 as before, and a floating-point tower is still read as stored (#3727). Thanks to @BadAd84.
+
 - Build: the three bounded top-k selection tests run in the fast `test-lanes-topk-host` step, with a planted failure confirming they can fail by name (#4095, refs #2460). Thanks to @jschmied.
 
 - Lanes: an optional normalized-row view of the prompt features, whose `null` default keeps every existing drafter path as it is (#4132, refs #2485). Thanks to @tacosta.
