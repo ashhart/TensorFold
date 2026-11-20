@@ -100,6 +100,7 @@ pub const Engine = struct {
     }
 
     fn send(e: *Engine, words: []const i64) !void {
+        if (comptime @import("builtin").os.tag == .windows) return; // no session there: `open` refuses two ranks first
         if (e.session) |ss| try ss.plan.send(words);
     }
 
