@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: the development stand-in returns its listed model from `GET /v1/models/{id}` and a 404 `model_not_found` for any other ID, as the engine does (#4091, fixes #4090). Thanks to @AIFlowML.
+
 - Tests: on macOS, threaded host tests no longer hang in Zig's debug stack capture: the test allocator keeps its leak and safety checks but records no allocation stacks there; Linux and custom runners are unchanged (#3855).
 
 - CI: the last four host checks excluded under #2031 return to the aggregate; recording fixtures initialize runner state and affine kernel handles.
