@@ -547,22 +547,7 @@ pub const Pool = struct {
     }
 
     /// Free pages [start, start + k) held by `l`, from its promise.
-    fn claimAt(p: *Pool, l: *Lease, start: u32, k: usize) void {
-        var n: usize = 0;
-        for (p.free[0..p.nfree]) |id| if (id < start or id >= start + k) {
-            p.free[n] = id;
-            n += 1;
-        };
-        std.debug.assert(n + k == p.nfree);
-        p.nfree = n;
-        p.cfree[0] = n; // one class: runs are refused above it
-        @memset(p.refs[start..][0..k], 1);
-        @memset(p.leased[start..][0..k], 1); // held as a lease holds its pages: never the store's to reclaim
-        p.nleased += k; // every page in this free run gained its first lease and no other holder
-        l.promised -= k;
-        p.promised -= k;
-        p.cpromised[0] -= k;
-    }
+    const claimAt = owners.claimAt;
 
     /// A run claimed at `start` goes back to the free pages.
     pub fn releaseRun(p: *Pool, start: u32, k: usize) void {
