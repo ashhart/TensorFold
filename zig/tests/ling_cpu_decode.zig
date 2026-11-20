@@ -70,8 +70,9 @@ pub fn main(init: std.process.Init) !void {
     var at: usize = 0;
     while (at < prompt.items.len) {
         const end = @min(prompt.items.len, at + 8);
-        const step = try session.step(prompt.items[at..end]);
-        next = top(step.logits[step.logits.len - c.vocab ..]);
+        const is_last = end == prompt.items.len;
+        const step = try session.prefillChunk(prompt.items[at..end], is_last);
+        if (is_last) next = top(step.logits);
         at = end;
     }
     const prefilled = std.Io.Clock.awake.now(init.io);
