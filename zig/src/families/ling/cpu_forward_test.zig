@@ -215,3 +215,29 @@ test "session step reuses its output buffers and matches run byte for byte" {
         if (first_picks_ptr) |p| try std.testing.expectEqual(p, got.picks.ptr) else first_picks_ptr = got.picks.ptr;
     }
 }
+
+test "session prefillChunk skips non-final logits while matching run state and final logits byte for byte" {
+    const a = std.testing.allocator;
+    var source = Synthetic{ .arena = std.heap.ArenaAllocator.init(a), .hidden = 64 };
+    defer source.deinit();
+    const c = tiny();
+    var ref = try Forward.Session.init(a, &source, c, 16, 1);
+    defer ref.deinit();
+    var fast = try Forward.Session.init(a, &source, c, 16, 1);
+    defer fast.deinit();
+
+    var r1 = try ref.run(a, &.{ 3, 17, 5 });
+    defer r1.deinit();
+    var r2 = try ref.run(a, &.{ 40, 9, 22 });
+    defer r2.deinit();
+
+    const p1 = try fast.prefillChunk(&.{ 3, 17, 5 }, false);
+    try std.testing.expectEqual(@as(usize, 0), p1.logits.len);
+    const p2 = try fast.prefillChunk(&.{ 40, 9, 22 }, true);
+    try std.testing.expectEqualSlices(u8, last(r2, c.vocab), std.mem.sliceAsBytes(p2.logits));
+
+    var d_ref = try ref.run(a, &.{11});
+    defer d_ref.deinit();
+    const d_fast = try fast.step(&.{11});
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(d_ref.logits), std.mem.sliceAsBytes(d_fast.logits));
+}
