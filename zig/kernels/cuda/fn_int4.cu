@@ -2,7 +2,9 @@
 
 // From MiaAI-Lab's dual-Spark recipe at 04f2b53826, patches/0002-kernels.patch, Apache-2.0, Copyright 2026 MiaAI-Lab.
 
-// TensorFold changed two things, each marked TF: the head's items of 16 MT rows, and the gate/up prompt form.
+// TensorFold changed three things: the head's items of 16 MT rows and the gate/up prompt form, each marked TF:, and the
+
+// mma, the non-allocating load and the cp.async copies, which now come from common/ with the same instruction text.
 
 // Weights are exact in bf16 MMAs: code q (0..15) becomes the pair (128 + q) - 136 = q - 8 and a group's products run
 
@@ -22,6 +24,9 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
+#include "common/cp_async.cuh"
+#include "common/qmm_frag.cuh"
+
 namespace tf_fn_int4 {
 
 constexpr uint32_t LOW = 0x000F000Fu;
@@ -37,19 +42,11 @@ __device__ __forceinline__ uint32_t pair(uint32_t w, int p) {
 
 __device__ __forceinline__ void mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
                                     uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%0, %1, %2, %3};\n"
-      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+  const uint32_t a[4] = {a0, a1, a2, a3};
+  qmm_frag::mma(d, a, b0, b1);
 }
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+using tf_common::ld_nc;
 
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) {
   return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w;
@@ -276,13 +273,8 @@ __global__ void __launch_bounds__(WARPS * 32)
 
 // fragment to WN n8 tiles of each matrix. A row's bits never depend on the other rows (an MMA's rows are independent).
 
-__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, int bytes) {
-  const unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(bytes));
-}
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N>
-__device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
 
 __device__ __forceinline__ uint4 lds128(const unsigned char* p) {
   return *reinterpret_cast<const uint4*>(p);
@@ -339,25 +331,25 @@ __global__ void __launch_bounds__(WR * WC * 32)
         const int r = c / P::CH, ch = c - r * P::CH;
         const int src = src_row[r];
         const __nv_bfloat16* gp = src >= 0 ? X + (size_t)src * x_stride + g * GS + ch * 8 : X;
-        cp_async16(st + r * GS * 2 + swz(r, ch) * 16, gp, src >= 0 ? 16 : 0);
+        tf_common::cp16z(st + r * GS * 2 + swz(r, ch) * 16, gp, src >= 0);
       }
       constexpr int TCH = 32 * P::WPL * 4 / 16;   // 16-byte chunks of a tile's group
       for (int c = threadIdx.x; c < MATS * P::BT * TCH; c += P::THREADS) {
         const int q = c / TCH, w = c - q * TCH;
         const int m = q / P::BT, j = q - m * P::BT;
         const uint32_t* gp = wbase + m * mat_words + ((size_t)(cb * P::BT + j) * KG + g) * 32 * P::WPL + w * 4;
-        cp_async16(st + P::A_BYTES + q * TCH * 16 + w * 16, gp, 16);
+        tf_common::cp16z(st + P::A_BYTES + q * TCH * 16 + w * 16, gp, true);
       }
       for (int q = threadIdx.x; q < MATS * P::BT; q += P::THREADS) {
         const int m = q / P::BT, j = q - m * P::BT;
         const __half* gp = sbase + m * mat_scales + ((size_t)(cb * P::BT + j) * KG + g) * 8;
-        cp_async16(st + P::A_BYTES + P::W_BYTES + q * 16, gp, 16);
+        tf_common::cp16z(st + P::A_BYTES + P::W_BYTES + q * 16, gp, true);
       }
     };
 #pragma unroll
     for (int s = 0; s < STAGES - 1; ++s) {
       if (s < KG) load(s, s);
-      cp_async_commit();
+      cp_commit();
     }
     float acc[RT][MATS][WN][4];
 #pragma unroll
@@ -371,10 +363,10 @@ __global__ void __launch_bounds__(WR * WC * 32)
     int live = (cnt - row_base + 15) / 16;
     live = live < 0 ? 0 : (live > RT ? RT : live);
     for (int g = 0; g < KG; ++g) {
-      cp_async_wait<STAGES - 2>();
+      cp_wait<STAGES - 2>();
       __syncthreads();
       if (g + STAGES - 1 < KG) load((g + STAGES - 1) % STAGES, g + STAGES - 1);
-      cp_async_commit();
+      cp_commit();
       if (live == 0) continue;
       const unsigned char* st = smem + (g % STAGES) * P::STAGE;
       const unsigned char* sw = st + P::A_BYTES;
@@ -441,7 +433,7 @@ __global__ void __launch_bounds__(WR * WC * 32)
             a[3] = fmaf(d[r][m][j][3], s1[m][j], a[3]);
           }
     }
-    cp_async_wait<0>();
+    cp_wait<0>();
 #pragma unroll
     for (int r = 0; r < RT; ++r) {
       if (r >= live) continue;
