@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights: with `--slide` and `--slide-forget`, the server counts how often each learned fact fires in successful requests and keeps the counts and pins in the folder; `POST /v1/slide/facts/ID/pin` pins or unpins a fact, and a lesson that finds the pocket full retires the least-used unpinned fact through the checked delete before it retries; without `--slide-forget` nothing new is counted or written (#2026).
+
 - Tests: the Web startup test imports tensorfold_web's modules on one line, as ruff's import order asks (#4202).
 - Web: the LibreChat and AnythingLLM Docker Connect examples keep the configured remote engine URL, with its scheme, hostname, port and proxy prefix; local loopback examples still use the Docker host alias and away examples the Web relay (#3843, fixes #3839). Thanks to @AIFlowML.
 
