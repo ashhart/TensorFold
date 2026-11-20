@@ -25,7 +25,6 @@ const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves"
 fn served(comptime name: []const u8) bool {
     return servedBy(native_serves, name);
 }
-
 fn servedBy(list: []const []const u8, name: []const u8) bool {
     for (list) |x| if (std.mem.eql(u8, x, name)) return true;
     return false;
