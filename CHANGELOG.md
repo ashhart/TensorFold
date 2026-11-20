@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the benchmark tests' fake server pads its first stream event past the client's 576 KiB read buffer so the two events arrive in separate reads, and two cluster bring-up tests run on a lockstep clock through a new `clock` option on `bringup.Options`, which defaults to the real clock (#3750).
+
 - Server: `/v1/metrics` reports a `tensorfold:open_connections` gauge, the client connections admitted over TCP or the Unix socket and not yet closed, including idle keep-alive ones (#3925). Thanks to @plotarmordev.
 
 - Tools: served checks reject unexercised draft, seed, cache, cancellation and logit comparisons, covered by 11 served and constraint regression tests, and benchmark receipts name vacuous comparisons (#3772, refs #2460). Thanks to @jschmied.
