@@ -154,12 +154,12 @@ export function PullRow({ pull, onCancel, onRetry }: { pull: PullProgress; onCan
             {running && <span title={tx("Estimated from bytes written to the model cache; the remaining time changes with transfer speed.")}>{estimate ?? tx("Measuring transfer speed…")}</span>}
           </div>}
           {pull.companionRepos?.length ? <div className="mt-1 break-all text-[12px] text-ink-2">{tx("Includes companion: ")}{pull.companionRepos.join(', ')}</div> : null}
-          {pull.message && <div className={clsx('mt-1.5 break-words text-[12px] leading-relaxed', pull.state === 'failed' ? 'text-danger' : 'text-ink-2')}>{pull.message}</div>}
+          {pull.message && <div role={pull.state === 'failed' ? 'alert' : 'status'} className={clsx('mt-1.5 break-words text-[12px] leading-relaxed', pull.state === 'failed' ? 'text-danger' : 'text-ink-2')}>{pull.message}</div>}
           {actionError && <p role="alert" className="mt-1.5 break-words text-[12px] text-danger">{actionError}</p>}
         </div>
         {(running || queued)
           ? <Button size="xs" variant="default" icon="x" disabled={pending} onClick={() => void act(onCancel)} aria-label={`${queued ? 'Remove queued download' : 'Cancel download'} ${pull.repo}`}>{queued ? tx("Remove") : tx("Cancel")}</Button>
-          : !verifying && pull.state !== 'done' && <Button size="xs" variant="default" icon="refresh" disabled={pending} onClick={() => void act(onRetry)} aria-label={tx("Resume download {value0}", { value0: pull.repo })}>{tx("Resume")}</Button>}
+          : !verifying && pull.state !== 'done' && <Button size="xs" variant="default" icon="refresh" disabled={pending} onClick={() => void act(onRetry)} aria-label={pull.state === 'failed' ? `${tx("Retry download")} ${pull.repo}` : tx("Resume download {value0}", { value0: pull.repo })}>{pull.state === 'failed' ? tx("Retry") : tx("Resume")}</Button>}
       </div>
     </Row>
   )
