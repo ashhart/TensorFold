@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: a decode window's EXL3 routed experts launch on the 16-pair item plan instead of the group kernel's grid of mostly idle blocks, with the same output bytes (#2044). Thanks to @BadAd84.
+
 - Qwen 3.5/3.6/3.8 on HIP: a prompt chunk before the last stops its last layer after the keys and values, and the final chunk runs that layer only over the rows that are read, through the shared prompt-tail rule CUDA and Metal use (#2845, for #2829).
 
 - Qwen3.8-27B on Metal: on a prompt's last chunk, the last layer's q projection, o projection, MLP and final norm run only over the 128-row block that holds the row the head reads, while every row still writes its keys, values and recurrent state; a chunk whose last layer has another reader (drafter taps, images, MoE, a tensor-parallel pair, the ANE share) runs every row as before, and a new `test-qwen27-prompt-tail` step checks the block byte for byte against an every-row pass (#2826, refs #2165). Thanks to @GumbiiDigital.
