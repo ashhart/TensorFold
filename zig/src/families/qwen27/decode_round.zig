@@ -304,14 +304,11 @@ pub const Runner = struct {
             r.current_placed = .{};
         }
         if (r.capture_taps) r.taps.begin();
-        if (stage_planes.on) if (stage_planes.active) |planes| planes.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        var tail_facts = @import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null);
-        // staged references read the last layer's stream and its final norm, as a tap on it does
-        if (stage_planes.on) tail_facts.last_tapped = tail_facts.last_tapped or stage_planes.active != null;
+        const tail_facts = stage_planes.begin(@import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null));
         r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
         defer r.tail_from = null;
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));

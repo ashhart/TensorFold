@@ -46,6 +46,16 @@ pub fn admit(windows: anytype) !void {
     try stages.admit(windows.len, windows.len == 1 and stages.isChain(windows[0].parents), true);
 }
 
+/// A round's prompt tail facts with its planes begun: recording reads the last layer's stream and final norm.
+pub inline fn begin(facts: anytype) @TypeOf(facts) {
+    var out = facts;
+    if (on) if (active) |p| {
+        p.begin();
+        out.last_tapped = true;
+    };
+    return out;
+}
+
 /// A pass's stage rows into the active planes, when stages are built in and asked for.
 pub inline fn record(glue: Glue, e: mtl.ComputeEncoder, at: stages.Point, x: Ref, rows: u32) !void {
     if (on) if (active) |p| try p.record(glue, e, at, x, rows);
