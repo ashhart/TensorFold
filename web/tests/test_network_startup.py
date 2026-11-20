@@ -5,10 +5,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from fastapi.testclient import TestClient
 
-from tensorfold_web import catalog, native
+from tensorfold_web import catalog, mock_engine, native
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.engine import Engine
-from tensorfold_web import mock_engine
 from tensorfold_web.mock_engine import serve
 from tensorfold_web.server import create_app
 
