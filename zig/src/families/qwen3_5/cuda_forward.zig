@@ -24,6 +24,23 @@ pub fn promptMoe(prompt: bool, rows: usize) bool {
     return prompt and rows > prompt_moe_cutoff;
 }
 
+/// A forward's delta-rule scan of `segments` windows (Engine.deltaScan): slot scans when recorded, else the chain.
+pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int, table: bool) !void {
+    const f = &e.fns;
+    const scan = if (!record) (if (table) f.gdn_chain_table else f.gdn_chain) else switch (slot_count) {
+        1 => if (table) f.gdn_slots_1_table else f.gdn_slots_1,
+        2 => if (table) f.gdn_slots_2_table else f.gdn_slots_2,
+        4 => if (table) f.gdn_slots_4_table else f.gdn_slots_4,
+        8 => if (table) f.gdn_slots_8_table else f.gdn_slots_8,
+        16 => if (table) f.gdn_slots_16_table else f.gdn_slots_16,
+        else => return error.InvalidGdnSlots,
+    };
+    const input = e.tables.ptr + @as(usize, if (record) @import("cuda_round.zig").steps_at else rowpar_at);
+    // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
+    const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
+    try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
+}
+
 pub fn body(e: *E.Engine, shape: anytype) !void {
     const g = e.g;
     const total: usize = shape.total;

@@ -32,6 +32,10 @@ comptime {
 pub fn tableBytes(entries: usize) usize {
     return states_at + max_segs * entries * 8;
 }
+/// A state table's entries (Engine.stateEntries): the engine's `tables` hold one for each forward segment.
+pub fn stateEntries(e: anytype) usize {
+    return @import("cuda_cache.zig").States.len(e.g);
+}
 /// Segment i's state table in the tables (qwen35.cuh forward_states): the stream's own, copied when it moved.
 pub fn forwardStates(e: anytype, i: usize, c: anytype) ![4]u64 {
     const States = @import("cuda_cache.zig").States;
