@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's octree and Gaussian decoders now run natively on M5 Metal, from the denoiser's latent to the 3DGS PLY and camera. On an M5 Ultra, 262,144 Gaussians decode in 0.343 s against the SDK's 0.739 s, and 1,048,576 in 1.963 s against 4.653 s, at a 2.43 GB peak footprint against 5.64 GB. Given the SDK's probabilities and draws, every octree level's counts match, and the PLY's header and rows equal the SDK's. Both decoders sit as close to an fp32 run as the SDK's own; `tf-idol-decode` runs those gates from a `tools/zig/idol_case.py decode` case. The decoders' nine kernels are registered with the kernel contract (#1773, after #1766, for #1757). Thanks to @jayleaton.
+
 - Living Weights: in a container that refuses file clones with a permission error (LXC), lessons and rollbacks copy the files instead of failing (#4147).
 
 - Build: the Qwen ModelOpt admission host test gets the `living` module, so `test-cuda-host` compiles on Windows again after #3294 (#4146).
