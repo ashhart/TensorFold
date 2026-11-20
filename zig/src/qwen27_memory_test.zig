@@ -14,7 +14,7 @@ fn fixture() memory.Fit {
     return .{ .config = config(), .context = 131072 + 128, .slots = 2, .shared = true, .current_rows = 512, .left = 0 };
 }
 
-test "qwen27 memory: the pre-M5 default fits both streams where the unused 512-row scratch cannot" {
+test "qwen27 memory: the unshared prefix fits both streams where unused 512-row scratch cannot" {
     var f = fixture();
     f.shared = false;
     f.context = 32768 + 16;
