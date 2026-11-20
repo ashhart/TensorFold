@@ -184,7 +184,7 @@ pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
     w.sh = try Shards.open(g.gpa, io, dir);
     errdefer w.sh.close(io);
     const held = try quant.heldMetadata(w.sh.metadata);
-    try quant.checkNames(&held, w.sh.map.keyIterator());
+    try quant.checkStored(&held, w.sh.map);
     const first = g.bufs.items.len;
     const indirect_first = g.indirect.items.len;
     errdefer {
