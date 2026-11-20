@@ -13,17 +13,17 @@ const parse = @import("tool_parse.zig");
 const a = std.testing.allocator;
 const specs = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"now\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]";
 
-const Text = struct {
+pub const Text = struct {
     form: enum { xml, json, gemma, lfm2, unknown } = .json,
-    fn text(t: *Text) mt.Text {
+    pub fn text(t: *Text) mt.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocab, .eos_ids = eos, .render = render, .template_source = source } };
     }
-    fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
+    pub fn encode(_: *anyopaque, g: std.mem.Allocator, s: []const u8, _: bool) mt.Error![]u32 {
         const ids = try g.alloc(u32, s.len);
         for (s, ids) |ch, *id| id.* = if (ch == '\n') 95 else @as(u32, ch) - 32;
         return ids;
     }
-    fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
+    pub fn decode(_: *anyopaque, g: std.mem.Allocator, ids: []const u32) std.mem.Allocator.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         for (ids) |id| if (id < 95) try out.append(g, @intCast(id + 32)) else if (id == 95) try out.append(g, '\n');
         return out.toOwnedSlice(g);
@@ -54,8 +54,8 @@ const Text = struct {
         })) };
     }
 };
-const Stub = struct {
-    fn engine(s: *Stub) api.Engine {
+pub const Stub = struct {
+    pub fn engine(s: *Stub) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
@@ -74,8 +74,8 @@ const Stub = struct {
 };
 
 // The compiler boundary records the production grammar; no xgrammar library or GPU is loaded in this fixture.
-const Compile = struct {
-    fn compiler(c: *Compile) api.grammar.Compiler {
+pub const Compile = struct {
+    pub fn compiler(c: *Compile) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;
@@ -90,7 +90,7 @@ const Compile = struct {
     }
     fn free(_: *anyopaque) callconv(.c) void {}
 };
-fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
+pub fn value(g: std.mem.Allocator, s: []const u8) !json.Value {
     return (try json.parse(g, s)).ok;
 }
 
@@ -162,7 +162,7 @@ test "required tools: an LFM2 template gets the Pythonic grammar, one call or se
     };
 }
 
-fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
+pub fn body(cx: *errors.Cx, response: bool, choice: []const u8) !json.Value {
     const History = struct {
         pub fn conversation(_: @This(), c: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
             return c.refuse("this fixture has no stored response");
@@ -531,70 +531,5 @@ test "auto tools: a strict tool gets the optional-call grammar, other auto reque
         var required: api.Request = .{ .prompt = &.{1}, .max_tokens = 200 };
         try srv.checkFeatures(&cx, try value(g, "{\"tool_call_required\":true}"), true, false, &.{1}, (try value(g, offered)).array, &required);
         try std.testing.expectEqualStrings("sequence", (try value(g, required.structure.?.text)).get("format").?.strField("type").?);
-    };
-}
-
-fn thinkRun(want: []const u32, r: api.Request, seed: u64) !struct { tokens: []u32, stop: bool } {
-    var seq: lanes.grammar.Sequence = .{ .want = want, .stop = 96, .gpa = a };
-    defer seq.log.deinit(a);
-    var constraint: lanes.grammar.Constraint = .init(seq.rules(), 4, 98);
-    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 0, .hidden_rows = true, .streams_exact = true, .batch_rows = 8, .max_streams = 2, .draft_streams = true }, 8, 7);
-    defer cfg.deinit(a);
-    var fake: lanes.fake.Fake = .{ .gpa = a };
-    defer fake.deinit();
-    var clock: lanes.fake.FixedClock = .{};
-    var engine = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());
-    defer engine.deinit();
-    var s = try lanes.Stream.init(a, .{ .id = "think", .prompt = &.{ 3, 1, 4, 1 }, .max_new = r.max_tokens, .sampling = .{ .seed = seed, .temperature = 1 }, .drafts = false, .grammar = &constraint, .think_budget = r.think_budget, .think_close = r.think_close, .think_end = if (r.think_end) |e| e else -1, .think_open = true });
-    defer s.deinit(a);
-    try engine.addStream(&s);
-    while (engine.activeCount() > 0) try engine.step();
-    return .{ .tokens = try a.dupe(u32, s.emitted()), .stop = s.reason == .stop };
-}
-
-test "required tools: with thinking on, a required or named call closes a think block that never ends and leaves room for the call" {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const g = arena.allocator();
-    var stub: Stub = .{};
-    var compile: Compile = .{};
-    var compiler = compile.compiler();
-    const close = [_]u32{ 97, 98 };
-    for ([_]bool{ false, true }) |response| for ([_][]const u8{ "\"required\"", "named", "\"auto\"" }) |kind| {
-        var text: Text = .{};
-        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .default_max_tokens = 300, .enable_thinking = true, .use_drafts = false }, null);
-        defer srv.deinit();
-        srv.info.structures = @import("qwen27_masks").supported;
-        srv.info.thinking_budget = true;
-        srv.think_close = &close;
-        srv.think_close_end = 98;
-        srv.grammars = &compiler;
-        var cx: errors.Cx = .{ .a = g };
-        const named = std.mem.eql(u8, kind, "named");
-        const choice = if (!named) kind else if (response) "{\"type\":\"function\",\"name\":\"now\"}" else "{\"type\":\"function\",\"function\":{\"name\":\"now\"}}";
-        const input = try openai.chatInput(srv, &cx, try body(&cx, response, choice));
-        const required = if (input.fields.get("tool_call_required")) |v| v.truthy() else false;
-        const prepared = try @import("chat.zig").prepare(srv, &cx, input, @import("rerank_test.zig").Present{});
-        defer srv.release(prepared.preparing, prepared.request);
-        const request = prepared.request;
-        try std.testing.expectEqual(!std.mem.eql(u8, kind, "\"auto\""), required);
-        if (!required) {
-            try std.testing.expect(request.think_budget == 0 and request.think_end == null);
-            continue;
-        }
-        try std.testing.expectEqual(@as(u32, 300 - 256), request.think_budget);
-        const want = try Text.encode(undefined, g, try @import("tool_required_witness.zig").text(g, try value(g, request.structure.?.text)), false);
-        for ([_]u64{ 1235, 1236 }) |seed| {
-            const before = try thinkRun(want, .{ .prompt = request.prompt, .max_tokens = request.max_tokens }, seed);
-            defer a.free(before.tokens);
-            try std.testing.expect(!before.stop and before.tokens.len == 300);
-            const ran = try thinkRun(want, request, seed);
-            defer a.free(ran.tokens);
-            const end = std.mem.indexOfScalar(u32, ran.tokens, 98).?;
-            try std.testing.expect(ran.stop and end == 300 - 256);
-            const result = try parse.parse(g, try Text.decode(undefined, g, ran.tokens[end + 1 ..]), input.tools, 1);
-            try std.testing.expectEqual(@as(usize, 1), result.calls.?.len);
-            try std.testing.expectEqualStrings(if (named) "now" else "lookup", result.calls.?[0].get("function").?.strField("name").?);
-        }
     };
 }
