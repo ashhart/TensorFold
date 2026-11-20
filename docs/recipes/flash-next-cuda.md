@@ -81,8 +81,12 @@ Other families keep their existing cache policy. Full token keys and frame ident
 ## Run
 
 ```bash
-tensorfold-native serve /path/to/checkpoint --temperature 0
+tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --temperature 0
 ```
+
+The download is 105.5 GiB; the engine uploads 73.3 GiB of it to the GPU (below). A local checkpoint folder serves by
+its path.
 
 - `--context N` takes up to the model's 262,144 tokens; the default is the whole window. Past 2,048 keys each attention
   layer reads 512 blocks of 4 keys a row, chosen by the model's block indexer, as the Python engine does.
