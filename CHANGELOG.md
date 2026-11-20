@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Pull: gated and private Hugging Face repos come down with your token: `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else `~/.cache/huggingface/token`). The token goes only to the hub's own host (`huggingface.co`, or `HF_ENDPOINT`'s), never to the storage hosts downloads are redirected to, and is never printed; a repo the hub refuses is named, with whether a token is missing or lacks access (#3524).
+
 - Tests: a third stream at --parallel 2 waits with the engine_busy reason in FIFO order, then decodes in every shared round with the backend's own tokens and never takes the lone path.
 
 - DeepSeek-V4.1 on Metal: long-prompt indexer passes skip key blocks that no row's candidate mask reaches, add up the first top-k pass's bin-3 counts per simdgroup before one atomic add, and score 128 index rows at a time instead of 64 (`ix_rows`), with the same tokens in the author's runs (#3669, refs #2984). Thanks to @gilby.
