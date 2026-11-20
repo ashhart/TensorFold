@@ -2,6 +2,7 @@
 pub const rows = @import("cpu_rows.zig");
 pub const gguf = @import("cpu_gguf.zig");
 pub const gguf_rows = @import("cpu_gguf_rows.zig");
+pub const gguf_q4_sdot = @import("cpu_gguf_q4_sdot.zig");
 pub const State = @import("cpu_state.zig").State;
 pub const forward = @import("cpu_forward.zig");
 /// The exact forward over the published GGUF.
@@ -15,6 +16,8 @@ test {
     _ = @import("cpu_gguf_rows.zig");
     _ = @import("cpu_gguf_rows_test.zig");
     _ = @import("cpu_gguf_pool_test.zig");
+    _ = @import("cpu_gguf_q4_sdot.zig");
+    _ = @import("cpu_gguf_q4_sdot_test.zig");
     _ = @import("cpu_mla.zig");
     _ = @import("cpu_forward_test.zig");
     _ = @import("gguf_names.zig");
