@@ -214,6 +214,12 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return if (room == std.math.maxInt(u64)) @min(left, 16 << 30) else automaticCache(left, 16 << 30);
 }
 
+/// Rows past a stream's window its pages hold: the width a family's load set (`windowRows()`), else `window_rows`.
+pub fn windowRows(comptime F: type) u64 {
+    if (comptime @hasDecl(F, "windowRows")) return F.windowRows();
+    return if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
+}
+
 /// Integrated devices count procfs on Linux; Windows and WSL2 (`wsl_pool`: procfs is WSL's RAM) read CUDA's pool.
 pub fn hostCounts(unified: bool, windows: bool, wsl_pool: bool) bool {
     return unified and !windows and !wsl_pool;
