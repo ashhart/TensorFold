@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
+
 - Idol's octree and Gaussian decoders now run natively on M5 Metal, from the denoiser's latent to the 3DGS PLY and camera. On an M5 Ultra, 262,144 Gaussians decode in 0.343 s against the SDK's 0.739 s, and 1,048,576 in 1.963 s against 4.653 s, at a 2.43 GB peak footprint against 5.64 GB. Given the SDK's probabilities and draws, every octree level's counts match, and the PLY's header and rows equal the SDK's. Both decoders sit as close to an fp32 run as the SDK's own; `tf-idol-decode` runs those gates from a `tools/zig/idol_case.py decode` case. The decoders' nine kernels are registered with the kernel contract (#1773, after #1766, for #1757). Thanks to @jayleaton.
 
 - Tests: the Web startup test imports tensorfold_web's modules on one line, as ruff's import order asks (#4202).
@@ -608,7 +610,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: a fact graph save whose final rename fails no longer leaves its temporary file behind (#3096).
 
 - Cluster: a pull plan asks for each file's safetensors header, and a file read in full is fetched whole, so its manifest hash is checked (#3095).
-- Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name, decoded on the host at load to the bf16 bytes it was coded from; before, such a checkpoint was refused by the missing tensor's name. GLM-5.3-Flash on CUDA is the one loader that attaches it, with the same tokens as the plain checkpoint and a longer load (38 to 40 s for 12 GB of coded bf16 on GB10s). A structurally damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649).
 
 - Tests: the macOS dashboard test no longer looks for a paged prefix cache tile the page never had; the paged store publishes no status (#3094).
 
