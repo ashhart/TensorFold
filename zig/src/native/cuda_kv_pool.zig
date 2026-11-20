@@ -477,14 +477,12 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
     if (taken > 0) return log.warn(short ++ "the KV pool's windows past the engine's own took {d:.3} GiB of it first, and --prompt-cache-gib N keeps N GiB before them", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes), toGib(taken) });
     log.warn(short ++ "lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
-
 test {
     _ = @import("cuda_cache_capacity_test.zig");
     _ = @import("cuda_streams.zig");
     _ = @import("cuda_keep_others_test.zig");
     _ = @import("cuda_kv_pool_classes_test.zig");
 }
-
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
