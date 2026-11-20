@@ -1,4 +1,4 @@
-// Prompt int4 GEMM with fp16 activations (w4g_dpb, w4g_s4dpb, w4g_dpb_swiglu, w4g_dpb_geglu): C[M, N] = A[M, K] · Wᵀ on fp16 DPAS.
+// Prompt int4 GEMM with fp16 activations/DPAS: C[M, N] = A[M, K] · Wᵀ (w4g_dpb, s4dpb, swiglu, geglu).
 #pragma once
 #include <functional>
 #include <vector>
@@ -377,7 +377,7 @@ public:
         }
 
         if (geglu) {
-            // GeGLU of 8 rows x 16 columns per row tile i in the glue's bf16 steps: g and u to fp16 then bf16, gelu(g) from a
+            // GeGLU 8x16 row tile in the glue's bf16 steps: g,u to fp16 then bf16; gelu(g) from a
             // table of the glue's own bf16 values, the product to bf16 then fp16; activation columns n0 ... + 15.
             const GRF X = GRF(PART), E = GRF(PART + 1), Q = GRF(PART + 2), U = GRF(PART + 3), O = GRF(PART + 4);
             const GRF AD = GRF(PART + 5), TT = GRF(PART + 7);   // AD: 16 addresses over two registers
