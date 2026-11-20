@@ -1,6 +1,6 @@
-//! Real fold/writer launches between canary bands, repeated five times and checked against FP32/FP64 models.
-//! GLP format and paired site: Matt Suiche/weightless; additive convention: llama.cpp; Arditi et al. is background.
+//! Real fold/writer launches between canary bands, repeated five times against FP32/FP64 models.
 
+// Format and paired site: Matt Suiche/weightless; additive convention: llama.cpp; Arditi et al. is background.
 const std = @import("std");
 const check = @import("../check.zig");
 const ref = @import("glp_ref.zig");

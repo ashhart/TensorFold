@@ -1,9 +1,8 @@
-//! TensorFold's CUDA GLPv3 additive launch ABI. Concept and format: Matt Suiche/weightless (spec
-//! b181a07d3980fc48abe39d95ddb044459dd0b868); directional-steering research (Arditi et al., NeurIPS 2024) is
-//! background only, nothing here projects or ablates; the additive convention is llama.cpp's; the reader and
-//! startup convention is TensorFold #1835. The kernels and their arithmetic contract: kernels/cuda/deepseek_v41/glp.cuh.
+//! CUDA GLPv3 additive launch ABI; kernels and arithmetic contract: kernels/cuda/deepseek_v41/glp.cuh.
 
+// Format: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868); reader and startup: TensorFold #1835.
 const std = @import("std");
+// Additive convention is llama.cpp's; Arditi et al. (NeurIPS 2024) is background only, nothing here projects.
 const cuda = @import("cuda");
 
 /// One CTA per row; the 5120-column width cap matches the contract's declared launch layout.
@@ -12,14 +11,12 @@ pub const max_width = 5120;
 pub const chain = 128;
 pub const max_world = 8;
 
-/// The mode-less entry points of the add-only image: distinct from any earlier project-and-add image's symbols, so
-/// a stale image fails to resolve instead of running under another argument layout.
+/// Mode-less entry points of the add-only image: a stale image fails to resolve instead of running another layout.
 pub const stream_symbol = "dsv41_glp_add_stream";
 pub const writer_symbol = "dsv41_glp_add_writer";
 pub const final_symbol = "dsv41_glp_add_final";
 
-/// glp.cuh's StreamArgs: the four copies [R, 4 width] edited in place (x' = x + alpha d), the tap [R, width] the
-/// mean of the steered copies. Strides are in elements.
+/// glp.cuh's StreamArgs: four copies [R, 4 width] edited in place, tap [R, width] their mean; strides in elements.
 pub const StreamArgs = extern struct {
     x: u64,
     xs: i64,

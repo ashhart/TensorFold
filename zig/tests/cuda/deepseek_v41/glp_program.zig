@@ -1,8 +1,8 @@
 //! Paired-edit sensitivity through real nonidentity mHC posts; emitter placement is a separate IR/model check.
-//! The paired site (Matt Suiche/weightless' DeepSeek concept): the writer's edit before the mHC post and the fold's
-//! edit after it, both adding alpha d; additive convention from llama.cpp.
 
+// Paired site (Matt Suiche/weightless' DeepSeek concept): writer edit before the mHC post, fold edit after it.
 const std = @import("std");
+// Additive convention from llama.cpp.
 const dsv41 = @import("dsv41_kernels");
 const check = @import("../check.zig");
 const ref = @import("glp_ref.zig");

@@ -468,8 +468,7 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// tf_sq_fits's words and tf_sq_prep_h's sums and halves for a norm's output of `half_rows` rows or more, where its
-    /// prompt rows may take half operands; a shorter output clears the words the norm before it left.
+    /// tf_sq_fits's words and tf_sq_prep_h's sums for `half_rows` rows or more; a shorter output clears them.
     fn fitsWords(k: *Kernels, e: mtl.ComputeEncoder, out: Ref, width: u32, rows: u32) !void {
         k.fits = null;
         if (k.raw_tiles and rows >= half_rows) {

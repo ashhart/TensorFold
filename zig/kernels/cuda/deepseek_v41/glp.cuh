@@ -1,23 +1,4 @@
-// GLPv3 paired additive steering for DeepSeek-V4.1 (EXL3, CUDA): the three edits the paired site needs.
-//
-// Credits. The GLP format and the DeepSeek paired-site concept (hc_fold_pre_engram) are Matt Suiche's
-// (MattSuiche/weightless, spec b181a07d3980fc48abe39d95ddb044459dd0b868). The rank-one directional idea is
-// Arditi, Obeso, Syed, Paleka, Panickssery, Gurnee and Nanda's (NeurIPS 2024), background only: these kernels
-// implement the additive edit alone (no projection, no ablation) and inherit no efficacy claim from that work.
-// The additive control-vector convention (h += alpha * d) is llama.cpp's GGUF one. The reader, writer and
-// startup convention is TensorFold's own #1835 (c5947a8d2e9543e6c6a11bd30dc4c43c32f3b0fb). No external serving
-// engine or plugin code, and no checkpoint or trained-vector tensor, is vendored here.
-//
-// The arithmetic, in the order the parent's reference models document: every sum and product is FP32 with no
-// contraction (__fmul_rn then __fadd_rn), every store is one BF16 round to nearest even through the canonical
-// tf_common::pack8. Alpha 0 (either sign) is an exact bypass: not a byte is read or written.
-//   stream: the four copies [R, 4 width] in place, x' = x + alpha d, and the tap [R, width] (null: none) the mean
-//           of the four steered copies, each scaled by 1/4 before the FP32 add so four finite copies cannot overflow
-//   writer: the gathered attention partials [world, R, width], summed in rank order and rounded to BF16 as the
-//           mHC post reads them, then edited; rank 0's slot takes the result and the others -0.0, so the post's
-//           rank-ordered sum returns it bit for bit
-//   final:  mhc_cuda's collapse by the carried pre-mix, ordered 128-column square chains, RMS scale and norm
-//           weight, on the steered streams, so the head reads the edited last fold
+// GLPv3 paired additive steering for DeepSeek-V4.1 (EXL3, CUDA): stream, writer and final edits at the paired site.
 #pragma once
 
 #include <cstddef>
@@ -27,8 +8,10 @@
 #include "common/reduce.cuh"
 #include "common/vec.cuh"
 
+// Format and paired site (hc_fold_pre_engram): Matt Suiche/weightless, spec b181a07d3980fc48abe39d95ddb044459dd0b868.
 namespace dsv41_glp {
 
+// Additive convention (h += alpha * d) is llama.cpp's; Arditi et al. (NeurIPS 2024) is background only, no projection.
 constexpr int NT = 320;        // threads a CTA: a row's groups of eight columns, two a thread at width 5120
 constexpr int MAXWIDTH = 5120; // the served width: the widest row the launch checks admit
 constexpr int MAXW = 8;        // ranks a writer reduces (the launch checks admit no more)
@@ -37,6 +20,7 @@ constexpr int CB = 128;        // columns a block of the final's square chain (t
 // Planted faults for the contract's controls; the production image instantiates NONE only.
 enum Control : int { NONE = 0, SUM = 1, HALF = 2, DROP_TAIL = 3, DROP_NONFINITE = 4, RANK_ORDER = 5, TRUNCATE = 6 };
 
+// Reader, writer and startup convention: TensorFold #1835 (c5947a8d2e9543e6c6a11bd30dc4c43c32f3b0fb); nothing vendored.
 struct StreamArgs {
     uint16_t* x; long long xs;        // streams [R, 4 width] bf16, row stride xs: edited in place
     uint16_t* tap; long long ts;      // the DSpark tap [R, width] bf16, row stride ts (null: none)
@@ -62,6 +46,7 @@ static_assert(sizeof(WriterArgs) == 48 && offsetof(WriterArgs, dir) == 24 && off
 static_assert(sizeof(FinalArgs) == 56 && offsetof(FinalArgs, eps) == 40 && offsetof(FinalArgs, R) == 48 &&
               offsetof(FinalArgs, width) == 52, "FinalArgs differs from glp_ops.zig");
 
+// FP32 with no contraction (__fmul_rn, __fadd_rn), one BF16 round to nearest even via tf_common::pack8; alpha 0 skips.
 __device__ __forceinline__ uint4 ld16(const void* p) { return *reinterpret_cast<const uint4*>(p); }
 __device__ __forceinline__ void widen8(const uint4 v, float (&f)[8]) {     // 8 bf16, column ascending -> fp32
     f[0] = __uint_as_float(v.x << 16); f[1] = __uint_as_float(v.x & 0xffff0000u);
@@ -96,8 +81,7 @@ template <int CTL> __device__ __forceinline__ float mean4(float a, float b, floa
     }
 }
 
-// The edit of one element, x + alpha * d in FP32 (the caller rounds to BF16 once). HALF: the planted FP16 sum;
-// DROP_NONFINITE: a nonfinite input flushed to zero.
+// One element, x + alpha * d in FP32, rounded to BF16 once by the caller; HALF is the FP16 sum, DROP_NONFINITE zeroes.
 template <int CTL> __device__ __forceinline__ float edit(float x, float alpha, float d) {
     const float p = __fmul_rn(alpha, d);
     if constexpr (CTL == HALF) {

@@ -1,9 +1,6 @@
-//! CUDA GLPv3 additive launches (dsv41_glp_add: Matt Suiche/weightless' format and DeepSeek paired site; add-only, no
-//! projection). Their geometry is fixed by the sources; compiled usage is not recorded, because this additive image
-//! has not been compiled and measured: the earlier project-and-add image's registers and static shared bytes do not
-//! describe it. Each record therefore refuses qualification (gate 5: "no compiled usage recorded") until a receipt of
-//! nvcc's resource usage for this image replaces `registry.none`.
+//! CUDA GLPv3 additive launches: compiled usage stays unrecorded (gate 5) until nvcc evidence replaces `registry.none`.
 const std = @import("std");
+// Format and paired site: Matt Suiche/weightless; add-only, no projection.
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
 

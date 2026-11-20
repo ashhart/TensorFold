@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
 const q27_eng = @import("qwen27_engine.zig");
 const q27_witness = @import("qwen27_witness.zig");
+const steer_served = @import("qwen27_steer_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
@@ -312,7 +313,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     const supports_v3 = !mem_ctrl.useLegacyPocket() and (std.mem.eql(u8, t, "nemotron_h") or std.mem.eql(u8, t, "qwen3_5") or std.mem.eql(u8, t, "qwen3_5_moe"));
-    if (o.glp != null and !dense) return "--glp: only the Qwen3.8-27B-class engine applies a control vector: serve this checkpoint without --glp";
+    if (steer_served.refusal(o, dense)) |why| return why;
     if (!learners.supports(t) and !supports_v3) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
     if (o.drafter != null and (!dense or loop_sn) and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint") and !std.mem.eql(u8, t, "glm5_next") and !std.mem.eql(u8, t, "inkling2_loop") and !std.mem.eql(u8, t, "ricursive")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), GLM-5.3-Flash (glm5_next), Gemma 4 dense, Flint (DFlash2 on M5), Inkling 2 Mini (DSpark), Llama (a smaller Llama on the same tokenizer) and Ripple (its DFlash2 drafter)";
@@ -429,6 +430,7 @@ test {
     _ = @import("metal_identity.zig");
     _ = @import("qwen27_landing.zig");
     _ = spill;
+    _ = steer_served;
     _ = @import("metal_link.zig");
     _ = metal_shared;
     _ = @import("uocr.zig");
@@ -501,16 +503,6 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
     for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
-}
-
-test "--glp is refused where the Qwen3.8-27B-class engine does not open" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const vector: api.glp.Vector = .{ .alpha = 1, .hook_point = "", .derived_at = "", .base_model = "", .base_revision = "", .method = "", .contrast = "", .width = 0, .layers = &.{}, .sha256 = @splat(0), .file_sha256 = @splat(0), .transferred = false };
-    const steered: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .glp = .{ .vector = vector, .alpha = 1 } };
-    try std.testing.expect((try refusal(a, steered, true)) == null);
-    try std.testing.expectStringStartsWith((try refusal(a, steered, false)) orelse "", "--glp: only the Qwen3.8-27B-class engine");
 }
 
 test "--spill-gib with --checkpoint-slots opens the four families with a disk store, and the others refuse it by name" {

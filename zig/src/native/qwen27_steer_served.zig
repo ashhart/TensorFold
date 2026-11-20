@@ -79,3 +79,16 @@ fn baseOf(v: api.glp.Vector, buf: []u8) []const u8 {
     }
     return buf[0..w.end];
 }
+
+/// The Metal engines other than the 27B-class one hold no steering hooks, so they refuse a control vector.
+pub fn refusal(o: api.Open, dense: bool) ?[]const u8 {
+    if (o.glp != null and !dense) return "--glp: only the Qwen3.8-27B-class engine applies a control vector: serve this checkpoint without --glp";
+    return null;
+}
+
+test "--glp is refused where the Qwen3.8-27B-class engine does not open" {
+    const vector: api.glp.Vector = .{ .alpha = 1, .hook_point = "", .derived_at = "", .base_model = "", .base_revision = "", .method = "", .contrast = "", .width = 0, .layers = &.{}, .sha256 = @splat(0), .file_sha256 = @splat(0), .transferred = false };
+    const steered: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .glp = .{ .vector = vector, .alpha = 1 } };
+    try std.testing.expect(refusal(steered, true) == null);
+    try std.testing.expectStringStartsWith(refusal(steered, false) orelse "", "--glp: only the Qwen3.8-27B-class engine");
+}

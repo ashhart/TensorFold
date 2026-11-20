@@ -1,5 +1,4 @@
-//! GLP final against FP64/FP32 math and the real mhc_cuda final at the served 5120-column width (the head of
-//! Matt Suiche/weightless' GLPv3 paired-site program: steered streams, then the final collapse and norm).
+//! GLP final against FP64/FP32 math and the real mhc_cuda final at width 5120 (Matt Suiche/weightless' program head).
 
 const std = @import("std");
 const cuda = @import("cuda");

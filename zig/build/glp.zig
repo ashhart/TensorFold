@@ -19,8 +19,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const tool = b.addExecutable(.{ .name = "tf-glp-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/glp_check.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "glp", .module = module }} }) });
     b.step("tf-glp-check", "Show a control vector file as this reader sees it").dependOn(&b.addInstallArtifact(tool, .{}).step);
 
-    // A command line that cannot run is refused with a usage line and status 2 before any file is opened; the files
-    // named here do not exist, so a read of one first would fail with another status.
+    // Refused before any file is opened (the named files do not exist), with a usage line and status 2.
     const refused = [_]struct { args: []const []const u8, says: []const u8 }{
         .{ .args = &.{"read"}, .says = "read takes FILE OUT.json OUT.bin" },
         .{ .args = &.{ "read", "vector.gguf" }, .says = "read takes FILE OUT.json OUT.bin" },
