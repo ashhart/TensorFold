@@ -239,6 +239,12 @@ Whole-prefill usage reports that actual restored count. With multiple live
 slots, saved-state reuse additionally needs `TF_DSV41_SESSION_SLOTS=1`; qualify
 that explicit profile rather than treating the default-off option as a hit.
 
+The standalone served NVMe tier is disposable: startup purges the selected
+compatibility/rank directory before tier workers start. This contribution
+preserves that behavior; it adds no cross-restart restore or reconciliation.
+Qualify RAM and NVMe round trips within a process. Qwen's saved-conversation
+persistence is a separate caller and contract.
+
 ### Recorded device mechanism check
 
 Kernel source `4da7c1439291b64996409da42ebd8393fe671f0d`, GB10 sm_121,
@@ -261,7 +267,54 @@ staging allocation at process exit: 4 MiB for the family runner and 256 KiB for
 the public runner. This is not a zero-leak receipt.
 
 These operator and graph-replay results do not alone qualify full-model token
-identity, persisted-cache reuse, performance or a trained vector's effect.
+identity, served RAM/NVMe reuse, performance or a trained vector's effect.
+
+### Recorded single-slot TP2 served check
+
+Model source `8da263a4743086b70cb6c3c462d9d95ae995cbc4` was compared with
+upstream `41969beed8` plus only the same usage-counter correction. Two GB10s
+ran the pinned Flash EXL3 checkpoint above, RoCE TP2, one physical slot, whole
+prefill, graphs and sampling, with the normal 4/5-GiB hard/target floors.
+Each policy passed 13 long requests: cold/warm, greedy and seeded plain/draft,
+and four concurrent clients queued through that slot. Four additional short
+prose/code/arithmetic prompts passed plain/draft token equality.
+
+No-file and loaded-zero outputs equal baseline. A synthetic unit-direction
+control at strength 4 changes all four short prompts and the long output;
+this proves a mechanism, not useful style, model quality or semantic efficacy.
+Changing only file metadata while overriding both strengths to 4 preserves
+the active output tokens but creates a distinct disk namespace on both ranks.
+No-file, loaded zero, active strength and metadata-only file identity occupy
+separate namespaces as applicable.
+
+RAM and forced-eviction NVMe restores reuse exactly 8176 rows of the 8192-token
+input and equal the cold output within each policy. Real mismatched ranks
+(loaded zero versus no file; same directions/strength but different file hash)
+both stop with `GlpMismatch` before weights open.
+
+Warm-cache client decode-window medians, 64 output tokens, three
+plain/draft/draft/plain repetitions, six samples per mode:
+
+| Policy | Plain tokens/s | Drafted tokens/s |
+|---|---:|---:|
+| Baseline | 38.418 | 181.404 |
+| Candidate, no file | 38.337 | 180.362 |
+| Candidate, loaded zero | 38.316 | 181.143 |
+| Candidate, synthetic strength 4 | 37.758 | 113.236 |
+
+These are single-stream, short-output observations, not a cold-prefill or
+pure-kernel speed claim. Active steering changes the target and draft
+acceptance. In the seeded active functional cell, drafting is slower:
+22.465 versus 30.415 tokens/s, with 17 of 112 proposals accepted. The
+no-slowdown gate is therefore not qualified for that control.
+
+The first four-slot baseline request failed with `MissingTritonVariant`
+(`_scores`): rank zero had 189 AOT variants, the follower 194. The consumed
+RoPE table prefix was bit-identical despite different file capacities.
+Private qualification assets now align the 194-variant bundle and the
+133120-row RoPE file on both ranks; original serving assets are unchanged.
+The wider-stream comparison is not yet qualified by that preparation.
+
 
 Derive later style/topic vectors for the exact DeepSeek checkpoint, quantization
 and paired site. Publish their authors/licence, checkpoint and conversion pins,
