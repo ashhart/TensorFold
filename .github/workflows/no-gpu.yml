@@ -90,8 +90,10 @@ jobs:
         run: |
           if [ -n "$BASE_REF" ]; then
             base=$(git merge-base HEAD "origin/$BASE_REF")
-          else
+          elif [ -n "$PUSH_BASE" ]; then
             base=$(git rev-parse "$PUSH_BASE^{commit}")
+          else  # started by hand (a landing train's branch): no PR base and no push base, so main's merge base
+            base=$(git merge-base HEAD origin/main)
           fi
           git worktree add --detach ../lean-base "$base"
           cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
