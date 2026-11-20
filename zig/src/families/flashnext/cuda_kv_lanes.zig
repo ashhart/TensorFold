@@ -8,8 +8,10 @@ const mtp = @import("cuda_mtp.zig");
 const snap = @import("cuda_snap.zig");
 const wt = @import("cuda_prompt_wt.zig");
 
-/// Rows past a request's prompt and reply its pages hold: one drafted window's.
-pub const window_rows: u32 = mtp.max_rows;
+/// Rows past a request's prompt and reply its pages hold: one drafted window's, as many as the load's buffers hold.
+pub fn windowRows() usize {
+    return mtp.bufferRows();
+}
 
 /// TF_FLASHNEXT_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset, blank or 0: none).
 pub fn paging() !usize {
@@ -30,7 +32,7 @@ pub fn pagedOnly() bool {
 
 /// Pages a stream maps at most: a full window and one more drafted window.
 fn mostPages(capacity: usize, tokens: usize) usize {
-    return (capacity + window_rows + tokens - 1) / tokens;
+    return (capacity + windowRows() + tokens - 1) / tokens;
 }
 
 fn al(n: usize) usize {
@@ -96,7 +98,7 @@ pub const State = struct {
     pub fn fits(s: *const State, prompt_rows: u32, max_tokens: u32) bool {
         const p = s.pool orelse return true;
         if (!s.paged_only and !s.own_busy) return true;
-        return p.fits(@as(usize, prompt_rows) + max_tokens + window_rows);
+        return p.fits(@as(usize, prompt_rows) + max_tokens + windowRows());
     }
 };
 
@@ -189,7 +191,7 @@ pub const Pool = struct {
 
     /// Whether a lane is free, the pool can promise a cache of `cap` rows and a run now, and a run is free.
     pub fn fits(p: *const Pool, cap: usize) bool {
-        if (cap > p.capacity + window_rows) return false;
+        if (cap > p.capacity + windowRows()) return false;
         const k = p.layout.runPages();
         for (p.lanes) |x| if (!x.used) return p.pool.fits(p.layout.pages(cap) + k) and p.pool.findRun(k) != null;
         return false;
@@ -222,7 +224,7 @@ pub const Pool = struct {
 
     /// A free lane's cleared cache (a copy) with `cap` rows' pages and its run; LaneMemory: not now.
     pub fn open(p: *Pool, cap: usize) !prompt.Seq {
-        if (cap > p.capacity + window_rows) return error.PromptTooLong;
+        if (cap > p.capacity + windowRows()) return error.PromptTooLong;
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
@@ -415,7 +417,7 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
     try std.testing.expectEqual(pages.pageBytesOf(256, wt.attn_n + 1), h.pageBytes());
     try std.testing.expect(h.run_bytes >= seqRunBytes() + mtp.Draft.runBytes(32768, 1536));
     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
-    try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
+    try std.testing.expect(l.pages(40960 + windowRows()) <= mostPages(40960, 256));
 }
 
 test {
