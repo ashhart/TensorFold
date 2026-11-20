@@ -55,7 +55,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
         .imports = &.{ .{ .name = "sam3", .module = module }, .{ .name = "safetensors", .module = safetensors }, .{ .name = "metal", .module = metal } },
     }) });
-    install(b, tools, image);
     const video = b.addExecutable(.{ .name = "tf-sam3-video", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_video.zig"),
         .target = target,
@@ -66,6 +65,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     video.root_module.addImport("process_memory", b.createModule(.{ .root_source_file = b.path("zig/src/server/process_memory.zig"), .target = target, .link_libc = true }));
     video.root_module.addImport("checkpoint_fixture", b.createModule(.{ .root_source_file = b.path("zig/src/core/checkpoint_fixture.zig"), .target = target }));
     install(b, tools, video);
+    image.root_module.addImport("checkpoint_fixture", video.root_module.import_table.get("checkpoint_fixture").?);
+    install(b, tools, image);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = video.root_module })).step);
     const compare = b.addExecutable(.{ .name = "tf-sam3-compare", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/sam3_compare.zig"),

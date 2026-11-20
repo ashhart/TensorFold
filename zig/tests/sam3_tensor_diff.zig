@@ -5,6 +5,7 @@ pub const Column = struct { maximum_absolute: f64 = 0, maximum_scaled: f64 = 0, 
 pub const Difference = struct {
     values: usize,
     unequal_values: usize = 0,
+    sign_changes: usize = 0,
     nonfinite_values: usize = 0,
     exact_bytes: bool,
     mean_absolute_finite: f64 = 0,
@@ -43,6 +44,7 @@ pub fn analyze(a: std.mem.Allocator, actual: st.Tensor, expected: st.Tensor) !Di
             continue;
         }
         result.unequal_values += @intFromBool(x != y);
+        result.sign_changes += @intFromBool((x > 0) != (y > 0));
         const error_ = @abs(x - y);
         if (!std.math.isFinite(error_)) return error.TensorDifferenceOverflow;
         result.mean_absolute_finite += error_;
@@ -63,6 +65,87 @@ pub fn analyze(a: std.mem.Allocator, actual: st.Tensor, expected: st.Tensor) !Di
     result.rms_finite = @sqrt(result.rms_finite / finite);
     if (!std.math.isFinite(result.mean_absolute_finite) or !std.math.isFinite(result.rms_finite)) return error.TensorDifferenceOverflow;
     return result;
+}
+
+/// The first `like.dim(0)` rows of `taller`, which must otherwise have `like`'s rank, trailing shape and dtype.
+pub fn leadingRows(taller: st.Tensor, like: st.Tensor) !st.Tensor {
+    if (taller.rank == 0 or taller.rank != like.rank or taller.dtype != like.dtype or like.dim(0) > taller.dim(0) or
+        !std.mem.eql(usize, taller.shape[1..taller.rank], like.shape[1..like.rank])) return error.TensorShapeMismatch;
+    var out = taller;
+    out.shape[0] = like.dim(0);
+    out.bytes = taller.bytes[0 .. like.numel() * taller.dtype.size()];
+    return out;
+}
+
+/// A copy of `tensor` at `index` of `axis`, with that axis removed.
+pub fn alongAxis(a: std.mem.Allocator, tensor: st.Tensor, axis: usize, index: usize) !st.Tensor {
+    if (axis >= tensor.rank or tensor.rank < 2 or index >= tensor.dim(axis)) return error.TensorShapeMismatch;
+    var outer: usize = 1;
+    for (tensor.shape[0..axis]) |dim| outer *= dim;
+    var inner: usize = tensor.dtype.size();
+    for (tensor.shape[axis + 1 .. tensor.rank]) |dim| inner *= dim;
+    const bytes = try a.alloc(u8, outer * inner);
+    for (0..outer) |o| @memcpy(bytes[o * inner ..][0..inner], tensor.bytes[(o * tensor.dim(axis) + index) * inner ..][0..inner]);
+    var out = tensor;
+    out.rank -= 1;
+    for (axis..out.rank) |d| out.shape[d] = tensor.shape[d + 1];
+    out.bytes = bytes;
+    return out;
+}
+
+/// `tensor` read in `like`'s shape; the element counts and dtypes must agree.
+pub fn reshapeLike(tensor: st.Tensor, like: st.Tensor) !st.Tensor {
+    if (tensor.numel() != like.numel() or tensor.dtype != like.dtype) return error.TensorShapeMismatch;
+    var out = like;
+    out.bytes = tensor.bytes;
+    return out;
+}
+
+test "one index along an axis removes that axis and keeps the order of the others" {
+    const values = [_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    const picked = try alongAxis(std.testing.allocator, f32Tensor(&values, &.{ 2, 3, 2 }), 1, 2);
+    defer std.testing.allocator.free(picked.bytes);
+    try std.testing.expectEqual(@as(usize, 2), picked.rank);
+    try std.testing.expectEqualSlices(f32, &.{ 4, 5, 10, 11 }, std.mem.bytesAsSlice(f32, @as([]align(4) const u8, @alignCast(picked.bytes))));
+    const flat = try reshapeLike(picked, f32Tensor(values[0..4], &.{4}));
+    try std.testing.expectEqual(@as(usize, 1), flat.rank);
+}
+
+test "leading rows keep the trailing shape and cut the payload" {
+    const values = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    const tall = f32Tensor(&values, &.{ 3, 2 });
+    const cut = try leadingRows(tall, f32Tensor(values[0..2], &.{ 1, 2 }));
+    try std.testing.expectEqual(@as(usize, 1), cut.dim(0));
+    try std.testing.expectEqual(@as(usize, 8), cut.bytes.len);
+    try std.testing.expectError(error.TensorShapeMismatch, leadingRows(tall, f32Tensor(&values, &.{ 2, 3 })));
+}
+
+pub const Summary = struct { minimum: f64 = std.math.inf(f64), maximum: f64 = -std.math.inf(f64), positive: usize = 0, zero: usize = 0, negative: usize = 0, interior: usize = 0 };
+
+/// Element `index` of a floating-point or integer tensor as f64.
+pub fn element(tensor: st.Tensor, index: usize) f64 {
+    return switch (tensor.dtype) {
+        .f64, .f32, .f16, .bf16 => read(tensor, index),
+        .i64 => @floatFromInt(@as(i64, @bitCast(std.mem.readInt(u64, tensor.bytes[index * 8 ..][0..8], .little)))),
+        .u64 => @floatFromInt(std.mem.readInt(u64, tensor.bytes[index * 8 ..][0..8], .little)),
+        .u8, .bool => @floatFromInt(tensor.bytes[index]),
+        else => std.math.nan(f64),
+    };
+}
+
+pub fn summarize(tensor: st.Tensor) Summary {
+    var out = Summary{};
+    for (0..tensor.numel()) |i| {
+        const v = element(tensor, i);
+        out.minimum = @min(out.minimum, v);
+        out.maximum = @max(out.maximum, v);
+        if (v > 0) out.positive += 1 else if (v == 0) out.zero += 1 else if (v < 0) out.negative += 1;
+    }
+    for (0..tensor.numel()) |i| {
+        const v = element(tensor, i);
+        out.interior += @intFromBool(v != 0 and v > out.minimum and v < out.maximum);
+    }
+    return out;
 }
 
 fn read(tensor: st.Tensor, index: usize) f64 {

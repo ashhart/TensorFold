@@ -33,11 +33,11 @@ fn chunkPixels(width: usize) usize {
 }
 
 fn denseConv(routes: Routes, out: usize, width: usize) bool {
-    return routes.device_projections and routes.precision == .fp32 and out <= dense_limit and width <= dense_limit;
+    return routes.exactDevice() and out <= dense_limit and width <= dense_limit;
 }
 
 fn denseDeconv(routes: Routes, out: usize, in: usize) bool {
-    return routes.device_projections and routes.precision == .fp32 and out <= deconv_out_limit and in <= dense_limit;
+    return routes.exactDevice() and out <= deconv_out_limit and in <= dense_limit;
 }
 
 fn packedDeconv(routes: Routes, out: usize, in: usize) bool {
@@ -218,16 +218,16 @@ test "SAM convolution chunks keep the unfolded columns near 32 MiB" {
 }
 
 test "SAM convolution device routes stop at the kept kernel limits" {
-    const device = Routes{ .precision = .fp32, .device_projections = true };
+    const device = Routes{ .precision = .fp32, .tensor_units = true };
     try std.testing.expect(denseConv(device, 4736, 4736));
     try std.testing.expect(!denseConv(device, 4737, 16));
     try std.testing.expect(!denseConv(device, 16, 4737));
     try std.testing.expect(!denseConv(.{ .precision = .fp32 }, 16, 16));
-    try std.testing.expect(!denseConv(.{ .precision = .mixed, .device_projections = true }, 16, 16));
+    try std.testing.expect(!denseConv(.{ .precision = .mixed, .tensor_units = true }, 16, 16));
     try std.testing.expect(packedDeconv(device, 1184, 4736));
     try std.testing.expect(!packedDeconv(device, 1185, 16));
     try std.testing.expect(!packedDeconv(device, 16, 4737));
-    try std.testing.expect(!denseDeconv(.{ .precision = .mixed }, 16, 16));
-    try std.testing.expect(packedDeconv(.{ .precision = .mixed }, 4096, 8192));
+    try std.testing.expect(!denseDeconv(.{ .precision = .mixed, .tensor_units = true }, 16, 16));
+    try std.testing.expect(packedDeconv(.{ .precision = .mixed, .tensor_units = true }, 4096, 8192));
     try std.testing.expect(!packedDeconv(.{ .precision = .fp32 }, 16, 16));
 }

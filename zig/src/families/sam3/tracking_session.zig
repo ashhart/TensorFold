@@ -76,7 +76,7 @@ const Keeper = struct {
     }
 
     fn outcomes(self: *Keeper, values: []const ?Outcome) !void {
-        var buffer: [3]Tensor = undefined;
+        var buffer: outcome.TensorBuffer = undefined;
         for (values) |value| if (value) |o| try self.list.appendSlice(self.allocator, o.tensors(&buffer));
     }
 
@@ -86,12 +86,17 @@ const Keeper = struct {
     }
 };
 
+// SAM3 squashes a prompted frame's memory with the step only when its prompt has points or boxes.
+fn hasPointsOrBoxes(prompt: prompts.Prompt) bool {
+    return prompt.points.len + prompt.boxes.len != 0;
+}
+
 fn releaseLevels(rt: *Runtime, levels: Levels) void {
     for (levels) |map| rt.release(map.tensor);
 }
 
 fn releaseOutcome(rt: *Runtime, value: Outcome) void {
-    var buffer: [3]Tensor = undefined;
+    var buffer: outcome.TensorBuffer = undefined;
     for (value.tensors(&buffer)) |tensor| rt.release(tensor);
 }
 
@@ -175,10 +180,13 @@ pub const Session = struct {
 
         const parts = try rt.scratch.alloc(?Outcome, self.groups.len * per_group);
         @memset(parts, null);
+        const hard = try rt.scratch.alloc(bool, self.groups.len);
+        @memset(hard, false);
         for (seeds) |item| {
             start = self.stamp();
             const slot = try self.objects.add(item.id);
             parts[slot.bucket * per_group + slot.slot] = try frame_step.prompted(rt, prompt_levels, item.prompt, image.size);
+            hard[slot.bucket] = hard[slot.bucket] or hasPointsOrBoxes(item.prompt);
             self.record(start, &self.last_profile.tracker);
         }
         const merged = try rt.scratch.alloc(?Outcome, self.groups.len);
@@ -197,7 +205,7 @@ pub const Session = struct {
             written[g] = try memory_writer.write(rt, encoded.tracking[2].tensor, merged[g].?, .{
                 .active = bits[g],
                 .prompted = bits[g],
-                .hard = config.version == .sam3,
+                .hard = config.version == .sam3 and hard[g],
                 .frame = index,
             });
             self.record(start, &self.last_profile.memory);
@@ -307,6 +315,21 @@ pub const Session = struct {
         try self.amend(id, global, value);
     }
 
+    /// Masks of the current frame as they stand, including amendments made since the frame was seeded or tracked.
+    pub fn currentMasks(self: *Session, allocator: std.mem.Allocator) !Prediction {
+        try self.model.mutex.lock(self.model.io);
+        defer self.model.mutex.unlock(self.model.io);
+        const index = self.frame_index orelse return error.SessionNotSeeded;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const saved = self.runtime.scratch;
+        self.runtime.scratch = arena.allocator();
+        defer self.runtime.scratch = saved;
+        const results = try self.runtime.scratch.alloc(?Outcome, self.groups.len);
+        for (self.groups, results) |group, *result| result.* = group.latest;
+        return self.readout(allocator, results, index);
+    }
+
     pub fn removeObject(self: *Session, id: slots.ObjectId) !void {
         try self.model.mutex.lock(self.model.io);
         defer self.model.mutex.unlock(self.model.io);
@@ -361,7 +384,7 @@ pub const Session = struct {
             written[0] = try memory_writer.write(rt, tracking[2].tensor, merged[0].?, .{
                 .active = bits,
                 .prompted = prompted_bits,
-                .hard = config.version == .sam3 and prompted_bits != 0,
+                .hard = config.version == .sam3 and prompted_bits != 0 and (if (value) |v| hasPointsOrBoxes(v) else true),
                 .frame = current,
             });
         }
@@ -380,9 +403,8 @@ pub const Session = struct {
             _ = self.objects.add(id) catch unreachable
         else
             _ = self.objects.remove(id) catch unreachable;
-        // An amendment restarts the group's memory: only the amended frame's entry survives.
-        group.bank.clear(rt);
-        if (written[0]) |entry| group.bank.put(rt, entry);
+        // The amended frame's entry replaces that frame's entry; every other entry stays.
+        if (written[0]) |entry| group.bank.put(rt, entry) else group.bank.clear(rt);
         if (group.latest) |old| releaseOutcome(rt, old);
         group.latest = merged[0];
         group.prompted_bits = prompted_bits;
@@ -417,7 +439,7 @@ pub const Session = struct {
             const id = maybe_id orelse continue;
             const result = results[global / per_group] orelse return error.MissingObjectState;
             const s = global % per_group;
-            const logits = result.full_logits orelse result.mask_logits;
+            const logits = result.shown();
             const mark = rt.mark();
             defer rt.rewind(mark, &.{});
             const channel = try elementwise.columns(rt, logits.tensor, logits.height * logits.width, logits.channels, s, 1);

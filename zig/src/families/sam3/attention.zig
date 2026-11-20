@@ -35,9 +35,9 @@ const Case = struct {
 
 fn routeFor(c: Case) Route {
     const plain = !c.bias and !c.causal;
-    if (c.routes.split_attention and plain and c.d == 256) return .split;
-    if (c.routes.device_attention and c.routes.precision == .fp32 and c.version == .sam31 and plain and c.d == 32 and
-        c.rows == grid_tokens and c.keys >= c.rows) return .split32;
+    const device = c.routes.exactDevice();
+    if (device and plain and c.d == 256) return .split;
+    if (device and c.version == .sam31 and plain and c.d == 32 and c.rows == grid_tokens and c.keys >= c.rows) return .split32;
     if (c.routes.precision == .mixed and plain and c.d == 32)
         return if (c.rows < grid_tokens or c.keys < grid_tokens) .flash_f32 else .flash_f16;
     if (plain and c.d == 16) return .padded;
@@ -117,7 +117,7 @@ fn attendRows(rt: *Runtime, q: Tensor, k: Tensor, v: Tensor, rows: usize, keys: 
 const TrunkRoute = enum { split32_full, device_tiles, flash_full, flash_tiles, core_full, core_tiles };
 
 fn trunkRouteFor(routes: Routes, full_grid: bool) TrunkRoute {
-    if (routes.device_attention and routes.precision == .fp32) return if (full_grid) .split32_full else .device_tiles;
+    if (routes.exactDevice()) return if (full_grid) .split32_full else .device_tiles;
     if (routes.precision == .mixed) return if (full_grid) .flash_full else .flash_tiles;
     return if (full_grid) .core_full else .core_tiles;
 }
@@ -149,7 +149,7 @@ pub fn trunk(rt: *Runtime, q: Tensor, k: Tensor, v: Tensor, full_grid: bool) !Te
 /// Reserves the single-head attention workspace for (rows, keys); call with no batch open.
 pub fn reserve(rt: *Runtime, rows: usize, keys: usize) !void {
     std.debug.assert(rt.gpu.batch == null);
-    if (rt.routes.split_attention) {
+    if (rt.routes.exactDevice()) {
         _ = try rt.gpu.splitAttentionWorkspace(rows, keys, 1, 1, @import("sam3_kernels").attention_split.chunk_blocks);
     } else try rt.gpu.reserveAttention(rows, keys, 1, 1);
 }
@@ -201,16 +201,16 @@ fn case(routes: Routes, version: variant.Version, bias: bool, causal: bool, d: u
 test "SAM attention route table, first match wins" {
     const expect = std.testing.expectEqual;
     const fp32 = Routes{ .precision = .fp32 };
-    const mixed = Routes{ .precision = .mixed };
-    const split = Routes{ .precision = .fp32, .split_attention = true };
-    const device = Routes{ .precision = .fp32, .device_attention = true };
-    const all = Routes{ .precision = .fp32, .split_attention = true, .device_projections = true, .device_attention = true, .compensated_norm = true };
-    try expect(Route.split, routeFor(case(split, .sam31, false, false, 256, 5184, 5184)));
-    try expect(Route.split, routeFor(case(.{ .precision = .mixed, .split_attention = true }, .sam3, false, false, 256, 7, 9)));
-    try expect(Route.rows_kernel, routeFor(case(split, .sam31, true, false, 256, 7, 9)));
-    try expect(Route.core_causal, routeFor(case(split, .sam31, false, true, 256, 7, 7)));
+    const mixed = Routes{ .precision = .mixed, .tensor_units = true };
+    const device = Routes{ .precision = .fp32, .tensor_units = true };
+    try expect(Route.split, routeFor(case(device, .sam31, false, false, 256, 5184, 5184)));
+    try expect(Route.split, routeFor(case(device, .sam3, false, false, 256, 7, 9)));
+    try expect(Route.core_cross, routeFor(case(mixed, .sam3, false, false, 256, 7, 9)));
+    try expect(Route.rows_kernel, routeFor(case(device, .sam31, true, false, 256, 7, 9)));
+    try expect(Route.core_causal, routeFor(case(device, .sam31, false, true, 256, 7, 7)));
     try expect(Route.split32, routeFor(case(device, .sam31, false, false, 32, 5184, 5184)));
-    try expect(Route.split32, routeFor(case(all, .sam31, false, false, 32, 5184, 9000)));
+    try expect(Route.split32, routeFor(case(device, .sam31, false, false, 32, 5184, 9000)));
+    try expect(Route.core_cross, routeFor(case(fp32, .sam31, false, false, 32, 5184, 5184)));
     try expect(Route.core_cross, routeFor(case(device, .sam31, false, false, 32, 5184, 5183)));
     try expect(Route.core_cross, routeFor(case(device, .sam3, false, false, 32, 5184, 5184)));
     try expect(Route.core_cross, routeFor(case(device, .sam31, false, false, 32, 5183, 5184)));
@@ -232,15 +232,15 @@ test "SAM attention route table, first match wins" {
     try expect(Route.rows_kernel, routeFor(case(fp32, .sam31, true, false, 16, 7, 9)));
 }
 
-test "SAM trunk attention route per device flag and precision" {
+test "SAM trunk attention route per precision and tensor units" {
     const expect = std.testing.expectEqual;
-    const device = Routes{ .precision = .fp32, .device_attention = true };
+    const device = Routes{ .precision = .fp32, .tensor_units = true };
     try expect(TrunkRoute.split32_full, trunkRouteFor(device, true));
     try expect(TrunkRoute.device_tiles, trunkRouteFor(device, false));
-    try expect(TrunkRoute.flash_full, trunkRouteFor(.{ .precision = .mixed }, true));
-    try expect(TrunkRoute.flash_tiles, trunkRouteFor(.{ .precision = .mixed, .device_attention = true }, false));
+    try expect(TrunkRoute.flash_full, trunkRouteFor(.{ .precision = .mixed, .tensor_units = true }, true));
+    try expect(TrunkRoute.flash_tiles, trunkRouteFor(.{ .precision = .mixed, .tensor_units = true }, false));
     try expect(TrunkRoute.core_full, trunkRouteFor(.{ .precision = .fp32 }, true));
-    try expect(TrunkRoute.core_tiles, trunkRouteFor(.{ .precision = .fp32, .split_attention = true }, false));
+    try expect(TrunkRoute.core_tiles, trunkRouteFor(.{ .precision = .fp32 }, false));
 }
 
 test "SAM attention scale is the f32 reciprocal of the f32 square root" {

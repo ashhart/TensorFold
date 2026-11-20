@@ -49,6 +49,7 @@ pub const Trace = struct {
             const prefix = try std.fmt.allocPrint(a, "group.{d}", .{b});
             try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.mask_logits", .{prefix}), result.mask_logits);
             if (result.full_logits) |value| try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.full_logits", .{prefix}), value);
+            if (result.readout_logits) |value| try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.readout_logits", .{prefix}), value);
             try tensor(a, &tensors, try std.fmt.allocPrint(a, "{s}.pointers", .{prefix}), result.pointers, &.{ result.slots, 256 });
             try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.presence_logits", .{prefix}), result.presence[0..result.slots]);
             try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.quality", .{prefix}), result.quality[0..result.slots]);

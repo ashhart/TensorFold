@@ -56,10 +56,21 @@ fn passThrough(rt: *Runtime, head: Outcome, mask: prompts.Mask) !Outcome {
     var result = head;
     result.full_logits = full_logits;
     result.mask_logits = try spatial.resample(rt, full_logits, side, side, .bilinear);
+    result.readout_logits = try readoutOf(rt, full_logits);
     result.presence[0] = if (any) passthrough_presence else -passthrough_presence;
     result.quality[0] = passthrough_quality;
     if (!any) result.pointers = try mask_head.absentPointer(rt, head.pointers);
     return result;
+}
+
+// Passthrough masks read from the model-frame logits shrunk with antialiasing: 252 on SAM3.1, the mask grid on SAM3.
+fn readoutOf(rt: *Runtime, full_logits: FeatureMap) !FeatureMap {
+    const frame = rt.config.image_size;
+    const side = if (rt.config.version == .sam31) frame / 4 else rt.config.maskSide();
+    const enlarged = try spatial.resample(rt, full_logits, frame, frame, .bilinear);
+    const shrunk = try rt.hostTensor(side * side);
+    try spatial.shrinkAntialiased(rt.scratch, enlarged.tensor.slice(f32, frame * frame), frame, frame, side, side, shrunk.slice(f32, side * side));
+    return FeatureMap.of(shrunk, side, side, 1);
 }
 
 pub fn prompted(rt: *Runtime, levels: [3]FeatureMap, prompt: prompts.Prompt, size: prompts.Size) !Outcome {
@@ -69,7 +80,9 @@ pub fn prompted(rt: *Runtime, levels: [3]FeatureMap, prompt: prompts.Prompt, siz
     const tracker = Scope.root(rt, rt.config.roots.tracker);
     const no_memory = try tracker.param(if (rt.config.version == .sam31) "interactivity_no_mem_embed" else "no_mem_embed");
     if (no_memory.count != rt.config.hidden) return error.SamPromptShape;
-    const image = try elementwise.add(rt, levels[2].tensor, no_memory);
+    // SAM3 decodes a mask passthrough on the plain coarse map; every other prompt adds the no-memory vector.
+    const plain = rt.config.version == .sam3 and passthroughMask(prompt) != null;
+    const image = if (plain) levels[2].tensor else try elementwise.add(rt, levels[2].tensor, no_memory);
     var result = try mask_head.decode(rt, levels, image, .{
         .grouped = false,
         .active = 1,
@@ -78,7 +91,7 @@ pub fn prompted(rt: *Runtime, levels: [3]FeatureMap, prompt: prompts.Prompt, siz
         .sparse = tokens.sparse,
     });
     if (passthroughMask(prompt)) |mask| result = try passThrough(rt, result, mask);
-    var buffer: [3]Tensor = undefined;
+    var buffer: outcome.TensorBuffer = undefined;
     rt.rewind(m, result.tensors(&buffer));
     return result;
 }
@@ -116,7 +129,7 @@ pub fn tracked(rt: *Runtime, levels: [3]FeatureMap, entries: []const Entry, fram
     else
         .{ .grouped = false, .pick = .best_alternative };
     const result = try mask_head.decode(rt, levels, conditioned, request);
-    var buffer: [3]Tensor = undefined;
+    var buffer: outcome.TensorBuffer = undefined;
     rt.rewind(m, result.tensors(&buffer));
     return result;
 }

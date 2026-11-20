@@ -9,6 +9,7 @@ pub const observe = @import("observe.zig");
 pub const engine = @import("engine.zig");
 pub const still_image = @import("still_image.zig");
 pub const image_tower = @import("image_tower.zig");
+pub const text_tower = @import("text_tower.zig");
 pub const session = @import("tracking_session.zig");
 pub const Session = session.Session;
 pub const Model = engine.Model;

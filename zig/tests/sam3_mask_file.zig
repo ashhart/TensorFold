@@ -46,6 +46,24 @@ pub const Masks = struct {
         return .{ .masks = masks, .ids = ids, .indices = indices, .active = active, .frames = frames, .objects = objects, .height = height, .width = width, .pixels = pixels };
     }
 
+    /// The first `frames` frames, for comparing a shorter run with the start of a longer reference.
+    pub fn leading(self: Masks, frames: usize) !Masks {
+        if (frames == 0 or frames > self.frames) return error.FrameOutOfRange;
+        var out = self;
+        out.frames = frames;
+        out.masks.shape[0] = frames;
+        out.masks.bytes = self.masks.bytes[0 .. frames * self.objects * self.pixels];
+        if (out.indices) |*indices| {
+            indices.shape[0] = frames;
+            indices.bytes = indices.bytes[0 .. frames * 8];
+        }
+        if (out.active) |*active| {
+            active.shape[0] = frames;
+            active.bytes = active.bytes[0 .. frames * self.objects];
+        }
+        return out;
+    }
+
     pub fn frameIndex(self: Masks, frame: usize) u64 {
         return if (self.indices) |indices| integer(indices, frame) else frame;
     }

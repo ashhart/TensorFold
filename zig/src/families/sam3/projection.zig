@@ -67,8 +67,8 @@ pub fn expandContract(s: Scope, x: Tensor, activation: Activation) !Tensor {
 
 const TrunkKernel = enum { affine, affine_gelu, dense, dense_half, dense_gelu, dense_compensated, exact_expansion };
 
-fn trunkKernel(device_projections: bool, weight_f16: bool, operand_exact: bool, role: TrunkRole) TrunkKernel {
-    if (!device_projections) return if (role == .expand) .affine_gelu else .affine;
+fn trunkKernel(exact_device: bool, weight_f16: bool, operand_exact: bool, role: TrunkRole) TrunkKernel {
+    if (!exact_device) return if (role == .expand) .affine_gelu else .affine;
     if (!weight_f16) return switch (role) {
         .qkv, .attention_out, .contract => .dense,
         .expand => .dense_gelu,
@@ -91,7 +91,7 @@ pub fn trunkFp32(s: Scope, leaf: []const u8, x: Tensor, role: TrunkRole) !Tensor
     const depth = shape.dim(1);
     if (cols == 0 or depth == 0 or x.count % depth != 0) return error.SamProjectionShape;
     const half = shape.dtype == .f16;
-    const device = rt.routes.device_projections;
+    const device = rt.routes.exactDevice();
     const full: ?Tensor = if (device and half and role == .expand) try p.param("weight") else null;
     const kernel = trunkKernel(device, half, if (full) |w| w.tensor_operand_exact else false, role);
     switch (kernel) {
@@ -115,8 +115,7 @@ pub fn trunkFp32(s: Scope, leaf: []const u8, x: Tensor, role: TrunkRole) !Tensor
 
 fn planesRoute(routes: runtime.Routes, weight_f16: bool, role: TrunkRole, key: []const u8) bool {
     const gelu = role == .expand;
-    return routes.precision == .fp32 and routes.device_projections and weight_f16 and
-        gelu == std.mem.endsWith(u8, key, ".mlp.fc1");
+    return routes.exactDevice() and weight_f16 and gelu == std.mem.endsWith(u8, key, ".mlp.fc1");
 }
 
 /// Route P-planes holds for the trunk projection `leaf` under `s`: it runs on the FP16 planes kernels.
@@ -159,7 +158,7 @@ pub fn matmul(rt: *Runtime, x: Tensor, w: Tensor, rows: usize, cols: usize, dept
     return rt.hold(try rt.gpu.matmul(x, w, rows, cols, depth));
 }
 
-test "SAM trunk projection route follows the device flag, weight dtype and operand exactness" {
+test "SAM trunk projection route follows the exact device route, weight dtype and operand exactness" {
     const expect = std.testing.expectEqual;
     for ([_]TrunkRole{ .qkv, .attention_out, .expand, .contract }) |role| {
         for ([_]bool{ false, true }) |half| for ([_]bool{ false, true }) |exact| {
@@ -180,8 +179,8 @@ test "SAM trunk projection route follows the device flag, weight dtype and opera
     try expect(TrunkKernel.dense_gelu, trunkKernel(true, true, false, .expand));
 }
 
-test "SAM trunk planes route needs FP32, device projections, an FP16 weight and GELU exactly on mlp.fc1" {
-    const on = runtime.Routes{ .precision = .fp32, .device_projections = true };
+test "SAM trunk planes route needs FP32 with tensor units, an FP16 weight and GELU exactly on mlp.fc1" {
+    const on = runtime.Routes{ .precision = .fp32, .tensor_units = true };
     const block = "detector.backbone.vision_backbone.trunk.blocks.3";
     try std.testing.expect(planesRoute(on, true, .qkv, block ++ ".attn.qkv"));
     try std.testing.expect(planesRoute(on, true, .attention_out, block ++ ".attn.proj"));
@@ -191,5 +190,5 @@ test "SAM trunk planes route needs FP32, device projections, an FP16 weight and 
     try std.testing.expect(!planesRoute(on, true, .contract, block ++ ".mlp.fc1"));
     try std.testing.expect(!planesRoute(on, false, .qkv, block ++ ".attn.qkv"));
     try std.testing.expect(!planesRoute(.{ .precision = .fp32 }, true, .qkv, block ++ ".attn.qkv"));
-    try std.testing.expect(!planesRoute(.{ .precision = .mixed, .device_projections = true }, true, .qkv, block ++ ".attn.qkv"));
+    try std.testing.expect(!planesRoute(.{ .precision = .mixed, .tensor_units = true }, true, .qkv, block ++ ".attn.qkv"));
 }

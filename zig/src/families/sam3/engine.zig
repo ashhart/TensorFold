@@ -16,11 +16,6 @@ pub const LoadOptions = struct {
     tokenizer_path: ?[]const u8 = null,
     version: ?Version = null,
     precision: enum { checkpoint, float32 } = .checkpoint,
-    compact_gemm: bool = true,
-    split_attention: bool = false,
-    device_projections: bool = false,
-    device_attention: bool = false,
-    compensated_norm: bool = false,
     scratch_cache_bytes: usize = 2 << 30,
 };
 
@@ -32,10 +27,7 @@ pub const Model = struct {
     gpu: *gpu.Gpu,
     tokenizer: ?tokenizer.Tokenizer = null,
     precision: Precision,
-    split_attention: bool = false,
-    device_projections: bool = false,
-    device_attention: bool = false,
-    compensated_norm: bool = false,
+    tensor_units: bool,
     mutex: std.Io.Mutex = .init,
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: LoadOptions) !*Model {
@@ -52,13 +44,13 @@ pub const Model = struct {
         errdefer device.deinit();
         device.cache_weights = true;
         device.map_weights = true;
-        device.compact_gemm = options.compact_gemm;
+        device.compact_gemm = true;
         device.buffer_cache_limit = options.scratch_cache_bytes;
         var text: ?tokenizer.Tokenizer = null;
         if (options.tokenizer_path) |tokenizer_path| text = try tokenizer.loadTokenizer(io, allocator, tokenizer_path);
         errdefer if (text) |*loaded| loaded.deinit();
         const model = try allocator.create(Model);
-        const flags = deriveFlags(options, patch.dtype, device.device.tensorUnits());
+        const derived = deriveRoutes(options, patch.dtype, device.device.tensorUnits());
         model.* = .{
             .allocator = allocator,
             .io = io,
@@ -66,11 +58,8 @@ pub const Model = struct {
             .store = store,
             .gpu = device,
             .tokenizer = text,
-            .precision = flags.precision,
-            .split_attention = flags.split_attention,
-            .device_projections = flags.device_projections,
-            .device_attention = flags.device_attention,
-            .compensated_norm = flags.compensated_norm,
+            .precision = derived.precision,
+            .tensor_units = derived.tensor_units,
         };
         return model;
     }
@@ -86,13 +75,7 @@ pub const Model = struct {
     }
 
     pub fn routes(self: *const Model) Routes {
-        return .{
-            .precision = self.precision,
-            .split_attention = self.split_attention,
-            .device_projections = self.device_projections,
-            .device_attention = self.device_attention,
-            .compensated_norm = self.compensated_norm,
-        };
+        return .{ .precision = self.precision, .tensor_units = self.tensor_units };
     }
 
     pub fn runtime(self: *Model, scratch: std.mem.Allocator) Runtime {
@@ -104,16 +87,9 @@ pub const Model = struct {
     pub const predictVisual = still_image.predictVisual;
 };
 
-fn deriveFlags(options: LoadOptions, patch: st.DType, tensor_units: bool) Routes {
+fn deriveRoutes(options: LoadOptions, patch: st.DType, tensor_units: bool) Routes {
     const precision: Precision = if (options.precision == .float32 or patch != .f16) .fp32 else .mixed;
-    const exact_device = tensor_units and precision == .fp32;
-    return .{
-        .precision = precision,
-        .split_attention = options.split_attention and tensor_units,
-        .device_projections = options.device_projections and exact_device,
-        .device_attention = options.device_attention and exact_device,
-        .compensated_norm = options.compensated_norm and exact_device,
-    };
+    return .{ .precision = precision, .tensor_units = tensor_units };
 }
 
 const Shapes = struct {
@@ -167,27 +143,19 @@ fn validate(config: Config, shapes: Shapes) error{UnsupportedSamTracker}!void {
         return error.UnsupportedSamTracker;
 }
 
-test "SAM load flags follow precision, request and tensor units" {
-    const half_patch = deriveFlags(.{}, .f16, true);
+test "SAM load routes follow precision, request and tensor units" {
+    const half_patch = deriveRoutes(.{}, .f16, true);
     try std.testing.expectEqual(Precision.mixed, half_patch.precision);
-    try std.testing.expectEqual(Precision.fp32, deriveFlags(.{}, .f32, true).precision);
-    try std.testing.expectEqual(Precision.fp32, deriveFlags(.{}, .bf16, true).precision);
-    try std.testing.expectEqual(Precision.fp32, deriveFlags(.{ .precision = .float32 }, .f16, true).precision);
-    for ([_]st.DType{ .f16, .f32 }) |patch| for ([_]bool{ false, true }) |units| for (0..32) |bits| {
-        const options = LoadOptions{
-            .precision = if (bits & 1 != 0) .float32 else .checkpoint,
-            .split_attention = bits & 2 != 0,
-            .device_projections = bits & 4 != 0,
-            .device_attention = bits & 8 != 0,
-            .compensated_norm = bits & 16 != 0,
-        };
-        const flags = deriveFlags(options, patch, units);
-        const fp32 = options.precision == .float32 or patch != .f16;
-        try std.testing.expectEqual(if (fp32) Precision.fp32 else Precision.mixed, flags.precision);
-        try std.testing.expectEqual(options.split_attention and units, flags.split_attention);
-        try std.testing.expectEqual(options.device_projections and units and fp32, flags.device_projections);
-        try std.testing.expectEqual(options.device_attention and units and fp32, flags.device_attention);
-        try std.testing.expectEqual(options.compensated_norm and units and fp32, flags.compensated_norm);
+    try std.testing.expect(!half_patch.exactDevice());
+    try std.testing.expectEqual(Precision.fp32, deriveRoutes(.{}, .bf16, true).precision);
+    // An FP32 checkpoint at checkpoint precision takes the same exact device routes as an FP32 request.
+    try std.testing.expectEqual(deriveRoutes(.{ .precision = .float32 }, .f16, true), deriveRoutes(.{}, .f32, true));
+    for ([_]st.DType{ .f16, .f32 }) |patch| for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |float32| {
+        const routes = deriveRoutes(.{ .precision = if (float32) .float32 else .checkpoint }, patch, units);
+        const fp32 = float32 or patch != .f16;
+        try std.testing.expectEqual(if (fp32) Precision.fp32 else Precision.mixed, routes.precision);
+        try std.testing.expectEqual(units, routes.tensor_units);
+        try std.testing.expectEqual(units and fp32, routes.exactDevice());
     };
 }
 

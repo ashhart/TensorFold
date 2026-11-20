@@ -40,9 +40,11 @@ fn framed(allocator: std.mem.Allocator, ids: []const u32) ![]u32 {
     return out;
 }
 
-/// HTML references replaced in one pass, whitespace runs collapsed to one space, ends trimmed, ASCII lowercased.
+/// HTML references replaced in two passes, whitespace runs collapsed to one space, ends trimmed, ASCII lowercased.
 fn clean(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    const unescaped = try unescape(allocator, text);
+    const once = try unescape(allocator, text);
+    defer allocator.free(once);
+    const unescaped = try unescape(allocator, once);
     defer allocator.free(unescaped);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -221,10 +223,11 @@ fn expectClean(expected: []const u8, text: []const u8) !void {
     try testing.expectEqualStrings(once, twice);
 }
 
-test "SAM text clean-up unescapes once, collapses whitespace, trims and lowercases ASCII" {
+test "SAM text clean-up unescapes twice, collapses whitespace, trims and lowercases ASCII" {
     try expectClean("a&b c", "  A&amp;B \n\t c ");
     try expectClean("hi", "&#72;&#x49;");
-    try expectClean("&lt;", "&amp;lt;");
+    try expectClean("<b>", "&amp;lt;b&amp;gt;");
+    try expectClean("&lt;", "&amp;amp;lt;");
     try expectClean("&bogus;", "&bogus;");
     try expectClean("a b", "a\u{3000}b");
     try expectClean("a b", "a&nbsp;b");

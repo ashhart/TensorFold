@@ -21,6 +21,7 @@ const sigmoid = concept_queries.sigmoid;
 const query_count = concept_queries.query_count;
 
 pub const score_clamp: f32 = 12;
+pub const joint_clamp: f32 = 10;
 pub const pixel_decoder_groups = 8;
 pub const pixel_decoder_stages = 2;
 
@@ -120,7 +121,11 @@ fn scoreQueries(rt: *Runtime, context: Context, queries: Queries) !Scored {
     const t = target.slice(f32, width);
     const e = embedded.slice(f32, embedded.count);
     const presence_logit = presence.slice(f32, 1)[0];
-    for (query_scores, 0..) |*s, q| s.* = composeScore(presence_logit, scoreLogit(dot(t, e[q * width ..][0..width]), width));
+    const joint = c.version == .sam31;
+    for (query_scores, 0..) |*s, q| {
+        const logit = scoreLogit(dot(t, e[q * width ..][0..width]), width);
+        s.* = if (joint) jointScore(presence_logit, logit) else composeScore(presence_logit, logit);
+    }
     return .{ .normed = normed, .query_scores = query_scores };
 }
 
@@ -160,6 +165,12 @@ pub fn composeScore(presence_logit: f32, score_logit: f32) f32 {
     return sigmoid(presence_logit) * sigmoid(score_logit);
 }
 
+/// SAM3.1: the composed score as a logit clamped to ±10, then σ again.
+pub fn jointScore(presence_logit: f32, score_logit: f32) f32 {
+    const p = composeScore(presence_logit, score_logit);
+    return sigmoid(std.math.clamp(@log(p / (1 - p)), -joint_clamp, joint_clamp));
+}
+
 /// Mean of `rows` rows of `width` values: rows summed in order, then one division by the row count.
 pub fn cueMean(out: []f32, values: []const f32, rows: usize, width: usize) void {
     @memset(out, 0);
@@ -170,7 +181,7 @@ pub fn cueMean(out: []f32, values: []const f32, rows: usize, width: usize) void 
     for (out) |*acc| acc.* /= count;
 }
 
-/// Kept queries in output order: score strictly above the threshold, descending, ties to the lower query, capped.
+/// Queries scoring strictly above the threshold, capped to the best scores (ties to lower), in ascending query order.
 pub fn keepQueries(scores: []const f32, threshold: f32, max_results: usize, order: []usize) usize {
     var kept: usize = 0;
     for (scores, 0..) |s, q| if (s > threshold) {
@@ -178,7 +189,9 @@ pub fn keepQueries(scores: []const f32, threshold: f32, max_results: usize, orde
         kept += 1;
     };
     std.mem.sort(usize, order[0..kept], scores, before);
-    return @min(kept, max_results);
+    kept = @min(kept, max_results);
+    std.mem.sort(usize, order[0..kept], {}, std.sort.asc(usize));
+    return kept;
 }
 
 fn before(scores: []const f32, a: usize, b: usize) bool {
@@ -212,15 +225,20 @@ test "SAM detection scores compose presence and clamped query logits" {
     try testing.expectEqual(@as(f32, -12), scoreLogit(-1000, 256));
     try testing.expectEqual(sigmoid(0) * sigmoid(12), composeScore(0, scoreLogit(1000, 256)));
     try testing.expectEqual(@as(f32, 0.5), scoreLogit(8, 256));
+    try testing.expectEqual(sigmoid(10), jointScore(12, 12));
+    try testing.expectEqual(sigmoid(-10), jointScore(-12, -12));
+    try testing.expectApproxEqAbs(composeScore(1, 0.5), jointScore(1, 0.5), 1e-6);
 }
 
 test "SAM detection selection is strict, ordered and capped" {
     var order: [4]usize = undefined;
     const scores = [_]f32{ 0.9, 0.7, 0.9, 0.6 };
     try testing.expectEqual(@as(usize, 4), keepQueries(&scores, 0.5, 200, &order));
-    try testing.expectEqualSlices(usize, &.{ 0, 2, 1, 3 }, &order);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, &order);
     try testing.expectEqual(@as(usize, 2), keepQueries(&scores, 0.5, 2, &order));
     try testing.expectEqualSlices(usize, &.{ 0, 2 }, order[0..2]);
+    try testing.expectEqual(@as(usize, 2), keepQueries(&.{ 0.6, 0.7, 0.9 }, 0.5, 2, &order));
+    try testing.expectEqualSlices(usize, &.{ 1, 2 }, order[0..2]);
     try testing.expectEqual(@as(usize, 1), keepQueries(&.{ 0.5, 0.75, std.math.nan(f32) }, 0.5, 200, &order));
     try testing.expectEqual(@as(usize, 1), order[0]);
     try testing.expectEqual(@as(usize, 0), keepQueries(&.{ 0, 0 }, 0, 200, &order));

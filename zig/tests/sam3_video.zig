@@ -13,9 +13,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
         std.debug.print(
             \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
-            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --baseline-gemm
-            \\  --split-attention --device-projections --device-attention
-            \\  --compensated-normalization
+            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle
+            \\  --reprompt FRAME ID X Y (repeat for more points; replaces that frame's prompt and reports the amended masks)
+            \\  --fallback-routes (test hook: the FP32 routes of a device without tensor units)
             \\  --operator-profile FILE.json [--operator-profile-frame N] (separate from timing)
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
@@ -34,12 +34,7 @@ pub fn main(init: std.process.Init) !void {
     var reverse = false;
     var exercise = false;
     var fp32 = false;
-    var attention_two_pass = true;
-    var split_attention = false;
-    var device_projections = false;
-    var device_attention = false;
-    var compensated_norm = false;
-    var compact_gemm = (sam.LoadOptions{}).compact_gemm;
+    var fallback_routes = false;
     var reference_path: ?[]const u8 = null;
     var seed_path: ?[]const u8 = null;
     var raw_path: ?[]const u8 = null;
@@ -50,6 +45,9 @@ pub fn main(init: std.process.Init) !void {
     var trace_path: ?[]const u8 = null;
     var trace_frames: std.ArrayList(usize) = .empty;
     var trace_layers = false;
+    var reprompt_frame: ?usize = null;
+    var reprompt_id: u64 = 0;
+    var reprompt_points: std.ArrayList(sam.prompts.Point) = .empty;
     var gate = sam.comparison.Gate{};
     var i: usize = 4;
     while (i < args.len) {
@@ -71,28 +69,8 @@ pub fn main(init: std.process.Init) !void {
             fp32 = true;
             continue;
         }
-        if (std.mem.eql(u8, flag, "--baseline-attention")) {
-            attention_two_pass = false;
-            continue;
-        }
-        if (std.mem.eql(u8, flag, "--split-attention")) {
-            split_attention = true;
-            continue;
-        }
-        if (std.mem.eql(u8, flag, "--device-projections")) {
-            device_projections = true;
-            continue;
-        }
-        if (std.mem.eql(u8, flag, "--device-attention")) {
-            device_attention = true;
-            continue;
-        }
-        if (std.mem.eql(u8, flag, "--compensated-normalization")) {
-            compensated_norm = true;
-            continue;
-        }
-        if (std.mem.eql(u8, flag, "--baseline-gemm")) {
-            compact_gemm = false;
+        if (std.mem.eql(u8, flag, "--fallback-routes")) {
+            fallback_routes = true;
             continue;
         }
         if (std.mem.eql(u8, flag, "--box")) {
@@ -112,6 +90,15 @@ pub fn main(init: std.process.Init) !void {
             points[0] = .{ .x = try std.fmt.parseFloat(f32, args[i + 1]), .y = try std.fmt.parseFloat(f32, args[i + 2]) };
             try seeds.append(a, .{ .id = try std.fmt.parseInt(u64, args[i], 10), .prompt = .{ .points = points } });
             i += 3;
+        } else if (std.mem.eql(u8, flag, "--reprompt")) {
+            if (i + 4 > args.len) return error.MissingRepromptArguments;
+            const frame = try std.fmt.parseInt(usize, args[i], 10);
+            const id = try std.fmt.parseInt(u64, args[i + 1], 10);
+            if (reprompt_frame != null and (reprompt_frame.? != frame or reprompt_id != id)) return error.MixedReprompt;
+            reprompt_frame = frame;
+            reprompt_id = id;
+            try reprompt_points.append(a, .{ .x = try std.fmt.parseFloat(f32, args[i + 2]), .y = try std.fmt.parseFloat(f32, args[i + 3]) });
+            i += 4;
         } else {
             if (i == args.len) return error.MissingArgument;
             const value = args[i];
@@ -156,6 +143,11 @@ pub fn main(init: std.process.Init) !void {
     if (operator_profile_frame) |frame| {
         if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
             (!reverse and (frame < start or frame - start >= count))) return error.ProfileFrameOutOfRange;
+    }
+    if (reprompt_frame) |frame| {
+        if (exercise) return error.RepromptLifecycleMismatch;
+        if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
+            (!reverse and (frame < start or frame - start >= count))) return error.RepromptFrameOutOfRange;
     }
     for (trace_frames.items) |frame| {
         if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
@@ -204,20 +196,13 @@ pub fn main(init: std.process.Init) !void {
     var trace: ?Trace = if (trace_path) |path| try Trace.init(init.gpa, init.io, path, trace_frames.items, trace_layers) else null;
     defer if (trace) |*output| output.deinit();
     const load_started = clock.seconds();
-    const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
-        .precision = if (fp32) .float32 else .checkpoint,
-        .compact_gemm = compact_gemm,
-        .split_attention = split_attention,
-        .device_projections = device_projections,
-        .device_attention = device_attention,
-        .compensated_norm = compensated_norm,
-    });
+    const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{ .precision = if (fp32) .float32 else .checkpoint });
     defer loaded.deinit();
+    if (fallback_routes) loaded.tensor_units = false;
     const load_seconds = clock.seconds() - load_started;
     var operator_profile = OperatorProfile{ .allocator = init.gpa };
     defer operator_profile.deinit();
     defer loaded.gpu.operator_observer = null;
-    loaded.gpu.attention_two_pass = attention_two_pass;
     const started = clock.seconds();
     if (exercise) {
         if (count < 2) return error.LifecycleNeedsTwoFrames;
@@ -257,6 +242,11 @@ pub fn main(init: std.process.Init) !void {
         else
             try session.track(init.gpa, image, index);
         defer prediction.deinit();
+        if (reprompt_frame == index) {
+            try session.prompt(reprompt_id, .{ .points = reprompt_points.items });
+            prediction.deinit();
+            prediction = try session.currentMasks(init.gpa);
+        }
         if (benchmark_path != null) {
             samples[step] = .{ .frame_index = index, .seed = is_seed, .wall_seconds = clock.seconds() - frame_start, .stages = session.last_profile };
             var index_bytes: [8]u8 = undefined;
@@ -292,18 +282,19 @@ pub fn main(init: std.process.Init) !void {
     if (benchmark_path) |path| {
         var digest: [32]u8 = undefined;
         masks_hash.final(&digest);
+        const exact_device = loaded.routes().exactDevice();
         try receipt.write(a, init.io, path, identity.?, loaded, load_seconds, samples, warmup, .{
             .input_shape = frames.shape[0..frames.rank],
             .start = start,
             .frames = count,
             .reverse = reverse,
             .object_ids = ids,
-            .attention_two_pass = attention_two_pass,
-            .split_attention = loaded.split_attention,
-            .device_projections = loaded.device_projections,
-            .device_attention = loaded.device_attention,
-            .compensated_norm = loaded.compensated_norm,
-            .compact_gemm = compact_gemm,
+            .attention_two_pass = loaded.gpu.attention_two_pass,
+            .split_attention = exact_device,
+            .device_projections = exact_device,
+            .device_attention = exact_device,
+            .compensated_norm = exact_device,
+            .compact_gemm = loaded.gpu.compact_gemm,
         }, std.fmt.bytesToHex(digest, .lower));
     }
     std.debug.print("SAM {s}: {d} frames, {d:.3}s wall, {d:.3}s GPU, peak Metal allocation {d} bytes\n", .{ loaded.config.version.name(), count, clock.seconds() - started, loaded.gpu.gpu_seconds, loaded.gpu.peak_bytes });

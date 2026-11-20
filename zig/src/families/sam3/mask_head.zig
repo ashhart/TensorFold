@@ -297,7 +297,7 @@ pub fn decode(rt: *Runtime, levels: [3]FeatureMap, image: Tensor, request: Reque
     result.mask_logits = FeatureMap.of(mask_values, side, side, n);
     result.pointers = try elementwise.concat(rt, pointers[0..n]);
     try rt.gpu.endBatch();
-    var buffer: [3]Tensor = undefined;
+    var buffer: outcome.TensorBuffer = undefined;
     rt.rewind(m, result.tensors(&buffer));
     return result;
 }

@@ -87,24 +87,31 @@ fn normStage(rt: *Runtime, scope: Scope, conv_leaf: []const u8, norm_leaf: []con
     return FeatureMap.of(try elementwise.gelu(rt, normed), y.height, y.width, y.channels);
 }
 
+// Probabilities on the model frame, the 4 × 4 stride-4 downsampler (252), then bilinear to the mask grid.
+fn probabilityGrid(rt: *Runtime, tracker: Scope, downsample: []const u8, input: FeatureMap) !FeatureMap {
+    const config = rt.config;
+    const side = config.maskSide();
+    const source = config.image_size;
+    const enlarged = try spatial.resample(rt, input, source, source, .bilinear);
+    const reduced = try convolution.conv(tracker, downsample, enlarged, .{ .stride = 4, .pad = 0 });
+    if (reduced.height == side) return reduced;
+    return spatial.resample(rt, reduced, side, side, .bilinear);
+}
+
 fn denseRows(rt: *Runtime, encoder: Scope, mask: prompts.Mask) !Tensor {
     const config = rt.config;
     const grid = config.featureSide();
     const side = config.maskSide();
-    const canvas = 16 * grid;
     const tracker = Scope.root(rt, config.roots.tracker);
     const downsample = if (config.version == .sam31) "interactive_mask_downsample" else "mask_downsample";
     const scaling = try encoder.sub("mask_downscaling");
     const input = FeatureMap.of(try rt.upload(mask.values), mask.size.height, mask.size.width, 1);
-    try rt.gpu.beginBatch();
-    errdefer if (rt.gpu.batch != null) rt.gpu.endBatch() catch {};
     var x = switch (mask.format) {
-        .probabilities => try convolution.conv(tracker, downsample, try spatial.resample(rt, input, canvas, canvas, .bilinear), .{
-            .stride = 4,
-            .pad = 0,
-        }),
+        .probabilities => try probabilityGrid(rt, tracker, downsample, input),
         .logits => try spatial.resample(rt, input, side, side, .bilinear),
     };
+    try rt.gpu.beginBatch();
+    errdefer if (rt.gpu.batch != null) rt.gpu.endBatch() catch {};
     if (x.height != side or x.width != side or x.channels != 1) return error.SamPromptShape;
     x = try normStage(rt, scaling, "0", "1", x);
     x = try normStage(rt, scaling, "3", "4", x);

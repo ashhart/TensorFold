@@ -14,22 +14,32 @@ const fill_quality: f32 = 0;
 
 pub const Pick = enum { primary, best_alternative, best_any };
 
+pub const TensorBuffer = [4]Tensor;
+
 pub const Outcome = struct {
     mask_logits: FeatureMap,
     full_logits: ?FeatureMap = null,
+    /// Map the frame's masks are read from when it differs from the full or mask logits (a mask-prompt passthrough).
+    readout_logits: ?FeatureMap = null,
     pointers: Tensor,
     slots: usize,
     presence: [max_slots]f32,
     quality: [max_slots]f32,
 
-    pub fn tensors(self: Outcome, buffer: *[3]Tensor) []const Tensor {
+    pub fn tensors(self: Outcome, buffer: *TensorBuffer) []const Tensor {
         buffer[0] = self.mask_logits.tensor;
         buffer[1] = self.pointers;
-        if (self.full_logits) |full| {
-            buffer[2] = full.tensor;
-            return buffer[0..3];
-        }
-        return buffer[0..2];
+        var count: usize = 2;
+        for ([_]?FeatureMap{ self.full_logits, self.readout_logits }) |maybe| if (maybe) |map| {
+            buffer[count] = map.tensor;
+            count += 1;
+        };
+        return buffer[0..count];
+    }
+
+    /// The logits masks are read from: readout, else full, else mask logits.
+    pub fn shown(self: Outcome) FeatureMap {
+        return self.readout_logits orelse self.full_logits orelse self.mask_logits;
     }
 };
 
@@ -59,6 +69,7 @@ pub fn single(rt: *Runtime, group: Outcome, slot: usize) !Outcome {
     var result = Outcome{
         .mask_logits = try column(rt, group.mask_logits, group.slots, slot),
         .full_logits = if (group.full_logits) |full| try column(rt, full, group.slots, slot) else null,
+        .readout_logits = if (group.readout_logits) |shown_map| try column(rt, shown_map, group.slots, slot) else null,
         .pointers = try elementwise.concat(rt, &.{runtime.part(group.pointers, slot * width, width)}),
         .slots = 1,
         .presence = @splat(0),
@@ -92,12 +103,18 @@ fn fullSize(parts: []const ?Outcome) ?[2]usize {
     return null;
 }
 
+fn readoutSize(parts: []const ?Outcome) ?[2]usize {
+    for (parts) |maybe| if (maybe) |part| if (part.readout_logits) |map| return .{ map.height, map.width };
+    return null;
+}
+
 fn checkPart(part: Outcome, side: usize, width: usize) !void {
     const logits = part.mask_logits;
     if (part.slots != 1 or logits.height != side or logits.width != side or logits.channels != 1 or
         logits.tensor.count != side * side or part.pointers.count != width) return error.SamOutcomeShape;
-    if (part.full_logits) |full| if (full.channels != 1 or full.tensor.count != full.height * full.width)
-        return error.SamOutcomeShape;
+    for ([_]?FeatureMap{ part.full_logits, part.readout_logits }) |maybe| if (maybe) |map| {
+        if (map.channels != 1 or map.tensor.count != map.height * map.width) return error.SamOutcomeShape;
+    };
 }
 
 pub fn merge(rt: *Runtime, parts: []const ?Outcome) !Outcome {
@@ -110,11 +127,13 @@ pub fn merge(rt: *Runtime, parts: []const ?Outcome) !Outcome {
         if (maybe) |part| try checkPart(part, side, width) else missing = true;
     }
     const size = fullSize(parts);
+    const shown_size = readoutSize(parts);
     const m = rt.mark();
     errdefer rt.rewind(m, &.{});
     const fill_mask: ?Tensor = if (missing) try elementwise.hostFill(rt, side * side, absent_logit) else null;
     const fill_pointer: ?Tensor = if (missing) try elementwise.hostFill(rt, width, 0) else null;
     const fill_full: ?Tensor = if (missing and size != null) try elementwise.hostFill(rt, size.?[0] * size.?[1], absent_logit) else null;
+    const fill_shown: ?Tensor = if (missing and shown_size != null) try elementwise.hostFill(rt, shown_size.?[0] * shown_size.?[1], absent_logit) else null;
 
     const opened = rt.gpu.batch == null;
     if (opened) try rt.gpu.beginBatch();
@@ -138,8 +157,13 @@ pub fn merge(rt: *Runtime, parts: []const ?Outcome) !Outcome {
         for (parts, 0..) |maybe, s| full[s] = if (maybe) |part| try fullPart(rt, part, hw) else fill_full.?;
         result.full_logits = FeatureMap.of(try stack(rt, full[0..n], hw[0] * hw[1]), hw[0], hw[1], n);
     }
+    if (shown_size) |hw| {
+        var shown: [max_slots]Tensor = undefined;
+        for (parts, 0..) |maybe, s| shown[s] = if (maybe) |part| try readoutPart(rt, part, hw) else fill_shown.?;
+        result.readout_logits = FeatureMap.of(try stack(rt, shown[0..n], hw[0] * hw[1]), hw[0], hw[1], n);
+    }
     if (opened) try rt.gpu.endBatch();
-    var buffer: [3]Tensor = undefined;
+    var buffer: TensorBuffer = undefined;
     rt.rewind(m, result.tensors(&buffer));
     return result;
 }
@@ -148,6 +172,13 @@ pub fn merge(rt: *Runtime, parts: []const ?Outcome) !Outcome {
 fn fullPart(rt: *Runtime, part: Outcome, size: [2]usize) !Tensor {
     if (part.full_logits) |full| if (full.height == size[0] and full.width == size[1]) return full.tensor;
     const source = part.full_logits orelse part.mask_logits;
+    return (try spatial.resample(rt, source, size[0], size[1], .bilinear)).tensor;
+}
+
+// A slot without its own readout map contributes its shown logits resampled bilinearly to the readout size.
+fn readoutPart(rt: *Runtime, part: Outcome, size: [2]usize) !Tensor {
+    const source = part.shown();
+    if (source.height == size[0] and source.width == size[1]) return source.tensor;
     return (try spatial.resample(rt, source, size[0], size[1], .bilinear)).tensor;
 }
 

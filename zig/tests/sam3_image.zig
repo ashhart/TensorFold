@@ -1,6 +1,8 @@
 const std = @import("std");
 const sam = @import("sam3");
 const st = @import("safetensors");
+const Capture = @import("sam3_capture.zig").Capture;
+const text_output = @import("sam3_text_output.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -9,6 +11,10 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             \\tf-sam3-image CHECKPOINT FRAMES OUTPUT_PREFIX --point X Y | --box X0 Y0 X1 Y1 | --text TEXT --tokenizer FILE
             \\  --negative-point X Y --fp32 --frame N --threshold N
+            \\  --primary (visual prompts: candidate 0 instead of the best alternative candidate)
+            \\  --raw-masks FILE.safetensors (visual prompts: the mask as object 1 of a one-frame mask file)
+            \\  --text-features FILE.safetensors --detections FILE.safetensors (text prompts: framed ids and features;
+            \\    detection masks, scores and source-pixel corner boxes in output order)
             \\
         , .{});
         return;
@@ -20,6 +26,10 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer: ?[]const u8 = null;
     var frame: usize = 0;
     var fp32 = false;
+    var primary = false;
+    var raw_path: ?[]const u8 = null;
+    var features_path: ?[]const u8 = null;
+    var detections_path: ?[]const u8 = null;
     var threshold: f32 = 0.5;
     var i: usize = 4;
     while (i < args.len) {
@@ -27,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
         i += 1;
         if (std.mem.eql(u8, flag, "--fp32")) {
             fp32 = true;
+        } else if (std.mem.eql(u8, flag, "--primary")) {
+            primary = true;
         } else if (std.mem.eql(u8, flag, "--point") or std.mem.eql(u8, flag, "--negative-point")) {
             if (i + 2 > args.len) return error.MissingPointCoordinates;
             try points.append(a, .{ .x = try std.fmt.parseFloat(f32, args[i]), .y = try std.fmt.parseFloat(f32, args[i + 1]), .positive = std.mem.eql(u8, flag, "--point") });
@@ -39,13 +51,15 @@ pub fn main(init: std.process.Init) !void {
             if (i == args.len) return error.MissingArgument;
             const value = args[i];
             i += 1;
-            if (std.mem.eql(u8, flag, "--text")) text = value else if (std.mem.eql(u8, flag, "--tokenizer"))
+            if (std.mem.eql(u8, flag, "--text-features")) features_path = value else if (std.mem.eql(u8, flag, "--detections")) detections_path = value else if (std.mem.eql(u8, flag, "--raw-masks")) raw_path = value else if (std.mem.eql(u8, flag, "--text")) text = value else if (std.mem.eql(u8, flag, "--tokenizer"))
                 tokenizer = value
             else if (std.mem.eql(u8, flag, "--frame")) frame = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--threshold")) threshold = try std.fmt.parseFloat(f32, value) else return error.UnknownArgument;
         }
     }
     if (text != null and (points.items.len != 0 or boxes.items.len != 0)) return error.MixedPromptNotSupported;
     if (text == null and points.items.len == 0 and boxes.items.len == 0) return error.EmptyPrompt;
+    if (text != null and (primary or raw_path != null)) return error.VisualPromptOption;
+    if (text == null and (features_path != null or detections_path != null)) return error.TextPromptOption;
     var file = try st.File.open(init.gpa, init.io, args[2]);
     defer file.close(init.io);
     const frames = file.get("frames") orelse return error.MissingFramesTensor;
@@ -61,11 +75,20 @@ pub fn main(init: std.process.Init) !void {
         .precision = if (fp32) .float32 else .checkpoint,
     });
     defer model.deinit();
+    if (features_path) |path| try text_output.writeFeatures(a, init.io, model, text.?, path);
     var prediction = if (text) |prompt|
         try model.predictText(init.gpa, image, prompt, .{ .threshold = threshold })
     else
-        try model.predictVisual(init.gpa, image, .{ .points = points.items, .boxes = boxes.items }, true);
+        try model.predictVisual(init.gpa, image, .{ .points = points.items, .boxes = boxes.items }, !primary);
     defer prediction.deinit();
+    if (raw_path) |path| {
+        var capture = try Capture.create(a, init.io, .cwd(), path, &.{1}, image.size, 1, frame, false);
+        defer capture.deinit(init.io);
+        var objects = [_]sam.session.TrackedMask{.{ .id = 1, .mask = prediction.masks[0] }};
+        try capture.add(init.io, .{ .allocator = a, .frame_index = frame, .objects = &objects }, false);
+        try capture.finish(init.io);
+    }
+    if (detections_path) |path| try text_output.writeDetections(a, init.io, prediction, image.size, path);
     for (prediction.masks, 0..) |mask, n| {
         const path = try std.fmt.allocPrint(a, "{s}-{d}.pgm", .{ args[3], n });
         const output = try std.Io.Dir.cwd().createFile(init.io, path, .{ .exclusive = true });

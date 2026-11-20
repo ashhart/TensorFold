@@ -6,17 +6,21 @@ const Masks = @import("sam3_mask_file.zig").Masks;
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        std.debug.print("tf-sam3-compare LEFT.safetensors RIGHT.safetensors [--skip-first-frame] [--min-frame-iou N] [--min-mean-iou N]\nDefault: exact binary masks. Approximate comparisons require a worst-frame IoU threshold.\n", .{});
+        std.debug.print("tf-sam3-compare LEFT.safetensors RIGHT.safetensors [--skip-first-frame] [--leading-frames] [--min-frame-iou N] [--min-mean-iou N]\nDefault: exact binary masks. Approximate comparisons require a worst-frame IoU threshold.\n--leading-frames compares LEFT with as many first frames of a longer RIGHT.\n", .{});
         return;
     }
     if (args.len < 3) return error.ExpectedTwoMaskFiles;
     var gate = sam.comparison.Gate{};
     var skip_first = false;
+    var leading = false;
     var at: usize = 3;
     while (at < args.len) : (at += 1) {
         if (std.mem.eql(u8, args[at], "--skip-first-frame")) {
             if (skip_first) return error.DuplicateComparisonOption;
             skip_first = true;
+        } else if (std.mem.eql(u8, args[at], "--leading-frames")) {
+            if (leading) return error.DuplicateComparisonOption;
+            leading = true;
         } else {
             if (at + 1 == args.len) return error.MissingComparisonThreshold;
             if (!try gate.set(args[at], args[at + 1])) return error.UnknownComparisonOption;
@@ -29,7 +33,8 @@ pub fn main(init: std.process.Init) !void {
     var right = try st.File.open(init.gpa, init.io, args[2]);
     defer right.close(init.io);
     const x = try Masks.fromFile(&left);
-    const y = try Masks.fromFile(&right);
+    var y = try Masks.fromFile(&right);
+    if (leading) y = try y.leading(x.frames);
     try x.match(y);
     const first: usize = @intFromBool(skip_first);
     if (x.frames <= first) return error.EmptyMaskComparison;
@@ -40,6 +45,7 @@ pub fn main(init: std.process.Init) !void {
     const failure: ?anyerror = if (gate.check(quality, (x.frames - first) * x.objects)) |_| null else |err| err;
     const json = try std.json.Stringify.valueAlloc(init.arena.allocator(), .{
         .scope = if (skip_first) "propagation_only" else "all_frames",
+        .leading_frames_of_right = leading,
         .skipped_frames = first,
         .frames = x.frames - first,
         .objects = x.objects,

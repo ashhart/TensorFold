@@ -92,6 +92,50 @@ pub fn sourceMask(rt: *Runtime, allocator: std.mem.Allocator, logits: FeatureMap
     return mask.fromLogits(allocator, resampled.tensor.slice(f32, pixels), size, score);
 }
 
+/// Host antialiased shrink of a one-channel map: a triangle filter stretched by the scale, columns then rows.
+pub fn shrinkAntialiased(allocator: std.mem.Allocator, x: []const f32, height: usize, width: usize, out_height: usize, out_width: usize, out: []f32) !void {
+    if (x.len != height * width or out.len != out_height * out_width or out_height == 0 or out_width == 0 or
+        out_height > height or out_width > width) return error.SamSpatialShape;
+    const rows = try allocator.alloc(f32, height * out_width);
+    defer allocator.free(rows);
+    for (0..out_width) |j| {
+        const span = triangle(j, width, out_width);
+        for (0..height) |i| {
+            var sum: f32 = 0;
+            for (span.first..span.end) |k| sum += x[i * width + k] * triangleWeight(k, span);
+            rows[i * out_width + j] = sum;
+        }
+    }
+    for (0..out_height) |i| {
+        const span = triangle(i, height, out_height);
+        for (0..out_width) |j| {
+            var sum: f32 = 0;
+            for (span.first..span.end) |k| sum += rows[k * out_width + j] * triangleWeight(k, span);
+            out[i * out_width + j] = sum;
+        }
+    }
+}
+
+const Span = struct { first: usize, end: usize, centre: f32, scale: f32, total: f32 };
+
+fn triangle(dst: usize, in: usize, out: usize) Span {
+    const scale = @as(f32, @floatFromInt(in)) / @as(f32, @floatFromInt(out));
+    const centre = scale * (@as(f32, @floatFromInt(dst)) + 0.5);
+    const first: usize = @intFromFloat(@max(0, @floor(centre - scale + 0.5)));
+    const end: usize = @intFromFloat(@min(@as(f32, @floatFromInt(in)), @floor(centre + scale + 0.5)));
+    var span = Span{ .first = first, .end = end, .centre = centre, .scale = scale, .total = 0 };
+    for (first..end) |k| span.total += triangleRaw(k, span);
+    return span;
+}
+
+fn triangleRaw(k: usize, span: Span) f32 {
+    return @max(0, 1 - @abs((@as(f32, @floatFromInt(k)) - span.centre + 0.5) / span.scale));
+}
+
+fn triangleWeight(k: usize, span: Span) f32 {
+    return triangleRaw(k, span) / span.total;
+}
+
 const Tap = struct { first: usize, second: usize, fraction: f32 };
 
 fn bilinearTap(dst: usize, in: usize, out: usize) Tap {
@@ -119,6 +163,21 @@ test "SAM tile map is a bijection with the stated inverse and column-by-column t
     try std.testing.expectEqual(@as(usize, 73), gridRow(72, 24, 25));
     try std.testing.expectEqual(@as(usize, 1728), gridRow(72, 24, 576));
     try std.testing.expectEqual(@as(usize, 24), gridRow(72, 24, 3 * 576));
+}
+
+test "SAM antialiased shrink by four uses eight taps, renormalised at the edges" {
+    const span = triangle(5, 1008, 252);
+    try std.testing.expectEqual(@as(usize, 18), span.first);
+    try std.testing.expectEqual(@as(usize, 26), span.end);
+    try std.testing.expectEqual(@as(f32, 0.125 / 4.0), triangleWeight(18, span));
+    try std.testing.expectEqual(@as(f32, 0.875 / 4.0), triangleWeight(21, span));
+    const edge = triangle(0, 1008, 252);
+    try std.testing.expectEqual(@as(usize, 0), edge.first);
+    try std.testing.expectEqual(@as(f32, 3.5), edge.total);
+    var x: [64]f32 = @splat(-10);
+    var out: [4]f32 = undefined;
+    try shrinkAntialiased(std.testing.allocator, &x, 8, 8, 2, 2, &out);
+    for (out) |v| try std.testing.expectApproxEqAbs(@as(f32, -10), v, 1e-5);
 }
 
 test "SAM resample coordinates follow the centre rule and the floor rule" {

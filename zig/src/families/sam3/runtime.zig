@@ -11,10 +11,12 @@ pub const Precision = enum { fp32, mixed };
 
 pub const Routes = struct {
     precision: Precision = .mixed,
-    split_attention: bool = false,
-    device_projections: bool = false,
-    device_attention: bool = false,
-    compensated_norm: bool = false,
+    tensor_units: bool = false,
+
+    /// FP32 on a device with tensor units: every site whose shape conditions hold takes the exact device kernels.
+    pub fn exactDevice(self: Routes) bool {
+        return self.precision == .fp32 and self.tensor_units;
+    }
 };
 
 pub const FeatureMap = struct {
