@@ -128,9 +128,9 @@ pub const Backend = struct {
         b.attention.deinit();
         b.primitives.deinit();
     }
-    /// The head the pass reads: the target's own output head weights.
+    /// The head the pass reads: the lightweight 4-bit draft head when present, else the target's output head.
     pub fn headWeights(b: *const Backend, _: op.View) wts.Affine {
-        return b.target.w.head;
+        return b.target.w.draft_head orelse b.target.w.head;
     }
     pub fn ops(b: *Backend) op.Ops {
         return .{ .ptr = b, .vtable = &vtable };
@@ -269,11 +269,12 @@ fn maskRows(ptr: *anyopaque, epoch: u64, x: op.View, first: u32, rows: u32) !op.
 fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     const b = backend(ptr);
     const e = try b.encoder(epoch);
-    const y = try b.frame.alloc(x.rows, b.target.w.head.n, .bf16);
+    const hw = b.headWeights(x);
+    const y = try b.frame.alloc(x.rows, hw.n, .bf16);
     const input = try b.frame.ref(x);
     const output = try b.frame.ref(y);
     if (blockHead(b, x)) |pipes| {
-        const q = b.headWeights(x);
+        const q = hw;
         const sums = try b.frame.ref(try b.frame.alloc(x.rows, q.k / 64, .f32));
         const offsets = try b.frame.ref(try b.frame.alloc(1, 1, .u32));
         std.mem.writeInt(i32, offsets.buf.contents()[offsets.off..][0..4], 0, .little);
@@ -289,9 +290,20 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
         while (s < x.rows) {
             const step = @min(x.rows - s, 16);
             const at = @as(usize, s) * x.stride * 2;
-            const to = @as(usize, s) * b.target.w.head.n * 2;
-            fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, b.target.w.head, .{ .buf = output.buf, .off = output.off + to }, step);
+            const to = @as(usize, s) * hw.n * 2;
+            fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, hw, .{ .buf = output.buf, .off = output.off + to }, step);
             s += step;
+        }
+        e.barrier();
+        return .{ .logits = y, .token_ids = null };
+    }
+    if (b.batch.len > 1 and b.batch_block > 1 and x.rows == @as(u32, @intCast(b.batch.len)) * (b.batch_block - 1)) {
+        const step = b.batch_block - 1;
+        var s: u32 = 0;
+        while (s < x.rows) : (s += step) {
+            const at = @as(usize, s) * x.stride * 2;
+            const to = @as(usize, s) * hw.n * 2;
+            fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, hw, .{ .buf = output.buf, .off = output.off + to }, step);
         }
         e.barrier();
         return .{ .logits = y, .token_ids = null };
@@ -302,8 +314,8 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     var s: u32 = 0;
     while (s < x.rows) : (s += block) {
         const at = (@as(usize, s) + first) * x.stride * 2;
-        const to = (@as(usize, s) + first) * b.target.w.head.n * 2;
-        fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, b.target.w.head, .{ .buf = output.buf, .off = output.off + to }, block - first);
+        const to = (@as(usize, s) + first) * hw.n * 2;
+        fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, hw, .{ .buf = output.buf, .off = output.off + to }, block - first);
     }
     e.barrier();
     return .{ .logits = y, .token_ids = null };
@@ -367,18 +379,21 @@ pub fn encodeTopk(b: *Backend, epoch: u64, h: op.Head, k: u32) !op.View {
     b.frame.encoder.barrier();
     return output;
 }
-/// A completed pass's lattices: a lone stream's headed rows, or each stream's block rows past its anchor.
+/// A completed pass's lattices: a lone stream's headed rows, packed active rows, or full block rows.
 pub fn readLattices(b: *Backend, h: op.Head, topk: op.View, projected: op.View, c: draft_cfg.Config, block: u32, out: []op.Lattice) !void {
     const read = @import("../qwen27/dflash/runtime_lattice.zig").read;
     if (out.len == 1 and h.logits.rows == block - 1) {
         out[0] = try read(b.allocator, &b.frame, topk, projected, c, h);
         return;
     }
-    if (h.logits.rows != out.len * block) return error.DraftOperatorShape;
+    const packed_rows = out.len > 1 and h.logits.rows == out.len * (block - 1);
+    if (!packed_rows and h.logits.rows != out.len * block) return error.DraftOperatorShape;
+    const step: u32 = if (packed_rows) block - 1 else block;
+    const skip: u32 = if (packed_rows) 0 else 1;
     var made: usize = 0;
     errdefer for (out[0..made]) |*l| l.deinit();
     for (out, 0..) |*l, k| {
-        const first: u32 = @intCast(k * block + 1); // a stream's anchor row drafts nothing
+        const first: u32 = @intCast(k * step + skip); // full-block layout skips each stream's anchor row
         const hs: op.Head = .{ .logits = try rowsOf(b, h.logits, first, block - 1), .token_ids = h.token_ids };
         l.* = try read(b.allocator, &b.frame, try rowsOf(b, topk, first, block - 1), try rowsOf(b, projected, first, block - 1), c, hs);
         made += 1;
