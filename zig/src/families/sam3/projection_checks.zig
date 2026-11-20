@@ -14,7 +14,7 @@ fn repeated(g: *gpu.Gpu, x: gpu.Tensor, w: gpu.Tensor, rows: usize, cols: usize,
 }
 
 const dense_planes = @import("dense_planes.zig");
-const Candidate = enum { half_weight, compensated, expansion_gelu, packing, plain, plain_residual, plain_window, plain_gelu, exact, exact_residual, exact_gelu };
+const Candidate = enum { half_weight, compensated, expansion_gelu, packing, plain, plain_residual, plain_tiled, plain_gelu, exact, exact_residual, exact_gelu };
 
 fn candidate(g: *gpu.Gpu, which: Candidate, x: gpu.Tensor, planes: gpu.Tensor, w: gpu.Tensor, wh: gpu.Tensor, bias: gpu.Tensor, residual: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
     return switch (which) {
@@ -24,7 +24,7 @@ fn candidate(g: *gpu.Gpu, which: Candidate, x: gpu.Tensor, planes: gpu.Tensor, w
         .packing => dense_planes.run(g, x, wh, bias, rows, cols, depth, .plain, .none),
         .plain => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .plain, .none),
         .plain_residual => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .plain, .{ .residual = residual }),
-        .plain_window => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .plain, .{ .window_residual = residual }),
+        .plain_tiled => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .plain, .{ .tile_residual = residual }),
         .plain_gelu => dense_planes.run(g, x, wh, bias, rows, cols, depth, .plain, .gelu_planes),
         .exact => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .compensated, .none),
         .exact_residual => dense_planes.run(g, planes, wh, bias, rows, cols, depth, .compensated, .{ .residual = residual }),
@@ -71,7 +71,7 @@ pub fn benchmarkPlanes(g: *gpu.Gpu) !void {
             try g.endBatch();
             var worst: f64 = 0;
             var total: f64 = 0;
-            const checked = out.dtype == .f32 and which != .plain_window and which != .expansion_gelu;
+            const checked = out.dtype == .f32 and which != .plain_tiled and which != .expansion_gelu;
             for (0..if (checked) 48 else 0) |sample| {
                 const row = (sample * 7919) % rows;
                 for (0..cols) |col| {

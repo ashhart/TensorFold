@@ -25,8 +25,8 @@ inline device atomic_uint* sam_planes_flags(device half* planes, ulong n) {
     return (device atomic_uint*)((device float*)planes + sam_planes_floats(n) + n);
 }
 
-// Spatial row of a row in nine 24x24 windows of a 72x72 grid.
-inline uint sam_planes_window_row(uint row) {
-    const uint window = row / 576, local = row % 576;
-    return (window / 3 * 24 + local / 24) * 72 + window % 3 * 24 + local % 24;
+// Grid row of a tile-ordered row: nine 24x24 tiles of a 72x72 grid, enumerated column by column.
+inline uint sam_planes_tile_row(uint row) {
+    const uint index = row / 576, local = row % 576;
+    return (index % 3 * 24 + local / 24) * 72 + index / 3 * 24 + local % 24;
 }

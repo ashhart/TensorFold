@@ -1,6 +1,7 @@
 const std = @import("std");
 const gpu = @import("tensor_metal");
 const planes = @import("dense_planes.zig");
+const abi = @import("kernel_abi.zig");
 const Tensor = gpu.Tensor;
 const Size = gpu.mtl.Size;
 
@@ -59,7 +60,7 @@ fn restored(planes_buffer: Tensor, n: usize, i: usize) f32 {
     return (high + @as(f32, halves[i + n]) * 0x1p-11) + @as(f32, halves[i + 2 * n]) * 0x1p-22;
 }
 
-// FP16-plane projections: FP64 bounds on ragged shapes, fallbacks, residual and window epilogues, GELU planes.
+// FP16-plane projections: FP64 bounds on ragged shapes, fallbacks, residual and tile epilogues, GELU planes.
 pub fn run(g: *gpu.Gpu) !void {
     const o = try Operands.init(g, 65, 129, 257, 7, true);
     defer o.deinit();
@@ -88,13 +89,18 @@ pub fn run(g: *gpu.Gpu) !void {
         };
     }
     try checkFallback(g);
-    try checkWindow(g);
+    try checkTiles(g);
     try checkGelu(g, o);
     try checkNorm(g);
-    std.debug.print("SAM planes projection: fallbacks, residual and window epilogues, GELU and normalization planes match\n", .{});
+    std.debug.print("SAM planes projection: fallbacks, residual and tile epilogues, GELU and normalization planes match\n", .{});
 }
 
-// Normalization planes hold exactly the planes of the FP32 normalization, in window order when windowed.
+fn tiles(g: *gpu.Gpu, src: Tensor, dst: Tensor, channels: u32, direction: u32) !void {
+    const params = abi.Tiles{ .channels = channels, .grid = 72, .tile = 24, .direction = direction };
+    try g.dispatch(abi.tiles, &.{ src, dst }, params, Size.of(src.count, 1, 1), Size.of(256, 1, 1));
+}
+
+// Normalization planes hold exactly the planes of the FP32 normalization, in tile order when tiled.
 fn checkNorm(g: *gpu.Gpu) !void {
     const o = try Operands.init(g, 5184, 1024, 1, 5, true);
     defer o.deinit();
@@ -103,17 +109,17 @@ fn checkNorm(g: *gpu.Gpu) !void {
     for (weight.slice(f32, 1024), 0..) |*value, i| value.* = 0.5 + @as(f32, @floatFromInt(i % 13)) / 16;
     const bias = o.residual;
     const norm = @import("normalization.zig");
-    for ([_]bool{ false, true }) |windowed| {
+    for ([_]bool{ false, true }) |tiled| {
         try g.beginBatch();
         const float = try norm.run(g, o.residual, weight, view(bias, 1024), 1024, 1e-5);
         defer float.deinit();
         const ordered = try g.allocDevice(float.count, .f32);
         defer ordered.deinit();
-        try g.dispatch("im_sam_window", &.{ float, ordered }, [3]u32{ 1024, 0, 0 }, Size.of(float.count, 1, 1), Size.of(256, 1, 1));
-        const emitted = try norm.runPlanes(g, o.residual, weight, view(bias, 1024), 1024, 1e-5, windowed);
+        try tiles(g, float, ordered, 1024, 0);
+        const emitted = try norm.runPlanes(g, o.residual, weight, view(bias, 1024), 1024, 1e-5, tiled);
         defer emitted.deinit();
         try g.endBatch();
-        const want = if (windowed) ordered else float;
+        const want = if (tiled) ordered else float;
         for (0..float.count) |i| {
             const value = want.get(i);
             const got = restored(emitted, float.count, i);
@@ -150,17 +156,19 @@ fn checkFallback(g: *gpu.Gpu) !void {
     }
 }
 
-fn checkWindow(g: *gpu.Gpu) !void {
+fn checkTiles(g: *gpu.Gpu) !void {
     const o = try Operands.init(g, 5184, 64, 64, 11, true);
     defer o.deinit();
     const plain = try project(g, o, .plain, .none);
     defer plain.deinit();
-    const out = try project(g, o, .plain, .{ .window_residual = o.residual });
+    const out = try project(g, o, .plain, .{ .tile_residual = o.residual });
     defer out.deinit();
     const expected = try g.allocDevice(plain.count, .f32);
     defer expected.deinit();
-    try g.dispatch("im_sam_window", &.{ plain, expected }, [3]u32{ 64, 1, 0 }, Size.of(plain.count, 1, 1), Size.of(256, 1, 1));
-    for (0..out.count) |i| if (out.get(i) != o.residual.get(i) + expected.get(i)) return error.SamPlanesWindow;
+    try g.beginBatch();
+    try tiles(g, plain, expected, 64, 1);
+    try g.endBatch();
+    for (0..out.count) |i| if (out.get(i) != o.residual.get(i) + expected.get(i)) return error.SamPlanesTiles;
 }
 
 fn checkGelu(g: *gpu.Gpu, o: Operands) !void {

@@ -257,7 +257,7 @@ pub const Suite = struct {
             const gemm = if (compensated) (if (residual) "sam_dense_planes_compensated_residual" else "sam_dense_planes_compensated") else if (residual) "sam_dense_planes_residual" else "sam_dense_planes";
             probe.pipes[8] = try rig_.pipeline(device, source, gemm);
             probe.pack = try rig_.pipeline(device, source, "sam_dense_planes_pack");
-            probe.copy = try rig_.pipeline(device, source, "im_sam_copy");
+            probe.copy = try rig_.pipeline(device, source, "sam3_copy");
             try kernels.append(self.a, probe.contractKernel());
         }
     }

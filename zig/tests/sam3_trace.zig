@@ -36,26 +36,26 @@ pub const Trace = struct {
         var runtime = session.model.runtime(a);
         defer runtime.deinit();
         var context = Context{ .a = a, .entries = &tensors };
-        const prepared = try sam.model.prepareImage(&runtime, image);
+        const prepared = try sam.image_tower.prepare(&runtime, image);
         try feature(a, &tensors, "preprocessed_nhwc", prepared);
         if (self.layers) runtime.observer = .{ .context = &context, .write = record };
-        const trunk = try sam.model.encodeTrunk(&runtime, image);
+        const trunk = try sam.image_tower.encodeImage(&runtime, image);
         try feature(a, &tensors, "trunk.0", trunk);
-        for (session.features.?, 0..) |value, i| try feature(a, &tensors, try std.fmt.allocPrint(a, "pyramid.propagation.{d}", .{i}), value);
-        if (session.interactive) |levels| for (levels, 0..) |value, i|
+        for (session.tracking_levels.?, 0..) |value, i| try feature(a, &tensors, try std.fmt.allocPrint(a, "pyramid.propagation.{d}", .{i}), value);
+        if (session.prompt_levels) |levels| for (levels, 0..) |value, i|
             try feature(a, &tensors, try std.fmt.allocPrint(a, "pyramid.interactive.{d}", .{i}), value);
-        for (session.buckets, 0..) |bucket, b| {
-            const result = bucket.last orelse continue;
-            const prefix = try std.fmt.allocPrint(a, "bucket.{d}.result", .{b});
-            try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.pred_masks", .{prefix}), result.masks);
-            if (result.input_masks) |value| try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.input_masks", .{prefix}), value);
-            try tensor(a, &tensors, try std.fmt.allocPrint(a, "{s}.obj_ptr", .{prefix}), result.pointer, &.{ result.count, 256 });
-            try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.object_score_logits", .{prefix}), result.scores[0..result.count]);
-            try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.ious", .{prefix}), result.ious[0..result.count]);
-            if (bucket.history.items.len != 0) {
-                const memory = bucket.history.items[bucket.history.items.len - 1];
-                if (memory.index != index) return error.UnexpectedMemoryFrame;
-                try tensor(a, &tensors, try std.fmt.allocPrint(a, "{s}.maskmem_features", .{prefix}), memory.encoded, &.{ 1, 72, 72, session.model.config.memory_width });
+        for (session.groups, 0..) |group, b| {
+            const result = group.latest orelse continue;
+            const prefix = try std.fmt.allocPrint(a, "group.{d}", .{b});
+            try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.mask_logits", .{prefix}), result.mask_logits);
+            if (result.full_logits) |value| try feature(a, &tensors, try std.fmt.allocPrint(a, "{s}.full_logits", .{prefix}), value);
+            try tensor(a, &tensors, try std.fmt.allocPrint(a, "{s}.pointers", .{prefix}), result.pointers, &.{ result.slots, 256 });
+            try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.presence_logits", .{prefix}), result.presence[0..result.slots]);
+            try host(a, &tensors, try std.fmt.allocPrint(a, "{s}.quality", .{prefix}), result.quality[0..result.slots]);
+            if (group.bank.entries.items.len != 0) {
+                const memory = group.bank.entries.items[group.bank.entries.items.len - 1];
+                if (memory.frame != index) return error.UnexpectedMemoryFrame;
+                try tensor(a, &tensors, try std.fmt.allocPrint(a, "{s}.memory", .{prefix}), memory.encoding, &.{ 1, 72, 72, session.model.config.memory_width });
             }
         }
         const bytes = try fixture.image(a, tensors.items);

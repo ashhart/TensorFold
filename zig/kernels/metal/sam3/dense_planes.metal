@@ -55,13 +55,13 @@ void sam_dense_planes_restore(device half* planes, constant SamDenseShape& shape
     ((device float*)planes)[sam_planes_floats(n) + at] = (high + ldexp(float(planes[at + n]), -11)) + ldexp(float(planes[at + 2 * n]), -22);
 }
 
-// Adds the residual to a fallback projection, at the unwindowed row when windowed is set.
+// Adds the residual to a fallback projection, at the grid row of a tile-ordered row when tiled is set.
 [[kernel, max_total_threads_per_threadgroup(128)]]
 void sam_dense_planes_finish(const device float* projected, device float* output, const device float* residual,
-    constant SamDenseShape& shape, constant uint& windowed, uint at [[thread_position_in_grid]]) {
+    constant SamDenseShape& shape, constant uint& tiled, uint at [[thread_position_in_grid]]) {
     if (at >= ulong(shape.rows) * shape.columns) return;
     const uint r = uint(at / shape.columns), c = uint(at % shape.columns);
-    const ulong target = ulong(windowed ? sam_planes_window_row(r) : r) * shape.columns + c;
+    const ulong target = ulong(tiled ? sam_planes_tile_row(r) : r) * shape.columns + c;
     output[target] = residual[target] + projected[at];
 }
 
@@ -74,7 +74,7 @@ void sam_dense_planes_gelu(const device float* x, device half* planes, constant 
 }
 
 // KC 0 accumulates each plane over the whole depth; otherwise the high plane is compensated per KC-deep chunk.
-// EPI 0: FP32 output; 2: residual added; 3: residual added at the unwindowed row.
+// EPI 0: FP32 output; 2: residual added; 3: residual added at the grid row of a tile-ordered row.
 template<ushort M, ushort N, ushort SG, ushort KC, ushort EPI>
 inline void sam_dense_planes_impl(const device half* planes, const device half* weight, const device float* bias,
     device float* output, constant SamDenseShape& shape, const device uint* plan, const device float* residual, uint2 group) {
@@ -127,7 +127,7 @@ inline void sam_dense_planes_impl(const device half* planes, const device half* 
         if (r < shape.rows && c < shape.columns) {
             sam_pair_add(sums[e], bias[c]);
             const float value = sums[e].x + sums[e].y;
-            const ulong target = ulong(EPI == 3 ? sam_planes_window_row(r) : r) * shape.columns + c;
+            const ulong target = ulong(EPI == 3 ? sam_planes_tile_row(r) : r) * shape.columns + c;
             if constexpr (EPI >= 2) output[target] = residual[target] + value;
             else output[target] = value;
         }
@@ -145,6 +145,6 @@ void NAME(const device half* planes, const device half* weight, const device flo
 // 64-deep chunks keep the trunk FC1 within PyTorch's per-column FP64 error; the FC2 residual kernel needs only 128.
 SAM_DENSE_PLANES(sam_dense_planes, 0, 0)
 SAM_DENSE_PLANES(sam_dense_planes_residual, 0, 2)
-SAM_DENSE_PLANES(sam_dense_planes_window, 0, 3)
+SAM_DENSE_PLANES(sam_dense_planes_tiled, 0, 3)
 SAM_DENSE_PLANES(sam_dense_planes_compensated, 64, 0)
 SAM_DENSE_PLANES(sam_dense_planes_compensated_residual, 128, 2)

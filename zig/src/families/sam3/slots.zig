@@ -1,5 +1,5 @@
 const std = @import("std");
-const Config = @import("config.zig").Config;
+const Config = @import("variant.zig").Config;
 
 pub const ObjectId = u64;
 pub const Slot = struct { bucket: usize, slot: usize, epoch: u64 };
@@ -64,7 +64,7 @@ pub const Slots = struct {
     }
 };
 
-test "SAM multiplex assigns stable IDs across buckets and invalidates removed-slot memory" {
+test "SAM grouped slots assign stable IDs across buckets and invalidates removed-slot memory" {
     var slots = try Slots.init(std.testing.allocator, Config.of(.sam31), 17);
     defer slots.deinit();
     for (0..17) |id| {

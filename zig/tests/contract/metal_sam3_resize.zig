@@ -9,20 +9,12 @@ const vt = g.hooks(Probe);
 const nonfinite_control_name = "control: sam3 resize lerp exceptional inputs";
 
 pub fn text(a: std.mem.Allocator, control: bool) ![]u8 {
-    const first = std.mem.indexOf(u8, sources.sam3_source, "[[kernel, max_total_threads_per_threadgroup(256)]]\nvoid im_sam_resize").?;
-    const end = std.mem.indexOfPos(u8, sources.sam3_source, first, "kernel void im_sam_group_norm").?;
-    const raw = try std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\n", sources.sam3_source[first..end] });
-    if (!control) return raw;
-    defer a.free(raw);
-    return std.mem.replaceOwned(u8, a, raw, "if(p.w==0)", "if(p.w==1)");
+    if (!control) return a.dupe(u8, sources.sam3_resample);
+    return std.mem.concat(a, u8, &.{ "#define SAM3_RESAMPLE_NEAREST_MODE 1u\n", sources.sam3_resample });
 }
 
 pub fn nonfiniteText(a: std.mem.Allocator) ![]u8 {
-    const raw = try text(a, false);
-    defer a.free(raw);
-    const from = "if(any((as_type<uint4>(samples)&0x7fffffffu)>=0x7e800000u))";
-    if (std.mem.count(u8, raw, from) != 1) return error.ControlTextNotFound;
-    return std.mem.replaceOwned(u8, a, raw, from, "if(false)");
+    return std.mem.concat(a, u8, &.{ "#define SAM3_RESAMPLE_EXCEPTIONAL(s) false\n", sources.sam3_resample });
 }
 
 fn depth(_: c.Shape) usize {
@@ -187,7 +179,7 @@ pub const Suite = struct {
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
             const source = if (i == 4) try nonfiniteText(s.a) else try text(s.a, i == 3);
             defer s.a.free(source);
-            entry.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, "im_sam_resize"), .mode = mode, .control = i >= 3, .nonfinite_control = i == 4 };
+            entry.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, "sam3_resample"), .mode = mode, .control = i >= 3, .nonfinite_control = i == 4 };
             if (entry.*) |*probe| try kernels.append(s.a, .{ .spec = probe.spec(), .ctx = probe, .vt = &vt, .control = if (i == 4) .nonfinite else if (i == 3) .shapes else null });
         }
     }

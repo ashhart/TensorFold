@@ -247,8 +247,8 @@ pub const Suite = struct {
             probe.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = pipe, .baseline = baseline, .control = i == 2, .unaligned = i == 1, .matrix = matrix };
             if (matrix) {
                 for (sources.sam3_dense_device.names, &probe.matrix_passes) |symbol, *slot| slot.* = try mtl.Pipeline.init(device, lib, symbol, false);
-                probe.weight_pass = try mtl.Pipeline.init(device, lib, "im_sam_deconv_weight", false);
-                probe.shuffle_pass = try mtl.Pipeline.init(device, lib, "im_sam_deconv_shuffle", false);
+                probe.weight_pass = try mtl.Pipeline.init(device, lib, "sam3_deconv_pack", false);
+                probe.shuffle_pass = try mtl.Pipeline.init(device, lib, "sam3_deconv_scatter", false);
             }
             self.probes[i] = probe;
             kernels.appendAssumeCapacity(probe.kernel());

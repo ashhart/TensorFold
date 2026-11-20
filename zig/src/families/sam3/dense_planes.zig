@@ -3,7 +3,7 @@ const gpu = @import("tensor_metal");
 const kernel = @import("sam3_kernels").dense_planes;
 
 pub const Accumulation = enum { plain, compensated };
-pub const Epilogue = union(enum) { none, gelu_planes, residual: gpu.Tensor, window_residual: gpu.Tensor };
+pub const Epilogue = union(enum) { none, gelu_planes, residual: gpu.Tensor, tile_residual: gpu.Tensor };
 
 pub fn planesCount(n: usize) usize {
     return kernel.planesCount(n);
@@ -30,7 +30,7 @@ pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, ou
     const outputs = try std.math.mul(usize, rows, cols);
     const packing = x.dtype == .f32;
     const residual: ?gpu.Tensor = switch (epilogue) {
-        .residual, .window_residual => |t| t,
+        .residual, .tile_residual => |t| t,
         else => null,
     };
     if (rows == 0 or cols == 0 or depth == 0 or depth > 4736 or cols > 4736 or
@@ -38,7 +38,7 @@ pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, ou
         weight.dtype != .f16 or weight.count != try std.math.mul(usize, cols, depth) or bias.dtype != .f32 or bias.count != cols or
         output.dtype != (if (epilogue == .gelu_planes) gpu.DType.f16 else gpu.DType.f32) or
         output.count != (if (epilogue == .gelu_planes) planesCount(outputs) else outputs) or
-        (epilogue == .window_residual and (rows != 5184 or accumulation != .plain)) or
+        (epilogue == .tile_residual and (rows != 5184 or accumulation != .plain)) or
         (residual != null and (residual.?.dtype != .f32 or residual.?.count != outputs))) return error.SamPlanesProjectionShape;
     const planes = if (packing) try g.allocDevice(planesCount(n), .f16) else x;
     defer if (packing) planes.deinit();
@@ -58,11 +58,11 @@ pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, ou
         .none => .none,
         .gelu_planes => .gelu_planes,
         .residual => .residual,
-        .window_residual => .window_residual,
+        .tile_residual => .tile_residual,
     };
-    const residual_name = code == .residual or code == .window_residual;
+    const residual_name = code == .residual or code == .tile_residual;
     pipes[8] = try g.pipeline(switch (accumulation) {
-        .plain => if (code == .window_residual) "sam_dense_planes_window" else if (residual_name) "sam_dense_planes_residual" else "sam_dense_planes",
+        .plain => if (code == .tile_residual) "sam_dense_planes_tiled" else if (residual_name) "sam_dense_planes_residual" else "sam_dense_planes",
         .compensated => if (residual_name) "sam_dense_planes_compensated_residual" else "sam_dense_planes_compensated",
     });
     const pass = g.command();

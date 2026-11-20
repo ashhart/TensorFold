@@ -13,13 +13,13 @@ inline float2 sam_norm_sum(float2 value) {
     return value;
 }
 
-// PLANES writes the planes buffer of a dense_planes projection, windowed rows reading their unwindowed source row.
+// PLANES writes the planes buffer of a dense_planes projection; tiled rows read the grid row of their tile row.
 template<bool PLANES>
 inline void sam_norm_compensated_impl(const device float* x, const device float* weight, const device float* bias,
-    device float* out, constant uint2& shape, constant float& eps, bool windowed, uint group, uint sg, uint lane) {
+    device float* out, constant uint2& shape, constant float& eps, bool tiled, uint group, uint sg, uint lane) {
     const uint row = group * 4 + sg, width = shape.y;
     if (row >= shape.x) return;
-    const ulong target = ulong(row) * width, base = PLANES && windowed ? ulong(sam_planes_window_row(row)) * width : target;
+    const ulong target = ulong(row) * width, base = PLANES && tiled ? ulong(sam_planes_tile_row(row)) * width : target;
     uint invalid = 0;
     float2 sum(0);
     for (uint col = lane; col < width; col += 32) sam_pair_add(sum, x[base + col]);
@@ -69,10 +69,10 @@ void sam_norm_compensated(const device float* x, const device float* weight, con
 
 [[kernel, max_total_threads_per_threadgroup(128)]]
 void sam_norm_compensated_planes(const device float* x, const device float* weight, const device float* bias,
-    device float* out, constant uint2& shape, constant float& eps, constant uint& windowed,
+    device float* out, constant uint2& shape, constant float& eps, constant uint& tiled,
     uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-    sam_norm_compensated_impl<true>(x, weight, bias, out, shape, eps, windowed != 0, group, sg, lane);
+    sam_norm_compensated_impl<true>(x, weight, bias, out, shape, eps, tiled != 0, group, sg, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(128)]]

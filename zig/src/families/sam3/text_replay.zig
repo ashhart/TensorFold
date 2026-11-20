@@ -1,6 +1,7 @@
 const std = @import("std");
 const st = @import("safetensors");
-const ops = @import("ops.zig");
+const sam_runtime = @import("runtime.zig");
+const text_tower = @import("text_tower.zig");
 const Store = @import("checkpoint.zig").Store;
 
 const Stage = struct {
@@ -25,7 +26,7 @@ const Capture = struct {
     reference: *st.File,
     stages: std.ArrayList(Stage) = .empty,
 
-    fn observe(context: *anyopaque, name: []const u8, tensor: ops.Tensor, shape: []const usize) !void {
+    fn observe(context: *anyopaque, name: []const u8, tensor: sam_runtime.Tensor, shape: []const usize) !void {
         const self: *Capture = @ptrCast(@alignCast(context));
         const a = self.allocator;
         const fp32 = self.reference.get(try std.fmt.allocPrint(a, "fp32.{s}", .{name})) orelse return error.MissingTextReference;
@@ -94,16 +95,16 @@ pub fn run(init: std.process.Init, g: *@import("tensor_metal").Gpu, args: []cons
         id.* = std.math.cast(u32, value) orelse return error.SamTokenOutOfRange;
     }
     var capture = Capture{ .allocator = a, .reference = &reference };
-    var runtime = ops.Runtime{
-        .g = g,
+    var runtime = sam_runtime.Runtime{
+        .gpu = g,
         .store = &store,
-        .a = a,
+        .scratch = a,
         .config = try store.config(),
-        .precision = .fp32,
+        .routes = .{ .precision = .fp32 },
         .observer = .{ .context = &capture, .write = Capture.observe },
     };
     defer runtime.deinit();
-    _ = try @import("text_encoder.zig").encodeWithMlp(&runtime, ids, compensated);
+    _ = try text_tower.encode(&runtime, ids, if (compensated) .compensated else .plain);
     var passed = capture.stages.items.len == 33;
     for (capture.stages.items) |stage| passed = passed and stage.worse_columns == 0 and stage.native_mean <= stage.reference_mean;
     var digest: [32]u8 = undefined;

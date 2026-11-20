@@ -12,7 +12,7 @@ pub fn restoreOffset(n: usize) usize {
     return 4 * ((3 * n + 1) / 2);
 }
 
-pub const Epilogue = enum(u32) { none, gelu_planes, residual, window_residual };
+pub const Epilogue = enum(u32) { none, gelu_planes, residual, tile_residual };
 
 // pipes: names in order, then the projection; refs: input, weight, bias, output, planes, plan, residual, projected.
 // The projection writes refs[7] for gelu_planes and refs[3] otherwise; the fallback always writes refs[7].
@@ -78,11 +78,11 @@ pub fn encode(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [9]mtl.Pipeline,
             e.dispatchThreads(mtl.Size.of(@min(rows * cols, 1 << 20), 1, 1), mtl.Size.of(128, 1, 1));
             e.barrier();
         },
-        .residual, .window_residual => {
+        .residual, .tile_residual => {
             e.setPipeline(pipes[6]);
             bind.buffers(e, refs, .{ 7, 3, 6 });
             e.setValue(shape, 3);
-            e.setValue(@as(u32, @intFromBool(epilogue == .window_residual)), 4);
+            e.setValue(@as(u32, @intFromBool(epilogue == .tile_residual)), 4);
             e.dispatchIndirect(refs[5].buffer, refs[5].offset + 40, mtl.Size.of(128, 1, 1));
             e.barrier();
         },

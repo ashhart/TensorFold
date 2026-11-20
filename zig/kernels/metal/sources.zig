@@ -3,7 +3,9 @@
 pub const sam3_contract = @embedFile("sam3/contract.metal");
 pub const sam3_dense_small = @embedFile("sam3/dense_small.metal");
 pub const sam3_dense_small_baseline = @embedFile("sam3/dense_small_baseline.metal");
-const sam3_common_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal");
+const sam3_common_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/layout.metal") ++ @embedFile("sam3/resample.metal") ++ @embedFile("sam3/convolution.metal") ++ @embedFile("sam3/rotary.metal") ++ @embedFile("sam3/trunk_tiles.metal") ++ @embedFile("sam3/flash.metal") ++ @embedFile("sam3/masks.metal") ++ @embedFile("sam3/rows_attention.metal");
+pub const sam3_resample = @embedFile("sam3/resample.metal");
+pub const sam3_masks = @embedFile("sam3/masks.metal");
 pub const sam3_attention_split = @import("sam3/attention_split.zig");
 pub const sam3_dense_device = @import("sam3/dense_device.zig");
 pub const sam3_dense_expansion = @import("sam3/dense_expansion.zig");

@@ -5,10 +5,10 @@ pub fn run(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, wid
     return encode(g, x, weight, bias, width, eps, null);
 }
 
-// Normalizes into the planes buffer of a dense_planes projection; windowed puts rows in the nine-window order.
-pub fn runPlanes(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32, windowed: bool) !gpu.Tensor {
-    if (windowed and x.count != 5184 * width) return error.SamNormalizationShape;
-    return encode(g, x, weight, bias, width, eps, windowed);
+// Normalizes into the planes buffer of a dense_planes projection; tiled puts rows in the trunk's tile order.
+pub fn runPlanes(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32, tiled: bool) !gpu.Tensor {
+    if (tiled and x.count != 5184 * width) return error.SamNormalizationShape;
+    return encode(g, x, weight, bias, width, eps, tiled);
 }
 
 fn encode(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32, planes: ?bool) !gpu.Tensor {
@@ -35,7 +35,7 @@ fn encode(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, widt
     for ([_]gpu.Tensor{ x, weight, bias, out }, 0..) |value, i| pass.enc.setBuffer(value.buffer, value.offset, i);
     pass.enc.setValue([2]u32{ rows, @intCast(width) }, 4);
     pass.enc.setValue(eps, 5);
-    if (planes) |windowed| pass.enc.setValue(@as(u32, @intFromBool(windowed)), 6);
+    if (planes) |tiled| pass.enc.setValue(@as(u32, @intFromBool(tiled)), 6);
     pass.enc.dispatchGroups(gpu.mtl.Size.of((@as(usize, rows) + 3) / 4, 1, 1), gpu.mtl.Size.of(128, 1, 1));
     try g.finish(pass.cb, pass.enc);
     return out;

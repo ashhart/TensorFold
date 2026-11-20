@@ -37,7 +37,7 @@ pub const Probe = struct {
     pub fn run(self: Probe, g: *gpu.Gpu, bias: gpu.Tensor) !gpu.Tensor {
         const output = try g.allocDevice(576 * 576 * 16, .f32);
         errdefer output.deinit();
-        try g.dispatch("im_sam_mask_downsample", &.{ self.input, self.weight, bias, output }, self.conditioning, gpu.mtl.Size.of(output.count, 1, 1), gpu.mtl.Size.of(256, 1, 1));
+        try g.dispatch("sam3_mask_first_conv", &.{ self.input, self.weight, bias, output }, self.conditioning, gpu.mtl.Size.of(output.count, 1, 1), gpu.mtl.Size.of(256, 1, 1));
         return output;
     }
 };

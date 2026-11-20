@@ -8,13 +8,8 @@ const g = contract.gates;
 const vt = g.hooks(Probe);
 
 pub fn text(a: std.mem.Allocator, control: bool) ![]u8 {
-    const first = std.mem.indexOf(u8, sources.sam3_source, "[[kernel, max_total_threads_per_threadgroup(256)]]\nvoid im_sam_mask_downsample").?;
-    const end = std.mem.indexOfPos(u8, sources.sam3_source, first, "// NHWC activations").?;
-    const raw = try std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\n", sources.sam3_source[first..end] });
-    if (!control) return raw;
-    defer a.free(raw);
-    if (std.mem.count(u8, raw, "if(conditioning)") != 1) return error.ControlTextNotFound;
-    return std.mem.replaceOwned(u8, a, raw, "if(conditioning)", "if(false)");
+    if (!control) return a.dupe(u8, sources.sam3_masks);
+    return std.mem.concat(a, u8, &.{ "#define SAM3_FIRST_CONV_PROMPTED(flag) false\n", sources.sam3_masks });
 }
 
 fn depth(_: c.Shape) usize {
@@ -149,7 +144,7 @@ pub const Suite = struct {
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
             const source = try text(s.a, i == 2);
             defer s.a.free(source);
-            entry.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, "im_sam_mask_downsample"), .conditioning = i != 0, .control = i == 2 };
+            entry.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, "sam3_mask_first_conv"), .conditioning = i != 0, .control = i == 2 };
             if (entry.*) |*probe| try kernels.append(s.a, .{ .spec = probe.spec(), .ctx = probe, .vt = &vt, .control = if (i == 2) .shapes else null });
         }
     }

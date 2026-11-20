@@ -136,7 +136,7 @@ pub const Suite = struct {
             if (i == 2) {
                 const full = try sources.tensor_library.source(self.a, sources.sam3_source);
                 defer self.a.free(full);
-                entry.*.?.planes = .{ try rig_.pipeline(device, source, "sam_norm_planes_clear"), try rig_.pipeline(device, full, "sam_dense_planes_restore"), try rig_.pipeline(device, full, "im_sam_copy") };
+                entry.*.?.planes = .{ try rig_.pipeline(device, source, "sam_norm_planes_clear"), try rig_.pipeline(device, full, "sam_dense_planes_restore"), try rig_.pipeline(device, full, "sam3_copy") };
             }
             if (entry.*) |*probe| try kernels.append(self.a, probe.kernel());
         }

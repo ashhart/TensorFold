@@ -4,10 +4,10 @@ const gpu = @import("tensor_metal");
 const ops = gpu.ops;
 const Tensor = gpu.Tensor;
 const Size = gpu.mtl.Size;
-const Runtime = @import("ops.zig");
-const Rope = Runtime.Rope;
-const Conv = Runtime.Conv;
-const flash = Runtime.flash;
+const abi = @import("kernel_abi.zig");
+const flash = @import("attention.zig").flash;
+const gridRow = @import("spatial.zig").gridRow;
+const operator_checks = @import("operator_checks.zig");
 
 fn checkGeluTails(g: *gpu.Gpu) !void {
     const values = [_]f32{ -8, -7, -6.5, -6, -5.5, -5.25, -5, -4.5, -4, -3, -2, -1, -0.5 };
@@ -163,7 +163,8 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
         defer active.deinit();
         try g.beginBatch();
         errdefer if (g.batch != null) g.endBatch() catch {};
-        for ([_]Tensor{ out, active }, 0..) |dst, activation| try g.dispatch(if (activation == 0) "im_sam_vision_linear" else "im_sam_vision_gelu", &.{ x, w, bias, dst }, [4]u32{ 64, 128, @intCast(depth), @intCast(activation) }, Size.of(32, 4, 2), Size.of(32, 4, 2));
+        const tile = abi.TileProject{ .rows = 64, .cols = 128, .depth = @intCast(depth), .scatter = 0, .grid = 72, .tile = 24 };
+        for ([_]Tensor{ out, active }, 0..) |dst, activation| try g.dispatch(if (activation == 0) abi.tile_project else abi.tile_project_gelu, &.{ x, w, bias, dst }, tile, Size.of(32, 4, 2), Size.of(32, 4, 2));
         try g.endBatch();
         const expected_active = try ops.gelu(&g, out, true);
         defer expected_active.deinit();
@@ -204,51 +205,12 @@ pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     for (actual.slice(f32, actual.count), expected.slice(f32, expected.count)) |x, y| maximum = @max(maximum, @abs(x - y));
     std.debug.print("SAM 32-wide attention: maximum padded-reference error {e}\n", .{maximum});
     if (maximum > 1e-5) return error.SamAttentionParity;
-    const table = try g.allocDevice(72 * 72 * 32, .f32);
-    defer table.deinit();
-    const rotated = try g.allocDevice(q.count, .f32);
-    defer rotated.deinit();
-    const original = try g.allocDevice(q.count, .f32);
-    defer original.deinit();
-    const rope_ = Rope{ .rows = 65, .heads = 2, .dim = 32, .spatial = 64, .side = 72, .scale = 1 };
-    try g.dispatch("im_sam_rope_table", &.{table}, rope_, Size.of(table.count / 2, 1, 1), Size.of(256, 1, 1));
-    try g.dispatch("im_sam_rope", &.{ q, original }, rope_, Size.of(q.count, 1, 1), Size.of(256, 1, 1));
-    try g.dispatch("im_sam_rope_cached", &.{ q, table, rotated }, rope_, Size.of(q.count, 1, 1), Size.of(256, 1, 1));
-    if (!std.mem.eql(u8, original.slice(u8, q.count * 4), rotated.slice(u8, q.count * 4))) return error.SamRotaryParity;
-    const input = try g.alloc(3 * 5 * 32, .f32);
-    defer input.deinit();
-    const raw = try g.alloc(32 * 16 * 4, .f32);
-    defer raw.deinit();
-    const bias = try g.alloc(16, .f32);
-    defer bias.deinit();
-    for (input.slice(f32, input.count), 0..) |*value, i| value.* = @sin(@as(f32, @floatFromInt(i)) * 0.03);
-    for (raw.slice(f32, raw.count), 0..) |*value, i| value.* = @cos(@as(f32, @floatFromInt(i)) * 0.07) * 0.03;
-    for (bias.slice(f32, bias.count), 0..) |*value, i| value.* = @as(f32, @floatFromInt(i)) / 256;
-    const matrix = try g.allocDevice(raw.count, .f32);
-    defer matrix.deinit();
-    const product = try g.allocDevice(6 * 10 * 16, .f32);
-    defer product.deinit();
-    const shuffled = try g.allocDevice(product.count, .f32);
-    defer shuffled.deinit();
-    const reference = try g.allocDevice(product.count, .f32);
-    defer reference.deinit();
-    const conv_ = Conv{ .h = 3, .w = 5, .c = 32, .n = 16, .k = 2, .oh = 6, .ow = 10, .stride = 2, .pad = 0, .first = 0, .rows = 0 };
-    try g.beginBatch();
-    errdefer if (g.batch != null) g.endBatch() catch {};
-    try g.dispatch("im_sam_deconv_weight", &.{ raw, matrix }, [3]u32{ 16, 32, 4 }, Size.of(raw.count, 1, 1), Size.of(256, 1, 1));
-    try g.matmulInto(input, matrix, product, 15, 64, 32);
-    try g.dispatch("im_sam_deconv_shuffle", &.{ product, bias, shuffled }, conv_, Size.of(shuffled.count, 1, 1), Size.of(256, 1, 1));
-    try g.dispatch("im_sam_deconv", &.{ input, raw, bias, reference }, conv_, Size.of(reference.count / 4, 1, 1), Size.of(256, 1, 1));
-    try g.endBatch();
-    maximum = 0;
-    for (shuffled.slice(f32, shuffled.count), reference.slice(f32, reference.count)) |x, y| maximum = @max(maximum, @abs(x - y));
-    std.debug.print("SAM cached rotary is byte-identical; transposed convolution maximum error {e}\n", .{maximum});
-    if (maximum > 1e-4) return error.SamDeconvolutionParity;
     try checkFlash(&g);
     try @import("attention_replay.zig").checkUniform(&g);
-    try checkSparseMask(&g);
-    try checkVisionResidual(&g);
-    try checkMemoryMasks(&g);
+    try checkTileResidual(&g);
+    try checkTileNorm(&g);
+    try checkRowsAttention(&g);
+    try operator_checks.run(&g);
 }
 
 fn checkExactWeightProducts(g: *gpu.Gpu) !void {
@@ -271,47 +233,7 @@ fn checkExactWeightProducts(g: *gpu.Gpu) !void {
     }
 }
 
-fn checkMemoryMasks(g: *gpu.Gpu) !void {
-    const Params = @import("memory.zig").MaskParams;
-    for ([_]usize{ 1, 32 }) |channels| {
-        const input_channels: usize = if (channels == 1) 1 else 16;
-        const x = try g.alloc(7 * input_channels, .f32);
-        defer x.deinit();
-        const out = try g.allocDevice(7 * channels, .f32);
-        defer out.deinit();
-        for (x.slice(f32, x.count), 0..) |*value, i|
-            value.* = (@as(f32, @floatFromInt(i % 29)) - 14) / 3;
-        for ([_]u16{ 1, 0x8002, 0xffff }) |active| for (0..2) |hard| {
-            if (channels == 1 and active != 1) continue;
-            const scale: f32 = if (channels == 1) 20 else 2;
-            const bias: f32 = if (channels == 1) -10 else -1;
-            try g.dispatch("im_sam_memory_masks", &.{ x, out }, Params{
-                .pixels = 7,
-                .channels = @intCast(channels),
-                .active = active,
-                .conditioning = active & 0x8001,
-                .hard = @intCast(hard),
-                .scale = scale,
-                .bias = bias,
-            }, Size.of(out.count, 1, 1), Size.of(256, 1, 1));
-            for (0..out.count) |i| {
-                const c = i % channels;
-                const slot = c % 16;
-                const bit = @as(u16, 1) << @intCast(slot);
-                const value: f64 = x.get(i / channels * input_channels + slot);
-                const probability: f64 = if (hard != 0) @floatFromInt(@intFromBool(value > 0)) else 1 / (1 + @exp(-value));
-                const expected: f64 = if (active & bit == 0) 0 else if (c >= 16)
-                    @floatFromInt(@intFromBool(active & 0x8001 & bit != 0))
-                else
-                    probability * scale + bias;
-                if (@abs(expected - out.get(i)) > 4e-6) return error.SamMemoryMaskParity;
-            }
-        };
-    }
-    std.debug.print("SAM memory masks: every slot, inactive channels, conditioning and hard masks match float64\n", .{});
-}
-
-fn checkVisionResidual(g: *gpu.Gpu) !void {
+fn checkTileResidual(g: *gpu.Gpu) !void {
     const rows = 5184;
     const cols = 128;
     const depth = 32;
@@ -331,20 +253,124 @@ fn checkVisionResidual(g: *gpu.Gpu) !void {
     defer projected.deinit();
     const actual = try g.allocDevice(residual.count, .f32);
     defer actual.deinit();
-    try g.dispatch("im_sam_vision_linear", &.{ x, w, bias, projected }, [4]u32{ rows, cols, depth, 0 }, Size.of(rows / 64 * 32, 4, 2), Size.of(32, 4, 2));
-    for (0..2) |windowed| {
-        try g.dispatch("im_sam_vision_residual", &.{ x, w, bias, actual, residual }, [4]u32{ rows, cols, depth, @intCast(windowed) }, Size.of(rows / 64 * 32, 4, 2), Size.of(32, 4, 2));
+    const plain = abi.TileProject{ .rows = rows, .cols = cols, .depth = depth, .scatter = 0, .grid = 72, .tile = 24 };
+    try g.dispatch(abi.tile_project, &.{ x, w, bias, projected }, plain, Size.of(rows / 64 * 32, cols / 128 * 4, 2), Size.of(32, 4, 2));
+    for (0..2) |scatter| {
+        var tiled = plain;
+        tiled.scatter = @intCast(scatter);
+        try g.dispatch(abi.tile_project_residual, &.{ x, w, bias, actual, residual }, tiled, Size.of(rows / 64 * 32, cols / 128 * 4, 2), Size.of(32, 4, 2));
         for (0..rows) |row| {
-            const win = row / 576;
-            const local = row % 576;
-            const dest = if (windowed == 1) (win / 3 * 24 + local / 24) * 72 + win % 3 * 24 + local % 24 else row;
+            const dest = if (scatter == 1) gridRow(72, 24, row) else row;
             for (0..cols) |col| {
                 const expected = residual.get(dest * cols + col) + projected.get(row * cols + col);
                 if (actual.get(dest * cols + col) != expected) return error.SamResidualParity;
             }
         }
     }
-    std.debug.print("SAM fused residual and all nine window tiles are byte-identical\n", .{});
+    std.debug.print("SAM fused residual and all nine tiles are byte-identical\n", .{});
+}
+
+fn fp16Ulp(value: f64) f64 {
+    const magnitude = @abs(value);
+    if (magnitude < 0x1p-14) return 0x1p-24;
+    return std.math.pow(f64, 2, @floor(@log2(magnitude)) - 10);
+}
+
+fn checkTileNorm(g: *gpu.Gpu) !void {
+    const rows = 5184;
+    const width = 96;
+    const x = try g.alloc(rows * width, .f32);
+    defer x.deinit();
+    const weight = try g.alloc(width, .f32);
+    defer weight.deinit();
+    const bias = try g.alloc(width, .f32);
+    defer bias.deinit();
+    for (x.slice(f32, x.count), 0..) |*value, i| value.* = @sin(@as(f32, @floatFromInt(i)) * 0.011) * 2 + 0.25;
+    for (weight.slice(f32, width), bias.slice(f32, width), 0..) |*scale, *shift, i| {
+        scale.* = @cos(@as(f32, @floatFromInt(i)) * 0.3);
+        shift.* = @sin(@as(f32, @floatFromInt(i)) * 0.7) * 0.5;
+    }
+    const out = try g.allocDevice(rows * width, .f16);
+    defer out.deinit();
+    const core = try ops.norm(g, x, weight, bias, width, false, 1e-5);
+    defer core.deinit();
+    var worst: f64 = 0;
+    for (0..2) |gather| {
+        const params = abi.TileNorm{ .width = width, .gather = @intCast(gather), .grid = 72, .tile = 24, .eps = 1e-5 };
+        try g.dispatch(abi.tile_norm_f16, &.{ x, weight, bias, out }, params, Size.of(rows * 256, 1, 1), Size.of(256, 1, 1));
+        for (0..rows) |row| {
+            const source = if (gather == 1) gridRow(72, 24, row) else row;
+            var mean: f64 = 0;
+            var magnitude: f64 = 0;
+            for (0..width) |c| mean += x.get(source * width + c);
+            for (0..width) |c| magnitude += @abs(x.get(source * width + c));
+            mean /= width;
+            magnitude /= width;
+            var variance: f64 = 0;
+            for (0..width) |c| variance += (x.get(source * width + c) - mean) * (x.get(source * width + c) - mean);
+            variance /= width;
+            const inverse = 1 / @sqrt(variance + 1e-5);
+            for (0..width) |c| {
+                const actual = out.get(row * width + c);
+                if (actual != @as(f32, @floatCast(@as(f16, @floatCast(core.get(source * width + c)))))) return error.SamTileNormParity;
+                const centered = x.get(source * width + c) - mean;
+                const expected = centered * inverse * weight.get(c) + bias.get(c);
+                // FP32 statistics carry about eight roundings of the row magnitude through the scale before the bias.
+                const statistics = 16 * std.math.floatEps(f32) * ((magnitude + @abs(centered)) * inverse * @abs(weight.get(c)) + @abs(bias.get(c)));
+                const err = @abs(expected - actual);
+                if (err > fp16Ulp(expected) + statistics) return error.SamTileNormPrecision;
+                worst = @max(worst, err / (fp16Ulp(expected) + statistics));
+            }
+        }
+    }
+    std.debug.print("SAM tile norm with and without gather: byte-identical to the core norm, worst float64 error {d:.3} of bound\n", .{worst});
+}
+
+fn checkRowsAttention(g: *gpu.Gpu) !void {
+    const rows = 7;
+    const keys = 13;
+    const heads = 2;
+    var maximum: f64 = 0;
+    for ([_]usize{ 16, 48 }) |dim| for (0..2) |has_bias| {
+        const q = try g.alloc(rows * heads * dim, .f32);
+        defer q.deinit();
+        const k = try g.alloc(keys * heads * dim, .f32);
+        defer k.deinit();
+        const v = try g.alloc(k.count, .f32);
+        defer v.deinit();
+        const bias = try g.alloc(heads * rows * keys, .f32);
+        defer bias.deinit();
+        for ([_]Tensor{ q, k, v, bias }, 0..) |tensor, index| for (tensor.slice(f32, tensor.count), 0..) |*value, i| {
+            value.* = @sin(@as(f32, @floatFromInt(i)) * @as(f32, @floatFromInt(index + 3)) * 0.021) * 1.5;
+        };
+        const out = try g.allocDevice(q.count, .f32);
+        defer out.deinit();
+        const params = abi.RowsAttention{ .rows = rows, .keys = keys, .heads = heads, .head_width = @intCast(dim), .has_bias = @intCast(has_bias) };
+        try g.dispatch(abi.attention_rows, &.{ q, k, v, if (has_bias == 1) bias else q, out }, params, Size.of(rows * 32, heads, 1), Size.of(32, 1, 1));
+        for (0..heads) |h| for (0..rows) |row| {
+            var scores: [keys]f64 = undefined;
+            var top = -std.math.inf(f64);
+            for (&scores, 0..) |*score, key| {
+                score.* = 0;
+                for (0..dim) |d| score.* += @as(f64, q.get((row * heads + h) * dim + d)) * k.get((key * heads + h) * dim + d);
+                score.* /= @sqrt(@as(f64, @floatFromInt(dim)));
+                if (has_bias == 1) score.* += bias.get((h * rows + row) * keys + key);
+                top = @max(top, score.*);
+            }
+            var total: f64 = 0;
+            for (&scores) |*score| {
+                score.* = @exp(score.* - top);
+                total += score.*;
+            }
+            for (0..dim) |d| {
+                var value: f64 = 0;
+                for (scores, 0..) |score, key| value += score * v.get((key * heads + h) * dim + d);
+                maximum = @max(maximum, @abs(value / total - out.get((row * heads + h) * dim + d)));
+            }
+        };
+    };
+    std.debug.print("SAM attention rows with and without bias: maximum float64 oracle error {e}\n", .{maximum});
+    if (!(maximum <= 2e-5)) return error.SamAttentionRowsParity;
 }
 
 fn checkFlash(g: *gpu.Gpu) !void {
@@ -394,37 +420,6 @@ fn checkFlash(g: *gpu.Gpu) !void {
         std.debug.print("SAM {s} attention D={d}: maximum float64 oracle error {e}\n", .{ @tagName(dtype), dim, maximum });
         if (maximum > (if (dtype == .f32) @as(f64, 3e-4) else @as(f64, 1e-3))) return error.SamAttentionParity;
     };
-}
-
-fn checkSparseMask(g: *gpu.Gpu) !void {
-    const x = try g.alloc(1152 * 1152, .f32);
-    defer x.deinit();
-    const w = try g.alloc(16 * 32 * 9, .f32);
-    defer w.deinit();
-    const bias = try g.alloc(16, .f32);
-    defer bias.deinit();
-    const out = try g.allocDevice(576 * 576 * 16, .f32);
-    defer out.deinit();
-    for (x.slice(f32, x.count), 0..) |*value, i| value.* = @sin(@as(f32, @floatFromInt(i)) * 0.017);
-    for (w.slice(f32, w.count), 0..) |*value, i| value.* = @as(f32, @floatCast(@as(f16, @floatCast(@cos(@as(f32, @floatFromInt(i)) * 0.037) * 0.1))));
-    for (bias.slice(f32, bias.count), 0..) |*value, i| value.* = @as(f32, @floatFromInt(i)) / 256;
-    var maximum: f64 = 0;
-    for (0..2) |conditioning| {
-        try g.dispatch("im_sam_mask_downsample", &.{ x, w, bias, out }, @as(u32, @intCast(conditioning)), Size.of(out.count, 1, 1), Size.of(256, 1, 1));
-        for ([_]usize{ 0, 1, 575, 576, 577, 1151, 576 * 288 + 288, 576 * 576 - 1 }) |pixel| for (0..16) |c| {
-            var expected: f64 = bias.get(c);
-            for (0..3) |ky| for (0..3) |kx| {
-                const y = @as(isize, @intCast(pixel / 576 * 2 + ky)) - 1;
-                const z = @as(isize, @intCast(pixel % 576 * 2 + kx)) - 1;
-                if (y < 0 or z < 0 or y >= 1152 or z >= 1152) continue;
-                expected += @as(f64, x.get(@intCast(y * 1152 + z))) * w.get(c * 32 * 9 + ky * 3 + kx);
-                if (conditioning == 1) expected += w.get((c * 32 + 16) * 9 + ky * 3 + kx);
-            };
-            maximum = @max(maximum, @abs(expected - out.get(pixel * 16 + c)));
-        };
-    }
-    std.debug.print("SAM sparse mask convolution: maximum float64 oracle error {e}\n", .{maximum});
-    if (maximum > 1e-6) return error.SamConvolutionParity;
 }
 
 fn benchmark(g: *gpu.Gpu) !void {
@@ -479,4 +474,8 @@ fn benchmark(g: *gpu.Gpu) !void {
             }
         }
     }
+}
+
+test {
+    _ = operator_checks;
 }

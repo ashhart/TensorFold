@@ -1,7 +1,7 @@
 const std = @import("std");
 const st = @import("safetensors");
 const torch = @import("torch_checkpoint");
-const Config = @import("config.zig").Config;
+const Config = @import("variant.zig").Config;
 const page_bytes = std.heap.page_size_max;
 const Cached = struct { tensor: st.Tensor, storage: []align(page_bytes) u8 };
 
