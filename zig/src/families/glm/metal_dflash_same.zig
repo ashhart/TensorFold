@@ -9,6 +9,7 @@ const Model = model_mod.Model;
 const ahead = @import("metal_dflash_ahead.zig");
 const follow = @import("metal_dflash_follow.zig");
 const backend_mod = @import("metal_dflash_backend.zig");
+const encode_mod = @import("metal_dflash_encode.zig");
 const ring = @import("metal_dflash_context.zig").ring;
 
 /// Where the block's acceptance comes from: the accept kernel's words on the GPU, or the host's (the checks' plan).
@@ -69,10 +70,24 @@ pub fn encode(m: *Model, kernel: *const follow.Follow, frame: u64, aheads: []con
         },
     }
     b.follow = .{ .ids = ids, .positions = positions, .mask = mask, .keys = p.keys, .streams = n, .mask_stride = p.args.mask_stride };
-    const output = try execution.encodeStreams(b.ops(), &m.graph, m.preparation, streams[0..n], frame, block, &.{});
+    const hidden = try encode_mod.encodeLayers(b.ops(), &m.graph, m.preparation, streams[0..n], frame, block);
     b.follow = null;
-    const topk = try backend_mod.encodeTopk(b, frame, output.head, c.topk);
-    return .{ .streams = n, .block = block, .plan = p, .head = output.head, .projected = output.projected, .topk = topk, .windows = windows };
+    const headed: u32 = n * (block - 1);
+    const masks = if (n == 1) try b.ops().vtable.mask_rows(b.ops().ptr, frame, hidden, 1, block - 1) else blk: {
+        const dst = try b.frame.alloc(headed, c.hidden, .bf16);
+        const src_ref = try b.frame.ref(hidden);
+        const dst_ref = try b.frame.ref(dst);
+        const e = try b.encoder(frame);
+        for (0..n) |k| try b.copy(e, .{ .buf = src_ref.buf, .off = src_ref.off + (k * block + 1) * hidden.stride * 2 }, .{ .buf = dst_ref.buf, .off = dst_ref.off + k * (block - 1) * dst.stride * 2 }, block - 1, c.hidden);
+        break :blk dst;
+    };
+    const final = try b.ops().vtable.norm(b.ops().ptr, frame, masks, .{ .weight = m.graph.norm, .eps = c.eps, .heads = 1, .head_dim = c.hidden });
+    const head = try b.ops().vtable.head(b.ops().ptr, frame, final);
+    if (head.logits.handle == 0 or head.logits.rows != headed or head.logits.dtype != .bf16 or head.logits.width == 0 or head.logits.width > c.vocab or head.logits.stride < head.logits.width) return error.DraftOperatorShape;
+    if (head.token_ids) |mapping| try mapping.check(1, head.logits.width, .u32) else if (head.logits.width != c.vocab) return error.DraftCandidateId;
+    const projected = try b.ops().vtable.project(b.ops().ptr, frame, final, m.graph.hidden_projection, m.preparation.mode);
+    const topk = try backend_mod.encodeTopk(b, frame, head, c.topk);
+    return .{ .streams = n, .block = block, .plan = p, .head = head, .projected = projected, .topk = topk, .windows = windows };
 }
 
 /// A completed pass's lattices, one a stream, in the order its windows were given.
