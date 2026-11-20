@@ -16,22 +16,27 @@ const config = @import("../../../weights/config.zig");
 const draft = @import("../draft/draft.zig");
 const Draft = draft.Draft;
 
-/// The MLX affine widths this native text server loads, each with its group size.
-const mlx_formats = blk: {
-    const widths = @import("core").quant.mlx.bit_widths;
-    var out: [widths.len * 3][]const u8 = undefined;
-    for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
-        out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
+/// MLX affine widths; a dense checkpoint adds ModelOpt's two, the sparse family none.
+fn formatsOf(comptime type_name: []const u8) []const []const u8 {
+    return comptime blk: {
+        const widths = @import("core").quant.mlx.bit_widths;
+        const named = [_][]const u8{ "modelopt-nvfp4", "modelopt-fp8" };
+        const extra: usize = if (std.mem.eql(u8, type_name, "qwen3_5")) named.len else 0;
+        var out: [widths.len * 3 + extra][]const u8 = undefined;
+        for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
+            out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
+        };
+        for (named[0..extra], 0..) |f, k| out[widths.len * 3 + k] = f;
+        const done = out;
+        break :blk &done;
     };
-    const done = out;
-    break :blk &done;
-};
+}
 
 /// The dense and the sparse checkpoints are two registry entries over one engine.
 pub fn Native(comptime type_name: []const u8) type {
     return struct {
         pub const model_type = type_name;
-        pub const formats = mlx_formats;
+        pub const formats = formatsOf(type_name);
         /// BF16 serves decisions only, with a joint schema head (joint_head_config.json); chat refuses it.
         pub const decision_formats: []const []const u8 = &.{"bf16"};
         /// Positions a stream holds when neither --context nor the checkpoint's config names a window.
@@ -87,7 +92,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         const what = "the joint schema head needs the BF16 checkpoint";
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
-    if (c.quant != .bf16 or head) return null;
+    if (c.quant != .bf16 or c.modelopt or head) return null;
     if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
@@ -449,9 +454,10 @@ fn openJoint(a: std.mem.Allocator, gpa: std.mem.Allocator, e: *Engine, loaded: j
     errdefer if (owned) w.deinit();
     const blas = if (e.blas) |*b| b else return steps.refuseAll(a, problem, "the joint schema head needs rocBLAS", .{});
     const head_rows = e.model().head;
-    if (head_rows.format() != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
+    const head_format = head_rows.format();
+    if (head_format == null or head_format.? != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
     const before = hip.usage(false).device;
-    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.bf16.weight, head_rows.n) catch |err|
+    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.?.bf16.weight, head_rows.n) catch |err|
         return steps.refuseAll(a, problem, "the joint schema head cannot start ({s})", .{@errorName(err)});
     owned = false;
     errdefer head.deinit();
@@ -510,6 +516,17 @@ test "a bf16 checkpoint without a joint head is refused as decision-only, an MLX
         for (Native(kind).formats) |format| try std.testing.expect(!std.mem.eql(u8, format, "bf16"));
         try std.testing.expectEqualStrings("bf16", Native(kind).decision_formats[0]);
     }
+    // the sparse family refuses a ModelOpt checkpoint, so it offers neither format; the dense one offers both
+    var moe_offered: usize = 0;
+    for (Native("qwen3_5_moe").formats) |format| if (std.mem.startsWith(u8, format, "modelopt-")) {
+        moe_offered += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), moe_offered);
+    var dense_offered: usize = 0;
+    for (Native("qwen3_5").formats) |format| if (std.mem.startsWith(u8, format, "modelopt-")) {
+        dense_offered += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), dense_offered);
     const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     // a quantized checkpoint that ships the head would open as a text model: refused by name instead

@@ -60,7 +60,7 @@ fn densePastKeys(f: view.Full) bool {
 }
 
 fn isDense(p: view.Projection) bool {
-    return p.handle == .dense;
+    return p.format() == .dense;
 }
 
 test "qwen3_5 hip prompt tail: an open chunk keeps its last tile, or only its keys when nothing reads it" {

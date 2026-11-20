@@ -6,6 +6,7 @@ const table = @import("table.zig");
 const host = @import("host.zig");
 
 const convert = quant.convert;
+const modelopt = @import("modelopt.zig");
 const Tensor = table.Tensor;
 const Table = table.Table;
 pub const Error = table.Error || convert.Error || error{UnexpectedTensor};
@@ -57,15 +58,19 @@ pub fn squeezed(w: Tensor) ?Tensor {
 
 /// `_packed`: a projection in whichever format its tensors are in; a bf16 one's are BF16 as stored, or fp32 widened.
 pub fn projection(a: std.mem.Allocator, t: *const Table, key: []const u8) !host.Projection {
+    if (modelopt.algo(t, key)) |what| return modelopt.read(a, t, key, what);
+    // a ModelOpt checkpoint's text layers read dense; its vision tower keeps rocBLAS (1,152 x 4,304 is no tile)
+    const tower = std.mem.startsWith(u8, key, "model.visual.") or std.mem.startsWith(u8, key, "vision_tower.");
+    if (t.quant == .bf16 and t.modelopt and !tower) return .{ .dense = try quant.dense.readStored(a, t, key) };
     if (t.quant == .bf16 and t.widen) {
         _ = try quant.bf16.read(a, t, key); // the same dtype and rank checks
         return .{ .dense = try quant.dense.read(a, t, key) };
     }
     if (t.quant == .bf16) return .{ .bf16 = try quant.bf16.read(a, t, key) };
-    return quant.read(a, t, key);
+    return host.read(a, t, key);
 }
 
 /// `_halves`: a fused [embedding | hidden] projection split in two along K, words and group tables alike.
 pub fn halves(a: std.mem.Allocator, fused: host.Projection) ![2]host.Projection {
-    return quant.halves(a, fused);
+    return host.halves(a, fused);
 }

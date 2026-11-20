@@ -7,6 +7,8 @@
 #include "tiles/matrix_gemm.hpp"
 #include "quant/mlx_tiles.hpp"
 #include "quant/dense_tiles.hpp"
+#include "quant/nvfp4_tiles.hpp"
+#include "quant/fp8_tiles.hpp"  // ModelOpt FP8 and NVFP4 products, each a 64-row tile and a 16-row decode block
 
 namespace tf {
 namespace rocm {

@@ -504,17 +504,8 @@ const groups = [_]Source{
     .{ .path = "decode/plan_rows.hip" },
     .{ .path = "inkling2/attention.hip", .strict = true },
 };
-/// What the group sources include, so an edit to one rebuilds them.
-const headers = [_][]const u8{
-    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",              "decode/plan.hpp",       "ops/attention.hpp",    "ops/common.hpp",
-    "ops/draw.hpp",               "ops/tp.hpp",            "ops/elementwise.hpp",           "ops/linear.hpp",        "ops/moe.hpp",          "ops/norms.hpp",
-    "ops/rope.hpp",               "common/arch.hpp",       "common/dot2.hpp",               "common/vec.hpp",        "common/wmma.hpp",      "quant/act.hpp",
-    "quant/mlx.hpp",              "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",          "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",       "tiles/epilogue.hpp",
-    "tiles/gemm.hpp",             "tiles/gemm_kp.hpp",     "tiles/matrix_gemm.hpp",         "tiles/matrix_item.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",
-    "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp",         "flashnext/sparse.hpp",  "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
-    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",       "columns_controls.hpp", "ops/vision.hpp",
-    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp", "inkling2/tile.hpp",
-};
+/// What the group sources include, so an edit to one rebuilds them: every .hpp under the kernels root.
+const headers = @import("hip_headers.zig");
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 const stub = std.fmt.comptimePrint("pub const arch = \"\";\npub const images: [{d}][]align(8) const u8 = @splat(&.{{}});\n", .{groups.len});
@@ -569,7 +560,7 @@ fn compileSource(b: *std.Build, cc: Hipcc, arch: []const u8, source: LazyPath, o
     // clang 21 leaves a branch of affine_dot2_stream_relu2_pair<Dot, 6, 1, 8> past simm16 on gfx1100 (#1521)
     if (cc.relax_branches and std.mem.eql(u8, arch, "gfx1100")) run.addArgs(&.{ "-mllvm", "-amdgpu-s-branch-bits=15" });
     run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
-    for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
+    for (headers.of(b)) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
     run.addArg("-o");
     const object = run.addOutputFileArg(out);
     run.addFileArg(source);
