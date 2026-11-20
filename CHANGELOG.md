@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
+
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
 
 - Windows: the native CUDA product compiles again: Muse Spark, which needs two TP ranks over the POSIX-only TP fabric, is refused by name on Windows (TP across ranks runs on Linux only) instead of breaking the build, and CI now type-checks the Windows CUDA product (`zig build compile-native-cuda-windows`, #4171, fixes #4105).
@@ -118,7 +120,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
 - Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
-- Nemotron 3.5 Lightning on HIP: `--mtp-drafts` up to `15` at `--tp 1` widens a lone stream's verify window up to sixteen rows while keeping the four-row default and capping shared rounds at three head drafts a stream; on `gfx1151`, `L=1` edit prompts rise from `149.0` to `229.1` tok/s on `Lightning-30B-A3B-MLX-4bit` (`134.3` to `204.7` greedy on `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP`), `gpu-chat` greedy runs at `94.5` vs `98.8` tok/s (full table in `docs/recipes/nemotron-3.5.md`), with identical tokens (#3613, part of #3394).
 
 - Desktop: a new conversation on the built-in engine asks for its title after the first run settles, not beside it, so the title no longer competes with that run; cancelling or renaming during the run skips it (#4072, refs #3606). Thanks to @AIFlowML.
 
