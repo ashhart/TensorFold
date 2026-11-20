@@ -81,5 +81,8 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const [tag, directory] = process.argv.slice(2);
   if (!directory) throw new Error('Usage: prepare.mjs TAG_OR_LATEST NEW_OUTPUT_DIRECTORY');
   try { console.log(JSON.stringify(await prepare(tag === 'latest' ? null : tag, path.resolve(directory)))); }
-  catch { process.exitCode = 1; console.error('Runtime preparation failed. No feed or release assets were changed.'); }
+  catch (error) {
+    process.exitCode = 1;
+    console.error(`Runtime preparation failed: ${error?.message ?? error}. No feed or release assets were changed.`);
+  }
 }
