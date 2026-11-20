@@ -244,7 +244,6 @@ test "a slide commit to a 4/64 projection without tiles rewrites its row copy an
     try std.testing.expectEqualSlices(u32, &edited, own.slice(u32, words));
 }
 
-/// A two-layer nemotron_h_puzzle (Bolt) model: hidden 128, latent 64, per-layer experts 4 and 8, widths 64 and 128.
 /// A two-layer 8-bit nemotron_h_puzzle (Bolt) model: hidden 128, latent 64, experts 4 and 8, widths 64 and 128.
 fn tinyBolt() cfg.Config {
     var c = cfg.Config{ .hidden = 128, .vocab = 128, .layers = 2, .mamba_heads = 2, .mamba_head_dim = 32, .groups = 1, .state = 16, .conv_kernel = 4, .heads = 2, .kv_heads = 1, .head_dim = 32, .experts = 8, .top_k = 2, .expert_width = 128, .shared_width = 64, .routed_scaling = 5.0, .eps = 1e-5 };

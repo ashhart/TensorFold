@@ -327,7 +327,6 @@ fn qwen27Context(a: Allocator, context: ?i64, problem: *[]const u8) !?u32 {
     }
     return @intCast(n);
 }
-
 pub const Qwen27Budget = @import("qwen27_reserve.zig").Budget;
 /// What a Qwen3.8-27B-class start keeps free of its working set.
 pub const qwen27_margin = tf.qwen27.prompt_memory.margin;

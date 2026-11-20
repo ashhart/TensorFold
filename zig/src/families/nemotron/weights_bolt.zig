@@ -1,4 +1,5 @@
 //! Bolt's dense (bf16, no scales) matrices: the struct, the head test and the builder, kept beside the weights.
+const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const ckpt = @import("../../core/checkpoint_metal.zig");
