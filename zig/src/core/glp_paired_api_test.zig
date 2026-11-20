@@ -33,6 +33,26 @@ fn pairedSpec(layers: []const glp.Layer) glp.WriteSpec {
     };
 }
 
+test "both GLP versions refuse a tensor offset whose payload end would overflow" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u32{ 1, 3 }) |version| {
+        var spec = pairedSpec(try layersOf(a, &.{1}, 8));
+        spec.spec_version = version;
+        if (version == 1) spec.hook_point = glp.residual_site;
+        const bytes = try glp.write(a, spec);
+        var problem: gguf.Problem = .{};
+        const file = try gguf.parse(a, bytes, &problem);
+        const name = "direction.1";
+        const name_at = std.mem.indexOf(u8, bytes, name).?;
+        const offset_at = name_at + name.len + 4 + 8 + 4;
+        std.mem.writeInt(u64, bytes[offset_at..][0..8], std.math.maxInt(u64) - @as(u64, @intCast(file.data_start)), .little);
+        var why: glp.Why = .{};
+        try std.testing.expectError(error.BadGlpVector, glp.read(a, bytes, &why));
+    }
+}
+
 test "a written paired vector is read back as paired, with every field and the keys a consumer sees" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

@@ -18,6 +18,11 @@ fn value(x: []const u8, args: []const []const u8, i: *usize, comptime flag: []co
     return null;
 }
 
+fn badAlpha() Error {
+    if (!quiet) std.debug.print("FAIL --glp-alpha: expected a finite strength from 0\n", .{});
+    return error.BadGlpFlag;
+}
+
 /// Separate the worker's positional arguments; the caller's arena keeps the accepted immutable file alive.
 pub fn split(a: std.mem.Allocator, io: std.Io, args: []const []const u8) Error!Split {
     const flagged = for (args) |x| {
@@ -34,12 +39,15 @@ pub fn split(a: std.mem.Allocator, io: std.Io, args: []const []const u8) Error!S
         if (try value(x, args, &i, "--glp")) |v| {
             path = v;
         } else if (try value(x, args, &i, "--glp-alpha")) |v| {
-            const parsed = std.fmt.parseFloat(f64, v) catch return error.BadGlpFlag;
-            alpha = api.glp.strength(parsed) orelse return error.BadGlpFlag;
+            const parsed = std.fmt.parseFloat(f64, v) catch return badAlpha();
+            alpha = api.glp.strength(parsed) orelse return badAlpha();
         } else try pos.append(a, x);
     }
     const file = path orelse {
-        if (alpha != null) return error.BadGlpFlag;
+        if (alpha != null) {
+            if (!quiet) std.debug.print("FAIL --glp-alpha: needs --glp\n", .{});
+            return error.BadGlpFlag;
+        }
         return .{ .positional = pos.items, .glp = null };
     };
     var why: api.glp.Why = .{};
