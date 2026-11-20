@@ -88,11 +88,9 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++
     @import("affine_gather_records.zig").records ++
     @import("flint_records.zig").records ++
-    @import("uocr_records.zig").records;
-pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("uocr_records.zig").records ++
     @import("bolt_records.zig").records;
-pub const landed_cuda = registry.cuda ++
+pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++
     registry.gradient_pending ++
     registry.qwen_learning_pending ++
