@@ -137,7 +137,7 @@ pub const File = struct {
         const size = std.math.mul(usize, count, width) catch return null;
         const offset = std.math.cast(usize, t.offset) orelse return null;
         const start = std.math.add(usize, self.data_start, offset) catch return null;
-        if (start < self.data_start or size > self.bytes.len or start + size > self.bytes.len) return null;
+        if (start < self.data_start or start > self.bytes.len or size > self.bytes.len - start) return null;
         return self.bytes[start..][0..size];
     }
 };

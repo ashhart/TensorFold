@@ -67,6 +67,20 @@ pub fn steps(b: *std.Build) void {
     b.step("test-dsv41-sm-host", "Check SM refusal before image load with a fake driver and inert images").dependOn(&sm_run.step);
     const forms = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/exl3_prepare.zig"), .target = b.graph.host, .optimize = .Debug }) }));
     host_step.dependOn(&forms.step);
+    if (b.graph.host.result.os.tag == .linux) {
+        const flags = b.step("test-dsv41-glp-cli", "Worker strength refusals reach stderr before checkpoint or device work");
+        const cli = b.addExecutable(.{ .name = "tf-dsv41-glp-flags-host", .root_module = module(b, b.graph.host, "tool_main.zig", true) });
+        const cases = [_][]const u8{ "-1", "not-a-number", "nan", "inf", "1" };
+        for (cases) |alpha| {
+            const check = b.addRunArtifact(cli);
+            check.addArgs(&.{ "follow", "missing-pack", "missing-assets", "--glp-alpha", alpha });
+            check.setEnvironmentVariable("TF_TP_WORLD", "invalid");
+            check.expectExitCode(1);
+            check.expectStdErrMatch("--glp-alpha");
+            flags.dependOn(&check.step);
+        }
+        host_step.dependOn(flags);
+    }
     const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
     const cross = b.addTest(.{ .root_module = module(b, target, "cuda_test.zig", true) });
     _ = cross.getEmittedBin();
