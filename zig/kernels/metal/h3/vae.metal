@@ -160,11 +160,11 @@
   const uint col = col3 / 3;
   const uint ww = col / p;
   const uint dw = col % p;
-  if (t >= depth || hh >= h || ww >= w) return;
+if (t >= depth || hh >= h || ww >= w) return;
   const uint v = (t * h + hh) * w + ww;
   const float o = PROJ[v * hb + c * pt * p * p + dt * p * p + dh * p + dw];
   const float value = o * STD[c] + MEAN[c];
-  RGB[(f * h * p + row) * out_w + col3] = (uchar)clamp((value * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f);
+  RGB[(f * h * p + row) * out_w + col3] = (uchar)clamp(value * 255.0f, 0.0f, 255.0f);
 }
 
 

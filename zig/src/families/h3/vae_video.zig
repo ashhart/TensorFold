@@ -647,10 +647,6 @@ pub const Decoder = struct {
         no_w.deinit(); no_b.deinit();
         std.debug.print("stage: norm_out done", .{});
         if (getenv("DUMP_N2") != null) {
-            const nh = normed2.slice(f32, rows * dim);
-            @memset(nh, 0.25);
-        }
-        if (getenv("DUMP_N2") != null) {
             const pz2: [*:0]const u8 = "normed2-dump.f32";
             const fh3 = fopen(pz2, "wb") orelse return error.CannotWrite;
             _ = fwrite(normed2.slice(f32, rows * dim).ptr, 4, rows * dim, fh3);
@@ -697,13 +693,13 @@ pub const Decoder = struct {
         const rgb_dev = try self.device.buffer(out_frames * out_h * out_w * 3, mtl.ResourceOptions.shared);
         const cb8 = q7.commandBuffer();
         const e8 = cb8.compute(.concurrent);
-        e8.setPipeline(self.p[6]);
+        e8.setPipeline(self.p[5]);
         e8.setBuffer(proj_dev, 0, 0);
         e8.setBuffer(mean_dev, 0, 1);
         e8.setBuffer(std_dev, 0, 2);
         e8.setBuffer(rgb_dev, 0, 3);
         e8.setValue([5]u32{ @intCast(depth), @intCast(height), @intCast(width), @intCast(out_w * 3), @intCast(head_block) }, 4);
-        e8.dispatchThreads(mtl.Size.of(out_w * 3, out_h, out_frames), mtl.Size.of(64, 1, 1));
+        e8.dispatchThreads(mtl.Size.of(out_w * 3 * out_h * out_frames, 1, 1), mtl.Size.of(256, 1, 1));
         e8.end();
         cb8.commit(); cb8.wait();
         mean_dev.deinit(); std_dev.deinit();
