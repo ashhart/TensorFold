@@ -25,6 +25,11 @@ weights are checked as on Metal: the released geometry only, and no tensor left 
 It runs on the two GPUs it was checked on, sm_120 (RTX 5090) and sm_121 (GB10): `Model.load` and `Decoder.load` refuse
 any other.
 
+On the 32 GB RTX 5090 the served route and the tool answer the same shapes with the same bytes: 1024x1024, the
+negative-prompt branch, 1280x1024 and 1408x1024 are byte equal between `POST /v1/images/generations` and
+`tf-moss-image`. At 1536x1024 on that card the served request is refused `OutOfDeviceMemory` and the engine keeps
+serving the shapes that fit; the tool completes the same case because it frees the transformer before the decode.
+
 ## Precision
 
 The Metal family's rounding, step for step:
@@ -136,11 +141,16 @@ Gate 5's records are in `moss_image_cuda_records.zig` for the transformer (sm_80
 13.0, 13.2 and 13.3, so no later release needs a set of its own), `moss_image_decoder_records.zig` for the decoder and
 `moss_image_encoder_records.zig` for the encoder, all of them measured.
 
-`tf-cuda-test moss-contract` on a GB10 (nvcc 13.0 and 13.2) and an RTX 5090 (nvcc 13.3):
+`tf-cuda-test moss-contract` on a GB10 (nvcc 13.0 and 13.2), and on an RTX 5090 (sm_120, nvcc 13.3) as reported by
+the tester who ran it there:
 
 ```
 SUMMARY moss image: 24 kernels, 24 pass gates 1-4, 0 fail; 21 controls: 21 red as planted, 0 missed
 ```
+
+Both runs cover all 24 kernels: the transformer's eight with the decoder's seven and the encoder's nine. The older
+RTX 5090 receipts under "Measured" are the transformer alone, from before the encoder and the decoder were ported,
+so they count its own kernels and the head-128 attention, not this 24-kernel set.
 
 ## Run a case
 
