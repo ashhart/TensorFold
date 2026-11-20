@@ -34,6 +34,7 @@ pub const metal_dflash_taps = @import("metal_dflash_taps.zig");
 pub const metal_dflash_rounds = @import("metal_dflash_rounds.zig");
 pub const metal_dflash_load = @import("metal_dflash_load.zig");
 pub const metal_dflash_prepared = @import("metal_dflash_prepared.zig");
+pub const metal_dflash_opt = @import("metal_dflash_opt.zig");
 pub const metal_dflash_attention = @import("metal_dflash_attention.zig");
 pub const metal_dflash_context = @import("metal_dflash_context.zig");
 pub const metal_dflash_topk = @import("metal_dflash_topk.zig");
@@ -87,6 +88,7 @@ test {
     _ = metal_dflash_rounds;
     _ = metal_dflash_load;
     _ = metal_dflash_prepared;
+    _ = metal_dflash_opt;
     _ = metal_dflash_attention;
     _ = metal_dflash_topk;
     _ = metal_dflash_source;
