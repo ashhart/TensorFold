@@ -14,8 +14,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
-- App: only the owner token resolves a tool approval on the remote-control server (#3034).
-
 - Qwen3.8-27B: the DSpine drafter `tencent/Qwen3.8-27B-DSpine-b16`, whose current revision names its architecture `DSpineDraftModel`, loads again on Metal and CUDA instead of stopping with `UnsupportedDraftConfig`; any other name is still refused (#3959, fixes #3819).
 
 - Server: `/v1/responses` accepts one level of `namespace` tools: each function is offered to the model as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket; requests without namespace tools are unchanged (#3610, fixes #3266). Thanks to @devopsfortunato.
