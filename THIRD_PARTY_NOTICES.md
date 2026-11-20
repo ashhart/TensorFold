@@ -466,10 +466,11 @@ The complete original MIT notices and permission text are retained in [Mia-Flash
 recipe commit `04f2b53826dca9a52893f2bce9d49bb3d1828e88`, under the Apache License 2.0, Copyright 2026 MiaAI-Lab.
 That recipe's NOTICE reads "Qwen3.8-Flash-Next on 2x DGX Spark with TensorFold / Copyright 2026 MiaAI-Lab" and asks a
 redistributor to keep it and to state what changed, which this section and the file's own header do. The license text
-is [Apache-2.0.txt](LICENSES/Apache-2.0.txt). TensorFold's two changes: the head's dense items hold 16 MT rows rather
-than 16, and one more `int4_prompt_kernel` instantiation builds for the routed gate/up. Both are marked `TF:` in the
-file. The groups-of-64 instantiations a two-rank serve would need are not built. The host packer and the launchers in
-`zig/src/cuda/int4.zig` are TensorFold's.
+is [Apache-2.0.txt](LICENSES/Apache-2.0.txt). TensorFold's three changes: the head's dense items hold 16 MT rows rather
+than 16, one more `int4_prompt_kernel` instantiation builds for the routed gate/up (both marked `TF:` in the file), and
+the local copies of the mma, the non-allocating load and the `cp.async` copies are replaced by the shared ones in
+`zig/kernels/cuda/common/`, whose instruction text is the same. The groups-of-64 instantiations a two-rank serve would
+need are not built. The host packer and the launchers in `zig/src/cuda/int4.zig` are TensorFold's.
 
 ## Ling-3.0-tiny and Ling-3.1-flash
 
