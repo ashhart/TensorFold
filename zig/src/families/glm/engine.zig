@@ -106,11 +106,11 @@ pub const Engine = struct {
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false, null);
+        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false, null, false);
     }
 
-    /// `load` with expert parallel over `ep_path`'s link, `vision`'s tower and GLM_POOL_TOKENS (`cap`: its pool).
-    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool, pool_tokens: ?u32) !*Engine {
+    /// `load` with EP link `ep_path`, `vision`, `GLM_POOL_TOKENS` (`cap`: its pool) and `--drafter` flags.
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool, pool_tokens: ?u32, external_drafter: bool) !*Engine {
         const keep_resident = try residency.policy.flag(platform.getenv("GLM_RESIDENCY"));
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
@@ -235,6 +235,7 @@ pub const Engine = struct {
         }
         if (!wts.native(e.w, &e.c)) try e.k.widen(gpa, e.device); // a width, split stack or layout past the 4/64 kernels
         if (e.w.has_tfq3) try e.k.enableTfq3(gpa, e.device);
+        try @import("draft_head_q4.zig").maybeMakeFromEnv(gpa, e.device, e.w, &e.c, external_drafter, e.w.bytes + e.arena.bytes + tower, limit);
         try e.prepare();
         if (link) |s| {
             const rows = e.c.byRows();
