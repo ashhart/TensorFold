@@ -35,7 +35,12 @@ def bf16_float(r: np.ndarray) -> np.ndarray:
 
 
 def quantize(w: np.ndarray, bits: int):
-    """w [rows, K] float32 of bf16 values: packed uint32 [rows, K*bits/32], scales and biases bf16 bits, codes."""
+    """w [rows, K] float32 of bf16 values: packed uint32 [rows, K*bits/32], scales and biases bf16 bits, codes.
+
+    A numpy port of quantizeGroup (zig/src/families/gemma4/dflash_weights.zig). Its two departures from that
+    function, rint and codes from the unrounded scale and bias, were chosen by comparing variants with
+    mx.quantize's outputs (--check-mlx), not taken from MLX's code.
+    """
     rows, k = w.shape
     g = w.reshape(rows, k // GROUP, GROUP)
     bins = np.float32((1 << bits) - 1)
@@ -43,11 +48,11 @@ def quantize(w: np.ndarray, bits: int):
     scale = np.maximum(hi - lo, np.float32(1e-7)) / bins
     from_min = np.abs(lo) > np.abs(hi)
     edge = np.where(from_min, lo, hi)
-    q0 = np.rint(np.abs(edge) / scale)  # ties to even, as MLX's rint
+    q0 = np.rint(np.abs(edge) / scale)  # ties to even: matches mx.quantize's outputs, round-half-away does not
     with np.errstate(all="ignore"):
         scale = np.where(q0 == 0, scale, np.where(from_min, np.abs(edge), -np.abs(edge)) / q0)
     bias = np.where(q0 == 0, lo, edge)
-    # the codes use the unrounded scale and bias, as MLX does; the stored ones are rounded to bf16
+    # codes from the unrounded scale and bias match mx.quantize's outputs; the stored ones are rounded to bf16
     q = np.clip(np.rint((g - bias[..., None]) / scale[..., None]), 0, bins).astype(np.uint32)
     per_word = 32 // bits
     packed = (q.reshape(rows, -1, per_word) << (bits * np.arange(per_word, dtype=np.uint32))).sum(-1, dtype=np.uint32)
@@ -158,7 +163,7 @@ def convert(source: Path, output: Path, dense_ple: bool = False, attn_bits: int 
     mx = None
     if check_mlx:
         import mlx.core as mx
-        # MLX's Metal quantize rounds some scales differently from its CPU one; the CPU one is the reference
+        # observed on a Mac: mx.quantize gives a few groups other scales on Metal than on CPU; CPU is the reference
         mx.set_default_device(mx.cpu)
     names = sorted(n for n in src.files if n.startswith(HF_PREFIX))
     shared_kv = ("self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.k_norm.weight")
