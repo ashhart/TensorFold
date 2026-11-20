@@ -34,8 +34,8 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
     try write(a, io, dir, "gdn.metal", gdn_source.text);
-    const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .mlp, .xsum };
-    const names = [_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" };
+    const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .norm_steer, .mlp, .xsum };
+    const names = [_][]const u8{ "norm_input", "norm_xs", "norm_steer", "mlp_xs", "xsum" };
     for (helpers, names) |kind, name| for ([_]bool{ true, false }) |xs| {
         const text = try q.quant_gpu.specializedSource(a, .{ .kind = kind, .k = 5120, .n = 17408, .xs = xs });
         const filename = try std.fmt.allocPrint(a, "{s}{s}.metal", .{ name, if (xs) "" else "-no-xs" });
