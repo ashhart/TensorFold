@@ -288,7 +288,7 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
     // no progress shown is no sample; a backend that never reports shows a whole prompt at its last step
     h.srpt.filled(if (rows == std.math.maxInt(u64) or !h.core.backend.vtable.reports_fill) 0 else rows, ns);
-    if (first and decoding and p < 1) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
+    if (first and decoding and p < 1 and std.mem.indexOfScalar(*LaneHost.Job, h.filling.items, job) != null) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
     h.share.steppedAt(ns, decoding, p);
     return rows;
 }
