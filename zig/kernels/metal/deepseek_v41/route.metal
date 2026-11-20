@@ -7,7 +7,7 @@ using namespace metal;
 #endif
 
 #ifndef TF_CTL
-#define TF_CTL 0 // planted faults: 1 a higher id wins a tie, 2 a NaN key wins, 3 the bias in the weight, 4 a write past k
+#define TF_CTL 0 // planted faults: 1 a higher id wins a tie, 2 a NaN wins, 3 bias is the weight, 4 an extra write
 #endif
 
 // The reference's softplus: the linear tail above 20 and the quadratic one below -10, as the CUDA router computes it.
