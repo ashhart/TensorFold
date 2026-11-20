@@ -8,6 +8,7 @@ const sys = @import("sys");
 const hub = @import("hub.zig");
 const catalog = @import("catalog.zig");
 const models = @import("models.zig");
+const snapshot_equal = @import("snapshot_equal.zig");
 
 pub const Refusal = struct {
     kind: Kind,
@@ -278,6 +279,7 @@ pub const Transaction = struct {
         for (0..t.slotCount()) |i| {
             const slot = t.slotAt(i);
             try checkStaged(t.a, t.io, slot.work);
+            if (hub.isDir(t.io, slot.snapshot) and !try snapshot_equal.equal(t.io, slot.work, slot.snapshot)) return error.CachedSnapshotMismatch;
             const current = try readHead(t.a, t.io, slot.ref);
             if (!sameHead(current, slot.previous_head)) return error.WrongHead;
             try std.Io.Dir.cwd().createDirPath(t.io, std.fs.path.dirname(slot.snapshot).?);

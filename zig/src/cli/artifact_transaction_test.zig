@@ -222,6 +222,57 @@ test "both staged snapshots replace both heads only after the immutable tuple is
     try std.testing.expectEqual(transaction.Recovery.committed, try transaction.recover(a, io, root, p.resolved.id));
 }
 
+test "an existing snapshot must match every staged byte before either visible head changes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try cacheRoot(a, tmp);
+    try seedRepo(a, io, root, "Org/Target", rev0);
+    try seedRepo(a, io, root, "Org/Target", rev1);
+    try writeHead(a, io, root, "models--Org--Target", rev0);
+    var req = request();
+    req.drafter = null;
+    var tx = try (try plan(req)).begin(a, io, root);
+    defer tx.deinit();
+    try stageConfig(a, io, tx.targetStaging(), "{\"model_type\":\"qwen4_exp\"}");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ tx.targetStaging(), "weights.safetensors" }), .data = "new weights" });
+    try std.testing.expectError(error.CachedSnapshotMismatch, tx.commit(req));
+    try std.testing.expectEqualStrings(rev0, try readHead(a, io, root, "models--Org--Target"));
+    const cached = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--Target/snapshots", rev1, "weights.safetensors" }), a, .limited(1 << 20));
+    try std.testing.expectEqualStrings("old weights", cached);
+    try tx.rollback();
+    try std.testing.expectEqualStrings(rev0, try readHead(a, io, root, "models--Org--Target"));
+}
+
+test "a byte-identical cached snapshot is reused and the staged copy is discarded" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try cacheRoot(a, tmp);
+    try seedRepo(a, io, root, "Org/Target", rev0);
+    try seedRepo(a, io, root, "Org/Target", rev1);
+    try writeHead(a, io, root, "models--Org--Target", rev0);
+    const cached_weights = try std.fs.path.join(a, &.{ root, "models--Org--Target/snapshots", rev1, "weights.safetensors" });
+    try std.Io.Dir.cwd().deleteFile(io, cached_weights);
+    try std.Io.Dir.cwd().symLink(io, "../../blobs/abc", cached_weights, .{});
+    var req = request();
+    req.drafter = null;
+    var tx = try (try plan(req)).begin(a, io, root);
+    defer tx.deinit();
+    try stageConfig(a, io, tx.targetStaging(), "{\"model_type\":\"qwen4_exp\"}");
+    try std.Io.Dir.cwd().symLink(io, "../../blobs/abc", try std.fs.path.join(a, &.{ tx.targetStaging(), "weights.safetensors" }), .{});
+    try tx.commit(req);
+    try std.testing.expectEqual(transaction.State.committed, tx.state);
+    try std.testing.expectEqualStrings(rev1, try readHead(a, io, root, "models--Org--Target"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, tx.work_root, .{}));
+}
+
 test "wrong head or a changed tuple leaves every visible head untouched and rollback discards staging" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
