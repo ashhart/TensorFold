@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
+
 - Pull: gated and private Hugging Face repos come down with your token: `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else `~/.cache/huggingface/token`). The token goes only to the hub's own host (`huggingface.co`, or `HF_ENDPOINT`'s), never to the storage hosts downloads are redirected to, and is never printed; a repo the hub refuses is named, with whether a token is missing or lacks access (#3524).
 
 - Windows: when a checkpoint load releases the pages it has finished with, the process's working set is trimmed too, so those pages stop crowding a unified-memory budget; Linux and macOS are unchanged (#3866). Thanks to @ElderOrb.
