@@ -59,6 +59,8 @@ pub const usage =
     \\  qk-rows                   QK norm, RoPE and the cache write against float64 references (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  nemotron-draws            Nemotron's batched draws and row kernels against the per-row path, byte for byte
+    \\  nemotron-request-starts MODEL IDS_FILE N PATTERNS [SEGMENTS]   named native states and logits, resumed == fresh
+    \\  lfm2-moe-request-starts MODEL IDS_FILE N PATTERNS   interior taps and native states/logits, resumed == fresh
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  lfm2-kernels              LFM2's glue kernels against their host references at d1's shapes (synthetic rows)
     \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
