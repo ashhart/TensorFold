@@ -157,6 +157,29 @@ fn send(srv: *Server, a: Allocator, method: []const u8, path: []const u8, body: 
     const at = std.mem.indexOf(u8, out, "\r\n\r\n") orelse return error.MissingHttpHead;
     return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = (try json.parse(a, out[at + 4 ..])).ok };
 }
+const RawAnswer = struct { status: u16, body: []const u8 };
+
+fn sendRaw(srv: *Server, a: Allocator, path: []const u8, key: ?u8) !RawAnswer {
+    var wire: Wire = .{ .a = a };
+    var c: http.Conn = .{ .fd = -1, .peer = "127.0.0.1", .buf = &.{}, .gpa = a, .version = "HTTP/1.1", .method = "GET", .path = path, .headers = &.{}, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
+    if (key) |k| c.key_digest = @splat(k);
+    routes.dispatch(srv, &c, a);
+    const out = wire.bytes.items;
+    const at = std.mem.indexOf(u8, out, "\r\n\r\n") orelse return error.MissingHttpHead;
+    return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = out[at + 4 ..] };
+}
+
+fn eventSequences(a: Allocator, body: []const u8) !std.ArrayList(u64) {
+    var result: std.ArrayList(u64) = .empty;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const parsed = (try json.parse(a, line["data: ".len..])).ok;
+        const number = parsed.get("sequence_number") orelse return error.MissingSequence;
+        try result.append(a, try std.fmt.parseInt(u64, number.int, 10));
+    }
+    return result;
+}
 
 fn post(srv: *Server, a: Allocator, body: []const u8) !Answer {
     return send(srv, a, "POST", "/v1/responses", body, null);
@@ -361,10 +384,10 @@ test "background Responses: the request id cancel route, DELETE while running, a
     try t.expectEqual(@as(u16, 400), (try send(srv, a, "POST", try urlOf(a, short, "/cancel"), "", null)).status);
     const plain = (try post(srv, a, "{\"model\":\"m\",\"input\":\"x\",\"max_output_tokens\":3}")).body.strField("id").?;
     try t.expectEqual(@as(u16, 400), (try send(srv, a, "POST", try urlOf(a, plain, "/cancel"), "", null)).status);
-    // a stream is refused by name for a background response; any other stored response reads as before
-    const streamed = try send(srv, a, "GET", try urlOf(a, short, "?stream=true&starting_after=0"), "", null);
-    try t.expectEqual(@as(u16, 400), streamed.status);
-    try t.expectEqualStrings("stream", streamed.body.get("error").?.strField("param").?);
+    // a completed background response replays its typed events; any other stored response reads as before
+    const streamed = try sendRaw(srv, a, try urlOf(a, short, "?stream=true&starting_after=0"), null);
+    try t.expectEqual(@as(u16, 200), streamed.status);
+    try t.expect(std.mem.indexOf(u8, streamed.body, "\"response.completed\"") != null);
     try t.expectEqual(@as(u16, 200), (try send(srv, a, "GET", try urlOf(a, plain, "?stream=true"), "", null)).status);
 }
 
@@ -421,4 +444,54 @@ test "background Responses: the server's stop cancels a running one and waits fo
     try waitFor(Lane.submitted, .{ &lane, 1 });
     srv.deinit();
     try t.expectEqual(@as(usize, 1), lane.cancels.load(.monotonic));
+}
+
+test "background Responses: replay resumes after its cursor and refuses stale or foreign cursors" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator) };
+    try lane.start();
+    defer lane.deinit();
+    const srv = try serve(&lane);
+    defer srv.deinit();
+    const id = (try post(srv, a, "{\"model\":\"m\",\"input\":\"hi\",\"background\":true,\"max_output_tokens\":8}")).body.strField("id").?;
+    try lane.waitFirstTokens(1);
+    const live_path = try urlOf(a, id, "?stream=true");
+    try t.expectEqual(@as(u16, 200), (try sendRaw(srv, a, live_path, null)).status);
+    _ = try waitStatus(srv, a, id, "completed");
+    const whole = try sendRaw(srv, a, live_path, null);
+    try t.expectEqual(@as(u16, 200), whole.status);
+    const sequences = try eventSequences(a, whole.body);
+    try t.expect(sequences.items.len > 2);
+    for (sequences.items, 0..) |sequence, i| try t.expectEqual(@as(u64, @intCast(i)), sequence);
+    try t.expect(std.mem.indexOf(u8, whole.body, "\"response.completed\"") != null);
+    const cursor = sequences.items[sequences.items.len / 2];
+    const resumed_path = try urlOf(a, id, try std.fmt.allocPrint(a, "?stream=true&starting_after={d}", .{cursor}));
+    const resumed = try sendRaw(srv, a, resumed_path, null);
+    try t.expectEqual(@as(u16, 200), resumed.status);
+    const suffix = try eventSequences(a, resumed.body);
+    try t.expectEqualSlices(u64, sequences.items[@as(usize, @intCast(cursor + 1))..], suffix.items);
+    const future_path = try urlOf(a, id, "?stream=true&starting_after=999999");
+    try t.expectEqual(@as(u16, 400), (try sendRaw(srv, a, future_path, null)).status);
+    try t.expectEqual(@as(u16, 404), (try sendRaw(srv, a, live_path, 2)).status);
+}
+
+test "background Responses: replay reports a queued turn before any visible generation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator) };
+    try lane.start();
+    defer lane.deinit();
+    const srv = try serve(&lane);
+    defer srv.deinit();
+    _ = (try post(srv, a, long)).body.strField("id").?;
+    const id = (try post(srv, a, long)).body.strField("id").?;
+    try waitFor(Lane.submitted, .{ &lane, 1 });
+    const replay = try sendRaw(srv, a, try urlOf(a, id, "?stream=true"), null);
+    try t.expectEqual(@as(u16, 200), replay.status);
+    try t.expect(std.mem.indexOf(u8, replay.body, "\"response.created\"") != null);
+    try t.expect(std.mem.indexOf(u8, replay.body, "output_text.delta") == null);
+    try t.expect(std.mem.indexOf(u8, replay.body, "response.completed") == null);
 }

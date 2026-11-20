@@ -1794,13 +1794,16 @@ the same. A second cancel answers the cancelled response again, a background res
 otherwise answers 400, as does a response not created with `background`, and an unknown id 404.
 `DELETE /v1/responses/{id}` on a running one stops it, and nothing of it is kept.
 
-`background: true` needs `store: true` (the default) and refuses `stream: true`: there is no event stream to start
-or resume (a GET of a background response with `stream=true`, as `starting_after` resumes one, answers 400), so poll
-instead. It is an HTTP request only; a Responses socket refuses it, and a true value that is not a boolean, such as
-`1`, is refused. At most 64 background responses are queued or running at once on a server, 16 for one API key,
-holding 256 MiB of copied requests in all; past those a create answers 429 `background_limit_exceeded` before any
-work starts. Each keeps its request's place under `--max-inflight` until it is stored, and a stop gives it the drain
-window any request in progress gets.
+`background: true` needs `store: true` (the default) and refuses `stream: true` on its POST. A later
+`GET /v1/responses/{id}?stream=true` replays its typed response events as SSE; `starting_after=N` takes the events after
+that sequence number. A queued response has `response.created` before any output event. Replay is a snapshot of the
+journal, not a connection held open for future events. Each journal is capped at 1 MiB, and completed journals share a
+64-response / 64 MiB archive. A truncated journal or an evicted archive answers 410 rather than claiming a complete
+replay; a malformed, repeated or future cursor answers 400. The background POST remains HTTP-only: a Responses socket
+refuses it, and a true value that is not a boolean, such as `1`, is refused. At most 64 background responses are queued
+or running at once on a server, 16 for one API key, holding 256 MiB of copied requests in all; past those a create
+answers 429 `background_limit_exceeded` before any work starts. Each keeps its request's place under `--max-inflight`
+until it is stored, and a stop gives it the drain window any request in progress gets.
 
 Stored responses are the server's, so with API keys only a full or `[admin]` key may create, poll or cancel one; a
 scoped key gets 403 (see [Key scopes](#key-scopes)). A server without keys takes the response's id, 128 random bits,

@@ -54,7 +54,7 @@ pub fn get(srv: *Server, conn: *Conn, a: Allocator, rid: []const u8) void {
     const found = srv.background_jobs.poll(srv.io, a, rid, conn.key_digest) orelse (srv.store.get(srv.io, a, rid, conn.key_digest) catch null);
     const v = found orelse return notStored(conn, a, rid);
     if (json.truthyField(v, "background") and background.streamAsked(conn.path))
-        return refuse(conn, a, "streaming a background response is not supported: GET it without stream=true and poll its status", 400, "stream");
+        return background.replay(srv, conn, a, rid);
     routes.sendValue(conn, a, 200, v);
 }
 

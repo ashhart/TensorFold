@@ -10,7 +10,11 @@ const routes = @import("routes.zig");
 const log = @import("log.zig");
 const Sink = @import("responses_sink.zig").Sink;
 const Server = @import("server.zig").Server;
+const event = @import("responses_event_log.zig");
+const sse = @import("sse.zig");
 const Conn = @import("http_conn.zig").Conn;
+const max_archives = 64;
+const max_archive_bytes = 64 << 20;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -28,10 +32,41 @@ pub const Manager = struct {
     bytes: usize = 0, // the copied requests' memory, against limits.bytes
     closed: bool = false,
     limits: Limits = .{},
+    archives: std.ArrayList(*Archive) = .empty,
+    archive_bytes: usize = 0,
 
     fn find(m: *Manager, id: []const u8, owner: ?[32]u8) ?*Job {
         for (m.jobs.items) |j| if (!j.deleted and std.mem.eql(u8, j.id, id) and std.meta.eql(j.key, owner)) return j;
         return null;
+    }
+
+    fn findArchive(m: *Manager, id: []const u8, owner: ?[32]u8) ?usize {
+        for (m.archives.items, 0..) |archive, i|
+            if (std.mem.eql(u8, archive.id, id) and std.meta.eql(archive.key, owner)) return i;
+        return null;
+    }
+
+    fn dropArchive(m: *Manager, i: usize) void {
+        const archive = m.archives.items[i];
+        m.archive_bytes -= archive.log.charge();
+        _ = m.archives.orderedRemove(i);
+        archive.free(archive.log.gpa);
+    }
+
+    fn retain(m: *Manager, j: *Job) void {
+        const archive = Archive.make(j) catch return;
+        const charge = archive.log.charge();
+        if (charge > max_archive_bytes) {
+            archive.free(j.srv.gpa);
+            return;
+        }
+        while (m.archives.items.len > 0 and (m.archives.items.len >= max_archives or m.archive_bytes + charge > max_archive_bytes))
+            m.dropArchive(0);
+        m.archives.append(j.srv.gpa, archive) catch {
+            archive.free(j.srv.gpa);
+            return;
+        };
+        m.archive_bytes += charge;
     }
 
     /// Why another job cannot start now (429), else null.
@@ -72,6 +107,15 @@ pub const Manager = struct {
         return j.snapshot(a) catch null;
     }
 
+    pub fn copyReplay(m: *Manager, io: std.Io, a: Allocator, id: []const u8, owner: ?[32]u8, after: ?u64) !?[]*json.Object {
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        if (m.find(id, owner)) |j|
+            return try j.log.copyAfter(a, after, if (j.log.last == null and !j.cancelled) j.base else null);
+        const i = m.findArchive(id, owner) orelse return null;
+        return try m.archives.items[i].log.copyAfter(a, after, null);
+    }
+
     /// Whether `id` names a response still queued or running.
     pub fn running(m: *Manager, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         m.mutex.lockUncancelable(io);
@@ -83,7 +127,10 @@ pub const Manager = struct {
     pub fn forget(m: *Manager, io: std.Io, id: []const u8, owner: ?[32]u8) bool {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
-        const j = m.find(id, owner) orelse return false;
+        const j = m.find(id, owner) orelse {
+            if (m.findArchive(id, owner)) |i| m.dropArchive(i);
+            return false;
+        };
         j.deleted = true;
         j.stop();
         return true;
@@ -110,6 +157,10 @@ pub const Manager = struct {
         while (m.jobs.items.len > 0) m.ended.waitUncancelable(srv.io, &m.mutex);
         m.jobs.deinit(srv.gpa);
         m.jobs = .empty;
+        for (m.archives.items) |archive| archive.free(srv.gpa);
+        m.archives.deinit(srv.gpa);
+        m.archives = .empty;
+        m.archive_bytes = 0;
     }
 
     /// The job's end kept (unless deleted), its counts released, and the job gone from `jobs`.
@@ -118,7 +169,8 @@ pub const Manager = struct {
         m.mutex.lockUncancelable(srv.io);
         defer m.mutex.unlock(srv.io);
         // stored before the job leaves `jobs`, so a poll always finds one of the two
-        if (!j.deleted) if (j.ending(cx.a, got)) |final| srv.store.put(srv.io, cx, final, j.t.added, j.key) catch |e|
+        const final: ?Value = if (j.deleted) null else j.ending(cx.a, got);
+        if (final) |v| srv.store.put(srv.io, cx, v, j.t.added, j.key) catch |e|
             log.line("background response {s} was not stored: {s}", .{ j.id, @errorName(e) });
         j.held.release();
         for (m.jobs.items, 0..) |x, i| if (x == j) {
@@ -126,6 +178,10 @@ pub const Manager = struct {
             break;
         };
         m.bytes -= j.charge;
+        if (!j.deleted) {
+            if (final) |v| if (j.log.last == null) j.synthetic(cx.a, v);
+            m.retain(j);
+        }
         j.free();
         m.ended.broadcast(srv.io);
     }
@@ -135,10 +191,32 @@ const Started = union(enum) { queued, closed, busy: []const u8, unavailable: []c
 
 const State = enum { queued, in_progress };
 
+const Archive = struct {
+    id: []const u8,
+    key: ?[32]u8,
+    log: event.Log,
+
+    fn make(j: *Job) !*Archive {
+        const gpa = j.srv.gpa;
+        const archive = try gpa.create(Archive);
+        archive.* = .{ .id = "", .key = j.key, .log = j.log };
+        j.log = .init(gpa);
+        errdefer archive.free(gpa);
+        archive.id = try archive.log.arena.allocator().dupe(u8, j.id);
+        return archive;
+    }
+
+    fn free(archive: *Archive, gpa: Allocator) void {
+        archive.log.deinit();
+        gpa.destroy(archive);
+    }
+};
+
 /// One background response: its own copy of the request, run on its own thread through the ordinary turn.
 const Job = struct {
     srv: *Server,
     arena: std.heap.ArenaAllocator,
+    log: event.Log,
     id: []const u8 = "",
     key: ?[32]u8,
     t: translate.Request,
@@ -152,7 +230,7 @@ const Job = struct {
 
     fn make(srv: *Server, a: Allocator, body: Value, t: translate.Request, key: ?[32]u8) !*Job {
         const j = try srv.gpa.create(Job);
-        j.* = .{ .srv = srv, .arena = .init(srv.gpa), .key = key, .t = t };
+        j.* = .{ .srv = srv, .arena = .init(srv.gpa), .log = .init(srv.gpa), .key = key, .t = t };
         errdefer j.free();
         const ja = j.arena.allocator();
         j.base = (try json.deepCopy(ja, .{ .object = try responses.newBase(srv, a, body, t) })).object;
@@ -168,6 +246,7 @@ const Job = struct {
 
     fn free(j: *Job) void {
         const gpa = j.srv.gpa;
+        j.log.deinit();
         j.arena.deinit();
         gpa.destroy(j);
     }
@@ -203,10 +282,13 @@ const Job = struct {
         m.end(j, &cx, if (begun) j.work(&cx) else null);
     }
 
-    /// The turn as a whole (unstreamed) POST runs it, on a connection that is gone only when cancelled.
+    /// The turn streams internally even though its POST is JSON: those typed events are its replay journal.
     fn work(j: *Job, cx: *errors.Cx) ?Value {
         var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = cx.a, .gone_hook = .{ .ctx = j, .call = gone }, .key_digest = j.key };
-        const sink: Sink = .{ .ctx = j, .vt = &.{ .open = quiet, .event = unheard, .keepalive = quiet } };
+        j.t.stream = true;
+        j.t.chat.object.put(cx.a, "stream", .{ .bool = true }) catch return null;
+        j.base.put(cx.a, "status", .{ .string = "in_progress" }) catch return null;
+        const sink: Sink = .{ .ctx = j, .vt = &.{ .open = quiet, .event = heard, .keepalive = quiet } };
         return switch (responses.turn(j.srv, cx.a, &conn, cx, .null, j.t, sink, .{ .base = j.base })) {
             .whole => |v| v,
             .streamed => |v| v,
@@ -225,9 +307,49 @@ const Job = struct {
         return .{ .object = o };
     }
 
+    fn synthetic(j: *Job, a: Allocator, final: Value) void {
+        for ([_]struct { sequence: u64, kind: []const u8, response: *json.Object }{
+            .{ .sequence = 0, .kind = "response.created", .response = j.base },
+            .{ .sequence = 1, .kind = if (std.mem.eql(u8, json.strOr(final.get("status")), "cancelled")) "response.incomplete" else "response.failed", .response = final.object },
+        }) |one| {
+            const payload = json.newObject(a) catch {
+                j.log.truncated = true;
+                return;
+            };
+            payload.put(a, "type", .{ .string = one.kind }) catch {
+                j.log.truncated = true;
+                return;
+            };
+            payload.put(a, "sequence_number", json.intValue(a, one.sequence) catch {
+                j.log.truncated = true;
+                return;
+            }) catch {
+                j.log.truncated = true;
+                return;
+            };
+            payload.put(a, "response", .{ .object = one.response }) catch {
+                j.log.truncated = true;
+                return;
+            };
+            j.log.record(payload) catch {
+                j.log.truncated = true;
+                return;
+            };
+        }
+    }
+
     fn quiet(_: *anyopaque) error{Closed}!void {}
 
-    fn unheard(_: *anyopaque, _: Allocator, _: []const u8, _: *json.Object) error{Closed}!void {}
+    fn heard(ctx: *anyopaque, _: Allocator, _: []const u8, payload: *json.Object) error{Closed}!void {
+        const j: *Job = @ptrCast(@alignCast(ctx));
+        const m = &j.srv.background_jobs;
+        m.mutex.lockUncancelable(j.srv.io);
+        defer m.mutex.unlock(j.srv.io);
+        j.log.record(payload) catch {
+            j.log.truncated = true;
+            return error.Closed;
+        };
+    }
 };
 
 /// The response failed with the chat route's error (`payload`, or none): "invalid_prompt" for the request's own fault.
@@ -292,6 +414,23 @@ pub fn cancel(srv: *Server, conn: *Conn, a: Allocator, id: []const u8) void {
     responses.refuse(conn, a, message, 400, "response_id");
 }
 
+pub fn replay(srv: *Server, conn: *Conn, a: Allocator, id: []const u8) void {
+    const after = startingAfter(conn.path) catch
+        return responses.refuse(conn, a, "starting_after must be one nonnegative integer sequence number", 400, "starting_after");
+    const found = srv.background_jobs.copyReplay(srv.io, a, id, conn.key_digest, after) catch |e| {
+        switch (e) {
+            error.InvalidCursor => responses.refuse(conn, a, "starting_after is newer than the response's latest event", 400, "starting_after"),
+            error.StaleCursor => responses.refuse(conn, a, "the response's event journal was truncated; replay is no longer complete", 410, "starting_after"),
+            else => responses.refuse(conn, a, "out of memory while copying the response's event journal", 503, null),
+        }
+        return;
+    };
+    const events = found orelse
+        return responses.refuse(conn, a, "the response's event journal is no longer retained", 410, "starting_after");
+    sse.open(conn) catch return;
+    for (events) |payload| sse.event(conn, a, payload.get("type").?.string, .{ .object = payload }) catch return;
+}
+
 /// ``stream=true`` (or 1) in a GET's query: an event stream asked of a stored response.
 pub fn streamAsked(path: []const u8) bool {
     const q = std.mem.indexOfScalar(u8, path, '?') orelse return false;
@@ -304,6 +443,19 @@ pub fn streamAsked(path: []const u8) bool {
     return false;
 }
 
+fn startingAfter(path: []const u8) error{InvalidCursor}!?u64 {
+    const q = std.mem.indexOfScalar(u8, path, '?') orelse return null;
+    var found: ?u64 = null;
+    var pairs = std.mem.splitScalar(u8, path[q + 1 ..], '&');
+    while (pairs.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], "starting_after")) continue;
+        if (found != null) return error.InvalidCursor;
+        found = std.fmt.parseInt(u64, pair[eq + 1 ..], 10) catch return error.InvalidCursor;
+    }
+    return found;
+}
+
 test "the cancel route names one response id, and only stream=true asks for a stream" {
     try std.testing.expectEqualStrings("resp_a", cancelPath("/v1/responses/resp_a/cancel").?);
     try std.testing.expectEqualStrings("resp_b", cancelPath("/responses/resp_b/cancel").?);
@@ -313,4 +465,9 @@ test "the cancel route names one response id, and only stream=true asks for a st
     try std.testing.expect(streamAsked("/v1/responses/r?include=x&stream=1"));
     for ([_][]const u8{ "/v1/responses/r", "/v1/responses/r?stream=false", "/v1/responses/r?streams=true" }) |p|
         try std.testing.expect(!streamAsked(p));
+    try std.testing.expectEqual(@as(?u64, null), try startingAfter("/v1/responses/r?stream=true"));
+    try std.testing.expectEqual(@as(?u64, 0), try startingAfter("/v1/responses/r?starting_after=0"));
+    try std.testing.expectEqual(@as(?u64, 3), try startingAfter("/v1/responses/r?stream=true&starting_after=3"));
+    for ([_][]const u8{ "/v1/responses/r?starting_after=", "/v1/responses/r?starting_after=-1", "/v1/responses/r?starting_after=1x", "/v1/responses/r?starting_after=18446744073709551616", "/v1/responses/r?starting_after=1&starting_after=2" }) |p|
+        try std.testing.expectError(error.InvalidCursor, startingAfter(p));
 }
