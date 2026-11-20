@@ -3,6 +3,7 @@
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details.
 
 ## Unreleased
+
 - App: only the owner token resolves a tool approval on the remote-control server (#3034).
 
 - App: Explore and Oracle child agents refuse a tool outside the list they were given, so a Read-only run stays read-only (#3040).
