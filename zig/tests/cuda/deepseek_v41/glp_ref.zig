@@ -1,9 +1,9 @@
-//! Independent FP64 and documented-order FP32 models of GLPv3's additive edit, shared by the device cases and the
-//! registered contract. GLP format and paired-site concept: Matt Suiche/weightless; directional-steering research
-//! (Arditi et al., NeurIPS 2024) is background only, nothing here projects; additive convention: llama.cpp.
+//! Independent FP64 and documented-order FP32 models of GLPv3's additive edit, shared by device cases and the contract.
 
+// Format and paired-site concept: Matt Suiche/weightless; Arditi et al. (NeurIPS 2024) is background, nothing projects.
 const std = @import("std");
 
+// Additive convention: llama.cpp.
 pub const nt: usize = 320; // threads a CTA
 pub const chain: usize = 128; // columns a block of the final's square chain
 pub const max_width: usize = 5120; // the served width: the launch checks refuse more
@@ -218,8 +218,7 @@ pub fn dirEntry(r: *Rng) f32 {
     return m * std.math.ldexp(@as(f32, 1), -@as(i32, @intCast(r.below(5))));
 }
 
-/// Ordinary, tie, rank-cancellation (writer), exact-sum (the final's gate 4), BF16-max and nonfinite fixtures,
-/// generated deterministically.
+/// Ordinary, tie, rank-cancellation (writer), exact-sum (final gate 4), BF16-max and nonfinite fixtures, deterministic.
 pub const Fill = enum { random, ties, cancel, stress, extreme, nonfinite };
 
 pub const nan16: u16 = 0x7fc0;
@@ -259,11 +258,7 @@ pub fn fillRow(kind: Fill, r: *Rng, row: usize, x: []u16, d: []const f32) void {
     }
 }
 
-/// bf16 bits of the cancellation fixture's large partial of column `k` in `row`: +-2^18 (1 + m/128), m in 1..127. The
-/// exponent puts the fp32 half-ulp of the large value (2^-6) at the small partial's size, so adding the small one to
-/// the negated large one ties to the large one's even significand and loses it; m = 0 is left out, because the
-/// binade below 2^18 has the finer ulp 2^-6 and holds the small one exactly. The order of the ranks shows in the bits
-/// (see `fillPartial`).
+/// bf16 bits of the cancellation fixture's large partial: +-2^18 (1 + m/128), m in 1..127; the order shows in the bits.
 fn big(row: usize, k: usize) u16 {
     var z: u64 = (@as(u64, row) << 20) ^ @as(u64, k) ^ 0x9e3779b97f4a7c15;
     z *%= 0xbf58476d1ce4e5b9;
@@ -276,9 +271,7 @@ fn big(row: usize, k: usize) u16 {
 /// The small partial of the cancellation fixture: 2^-6, as bf16 bits.
 pub const small16: u16 = 0x3c80;
 
-/// One rank's partial row of the writer for a fill (`row` picks the nonfinite placements). The cancellation fill:
-/// rank 0 the large value, rank 1 its negation, rank 2 the small one, the rest zero. In rank order the sum is the
-/// small value exactly; with the small one added to the negated large one first it is lost, and the result is 0.
+/// One rank's writer partial row for a fill; cancellation: rank 0 large, rank 1 its negation, rank 2 small, rest zero.
 pub fn fillPartial(kind: Fill, r: *Rng, row: usize, rank: usize, world: usize, part: []u16) void {
     const w = part.len;
     for (part, 0..) |*v, k| v.* = switch (kind) {
@@ -399,8 +392,7 @@ test "glp ref: the model's fold adds alpha d to every copy and the tap is the me
 }
 
 test "glp ref: the model's one rounding is the store, the writer's rank sum rounds first" {
-    // 1 + 2^-8 sums to a bf16 tie at the rank sum (rounding to 1.0); adding 2^-8 more is only seen when the sum was
-    // left unrounded
+    // 1 + 2^-8 sums to a bf16 tie at the rank sum (rounding to 1.0); adding 2^-8 more is seen only when unrounded
     const ranks = [_][]const u16{ &.{0x3f80}, &.{0x3b80} }; // 1.0 and 2^-8
     const d = [_]f32{0x1p-8};
     var y: [1]u16 = undefined;

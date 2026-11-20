@@ -51,6 +51,16 @@ pub fn strength(v: []const u8) ?f32 {
     return glp.strength(@import("fields.zig").pyFloat(v) orelse return null);
 }
 
+/// True when `name` is a control vector flag, now held in `g`; BadStrength for a --glp-alpha no FP32 strength holds.
+pub fn flag(g: *?Vec, name: []const u8, v: []const u8) error{BadStrength}!bool {
+    if (std.mem.eql(u8, name, "--glp")) {
+        g.* = withPath(g.*, v);
+    } else if (std.mem.eql(u8, name, "--glp-alpha")) {
+        g.* = withAlpha(g.*, strength(v) orelse return error.BadStrength);
+    } else return false;
+    return true;
+}
+
 /// Read the file the operator named and accept it; the message says why not, or null when it is read.
 pub fn read(a: std.mem.Allocator, g: *?Vec) error{OutOfMemory}!?[]const u8 {
     const v = g.* orelse return null;

@@ -128,8 +128,7 @@ pub const Kernels = struct {
         if (mode.cluster) std.log.scoped(.dsv41).info("lin2: dense3's split-K launches of up to 32 rows reduce their partials in a cluster's shared memory (TF_DSV41_LIN2_CLUSTER)", .{});
     }
 
-    /// --glp: glp.cu's module and functions, loaded once before any launch or graph capture; refused without an
-    /// image. Nothing is loaded for an unsteered server, and `deinit` unloads it with the other modules.
+    /// --glp: glp.cu's module, loaded once before any launch or capture; refused without an image.
     pub fn loadGlp(k: *Kernels, d: *const cuda.Driver) !void {
         if (k.glp_fns != null) return;
         if (glp_image.len == 0) return error.GlpKernelNotBuilt;

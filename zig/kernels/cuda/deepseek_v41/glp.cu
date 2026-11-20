@@ -1,6 +1,4 @@
-// Load these GLPv3 additive fold/writer/final C entry points only for active steering; the arithmetic contract,
-// the argument structs and the full credits (Matt Suiche/weightless, Arditi et al. as background, llama.cpp,
-// TensorFold #1835) are in glp.cuh.
+// GLPv3 additive fold/writer/final entry points, loaded only for active steering; contract and credits are in glp.cuh.
 
 #include "glp.cuh"
 

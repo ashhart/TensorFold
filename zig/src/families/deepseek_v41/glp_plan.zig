@@ -1,16 +1,14 @@
-//! Immutable CUDA GLPv3 additive plan: the validated, owned directions of one loaded vector. Format and the
-//! DeepSeek paired-site concept: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868);
-//! directional-steering research (Arditi et al., NeurIPS 2024) is background only: this plan adds, it never
-//! projects; the additive convention is llama.cpp's; the reader and startup convention is TensorFold #1835.
+//! Immutable CUDA GLPv3 additive plan: the validated, owned directions of one loaded vector; it adds, never projects.
 
+// Format and paired site: Matt Suiche/weightless (spec b181a07d3980fc48abe39d95ddb044459dd0b868).
 const std = @import("std");
+// Additive convention is llama.cpp's; reader and startup convention is TensorFold #1835; Arditi et al. is background.
 const glp_ops = @import("dsv41_kernels").glp; // the kernels module's own, never a second copy of its file
 
 /// The persistent role holding every steered layer's direction, [layers, width] fp32 (uploaded once at load).
 pub const dirs_role = "s.glp.dirs";
 
-/// The paired site's hook point and the spec version that defines it (core's reader names both; a vector at any
-/// other site or version never becomes a plan).
+/// The paired site's hook point and spec version (core's reader names both); any other never becomes a plan.
 pub const paired_site = "hc_fold_pre_engram";
 pub const spec_version: u32 = 3;
 
@@ -32,8 +30,7 @@ pub const Plan = struct {
     /// the plan's own copy of every direction, [layers, width] fp32: what is uploaded, and what outlives the source
     dirs: []f32,
 
-    /// Validate the structural GLP source and copy its directions. A valid vector at strength 0 (either sign)
-    /// returns no plan and allocates nothing; an invalid one is refused at any strength.
+    /// Validate the GLP source and copy its directions; strength 0 (either sign) returns no plan, invalid is refused.
     pub fn init(gpa: std.mem.Allocator, source: anytype) Error!?Plan {
         const alpha: f32 = source.alpha;
         if (!std.math.isFinite(alpha) or alpha < 0) return error.BadGlpStrength;
@@ -128,16 +125,13 @@ pub const Plan = struct {
         return pack(x.file_sha256, spec_version, x.alpha, x.layers.len);
     }
 
-    /// `checkpoint` bound to this plan's policy: a stored session never restores into another steering. A null plan
-    /// is no policy and leaves the checkpoint as it was; a loaded vector at strength 0 has no plan, so its
-    /// identity binds through `bindPolicy` on its `policyWords`.
+    /// `checkpoint` bound to this plan's policy; a null plan leaves it unchanged (strength 0 binds via `bindPolicy`).
     pub fn bind(checkpoint: [32]u8, p: ?*const Plan) [32]u8 {
         return bindPolicy(checkpoint, words(p));
     }
 };
 
-/// `checkpoint` bound to the loaded vector's whole policy, strength 0 included: unchanged exactly when no vector
-/// is loaded (word 0 is 0), otherwise a domain-separated hash of the checkpoint and all eight words.
+/// `checkpoint` bound to the whole loaded policy, strength 0 included; unchanged when no vector is loaded.
 pub fn bindPolicy(checkpoint: [32]u8, policy: [8]i64) [32]u8 {
     if (policy[0] == 0) return checkpoint;
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
@@ -161,9 +155,7 @@ fn pack(sha: [32]u8, version: u32, alpha: f32, layers: usize) [8]i64 {
     return w;
 }
 
-/// The loaded-policy words the ranks agree on, strength 0 included where no GPU plan exists: presence, the whole
-/// file hash (four words), the spec version, the effective strength's FP32 bits (-0 as 0) and the layer count.
-/// All zero: no vector loaded, so a loaded vector at strength 0 stays distinct from none.
+/// The eight loaded-policy words the ranks agree on; all zero when no vector is loaded (strength 0 differs from none).
 pub fn policyWords(source: anytype) [8]i64 {
     const s = source orelse return @splat(0);
     return pack(s.vector.file_sha256, s.vector.spec_version, s.alpha, s.vector.layers.len);

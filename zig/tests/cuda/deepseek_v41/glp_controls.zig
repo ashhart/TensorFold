@@ -1,6 +1,4 @@
-//! Required nonproduction fault images; each control must fail its declared gate while production passes.
-//! The faults (a tap that sums, an fp16 edit, a dropped tail column, flushed nonfinite values, a reversed rank sum
-//! and truncation) are planted in dsv41_glp_add_controls.fatbin, which no serve loads.
+//! Nonproduction fault images (dsv41_glp_add_controls.fatbin, loaded by no serve); each must fail its declared gate.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -22,8 +20,7 @@ fn hasWriter(comptime which: Control) bool {
     return which != .sum;
 }
 
-/// The controls module and, per control, the stream and writer entry points (the production ones fill an absent half,
-/// the production final sits beside them).
+/// The controls module and per control its stream and writer entry points (production fills an absent half).
 pub const Controls = struct {
     mod: cuda.Module,
     fns: [6]glp.Functions,
@@ -83,7 +80,7 @@ fn plans() [6]Plan {
         .{ .control = .drop_tail, .gate = .fp64_bound, .stream = .{ .name = "dropped tail", .width = 1032, .rows = 8, .witness = true, .seed = 0x5004 }, .writer = .{ .name = "dropped tail", .width = 1032, .rows = 8, .world = 3, .witness = true, .seed = 0x5005 } },
         // a NaN or infinity flushed to zero by the edit: a finite value where FP64 says NaN or infinity
         .{ .control = .drop_nonfinite, .gate = .nonfinite, .stream = .{ .name = "dropped nonfinite", .width = 1032, .rows = 6, .fill = .nonfinite, .seed = 0x5006 }, .writer = .{ .name = "dropped nonfinite", .width = 1032, .rows = 6, .world = 2, .fill = .nonfinite, .seed = 0x5007 } },
-        // the ranks added last to first: only the cancellation fill's partials tell the order, and it must show in the bits
+        // the ranks added last to first: only the cancellation fill's partials tell the order, in the bits
         .{ .control = .rank_order, .gate = .order, .stream = null, .writer = .{ .name = "ranks last to first", .width = 5120, .rows = 8, .world = 3, .alpha = 1, .fill = .cancel, .seed = 0x5008 } },
         // truncation instead of round to nearest even
         .{ .control = .truncate, .gate = .fp64_bound, .stream = .{ .name = "truncation", .width = 1032, .rows = 8, .seed = 0x5009 }, .writer = .{ .name = "truncation", .width = 1032, .rows = 8, .world = 2, .seed = 0x500a } },
