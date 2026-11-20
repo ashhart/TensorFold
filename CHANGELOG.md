@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
+
 - Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
 
 - Idol's octree and Gaussian decoders now run natively on M5 Metal, from the denoiser's latent to the 3DGS PLY and camera. On an M5 Ultra, 262,144 Gaussians decode in 0.343 s against the SDK's 0.739 s, and 1,048,576 in 1.963 s against 4.653 s, at a 2.43 GB peak footprint against 5.64 GB. Given the SDK's probabilities and draws, every octree level's counts match, and the PLY's header and rows equal the SDK's. Both decoders sit as close to an fp32 run as the SDK's own; `tf-idol-decode` runs those gates from a `tools/zig/idol_case.py decode` case. The decoders' nine kernels are registered with the kernel contract (#1773, after #1766, for #1757). Thanks to @jayleaton.
@@ -13,15 +15,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: Replay launches one task at a time: a second click while a launch is pending creates no new task, the button shows the pending state and is available again after a failure, and a late result from an earlier panel cannot close a reopened one (#3848, fixes #3845). Thanks to @AIFlowML.
 
-
-
 - Qwen3.8-27B on Metal with `--thinking-reserve`: the shorter-reply-first order no longer counts a reply that is still reasoning as the whole limit the reserve gave it. It estimates the reply as its answer quota plus the reasoning left, taken from the think blocks this server has seen close; until one has, and for requests without `--thinking-reserve` or with thinking off, nothing changes. Replies are the same tokens. On an M5 Ultra, once the server has seen a think block close, a reasoning chat reply beside a 110,000-token cold prompt streams 7.3 chunks a second instead of 2.0, and the prompt's fill takes 17% longer (#3371, fixes #3270). Thanks to @CodingEmil for the report.
 
 - CUDA: an opt-in slab mode carves small uploads from shared slabs instead of one 2 MiB-rounded allocation each, and identical trellis bytes upload once, so Hy4-flash EXL3 4bpw loads all 42 layers on one GB10 (85.38 GiB, 29 GiB left) where it ran out at layer 30 (#4003). Thanks to @shantanugoel.
 
 - Tests: for Qwen3.5 dense EXL3 at TP=2, a rank's column cut of a weight can keep the whole weight's K-split plan (`Weight.pinnedColumns`), and `tf-cuda-test qwen35-tp-cut PACK` compares each rank's columns with one GPU's whole-weight bytes; `--tp 1` is unchanged and `--tp 2` stays refused (#3602). Thanks to @Nipale-ai.
-
-
 
 - Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
@@ -579,8 +577,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
 - LFM2.5 on CUDA: attention pages come from the shared KV pool and chat states are kept in the prompt cache, with the kept states' copies off the first token's path; replies are unchanged (#1503). Thanks to @jschmied.
-
-- GLM-5.3-Flash on CUDA at worlds where a rank's fused KDA input is not eight columns wide (TP=3's 8,726 and 8,341): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles instead of `tf_glm_bmm_rows`. Every byte is as before at every row count (a device check compares them); on three GB10s at TP=3 a cold 7.2K prompt's first token comes 10% sooner and a 28.8K one 11%, decode level. `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516).
 
 - Environment: the Metal Qwen KV paging and slot-resume switches and the slide checks refuse a malformed value by name, and `TF_SLIDE_TAKE_OUT_CHECK` is read once at start with `--slide` (#3018, for #2370).
 
