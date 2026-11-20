@@ -9,6 +9,7 @@ const tool_dsml = @import("tool_dsml.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_streaming = @import("tool_streaming.zig");
+const tool_custom = @import("tool_custom.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const strip = reply_text.pyStrip;
@@ -108,7 +109,8 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         const name = try tool_specs.toolName(a, tool);
         try known.put(a, try std.ascii.allocLowerString(a, name), name);
     }
-    if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
+    const custom = try tool_custom.names(a, tools);
+    if (try bareCalls(a, text, &known, max_calls, custom)) |calls| return .{ .content = "", .calls = calls };
     const schemas = try tool_params.schemas(a, tools);
     const envs = try envelopes(a, text);
     if (envs.len == 0) return .{ .content = text, .calls = null };
@@ -134,7 +136,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
                     error.Invalid => null,
                 };
             }
-            const one = payload(a, env.payload, &schemas, max_calls != null) catch |e| switch (e) {
+            const one = payload(a, env.payload, &schemas, max_calls != null, custom) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :blk null,
             };
@@ -149,11 +151,15 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             const list = parsed orelse break :blk .malformed;
             if (list.len == 0) break :blk .malformed;
             var unoffered = false;
-            for (list) |c| if ((try callName(a, c, &known)) == null) {
-                unoffered = true;
-                try keepName(a, &kept_names, strip(c.name));
-            };
-            break :blk if (unoffered) .unoffered else .none;
+            var malformed_custom = false;
+            for (list) |c| {
+                const offered = try callName(a, c, &known);
+                if (offered == null) {
+                    unoffered = true;
+                    try keepName(a, &kept_names, strip(c.name));
+                } else if (tool_custom.isCustom(custom, offered.?) and c.arguments != .string) malformed_custom = true;
+            }
+            break :blk if (malformed_custom) .malformed else if (unoffered) .unoffered else .none;
         };
         if (reject != .none) {
             try residue.appendSlice(a, text[env.start..env.end]);
@@ -162,7 +168,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             continue;
         }
         for (parsed.?) |c| {
-            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, &known)).?, c.arguments));
+            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try tool_custom.openaiCall(a, (try callName(a, c, &known)).?, c.arguments, custom));
         }
     }
     try residue.appendSlice(a, text[cursor..]);
@@ -241,19 +247,7 @@ fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
-/// ``_openai_tool_call``: the call under ``name`` (``callName``), arguments as compact JSON.
-fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!Value {
-    const function = try json.newObject(a);
-    try function.put(a, "name", .{ .string = name });
-    try function.put(a, "arguments", .{ .string = try json.stringify(a, arguments, .{ .ascii = false, .compact = true }) });
-    const call = try json.newObject(a);
-    try call.put(a, "id", .{ .string = try ids.make(a, "call_", 24) });
-    try call.put(a, "type", .{ .string = "function" });
-    try call.put(a, "function", .{ .object = function });
-    return .{ .object = call };
-}
-
-fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize) Allocator.Error!?[]Value {
+fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize, custom: []const []const u8) Allocator.Error!?[]Value {
     const stripped = stripFence(strip(text));
     if (stripped.len == 0 or (stripped[0] != '[' and stripped[0] != '{')) return null;
     const value = switch (try json.parseText(a, stripped)) {
@@ -266,7 +260,7 @@ fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMa
         if (max_calls) |m| if (calls.items.len >= m) break;
         if (item != .object) return null;
         const doc = try json.stringify(a, item, .{ .ascii = false });
-        const parsed = payload(a, doc, null, max_calls != null) catch |e| switch (e) {
+        const parsed = payload(a, doc, null, max_calls != null, custom) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Invalid => {
                 if (max_calls == null) return null; // JSON that is not a call (a structured answer) is the reply's content
@@ -276,7 +270,7 @@ fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMa
         const c = parsed orelse return null;
         // bare JSON naming a tool the request did not offer is a structured answer, the reply's content
         const name = known.get(try std.ascii.allocLowerString(a, c.name)) orelse return null;
-        try calls.append(a, try openaiCall(a, name, c.arguments));
+        try calls.append(a, try tool_custom.openaiCall(a, name, c.arguments, custom));
     }
     return if (calls.items.len > 0) calls.items else null;
 }
@@ -296,7 +290,7 @@ fn stripFence(text: []const u8) []const u8 {
 }
 
 /// ``_parse_tool_call_payload``: one call from a block; null when it is not one, Invalid where Python raises.
-fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool) Error!?Call {
+fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool, custom: []const []const u8) Error!?Call {
     if (std.mem.startsWith(u8, block, "call:") or std.mem.startsWith(u8, block, ":")) {
         if (try gemmaCall(a, block)) |c| return c;
     }
@@ -307,7 +301,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
     if (decoded) |v| {
         if (v == .array) {
             for (v.array) |item| {
-                if (try payload(a, try json.stringify(a, item, .{ .ascii = false }), null, complete)) |c| return c;
+                if (try payload(a, try json.stringify(a, item, .{ .ascii = false }), null, complete, custom)) |c| return c;
             }
             return null;
         }
@@ -332,8 +326,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
                 break :blk Value{ .object = loose };
             };
             if (name.len == 0) return error.Invalid;
-            const object = try jsonObject(a, args);
-            if (complete and !tool_params.finite(object)) return error.Invalid;
+            const object = try tool_custom.arguments(a, name, args, custom, complete);
             return .{ .name = name, .arguments = object };
         }
     }
@@ -343,20 +336,6 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
         if (lead.len == 0 or (lead[0] != '{' and lead[0] != '[' and lead[0] != '<')) return glmCall(a, block, schemas, complete);
     }
     return null;
-}
-
-/// ``_tool_json_object``: arguments as an object, Invalid where Python raises.
-fn jsonObject(a: Allocator, v: Value) Error!Value {
-    switch (v) {
-        .object => return v,
-        .null => return .{ .object = try json.newObject(a) },
-        .string => |s| {
-            const doc = strip(s);
-            if (doc.len == 0) return .{ .object = try json.newObject(a) };
-            return try tool_params.parseObject(a, doc) orelse error.Invalid;
-        },
-        else => return error.Invalid,
-    }
 }
 
 /// ``<function=NAME> <parameter=K>V</parameter> </function>`` (Qwen3-Coder's XML).
@@ -554,7 +533,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     try keyed.appendSlice(a, src[copied..]);
     const quoted = try a.alloc([]const u8, strings.items.len);
     for (strings.items, quoted) |value, *q| q.* = try json.quote(a, value, .{ .ascii = false });
-    return .{ .name = name, .arguments = try jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
+    return .{ .name = name, .arguments = try tool_custom.jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
 }
 
 /// Each mark ``\x00{i}\x00`` in `text` as `quoted[i]`, as replacing i = 0, 1, ... in turn does; no `quoted` has a NUL.

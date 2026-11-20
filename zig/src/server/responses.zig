@@ -296,11 +296,12 @@ pub const Reply = struct {
             try r.put(part.?, "type", .{ .string = "reasoning_text" });
             try r.put(part.?, "text", .{ .string = "" });
         } else {
-            try r.put(item, "id", .{ .string = ids.derived(r.a, r.call_ids.key, "fc_", 32, call_id) catch return error.Closed });
-            try r.put(item, "type", .{ .string = "function_call" });
+            const custom = std.mem.eql(u8, kind, "custom_tool_call");
+            try r.put(item, "id", .{ .string = ids.derived(r.a, r.call_ids.key, if (custom) "ctc_" else "fc_", 32, call_id) catch return error.Closed });
+            try r.put(item, "type", .{ .string = kind });
             try r.put(item, "call_id", .{ .string = call_id });
             translate_mod.writeCallName(r.a, item, r.base.get("tools"), name) catch return error.Closed;
-            try r.put(item, "arguments", .{ .string = "" });
+            try r.put(item, if (custom) "input" else "arguments", .{ .string = "" });
             try r.put(item, "status", .{ .string = "in_progress" });
         }
         r.items.append(r.a, item) catch return error.Closed;
@@ -325,6 +326,8 @@ pub const Reply = struct {
         const where_index = try r.int(r.index(item));
         if (std.mem.eql(u8, item.get("type").?.string, "function_call")) {
             try r.event("response.function_call_arguments.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "name", item.get("name").? }, .{ "arguments", item.get("arguments").? } });
+        } else if (std.mem.eql(u8, item.get("type").?.string, "custom_tool_call")) {
+            try r.event("response.custom_tool_call_input.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "name", item.get("name").? }, .{ "input", item.get("input").? } });
         } else {
             const part = item.get("content").?.array[0].object;
             if (std.mem.eql(u8, item.get("type").?.string, "message")) {
@@ -356,7 +359,7 @@ pub const Reply = struct {
     }
 
     /// A text delta, with the entries the chunk carried for it (null: none asked).
-    fn write(r: *Reply, kind: []const u8, text: []const u8, rows: ?[]Value) E!void {
+    pub fn write(r: *Reply, kind: []const u8, text: []const u8, rows: ?[]Value) E!void {
         const reuse = if (r.current) |c| std.mem.eql(u8, c.get("type").?.string, kind) else false;
         const item = if (reuse) r.current.? else try r.open(kind, "", "");
         const part = item.get("content").?.array[0].object;
@@ -394,18 +397,21 @@ pub const Reply = struct {
         const calls = d.get("tool_calls") orelse return;
         if (calls != .array) return;
         for (calls.array) |call| {
-            const function = call.get("function") orelse Value.null;
+            const custom = call.get("custom") orelse Value.null;
+            const is_custom = custom == .object;
+            const payload = if (is_custom) custom else call.get("function") orelse Value.null;
             const at: i64 = if (call.get("index")) |ix| ix.int64() orelse 0 else 0;
             const item = r.calls.get(at) orelse blk: {
                 const id = textOf(call.get("id")) orelse (r.call_ids.id(r.a, 0, std.math.cast(u64, at) orelse 0) catch return error.Closed);
-                const name = textOf(function.get("name")) orelse "";
-                const made = try r.open("function_call", id, name);
+                const call_name = textOf(payload.get("name")) orelse "";
+                const made = try r.open(if (is_custom) "custom_tool_call" else "function_call", id, call_name);
                 r.calls.put(r.a, at, made) catch return error.Closed;
                 break :blk made;
             };
-            if (textOf(function.get("arguments"))) |args| {
-                try r.put(item, "arguments", .{ .string = try r.append(item, args) });
-                try r.event("response.function_call_arguments.delta", &.{ .{ "item_id", item.get("id").? }, .{ "output_index", try r.int(r.index(item)) }, .{ "delta", .{ .string = args } } });
+            if (textOf(payload.get(if (is_custom) "input" else "arguments"))) |args| {
+                try r.put(item, if (is_custom) "input" else "arguments", .{ .string = try r.append(item, args) });
+                const event_kind = if (is_custom) "response.custom_tool_call_input.delta" else "response.function_call_arguments.delta";
+                try r.event(event_kind, &.{ .{ "item_id", item.get("id").? }, .{ "output_index", try r.int(r.index(item)) }, .{ "delta", .{ .string = args } } });
             }
         }
     }
@@ -425,7 +431,8 @@ pub const Reply = struct {
             const where = try r.int(r.index(one.item));
             const entries: Value = .{ .array = one.rows };
             if (one.item == one.owner) {
-                try r.event("response.function_call_arguments.delta", &.{ .{ "item_id", one.item.get("id").? }, .{ "output_index", where }, .{ "delta", .{ .string = "" } }, .{ "logprobs", entries } });
+                const event_kind = if (std.mem.eql(u8, one.item.get("type").?.string, "custom_tool_call")) "response.custom_tool_call_input.delta" else "response.function_call_arguments.delta";
+                try r.event(event_kind, &.{ .{ "item_id", one.item.get("id").? }, .{ "output_index", where }, .{ "delta", .{ .string = "" } }, .{ "logprobs", entries } });
                 continue;
             }
             const name = if (std.mem.eql(u8, one.item.get("type").?.string, "reasoning")) "response.reasoning_text.delta" else "response.output_text.delta";
@@ -463,7 +470,7 @@ pub const Reply = struct {
         return .{ .array = list };
     }
 
-    fn finish(r: *Reply, reason: ?[]const u8, chat_usage: ?Value, stats: ?Value) E!Value {
+    pub fn finish(r: *Reply, reason: ?[]const u8, chat: ?Value, tensorfold: ?Value) E!Value {
         const length = reason != null and std.mem.eql(u8, reason.?, "length");
         const filtered = reason != null and std.mem.eql(u8, reason.?, @import("loop_stop.zig").finish_reason);
         const cancelled = reason != null and std.mem.eql(u8, reason.?, "cancelled"); // POST /v1/requests/{id}/cancel
@@ -479,14 +486,14 @@ pub const Reply = struct {
         const final = json.copyObject(r.a, r.base) catch return error.Closed;
         try r.put(final, "status", .{ .string = status });
         try r.put(final, "output", try r.itemsValue());
-        try r.put(final, "usage", try r.usage(chat_usage));
+        try r.put(final, "usage", try r.usage(chat));
         if (incomplete) {
             const d = try r.obj();
             try r.put(d, "reason", .{ .string = if (filtered) "content_filter" else "max_output_tokens" });
             try r.put(final, "incomplete_details", .{ .object = d });
         } else try r.put(final, "incomplete_details", .null);
         if (!incomplete and !cancelled) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
-        if (stats) |s| if (s != .null) try r.put(final, "tensorfold", s);
+        if (tensorfold) |s| if (s != .null) try r.put(final, "tensorfold", s);
         r.final = .{ .object = final };
         if (r.keep) r.store(.{ .object = final });
         // a cancelled response ends with the terminal event clients know for a cut reply, its status "cancelled"
@@ -555,46 +562,6 @@ pub const Reply = struct {
     }
 };
 
-test "a call delta that names no id takes the chat run's id at its index, and one that names its id keeps it" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const key: ids.Key = .of(ids.test_key_text);
-    const chat = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}")).ok;
-    var cx: Cx = .{ .a = a };
-    var reply: Reply = .{ .srv = undefined, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .owner = null, .call_ids = .{ .key = &key, .body = chat } };
-    try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok, null);
-    var calls: ids.Calls = .{ .key = &key, .body = chat };
-    try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
-    try std.testing.expectEqualStrings("call_sent", reply.items.items[1].get("call_id").?.string);
-}
-
-test "Server recovery: Responses grows reasoning, text and interleaved call arguments in bounded buffers" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var cx: Cx = .{ .a = a };
-    var srv: Server = undefined;
-    const key: ids.Key = .of(ids.test_key_text);
-    var r: Reply = .{ .srv = &srv, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .owner = null, .call_ids = .{ .key = &key, .body = .null } };
-    const chunk = "abcdefgh";
-    for ([_][]const u8{ "reasoning", "message" }) |kind| {
-        for (0..3000) |_| try r.write(kind, chunk, null);
-        const text = r.current.?.get("content").?.array[0].get("text").?.string;
-        try std.testing.expectEqual(@as(usize, 3000 * chunk.len), text.len);
-        for (0..3000) |i| try std.testing.expectEqualStrings(chunk, text[i * chunk.len ..][0..chunk.len]);
-    }
-    const first = (try json.parse(a, "{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"abcdefgh\"}}]}")).ok;
-    const second = (try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":\"abcdefgh\"}}]}")).ok;
-    for (0..3000) |_| {
-        try r.delta(first, null);
-        try r.delta(second, null);
-    }
-    for ([_]i64{ 0, 1 }) |i| {
-        const args = r.calls.get(i).?.get("arguments").?.string;
-        try std.testing.expectEqual(@as(usize, 3000 * chunk.len), args.len);
-        for (0..3000) |j| try std.testing.expectEqualStrings(chunk, args[j * chunk.len ..][0..chunk.len]);
-    }
-    try std.testing.expectEqual(@as(usize, 4), r.items.items.len);
-    try std.testing.expect(arena.queryCapacity() < 4 << 20);
+test {
+    _ = @import("responses_reply_test.zig");
 }

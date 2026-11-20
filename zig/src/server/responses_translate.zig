@@ -5,6 +5,8 @@ const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pyrepr = @import("pyrepr.zig");
 const tool_specs = @import("tool_specs.zig");
+const response_tools = @import("responses_tools.zig");
+const namespace_tools = @import("responses_namespace.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -133,7 +135,7 @@ fn flatName(cx: *Cx, namespace: ?Value, name: []const u8) errors.Refused![]const
 pub const Child = struct { name: []const u8, namespace: []const u8 };
 
 /// Whether ``name`` is ``group`` followed by the separator and ``own``: the one engine spelling a child can carry.
-fn spells(name: []const u8, group: []const u8, own: []const u8) bool {
+pub fn spells(name: []const u8, group: []const u8, own: []const u8) bool {
     if (!std.mem.startsWith(u8, name, group)) return false;
     const tail = name[group.len..];
     return std.mem.startsWith(u8, tail, "__") and std.mem.eql(u8, tail[2..], own);
@@ -188,18 +190,27 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
                 thought = null;
             };
             try out.append(a, m);
-        } else if (std.mem.eql(u8, k, "function_call")) {
-            const call_id = item.strField("call_id");
-            const name = item.strField("name");
-            if (call_id == null or name == null) return cx.refuse("a function_call item needs a call_id and a name");
+        } else if (std.mem.eql(u8, k, "function_call") or std.mem.eql(u8, k, "custom_tool_call")) {
+            const custom = std.mem.eql(u8, k, "custom_tool_call");
+            const call_id = item.strField("call_id") orelse return cx.refuse("a tool call item needs a call_id");
+            const call_name = item.strField("name") orelse return cx.refuse("a tool call item needs a name");
+            const supplied = if (custom) item.get("input") else item.get("arguments");
+            if (custom and (supplied == null or supplied.? != .string)) return cx.refuse("a custom_tool_call item needs string input, including an explicitly empty input");
+            const arguments = if (custom) supplied.? else if (supplied != null and supplied.?.truthy()) supplied.? else Value{ .string = "{}" };
+            if (!custom and arguments != .string) return cx.refuse("a function_call item's arguments must be a string; incomplete arguments remain incomplete");
             const function = try json.newObject(a);
-            try function.put(a, "name", .{ .string = try flatName(cx, item.get("namespace"), name.?) });
-            const args = item.get("arguments");
-            try function.put(a, "arguments", if (args != null and args.?.truthy()) args.? else .{ .string = "{}" });
+            try function.put(a, "name", .{ .string = if (custom) call_name else try flatName(cx, item.get("namespace"), call_name) });
+            try function.put(a, "arguments", arguments);
             const call = try json.newObject(a);
-            try call.put(a, "id", .{ .string = call_id.? });
-            try call.put(a, "type", .{ .string = "function" });
+            try call.put(a, "id", .{ .string = call_id });
+            try call.put(a, "type", .{ .string = if (custom) "custom" else "function" });
             try call.put(a, "function", .{ .object = function });
+            if (custom) {
+                const payload = try json.newObject(a);
+                try payload.put(a, "name", .{ .string = call_name });
+                try payload.put(a, "input", arguments);
+                try call.put(a, "custom", .{ .object = payload });
+            }
             const last_role = if (out.items.len > 0) (Value{ .object = out.items[out.items.len - 1] }).strField("role") orelse "" else "";
             if (out.items.len == 0 or !std.mem.eql(u8, last_role, "assistant")) {
                 const m = try json.newObject(a);
@@ -215,8 +226,8 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             const existing = last.get("tool_calls");
             const before: []const Value = if (existing != null and existing.? == .array) existing.?.array else &.{};
             try last.put(a, "tool_calls", .{ .array = try std.mem.concat(a, Value, &.{ before, &.{.{ .object = call }} }) });
-        } else if (std.mem.eql(u8, k, "function_call_output")) {
-            const call_id = item.strField("call_id") orelse return cx.refuse("a function_call_output item needs the call_id of its call");
+        } else if (std.mem.eql(u8, k, "function_call_output") or std.mem.eql(u8, k, "custom_tool_call_output")) {
+            const call_id = item.strField("call_id") orelse return cx.refuse("a tool call output item needs the call_id of its call");
             const m = try json.newObject(a);
             try m.put(a, "role", .{ .string = "tool" });
             try m.put(a, "tool_call_id", .{ .string = call_id });
@@ -231,205 +242,15 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             };
             if (json.truthyField(item, "encrypted_content") and !any) return cx.refuse("encrypted reasoning is not supported: send the reasoning item's content");
             thought = if (texts.items.len > 0) texts.items else null;
-        } else return cx.fail(.request, "input items of type {s} are not supported: send messages, function_call, function_call_output and reasoning items", .{try pyrepr.repr(a, kind)});
+        } else if (std.mem.eql(u8, k, "compaction") and json.truthyField(item, "encrypted_content")) {
+            continue; // a foreign opaque compaction has no model-visible content; retain the supplied remaining history
+        } else if (std.mem.eql(u8, k, "item_reference")) {
+            return cx.refuse("an item_reference requires its original response history; missing history cannot be reconstructed");
+        } else return cx.fail(.request, "input items of type {s} are not supported: send messages, function_call, custom_tool_call, tool outputs and reasoning items", .{try pyrepr.repr(a, kind)});
     }
     const result = try a.alloc(Value, out.items.len);
     for (out.items, result) |m, *slot| slot.* = .{ .object = m };
     return result;
-}
-
-/// A tool that asks to be loaded later: this server runs every tool it is given now.
-fn deferred(cx: *Cx, tool: Value) errors.Refused {
-    return cx.fail(.request, "tool {s} sets defer_loading, which is not supported: send the tool without it", .{try pyrepr.repr(cx.a, tool.get("name"))});
-}
-
-/// Whether the declared tools hold a namespace: what makes the flat path pay for the namespace-only checks.
-fn hasNamespace(declared: ?Value) bool {
-    if (declared == null or declared.? != .array) return false;
-    for (declared.?.array) |tool| if (tool.typeIs("namespace")) return true;
-    return false;
-}
-
-/// Whether ``name`` is one of the namespace groups these tools declare.
-fn offeredGroup(declared: ?Value, name: []const u8) bool {
-    if (declared == null or declared.? != .array) return false;
-    for (declared.?.array) |tool| {
-        if (!tool.typeIs("namespace")) continue;
-        const group = tool.strField("name") orelse continue;
-        if (std.mem.eql(u8, group, name)) return true;
-    }
-    return false;
-}
-
-/// A raw function_call item's namespace as the group it came from: only a declared group's name answers for it.
-fn inputNamespaces(cx: *Cx, items: []const Value, declared: ?Value) errors.Refused!void {
-    for (items) |item| {
-        if (item != .object or !item.typeIs("function_call")) continue;
-        const ns = item.get("namespace") orelse continue; // absent or null keeps the name as it was sent
-        if (ns != .string) continue; // messages() gives that item its own refusal
-        if (!offeredGroup(declared, ns.string)) return cx.fail(.request, "namespace {s} is not among offered: send the name of a namespace tool", .{try pyrepr.repr(cx.a, ns)});
-    }
-}
-
-/// A flattened tool's name, refused by name when another tool carries it already.
-fn uniqueName(cx: *Cx, names: *std.ArrayList([]const u8), name: []const u8) errors.Refused!void {
-    for (names.items) |taken| if (std.mem.eql(u8, taken, name)) return cx.fail(.request, "two tools are named {s}: each tool needs its own name", .{try pyrepr.repr(cx.a, Value{ .string = name })});
-    try names.append(cx.a, name);
-}
-
-/// One function tool as the chat function that runs it; a namespace child is flattened as <ns>__<tool> with both notes.
-fn functionTool(cx: *Cx, names: ?*std.ArrayList([]const u8), out: *std.ArrayList(Value), tool: Value, ns_name: []const u8, ns_desc: []const u8) errors.Refused!void {
-    if (names != null and json.truthyField(tool, "defer_loading")) return deferred(cx, tool);
-    const name = tool.strField("name") orelse "";
-    if (name.len == 0) return cx.refuse("a function tool needs a name");
-    const function = try json.newObject(cx.a);
-    for ([_][]const u8{ "name", "description", "parameters", "strict" }) |k| if (tool.field(k)) |v| try function.put(cx.a, k, v);
-    var flat = name;
-    if (ns_name.len > 0) {
-        const prefix = try std.fmt.allocPrint(cx.a, "{s}__", .{ns_name});
-        if (std.mem.startsWith(u8, name, prefix)) return cx.refuse("a namespace child's name must not start with its namespace and '__'");
-        if (tool.get("description")) |d| if (d != .null and d != .string) return cx.refuse("a namespace tool's child needs a string description");
-        flat = try std.fmt.allocPrint(cx.a, "{s}__{s}", .{ ns_name, name });
-        const own = tool.strField("description") orelse "";
-        try function.put(cx.a, "name", .{ .string = flat });
-        try function.put(cx.a, "description", .{ .string = if (own.len == 0) ns_desc else try std.fmt.allocPrint(cx.a, "{s}: {s}", .{ ns_desc, own }) });
-    }
-    if (names) |taken| try uniqueName(cx, taken, flat);
-    const t = try json.newObject(cx.a);
-    try t.put(cx.a, "type", .{ .string = "function" });
-    try t.put(cx.a, "function", .{ .object = function });
-    try out.append(cx.a, .{ .object = t });
-}
-
-/// A namespace tool's children as flat function tools: OpenAI's one level of namespacing, and only one.
-fn namespaceTools(cx: *Cx, names: *std.ArrayList([]const u8), out: *std.ArrayList(Value), ns: Value) errors.Refused!void {
-    if (json.truthyField(ns, "defer_loading")) return deferred(cx, ns);
-    const ns_name = ns.strField("name") orelse "";
-    if (ns_name.len == 0) return cx.refuse("a namespace tool needs a name");
-    const ns_desc = ns.strField("description") orelse "";
-    if (ns_desc.len == 0) return cx.refuse("a namespace tool needs a description");
-    const children = ns.get("tools") orelse return cx.refuse("a namespace tool needs a list of function tools");
-    if (children != .array) return cx.refuse("a namespace tool's tools must be a list");
-    if (children.array.len == 0) return cx.refuse("a namespace tool needs at least one function tool");
-    for (children.array) |child| {
-        const kind = kindOf(child);
-        if (kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "namespace")) return cx.refuse("a namespace tool cannot hold another namespace");
-        if (kind == null or kind.? != .string or !std.mem.eql(u8, kind.?.string, "function")) return cx.fail(.request, "tools of type {s} are not supported: this server runs function tools only", .{try pyrepr.repr(cx.a, kind)});
-        try functionTool(cx, names, out, child, ns_name, ns_desc);
-    }
-}
-
-fn tools(cx: *Cx, raw: ?Value) errors.Refused!?[]Value {
-    const value = raw orelse return null;
-    if (value == .null) return null;
-    if (value != .array) return cx.refuse("tools must be a list");
-    var out: std.ArrayList(Value) = .empty;
-    var names: std.ArrayList([]const u8) = .empty; // every name the tools end up with, so none is given twice
-    const taken = if (hasNamespace(value)) &names else null; // flat-only lists keep main's unchecked names
-    for (value.array) |tool| {
-        if (tool.typeIs("namespace")) {
-            try namespaceTools(cx, &names, &out, tool);
-            continue;
-        }
-        if (!tool.typeIs("function")) return cx.fail(.request, "tools of type {s} are not supported: this server runs function tools only", .{try pyrepr.repr(cx.a, kindOf(tool))});
-        try functionTool(cx, taken, &out, tool, "", "");
-    }
-    return out.items;
-}
-
-/// The name a tool_choice selector picks among the declared tools: null for none, "" for an ambiguous one.
-fn selectorName(a: Allocator, declared: ?Value, selector: []const u8, ns: ?[]const u8) errors.Refused!?[]const u8 {
-    if (declared == null or declared.? != .array) return null;
-    for (declared.?.array) |tool| { // a composed engine spelling is unique, so it answers before any own-name match
-        if (!tool.typeIs("namespace")) continue;
-        const group = tool.strField("name") orelse continue;
-        if (ns) |want| if (!std.mem.eql(u8, want, group)) continue;
-        const children = tool.get("tools") orelse continue;
-        if (children != .array) continue;
-        for (children.array) |child| {
-            if (!child.typeIs("function")) continue;
-            const own = child.strField("name") orelse continue;
-            if (!spells(selector, group, own)) continue;
-            return try std.fmt.allocPrint(a, "{s}__{s}", .{ group, own });
-        }
-    }
-    var picked: ?[]const u8 = null;
-    var hits: usize = 0;
-    for (declared.?.array) |tool| {
-        if (tool.typeIs("function")) {
-            if (ns != null) continue; // a top-level tool has no namespace, so an explicit one never picks it
-            const own = tool.strField("name") orelse continue;
-            if (std.mem.eql(u8, own, selector)) return own; // the tool's own name answers for itself
-            continue;
-        }
-        if (!tool.typeIs("namespace")) continue;
-        const group = tool.strField("name") orelse continue;
-        if (ns) |want| if (!std.mem.eql(u8, want, group)) continue;
-        const children = tool.get("tools") orelse continue;
-        if (children != .array) continue;
-        for (children.array) |child| {
-            if (!child.typeIs("function")) continue;
-            const own = child.strField("name") orelse continue;
-            if (std.mem.eql(u8, own, selector)) {
-                hits += 1;
-                picked = try std.fmt.allocPrint(a, "{s}__{s}", .{ group, own });
-            }
-        }
-    }
-    return if (hits == 0) null else if (hits > 1) "" else picked;
-}
-
-const Choice = struct { choice: ?Value, offered: ?[]Value };
-
-fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value, declared: ?Value) errors.Refused!Choice {
-    const choice = raw orelse return .{ .choice = null, .offered = offered };
-    if (choice == .null) return .{ .choice = null, .offered = offered };
-    if (choice == .string) for ([_][]const u8{ "none", "auto", "required" }) |s| if (std.mem.eql(u8, s, choice.string)) return .{ .choice = choice, .offered = offered };
-    const kind = kindOf(choice);
-    const k = if (kind != null and kind.? == .string) kind.?.string else "";
-    const namespaced = hasNamespace(declared); // only these requests read the namespace a selector carries
-    if (std.mem.eql(u8, k, "function") and choice.strField("name") != null) {
-        const given = choice.strField("name").?;
-        const found = try selectorName(cx.a, declared, given, if (namespaced) choice.strField("namespace") else null);
-        if (found) |name| if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, choice.get("name").?)});
-        // An unresolved name keeps its own spelling, which is the name tool_specs refuses it by.
-        const resolved = found orelse given;
-        const function = try json.newObject(cx.a);
-        try function.put(cx.a, "name", .{ .string = resolved });
-        const c = try json.newObject(cx.a);
-        try c.put(cx.a, "type", .{ .string = "function" });
-        try c.put(cx.a, "function", .{ .object = function });
-        return .{ .choice = .{ .object = c }, .offered = offered };
-    }
-    const mode: Value = choice.get("mode") orelse .{ .string = "auto" };
-    const mode_ok = mode == .string and (std.mem.eql(u8, mode.string, "auto") or std.mem.eql(u8, mode.string, "required"));
-    if (std.mem.eql(u8, k, "allowed_tools") and mode_ok) {
-        const allowed = choice.get("tools");
-        const list: []const Value = if (allowed != null and allowed.? == .array) allowed.?.array else &.{};
-        if (allowed != null and allowed.?.truthy() and allowed.? != .array) return cx.refuse("allowed_tools may name function tools only");
-        for (list) |t| {
-            const tk = kindOf(t);
-            if (tk == null or tk.? != .string or !std.mem.eql(u8, tk.?.string, "function")) return cx.refuse("allowed_tools may name function tools only");
-        }
-        var resolved: std.ArrayList([]const u8) = .empty;
-        for (list) |t| {
-            const pick = t.strField("name") orelse if (namespaced) return cx.refuse("allowed_tools may name function tools only") else continue;
-            // An entry no tool carries keeps nothing.
-            const name = try selectorName(cx.a, declared, pick, if (namespaced) t.strField("namespace") else null) orelse continue;
-            if (name.len == 0) return cx.fail(.request, "tool_choice {s} is ambiguous: name it as <namespace>__<tool>", .{try pyrepr.repr(cx.a, t.get("name").?)});
-            try resolved.append(cx.a, name);
-        }
-        var kept: std.ArrayList(Value) = .empty;
-        for (offered orelse &.{}) |t| {
-            const name = t.get("function").?.get("name").?;
-            for (resolved.items) |allow| if (name == .string and std.mem.eql(u8, allow, name.string)) {
-                try kept.append(cx.a, t);
-                break;
-            };
-        }
-        return .{ .choice = mode, .offered = kept.items };
-    }
-    return cx.refuse("tool_choice must be none, auto, required, a function or allowed_tools of functions");
 }
 
 /// ``text.format`` as a chat ``response_format`` (null for plain text).
@@ -500,12 +321,13 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
         given = .{ .array = one };
     }
     if (given != .array or given.array.len == 0) return cx.refuse("input must be a string or a non-empty list of items");
-    try inputNamespaces(cx, given.array, body.get("tools"));
+    try namespace_tools.inputNamespaces(cx, given.array, body.get("tools"));
     const added = try messages(cx, given.array);
     const parent = body.field("previous_response_id");
     const earlier: []Value = if (parent) |p| try history.conversation(cx, p) else &.{};
-    const offered = try tools(cx, body.get("tools"));
-    const choice = try toolChoice(cx, body.get("tool_choice"), offered, body.get("tools"));
+    const namespaced = namespace_tools.hasNamespace(body.get("tools"));
+    const offered = if (namespaced) try namespace_tools.tools(cx, body.get("tools")) else try response_tools.tools(cx, body.get("tools"));
+    const choice = if (namespaced) try namespace_tools.toolChoice(cx, body.get("tool_choice"), offered, body.get("tools")) else try response_tools.toolChoice(cx, body.get("tool_choice"), offered);
     const chat = try json.newObject(a);
     // rows come with top_logprobs or logprobs; the include name alone asks for them only where the engine has them
     const listed = if (body.get("include")) |inc| inc == .array and for (inc.array) |v| {
@@ -589,4 +411,8 @@ test "input_file refuses remote file_url" {
     )).ok.array;
     try std.testing.expectError(error.Refused, messages(&cx, items));
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
+}
+
+test {
+    _ = @import("responses_tools_test.zig");
 }

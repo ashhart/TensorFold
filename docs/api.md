@@ -1729,15 +1729,21 @@ same handler and engine path. A response has that chat completion's prompt and t
 
 - `input` is a string or a list of items: messages (`input_text`, `output_text`, `text` and `refusal` parts, whose
   text or refusal text becomes input text; `input_image` on a server started with `--vision` for a model that reads
-  images; `input_file` with inline PDFs on a server started with `--vision --vision-pdf`), `function_call`,
-  `function_call_output` (its `output` text, or `input_text`, `input_image` and `input_file` parts under the same
+  images; `input_file` with inline PDFs on a server started with `--vision --vision-pdf`), `function_call` and
+  `custom_tool_call` (`call_id`, `name`, and JSON `arguments` or exact string `input`), `function_call_output` and
+  `custom_tool_call_output` (their `output` text, or `input_text`, `input_image` and `input_file` parts under the same
   image and PDF rules), and `reasoning` items with their `content` text, which the template gets back as the next
-  assistant message's `reasoning_content`. `instructions` becomes the system message and is not carried to a later
-  turn.
-- `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
-  `parallel_tool_calls` works as in chat. `namespace` groups are accepted too, one level deep: their function children
-  reach the engine flattened as `<namespace>__<tool>`, and their `function_call` items carry the child's `name` plus
-  the group as `namespace`. A child's own name cannot start with its group's `<namespace>__` prefix.
+  assistant message's `reasoning_content`. Foreign opaque `compaction` items are dropped without dropping the supplied
+  remaining history. `instructions` becomes the system message and is not carried to a later turn.
+- `tools` takes function and client-executed custom tools; `tool_choice` takes `none`, `auto`, `required`, a named
+  function/custom tool or `allowed_tools`, with distinct function/custom namespaces. `parallel_tool_calls` works as
+  in chat. `defer_loading: true` keeps a tool out of the prompt until a named or allowed reference selects it; an
+  unknown reference gets HTTP 400. Custom `format` accepts `text` or a Lark `grammar` definition and validates its
+  shape; it is model-visible metadata, not the token-grammar enforcement described above.
+  `namespace` groups are accepted too, one level deep: their function children reach the engine flattened as
+  `<namespace>__<tool>`, and their `function_call` items carry the child's `name` plus the group as `namespace`. A
+  child's own name cannot start with its group's `<namespace>__` prefix. A request with a namespace group takes function
+  tools only and refuses `defer_loading`.
 - `max_output_tokens` counts reasoning tokens too. `temperature`, `top_p`, `top_k`, `min_p` and `seed` sample as in
   chat.
 - `reasoning.effort` follows the chat effort rule: unset is the template's default and `none` turns thinking off.
@@ -1749,16 +1755,16 @@ same handler and engine path. A response has that chat completion's prompt and t
   `grammar_budget` pass through.
 
 `output` holds a `reasoning` item (its text as `reasoning_text` content, with an empty `summary`), a `message` with
-`output_text`, and `function_call` items (`call_id`, `name` and JSON `arguments`). A reply cut by the token limit has
-`status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"`. `usage` has `input_tokens` (with
-`input_tokens_details.cached_tokens`), `output_tokens` (with `output_tokens_details.reasoning_tokens`) and
-`total_tokens`.
+`output_text`, and `function_call` or `custom_tool_call` items (`call_id`, `name`, and JSON `arguments` or exact custom
+`input`). A reply cut by the token limit has `status: "incomplete"` and
+`incomplete_details.reason: "max_output_tokens"`. `usage` has `input_tokens` (with `input_tokens_details.cached_tokens`),
+`output_tokens` (with `output_tokens_details.reasoning_tokens`) and `total_tokens`.
 
 A stream sends typed events, each with a `sequence_number`: `response.created` and `response.in_progress`; for each
-output item `response.output_item.added`, `response.content_part.added`, its deltas
-(`response.reasoning_text.delta`, `response.output_text.delta` or `response.function_call_arguments.delta`), their
-`.done` events, `response.content_part.done` and `response.output_item.done`; and last `response.completed`,
-`response.incomplete` or `response.failed`.
+output item `response.output_item.added`, `response.content_part.added` where the item has content parts, its deltas
+(`response.reasoning_text.delta`, `response.output_text.delta`, `response.function_call_arguments.delta` or
+`response.custom_tool_call_input.delta`), their `.done` events, applicable `response.content_part.done` and
+`response.output_item.done`; and exactly one terminal `response.completed`, `response.incomplete` or `response.failed`.
 
 With `store` true, a finished response is kept in memory (the newest 1,024, up to 256 MiB) before its last event or
 body is sent. `GET /v1/responses/{id}` returns it, `DELETE /v1/responses/{id}` removes it, and

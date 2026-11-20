@@ -76,6 +76,31 @@ test "Responses render receipt: inline and saved-parent turns emit identical tok
     try t.expectEqual(@as(u32, 1), saved_receipt.render_calls);
 }
 
+test "Responses render receipt: custom call and result replay produce identical prompt IDs" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: errors.Cx = .{ .a = a };
+    const tools = ",\"tools\":[{\"type\":\"custom\",\"name\":\"freeform\",\"format\":{\"type\":\"text\"}}]";
+    const call = "{\"type\":\"custom_tool_call\",\"id\":\"ctc_client\",\"call_id\":\"custom-1\",\"name\":\"freeform\",\"input\":\" raw\\n{\\\"partial\"}";
+    const result = "{\"type\":\"custom_tool_call_output\",\"call_id\":\"custom-1\",\"output\":\"kept\"}";
+    const inline_body = (try json.parse(a, "{\"input\":[" ++ call ++ "," ++ result ++ "]" ++ tools ++ "}")).ok;
+    const inline_turn = try responses.translate(&cx, inline_body, NoHistory{});
+    const inline_receipt = try render.render(fixture.srv, &cx, inline_turn.chat, identity(fixture.srv));
+
+    var none: [0]json.Value = .{};
+    try fixture.srv.store.put(t.io, &cx, (try json.parse(a, "{\"id\":\"resp_custom\",\"output\":[" ++ call ++ "]}")).ok, &none, null);
+    const saved_body = (try json.parse(a, "{\"input\":[" ++ result ++ "],\"previous_response_id\":\"resp_custom\"" ++ tools ++ "}")).ok;
+    const history: store_mod.History = .{ .store = &fixture.srv.store, .io = t.io, .owner = null };
+    const saved_turn = try responses.translate(&cx, saved_body, history);
+    const saved_receipt = try render.render(fixture.srv, &cx, saved_turn.chat, identity(fixture.srv));
+    try t.expectEqualSlices(u32, inline_receipt.ids, saved_receipt.ids);
+    try t.expectEqualStrings(&inline_receipt.token_sha256, &saved_receipt.token_sha256);
+    try t.expectEqual(inline_receipt.render_options, saved_receipt.render_options);
+}
+
 test "Responses render receipt: worker mismatch is explicit and prefill delay uses observed timestamps" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

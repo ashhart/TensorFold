@@ -118,6 +118,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-responses-durable-host", "Owner-bound durable Responses restart, retry and exact history recovery").dependOn(&durable.step);
     const render_receipt = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"Responses render receipt:"} }));
     b.step("test-responses-render-host", "Exact Responses prompt IDs, route parity and admitted-worker identity refusal").dependOn(&render_receipt.step);
+    const custom = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses custom", "Responses deferred", "Responses malformed freeform", "Responses drops only", "a call delta that names", "Server recovery: Responses grows" } }));
+    b.step("test-responses-custom-host", "Freeform/deferred tool replay, exact custom events and incomplete terminal behavior").dependOn(&custom.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
