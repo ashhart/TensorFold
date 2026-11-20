@@ -209,7 +209,7 @@ pub const Config = struct {
     }
 };
 
-fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
+pub fn int(obj: std.json.ObjectMap, key: []const u8) !usize {
     const v = obj.get(key) orelse {
         std.log.err("config.json has no {s}", .{key});
         return error.BadConfig;
@@ -238,7 +238,7 @@ fn float(obj: std.json.ObjectMap, key: []const u8) !f32 {
     return @floatCast(try number(obj.get(key) orelse return error.BadConfig));
 }
 
-fn kindOf(name: []const u8) !Kind {
+pub fn kindOf(name: []const u8) !Kind {
     if (std.mem.eql(u8, name, "mamba") or std.mem.eql(u8, name, "M")) return .mamba;
     if (std.mem.eql(u8, name, "moe") or std.mem.eql(u8, name, "E")) return .moe;
     if (std.mem.eql(u8, name, "attention") or std.mem.eql(u8, name, "*")) return .attention;
@@ -436,7 +436,7 @@ pub fn parseWith(allocator: std.mem.Allocator, text: []const u8, why: *Why, allo
         if (v.integer < 0) return error.BadConfig; // a width: refused before the cast, as the latent checks below would
         c.latent = @intCast(v.integer);
     };
-    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try puzzle(&c, v.array.items, why);
+    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try bolt_checks.puzzle(&c, v.array.items, why);
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
     if (c.layers == 0) if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
         if (v.string.len > max_layers) return error.BadConfig;
@@ -538,37 +538,6 @@ fn eos(c: *Config, e: std.json.Value) void {
         c.eos[c.eos_count] = @intCast(x.integer);
         c.eos_count += 1;
     };
-}
-
-/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
-fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
-    if (blocks.len > max_layers) {
-        why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, max_layers });
-        return error.BadConfig;
-    }
-    c.bolt = true;
-    c.experts = 0;
-    c.expert_width = 0;
-    for (blocks, 0..) |b, i| {
-        if (b != .object) return error.BadConfig;
-        c.kinds[i] = try kindOf((b.object.get("block_type") orelse return error.BadConfig).string);
-        if (c.kinds[i] != .moe) continue;
-        const m: Moe = .{ .experts = try int(b.object, "n_routed_experts"), .width = try int(b.object, "moe_intermediate_size") };
-        const k = try int(b.object, "num_experts_per_tok");
-        if (c.top_k == 0) c.top_k = k;
-        if (k != c.top_k) {
-            why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
-            return error.BadConfig;
-        }
-        if (k < 1 or k > m.experts) {
-            why.set("layer {d} picks {d} of its {d} experts; top-k must be 1 to the layer's own expert count", .{ i, k, m.experts });
-            return error.BadConfig;
-        }
-        c.moe[i] = m;
-        c.experts = @max(c.experts, m.experts);
-        c.expert_width = @max(c.expert_width, m.width);
-    }
-    c.layers = blocks.len;
 }
 
 pub fn checkShapes(c: Config) !void {
