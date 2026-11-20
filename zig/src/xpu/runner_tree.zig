@@ -77,7 +77,7 @@ pub fn reset(r: *Runner) !void {
 pub fn step(r: *Runner, token: u32) !void {
     if (r.pos + 1 > r.context) return error.ContextFull;
     const id: i32 = @bitCast(token);
-    r.last = @intCast((try forwardRunner(r, &.{id}, r.pos, .{ .taps = r.taps_on })).?);
+    r.last = @intCast((try forwardRunner(r, &.{id}, r.pos, .{ .taps = r.taps_on, .cand = r.candMode() })).?);
     r.pos += 1;
     if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
 }
@@ -85,11 +85,8 @@ pub fn step(r: *Runner, token: u32) !void {
 pub fn verify(r: *Runner, ids: []const u32) ![]const u32 {
     if (ids.len == 0 or ids.len > 16) return error.BadBlock;
     if (r.pos + ids.len > r.context) return error.ContextFull;
-    _ = try forwardRunner(r, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on });
-    var toks: [16]i32 = undefined;
-    try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, &toks, r.acts.tok, ids.len * 4, null, 0, null));
-    try r.d.sync();
-    for (r.block[0..ids.len], toks[0..ids.len]) |*o, t| o.* = @intCast(t);
+    _ = try forwardRunner(r, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .rows_out = &r.tok_host, .cand = r.candMode() });
+    for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
     r.block_rows = @intCast(ids.len);
     return r.block[0..ids.len];
 }
@@ -146,11 +143,8 @@ pub fn verifyTree(r: *Runner, ids: []const u32, parents: []const i32) ![]const u
         const d = r.devAt(rk);
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.actsAt(rk).tree, &r.tree_host, ids.len * 17 * 4, null, 0, null));
     }
-    _ = try forwardRunner(r, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true });
-    var toks: [16]i32 = undefined;
-    try ze.check(r.d.g.api.zeCommandListAppendMemoryCopy(r.d.list, &toks, r.acts.tok, ids.len * 4, null, 0, null));
-    try r.d.sync();
-    for (r.block[0..ids.len], toks[0..ids.len]) |*o, t| o.* = @intCast(t);
+    _ = try forwardRunner(r, @ptrCast(ids), r.pos, .{ .want = .rows, .stash = true, .taps = r.taps_on, .tree = true, .rows_out = &r.tok_host, .cand = r.candMode() });
+    for (r.block[0..ids.len], r.tok_host[0..ids.len]) |*o, t| o.* = @intCast(t);
     r.block_rows = @intCast(ids.len);
     r.tree_on = true;
     return r.block[0..ids.len];
