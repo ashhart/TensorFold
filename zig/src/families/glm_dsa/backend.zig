@@ -85,6 +85,11 @@ pub const Backend = struct {
         return null;
     }
 
+    fn startProgress(s: *Stream, at: u32) void {
+        s.cached = at;
+        s.fill_at.store(at, .monotonic);
+    }
+
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const b = self(ptr);
         const e = b.e;
@@ -103,9 +108,9 @@ pub const Backend = struct {
             if (k.at < prompt.len) {
                 try fl.restore(e, i, k.id);
                 at = k.at;
-                s.cached = at;
             } else s.reuse_failed = true;
         }
+        startProgress(s, at);
         var next: usize = 0;
         var mark: usize = 0;
         while (at < prompt.len) {
@@ -277,3 +282,18 @@ pub const Backend = struct {
         return @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds)) / 1e6;
     }
 };
+
+test "glm_dsa prefill: a restored row seeds landed progress" {
+    const ids: [2049]u32 = @splat(1);
+    var resumed = try Stream.init(std.testing.allocator, .{ .id = "resumed", .prompt = &ids, .max_new = 1 });
+    defer resumed.deinit(std.testing.allocator);
+    Backend.startProgress(&resumed, 2048);
+    try std.testing.expectEqual(@as(u32, 2048), resumed.cached);
+    try std.testing.expectEqual(@as(u32, 2048), resumed.fill_at.load(.monotonic));
+
+    var fresh = try Stream.init(std.testing.allocator, .{ .id = "fresh", .prompt = &ids, .max_new = 1 });
+    defer fresh.deinit(std.testing.allocator);
+    Backend.startProgress(&fresh, 0);
+    try std.testing.expectEqual(@as(u32, 0), fresh.cached);
+    try std.testing.expectEqual(@as(u32, 0), fresh.fill_at.load(.monotonic));
+}
