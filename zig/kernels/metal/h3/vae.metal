@@ -59,68 +59,33 @@
 [[kernel]] void h3_vae_attention_il(
   const device float* QKV [[buffer(0)]],
   device float* Y [[buffer(1)]],
-  constant uint* P [[buffer(2)]],          // P[0]=rows
-  uint tg [[threadgroup_position_in_grid]],
-  uint tid [[thread_index_in_threadgroup]],
-  uint threads [[threads_per_threadgroup]]) {
+  constant uint* P [[buffer(2)]],
+  uint2 at [[thread_position_in_grid]]) {
   const uint rows = P[0];
   const uint hd = 64, heads = 32, dim = heads * hd;
-  const uint r = tg % rows; const uint head = tg / rows;
+  const uint r = at.x;
+  const uint head = at.y;
+  if (r >= rows || head >= heads) return;
   const device float* q = QKV + r * 3 * dim + head * 3 * hd;
-  const device float* kbase = QKV;
-  const device float* vbase = QKV;
-  threadgroup float acc[64];
   float run_max = -1e30f;
   float run_sum = 0.0f;
-  for (uint i = tid; i < hd; i += threads) acc[i] = 0.0f;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const uint BLOCK = 256;
-  for (uint k0 = 0; k0 < rows; k0 += BLOCK) {
-    const uint kend = min(k0 + BLOCK, rows);
-    // per-thread local max first, then a tree reduction through shared memory
-    float local_max = -1e30f;
-    for (uint k = k0 + tid; k < kend; k += threads) {
-      float dot = 0.0f;
-      const device float* kk = kbase + k * 3 * dim + head * 3 * hd + hd;
-      for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
-      dot *= rsqrt(float(hd));
-      if (dot > local_max) local_max = dot;
-    }
-    threadgroup float bmax[256];
-    bmax[tid] = local_max;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint stride = threads / 2; stride > 0; stride /= 2) {
-      if (tid < stride) bmax[tid] = max(bmax[tid], bmax[tid + stride]);
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    const float bm = max(bmax[0], run_max);
+  float acc[64];
+  for (uint i = 0; i < hd; i++) acc[i] = 0.0f;
+  // online softmax over all keys
+  for (uint k = 0; k < rows; k++) {
+    float dot = 0.0f;
+    const device float* kk = QKV + k * 3 * dim + head * 3 * hd + hd;
+    for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
+    dot *= rsqrt(float(hd));
+    const float bm = max(dot, run_max);
     const float rescale = exp(run_max - bm);
-    for (uint k = k0 + tid; k < kend; k += threads) {
-      float dot = 0.0f;
-      const device float* kk = kbase + k * 3 * dim + head * 3 * hd + hd;
-      for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
-      const float wgt = exp(dot * rsqrt(float(hd)) - bm);
-      run_sum += wgt;
-      const device float* vv = vbase + k * 3 * dim + head * 3 * hd + 2 * hd;
-      for (uint i = 0; i < hd; i++) acc[i] += wgt * vv[i];
-    }
-    for (uint i = tid; i < hd; i += threads) acc[i] *= rescale;
+    const float wgt = exp(dot - bm);
+    run_sum = run_sum * rescale + wgt;
+    const device float* vv = QKV + k * 3 * dim + head * 3 * hd + 2 * hd;
+    for (uint i = 0; i < hd; i++) acc[i] = acc[i] * rescale + wgt * vv[i];
     run_max = bm;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  // reduce run_sum across the threadgroup (each thread holds a partial sum)
-  threadgroup float sums[256];
-  sums[tid] = run_sum;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = threads / 2; stride > 0; stride /= 2) {
-    if (tid < stride) sums[tid] += sums[tid + stride];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
-  const float total = sums[0];
-  for (uint i = tid; i < hd; i += threads) {
-    Y[r * dim + head * hd + i] = total > 0.0f ? acc[i] / total : 0.0f;
-  }
+  for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = run_sum > 0.0f ? acc[i] / run_sum : 0.0f;
 }
 
 // LayerNorm affine: mean/var in fp32, then (x - mean) / std * w + b.
@@ -178,16 +143,19 @@
   const device float* STD [[buffer(2)]],
   device uchar* RGB [[buffer(3)]],
   constant uint* P [[buffer(4)]],
-  uint3 at [[thread_position_in_grid]]) {
+  uint at1 [[thread_position_in_grid]]) {
   const uint depth = P[0], h = P[1], w = P[2], out_w = P[3], hb = P[4];
   const uint pt = 4, p = 16;
-  const uint f = at.z;
+  const uint total_cols = w * p * 3;
+  const uint total_rows = h * p;
+  const uint f = at1 / (total_rows * total_cols);
+  const uint rem = at1 % (total_rows * total_cols);
+  const uint row = rem / total_cols;
+  const uint col3 = rem % total_cols;
   const uint t = f / pt;
   const uint dt = f % pt;
-  const uint row = at.y;
   const uint hh = row / p;
   const uint dh = row % p;
-  const uint col3 = at.x;
   const uint c = col3 % 3;
   const uint col = col3 / 3;
   const uint ww = col / p;

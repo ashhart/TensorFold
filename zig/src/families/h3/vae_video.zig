@@ -293,8 +293,7 @@ pub const Decoder = struct {
 
         const canvas = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
         @memset(canvas, 0);
-        std.debug.print("canvas len={d}", .{canvas.len});
-        const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
+                const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
         @memset(weight, 0);
 
         std.debug.print("canvas ready", .{});
@@ -349,8 +348,7 @@ pub const Decoder = struct {
                         }
                     }
                     std.debug.print("piece placed DONE", .{});
-        std.debug.print("canvas[0] after piece: {d}", .{canvas[0]});
-                    if (x + tile_w >= width) break;
+                            if (x + tile_w >= width) break;
                     x += tile_latents - overlap_latents;
                 }
                 if (y + tile_h >= height) break;
@@ -505,7 +503,7 @@ pub const Decoder = struct {
         e.setBuffer(qkv_b, 0, 2);
         e.setBuffer(qkv, 0, 3);
         e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
-        e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
+                e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
 
         // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
@@ -516,7 +514,7 @@ pub const Decoder = struct {
         e.setBuffer(attended, 0, 1);
         e.setBuffer(rope, 0, 2);
         e.setValue([1]u32{ @intCast(rows) }, 3);
-        e.dispatchGroups(mtl.Size.of(rows, 32, 1), mtl.Size.of(128, 1, 1));
+                e.dispatchGroups(mtl.Size.of(voxels, 32, 1), mtl.Size.of(1, 1, 1));
         e.barrier();
 
         const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
@@ -538,7 +536,7 @@ pub const Decoder = struct {
             for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
         }
         n1_w.deinit(); qkv_w.deinit(); qkv_b.deinit(); out_w.deinit(); out_b.deinit();
-        std.debug.print("stage: block1 attn done", .{});
+                std.debug.print("stage: block1 attn done", .{});
 
         // Stage 3: ff half
         cb = self.queue.commandBuffer();
@@ -594,6 +592,12 @@ pub const Decoder = struct {
             for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
         }
         n2_w.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
+        if (getenv("DUMP_B2") != null) {
+            const pzb: [*:0]const u8 = "block2-dump.f32";
+            const fhb = fopen(pzb, "wb") orelse return error.CannotWrite;
+            _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fhb);
+            _ = fclose(fhb);
+        }
         if (getenv("DUMP_BLOCK1") != null) {
             const pathz: [*:0]const u8 = "block1-dump.f32";
             const fh = fopen(pathz, "wb") orelse return error.CannotWrite;
@@ -617,21 +621,12 @@ pub const Decoder = struct {
         // Stage 5: layernorm + proj_out on Metal
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
+        e.end();
+        cb.commit(); cb.wait();
         const no_w = try self.device.buffer(self.norm_out_w.len * 4, mtl.ResourceOptions.shared);
         @memcpy(no_w.slice(f32, self.norm_out_w.len), self.norm_out_w);
         const no_b = try self.device.buffer(self.norm_out_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(no_b.slice(f32, self.norm_out_b.len), self.norm_out_b);
-        if (false) {
-        e.setPipeline(self.p[3]);
-        e.setBuffer(normed, 0, 0);
-        e.setBuffer(no_w, 0, 1);
-        e.setBuffer(no_b, 0, 2);
-        e.setBuffer(normed2, 0, 3);
-        e.setValue([1]u32{ @intCast(dim) }, 4);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-        e.end();
-        cb.commit(); cb.wait();
-        }
         // CPU layernorm fallback (bisection): tokens_full -> normed2 host slice
         {
             const nh = normed2.slice(f32, rows * dim);
@@ -669,18 +664,21 @@ pub const Decoder = struct {
         @memcpy(w_buf.slice(f32, self.proj_out_w.len), self.proj_out_w);
         const b_buf = try self.device.buffer(self.proj_out_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(b_buf.slice(f32, self.proj_out_b.len), self.proj_out_b);
-        cb = self.queue.commandBuffer();
-        e = cb.compute(.concurrent);
-        e.setPipeline(self.p[0]);
-        e.setBuffer(normed2, 0, 0);
-        e.setBuffer(w_buf, 0, 1);
-        e.setBuffer(b_buf, 0, 2);
-        e.setBuffer(proj_dev, 0, 3);
-        e.setValue([4]u32{ @intCast(voxels), @intCast(dim), @intCast(head_block), 0 }, 4);
-        e.dispatchThreads(mtl.Size.of(head_block, voxels, 1), mtl.Size.of(64, 1, 1));
-        e.end();
-        cb.commit(); cb.wait();
-        w_buf.deinit(); b_buf.deinit();
+
+        const q7 = try self.device.queue();
+        {
+        const cb7 = q7.commandBuffer();
+        const e7 = cb7.compute(.concurrent);
+        e7.setPipeline(self.p[0]);
+        e7.setBuffer(normed2, 0, 0);
+        e7.setBuffer(w_buf, 0, 1);
+        e7.setBuffer(b_buf, 0, 2);
+        e7.setBuffer(proj_dev, 0, 3);
+        e7.setValue([4]u32{ @intCast(voxels), @intCast(dim), @intCast(head_block), 0 }, 4);
+        e7.dispatchThreads(mtl.Size.of(head_block, voxels, 1), mtl.Size.of(64, 1, 1));
+        e7.end();
+        cb7.commit(); cb7.wait();
+        }
 
         const mean_dev = try self.device.buffer(24 * 4, mtl.ResourceOptions.shared);
         const std_dev = try self.device.buffer(24 * 4, mtl.ResourceOptions.shared);
@@ -698,17 +696,17 @@ pub const Decoder = struct {
         const out_h = height * 16;
         const out_w = width * 16;
         const rgb_dev = try self.device.buffer(out_frames * out_h * out_w * 3, mtl.ResourceOptions.shared);
-        cb = self.queue.commandBuffer();
-        e = cb.compute(.concurrent);
-        e.setPipeline(self.p[6]);
-        e.setBuffer(proj_dev, 0, 0);
-        e.setBuffer(mean_dev, 0, 1);
-        e.setBuffer(std_dev, 0, 2);
-        e.setBuffer(rgb_dev, 0, 3);
-        e.setValue([5]u32{ @intCast(depth), @intCast(height), @intCast(width), @intCast(out_w * 3), @intCast(head_block) }, 4);
-        e.dispatchThreads(mtl.Size.of(out_w * 3 * out_h * out_frames, 1, 1), mtl.Size.of(256, 1, 1));
-        e.end();
-        cb.commit(); cb.wait();
+        const cb8 = q7.commandBuffer();
+        const e8 = cb8.compute(.concurrent);
+        e8.setPipeline(self.p[6]);
+        e8.setBuffer(proj_dev, 0, 0);
+        e8.setBuffer(mean_dev, 0, 1);
+        e8.setBuffer(std_dev, 0, 2);
+        e8.setBuffer(rgb_dev, 0, 3);
+        e8.setValue([5]u32{ @intCast(depth), @intCast(height), @intCast(width), @intCast(out_w * 3), @intCast(head_block) }, 4);
+        e8.dispatchThreads(mtl.Size.of(out_w * 3, out_h, out_frames), mtl.Size.of(64, 1, 1));
+        e8.end();
+        cb8.commit(); cb8.wait();
         mean_dev.deinit(); std_dev.deinit();
         if (getenv("DUMP_PROJ") != null) {
             const pz3: [*:0]const u8 = "proj-dump.f32";
@@ -721,5 +719,5 @@ pub const Decoder = struct {
         @memcpy(out_rgb_bytes, rgb_bytes);
         rgb_dev.deinit(); proj_dev.deinit();
         std.debug.print("gpu unpatch done", .{});
-    }
+            }
 };

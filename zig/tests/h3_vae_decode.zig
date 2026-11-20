@@ -45,6 +45,38 @@ pub fn main(init: std.process.Init) !void {
     }
     defer decoder.deinit();
     std.debug.print("decoder loaded, calling frames", .{});
+    {
+        const R = 4;
+        const K = 2048;
+        const N = 8;
+        const xb = try device.buffer(R * K * 4, mtl.ResourceOptions.shared);
+        defer xb.deinit();
+        @memset(xb.slice(f32, R * K), 0.25);
+        const wb = try device.buffer(N * K * 4, mtl.ResourceOptions.shared);
+        defer wb.deinit();
+        const wh = wb.slice(f32, N * K);
+        @memset(wh, 0.0);
+        for (0..N) |n| wh[n * K + n] = 1.0;
+        const bb2 = try device.buffer(N * 4, mtl.ResourceOptions.shared);
+        defer bb2.deinit();
+        @memset(bb2.slice(f32, N), 0.5);
+        const yb = try device.buffer(R * N * 4, mtl.ResourceOptions.shared);
+        defer yb.deinit();
+        const q2 = try device.queue();
+        const cb2 = q2.commandBuffer();
+        const et = cb2.compute(.concurrent);
+        et.setPipeline(decoder.p[0]);
+        et.setBuffer(xb, 0, 0);
+        et.setBuffer(wb, 0, 1);
+        et.setBuffer(bb2, 0, 2);
+        et.setBuffer(yb, 0, 3);
+        et.setValue([4]u32{ @intCast(R), @intCast(K), @intCast(N), 0 }, 4);
+        et.dispatchThreads(mtl.Size.of(N, R, 1), mtl.Size.of(64, 1, 1));
+        et.end();
+        cb2.commit(); cb2.wait();
+        const yh = yb.slice(f32, R * N);
+        std.debug.print("MATMUL-TEST y = {d} {d} {d} {d}", .{ yh[0], yh[1], yh[2], yh[3] });
+    }
     const pixels = try decoder.frames(gpa, denorm, depth, height, width);
     std.debug.print("frames done", .{});
     defer gpa.free(pixels);
