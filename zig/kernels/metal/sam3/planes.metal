@@ -1,0 +1,32 @@
+// Planes buffer: three FP16 planes of n values, n FP32 restore values, then eight flag words.
+inline ulong sam_planes_floats(ulong n) { return (3 * n + 1) / 2; }
+
+// Three FP16 planes keep every FP32 bit at or above 2^-46, so only values below 2^-22 can round.
+inline bool sam_planes_split(float value, thread half& high, thread half& middle, thread half& low) {
+    high = half(value);
+    const float remainder = value - float(high);
+    middle = half(ldexp(remainder, 11));
+    low = half(ldexp(remainder - ldexp(float(middle), -11), 22));
+    return isfinite(float(high));
+}
+
+inline void sam_planes_store(device half* planes, ulong n, ulong at, float value, thread uint& invalid) {
+    half high, middle, low;
+    if (!sam_planes_split(value, high, middle, low)) {
+        ((device float*)planes)[sam_planes_floats(n) + at] = value;
+        invalid = 1;
+    }
+    planes[at] = high;
+    planes[at + n] = middle;
+    planes[at + 2 * n] = low;
+}
+
+inline device atomic_uint* sam_planes_flags(device half* planes, ulong n) {
+    return (device atomic_uint*)((device float*)planes + sam_planes_floats(n) + n);
+}
+
+// Spatial row of a row in nine 24x24 windows of a 72x72 grid.
+inline uint sam_planes_window_row(uint row) {
+    const uint window = row / 576, local = row % 576;
+    return (window / 3 * 24 + local / 24) * 72 + window % 3 * 24 + local % 24;
+}

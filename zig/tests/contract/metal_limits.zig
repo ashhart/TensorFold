@@ -101,6 +101,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 device projection ")) {
         if (!assemble) return undefined;
+        if (std.mem.startsWith(u8, d.name, "sam3 device projection planes "))
+            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_planes.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         if (std.mem.startsWith(u8, d.name, "sam3 device projection exact half weight "))
             return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").halfText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").deviceText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
@@ -525,7 +527,7 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
-    if (std.mem.indexOf(u8, l.decl.name, "exact expansion ") != null) {
+    if (std.mem.indexOf(u8, l.decl.name, "exact expansion ") != null or std.mem.indexOf(u8, l.decl.name, " planes ") != null) {
         std.debug.print("PRECISION limits {s}: exact FP16 components, FP32 accumulation\n", .{l.decl.name});
     } else if (std.mem.indexOf(u8, l.decl.name, "exact half weight ") != null) {
         std.debug.print("PRECISION limits {s}: FP32 activations and accumulation, exact FP16 weights\n", .{l.decl.name});

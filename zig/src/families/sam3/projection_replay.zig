@@ -7,10 +7,25 @@ const HalfWeight = @import("half_weight_probe.zig").Probe;
 const Override = union(enum) { mps: *Mps, sparse: *SparseMask, half_weight: *HalfWeight };
 const timed_batch = 64;
 const batch_output_target = 32 << 20;
-const NativeBackend = enum { tensor, small, tensor_device, tensor_device_compensated, tensor_device_nn, tensor_device_nn_compensated, tensor_device_gelu, tensor_device_gelu_baseline, expansion, expansion_gelu };
+const NativeBackend = enum { tensor, small, tensor_device, tensor_device_compensated, tensor_device_nn, tensor_device_nn_compensated, tensor_device_gelu, tensor_device_gelu_baseline, expansion, expansion_gelu, planes, planes_compensated, planes_gelu, planes_gelu_compensated };
 
 fn project(g: *gpu.Gpu, override: ?*Override, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
     return switch (native) {
+        .planes, .planes_compensated => residual: {
+            // FC2 runs the residual kernel; adding a zero residual leaves every nonzero output unchanged.
+            const zero = try g.alloc(rows * cols, .f32);
+            defer zero.deinit();
+            @memset(zero.slice(f32, zero.count), 0);
+            break :residual @import("dense_planes.zig").run(g, x, w, bias, rows, cols, depth, if (native == .planes) .plain else .compensated, .{ .residual = zero });
+        },
+        .planes_gelu, .planes_gelu_compensated => activated: {
+            const projected = try @import("dense_planes.zig").run(g, x, w, bias, rows, cols, depth, if (native == .planes_gelu) .plain else .compensated, .none);
+            defer projected.deinit();
+            const output = try g.allocDevice(projected.count, .f32);
+            errdefer output.deinit();
+            try g.dispatch("im_sam_gelu", &.{ projected, output }, @as(u32, @intCast(projected.count)), gpu.mtl.Size.of(projected.count, 1, 1), gpu.mtl.Size.of(256, 1, 1));
+            break :activated output;
+        },
         .small => @import("dense_small.zig").run(g, x, w, bias, rows, cols, depth),
         .expansion, .expansion_gelu => @import("dense_expansion.zig").run(g, x, w, bias, rows, cols, depth, native == .expansion_gelu),
         .tensor_device_gelu_baseline => activated: {
@@ -82,12 +97,19 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const gelu_baseline = args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-gelu-baseline");
     const expansion_gelu = args.len == 3 and std.mem.eql(u8, args[2], "--tensor-expansion-gelu");
     const expansion = expansion_gelu or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-expansion"));
-    const activated = expansion_gelu or gelu_baseline or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-gelu"));
+    const planes_kinds = [_][]const u8{ "--tensor-planes", "--tensor-planes-compensated", "--tensor-planes-gelu", "--tensor-planes-gelu-compensated" };
+    var planes_kind: ?usize = null;
+    for (planes_kinds, 0..) |kind, i| if (args.len == 3 and std.mem.eql(u8, args[2], kind)) {
+        planes_kind = i;
+    };
+    const planes = planes_kind != null;
+    const planes_gelu = planes and planes_kind.? >= 2;
+    const activated = planes_gelu or expansion_gelu or gelu_baseline or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-gelu"));
     const tensor_device = expansion or activated or compensated or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device"));
     const compensated_nn = args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-nn-compensated");
     const tensor_device_nn = compensated_nn or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-nn"));
-    const native_backend: NativeBackend = if (expansion_gelu) .expansion_gelu else if (expansion) .expansion else if (gelu_baseline) .tensor_device_gelu_baseline else if (activated) .tensor_device_gelu else if (compensated_nn) .tensor_device_nn_compensated else if (tensor_device_nn) .tensor_device_nn else if (compensated) .tensor_device_compensated else if (tensor_device) .tensor_device else if (use_small) .small else .tensor;
-    if (args.len == 3 and !use_mps and !use_sparse and !use_half_weight and !use_small and !baseline_gemm and !tensor_device and !tensor_device_nn) return error.UnexpectedProjectionBackend;
+    const native_backend: NativeBackend = if (planes) @fromBackingInt(@intCast(@backingInt(NativeBackend.planes) + planes_kind.?)) else if (expansion_gelu) .expansion_gelu else if (expansion) .expansion else if (gelu_baseline) .tensor_device_gelu_baseline else if (activated) .tensor_device_gelu else if (compensated_nn) .tensor_device_nn_compensated else if (tensor_device_nn) .tensor_device_nn else if (compensated) .tensor_device_compensated else if (tensor_device) .tensor_device else if (use_small) .small else .tensor;
+    if (args.len == 3 and !use_mps and !use_sparse and !use_half_weight and !use_small and !baseline_gemm and !tensor_device and !tensor_device_nn and !planes) return error.UnexpectedProjectionBackend;
     var mps = if (use_mps) try Mps.init(g.device) else null;
     defer if (mps) |*backend| backend.deinit();
     g.buffer_cache_limit = 1 << 30;
@@ -133,15 +155,22 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
             for (0..depth) |k| values[k * cols + col] = w.get(col * depth + k);
         }
         break :transposed target;
+    } else if (planes) halved: {
+        const target = try g.alloc(w.count, .f16);
+        for (target.slice(f16, target.count), w.slice(f32, w.count)) |*half, value| {
+            half.* = @floatCast(value);
+            if (@as(f32, half.*) != value) return error.ProjectionWeightNotHalf;
+        }
+        break :halved target;
     } else w;
-    defer if (tensor_device_nn) candidate_weight.deinit();
+    defer if (tensor_device_nn or planes) candidate_weight.deinit();
     g.compact_gemm = !baseline_gemm;
     const actual = try linear(g, backend, native_backend, x, candidate_weight, bias, rows, cols, depth);
     defer actual.deinit();
     const bytes = actual.slice(u8, actual.count * 4);
     const replacement_equal = std.mem.eql(u8, baseline.slice(u8, bytes.len), bytes);
     if (native_backend == .tensor and !use_mps and !use_sparse and !use_half_weight and !replacement_equal) return error.ProjectionReplacementChanged;
-    if (activated and !expansion and !replacement_equal) return error.ProjectionGeluReplacementChanged;
+    if (activated and !expansion and !planes and !replacement_equal) return error.ProjectionGeluReplacementChanged;
     const reference_equal = std.mem.eql(u8, truth.bytes, bytes);
     for (0..5) |_| {
         const repeated = try linear(g, backend, native_backend, x, candidate_weight, bias, rows, cols, depth);
@@ -203,7 +232,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const output_hash = std.fmt.bytesToHex(digest, .lower);
     std.crypto.hash.sha2.Sha256.hash(if (small_baseline) @import("sam3_kernels").baseline_source else @import("sam3_kernels").source, &digest, .{});
     const shader_hash = std.fmt.bytesToHex(digest, .lower);
-    const backend_name = if (use_half_weight) "fp32_activation_exact_half_weight_probe" else if (use_sparse) "sam31_sparse_mask_fp32_probe" else if (expansion_gelu) "tensor_exact_expansion_gelu_guarded" else if (expansion) "tensor_exact_expansion_guarded" else if (gelu_baseline) "tensor_device_separate_gelu_guarded" else if (activated) "tensor_device_fused_gelu_guarded" else if (compensated_nn) "tensor_device_nn_compensated_guarded" else if (tensor_device_nn) "tensor_device_nn_full_precision_guarded" else if (compensated) "tensor_device_compensated_guarded" else if (tensor_device) "tensor_device_full_precision_guarded" else if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else if (baseline_gemm) "tensor_64_rows" else "tensor_32_rows";
+    const backend_name = if (planes) planes_kinds[planes_kind.?][2..] else if (use_half_weight) "fp32_activation_exact_half_weight_probe" else if (use_sparse) "sam31_sparse_mask_fp32_probe" else if (expansion_gelu) "tensor_exact_expansion_gelu_guarded" else if (expansion) "tensor_exact_expansion_guarded" else if (gelu_baseline) "tensor_device_separate_gelu_guarded" else if (activated) "tensor_device_fused_gelu_guarded" else if (compensated_nn) "tensor_device_nn_compensated_guarded" else if (tensor_device_nn) "tensor_device_nn_full_precision_guarded" else if (compensated) "tensor_device_compensated_guarded" else if (tensor_device) "tensor_device_full_precision_guarded" else if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else if (baseline_gemm) "tensor_64_rows" else "tensor_32_rows";
     const json = try std.json.Stringify.valueAlloc(a, .{
         .shape = .{ rows, cols, depth },
         .capture_sha256 = source_hash[0..],

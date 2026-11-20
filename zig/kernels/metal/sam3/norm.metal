@@ -13,14 +13,14 @@ inline float2 sam_norm_sum(float2 value) {
     return value;
 }
 
-[[kernel, max_total_threads_per_threadgroup(128)]]
-void sam_norm_compensated(const device float* x, const device float* weight, const device float* bias,
-    device float* out, constant uint2& shape, constant float& eps,
-    uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
+// PLANES writes the planes buffer of a dense_planes projection, windowed rows reading their unwindowed source row.
+template<bool PLANES>
+inline void sam_norm_compensated_impl(const device float* x, const device float* weight, const device float* bias,
+    device float* out, constant uint2& shape, constant float& eps, bool windowed, uint group, uint sg, uint lane) {
     const uint row = group * 4 + sg, width = shape.y;
     if (row >= shape.x) return;
-    const ulong base = ulong(row) * width;
+    const ulong target = ulong(row) * width, base = PLANES && windowed ? ulong(sam_planes_window_row(row)) * width : target;
+    uint invalid = 0;
     float2 sum(0);
     for (uint col = lane; col < width; col += 32) sam_pair_add(sum, x[base + col]);
     float2 mean = sam_norm_sum(sum);
@@ -45,12 +45,37 @@ void sam_norm_compensated(const device float* x, const device float* weight, con
         float2 delta = sam_two_sum(x[base + col], -mean.x);
         sam_pair_add(delta, -mean.y);
         delta = sam_norm_product(delta, inv);
+        float value;
         if (!isfinite(weight[col]) || !isfinite(bias[col])) {
-            out[base + col] = (delta.x + delta.y) * weight[col] + bias[col];
+            value = (delta.x + delta.y) * weight[col] + bias[col];
         } else {
             sam_pair_scale(delta, weight[col]);
             sam_pair_add(delta, bias[col]);
-            out[base + col] = delta.x + delta.y;
+            value = delta.x + delta.y;
         }
+        if constexpr (PLANES) sam_planes_store((device half*)out, ulong(shape.x) * width, target + col, value, invalid);
+        else out[target + col] = value;
     }
+    if (PLANES && invalid) atomic_fetch_or_explicit(sam_planes_flags((device half*)out, ulong(shape.x) * width), 1u, memory_order_relaxed);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_norm_compensated(const device float* x, const device float* weight, const device float* bias,
+    device float* out, constant uint2& shape, constant float& eps,
+    uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    sam_norm_compensated_impl<false>(x, weight, bias, out, shape, eps, false, group, sg, lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_norm_compensated_planes(const device float* x, const device float* weight, const device float* bias,
+    device float* out, constant uint2& shape, constant float& eps, constant uint& windowed,
+    uint group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    sam_norm_compensated_impl<true>(x, weight, bias, out, shape, eps, windowed != 0, group, sg, lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_norm_planes_clear(device half* planes, constant uint& count, uint at [[thread_position_in_grid]]) {
+    if (at < 8) atomic_store_explicit(sam_planes_flags(planes, count) + at, 0u, memory_order_relaxed);
 }

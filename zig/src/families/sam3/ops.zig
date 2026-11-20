@@ -151,8 +151,19 @@ pub const Runtime = struct {
             return self.own(try @import("normalization.zig").run(self.g, x, w, b, width, eps));
         return self.own(try ops.norm(self.g, x, w, b, width, false, eps));
     }
+    // A trunk norm feeding a planes projection writes that projection's planes directly, already in window order.
+    fn visionNormPlanes(self: *Runtime, key: []const u8, x: Tensor, windowed: bool) !?Tensor {
+        const consumer = if (std.mem.endsWith(u8, key, ".norm1")) "attn.qkv" else if (std.mem.endsWith(u8, key, ".norm2")) "mlp.fc1" else return null;
+        const source = try self.store.get(try self.name("{s}{s}.weight", .{ key[0 .. key.len - "norm1".len], consumer }));
+        if (!self.compensated_norm or !self.device_projections or source.dtype != .f16 or x.count != 5184 * 1024 or
+            !std.mem.startsWith(u8, key, "detector.backbone.vision_backbone.trunk.")) return null;
+        const w = try self.weight(try self.name("{s}.weight", .{key}));
+        const b = try self.weight(try self.name("{s}.bias", .{key}));
+        return try self.own(try @import("normalization.zig").runPlanes(self.g, x, w, b, 1024, 1e-5, windowed));
+    }
     pub fn visionNorm(self: *Runtime, key: []const u8, x: Tensor, windowed: bool) !Tensor {
         if (self.precision == .fp32) {
+            if (try self.visionNormPlanes(key, x, windowed)) |out| return out;
             const out = try self.norm(key, x, 1024, 1e-5);
             return if (windowed) self.window(out, 1024, false) else out;
         }
@@ -175,16 +186,30 @@ pub const Runtime = struct {
     }
     pub fn visionResidual(self: *Runtime, key: []const u8, x: Tensor, width: usize, residual: Tensor, windowed: bool) !Tensor {
         if (self.precision == .fp32) {
+            if (try self.visionPlanes(key, x, width, if (windowed) .{ .window_residual = residual } else .{ .residual = residual })) |out| return out;
             const projected = try self.visionF32Projection(key, x, width, false);
             return self.add(residual, if (windowed) try self.window(projected, 1024, true) else projected);
         }
         return self.visionProjection(key, x, width, false, residual, windowed);
+    }
+    // Trunk projections with FP16 checkpoint weights run on exact FP16 planes; the MLP hidden stays in planes form.
+    fn visionPlanes(self: *Runtime, key: []const u8, x: Tensor, width: usize, epilogue: @import("dense_planes.zig").Epilogue) !?Tensor {
+        const planes = @import("dense_planes.zig");
+        const source = try self.store.get(try self.name("{s}.weight", .{key}));
+        const hidden = std.mem.endsWith(u8, key, ".mlp.fc1") or std.mem.endsWith(u8, key, ".mlp.fc2");
+        if (!self.device_projections or source.dtype != .f16 or (epilogue == .gelu_planes) != std.mem.endsWith(u8, key, ".mlp.fc1") or
+            !(hidden or std.mem.endsWith(u8, key, ".attn.qkv") or std.mem.endsWith(u8, key, ".attn.proj"))) return null;
+        const rows = if (x.dtype == .f16) (planes.values(x.count) orelse return error.SamProjectionShape) / width else x.count / width;
+        const b = try self.weight(try self.name("{s}.bias", .{key}));
+        const half_weight = try self.own(try self.g.weight(source, .f16));
+        return try self.own(try planes.run(self.g, x, half_weight, b, rows, b.count, width, if (hidden) .compensated else .plain, epilogue));
     }
     fn visionF32Projection(self: *Runtime, key: []const u8, x: Tensor, width: usize, activate: bool) !Tensor {
         if (!self.device_projections) {
             const output = try self.linear(key, x, width);
             return if (activate) self.gelu(output) else output;
         }
+        if (try self.visionPlanes(key, x, width, if (activate) .gelu_planes else .none)) |out| return out;
         const weight_key = try self.name("{s}.weight", .{key});
         const source = try self.store.get(weight_key);
         const b = try self.weight(try self.name("{s}.bias", .{key}));

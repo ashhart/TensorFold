@@ -2,10 +2,21 @@ const std = @import("std");
 const gpu = @import("tensor_metal");
 
 pub fn run(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32) !gpu.Tensor {
+    return encode(g, x, weight, bias, width, eps, null);
+}
+
+// Normalizes into the planes buffer of a dense_planes projection; windowed puts rows in the nine-window order.
+pub fn runPlanes(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32, windowed: bool) !gpu.Tensor {
+    if (windowed and x.count != 5184 * width) return error.SamNormalizationShape;
+    return encode(g, x, weight, bias, width, eps, windowed);
+}
+
+fn encode(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, width: usize, eps: f32, planes: ?bool) !gpu.Tensor {
     if (width == 0 or width > 4096 or x.count == 0 or x.count % width != 0 or
         weight.count != width or bias.count != width or x.dtype != .f32 or weight.dtype != .f32 or bias.dtype != .f32 or
         !std.math.isFinite(eps) or eps <= 0) return error.SamNormalizationShape;
-    const out = try g.allocDevice(x.count, .f32);
+    const count = std.math.cast(u32, x.count) orelse return error.SamNormalizationShape;
+    const out = if (planes != null) try g.allocDevice(@import("dense_planes.zig").planesCount(x.count), .f16) else try g.allocDevice(x.count, .f32);
     errdefer out.deinit();
     const rows = std.math.cast(u32, x.count / width) orelse return error.SamNormalizationShape;
     const batched = try g.beginOperator();
@@ -13,10 +24,18 @@ pub fn run(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, wid
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     const pass = g.command();
-    pass.enc.setPipeline(try g.pipeline("sam_norm_compensated"));
+    if (planes != null) {
+        pass.enc.setPipeline(try g.pipeline("sam_norm_planes_clear"));
+        pass.enc.setBuffer(out.buffer, out.offset, 0);
+        pass.enc.setValue(count, 1);
+        pass.enc.dispatchThreads(gpu.mtl.Size.of(8, 1, 1), gpu.mtl.Size.of(8, 1, 1));
+        pass.enc.barrier();
+    }
+    pass.enc.setPipeline(try g.pipeline(if (planes != null) "sam_norm_compensated_planes" else "sam_norm_compensated"));
     for ([_]gpu.Tensor{ x, weight, bias, out }, 0..) |value, i| pass.enc.setBuffer(value.buffer, value.offset, i);
     pass.enc.setValue([2]u32{ rows, @intCast(width) }, 4);
     pass.enc.setValue(eps, 5);
+    if (planes) |windowed| pass.enc.setValue(@as(u32, @intFromBool(windowed)), 6);
     pass.enc.dispatchGroups(gpu.mtl.Size.of((@as(usize, rows) + 3) / 4, 1, 1), gpu.mtl.Size.of(128, 1, 1));
     try g.finish(pass.cb, pass.enc);
     return out;

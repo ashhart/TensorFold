@@ -49,13 +49,25 @@ inline void sam_attention_device_split_impl(const device float* Q, const device 
         float next[ROW_PARTS];
         TF_UNROLL
         for (ushort r = 0; r < ROW_PARTS; ++r) next[r] = maximum[r];
-        TF_UNROLL
-        for (ushort e = 0; e < scores.get_capacity(); ++e) {
-            const auto at = scores.get_multidimensional_index(e);
-            const int r = at[1] >> 3;
-            scores[e] = first_key + at[0] < P[3] ? scores[e] * as_type<float>(P[26]) : -INFINITY;
-            next[r] = max(next[r], scores[e]);
-            if (first_key + at[0] < P[3]) minimum[r] = min(minimum[r], scores[e]);
+        // Full key blocks skip the per-key bound test; the arithmetic matches the bounded loop.
+        const float scale = as_type<float>(P[26]);
+        if (first_key + KEY_ROWS <= P[3]) {
+            TF_UNROLL
+            for (ushort e = 0; e < scores.get_capacity(); ++e) {
+                const int r = scores.get_multidimensional_index(e)[1] >> 3;
+                scores[e] *= scale;
+                next[r] = max(next[r], scores[e]);
+                minimum[r] = min(minimum[r], scores[e]);
+            }
+        } else {
+            TF_UNROLL
+            for (ushort e = 0; e < scores.get_capacity(); ++e) {
+                const auto at = scores.get_multidimensional_index(e);
+                const int r = at[1] >> 3;
+                scores[e] = first_key + at[0] < P[3] ? scores[e] * scale : -INFINITY;
+                next[r] = max(next[r], scores[e]);
+                if (first_key + at[0] < P[3]) minimum[r] = min(minimum[r], scores[e]);
+            }
         }
         TF_UNROLL
         for (ushort r = 0; r < ROW_PARTS; ++r) {
@@ -110,10 +122,12 @@ inline void sam_attention_device_split_impl(const device float* Q, const device 
             }
         }
         TF_UNROLL
+        for (ushort e = 0; e < product.get_capacity(); ++e) output[e] = product[e];
+        if (first_key + KEY_ROWS < end) continue;
+        TF_UNROLL
         for (ushort e = 0; e < product.get_capacity(); ++e) {
             const auto at = product.get_multidimensional_index(e);
-            output[e] = product[e];
-            if (first_key + KEY_ROWS >= end && row + at[1] < rows) {
+            if (row + at[1] < rows) {
                 const int r = at[1] >> 3;
                 partial[at[1] * DIM + at[0]] = output[e];
                 if (at[0] == 0) {

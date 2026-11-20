@@ -10,7 +10,7 @@ const Label = enum { negative, positive, upper_left, lower_right, padding };
 const Coordinate = struct { xy: [2]f32 = .{ 0, 0 }, label: Label };
 
 fn coordinates(r: *ops.Runtime, prompt: prompts.Prompt, size: prompts.Size) ![]Coordinate {
-    const pad = prompt.points.len > 0 and prompt.boxes.len == 0;
+    const pad = prompt.points.len > 0 or prompt.boxes.len > 0;
     const corners = try std.math.mul(usize, 2, prompt.boxes.len);
     const count = try std.math.add(usize, corners, try std.math.add(usize, prompt.points.len, @intFromBool(pad)));
     const records = try r.a.alloc(Coordinate, count);

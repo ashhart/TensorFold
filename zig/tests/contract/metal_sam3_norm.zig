@@ -7,9 +7,10 @@ const c = contract.spec;
 const g = contract.gates;
 const name = "metal sam3 compensated normalization";
 const control_name = "control: sam3 compensated normalization half variance";
+const planes_name = "metal sam3 compensated normalization planes";
 
 pub fn text(a: std.mem.Allocator, control: bool) ![]u8 {
-    const source = "#define TF_UNROLL _Pragma(\"clang loop unroll(full)\")\n" ++ sources.sam3_dense_small ++ sources.sam3_norm;
+    const source = "#define TF_UNROLL _Pragma(\"clang loop unroll(full)\")\n" ++ sources.sam3_dense_small ++ sources.sam3_planes ++ sources.sam3_norm;
     const needle = "float2 variance = sam_norm_sum(squares);";
     if (std.mem.count(u8, source, needle) != 1) return error.ControlTextNotFoundOnce;
     return if (control) std.mem.replaceOwned(u8, a, source, needle, needle ++ " variance = float2(float(half(variance.x)), 0);") else a.dupe(u8, source);
@@ -24,13 +25,16 @@ const Probe = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     control: bool,
+    // Planes output: clear, restore and copy pipelines read the planes back as FP32.
+    planes: ?[3]mtl.Pipeline = null,
     rows: ?contract.rows.Rows = null,
     inputs: [3]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    emitted: rig_.Ref = undefined,
 
     fn kernel(self: *Probe) g.Kernel {
         return .{ .ctx = self, .vt = &vt, .control = if (self.control) .sums else null, .spec = .{
-            .name = if (self.control) control_name else name,
+            .name = if (self.control) control_name else if (self.planes != null) planes_name else name,
             .accum = .f32,
             .out = .f32,
             .depth = depth,
@@ -65,18 +69,42 @@ const Probe = struct {
             input.* = try self.rig.input(std.mem.sliceAsBytes(floats));
         }
         self.out = try self.rig.output(rows.outputs() * 4);
+        if (self.planes != null) self.emitted = try self.rig.scratch(sources.sam3_dense_planes.planesCount(rows.outputs()) * 2);
         return true;
     }
 
     pub fn run(self: *Probe) !void {
         const rows = self.rows.?;
+        const n: u32 = @intCast(rows.outputs());
+        const target = if (self.planes != null) self.emitted else self.out;
         const pass = self.rig.begin();
+        if (self.planes) |pipes| {
+            pass.e.setPipeline(pipes[0]);
+            pass.e.setBuffer(target.buf, target.off, 0);
+            pass.e.setValue(n, 1);
+            pass.e.dispatchThreads(mtl.Size.of(8, 1, 1), mtl.Size.of(8, 1, 1));
+            pass.e.barrier();
+        }
         pass.e.setPipeline(self.pipe);
         for (self.inputs, 0..) |input, i| pass.e.setBuffer(input.buf, input.off, i);
-        pass.e.setBuffer(self.out.buf, self.out.off, 3);
+        pass.e.setBuffer(target.buf, target.off, 3);
         pass.e.setValue([2]u32{ @intCast(rows.shape.rows), @intCast(rows.shape.k) }, 4);
         pass.e.setValue(rows.eps, 5);
+        if (self.planes != null) pass.e.setValue(@as(u32, 0), 6);
         pass.e.dispatchGroups(mtl.Size.of((rows.shape.rows + 3) / 4, 1, 1), mtl.Size.of(128, 1, 1));
+        if (self.planes) |pipes| {
+            pass.e.barrier();
+            pass.e.setPipeline(pipes[1]);
+            pass.e.setBuffer(target.buf, target.off, 0);
+            pass.e.setValue([3]u32{ n, 0, 1 }, 1);
+            pass.e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(128, 1, 1));
+            pass.e.barrier();
+            pass.e.setPipeline(pipes[2]);
+            pass.e.setBuffer(target.buf, target.off + sources.sam3_dense_planes.restoreOffset(n), 0);
+            pass.e.setBuffer(self.out.buf, self.out.off, 1);
+            pass.e.setValue(n, 2);
+            pass.e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(128, 1, 1));
+        }
         try self.rig.finish(pass);
     }
 
@@ -95,15 +123,21 @@ const Probe = struct {
 
 pub const Suite = struct {
     a: std.mem.Allocator,
-    probes: [2]?Probe = @splat(null),
+    probes: [3]?Probe = @splat(null),
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         for (&self.probes, 0..) |*entry, i| {
-            const label = if (i == 1) control_name else name;
+            const label = if (i == 1) control_name else if (i == 2) planes_name else name;
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
+            if (i == 2 and !device.tensorUnits()) continue;
             const source = try text(self.a, i == 1);
             defer self.a.free(source);
-            entry.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, "sam_norm_compensated"), .control = i == 1 };
+            entry.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, source, if (i == 2) "sam_norm_compensated_planes" else "sam_norm_compensated"), .control = i == 1 };
+            if (i == 2) {
+                const full = try sources.tensor_library.source(self.a, sources.sam3_source);
+                defer self.a.free(full);
+                entry.*.?.planes = .{ try rig_.pipeline(device, source, "sam_norm_planes_clear"), try rig_.pipeline(device, full, "sam_dense_planes_restore"), try rig_.pipeline(device, full, "im_sam_copy") };
+            }
             if (entry.*) |*probe| try kernels.append(self.a, probe.kernel());
         }
     }
@@ -113,6 +147,7 @@ pub const Suite = struct {
             if (probe.rows) |rows| rows.deinit();
             probe.rig.deinit();
             probe.pipe.deinit();
+            if (probe.planes) |pipes| for (pipes) |pipe| pipe.deinit();
         };
     }
 };
