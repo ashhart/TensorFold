@@ -41,8 +41,8 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "attention-tensor.metal", try q.simd_attention.grouped(a, true, true, 6, 4, false));
     try write(a, io, dir, "attention-simd.metal", try q.simd_attention.grouped(a, false, true, 6, 4, false));
     try write(a, io, dir, "gdn.metal", gdn_source.text);
-    const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .mlp, .xsum };
-    const names = [_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" };
+    const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .norm_steer, .mlp, .xsum };
+    const names = [_][]const u8{ "norm_input", "norm_xs", "norm_steer", "mlp_xs", "xsum" };
     for (helpers, names) |kind, name| for ([_]bool{ true, false }) |xs| {
         const text = try q.quant_gpu.specializedSource(a, .{ .kind = kind, .k = 5120, .n = 17408, .xs = xs });
         const filename = try std.fmt.allocPrint(a, "{s}{s}.metal", .{ name, if (xs) "" else "-no-xs" });

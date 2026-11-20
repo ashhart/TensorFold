@@ -47,6 +47,7 @@ pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
 pub const state = @import("state.zig");
 pub const session = @import("session.zig");
+pub const steer = @import("steer.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");

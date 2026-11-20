@@ -20,6 +20,7 @@ const StartupLine = startup.StartupLine;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
+const steer_served = @import("qwen27_steer_served.zig");
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
 const room = helpers.room;
@@ -44,6 +45,7 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
+    glp: ?api.glp.Glp = null, // the control vector the model steers with (null: none)
 };
 
 pub const Host = struct {
@@ -260,6 +262,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         if (err == error.MissingMtpFile) why.* = try std.fmt.allocPrint(a, "--mtp-drafts: Qwen3.8-27B's MTP head is read from {s} beside the checkpoint, and {s} has none", .{ q.gpu_weights.mtp_file, dir });
         return err;
     };
+    if (o.glp) |g| try steer_served.apply(gpa, model, dir, g, a, why);
     var with = o; // the tower before the slots: their room and the cache's budget count it as taken
     with.mtp_dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
@@ -426,7 +429,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
-    if (o.learn) |l| try disk.attach(h, io, a, l);
+    if (o.learn) |l| try disk.attach(h, io, a, l, if (o.glp) |*g| g else null);
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
@@ -434,6 +437,9 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
+    if (o.glp) |g| {
+        if (model.steer != null) steer_served.report(g);
+    }
     return h;
 }
 test "qwen27 startup: draft stream count, singular text and optional suffixes" {

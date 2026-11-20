@@ -519,6 +519,9 @@ pub fn main(init: std.process.Init) !u8 {
     var sn_lin = @import("metal_sensenova_linear.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer sn_lin.deinit();
     try sn_lin.collect(o.only);
+    var steer: @import("metal_qwen27_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer steer.deinit();
+    try steer.collect(o.only, o.gates, o.seed);
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
     const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);

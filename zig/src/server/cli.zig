@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
+const glp_startup = @import("glp_startup.zig");
 const Allocator = std.mem.Allocator;
 pub const Kind = enum {
     value, // --flag VALUE or --flag=VALUE
@@ -48,7 +49,7 @@ pub const flags = [_]Flag{
     .{ .name = "--chat-template", .path = true, .native = true },
     .{ .name = "--voices", .path = true, .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ @import("voice_cli.zig").flags ++ glp_startup.flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
@@ -246,6 +247,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
     if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
     try spillWith(u, a, out);
+    if (try glp_startup.read(a, &out.glp)) |why| return fail(u, a, "{s}", .{why});
     return out;
 }
 
@@ -319,6 +321,14 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
     if (@import("voice_cli.zig").apply(&out.voice, name)) return;
+    if (is(name, "--glp")) {
+        out.glp = glp_startup.withPath(out.glp, v);
+        return;
+    }
+    if (is(name, "--glp-alpha")) {
+        out.glp = glp_startup.withAlpha(out.glp, glp_startup.strength(v) orelse return fail(u, a, "argument --glp-alpha: expected a finite strength above 0: '{s}'", .{v}));
+        return;
+    }
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
@@ -440,6 +450,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafter_bits = args.drafter_bits,
         .rope_yarn = args.rope_yarn,
         .record = args.record,
+        .glp = try glp_startup.engine(a, dir, model_type, args.backend, args.glp),
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .prompt_int8 = std.mem.eql(u8, args.prompt_precision, "int8"),
         .speed_up = args.speed_up,
