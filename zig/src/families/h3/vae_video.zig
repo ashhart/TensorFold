@@ -293,6 +293,7 @@ pub const Decoder = struct {
 
         const canvas = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
         @memset(canvas, 0);
+        std.debug.print("canvas len={d}", .{canvas.len});
         const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
         @memset(weight, 0);
 
@@ -348,6 +349,7 @@ pub const Decoder = struct {
                         }
                     }
                     std.debug.print("piece placed DONE", .{});
+        std.debug.print("canvas[0] after piece: {d}", .{canvas[0]});
                     if (x + tile_w >= width) break;
                     x += tile_latents - overlap_latents;
                 }
@@ -366,7 +368,7 @@ pub const Decoder = struct {
                     const wgt = weight[ci];
                     for (0..3) |c| {
                         const value = if (wgt > 0) canvas[ci * 3 + c] / wgt else 0;
-                        pixels[ci * 3 + c] = @intFromFloat(std.math.clamp((value * 0.5 + 0.5) * 255.0, 0.0, 255.0));
+                        pixels[ci * 3 + c] = @intFromFloat(std.math.clamp(value, 0.0, 255.0));
                     }
                 }
             }
@@ -442,38 +444,10 @@ pub const Decoder = struct {
 
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
+        e.end();
+        cb.commit(); cb.wait();
         const fused = try self.device.buffer(rows * 2 * self.config.ffn() * 4, mtl.ResourceOptions.shared);
         const gated = try self.device.buffer(rows * self.config.ffn() * 4, mtl.ResourceOptions.shared);
-        for (self.blocks) |b| {
-        cb = self.queue.commandBuffer();
-        e = cb.compute(.concurrent);
-
-        const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
-        e.setPipeline(self.p[1]);
-        e.setBuffer(normed, 0, 0);
-        e.setBuffer(n1_w, 0, 1);
-        e.setBuffer(normed, 0, 2);
-        e.setValue([1]u32{ @intCast(dim) }, 3);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-        e.barrier();
-
-        const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
-        const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
-        @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
-        e.setPipeline(self.p[0]);
-        e.setBuffer(normed, 0, 0);
-        e.setBuffer(qkv_w, 0, 1);
-        e.setBuffer(qkv_b, 0, 2);
-        e.setBuffer(qkv, 0, 3);
-        e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
-        e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
-        e.barrier();
-
-        // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
-        // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
-        // real attention kernel replaces this in the next stage)
         const rope = try self.device.buffer(rows * 48 * 2 * 4, mtl.ResourceOptions.shared);
         const rope_h = rope.slice(f32, rows * 48);
         const rope_s = rope.slice(f32, rows * 48)[rows * 48 ..];
@@ -507,6 +481,36 @@ pub const Decoder = struct {
                 rope_s[rr * 48 + k2] = 0.0;
             }
         }
+        for (self.blocks) |b| {
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+
+        const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
+        e.setPipeline(self.p[1]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(n1_w, 0, 1);
+        e.setBuffer(normed, 0, 2);
+        e.setValue([1]u32{ @intCast(dim) }, 3);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+
+        const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
+        const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
+        @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
+        e.setPipeline(self.p[0]);
+        e.setBuffer(normed, 0, 0);
+        e.setBuffer(qkv_w, 0, 1);
+        e.setBuffer(qkv_b, 0, 2);
+        e.setBuffer(qkv, 0, 3);
+        e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
+        e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+
+        // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
+        // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
+        // real attention kernel replaces this in the next stage)
         e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
         e.setBuffer(attended, 0, 1);
@@ -600,9 +604,16 @@ pub const Decoder = struct {
         fused.deinit();
         gated.deinit();
         std.debug.print("stage: 36 blocks done", .{});
+        if (getenv("DUMP36") != null) {
+            const pz: [*:0]const u8 = "tokens36-dump.f32";
+            const fh2 = fopen(pz, "wb") orelse return error.CannotWrite;
+            _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fh2);
+            _ = fclose(fh2);
+        }
         const head_block = self.config.out_channels * self.config.temporal_ratio * self.config.spatial_ratio * self.config.spatial_ratio;
 
         const normed2 = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        @memcpy(normed.slice(f32, rows * dim), tokens_full);
         // Stage 5: layernorm + proj_out on Metal
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
@@ -610,7 +621,8 @@ pub const Decoder = struct {
         @memcpy(no_w.slice(f32, self.norm_out_w.len), self.norm_out_w);
         const no_b = try self.device.buffer(self.norm_out_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(no_b.slice(f32, self.norm_out_b.len), self.norm_out_b);
-        e.setPipeline(self.p[4]);
+        if (false) {
+        e.setPipeline(self.p[3]);
         e.setBuffer(normed, 0, 0);
         e.setBuffer(no_w, 0, 1);
         e.setBuffer(no_b, 0, 2);
@@ -619,8 +631,37 @@ pub const Decoder = struct {
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
         e.end();
         cb.commit(); cb.wait();
+        }
+        // CPU layernorm fallback (bisection): tokens_full -> normed2 host slice
+        {
+            const nh = normed2.slice(f32, rows * dim);
+            const nw = self.norm_out_w;
+            const nb = self.norm_out_b;
+            for (0..rows) |r| {
+                var mean: f32 = 0;
+                for (0..dim) |i| mean += tokens_full[r * dim + i];
+                mean /= @floatFromInt(dim);
+                var m2: f32 = 0;
+                for (0..dim) |i| {
+                    const t = tokens_full[r * dim + i] - mean;
+                    m2 += t * t;
+                }
+                const rstd = 1.0 / @sqrt(m2 / @as(f32, @floatFromInt(dim)) + 1e-5);
+                for (0..dim) |i| nh[r * dim + i] = (tokens_full[r * dim + i] - mean) * rstd * nw[i] + nb[i];
+            }
+        }
         no_w.deinit(); no_b.deinit();
         std.debug.print("stage: norm_out done", .{});
+        if (getenv("DUMP_N2") != null) {
+            const nh = normed2.slice(f32, rows * dim);
+            @memset(nh, 0.25);
+        }
+        if (getenv("DUMP_N2") != null) {
+            const pz2: [*:0]const u8 = "normed2-dump.f32";
+            const fh3 = fopen(pz2, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed2.slice(f32, rows * dim).ptr, 4, rows * dim, fh3);
+            _ = fclose(fh3);
+        }
 
         // Stage 7: proj_out on device, then the GPU unpatch kernel to RGB bytes.
         const proj_dev = try self.device.buffer(voxels * head_block * 4, mtl.ResourceOptions.shared);
@@ -665,10 +706,17 @@ pub const Decoder = struct {
         e.setBuffer(std_dev, 0, 2);
         e.setBuffer(rgb_dev, 0, 3);
         e.setValue([5]u32{ @intCast(depth), @intCast(height), @intCast(width), @intCast(out_w * 3), @intCast(head_block) }, 4);
-        e.dispatchThreads(mtl.Size.of(out_w * 3, out_h, out_frames), mtl.Size.of(64, 1, 1));
+        e.dispatchThreads(mtl.Size.of(out_w * 3 * out_h * out_frames, 1, 1), mtl.Size.of(256, 1, 1));
         e.end();
         cb.commit(); cb.wait();
         mean_dev.deinit(); std_dev.deinit();
+        if (getenv("DUMP_PROJ") != null) {
+            const pz3: [*:0]const u8 = "proj-dump.f32";
+            const fh4 = fopen(pz3, "wb") orelse return error.CannotWrite;
+            const ph3 = proj_dev.slice(f32, voxels * head_block);
+            _ = fwrite(ph3.ptr, 4, ph3.len, fh4);
+            _ = fclose(fh4);
+        }
         const rgb_bytes = rgb_dev.slice(u8, out_frames * out_h * out_w * 3);
         @memcpy(out_rgb_bytes, rgb_bytes);
         rgb_dev.deinit(); proj_dev.deinit();

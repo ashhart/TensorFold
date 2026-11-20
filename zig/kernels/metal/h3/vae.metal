@@ -40,11 +40,16 @@
   uint tid [[thread_index_in_threadgroup]],
   uint tg [[threadgroup_position_in_grid]]) {
   const uint D = P[0];
+  threadgroup float red[256];
   float acc = 0.0f;
   for (uint i = tid; i < D; i += 256) acc += X[tg * D + i] * X[tg * D + i];
-  acc = simd_sum(acc);
+  red[tid] = acc;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float inv = rsqrt(acc / float(D) + 1e-5f);
+  for (uint stride = 128; stride > 0; stride /= 2) {
+    if (tid < stride) red[tid] += red[tid + stride];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const float inv = rsqrt(red[0] / float(D) + 1e-5f);
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
@@ -128,15 +133,25 @@
   uint tid [[thread_index_in_threadgroup]],
   uint tg [[threadgroup_position_in_grid]]) {
   const uint D = P[0];
+  threadgroup float red[256];
   float sum = 0.0f;
   for (uint i = tid; i < D; i += 256) sum += X[tg * D + i];
-  sum = simd_sum(sum);
-  const float mean = sum / float(D);
+  red[tid] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = 128; stride > 0; stride /= 2) {
+    if (tid < stride) red[tid] += red[tid + stride];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const float mean = red[0] / float(D);
   float m2 = 0.0f;
   for (uint i = tid; i < D; i += 256) { const float t = X[tg * D + i] - mean; m2 += t * t; }
-  m2 = simd_sum(m2);
+  red[tid] = m2;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float rstd = rsqrt(m2 / float(D) + 1e-5f);
+  for (uint stride = 128; stride > 0; stride /= 2) {
+    if (tid < stride) red[tid] += red[tid + stride];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  const float rstd = rsqrt(red[0] / float(D) + 1e-5f);
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = (X[tg * D + i] - mean) * rstd * W[i] + B[i];
 }
 
