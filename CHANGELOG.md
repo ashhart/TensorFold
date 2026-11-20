@@ -10,10 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - App: only the owner token resolves a tool approval on the remote-control server (#3034).
 
-- App: Explore and Oracle child agents refuse a tool outside the list they were given, so a Read-only run stays read-only (#3040).
-
-- App: only the owner token resolves a tool approval on the remote-control server (#3034).
-
 - Mobile: a pairing link opened from outside the app asks first and names its host (#3036).
 
 
