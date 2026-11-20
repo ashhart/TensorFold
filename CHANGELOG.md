@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Windows: the native CUDA product compiles again: Muse Spark, which needs two TP ranks over the POSIX-only TP fabric, is refused by name on Windows (TP across ranks runs on Linux only) instead of breaking the build, and CI now type-checks the Windows CUDA product (`zig build compile-native-cuda-windows`, #4171, fixes #4105).
+
 - Qwen3.5/3.8 and Flash Next on CUDA: `--vision` loads a tower whose linears ModelOpt stores as MXFP8 or NVFP4, as `nvidia/Qwen3.8-Flash-Next-FP4-Local` does, where it stopped at the first quantized linear; they are decoded to bf16 on the host at load, one linear at a time, so the tower runs in bf16 as before, and a floating-point tower is still read as stored (#3727). Thanks to @BadAd84.
 
 - Build: the three bounded top-k selection tests run in the fast `test-lanes-topk-host` step, with a planted failure confirming they can fail by name (#4095, refs #2460). Thanks to @jschmied.
@@ -18,18 +20,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Mobile: a pairing link opened from outside the app asks first and names its host (#3036).
 
-
-
-
-
-
-
 - Qwen3.8-27B: the DSpine drafter `tencent/Qwen3.8-27B-DSpine-b16`, whose current revision names its architecture `DSpineDraftModel`, loads again on Metal and CUDA instead of stopping with `UnsupportedDraftConfig`; any other name is still refused (#3959, fixes #3819).
 
 - Server: `/v1/responses` accepts one level of `namespace` tools: each function is offered to the model as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket; requests without namespace tools are unchanged (#3610, fixes #3266). Thanks to @devopsfortunato.
 
 - CUDA: a long prompt shares its steps with running replies by default: a filling prompt with more than 32,768 rows left takes a decode share of 0.25 and the 512-row chunk hint, as `--decode-share 0.25` does, while a shorter prompt fills whole as before; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings (#3486, refs #3397). Thanks to @bikepresentball.
-
 
 - Lane host: the CUDA engine arms a default decode-share of 0.25 for long fills only — a filling prompt past 32,768 remaining rows shares its steps beside live decoders and takes the 512-row chunk hint, and a shorter one fills whole as main does; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings, the flag sharing every long prompt and the env never arming the cap (#3397, #3486).
 - Qwen3.8-27B and 9B on Metal (M1 to M4): the default prompt frame is sized to the 128-row passes these chips run, instead of 512 rows, so the frame, attention and GDN scratch no longer hold room that is never used (#2797, refs #2089).
@@ -41,7 +36,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the last real-clock multi-rank bring-up tests run on the lockstep clock, so a busy CI runner cannot change their outcome (#4193).
 
 - CUDA contract: nvcc 13.3 resource records for 121 launches, clearing 408 stale lines on five-SM fatbins (#3953). Thanks to @Bizuayeu.
-
 
 - DeepSeek-V4.1 on Metal: decode launches of 6 to 16 rows (draft verify windows, alone or with other streams' rows) run the dense FP8 projections on a simdgroup-matrix tile that splits K over simdgroups in the row kernel's own group tree, so every row's bits equal the row kernel's one row at a time; launches of 1 to 5 rows keep the row kernel. On the release weights two drafted streams decode 3.7 to 5.5% faster on an M5 Ultra and 3.6 to 5.4% faster on an M3 Ultra, other stream counts are level, and every token is unchanged; `time-dsv41-metal-synth` times the dispatch classes per row without a checkpoint (#2973, part of #2984).
 - DeepSeek-V4.1 on Metal: in decode launches of 2 to 16 rows, the routed experts read and decode an expert's MXFP4 weights once for all of the rows it takes (passes of 2, 4, 6 or 8 rows for gate/up and 2 or 4 for down) instead of padding every expert's rows to passes of four, so each row's bits equal the one-row kernel's one row a launch whatever other rows share the launch or their experts. On the release weights, with #2973 under it, decode is 6 to 17% faster at one and two streams and 2 to 3% faster at three and four on an M5 Ultra, and 5 to 17% and 2 to 5% faster on an M3 Ultra, with every token unchanged (#2983, part of #2984).
