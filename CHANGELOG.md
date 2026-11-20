@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
+
 - Kolibri-1 on CUDA: `--drafter` loads the published EAGLE-3 drafter (`josch15366/Kolibri-1-EAGLE3-drafter`) through the lane core, running on the shared CUDA operators, and its draft rounds are priced from passes timed at load; every draft is verified by the target, so replies are the same as without it, and it is off unless asked (#3590). Thanks to @jschmied.
 
 - Server: `/v1/metrics` reports a `tensorfold:open_connections` gauge, the client connections admitted over TCP or the Unix socket and not yet closed, including idle keep-alive ones (#3925). Thanks to @plotarmordev.
