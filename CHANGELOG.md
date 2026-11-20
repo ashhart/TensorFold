@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: for Qwen3.5 dense EXL3 at TP=2, a rank's column cut of a weight can keep the whole weight's K-split plan (`Weight.pinnedColumns`), and `tf-cuda-test qwen35-tp-cut PACK` compares each rank's columns with one GPU's whole-weight bytes; `--tp 1` is unchanged and `--tp 2` stays refused (#3602). Thanks to @Nipale-ai.
+
 - Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
 - GLM-5.3-Flash on CUDA: the load races the classic and factored expert forms, which give the same bits, at each of its ten timed decode window widths and keeps the faster one at each (classic unless factored is more than 1% faster), instead of one form for every window; a window takes the form of the narrowest timed width that holds it, and `TF_GLM_EXPERT_FORM` names one form for every width (#3249). Thanks to @Bizuayeu.
