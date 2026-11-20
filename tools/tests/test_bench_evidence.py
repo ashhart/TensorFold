@@ -115,6 +115,15 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(row["prefill_widths"], [6, 2])
         self.assertNotEqual(row["ttft_s"], row["time_to_first_token"])
 
+    def test_malformed_native_runtime_cannot_crash_or_supply_prefill_evidence(self):
+        row = self.stream(bench_openai, counts=usage(), runtime="not-an-object")
+        self.assertTrue(row["complete"])
+        self.assertEqual(row["cache_state"], "cold")
+        self.assertIsNone(row["token_sha"])
+        self.assertIsNone(row["token_sha256"])
+        for field in ["prefill_seconds", "time_to_first_token", "prefill_widths"]:
+            self.assertIsNone(row[field])
+
     def test_missing_usage_and_empty_replies_are_unmeasured(self):
         for module in [bench_openai, bench_concurrent]:
             row = self.stream(module, counts=None, chunks=[])
