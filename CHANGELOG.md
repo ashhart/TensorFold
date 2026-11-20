@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU: Qwen3.8 Flash Next serves with MTP and prompt snapshots on Intel Xe2, with 24 reported concurrency and sampling cells matching solo and plain decoding (#3587, fixes #3583). Thanks to @supernovae.
+
 - DeepSeek V4.1 on Metal: with `--vision`, the server loads the checkpoint's vision tower (a checkpoint without `vision.*` tensors stops at load), and chats with PNG, JPEG or WebP image parts put the tower's rows into the prompt, within `--vision-image-tokens` (4,096 by default) and `--vision-max-images` (4); an image's span is prefilled in one chunk, the prompt cache keys image rows by the image's hash, text that spells the image token stays text, and a vision config with zero heads, a zero `max_wh_ratio` or a `downsample_ratio` below 2 is refused by name (#3926, part of #1676). Thanks to @gilby.
 
 - Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
