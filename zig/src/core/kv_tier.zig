@@ -305,7 +305,7 @@ pub const Tier = struct {
             const own = std.mem.indexOfScalar(u32, l.pages.ids.items, id) != null;
             if (!own or t.pool.refs[id] > 1) return false;
         }
-        for (l.pages.ids.items) |id| if (t.dirty[id] and t.pool.refs[id] > 1) return false;
+        for (l.pages.ids.items) |id| if (id != none and t.dirty[id] and t.pool.refs[id] > 1) return false;
         return true;
     }
 
