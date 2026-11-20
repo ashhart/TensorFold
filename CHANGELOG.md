@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights: with `--slide` and `--slide-forget`, the server counts how often each learned fact fires in successful requests and keeps the counts and pins in the folder; `POST /v1/slide/facts/ID/pin` pins or unpins a fact, and a lesson that finds the pocket full retires the least-used unpinned fact through the checked delete before it retries; without `--slide-forget` nothing new is counted or written (#2026).
+
 - Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
 
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
