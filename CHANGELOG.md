@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Nemotron 3.5 Bolt (`nemotron_h_puzzle`, MLX affine 4-bit) serves text on M1 to M4 Macs, with its per-layer expert counts, latent MoE, bf16 head and Bolt-width Mamba kernels under the kernel contract; an M5 refuses it by name before any weight file is opened, and images and drafts stay deferred (#4162, lands #1038, part of #962).
+
 - Docs: the Orchestrator guide says a custom `VONTRA_HOME` on macOS must be the canonical path (`pwd -P` gives it, so `/tmp/profile` is `/private/tmp/profile`), since the alias stops startup as linked (#4088, fixes #4084). Thanks to @AIFlowML.
 
 
