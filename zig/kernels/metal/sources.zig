@@ -336,3 +336,6 @@ pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");
+
+/// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
+pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");
