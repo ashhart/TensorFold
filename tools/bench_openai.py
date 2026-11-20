@@ -66,6 +66,9 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     span = last - first if first is not None else None
     out = {"ttft_s": first - start if complete and first is not None else None, "decode_s": span, **observed,
            "decode_tps": (n - 1) / span if complete and n is not None and n > 1 and span else None,
+           "prefill_seconds": reply.runtime.get("prefill_seconds"),
+           "time_to_first_token": reply.runtime.get("time_to_first_token"),
+           "prefill_widths": reply.runtime.get("prefill_widths"),
            "text": "".join(reply.text), "pieces": pieces, **reply.receipt()}
     return {**out, **bench_metrics.request(out), **bench_thinking.receipt(item)}
 

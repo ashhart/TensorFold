@@ -81,8 +81,13 @@ fn check(lane_memory: bool) !void {
     defer cfg.deinit(a);
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(a, &cfg, t.backend(), clock.clock());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    defer a.free(path);
     defer core.deinit();
     var h = LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2 });
+    h.trace = try @import("lane_trace.zig").Trace.open(a, std.testing.io, path);
     const e = h.engine();
     const terminal: api.Request = .{ .prompt = &.{ 3, 1, 4 }, .max_tokens = 1, .logprobs = 2 };
     const failing: api.Request = .{ .prompt = &.{ 3, 1, 4 }, .max_tokens = 8, .logprobs = 2 };
@@ -108,6 +113,21 @@ fn check(lane_memory: bool) !void {
     try std.testing.expectEqual(@as(usize, 1), t.drafts);
     try std.testing.expectEqual(@as(usize, 2), t.releases);
     try std.testing.expect(t.delivered_before_draft);
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 20));
+    defer a.free(text);
+    const Line = struct { t0_ns: i96, t1_ns: i96, kind: []const u8, id: u64, stream: u64, rows_from: usize, rows_to: usize, ok: bool };
+    var decoded: [2]usize = @splat(0);
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const parsed = try std.json.parseFromSlice(Line, a, raw, .{});
+        defer parsed.deinit();
+        const line = parsed.value;
+        if (!std.mem.eql(u8, line.kind, "decode")) continue;
+        try std.testing.expect(line.id >= 1 and line.id <= 2);
+        try std.testing.expect(line.ok and line.rows_from == 0 and line.rows_to == 1);
+        decoded[line.id - 1] += 1;
+    }
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1 }, &decoded);
 }
 
 test "first token and logprob sent once; terminal job survives another job's draft error" {

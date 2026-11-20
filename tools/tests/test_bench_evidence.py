@@ -106,6 +106,15 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(row["token_sha"], "a" * 12)
                 self.assertEqual(len(row["output_sha256"]), 64)
 
+    def test_openai_stream_retains_distinct_native_prefill_evidence(self):
+        runtime = {"token_sha": "a" * 12, "token_sha256": "a" * 64, "prefill_seconds": 1.25,
+                   "time_to_first_token": 1.5, "prefill_widths": [6, 2]}
+        row = self.stream(bench_openai, counts=usage(), runtime=runtime)
+        self.assertEqual(row["prefill_seconds"], 1.25)
+        self.assertEqual(row["time_to_first_token"], 1.5)
+        self.assertEqual(row["prefill_widths"], [6, 2])
+        self.assertNotEqual(row["ttft_s"], row["time_to_first_token"])
+
     def test_missing_usage_and_empty_replies_are_unmeasured(self):
         for module in [bench_openai, bench_concurrent]:
             row = self.stream(module, counts=None, chunks=[])
