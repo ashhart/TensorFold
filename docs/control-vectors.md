@@ -324,3 +324,7 @@ The TensorFold-native reader and Qwen foundation reuse
 upstream. External serving plugins, engine kernels, checkpoint tensors and
 trained vector assets are not vendored. TensorFold code remains Apache-2.0;
 future vectors require their own publication provenance and licence.
+
+No Aevonix/FlashAlign code, data or method is incorporated. The sources are the
+GLP specification and native foundation cited above; this does not claim
+priority over related work. See the [original attribution clarification](https://github.com/ashhart/TensorFold/issues/1834#issuecomment-6693354132).
