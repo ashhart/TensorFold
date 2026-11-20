@@ -52,7 +52,13 @@ pub fn main(init: std.process.Init) !void {
     const opening = std.Io.Clock.awake.now(init.io);
     var file = try cpu.gguf.File.open(init.gpa, init.io, pos[0]);
     defer file.close(init.io);
-    if (fast_mode) try file.enableFastMode();
+    if (fast_mode) file.enableFastMode() catch |err| {
+        if (err == error.DotprodTargetRequired) {
+            try w.writeAll("error: --fast requires an ARM dot-product build (rebuild with -Dcpu=baseline+dotprod; check for asimddp in /proc/cpuinfo)\n");
+            try w.flush();
+        }
+        return err;
+    };
     const c = try file.config();
     var session = try cpu.Gguf.Session.init(init.gpa, &file, c, @intCast(prompt.items.len + count), threads);
     defer session.deinit();
