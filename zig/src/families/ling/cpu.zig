@@ -14,6 +14,7 @@ test {
     _ = @import("cpu_gguf_values.zig");
     _ = @import("cpu_gguf_rows.zig");
     _ = @import("cpu_gguf_rows_test.zig");
+    _ = @import("cpu_gguf_pool_test.zig");
     _ = @import("cpu_mla.zig");
     _ = @import("cpu_forward_test.zig");
     _ = @import("gguf_names.zig");

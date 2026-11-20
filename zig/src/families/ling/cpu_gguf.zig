@@ -68,6 +68,9 @@ pub const File = struct {
     joined_mla: [24]?[]f32 = @splat(null),
     cached_values: std.StringHashMapUnmanaged(CachedValue) = .empty,
     validated: std.StringHashMapUnmanaged(void) = .empty,
+    io: std.Io,
+    pool: ?*Pool = null,
+    pub const Pool = @import("cpu_gguf_pool.zig").Pool;
     pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !File {
         var source = try g.File.open(a, io, path, .{});
         errdefer source.close(io);
@@ -77,7 +80,7 @@ pub const File = struct {
         const plan = try names.tiny(arena.allocator());
         if (source.document.tensors.len != plan.len) return error.UnexpectedLingGgufTensor;
         for (plan) |name| try checkTensor(source.document.getTensor(name.source) orelse return error.MissingLingGgufTensor, name);
-        return .{ .source = source, .arena = arena, .plan = plan };
+        return .{ .source = source, .arena = arena, .plan = plan, .io = io };
     }
     pub fn config(f: *const File) !@import("config.zig").Config {
         return @import("cpu_gguf_config.zig").tiny(&f.source.document);
@@ -121,7 +124,8 @@ pub const File = struct {
         }
         return data;
     }
-    pub fn project(f: *File, key: []const u8, input: []const f32, output: []f32, count: usize, width: usize, n: usize, rounded: bool, threads: usize) !void {
+    /// A matrix view whose quantized scales have been validated once.
+    fn matrix(f: *File, key: []const u8, width: usize, n: usize) !g.Tensor {
         const v = try f.view(key);
         if (v.tensor.rank != 2 or v.tensor.shape[0] != width or v.tensor.shape[1] != n) return error.BadLingGgufMatrix;
         if (v.tensor.kind != .f32 and !f.validated.contains(key)) {
@@ -129,12 +133,41 @@ pub const File = struct {
             const dup = try f.arena.allocator().dupe(u8, key);
             try f.validated.put(f.arena.allocator(), dup, {});
         }
-        try @import("cpu_gguf_rows.zig").projectValidatedOn(v.tensor, input, output, count, rounded, threads);
+        return v.tensor;
+    }
+    /// The persistent workers for this thread count, made on first use and replaced when the count changes.
+    pub fn workers(f: *File, threads: usize) !*Pool {
+        if (f.pool) |p| {
+            if (p.threads == threads) return p;
+            p.destroy();
+            f.pool = null;
+        }
+        f.pool = try Pool.create(f.arena.child_allocator, f.io, threads);
+        return f.pool.?;
+    }
+    pub fn project(f: *File, key: []const u8, input: []const f32, output: []f32, count: usize, width: usize, n: usize, rounded: bool, threads: usize) !void {
+        const t = try f.matrix(key, width, n);
+        if (threads > 1) return (try f.workers(threads)).project(t, input, output, count, rounded);
+        try @import("cpu_gguf_rows.zig").projectValidatedOn(t, input, output, count, rounded, 1);
+    }
+    /// One row's routed experts on the workers; `out` holds each result, `hidden` values apiece, in `ids` order.
+    pub fn projectExperts(f: *File, prefix: []const u8, ids: []const u32, x: []const f32, out: []f32, hidden: usize, inter: usize, limit: f32, threads: usize) !void {
+        var list: [16]@import("cpu_gguf_pool.zig").Expert = undefined;
+        if (ids.len > list.len or out.len != ids.len * hidden) return error.BadLingGgufMatrix;
+        var buf: [128]u8 = undefined;
+        for (ids, 0..) |id, j| list[j] = .{
+            .gate = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.gate_proj.weight", .{ prefix, id }), hidden, inter),
+            .up = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.up_proj.weight", .{ prefix, id }), hidden, inter),
+            .down = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.down_proj.weight", .{ prefix, id }), inter, hidden),
+            .out = out[j * hidden ..].ptr,
+        };
+        try (try f.workers(threads)).experts(list[0..ids.len], x, hidden, inter, limit);
     }
     pub fn embed(f: *const File, ids: []const u32, output: []f32) !void {
         try @import("cpu_gguf_values.zig").embedding(&f.source.document, ids, output);
     }
     pub fn close(f: *File, io: std.Io) void {
+        if (f.pool) |p| p.destroy();
         for (f.joined_mla) |entry| if (entry) |data| f.arena.child_allocator.free(data);
         f.arena.deinit();
         f.source.close(io);
