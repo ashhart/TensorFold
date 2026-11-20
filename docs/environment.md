@@ -13,6 +13,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_PARALLEL` | Whole count 1 through 4096, or `auto` (`auto` = 8); default: what `--parallel` says. Read only when `--parallel` is not on the command line, so the flag wins; blank keeps the default; other values are refused at server startup |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
 | `TENSORFOLD_PREFIX_WAIT_MS` | Whole milliseconds 0 through 4294967295; zero disables waiting; default 60000 |
+| `TENSORFOLD_PULL_CONNECT_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for a connection to the hub, the storage host or the proxy; default 30 |
+| `TENSORFOLD_PULL_STALL_SECONDS` | Whole seconds 1 through 4294967295; how long `pull` waits for the next byte before it resumes the file with a range request (at most 3 times); default 60 |
 | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
 | `TENSORFOLD_RESTORE_PREFETCH_GIB` | Whole unsigned 64-bit GiB count, capped at 16777216; default 16 |
 | `TENSORFOLD_RESTORE_PREFETCH_MS` | Whole unsigned 64-bit milliseconds, capped at 1099511627776; default 30000 |
@@ -142,6 +144,19 @@ Backend-specific settings are checked when that backend starts; slide settings r
 The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family; on Metal `TF_GLM_DRAFT_CONFIDENCE` is read and validated when GLM loads `--drafter`.
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
+
+## Pull behind a proxy
+
+`tensorfold pull` reads the proxy variables the Hugging Face CLI reads: `HTTPS_PROXY` for https requests,
+`HTTP_PROXY` for http ones and `ALL_PROXY` for either. The lower-case spelling wins when both are set, as in curl.
+Every request goes through the proxy, including the storage host a hub redirect names; each hop takes the proxy for its own scheme.
+`NO_PROXY` sends a host direct: `*`, an exact host, a domain suffix (`.example.org`, `*.example.org` or `example.org`)
+or any of those with `:port`. Address ranges (CIDR) are not matched.
+Only `http://` proxies are supported; pull opens a CONNECT tunnel through them, so the proxy must allow CONNECT to the hub's port.
+Credentials in the proxy URL (`http://user:password@host:port`) are sent to the proxy only; messages show `http://host:port`.
+Pull waits `TENSORFOLD_PULL_CONNECT_SECONDS` for each connection and `TENSORFOLD_PULL_STALL_SECONDS` for each next byte.
+A stalled file resumes from its `.incomplete` bytes with a range request at most 3 times, then pull stops and names the proxy in use.
+On Windows, pull does not read these settings yet.
 
 ## Flash Next
 
