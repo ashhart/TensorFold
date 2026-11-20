@@ -88,6 +88,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     const tokens: [63]u32 = @splat(7);
     var p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
     for ([_]u32{ 0, 15, 31, 47, 63 }) |count| {
+        // 8 rounds: the first deadline (cost_probe_after) and the default Cooldown.spacing, so a width is owed
         s.rounds += 8;
         try std.testing.expectEqual(@as(?u32, count), own.probe(&e, p));
         try e.rule.observeCost(count, 100, false, win.who(&s));
@@ -96,12 +97,15 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
         try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
         s.rounds -= 1;
     }
+    // 8 more rounds: the walk 1, 16, 32, 48, 64 is sampled, so null means nothing is owed
     s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
     p.tokens = tokens[0..16];
     try std.testing.expectEqual(@as(?u32, 16), own.probe(&e, p));
     try e.rule.observeCost(16, 100, false, win.who(&s));
     own.observe(&s, 17, 17, 100);
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
+    s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
 
@@ -305,12 +309,12 @@ test "lone price: a finished lone stream's prices and backed-off deadlines start
     var done = try Stream.init(a, .{ .id = "done", .prompt = &.{ 3, 1, 4 }, .max_new = 128 });
     defer done.deinit(a);
     try measured(&e, &done, 60);
-    try own.keep(a, &e.lone_kept[0][0], &done);
+    try own.keep(a, &e.lone_kept[0][0][0], &done);
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
     next.rounds = 2;
     _ = try e.rule.rates(win.who(&next));
-    try own.seed(a, e.lone_kept[0][0], &next);
+    try own.seed(a, e.lone_kept[0][0][0], &next);
     try std.testing.expectEqual(@as(?f64, 94.5), next.depth.?.ms.?.get(15));
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
     try std.testing.expectEqual(@as(u64, 42), next.cost_probe_after);
@@ -332,15 +336,15 @@ test "lone price: a stream that shared a round leaves nothing, and a priced stre
     defer shared.deinit(a);
     try measured(&e, &shared, 30);
     shared.shared_round = true;
-    try own.keep(a, &e.lone_kept[0][0], &shared);
-    try std.testing.expect(e.lone_kept[0][0] == null);
+    try own.keep(a, &e.lone_kept[0][0][0], &shared);
+    try std.testing.expect(e.lone_kept[0][0][0] == null);
     shared.shared_round = false;
-    try own.keep(a, &e.lone_kept[0][0], &shared);
+    try own.keep(a, &e.lone_kept[0][0][0], &shared);
     var priced = try Stream.init(a, .{ .id = "priced", .prompt = &.{2}, .max_new = 128 });
     defer priced.deinit(a);
     _ = try e.rule.rates(win.who(&priced));
     try e.rule.observeCost(15, 70, false, win.who(&priced));
-    try own.seed(a, e.lone_kept[0][0], &priced);
+    try own.seed(a, e.lone_kept[0][0][0], &priced);
     try std.testing.expectEqual(@as(?f64, 70), priced.depth.?.ms.?.get(15));
     try std.testing.expectEqual(@as(?f64, null), priced.depth.?.ms.?.get(16));
     try std.testing.expectEqual(@as(u64, 8), priced.cost_probe_after);
@@ -357,7 +361,7 @@ test "lone price: a long prompt's calibration starts only long streams, and leav
     var short = try Stream.init(a, .{ .id = "short", .prompt = &.{ 3, 1, 4 }, .max_new = 128 });
     defer short.deinit(a);
     try measured(&e, &short, 60);
-    try own.keep(a, own.slot(&e.lone_kept, &short), &short);
+    try own.keep(a, own.slot(&e.lone_kept[0], &short), &short);
     // a 200,000-token prompt: its wide rounds timed slow, and its losing tile probe backed off far past a short reply
     const prompt = try a.alloc(u32, 200_000);
     defer a.free(prompt);
@@ -369,19 +373,19 @@ test "lone price: a long prompt's calibration starts only long streams, and leav
     try e.rule.observeCost(16, 400, false, win.who(&long));
     long.rounds = 60;
     long.cost_probes[16] = .{ .after = 5000, .spacing = 4096, .retry = true };
-    try own.keep(a, own.slot(&e.lone_kept, &long), &long);
+    try own.keep(a, own.slot(&e.lone_kept[0], &long), &long);
     try std.testing.expectEqual(@as(usize, 0), own.band(3));
     try std.testing.expectEqual(@as(usize, 5), own.band(200_000));
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
     _ = try e.rule.rates(win.who(&next));
-    try own.seed(a, own.slot(&e.lone_kept, &next).*, &next);
+    try own.seed(a, own.slot(&e.lone_kept[0], &next).*, &next);
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
     try std.testing.expectEqual(@as(u64, 100), next.cost_probes[16].after);
     var later = try Stream.init(a, .{ .id = "later", .prompt = prompt, .max_new = 128 });
     defer later.deinit(a);
     _ = try e.rule.rates(win.who(&later));
-    try own.seed(a, own.slot(&e.lone_kept, &later).*, &later);
+    try own.seed(a, own.slot(&e.lone_kept[0], &later).*, &later);
     try std.testing.expectEqual(@as(?f64, 400), later.depth.?.ms.?.get(16));
 }
 
@@ -400,15 +404,48 @@ test "lone price: deadlines a run of streams backed off start the next stream at
     done.cost_probe_after = 60 + (1 << 20);
     done.cost_probe_spacing = 1 << 20;
     done.cost_probes[16] = .{ .after = 60 + (1 << 21), .spacing = 1 << 21, .retry = true };
-    try own.keep(a, own.slot(&e.lone_kept, &done), &done);
+    try own.keep(a, own.slot(&e.lone_kept[0], &done), &done);
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
     next.rounds = 2;
     _ = try e.rule.rates(win.who(&next));
-    try own.seed(a, own.slot(&e.lone_kept, &next).*, &next);
+    try own.seed(a, own.slot(&e.lone_kept[0], &next).*, &next);
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
     try std.testing.expectEqual(2 + own.carry_most, next.cost_probe_after);
     try std.testing.expectEqual(own.carry_most, next.cost_probe_spacing);
     try std.testing.expectEqual(2 + own.carry_most, next.cost_probes[16].after);
     try std.testing.expectEqual(own.carry_most, next.cost_probes[16].spacing);
+}
+
+test "lone price: without plain_guard no probe asks for a round with no draft, and a lone round is priced by its own times" {
+    var cfg = try setup();
+    defer cfg.deinit(a);
+    cfg.plain_guard = false;
+    cfg.lone_cost_tile = 4;
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    e.alone = true;
+    var s = try Stream.init(a, .{ .id = "no-plain", .prompt = &.{3}, .max_new = 128 });
+    defer s.deinit(a);
+    const tokens: [15]u32 = @splat(7);
+    const p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
+    try std.testing.expect(own.enabled(&e, p));
+    var w = win.who(&s);
+    w.lone = true;
+    // 8 rounds is the first deadline, as for a stream's cost_probe_after and every Cooldown
+    s.rounds += 8;
+    for ([_]u32{ 1, 5, 9, 13, 15 }) |drafts| {
+        s.rounds += 8;
+        try std.testing.expectEqual(@as(?u32, drafts), own.probe(&e, p));
+        try e.rule.observeCost(drafts, 100, false, w);
+        own.observe(&s, drafts + 1, drafts + 1, 100);
+    }
+    try std.testing.expectEqual(@as(?f64, 100), s.depth.?.ms.?.get(15));
+    try std.testing.expect(e.rule.greedy_ms.empty()); // the shared rounds' table is left alone
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
+    s.rounds += 8;
+    try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }

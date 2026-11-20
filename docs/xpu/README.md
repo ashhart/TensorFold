@@ -11,7 +11,7 @@ Battlemage G31, 32 GB) directly through **Level Zero**, with no PyTorch, no SYCL
 | Model | Qwen3.8-27B (`model_type` `qwen3_5`: 48 GDN layers + 16 attention layers) |
 | Formats | MLX affine 4-bit, group size 64 (`mlx-q4g64`); GPTQ symmetric 4-bit, group size 128 (`gptq-int4-g128`) |
 | Measured checkpoints | GPTQ: [`SergiioB/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16`](https://huggingface.co/SergiioB/Qwen3.8-27B-GPTQ-Int4-sym-G128-MTP-BF16) (revision `9d189a60`), with its tokenizer as published; full recipe: [RECIPE-qwen38-27b-b70.md](RECIPE-qwen38-27b-b70.md) |
-| Drafts | DFlash2 (`--drafter`), best-first tree of 15 nodes, greedy and sampled |
+| Drafts | DFlash2 (`--drafter`), best-first tree of at most 15 nodes (a lone stream's width from the lane rule's lone pricing), greedy and sampled |
 | Serving | several streams (`--parallel N`, 8 by default, the engine's "lanes" host): shared rounds, a lone stream runs as a DFlash2 tree (also with `--parallel 1`) |
 
 In the GPTQ format, the layers are int4 g128 as stored. The GDN `in_proj_a/b` gates stay in dense fp16, as in the
@@ -83,7 +83,7 @@ Options through environment variables:
 | `XPU_PREFILL_INT4=1` | **Local option**, with `XPU_PREFILL_INT8=1` and a rotated checkpoint (`zig/tools/xpu/rotate_w4.py`, marker `hadamard128`): `down` input in int4 (DPAS u4 × s4), +8 % prefill at equal quality to GPTQ W4A8; `XPU_PREFILL_INT4_SITES=10` adds the mixer outputs (+12 %, perplexity +1 %). |
 | `XPU_KV_INT8=1` | **Option** (the default stays bf16): K/V cache in int8 (scale per position and K/V head): half the memory, 12 streams instead of 7 at 16 k tokens, 7 instead of 3 at 32 k; perplexity unchanged (±0.04 %), DFlash2 acceptance unchanged. Answers are not bit-identical to those of the bf16 cache (15 of 24 greedy answers identical over 256 tokens, the others diverge on near-ties); the drafted == serial and multi-stream == serial contracts hold in this mode. Prompt attention `attn_prompt8`: Q·Kᵀ in int8 DPAS, P·V in fp16. |
 | `XPU_PREFILL_INT8=1` | **Local option**: prompt GEMMs in W4A8, int8 activations per (row, group of 128), GPTQ only. Decoding stays in fp16. |
-| `XPU_TREE=N` | DFlash2 tree nodes per round (15 by default; 0: a chain) |
+| `XPU_TREE=N` | DFlash2 tree nodes per round, at most (15 by default; 0: a chain). A stream served alone picks its width up to N from its own measured rounds, a context band each; the test runners use N as is |
 | `XPU_BLOCK=N` | Rows of the drafter block (8) |
 | `XPU_FP64_REF=1` | `xpu-qwen27` runner only: on the prompt's real activations, each int4 GEMM of layers 0, 1, 31, 63 and the head (decode on 1 and 8 rows, prompt) against FP64 references of the same int4 weights (`core/quant` MLX affine; GPTQ as affine with bias −8·scale), worst column and error over the outputs' rms (`zig/src/xpu/fp64_ref.zig`) |
 | `XPU_FIDELITY=1` | `xpu-qwen27` runner only: teacher-forced top tokens of the prompt and decode paths at every position of the IDS file against the same forward with every GEMM in FP64, all differences and margins (`XPU_FIDELITY_CACHE=FILE` keeps the FP64 forward's tokens) |

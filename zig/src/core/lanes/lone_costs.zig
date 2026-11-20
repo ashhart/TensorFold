@@ -13,8 +13,15 @@ fn observed(s: anytype) Table {
 }
 
 pub fn enabled(e: anytype, p: anytype) bool {
-    return e.alone and e.cfg.lone_cost_tile > 0 and e.cfg.timed and e.cfg.plain_guard and
+    return e.alone and e.cfg.lone_cost_tile > 0 and e.cfg.timed and
         e.cfg.draft_confidence == null and p.kind == .head and p.lanes == null;
+}
+
+/// The rule's view of a stream, marked as a lone round priced from its own times or not.
+pub fn marked(who: anytype, lone: bool) @TypeOf(who) {
+    var w = who;
+    w.lone = lone;
+    return w;
 }
 
 /// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.
@@ -38,14 +45,14 @@ pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64
     return base + overhead;
 }
 
-/// Arena-owned complete-round prices; callers must pass zero additional overhead to the allocator.
-pub fn prices(e: anytype, p: anytype) !Table {
+/// Complete-round prices in the caller's allocator (an arena or a fixed buffer, never freed), with no added overhead.
+pub fn prices(e: anytype, a: std.mem.Allocator, p: anytype) !Table {
     var out: Table = .{};
     const overhead = e.rule.overheadMs(1, p.stream.sampling != null);
     const samples = observed(p.stream);
     for (1..p.count() + 2) |rows| {
         if (estimate(e.cfg.shared_costs, samples, rows, overhead)) |ms|
-            try out.put(e.arena.allocator(), @intCast(rows), ms);
+            try out.put(a, @intCast(rows), ms);
     }
     return out;
 }
@@ -58,7 +65,8 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
     const most: u32 = @intCast(@min(p.count() + 1, e.cfg.batch_rows));
     var retry: ?u32 = null;
     var earliest: u64 = std.math.maxInt(u64);
-    var rows: u32 = 1;
+    // without plain_guard, when the plan offers a draft, no round is drafted with nothing
+    var rows: u32 = @min(@as(u32, if (e.cfg.plain_guard) 1 else 2), most);
     while (true) {
         if (rows < s.cost_probes.len) {
             const cd = s.cost_probes[rows];
@@ -168,6 +176,60 @@ fn fill(gpa: std.mem.Allocator, own: *?Table, from: Table) !void {
         t.deinit(gpa);
     }
     own.* = .{ .slots = try gpa.dupe(?f64, from.slots) };
+}
+
+/// Which clock timed a lone stream's rounds: the engine's backend clock, or a backend's own wall time.
+pub const Clock = enum { backend, wall };
+
+/// The kept calibrations of each clock: one clock's times never seed or price the other's rounds.
+pub const clocks = 2;
+
+pub fn table(e: anytype, clock: Clock) *[2][bands]?Kept {
+    return &e.lone_kept[@backingInt(clock)];
+}
+
+/// A stream's calibration into the table of the clock that timed it (an unmarked one is the backend's).
+pub fn retain(e: anytype, s: anytype) void {
+    keep(e.gpa, slot(table(e, s.clock orelse .backend), s), s) catch {};
+}
+
+/// A lone choice's start on `clock`: a stream that crossed clocks or lost its samples starts from this clock's table.
+pub fn prepare(e: anytype, s: anytype, clock: Clock) !void {
+    const crossed = if (s.clock) |old| old != clock else false;
+    if (crossed) retain(e, s);
+    if (crossed or (s.prices_seeded and s.depth == null)) {
+        if (s.depth) |*d| if (d.ms) |*own| {
+            own.deinit(e.gpa);
+            d.ms = null;
+        };
+        s.cost_probes = @splat(.{});
+        s.cost_probe_after = 8;
+        s.cost_probe_spacing = 8;
+        s.cost_probe_trial = null;
+        s.shared_round = false; // the flag described the samples just dropped
+        s.prices_seeded = false;
+    }
+    s.clock = clock;
+    if (!s.prices_seeded) {
+        s.prices_seeded = true;
+        _ = try e.rule.rates(@import("windows.zig").who(s));
+        try seed(e.gpa, slot(table(e, clock), s).*, s);
+    }
+}
+
+pub const Pick = struct { counts: []u32, prices: Table, trial: ?u32 };
+
+/// A lone round's drafts, for the engine and a backend alike, after `prepare`: price each width, pick or trial one.
+pub fn choose(e: anytype, a: std.mem.Allocator, p: anytype, chances: []const f64, least_rows: u32) !Pick {
+    const priced = try prices(e, a, p);
+    const counts = try @import("allocate.zig").allocateDrafts(a, &.{1}, &.{chances}, &priced, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = least_rows });
+    var out: Pick = .{ .counts = counts, .prices = priced, .trial = null };
+    if (probe(e, p)) |drafts| {
+        counts[0] = drafts;
+        out.trial = drafts + 1;
+        p.stream.cost_probe_trial = trial(p.stream, chances, drafts + 1);
+    }
+    return out;
 }
 
 pub const Trial = struct {

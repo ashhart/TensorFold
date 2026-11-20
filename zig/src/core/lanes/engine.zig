@@ -47,7 +47,7 @@ pub const Engine = struct {
     shared_rounds: u64 = 0,
     late: @import("late_draft.zig").State = .{},
     alone: bool = true, // this step has one live stream: its copies may take their ramp
-    lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
+    lone_kept: [lone_costs.clocks][2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(@splat(null))), // by clock
     steps: u64 = 0,
     grammar_round: @import("grammar_time.zig").Round = .{},
     grammar_workers: @import("grammar_parallel.zig").State = .{},
@@ -87,7 +87,7 @@ pub const Engine = struct {
         e.live.deinit(e.gpa);
         e.unread.deinit(e.gpa);
         e.rule.deinit();
-        for (&e.lone_kept) |*mode| for (mode) |*k| if (k.*) |*x| x.deinit(e.gpa);
+        for (&e.lone_kept) |*clock| for (clock) |*mode| for (mode) |*k| if (k.*) |*x| x.deinit(e.gpa);
         e.arena.deinit();
     }
 
@@ -239,7 +239,7 @@ pub const Engine = struct {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
-                try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                try e.rule.observeCost(@intCast(rows - 1), ms, first, lone_costs.marked(win.who(s), lone_costs.enabled(e, plan)));
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
@@ -536,7 +536,7 @@ pub const Engine = struct {
 
     pub fn release(e: *Engine, s: *Stream) void {
         e.late.cancel(s);
-        if (e.cfg.lone_cost_tile > 0) lone_costs.keep(e.gpa, lone_costs.slot(&e.lone_kept, s), s) catch {};
+        if (e.cfg.lone_cost_tile > 0 or s.clock != null) lone_costs.retain(e, s);
         @import("lone_copy.zig").keep(e, s);
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);

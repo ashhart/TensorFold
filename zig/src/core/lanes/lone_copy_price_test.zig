@@ -426,17 +426,17 @@ test "lone copy price: kept copy prices need two timed copies on a lone stream, 
         try copy_price.observeOwn(&e.rule, 0, 10.1, false, win.who(&done));
         done.depth.?.copy_band = 0; // as its first priced round left it (lone_copy.zig's seed)
         lone_copy.keep(&e, &done);
-        try std.testing.expect(e.lone_kept[0][0] == null); // one timed copy round, as a warm-up's few tokens: nothing kept
+        try std.testing.expect(e.lone_kept[0][0][0] == null); // one timed copy round, as a warm-up's few tokens: nothing kept
         try copy_price.observeCopy(&e.rule, 15, 11.6, false, win.who(&done));
         done.shared_round = true;
         lone_copy.keep(&e, &done);
-        try std.testing.expect(e.lone_kept[0][0] == null); // a round beside another stream: its times were not its own
+        try std.testing.expect(e.lone_kept[0][0][0] == null); // a round beside another stream: its times were not its own
         done.shared_round = false;
         lone_copy.keep(&e, &done);
         var next = try sm.Stream.init(gpa, .{ .id = "b", .prompt = prompts[1], .max_new = 8 });
         defer next.deinit(gpa);
         _ = try e.rule.rates(win.who(&next));
-        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &next).*, &next);
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept[0], &next).*, &next);
         try std.testing.expectEqual(@as(?f64, 11.6), next.depth.?.copy_ms.?.get(15));
         // a head's own round times are its depth rule's, never carried by copy pricing
         try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (next.depth.?.ms) |t| t.get(0) else null);
@@ -446,12 +446,12 @@ test "lone copy price: kept copy prices need two timed copies on a lone stream, 
         var far = try sm.Stream.init(gpa, .{ .id = "c", .prompt = long, .max_new = 8 });
         defer far.deinit(gpa);
         _ = try e.rule.rates(win.who(&far));
-        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &far).*, &far);
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept[0], &far).*, &far);
         try std.testing.expect(far.depth.?.copy_ms == null); // another context band starts unpriced
         var timed = try sm.Stream.init(gpa, .{ .id = "d", .prompt = prompts[2], .max_new = 8 });
         defer timed.deinit(gpa);
         try copy_price.observeCopy(&e.rule, 15, 30, false, win.who(&timed));
-        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &timed).*, &timed);
+        try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept[0], &timed).*, &timed);
         try std.testing.expectEqual(@as(?f64, 30), timed.depth.?.copy_ms.?.get(15)); // its own copy times stay
         try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (timed.depth.?.ms) |t| t.get(0) else null);
     }
@@ -523,7 +523,7 @@ test "lone copy price: a head stream's copy rounds are timed by their verify, wi
     while (e.activeCount() > 0) try e.step();
     try std.testing.expect(target.drafts_calls > 0);
     // the kept copy prices hold each whole copy's verify time, 10 ms plus 0.1 ms a row, and none of the drafting
-    const kept = e.lone_kept[0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
+    const kept = e.lone_kept[0][0][lone_costs.band(prompts[0].len)] orelse return error.NothingKept;
     try std.testing.expectEqual(@as(?f64, short_context[0] + short_context[1] * 16), kept.copy_ms.get(15));
 }
 

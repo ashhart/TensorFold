@@ -70,5 +70,5 @@ pub fn keep(e: *Engine, s: *const Stream) void {
 
 /// The kept copy prices of a stream's sampling mode at a band: those of the band it started in, read and left.
 fn slot(e: *Engine, s: *const Stream, band: usize) *?lone_costs.Kept {
-    return &e.lone_kept[@intFromBool(s.sampling != null)][band];
+    return &e.lone_kept[0][@intFromBool(s.sampling != null)][band]; // no copy price is timed by a backend's wall clock
 }
