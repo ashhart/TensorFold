@@ -169,6 +169,31 @@ fn shape(t: g.Tensor) !struct { width: usize, n: usize } {
     return .{ .width = width, .n = n };
 }
 
+/// Extract up to `out.len` set CPU indices from a bitmask of `usize` words, in ascending order.
+pub fn extractAllowedCpus(words: []const usize, out: []usize) usize {
+    const bits = @bitSizeOf(usize);
+    var count: usize = 0;
+    for (words, 0..) |word, wi| {
+        var w = word;
+        while (w != 0 and count < out.len) {
+            const bit = @ctz(w);
+            out[count] = wi * bits + bit;
+            count += 1;
+            w &= w - 1;
+        }
+    }
+    return count;
+}
+
+fn pinSingleCpu(cpu: usize) void {
+    if (@import("builtin").os.tag != .linux) return;
+    const bits = @bitSizeOf(usize);
+    var set: std.os.linux.cpu_set_t = @splat(0);
+    if (cpu >= set.len * bits) return;
+    set[cpu / bits] = @as(usize, 1) << @intCast(cpu % bits);
+    std.os.linux.sched_setaffinity(0, &set) catch {};
+}
+
 /// Workers spin briefly between jobs, which come every few microseconds within a token, then park until woken.
 pub const Pool = struct {
     const spin_limit: usize = 500_000;
@@ -180,6 +205,10 @@ pub const Pool = struct {
     min_weights: usize = 256 * 256,
     workers: [7]std.Thread = undefined,
     made: usize = 0,
+    allowed_cpus: [8]usize = @splat(0),
+    pin_enabled: bool = false,
+    saved_mask: if (@import("builtin").os.tag == .linux) std.os.linux.cpu_set_t else void =
+        if (@import("builtin").os.tag == .linux) @splat(0) else {},
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Condition = .init,
     generation: std.atomic.Value(usize) align(64) = .init(0),
@@ -194,10 +223,21 @@ pub const Pool = struct {
         const p = try a.create(Pool);
         p.* = .{ .allocator = a, .io = io, .threads = threads };
         errdefer p.destroy();
-        for (0..threads - 1) |_| {
-            p.workers[p.made] = try std.Thread.spawn(.{}, worker, .{p});
+        if (@import("builtin").os.tag == .linux and threads > 1) {
+            var mask: std.os.linux.cpu_set_t = @splat(0);
+            const rc = std.os.linux.sched_getaffinity(0, @sizeOf(std.os.linux.cpu_set_t), &mask);
+            if (std.os.linux.errno(rc) == .SUCCESS) {
+                if (extractAllowedCpus(&mask, p.allowed_cpus[0..threads]) >= threads) {
+                    p.saved_mask = mask;
+                    p.pin_enabled = true;
+                }
+            }
+        }
+        for (0..threads - 1) |id| {
+            p.workers[p.made] = try std.Thread.spawn(.{}, worker, .{ p, id });
             p.made += 1;
         }
+        if (p.pin_enabled) pinSingleCpu(p.allowed_cpus[0]);
         return p;
     }
 
@@ -208,6 +248,9 @@ pub const Pool = struct {
         p.ready.broadcast(p.io);
         p.mutex.unlock(p.io);
         for (p.workers[0..p.made]) |w| w.join();
+        if (@import("builtin").os.tag == .linux and p.pin_enabled) {
+            std.os.linux.sched_setaffinity(0, &p.saved_mask) catch {};
+        }
         p.allocator.destroy(p);
     }
 
@@ -220,7 +263,8 @@ pub const Pool = struct {
         }
     }
 
-    fn worker(p: *Pool) void {
+    fn worker(p: *Pool, id: usize) void {
+        if (p.pin_enabled) pinSingleCpu(p.allowed_cpus[id + 1]);
         var seen: usize = 0;
         while (true) {
             var spins: usize = 0;

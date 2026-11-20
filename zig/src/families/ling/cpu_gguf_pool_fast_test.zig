@@ -106,3 +106,13 @@ test "fast pool routed experts match 1-thread bit-for-bit across thread counts" 
     try p4.expertsFast(&list, &x, &acts, hidden, inter, 7.0);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want), std.mem.sliceAsBytes(&got));
 }
+
+test "extractAllowedCpus reads sparse affinity masks in ascending order without hardcoded cores" {
+    const mask = [_]usize{ (@as(usize, 1) << 0) | (@as(usize, 1) << 3) | (@as(usize, 1) << 5) | (@as(usize, 1) << 7), (@as(usize, 1) << 2) };
+    var out: [4]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 4), pool_mod.extractAllowedCpus(&mask, &out));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3, 5, 7 }, &out);
+    var all: [8]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 5), pool_mod.extractAllowedCpus(&mask, &all));
+    try std.testing.expectEqual(@as(usize, @bitSizeOf(usize) + 2), all[4]);
+}
