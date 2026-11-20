@@ -4,28 +4,15 @@ const core = @import("core");
 const g = core.gguf;
 const rows = @import("cpu_rows.zig");
 const sdot = @import("cpu_gguf_q4_sdot.zig");
+const act_mod = @import("cpu_gguf_sdot_act.zig");
 
-const V = @Vector(16, i8);
-const I = @Vector(4, i32);
+const V = act_mod.V;
+const I = act_mod.I;
 const F4 = @Vector(4, f32);
-
-extern fn @"llvm.aarch64.neon.sdot.v4i32.v16i8"(I, V, V) I;
-
-inline fn sdotAcc(acc: I, a: V, b: V) I {
-    if (@import("builtin").cpu.arch == .aarch64) {
-        return @"llvm.aarch64.neon.sdot.v4i32.v16i8"(acc, a, b);
-    }
-    const prod = @as(@Vector(16, i32), a) *% @as(@Vector(16, i32), b);
-    return acc +% I{
-        prod[0] +% prod[1] +% prod[2] +% prod[3],
-        prod[4] +% prod[5] +% prod[6] +% prod[7],
-        prod[8] +% prod[9] +% prod[10] +% prod[11],
-        prod[12] +% prod[13] +% prod[14] +% prod[15],
-    };
-}
+const sdotAcc = act_mod.sdotAcc;
 
 inline fn sdotLane(acc: I, a: V, b: V, comptime lane: u2) I {
-    if (@import("builtin").cpu.arch == .aarch64) {
+    if (comptime act_mod.has_dotprod) {
         const idx = switch (lane) {
             0 => "0",
             1 => "1",

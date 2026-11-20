@@ -28,10 +28,16 @@ With Zig 0.17.0, natively on the board:
 zig build tf-ling-cpu-decode
 ```
 
-or from a Mac, for the board:
+or from a Mac, for any aarch64 Linux board (exact mode only):
 
 ```bash
 zig build tf-ling-cpu-decode -Dtarget=aarch64-linux-gnu
+```
+
+For boards with ARM dot-product support (check `grep -o asimddp /proc/cpuinfo` on the board), add `-Dcpu=baseline+dotprod` (or the board's CPU model) so `--fast` is enabled:
+
+```bash
+zig build tf-ling-cpu-decode -Dtarget=aarch64-linux-gnu -Dcpu=baseline+dotprod
 ```
 
 Either way the tool is `zig-out/bin/ling-cpu-decode`, built ReleaseSafe whatever `-Doptimize` says; copy it to the
@@ -39,8 +45,16 @@ board from a Mac. `-Dtarget=aarch64-linux-musl` gives a static binary.
 
 ## Run
 
+Exact mode (default):
+
 ```bash
 ling-cpu-decode ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
+```
+
+Fast mode (requires a dot-product build; uses integer SDOT, 8x4 repacked weights cached next to the GGUF as `.tf_repack8.v4`, and head-parallel fast attention):
+
+```bash
+ling-cpu-decode --fast ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
 The arguments are the GGUF, the prompt's token IDs separated by commas (`PROMPT_IDS=ID,ID,...`), the number of tokens
