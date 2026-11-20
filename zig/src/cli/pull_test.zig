@@ -35,6 +35,11 @@ pub const FakeHub = struct {
     const nested_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/tensors/model-00001-of-00001.safetensors";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
     const drafter_config = "{\"model_type\": \"qwen3\", \"architectures\": [\"DFlash2DraftModel\"], \"dflash_config\": {\"block_size\": 8}}";
+    const lilicorr_config = "{\"model_type\": \"qwen3\", \"architectures\": [\"LiLiCorrDraftModel\"], \"dflash_config\": {\"projector_type\": \"lilicorr\", \"lilicorr_enabled\": true}}";
+    const transcribe_drafter_config = "{\"model_type\": \"nemotron_parse\", \"architectures\": [\"DFlash2DraftModel\"], \"dflash_config\": {\"block_size\": 16}}";
+    const lilicorr_sha = "fffffffffffffffffffffffffffffffffffffff6";
+    const transcribe_drafter_sha = "9999999999999999999999999999999999999997";
+    const lilicorr_weights_path = "/Org/LiLiCorr/resolve/fffffffffffffffffffffffffffffffffffffff6/weights.safetensors";
 
     var nested_body_storage: [1234]u8 = @splat(0x5A);
     const nested_body: []const u8 = &nested_body_storage;
@@ -186,6 +191,21 @@ pub const FakeHub = struct {
             fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{drafter_config.len}) catch return false);
         } else if (std.mem.eql(u8, path, "/Org/DFlash/resolve/ddddddddddddddddddddddddddddddddddddddd4/config.json")) {
             fake.respond(conn, drafter_config);
+        } else if (std.mem.eql(u8, path, "/api/models/Org/LiLiCorr/revision/main")) {
+            fake.respond(conn, "{\"sha\": \"" ++ lilicorr_sha ++ "\"}");
+        } else if (std.mem.eql(u8, path, "/api/models/Org/LiLiCorr/tree/" ++ lilicorr_sha)) {
+            fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ lilicorr_config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len }) catch return false);
+        } else if (std.mem.eql(u8, path, "/Org/LiLiCorr/resolve/" ++ lilicorr_sha ++ "/config.json")) {
+            fake.respond(conn, lilicorr_config);
+        } else if (std.mem.eql(u8, path, lilicorr_weights_path)) {
+            fake.weight_requests.store(fake.weight_requests.load(.monotonic) + 1, .monotonic);
+            fake.whole(conn, fake.weights);
+        } else if (std.mem.eql(u8, path, "/api/models/Org/TranscribeDraft/revision/main")) {
+            fake.respond(conn, "{\"sha\": \"" ++ transcribe_drafter_sha ++ "\"}");
+        } else if (std.mem.eql(u8, path, "/api/models/Org/TranscribeDraft/tree/" ++ transcribe_drafter_sha)) {
+            fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{transcribe_drafter_config.len}) catch return false);
+        } else if (std.mem.eql(u8, path, "/Org/TranscribeDraft/resolve/" ++ transcribe_drafter_sha ++ "/config.json")) {
+            fake.respond(conn, transcribe_drafter_config);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Reserved/revision/main")) {
             fake.respond(conn, "{\"sha\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/Reserved/tree/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5")) {
@@ -378,6 +398,23 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &drafter_out.writer, &err_out.writer, &env, root, "Org/DFlash"));
     try std.testing.expect(std.mem.indexOf(u8, drafter_out.written(), "DFlash2 drafter (qwen3)") != null);
     try std.testing.expectEqualStrings(FakeHub.drafter_config, try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--DFlash/snapshots/ddddddddddddddddddddddddddddddddddddddd4/config.json" }), a, .limited(1 << 20)));
+
+    // CLI classification accepts a Transcribe-shaped DFlash2 config; it is not a runtime-support receipt.
+    var transcribe_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &transcribe_out.writer, &err_out.writer, &env, root, "Org/TranscribeDraft"));
+    try std.testing.expect(std.mem.indexOf(u8, transcribe_out.written(), "DFlash2 drafter (nemotron_parse)") != null);
+    try std.testing.expectEqualStrings(FakeHub.transcribe_drafter_config, try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--TranscribeDraft/snapshots", FakeHub.transcribe_drafter_sha, "config.json" }), a, .limited(1 << 20)));
+
+    const before_lilicorr = fake_hub.weight_requests.load(.monotonic);
+    var lilicorr_out: std.Io.Writer.Allocating = .init(a);
+    var lilicorr_err: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &lilicorr_out.writer, &lilicorr_err.writer, &env, root, "Org/LiLiCorr"));
+    try std.testing.expect(std.mem.indexOf(u8, lilicorr_err.written(), "no LiLiCorr drafter backend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lilicorr_err.written(), "refusing before download") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lilicorr_out.written(), "DFlash2 drafter") == null);
+    try std.testing.expectEqual(before_lilicorr, fake_hub.weight_requests.load(.monotonic));
+    const lilicorr_config_path = try std.fs.path.join(a, &.{ root, "models--Org--LiLiCorr/snapshots", FakeHub.lilicorr_sha, "config.json" });
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().readFileAlloc(io, lilicorr_config_path, a, .limited(1 << 20)));
 
     // A bad repo id is usage.
     var bad_err: std.Io.Writer.Allocating = .init(a);
