@@ -131,7 +131,6 @@ pub const Mix = struct {
     const mix_vt = g.hooks(Mix);
 
     pub fn prepare(self: *Mix, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows != 1) return false;
         self.free();
         self.rig.reset();
         const a = self.rig.gpu.gpa;
