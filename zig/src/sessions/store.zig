@@ -202,7 +202,12 @@ pub const Store = struct {
         const e = s.index.get(id);
         if (!e.extra.file) return error.NotOnDisk;
         if (slot.len != 0) return error.SlotNotEmpty;
+        const over = slot.over;
         try slot.ensure(e.pos);
+        errdefer {
+            _ = slot.truncate(0) catch unreachable;
+            slot.over = over;
+        }
         const j = try s.gpa.create(Job);
         j.* = .{ .kind = .restore, .entry = id, .slot = slot.id };
         errdefer j.deinit(s.gpa);
