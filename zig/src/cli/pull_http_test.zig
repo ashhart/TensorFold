@@ -3,6 +3,7 @@ const http = @import("pull_http.zig");
 const Io = std.Io;
 const net = Io.net;
 const Error = net.IpAddress.ConnectError;
+const fake_handle: net.Socket.Handle = if (@import("builtin").os.tag == .windows) @ptrFromInt(7) else 7;
 
 const Fake = struct {
     var first: std.posix.E = .INTR;
@@ -28,7 +29,7 @@ const Fake = struct {
     }
 
     pub fn open(_: Io, _: *const net.IpAddress) Error!std.posix.socket_t {
-        return 7;
+        return fake_handle;
     }
     pub fn begin(_: std.posix.socket_t, _: *const net.IpAddress) std.posix.E {
         begins += 1;
@@ -60,7 +61,7 @@ const address: net.IpAddress = .{ .ip4 = .loopback(80) };
 test "pull connect: an interrupted connect waits without reconnecting the connected socket" {
     Fake.reset();
     const socket = try http.connectWith(Fake, std.testing.io, &address, 30_000);
-    try std.testing.expectEqual(@as(std.posix.socket_t, 7), socket.handle);
+    try std.testing.expectEqual(fake_handle, socket.handle);
     try std.testing.expectEqual(@as(usize, 1), Fake.begins);
     try std.testing.expectEqual(@as(usize, 2), Fake.waits);
     try std.testing.expectEqual(@as(usize, 0), Fake.closes);
@@ -108,7 +109,7 @@ test "pull connect: the adapter changes only the threaded TCP connector, lookups
     try std.testing.expectEqual(original.userdata, adapted.userdata);
     inline for (@typeInfo(Io.VTable).@"struct".field_names) |name| {
         const ours = comptime std.mem.eql(u8, name, "netConnectIp") or std.mem.eql(u8, name, "netLookup") or std.mem.eql(u8, name, "operate");
-        if (ours and @import("builtin").os.tag != .windows) {
+        if (ours) {
             try std.testing.expect(@field(original.vtable, name) != @field(adapted.vtable, name));
         } else {
             try std.testing.expect(@field(original.vtable, name) == @field(adapted.vtable, name));
@@ -117,7 +118,6 @@ test "pull connect: the adapter changes only the threaded TCP connector, lookups
 }
 
 test "pull connect: real TCP returns a blocking close-on-exec socket and preserves refusal" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const io = http.forClient(std.testing.io);
     const loopback: net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try loopback.listen(io, .{});
@@ -126,12 +126,14 @@ test "pull connect: real TCP returns a blocking close-on-exec socket and preserv
     defer stream.close(io);
     const accepted = try server.accept(io);
     defer accepted.close(io);
-    const c = std.c;
-    const flags = c.fcntl(stream.socket.handle, c.F.GETFL);
-    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
-    try std.testing.expect(flags >= 0 and flags & nonblock == 0);
-    const fd_flags = c.fcntl(stream.socket.handle, c.F.GETFD);
-    try std.testing.expect(fd_flags >= 0 and fd_flags & c.FD_CLOEXEC != 0);
+    if (@import("builtin").os.tag != .windows) {
+        const c = std.c;
+        const flags = c.fcntl(stream.socket.handle, c.F.GETFL);
+        const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
+        try std.testing.expect(flags >= 0 and flags & nonblock == 0);
+        const fd_flags = c.fcntl(stream.socket.handle, c.F.GETFD);
+        try std.testing.expect(fd_flags >= 0 and fd_flags & c.FD_CLOEXEC != 0);
+    }
     try std.testing.expect(stream.socket.address.getPort() != 0);
     var refused = try loopback.listen(io, .{});
     const closed_address = refused.socket.address;
@@ -191,7 +193,7 @@ test "pull connect: a connect that never completes gives up at its limit with er
     const Never = struct {
         var closes: usize = 0;
         pub fn open(_: Io, _: *const net.IpAddress) Error!std.posix.socket_t {
-            return 7;
+            return fake_handle;
         }
         pub fn begin(_: std.posix.socket_t, _: *const net.IpAddress) std.posix.E {
             return .INPROGRESS;
