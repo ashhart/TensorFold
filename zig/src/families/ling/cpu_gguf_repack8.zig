@@ -42,7 +42,7 @@ pub inline fn loadU8Pair(p: [*]const u8) struct { lo: @Vector(4, u16), hi: @Vect
     };
 }
 
-inline fn sli4U8x16(dst: @Vector(16, u8), src: @Vector(16, u8)) @Vector(16, u8) {
+pub inline fn sli4U8x16(dst: @Vector(16, u8), src: @Vector(16, u8)) @Vector(16, u8) {
     if (@import("builtin").cpu.arch == .aarch64) {
         var out = dst;
         asm ("sli %[out].16b, %[src].16b, #4"
@@ -54,12 +54,12 @@ inline fn sli4U8x16(dst: @Vector(16, u8), src: @Vector(16, u8)) @Vector(16, u8) 
     return (dst & @as(@Vector(16, u8), @splat(0x0F))) | (src << @as(@Vector(16, u8), @splat(4)));
 }
 
-inline fn loadDupI8x4(p: [*]const i8) V {
+pub inline fn loadDupI8x4(p: [*]const i8) V {
     const word = std.mem.readInt(u32, @as([*]const u8, @ptrCast(p))[0..4], .little);
     return @bitCast(@as(@Vector(4, u32), @splat(word)));
 }
 
-inline fn loadScalePair(p: [*]const i8) struct { lo: @Vector(4, i16), hi: @Vector(4, i16) } {
+pub inline fn loadScalePair(p: [*]const i8) struct { lo: @Vector(4, i16), hi: @Vector(4, i16) } {
     const raw: @Vector(8, i8) = @as(*align(1) const [8]i8, @ptrCast(p)).*;
     const wide: @Vector(8, i16) = raw;
     return .{
@@ -477,7 +477,24 @@ pub fn projectRangeQ6Kx8(
             var bi: usize = 0;
             while (bi < blocks_per_row) : (bi +%= 1) {
                 const blk = &base_blk[bi];
-                for (0..batch) |b_row| {
+                var b_row: usize = 0;
+                while (b_row + 4 <= batch) : (b_row +%= 4) {
+                    const row_acts = [4]*const sdot.Activation256{
+                        &acts[(first +% b_row) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 1) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 2) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 3) *% blocks_per_row +% bi],
+                    };
+                    batch_mod.dotQ6Kx8BlockN(4, blk, row_acts, totals[b_row..][0..4]);
+                }
+                while (b_row + 2 <= batch) : (b_row +%= 2) {
+                    const row_acts = [2]*const sdot.Activation256{
+                        &acts[(first +% b_row) *% blocks_per_row +% bi],
+                        &acts[(first +% b_row +% 1) *% blocks_per_row +% bi],
+                    };
+                    batch_mod.dotQ6Kx8BlockN(2, blk, row_acts, totals[b_row..][0..2]);
+                }
+                while (b_row < batch) : (b_row +%= 1) {
                     dotQ6Kx8Block(blk, &acts[(first +% b_row) *% blocks_per_row +% bi], &totals[b_row]);
                 }
             }
