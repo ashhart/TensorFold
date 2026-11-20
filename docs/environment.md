@@ -208,6 +208,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |
 | `TF_FLASHNEXT_WINDOW_ROWS` | Whole row count; default the shared round's rows, capped by them |
+| `TF_FLASHNEXT_WINDOW_CHECK` | Exactly `0` or `1`; default off. `1` measures, before the model serves, the widest verify window whose every row scores byte-equal to its one-token step, and widens a lone stream's copy window up to it, past the 32 rows served without it and at most the 48 rows a window's pending-row log holds; a check that cannot run, fails, or proves nothing past 32 rows leaves 32 |
 | `TF_FLASHNEXT_READOUT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
 | `TF_FLASHNEXT_CHUNK` | Whole prompt rows a pass, 1 through 16384; default 3072 |
 | `TF_FLASHNEXT_CHUNK_SOLO` | Whole prompt rows a pass with no stream decoding, from the chunk `TF_FLASHNEXT_CHUNK` resolves to through 16384; unset or blank is the larger of that chunk and 8192 on a server of one stream, and that chunk elsewhere |

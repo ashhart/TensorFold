@@ -91,8 +91,22 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", mtp.default_confidence);
     }
     errdefer if (own.head) |h| h.deinit();
+    // TF_FLASHNEXT_WINDOW_CHECK=1: the boot self-check measures the copied rows against their one-token steps
+    const check = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_CHECK", false);
+    const runs = check and own.head != null and o.drafts and o.tp == 1;
+    mtp.sizeWindow(runs); // every window buffer from here on, the check's first: the shipped rows unless it runs
+    var proved: ?usize = null;
+    if (runs) {
+        const tri = own.tri();
+        proved = @import("cuda_mtp_check.zig").probeServed(@TypeOf(tri), gpa, driver, &own.stream, tri, own.engine, own.head.?) catch |err| blk: {
+            std.log.warn("flashnext: the window self-check did not run ({s}); copy windows stay at {d} rows", .{ @errorName(err), mtp.base_rows });
+            break :blk null;
+        };
+    }
+    mtp.serveWindow(check, proved);
+    if (mtp.window() > mtp.base_rows) std.log.info("flashnext: serving {d}-row copy windows after the self-check", .{mtp.window()});
     @import("cuda_prompt_wt.zig").dropPageCache(gpa, io, dir, e.ngram.files.items);
-    const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
+    const window = @min(o.context + mtp.bufferRows(), prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
     // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
@@ -121,7 +135,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .vision = own.vision,
         .backend = own.backend(),
         .facts = own.facts(),
-        .rows = if (own.head != null) mtp.max_rows else 2,
+        .rows = if (own.head != null) @intCast(mtp.window()) else 2,
         .prompt_rows = @intCast(own.engine.chunk),
         .stream_bytes = stream_bytes,
         .ctx = own,

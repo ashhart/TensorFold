@@ -66,7 +66,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 15. MTP | done [#1562]; dense C done [#3582] | done [#1925] | done [#1585]; wide C done [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
-| 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C done [#2257] | done [#2022] | done [#1974] |
+| 18. Copy drafts | done [#1477] | done [#468]; wide C open | done [#2146]; wide C done [#2257] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C done [#2257] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |

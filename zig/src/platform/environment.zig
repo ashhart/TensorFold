@@ -297,6 +297,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_DRAFTS_GREEDY", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 8; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_GREEDY_WIDE", .scope = .flashnext, .kind = .size, .forms = "a whole round width from 0 to the native size maximum (default 4)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default the shared round's rows; capped by them)" },
+    .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1 runs the boot copy-window self-check; default 0)" },
     .{ .name = "TF_FLASHNEXT_READOUT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .flashnext, .kind = .size, .min = 1, .max = 16384, .forms = "whole prompt rows a pass, 1 to 16384 (default 3072)" },
     .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .flashnext, .kind = .size, .max = 16384, .forms = "whole prompt rows a pass with no stream decoding, TF_FLASHNEXT_CHUNK to 16384 (unset: 8192 alone at --parallel 1, else off)" },
