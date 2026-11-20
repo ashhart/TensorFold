@@ -239,11 +239,11 @@ test "workspace manifest cancellation leaves neither publication nor temporary f
     const sources = [_]wm.Source{source("a.txt", &.{2}, "alpha")};
     try std.testing.expectError(error.Cancelled, f.store.cold(id, &.{1}, &sources, stop()));
     try expectStateEmpty(&f);
-    var captured = try disk.capture(a, io, f.store.workspace, id, &.{1}, &sources, null);
+    var captured = try disk.capture(a, io, f.store.workspace, f.store.workspace_dir, id, &.{1}, &sources, null);
     defer captured.deinit();
     var checks: usize = 0;
     const trip: wm.Stop = .{ .ptr = &checks, .check = cancelledAfterFirst };
-    try std.testing.expectError(error.Cancelled, disk.publish(a, io, f.store.state, &captured, false, trip));
+    try std.testing.expectError(error.Cancelled, disk.publish(a, io, f.store.state_dir, &captured, false, trip));
     try std.testing.expectEqual(@as(usize, 2), checks);
     try expectStateEmpty(&f);
 }
@@ -305,4 +305,37 @@ test "workspace source reads honor cancellation" {
     defer f.deinit();
     try f.write("a.txt", "alpha");
     try std.testing.expectError(error.Cancelled, f.store.readSource(a, "a.txt", stop()));
+}
+
+test "workspace manifest stays bound across ancestor substitution" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try f.tmp.dir.createDirPath(io, "container/repo");
+    try f.tmp.dir.createDirPath(io, "container/state");
+    try f.tmp.dir.createDirPath(io, "outside/repo");
+    try f.tmp.dir.createDirPath(io, "outside/state");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "container/repo/secret.txt", .data = "original-secret" });
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "outside/repo/secret.txt", .data = "outside-secret" });
+    const root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const workspace = try std.fs.path.join(a, &.{ root, "container/repo" });
+    defer a.free(workspace);
+    const state = try std.fs.path.join(a, &.{ root, "container/state" });
+    defer a.free(state);
+    var store = try wm.Store.init(a, io, workspace, state);
+    defer store.deinit();
+    try f.tmp.dir.rename("container", f.tmp.dir, "original-container", io);
+    try f.tmp.dir.symLink(io, "outside", "container", .{});
+    const text = try store.readSource(a, "secret.txt", null);
+    defer a.free(text.bytes);
+    try std.testing.expectEqualStrings("original-secret", text.bytes);
+    var cold = try store.cold(id, &.{1}, &.{source("secret.txt", &.{2}, "original-secret")}, null);
+    defer cold.deinit();
+    var warm = try store.warm(id, null);
+    defer warm.deinit();
+    try std.testing.expectEqualSlices(u32, cold.manifest.prompt, warm.manifest.prompt);
+    var outside = try f.tmp.dir.openDir(io, "outside/state", .{});
+    defer outside.close(io);
+    try std.testing.expectError(error.FileNotFound, outside.statFile(io, wm.manifest_name, .{}));
 }

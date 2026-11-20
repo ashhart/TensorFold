@@ -17,60 +17,94 @@ pub const Store = struct {
     io: std.Io,
     workspace: [:0]u8,
     state: [:0]u8,
+    workspace_dir: std.Io.Dir,
+    state_dir: std.Io.Dir,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, workspace: []const u8, state: []const u8) !Store {
-        const canonical_workspace = try canonicalDirectory(gpa, io, workspace, error.InvalidWorkspace);
-        errdefer gpa.free(canonical_workspace);
-        const canonical_state = try canonicalDirectory(gpa, io, state, error.InvalidStateRoot);
-        errdefer gpa.free(canonical_state);
-        return .{ .gpa = gpa, .io = io, .workspace = canonical_workspace, .state = canonical_state };
+        var pinned_workspace = try pinnedDirectory(gpa, io, workspace, error.InvalidWorkspace);
+        errdefer pinned_workspace.deinit(gpa, io);
+        var pinned_state = try pinnedDirectory(gpa, io, state, error.InvalidStateRoot);
+        errdefer pinned_state.deinit(gpa, io);
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .workspace = pinned_workspace.path,
+            .state = pinned_state.path,
+            .workspace_dir = pinned_workspace.dir,
+            .state_dir = pinned_state.dir,
+        };
     }
 
     pub fn deinit(s: *Store) void {
+        s.workspace_dir.close(s.io);
+        s.state_dir.close(s.io);
         s.gpa.free(s.state);
         s.gpa.free(s.workspace);
         s.* = undefined;
     }
 
     pub fn readSource(s: *Store, gpa: std.mem.Allocator, path: []const u8, stop: ?Stop) !SourceText {
-        return disk.readSource(gpa, s.io, s.workspace, path, stop);
+        return disk.readSource(gpa, s.io, s.workspace_dir, path, stop);
     }
     pub fn cold(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
-        var m = try disk.capture(s.gpa, s.io, s.workspace, id, base_prompt, sources, stop);
+        var revision = try s.prepareCold(id, base_prompt, sources, stop);
+        errdefer revision.deinit();
+        try s.commit(&revision.manifest, false, stop);
+        return revision;
+    }
+    pub fn prepareCold(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
+        var m = try disk.capture(s.gpa, s.io, s.workspace, s.workspace_dir, id, base_prompt, sources, stop);
         errdefer m.deinit();
-        try disk.verify(s.io, s.workspace, &m, stop);
-        try disk.publish(s.gpa, s.io, s.state, &m, false, stop);
+        try disk.verify(s.io, s.workspace, s.workspace_dir, &m, stop);
         return .{ .manifest = m, .reused_tokens = 0, .changed_files = 0 };
     }
 
     pub fn warm(s: *Store, id: Identity, stop: ?Stop) !Revision {
-        var m = try disk.load(s.gpa, s.io, s.state);
+        var m = try disk.load(s.gpa, s.io, s.state_dir);
         errdefer m.deinit();
         if (!m.identityMatches(s.workspace, id)) return error.NamespaceMismatch;
-        try disk.verify(s.io, s.workspace, &m, stop);
+        try disk.verify(s.io, s.workspace, s.workspace_dir, &m, stop);
         return .{ .manifest = m, .reused_tokens = @intCast(m.prompt.len), .changed_files = 0 };
     }
 
     pub fn edit(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
-        var old = try disk.load(s.gpa, s.io, s.state);
+        var revision = try s.prepareEdit(id, base_prompt, sources, stop);
+        errdefer revision.deinit();
+        try s.commit(&revision.manifest, true, stop);
+        return revision;
+    }
+    pub fn prepareEdit(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
+        var old = try disk.load(s.gpa, s.io, s.state_dir);
         defer old.deinit();
         if (!old.identityMatches(s.workspace, id)) return error.NamespaceMismatch;
-        var m = try disk.capture(s.gpa, s.io, s.workspace, id, base_prompt, sources, stop);
+        var m = try disk.capture(s.gpa, s.io, s.workspace, s.workspace_dir, id, base_prompt, sources, stop);
         errdefer m.deinit();
         const reused = exactPrefix(&old, &m);
         const changed = changedFiles(&old, &m);
-        try disk.verify(s.io, s.workspace, &m, stop);
-        try disk.publish(s.gpa, s.io, s.state, &m, true, stop);
+        try disk.verify(s.io, s.workspace, s.workspace_dir, &m, stop);
         return .{ .manifest = m, .reused_tokens = reused, .changed_files = changed };
+    }
+
+    pub fn commit(s: *Store, m: *Manifest, replace_existing: bool, stop: ?Stop) !void {
+        return disk.publish(s.gpa, s.io, s.state_dir, m, replace_existing, stop);
     }
 };
 
-fn canonicalDirectory(gpa: std.mem.Allocator, io: std.Io, path: []const u8, comptime failure: anyerror) ![:0]u8 {
+const PinnedDirectory = struct {
+    path: [:0]u8,
+    dir: std.Io.Dir,
+
+    fn deinit(p: *PinnedDirectory, gpa: std.mem.Allocator, io: std.Io) void {
+        p.dir.close(io);
+        gpa.free(p.path);
+    }
+};
+
+fn pinnedDirectory(gpa: std.mem.Allocator, io: std.Io, path: []const u8, comptime failure: anyerror) !PinnedDirectory {
     const canonical = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch return failure;
     errdefer gpa.free(canonical);
     const dir = std.Io.Dir.cwd().openDir(io, canonical, .{ .follow_symlinks = false }) catch return failure;
-    dir.close(io);
-    return canonical;
+    return .{ .path = canonical, .dir = dir };
 }
 
 fn exactPrefix(old: *const Manifest, new: *const Manifest) u32 {

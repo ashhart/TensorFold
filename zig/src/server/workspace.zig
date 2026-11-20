@@ -163,10 +163,22 @@ fn refusal(cx: *Cx, err: anyerror) error{ Refused, Cancelled, OutOfMemory } {
     };
 }
 
-pub fn resolve(srv: anytype, cx: *Cx, call: Request, base_text: []const u8, gone: anytype) error{ Refused, Cancelled, OutOfMemory }!wm.Revision {
+pub const Pending = struct {
+    service: *Service,
+    io: std.Io,
+    call: Operation,
+    revision: wm.Revision,
+
+    pub fn deinit(p: *Pending) void {
+        p.service.mutex.unlock(p.io);
+        p.* = undefined;
+    }
+};
+
+pub fn resolve(srv: anytype, cx: *Cx, call: Request, base_text: []const u8, gone: anytype) error{ Refused, Cancelled, OutOfMemory }!Pending {
     const service = srv.workspace.?;
     service.mutex.lockUncancelable(srv.io);
-    defer service.mutex.unlock(srv.io);
+    errdefer service.mutex.unlock(srv.io);
     const stop = stopped(gone);
     var sources: []wm.Source = &.{};
     var base: []const u32 = &.{};
@@ -188,11 +200,19 @@ pub fn resolve(srv: anytype, cx: *Cx, call: Request, base_text: []const u8, gone
     }
     var store = service.store;
     store.gpa = cx.a;
-    return switch (call.op) {
-        .cold => store.cold(service.identity, base, sources, stop),
-        .edit => store.edit(service.identity, base, sources, stop),
+    const revision = switch (call.op) {
+        .cold => store.prepareCold(service.identity, base, sources, stop),
+        .edit => store.prepareEdit(service.identity, base, sources, stop),
         .warm => store.warm(service.identity, stop),
-    } catch |err| refusal(cx, err);
+    } catch |err| return refusal(cx, err);
+    return .{ .service = service, .io = srv.io, .call = call.op, .revision = revision };
+}
+
+pub fn commit(cx: *Cx, p: *Pending, gone: anytype) error{ Refused, Cancelled, OutOfMemory }!void {
+    if (p.call == .warm) return;
+    var store = p.service.store;
+    store.gpa = p.revision.manifest.gpa;
+    store.commit(&p.revision.manifest, p.call == .edit, stopped(gone)) catch |err| return refusal(cx, err);
 }
 
 pub fn metadata(a: Allocator, reply: anytype, revision: wm.Revision) Allocator.Error!void {

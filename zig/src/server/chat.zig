@@ -168,11 +168,13 @@ pub fn prepare(srv: *Server, cx: *Cx, initial: Input, gone: anytype) Failure!Pre
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
+    var pending: ?workspace.Pending = null;
+    defer if (pending) |*p| p.deinit();
     if (input.workspace) |*call| {
         const base = if (call.op == .warm) "" else input.prompt.?.text;
-        const revision = try workspace.resolve(srv, cx, call.*, base, gone);
-        call.revision = revision;
-        input.prompt = .{ .ids = revision.manifest.prompt };
+        pending = try workspace.resolve(srv, cx, call.*, base, gone);
+        call.revision = pending.?.revision;
+        input.prompt = .{ .ids = pending.?.revision.manifest.prompt };
     }
     const thinking = input.prompt == null and (fields_mod.flag(f, "enable_thinking") orelse srv.config.enable_thinking);
     const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
@@ -255,6 +257,7 @@ pub fn prepare(srv: *Server, cx: *Cx, initial: Input, gone: anytype) Failure!Pre
         break :blk received + @as(i96, @intFromFloat(s * std.time.ns_per_s));
     } else null;
     if (input.trace) |trace| trace.prepared(&request, thinking, effort);
+    if (pending) |*p| try workspace.commit(cx, p, gone);
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = fields_mod.flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames, .deadline_ns = deadline };
 }
 

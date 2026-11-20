@@ -10,14 +10,6 @@ pub const SourceText = struct {
     sha256: types.Digest,
 };
 
-fn openWorkspace(io: Io, workspace: []const u8) !Io.Dir {
-    return Io.Dir.cwd().openDir(io, workspace, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound => error.WorkspaceFileMissing,
-        error.Canceled => error.Canceled,
-        else => error.WorkspacePathRefused,
-    };
-}
-
 fn openRelative(io: Io, root: Io.Dir, path: []const u8) !Io.File {
     try types.validateRelativePath(path);
     const slash = std.mem.lastIndexOfScalar(u8, path, '/');
@@ -99,18 +91,14 @@ fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const type
     _ = try readFile(null, io, root, relative, expected, out, stop);
 }
 
-pub fn readSource(gpa: std.mem.Allocator, io: Io, workspace: []const u8, relative: []const u8, stop: ?types.Stop) !SourceText {
-    const root = try openWorkspace(io, workspace);
-    defer root.close(io);
+pub fn readSource(gpa: std.mem.Allocator, io: Io, root: Io.Dir, relative: []const u8, stop: ?types.Stop) !SourceText {
     var file: types.File = undefined;
     const bytes = (try readFile(gpa, io, root, relative, null, &file, stop)).?;
     return .{ .bytes = bytes, .sha256 = file.sha256 };
 }
 
-pub fn verify(io: Io, workspace: []const u8, m: *const types.Manifest, stop: ?types.Stop) !void {
+pub fn verify(io: Io, workspace: []const u8, root: Io.Dir, m: *const types.Manifest, stop: ?types.Stop) !void {
     if (!std.mem.eql(u8, workspace, m.workspace)) return error.NamespaceMismatch;
-    const root = try openWorkspace(io, workspace);
-    defer root.close(io);
     for (m.files) |*f| {
         var current: types.File = undefined;
         try digestFile(io, root, f.path, f, &current, stop);
@@ -121,6 +109,7 @@ pub fn capture(
     gpa: std.mem.Allocator,
     io: Io,
     workspace: []const u8,
+    root: Io.Dir,
     id: types.Identity,
     base_prompt: []const u32,
     sources: []const types.Source,
@@ -162,8 +151,6 @@ pub fn capture(
     errdefer gpa.free(prompt);
     @memcpy(prompt[0..base_prompt.len], base_prompt);
     var prompt_at = base_prompt.len;
-    const root = try openWorkspace(io, workspace);
-    defer root.close(io);
     for (ordered, files) |source, *f| {
         f.path = try gpa.dupe(u8, source.path);
         initialized += 1;
@@ -187,9 +174,7 @@ pub fn capture(
     };
 }
 
-pub fn load(gpa: std.mem.Allocator, io: Io, state: []const u8) !types.Manifest {
-    const dir = Io.Dir.cwd().openDir(io, state, .{ .follow_symlinks = false }) catch return error.ManifestRefused;
-    defer dir.close(io);
+pub fn load(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !types.Manifest {
     const file = dir.openFile(io, types.manifest_name, .{ .follow_symlinks = false, .resolve_beneath = true }) catch |err| switch (err) {
         error.FileNotFound => return error.ManifestMissing,
         else => return error.ManifestRefused,
@@ -207,13 +192,11 @@ pub fn load(gpa: std.mem.Allocator, io: Io, state: []const u8) !types.Manifest {
     return codec.decode(gpa, bytes);
 }
 
-pub fn publish(gpa: std.mem.Allocator, io: Io, state: []const u8, m: *types.Manifest, replace_existing: bool, stop: ?types.Stop) !void {
+pub fn publish(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, m: *types.Manifest, replace_existing: bool, stop: ?types.Stop) !void {
     try types.checkStop(stop);
     const bytes = try codec.encode(m);
     defer gpa.free(bytes);
     m.provenance = bytes[bytes.len - 32 ..][0..32].*;
-    const dir = Io.Dir.cwd().openDir(io, state, .{ .follow_symlinks = false }) catch return error.ManifestRefused;
-    defer dir.close(io);
     var atomic = try dir.createFileAtomic(io, types.manifest_name, .{ .replace = replace_existing });
     defer atomic.deinit(io);
     try atomic.file.writePositionalAll(io, bytes, 0);

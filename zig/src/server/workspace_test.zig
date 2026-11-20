@@ -308,3 +308,25 @@ test "workspace compaction refuses before manifest publication or submission" {
     try t.expectError(error.Refused, h.run(a, .{ .op = .warm }, ""));
     try t.expectEqual(@as(usize, 0), h.submits);
 }
+
+test "workspace source refused edit preserves the last good revision" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var files = try Files.init();
+    defer files.deinit();
+    try files.write("a.txt", "alpha");
+    var h: Harness = undefined;
+    try h.init(t.allocator, &files);
+    defer h.deinit();
+    h.srv.info.context_window = 7;
+    _ = try h.run(a, .{ .op = .cold, .sources = &.{"a.txt"} }, "R");
+    try files.write("a.txt", "bravo");
+    h.srv.info.context_window = 6;
+    try t.expectError(error.Refused, h.run(a, .{ .op = .edit, .sources = &.{"a.txt"} }, "R"));
+    try t.expectEqual(@as(usize, 1), h.submits);
+    h.srv.info.context_window = 7;
+    try files.write("a.txt", "alpha");
+    _ = try h.run(a, .{ .op = .warm }, "");
+    try t.expectEqualSlices(u32, &byteIds("Ralpha"), h.prompt);
+}
