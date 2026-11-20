@@ -1,4 +1,4 @@
-//! The tensorfold checkpoint subcommands: `models` and `info` (pull adds downloading in its own commit).
+//! The tensorfold checkpoint subcommands (`models`, `info`, `pull`, `rm`, `plan`, `merge`) and `log`.
 const std = @import("std");
 const models = @import("models.zig");
 const info = @import("info.zig");
@@ -6,6 +6,7 @@ const pull = @import("pull.zig");
 const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const rm = @import("rm.zig");
+const journal_log = @import("journal_log.zig");
 const lora_merge = @import("core").lora_merge;
 /// The checkpoints `models` lists, sized, for `tensorfold device`.
 pub const onDisk = models.onDisk;
@@ -20,6 +21,7 @@ const usage =
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
     \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
+    \\       tensorfold log [list|show ID|follow] [PATH] [--json]   (the request journal, read-only)
     \\
 ;
 
@@ -27,7 +29,7 @@ const usage =
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;
     const cmd = args[0];
-    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan") or std.mem.eql(u8, cmd, "rm");
+    return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull") or std.mem.eql(u8, cmd, "merge") or std.mem.eql(u8, cmd, "plan") or std.mem.eql(u8, cmd, "rm") or std.mem.eql(u8, cmd, "log");
 }
 
 /// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
@@ -79,6 +81,13 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         const interactive = std.Io.File.stdin().isTty(init.io) catch false;
         return rm.run(a, init.io, &out.interface, &err.interface, env, null, parsed, .{ .interactive = interactive, .input = &input.interface });
     }
+    if (std.mem.eql(u8, args[0], "log")) {
+        if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
+            try out.interface.writeAll(journal_log.usage);
+            return 0;
+        }
+        return journal_log.run(a, init.io, &out.interface, &err.interface, env, args[1..]);
+    }
     if (std.mem.eql(u8, args[0], "plan")) {
         const parsed = plan.parseArgs(a, args[1..]) orelse {
             try err.interface.writeAll(usage);
@@ -111,5 +120,6 @@ test "wants only the checkpoint subcommands" {
     try std.testing.expect(wants(&.{ "merge", "model", "adapter", "out" }));
     try std.testing.expect(wants(&.{ "merge", "dense", "adapter", "out", "--quantize", "shipped" }));
     try std.testing.expect(wants(&.{ "rm", "Org/Flash@main", "--yes" }));
+    try std.testing.expect(wants(&.{"log"}) and wants(&.{ "log", "show", "chatcmpl-a" }));
     try std.testing.expect(!wants(&.{"run"}) and !wants(&.{}) and !wants(&.{"serve"}));
 }

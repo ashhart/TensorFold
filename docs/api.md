@@ -1799,6 +1799,23 @@ crash. Other requests, and other keys sending the same body, are served as befor
 API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
 Ctrl-C) quarantines nothing.
 
+`tensorfold log` reads the journal in the terminal. It reads `PATH.3`, `PATH.2`, `PATH.1` and then `PATH`, oldest
+first, and never writes, locks or truncates them, so it works while a server runs; a torn last line is left for the
+next read. `PATH` defaults to `$TENSORFOLD_REQUEST_JOURNAL`.
+
+```sh
+tensorfold log list [PATH] [--last N] [--route chat|completions] [--model M]   # one line a request
+tensorfold log show chatcmpl-example [PATH]   # the request as journaled and its reply, decoded
+tensorfold log follow [PATH]                  # each newly finished request as it lands, across rotations
+```
+
+A `list` line holds the start time (UTC), reply id, route, model, status and outcome, prompt and completion tokens,
+time to first token and decode rate; a request with no `finish` shows as in flight, and one a crash left open as
+quarantined. `show` prints the messages or prompt (image and PDF data stay `<redacted>`), then the reply's text,
+reasoning, tool calls and finish reason, joined from the stream's deltas for a streamed reply, with its tokens and
+timings; a reply too large to keep shows its size and SHA-256. `--json` prints each request's records as journaled, one
+object a line. Ctrl-C ends `follow`.
+
 `tools/replay_request.py` lists, clears and replays journaled requests:
 
 ```sh
