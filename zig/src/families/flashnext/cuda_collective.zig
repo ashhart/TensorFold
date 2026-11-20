@@ -19,6 +19,8 @@ pub const Collective = struct {
     timeout_ms: u64,
     rank: usize = 0,
     failed: bool = false,
+    /// How long a wait polls before it sleeps between polls (0: sleeps from the first poll); an EXL3 engine sets it.
+    spin_ns: u64 = 0,
 
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
@@ -65,6 +67,7 @@ pub const Collective = struct {
 
     fn wait(c: *Collective, stream: ?cuda.Stream, until: u64) !void {
         errdefer c.abort();
+        var spin_until: u64 = 0;
         while (true) {
             try c.link.checkPeer();
             if (wire.now() >= until) return error.RankTimeout;
@@ -75,6 +78,13 @@ pub const Collective = struct {
                 if (stream) |s| {
                     if (try s.done()) return;
                 } else return;
+            }
+            if (c.spin_ns != 0) {
+                if (spin_until == 0) spin_until = wire.now() + c.spin_ns;
+                if (wire.now() < spin_until) {
+                    std.atomic.spinLoopHint();
+                    continue;
+                }
             }
             wire.pause();
         }
@@ -118,6 +128,11 @@ pub const Collective = struct {
         return c.gatherType(stream, local, out, count, .f32);
     }
 
+    /// Concatenate rank blocks without reduction; count is in eight-byte doubles.
+    pub fn gatherF64(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        return c.gatherType(stream, local, out, count, .f64);
+    }
+
     fn gatherType(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize, dtype: nccl.DataType) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;
         if (count == 0) return;
@@ -132,6 +147,23 @@ pub const Collective = struct {
         errdefer c.abort();
         try c.link.checkPeer();
         try c.submitted(c.lib.api.ncclBroadcast(values, values, bytes, .u8, 0, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
+    /// FP32 values sent to the peer and the peer's received, enqueued together: no arithmetic, the bytes as they are.
+    pub fn exchange(c: *Collective, stream: cuda.Stream, send: u64, send_count: usize, recv: u64, recv_count: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        if (send_count == 0 and recv_count == 0) return;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        const peer: c_int = @intCast(1 - c.rank);
+        try c.submitted(c.lib.api.ncclGroupStart());
+        var posted: nccl.Result = 0;
+        if (send_count != 0) posted = c.lib.api.ncclSend(send, send_count, .f32, peer, c.comm, stream.handle);
+        if (posted == 0 and recv_count != 0) posted = c.lib.api.ncclRecv(recv, recv_count, .f32, peer, c.comm, stream.handle);
+        const ended = c.lib.api.ncclGroupEnd();
+        try c.submitted(posted);
+        try c.submitted(ended);
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 
