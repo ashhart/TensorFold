@@ -213,7 +213,8 @@ The `qwen3_5` family combines Gated DeltaNet and full attention. The standard re
 4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
@@ -231,6 +232,12 @@ The target verifies every proposed token against its own serial sample.
 This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
 NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
 not the ones below.
+
+### Native engine on sm_110 (development build)
+
+On NVIDIA Thor (sm_110), build the native CUDA engine with `-Dsm=110`. This is a development target; `-Dgpu=sm_110` is not a product target yet. The measured path uses the MLX affine 4-bit/group-64 checkpoint, one GPU, BF16 KV and prompt activations, and the DFlash2 drafter. Text and PNG image requests were checked against `"draft": false` with greedy and seeded sampling, solo and concurrent streams, cancelled requests and resumed prompts. The device receipt belongs to the commit and checkpoint hashes recorded with the test run; it does not qualify other checkpoints or image decoders.
+
+The SM110 Qwen loader refuses `--slide`, DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES` when they would change the default serving path. Their other-GPU behavior is unchanged. Unset or explicit off values for the `TF_QWEN_*` switches keep the default path; `TF_NO_TREES` and `TF_DRAFT_NODES` must be unset.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
@@ -261,7 +268,8 @@ alone. One GPU: `--tp 2` stops at startup (two ranks read the MLX checkpoint), a
 input is qualified on this checkpoint.
 
 ```bash
-tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull nvidia/Qwen3.8-27B-NVFP4
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
 

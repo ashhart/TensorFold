@@ -6,7 +6,7 @@ const rules = @import("qwen35_rules");
 const rope_config = @import("rope_config");
 const eos_ids = @import("checkpoint_eos");
 
-pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
+pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary, ZeroHeadCount } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
@@ -79,7 +79,13 @@ pub const Sizes = struct {
     shared_width: usize,
 };
 
+/// Every head count the host divides by or groups with: 0 is refused by name before any division.
+pub fn heads(counts: []const usize) Error!void {
+    for (counts) |n| if (n == 0) return error.ZeroHeadCount;
+}
+
 pub fn products(s: Sizes) Error!void {
+    try heads(&.{ s.heads, s.kv_heads, s.key_heads, s.value_heads });
     if (s.heads % s.kv_heads != 0 or s.value_heads % s.key_heads != 0) return error.InvalidConfig;
     const limit: usize = std.math.maxInt(u32);
     const q = try mul(try mul(s.heads, s.head_dim), 2);
@@ -150,7 +156,7 @@ test "end ids from config.json and generation_config.json, once each, refused pa
     try std.testing.expectError(error.TooManyEos, eos(&out, try parsed(a, "{\"eos_token_id\":[0,1,2,3,4,5,6,7,8]}"), try parsed(a, "{}"), null, 10));
 }
 
-test "sizes: products past 32 bits and uneven head groups are refused" {
+test "sizes: products past 32 bits, uneven head groups and zero head counts are refused" {
     const ok: Sizes = .{ .hidden = 5120, .intermediate = 17408, .vocab = 248320, .heads = 24, .kv_heads = 4, .head_dim = 256, .key_heads = 16, .value_heads = 48, .key_dim = 128, .value_dim = 128, .conv = 4, .experts = 0, .moe_width = 0, .shared_width = 0 };
     try products(ok);
     var moe = ok;
@@ -160,6 +166,11 @@ test "sizes: products past 32 bits and uneven head groups are refused" {
     var wide = ok;
     wide.vocab = 1 << 20;
     try std.testing.expectError(error.InvalidConfig, products(wide));
+    inline for (.{ "heads", "kv_heads", "key_heads", "value_heads" }) |name| {
+        var zero = ok;
+        @field(zero, name) = 0;
+        try std.testing.expectError(error.ZeroHeadCount, products(zero));
+    }
     var uneven = ok;
     uneven.kv_heads = 5;
     try std.testing.expectError(error.InvalidConfig, products(uneven));

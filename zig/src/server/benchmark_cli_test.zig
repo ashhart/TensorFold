@@ -296,8 +296,8 @@ pub fn managedWorld(a: std.mem.Allocator, chat_trickles: bool) !*fake.Fake {
     return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
         .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\": [{\"id\": \".tensorfold-benchmark\"}]}")}) },
-        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
-        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{if (chat_trickles) trickle.items else try fake.reply(a, true, 4, 15)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, false, 4, "")}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{if (chat_trickles) trickle.items else try fake.apart(a, true, 4, "")}) },
     }));
 }
 
@@ -306,8 +306,8 @@ pub fn draftedWorld(a: std.mem.Allocator, speculative: []const u8) !*fake.Fake {
     return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
         .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\": [{\"id\": \".tensorfold-benchmark\"}]}")}) },
-        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, false, 4, 15, speculative)}) },
-        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, true, 4, 15, speculative)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, false, 4, speculative)}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, true, 4, speculative)}) },
     }));
 }
 

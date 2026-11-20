@@ -57,6 +57,14 @@ context (~0.8 GB at 9.7 k tokens). A resume gives exactly the state of a full pa
 answer, bit for bit. Budget: `--prompt-cache-gib` (2 GiB by default, reserved before the streams: 6 streams instead
 of 7 in GPTQ at 16 k; `0` disables it). The core keeps nothing below 4,096 tokens. Measured on a 9.7 k-token
 document: the same request replayed 6.1 → 1.2 s, the next turn of a conversation 6.1 → 1.1 s.
+With the DFlash2 drafter, a kept state with bf16 K/V takes 64 KiB a prompt token plus 187 MiB (147 MiB without a
+drafter), so the default budget keeps nothing past about 29,700 tokens: the log says
+`kept nothing at N tokens: M MiB passes the 2048 MiB budget`, and a later turn resumes from the last state that
+fit, or from the start when none matches. The budget is shared by the streams: give a conversation you want resumed
+a budget above its state and a `--context` that leaves room for it. On one 32 GB card, measured on the MLX 4-bit
+checkpoint at `--parallel 1`, 3 GiB at `--context 40960` holds a 32 k-token conversation (first token 0.3–0.6 s,
+against 22 s with nothing kept), while 3 GiB beside `--context 139264` does not fit and the server refuses to
+start.
 Prefix shared between different requests: put the common base in the **system** message (or in the tools); the
 server places points at the end of the system prefix (and 512 / 2,048 tokens before it), and any request that shares
 that system message restarts from there, whatever follows (measured: two other questions on the same 9.7 k-token

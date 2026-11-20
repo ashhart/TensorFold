@@ -94,6 +94,7 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("models_input_types_test.zig");
+    _ = @import("models_id_test.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_batch_test.zig"); // uses a socketpair test
@@ -162,6 +163,7 @@ test {
     _ = @import("stream_scan_text.zig");
     _ = @import("stream_scan_bench.zig");
     _ = @import("stream_memory_wire_test.zig");
+    _ = @import("warm_reasoning_test.zig");
     _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
@@ -284,6 +286,18 @@ test {
 }
 
 test {
+    _ = @import("chat_cli_args.zig");
+    _ = @import("chat_cli_history.zig");
+    _ = @import("chat_cli_reply.zig");
+    _ = @import("chat_cli_turn.zig");
+    // the chat's own serve child and its runs against fakes use POSIX signals and processes, as the benchmark's do
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("chat_cli_child.zig");
+        _ = @import("chat_cli_test.zig");
+    }
+}
+
+test {
     _ = @import("slide_retention_test.zig");
     _ = @import("slide_shrink_test.zig");
     _ = @import("slide_correction_test.zig");
@@ -338,4 +352,5 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
+    _ = @import("open_connections_route_test.zig");
 }

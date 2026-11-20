@@ -106,7 +106,7 @@
   "After this change": "이 변경 후",
   "All": "모두",
   "All assistant sources": "모든 어시스턴트 소스",
-  "All community-v1 cells meet the complete protocol.": "모든 community-v1 셀이 전체 프로토콜을 충족합니다.",
+  "All community-v2 cells meet the complete protocol.": "모든 community-v2 셀이 전체 프로토콜을 충족합니다.",
   "Allow Kokoro watch replies for {value0}": "{value0}의 Kokoro 시계 응답 허용",
   "Allow private network for {value0}": "{value0}의 사설 네트워크 허용",
   "Allowed": "허용됨",

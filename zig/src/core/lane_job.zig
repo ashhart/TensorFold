@@ -60,10 +60,19 @@ pub const Job = struct {
 
     /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
     pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, false);
+    }
+
+    pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, true);
+    }
+
+    fn keepAt(ptr: *anyopaque, s: *lanes.Stream, at: u32, cancelled: bool) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
-        @import("lane_cache_queue.zig").keep(job.host, job, s, at);
+        const cache = @import("lane_cache_queue.zig");
+        if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.

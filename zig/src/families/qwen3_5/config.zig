@@ -339,6 +339,7 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     }
     const model_width = try requiredInt(tower, "hidden_size");
     const attn_heads = try requiredInt(tower, "num_attention_heads");
+    try checks.heads(&.{attn_heads}); // before hidden / heads below; the other counts in checks.products
     const per_head = if (truthy(tower.get("head_dim"))) try toInt(tower.get("head_dim").?) else model_width / attn_heads;
     const rope = if (truthy(tower.get("rope_parameters"))) try objectOf(tower.get("rope_parameters").?) else std.json.ObjectMap.empty;
     const partial = try numberOf(rope_config.pick(rope, tower, "partial_rotary_factor", .both) orelse .{ .float = 0.25 });
@@ -371,7 +372,6 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .mtp_layers = try optionalInt(tower, "mtp_num_hidden_layers", 0),
     };
     if (rotary % 2 != 0 or rotary == 0 or rotary > per_head) return error.InvalidRotary;
-    if (attn_heads == 0) return error.InvalidConfig;
     try checks.computes(tower);
     try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
     try checks.layers(&spec.full_layers, tower, spec.n_layers);

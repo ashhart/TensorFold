@@ -1,6 +1,7 @@
 //! GLM-5.3-Flash's draft-only weight quantizers on CUDA (glm_quant.cu): the Python family's load-time ops, same bits.
 
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 
 /// glm_quant.cu's entries.
 pub const Kernels = struct {
@@ -30,7 +31,7 @@ pub fn nvfp4(ks: *const Kernels, stream: cuda.Stream, w: u64, e: usize, n: usize
     a.add(w);
     a.add(@as(c_longlong, @intCast(per)));
     a.add(g);
-    try cuda.launch.launch(ks.amax, .{ .grid = .{ .x = @intCast(e) }, .block = .{ .x = 1024 } }, stream, &a);
+    try cuda_pdl.launch(ks.amax, .{ .grid = .{ .x = @intCast(e) }, .block = .{ .x = 1024 } }, stream, &a);
     const total = e * per / 16;
     var b: cuda.Args = .{};
     b.add(w);
@@ -39,7 +40,7 @@ pub fn nvfp4(ks: *const Kernels, stream: cuda.Stream, w: u64, e: usize, n: usize
     b.add(@as(c_longlong, @intCast(total)));
     b.add(codes);
     b.add(scales);
-    try cuda.launch.launch(ks.nvfp4, .{ .grid = .{ .x = blocks(total) }, .block = .{ .x = 256 } }, stream, &b);
+    try cuda_pdl.launch(ks.nvfp4, .{ .grid = .{ .x = blocks(total) }, .block = .{ .x = 256 } }, stream, &b);
 }
 
 /// qmm.quantize4: w bf16 [n][k] -> MLX words i32 [n][k/8], scales and biases bf16 [n][k/64]; 16-byte aligned.
@@ -53,5 +54,5 @@ pub fn q4(ks: *const Kernels, stream: cuda.Stream, w: u64, n: usize, k: usize, w
     a.add(words);
     a.add(scales);
     a.add(biases);
-    try cuda.launch.launch(ks.q4, .{ .grid = .{ .x = blocks(groups) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(ks.q4, .{ .grid = .{ .x = blocks(groups) }, .block = .{ .x = 256 } }, stream, &a);
 }

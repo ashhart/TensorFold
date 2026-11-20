@@ -32,6 +32,7 @@ pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");

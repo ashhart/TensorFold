@@ -14,6 +14,7 @@ const g = core.contract.gates;
 
 pub const Set = struct {
     embed_rows: ?cuda.embed_rows.EmbedRows = null,
+    affine4_pack: ?cuda.Module = null, // the tile entries' packers
     embeds: [embed_k.entries.len]embed_k.Embed = undefined,
     n_embeds: usize = 0,
     sample: ?cuda.Module = null,
@@ -28,8 +29,12 @@ pub const Set = struct {
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, ctl_mod: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !void {
         const a = gpu.gpa;
         self.embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
+        self.affine4_pack = try cuda.Module.load(gpu.d, cuda.kernels.affine4_pack);
+        const pm = self.affine4_pack.?;
+        const pack: embed_k.Pack = .{ .words = try pm.function("tf_pack_dense"), .scales = try pm.function("tf_transpose_pad16") };
         for (embed_k.entries, &self.embeds) |e, *x| {
-            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &self.embed_rows.?, .ctl = if (e.keep != null) try ctl_mod.function("tf_ctl_embed_affine") else null };
+            const ctl = if (e.keep == null) null else try ctl_mod.function(if (e.tiles) "tf_ctl_embed_tiles4" else "tf_ctl_embed_affine");
+            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &self.embed_rows.?, .ctl = ctl, .pack = if (e.tiles) pack else null };
             self.n_embeds += 1;
         }
         for (&self.embeds) |*x| try kernels.append(a, x.kernel());
@@ -51,6 +56,7 @@ pub const Set = struct {
         if (self.penalize) |*p| p.deinit();
         if (self.sample) |*m| m.unload();
         for (self.embeds[0..self.n_embeds]) |*x| x.deinit();
+        if (self.affine4_pack) |*m| m.unload();
         if (self.embed_rows) |*e| e.unload();
     }
 };

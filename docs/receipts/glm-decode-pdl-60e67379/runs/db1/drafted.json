@@ -1,0 +1,150 @@
+[
+ {
+  "label": "drafted",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 43.448904486045215,
+  "decode_tps_all": [
+   43.45,
+   43.55,
+   42.97
+  ],
+  "ttft_s_median": 0.13085261301603168,
+  "prompt_ttft_tps_median": 106.991,
+  "prefill_tps_median": 106.991,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 23.016,
+  "round_gap_p50_ms_median": 68.493,
+  "round_gap_p95_ms_median": 75.421,
+  "tokens_per_chunk_median": 2.943,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.131,
+  "first_content_s_median": 0.131,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.131,
+  "last_output_s_median": 5.998,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "3fcd20ce2fb0",
+    "output_sha256": "64589a335b074e19ecfe5509272975612b804e23d390b19a86b0ff9691cb70fa",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, ... The next number is found by adding up the two numbers before it. The Fibonacci sequence i",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ },
+ {
+  "label": "drafted",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 256,
+  "thinking": "off",
+  "thinking_off_requested": true,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 34.094668041751056,
+  "decode_tps_all": [
+   33.6,
+   34.68,
+   34.09
+  ],
+  "ttft_s_median": 0.19649294298142195,
+  "prompt_ttft_tps_median": 162.856,
+  "prefill_tps_median": 162.856,
+  "itl_mean_ms_median": null,
+  "itl_p50_ms_median": null,
+  "itl_p95_ms_median": null,
+  "tpot_ms_median": null,
+  "chunk_tpot_estimate_ms_median": 29.33,
+  "round_gap_p50_ms_median": 62.8,
+  "round_gap_p95_ms_median": 72.966,
+  "tokens_per_chunk_median": 2.207,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.001,
+  "first_content_s_median": 0.196,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.196,
+  "last_output_s_median": 7.676,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 256,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "98f95af2c394",
+    "output_sha256": "631efb36da29c99e1df3cd4d0d43d8c651caa1c915c75b14b9d9a923c6212d75",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "# How GPUs Do Matrix Multiplication\n\n## The Plain-English Explanation\n\nImagine you have a huge stack of homework to grade, where each problem is completely inde",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ }
+]

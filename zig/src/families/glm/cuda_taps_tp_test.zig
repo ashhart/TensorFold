@@ -80,6 +80,7 @@ fn driver() cuda.Driver {
     var api: cuda.abi.Api = undefined;
     api.cuMemcpyDtoDAsync_v2 = memcpy;
     api.cuLaunchKernel = launchTap;
+    api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(launchTap);
     api.cuGetErrorName = errName;
     api.cuGetErrorString = errName;
     return .{ .lib = undefined, .api = api, .func_name = null };

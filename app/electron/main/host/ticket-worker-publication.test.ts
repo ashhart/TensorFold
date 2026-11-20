@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import ts from 'typescript'
+import { botRunApprovalMode } from '../../../shared/bot-policy'
+import { scopeBotToolContext } from '../../agent/bot-tool-scope'
 import { normalizeTicketCapabilities, startTicketExecution, settleTicketExecution, ticketStateAfterRun, ticketWorkPrompt } from '../../agent/tickets'
+import { captureTicketBot, sameTicketBot } from './ticket-bot'
 
 const file = path.join(__dirname, 'ticket-worker-runtime.ts')
 const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.ES2022, true)
@@ -27,6 +30,7 @@ async function scenario(roomScoped: boolean, rendererAvailable = true) {
   const aborters = new Map<string, AbortController>()
   const bindings: Record<string, unknown> = {
     selectedResponseLocale: () => 'en', randomUUID, path, store,
+    botRunApprovalMode, scopeBotToolContext, captureTicketBot, sameTicketBot,
     runAgent: () => new Promise<void>((resolve) => { finishRun = resolve }),
     assertProviderEndpoint() {}, auditPreview: String, auditEvent: async () => {}, requireSecurityRole() {},
     normalizeTicketCapabilities, startTicketExecution, settleTicketExecution, ticketStateAfterRun, ticketWorkPrompt,

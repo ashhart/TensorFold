@@ -8,6 +8,7 @@ import { createSharedMemory, MEMORY_MAX_BLOCK_CHARS, MEMORY_MAX_BLOCKS, renderSh
 
 import type { WorkspaceRuntimeIpcDeps } from './workspace-runtime-ipc'
 import type { RoomWorkerBudget } from '../../agent/types'
+import { pickTicketUserPatch, ticketHasActiveRun } from './room-ticket-patch-policy'
 
 export interface RoomToolScope {
   reasoningEffort: ReasoningEffortSetting
@@ -42,6 +43,8 @@ export function createRoomTools(ctx: WorkspaceRuntimeIpcDeps, runtimeScope: Room
     emitTicket,
     publishRemote,
     activeJob,
+    aborters,
+    isTicketStarting,
     runtimeProvider,
     appendRoomSupervisorEvent,
     roomTicketConflictBlockers,
@@ -96,6 +99,29 @@ export function createRoomTools(ctx: WorkspaceRuntimeIpcDeps, runtimeScope: Room
       const required = normalizeStringList(tk.requiredEvidence, [])
       const caps = normalizeTicketCapabilities(tk.allowedCapabilities, ['read']).join(', ')
       return `You claimed "${tk.title}". Allowed capabilities: ${caps}. Required evidence: ${required.length ? required.join('; ') : 'none'}.`
+    },
+    release_ticket: async (args, seat) => {
+      const selector = typeof args?.id === 'string' && args.id ? { id: args.id } : args
+      const { ticket, error } = runtimeScope.resolveTicket(selector)
+      if (error) return error
+      const room = runtimeScope.room
+      if (!ticket || ticket.archivedAt || ticket.roomId !== room.id || ticket.projectId !== room.projectId) {
+        return 'No matching ticket.'
+      }
+      const name = seat.trim().toLowerCase()
+      const configured = room.seats.filter((candidate) => candidate.name.trim().toLowerCase() === name)
+      if (configured.length !== 1 || configured[0].name !== seat) return 'The requesting seat is not uniquely configured.'
+      if (!ticket.assignee) return 'This ticket has no claim to release.'
+      if (ticket.assignee !== seat) return `Only ${ticket.assignee} can release "${ticket.title}".`
+      if (ticket.status === 'completed') return 'A completed ticket cannot be released.'
+      const activeThread = !!ticket.threadId && aborters?.has?.(ticket.threadId)
+      if (ticketHasActiveRun(ticket, activeThread || !!isTicketStarting?.(ticket.id))) {
+        return 'Stop the active ticket run before releasing its claim.'
+      }
+      Object.assign(ticket, pickTicketUserPatch({ status: 'ready' }), { updatedAt: Date.now() })
+      persistTickets()
+      emitTicket(ticket)
+      return `Released "${ticket.title}" to Ready.`
     },
     add_ticket_evidence: async (args, seat) => {
       const tk = runtimeScope.findTicket(args)

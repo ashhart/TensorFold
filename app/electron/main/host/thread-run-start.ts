@@ -75,7 +75,8 @@ export function createThreadRunStarter(deps: ThreadRuntimeDeps, support: ThreadR
       assertBotLifecycleIdle(thread.bot.presetId)
       if (thread.engine && thread.engine !== 'native') throw new Error('Bot chats require TensorFold permission checks.')
       if (thread.providerId !== thread.bot.providerId || (thread.providerAccountId ?? null) !== thread.bot.providerAccountId || thread.model !== thread.bot.model) throw new Error('The model differs from the captured bot configuration; start a new bot chat.')
-      if (thread.workspace || thread.projectId || (botVm ? thread.cwd !== '/workspace' : !!thread.cwd)) throw new Error('The bot execution location has changed; start a new bot chat.')
+      const ticketBotThread = !botVm && store.tickets.some((ticket) => ticket.threadId === thread.id && ticket.projectId === thread.projectId && !ticket.archivedAt)
+      if (thread.workspace || (!ticketBotThread && (thread.projectId || (botVm ? thread.cwd !== '/workspace' : !!thread.cwd)))) throw new Error('The bot execution location has changed; start a new bot chat.')
       if (botVm && !vmHost) throw new Error('The bot VM service is unavailable; the run will not use this Mac instead.')
     }
     // Guard against a second concurrent run for the same thread: it would overwrite the shared
@@ -366,7 +367,7 @@ export function createThreadRunStarter(deps: ThreadRuntimeDeps, support: ThreadR
       emit({ runId, threadId: thread.id, type: 'item_add', item: { id: randomUUID(), kind: 'notice', title: 'Budget', text: initialSpend.warning, state: 'ok', createdAt: Date.now() } })
     }
 
-    if (!localHelpersOnly && !thread.googleLocalOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
+    if (!isEngineProvider(provider) && !localHelpersOnly && !thread.googleLocalOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
 
     const review: ThreadRunReview = { viewedSkillNames: new Set(), provider: null, model: '' }
     const routeContext: ThreadRouteContext = {

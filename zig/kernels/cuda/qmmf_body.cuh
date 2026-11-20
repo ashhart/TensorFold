@@ -36,8 +36,9 @@
 #endif
 #endif
     auto stage = [&](int s) { return buf + s * T::STAGE; };
-    auto load = [&](int s, int g) {
+    auto load = [&](int s, int g, int what = 3) {  // what: 1 the input rows, 2 the weights and scales
         unsigned char* p = stage(s);
+        if (what & 1)
         for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
             const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
             const int row = min(m0 + r, M - 1);
@@ -49,6 +50,7 @@
                   m0 + r < M);
 #endif
         }
+        if (!(what & 2)) return;
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
 #if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
@@ -111,11 +113,24 @@
         for (int j = 0; j < T::NT; ++j)
 #pragma unroll
             for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.0f;
+#ifdef TF_QMMF_WFIRST
+    // weights stream in while the kernel before ends; its outputs (the input rows) only after the wait
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s)
+        if (s < per) load(s, g0 + s, 2);
+    qmm_frag::grid_wait();
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s) {
+        if (s < per) load(s, g0 + s, 1);
+        commit();
+    }
+#else
 #pragma unroll
     for (int s = 0; s < STAGES - 1; ++s) {
         if (s < per) load(s, g0 + s);
         commit();
     }
+#endif
     for (int it = 0; it < per; ++it) {
         if constexpr (FUSE) {
             if (it > 0 && it % slice_groups == 0) {

@@ -58,6 +58,7 @@ test {
     _ = @import("kernel_tests/stats.zig");
     _ = @import("kernel_tests/tap.zig");
     _ = @import("kernel_tests/draft.zig");
+    _ = @import("kernel_tests/exl3.zig");
     _ = @import("kernel_tests/ops.zig");
     _ = @import("kernel_tests/conv_split.zig");
     _ = @import("kernel_tests/dense.zig");
@@ -70,6 +71,7 @@ test {
     _ = @import("kernel_tests/affine/order.zig");
     _ = @import("kernel_tests/affine/item_few.zig");
     _ = @import("kernel_tests/affine/round.zig");
+    _ = @import("kernel_tests/affine/items.zig");
     _ = @import("kernel_tests/affine/layout.zig");
     _ = @import("kernel_tests/affine/golden.zig");
     _ = @import("kernel_tests/graph_split.zig");

@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Directorium removere detectionem ibi sistit, exemplaria numquam delet. Exemplar currens oneratum manet donec ministrum sistas.",
   "Rename": "Renomina",
   "Render the plan panel with block progress bars and status glyphs.": "Consilium cum fasciis progressus et signis status ostende.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Mensurae community-v1 repetibiles exemplaribus conditis huius Mac.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Mensurae community-v2 repetibiles exemplaribus conditis huius Mac.",
   "repeated checks": "probationes repetitae",
   "Replace matching records from the backup": "Recordationes congruentes ex copia substitue",
   "replaces the current instructions": "praecepta praesentia substituit",

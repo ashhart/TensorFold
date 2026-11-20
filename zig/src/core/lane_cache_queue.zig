@@ -59,6 +59,16 @@ pub fn lookup(h: *LaneHost, job: *Job) !pc.Lookup {
 
 /// Complete a promised keep without spending room another admitted pass has already claimed.
 pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
+    keepAt(h, job, stream, at, false);
+}
+
+/// A cancelled pass spends its abandoned promise on landed progress, preserving every other pass's reservation.
+pub fn interrupted(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
+    job.cache_promise = .{};
+    keepAt(h, job, stream, at, true);
+}
+
+fn keepAt(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32, cancelled: bool) void {
     const store = h.cache orelse return;
     var snapshot = Snapshot.init(h, job) catch {
         job.cache_promise = .{};
@@ -70,7 +80,15 @@ pub fn keep(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32) void {
     const before = store.reservation_guard;
     store.reservation_guard = snapshot.guard();
     defer store.reservation_guard = before;
-    const planned = std.mem.indexOfScalar(u32, job.marks, at) != null;
+    const planned = cancelled or std.mem.indexOfScalar(u32, job.marks, at) != null;
+    if (cancelled) {
+        const bytes = store.family.vtable.bytes(store.family.ptr, at);
+        const can = reserve.evictable(store, null, job.cacheKey());
+        const held = store.held +| if (store.family.vtable.trim == null) store.spare() else 0;
+        if (bytes > store.budget -| snapshot.promised.bytes or
+            held -| can.bytes +| bytes > store.budget -| snapshot.promised.bytes or
+            store.entries.items.len -| can.slots >= store.most -| snapshot.promised.slots) return;
+    }
     if (!planned) {
         const bytes = store.family.vtable.bytes(store.family.ptr, at);
         const promised = snapshot.promised;

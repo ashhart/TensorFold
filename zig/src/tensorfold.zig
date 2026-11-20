@@ -4,6 +4,9 @@ const std = @import("std");
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
+/// torch.save archives and WAV files: Drama 3's codec and clips, through its `core` shim.
+pub const torch_pth = @import("core/torch_pth.zig");
+pub const wav = @import("core/wav.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
@@ -28,6 +31,7 @@ pub const picture = @import("core/picture/picture.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
+pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
@@ -119,6 +123,7 @@ test {
     _ = @import("families/lfm2_moe/state.zig");
     _ = @import("families/lfm2_moe/dspark_test.zig");
     _ = @import("families/deepseek_v41/metal/glue.zig"); // the launch wrappers' shape refusals, reached by no other test root
+    _ = @import("families/deepseek_v41/metal/vision.zig"); // its config refusals; no other test root reaches it
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");

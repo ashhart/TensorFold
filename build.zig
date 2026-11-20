@@ -61,6 +61,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
+    @import("zig/build/test_allocator.zig").checks(b);
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
     if (@import("zig/build/product.zig").requested(b)) |gpu| {
         @import("zig/build/product.zig").build(b, gpu);
@@ -209,6 +210,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
     @import("zig/build/gradient_host.zig").add(b);
+    @import("zig/build/glm_pdl_scan.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
@@ -276,7 +278,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
     @import("zig/build/host_ci.zig").steps(b);
-    @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
+    @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
+    @import("zig/build/test_allocator.zig").wire(b);
 }
 
 /// The native Metal server build is owned by its own module, like cuda.zig's.

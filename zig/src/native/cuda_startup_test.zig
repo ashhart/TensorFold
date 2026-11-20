@@ -50,7 +50,7 @@ fn check(value: ?[:0]const u8, comptime rows: u32) !void {
 }
 
 test "CUDA startup: unset Flash Next chunk reports the default stored pass" {
-    try check(null, 1536);
+    try check(null, 3072);
 }
 
 test "CUDA startup: Flash Next chunk 4096 reports the stored pass" {

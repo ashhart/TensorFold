@@ -1,6 +1,8 @@
 // GLM-5.3-Flash DSA indexer, a prompt chunk's pool scores: tf_glm_scores' arithmetic with each key tile staged once.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include <cuda_bf16.h>
 #include <math.h>
 #include <stdint.h>
@@ -44,6 +46,7 @@ extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
     tf_glm_index_scores(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride, const __nv_bfloat16* pk,
                         float* out, const int* pos, int64_t rows, int64_t np, int64_t nb, float scale, float wscale,
                         int64_t heads, int loop, const int* pt, int64_t ps) {
+  glm_pdl::enter();
   using namespace glm_index;
   __shared__ __align__(16) __nv_bfloat16 tile[2][BP * D];  // two key tiles
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
