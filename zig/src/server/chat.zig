@@ -52,6 +52,8 @@ pub const Input = struct {
     image_bytes: images.ByteLimits = .{},
     /// With a known window, the reply may fill all the room the prompt leaves; max_tokens otherwise.
     fill_room: bool = false,
+    /// The reply continues the final assistant message (continue_final_message, or a Messages prefill): prefill.zig.
+    prefill: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -155,7 +157,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (preparing) _ = srv.preparing.fetchAdd(1, .acq_rel);
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
-    const thinking = input.prompt == null and (fields_mod.flag(f, "enable_thinking") orelse srv.config.enable_thinking);
+    // a continued final message thinks only when the request turns thinking on: the server's default is off for it
+    const thinking = input.prompt == null and (fields_mod.flag(f, "enable_thinking") orelse (srv.config.enable_thinking and !input.prefill));
     const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
     const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
     const asked = if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null;

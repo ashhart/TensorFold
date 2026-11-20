@@ -49,13 +49,15 @@ fn sendError(conn: *Conn, a: Allocator, message: []const u8, status: u16) void {
 /// Rendered like the chat route renders, without generating: the prompt's token count.
 fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors.Refused!usize {
     const thinking = try fields.thinkingFields(cx, chat, srv.effort_levels);
-    const on = thinking.enable orelse srv.config.enable_thinking;
+    const prefill = chat.get("continue_final_message") != null; // a prefill counts the prompt that continues it
+    const on = thinking.enable orelse (srv.config.enable_thinking and !prefill); // as chat.prepare decides it
     cx.clear_thinking = thinking.clear;
     cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels); // as the chat route sets it
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
     const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
     const explicit_off = client_thinking and !(thinking.enable orelse true);
-    const ids_ = prompt.renderRequest(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true, explicit_off) catch |e| switch (e) {
+    const effort = srv.effortFor(thinking.effort);
+    const ids_ = (if (prefill) @import("prefill.zig").ids(srv, cx, msgs, tools, on, effort) else prompt.renderRequest(srv, cx, msgs, tools, on, effort, true, explicit_off)) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
         else => |x| return x,
     };

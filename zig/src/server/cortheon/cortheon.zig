@@ -156,7 +156,7 @@ fn roleIs(m: Value, r: []const u8) bool {
 /// The request's turn, its input given the note, the tools and earlier hidden messages; null when Cortheon stays out.
 pub fn begin(srv: *Server, a: Allocator, raw: Value, id: []const u8, is_chat: bool, input: *chat.Input) ?*Turn {
     const state = srv.cortheon orelse return null;
-    if (!is_chat or input.prompt != null or input.messages != .array or input.messages.array.len == 0) return null;
+    if (!is_chat or input.prompt != null or input.prefill or input.messages != .array or input.messages.array.len == 0) return null;
     if (raw.get("cortheon")) |v| if (v == .bool and !v.bool) return null;
     const choice = raw.get("tool_choice");
     if (tool_specs.choiceDisables(choice) or (tool_specs.choiceRequiresCall(a, choice) catch true)) return null;

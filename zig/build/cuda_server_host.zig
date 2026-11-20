@@ -76,6 +76,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-server-recovery-host", "Incomplete replies, token allocation and bounded SSE storage without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Server recovery:"} })).step);
     b.step("test-request-journal-host", "The request journal's records, rotation and crash quarantine on a fake engine").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request journal:"} })).step);
     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
+    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"assistant prefill:"} }));
+    prefill.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    b.step("test-prefill-host", "Continued final assistant messages on Messages and chat routes and real templates, no devices").dependOn(&prefill.step);
     b.step("test-cors-template-host", "Exact CORS and special-preserving template route regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "CORS", "apply-template:" } })).step);
     b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));

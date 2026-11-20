@@ -194,6 +194,31 @@ def anthropic_cases() -> list[tuple[str, str, list[Any]]]:
     return out
 
 
+def prefill_cases() -> list[tuple[str, str, list[Any]]]:
+    """A final assistant message the reply continues: Messages' prefill, and chat's continue_final_message."""
+    turns = [{"role": "user", "content": "Hi @script=plain"}, {"role": "assistant", "content": "Sure:"}]
+    base = {"model": "fake-model", "max_tokens": 64, "messages": turns}
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    chat_body = {"model": "fake-model", "messages": turns, "continue_final_message": True, "add_generation_prompt": False, **off}
+    tool = {"name": "lookup", "input_schema": TOOLS[0]["function"]["parameters"]}
+    called = [turns[0], {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "lookup", "input": {}}]}]
+    return [
+        ("prefill", "messages", [post("/v1/messages", base)]),
+        ("prefill", "messages-stream", [post("/v1/messages", {**base, "stream": True})]),
+        ("prefill", "messages-count", [post("/v1/messages/count_tokens", base)]),
+        ("prefill", "chat", [post("/v1/chat/completions", chat_body)]),
+        ("prefill", "chat-stream", [post("/v1/chat/completions", {**chat_body, "stream": True})]),
+        ("prefill", "chat-without-flag", [post("/v1/chat/completions", {"model": "fake-model", "messages": turns, **off})]),
+        ("prefill", "refuse-messages-space", [post("/v1/messages", {**base, "messages": [turns[0], {"role": "assistant", "content": "Sure: "}]})]),
+        ("prefill", "refuse-messages-thinking", [post("/v1/messages", {**base, "thinking": {"type": "enabled", "budget_tokens": 32}})]),
+        ("prefill", "refuse-messages-tool", [post("/v1/messages", {**base, "messages": called, "tools": [tool]})]),
+        ("prefill", "refuse-chat-user-last", [post("/v1/chat/completions", {**chat_body, "messages": say("plain")})]),
+        ("prefill", "refuse-chat-generation", [post("/v1/chat/completions", {**chat_body, "add_generation_prompt": True})]),
+        ("prefill", "chat-default-thinking", [post("/v1/chat/completions", {k: v for k, v in chat_body.items() if k not in off})]),
+        ("prefill", "refuse-chat-thinking", [post("/v1/chat/completions", {**chat_body, "chat_template_kwargs": {"enable_thinking": True}})]),
+    ]
+
+
 def token_cases() -> list[tuple[str, str, list[Any]]]:
     bodies = {"prompt": {"prompt": "Hello world é"}, "prompt-special": {"prompt": "<|im_start|>x", "add_special_tokens": False},
               "strs": {"prompt": "Hello\n", "return_token_strs": True}, "messages": {"messages": say("plain")},
