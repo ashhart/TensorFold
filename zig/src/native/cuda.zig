@@ -153,7 +153,15 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
+        return .{
+            .proposal_head = h.inner.proposal_head,
+            .ptr = h,
+            .round_observer = h.inner.round_observer,
+            .vtable = &h.vtable,
+            .first_before_draft = h.inner.first_before_draft,
+            .penalties = h.inner.penalties,
+            .chunk_invariant = h.inner.chunk_invariant,
+        };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -532,6 +540,17 @@ test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance 
     try std.testing.expect(h.backend().chunk_invariant); // the fake declares it; the wrapper must carry it
     h.inner.chunk_invariant = false;
     try std.testing.expect(!h.backend().chunk_invariant);
+}
+
+test "draft sources: CUDA host preserves the calibrated proposal service identity" {
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer target.deinit();
+    var service: lanes.proposal_head.Service = undefined;
+    var h: Host = undefined;
+    h.inner = target.backend();
+    h.inner.proposal_head = &service;
+    try std.testing.expectEqual(&service, h.backend().proposal_head.?);
+    try std.testing.expect(h.backend().vtable.proposal_draft == null); // legacy stays legacy until planned callbacks exist
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {

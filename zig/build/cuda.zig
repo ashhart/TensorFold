@@ -313,6 +313,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native = native_modules.engines;
     b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
+    b.step("test-cuda-proposal-host", "CUDA planned-proposal forwarding without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA host preserves the calibrated proposal service identity", "each forwarded entry calls the family's entry of the same name, once" } })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);
     const copies = b.step("test-nemotron-copies-host", "Nemotron CUDA copy gates and plain equality without devices");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
