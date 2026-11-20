@@ -13,6 +13,7 @@ pub const Sets = struct {
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
+    inkling2: *@import("contract_inkling2.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
     nemo_audio: *@import("contract_nemo_audio.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
@@ -34,6 +35,8 @@ pub const Sets = struct {
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
         errdefer minimax.deinit();
+        const inkling2 = try @import("contract_inkling2.zig").Set.init(gpu, s, a, list);
+        errdefer inkling2.deinit();
         const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, list);
         errdefer moss.deinit();
         const nemo_audio = try @import("contract_nemo_audio.zig").Set.init(gpu, s, a, list);
@@ -73,6 +76,7 @@ pub const Sets = struct {
             .bf16_experts = bf16_experts,
             .pocket = pocket,
             .minimax = minimax,
+            .inkling2 = inkling2,
             .moss = moss,
             .nemo_audio = nemo_audio,
             .modelopt = modelopt,
@@ -103,6 +107,7 @@ pub const Sets = struct {
         sets.modelopt.deinit();
         sets.nemo_audio.deinit();
         sets.moss.deinit();
+        sets.inkling2.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();
         sets.bf16_experts.deinit();

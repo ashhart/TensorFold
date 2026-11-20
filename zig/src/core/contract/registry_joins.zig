@@ -17,6 +17,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("lane_half_records.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
+    @import("inkling2_cuda_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
     @import("nemo_audio_cuda_records.zig").cuda ++
     @import("idol_cuda_sets.zig").cuda ++
@@ -35,11 +36,13 @@ pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("nvfp4_fact_records.zig").cuda_132 ++
     @import("experts_bf16_records.zig").cuda_132 ++
     @import("pocket_records.zig").cuda_132 ++
-    @import("minimax_cuda_records.zig").cuda_132;
+    @import("minimax_cuda_records.zig").cuda_132 ++
+    @import("inkling2_cuda_records.zig").cuda_132;
 pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("glm_cuda_records.zig").cuda_133 ++
     @import("nvcc_133_records.zig").cuda_133 ++
     @import("minimax_cuda_records.zig").cuda_133 ++
+    @import("inkling2_cuda_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133 ++
     @import("paging_pending.zig").cuda_133 ++
     @import("experts_bf16_records.zig").cuda_133;
@@ -130,4 +133,5 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 
 test {
     _ = @import("mla_cuda_records.zig");
+    _ = @import("inkling2_cuda_records.zig");
 }
