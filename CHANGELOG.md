@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kolibri-1 on CUDA: `--drafter` loads the published EAGLE-3 drafter (`josch15366/Kolibri-1-EAGLE3-drafter`) through the lane core, running on the shared CUDA operators, and its draft rounds are priced from passes timed at load; every draft is verified by the target, so replies are the same as without it, and it is off unless asked (#3590). Thanks to @jschmied.
+
 - Server: `/v1/metrics` reports a `tensorfold:open_connections` gauge, the client connections admitted over TCP or the Unix socket and not yet closed, including idle keep-alive ones (#3925). Thanks to @plotarmordev.
 
 - Tools: served checks reject unexercised draft, seed, cache, cancellation and logit comparisons, covered by 11 served and constraint regression tests, and benchmark receipts name vacuous comparisons (#3772, refs #2460). Thanks to @jschmied.
