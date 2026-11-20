@@ -1,10 +1,9 @@
 //! ZONOS3 Mini's CUDA family module and its zonos3-generate tool.
 const std = @import("std");
 
-/// The family over a runtime and the core; torch_pth is the Python-free .pth reader Drama 3's codec loads with.
+/// The family over a runtime and the core.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
-    const pth = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/codec_pth.zig"), .target = target, .optimize = optimize });
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/zonos3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "torch_pth", .module = pth } } });
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/zonos3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
 }
 
 pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) void {

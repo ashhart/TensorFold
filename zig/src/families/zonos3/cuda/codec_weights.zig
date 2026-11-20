@@ -1,7 +1,7 @@
 //! The codec decoder's published fp32 weights (generator.pt, a head checkpoint); weight norms and code tables folded.
 const std = @import("std");
 const cuda = @import("cuda");
-const pth = @import("torch_pth");
+const pth = @import("core").torch_pth;
 
 pub const latent_dim = 1024;
 pub const width = 768; // the semantic head's and the iSTFT head's width, and stages 2..8's
