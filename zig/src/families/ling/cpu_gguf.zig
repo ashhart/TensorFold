@@ -61,10 +61,12 @@ pub fn checkTensor(t: g.Tensor, n: names.Name) !void {
     }
 }
 pub const File = struct {
+    const CachedValue = struct { data: []f32, rank: u8, shape: [4]usize };
     source: g.File,
     arena: std.heap.ArenaAllocator,
     plan: []names.Name,
     joined_mla: [24]?[]f32 = @splat(null),
+    cached_values: std.StringHashMapUnmanaged(CachedValue) = .empty,
     validated: std.StringHashMapUnmanaged(void) = .empty,
     pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !File {
         var source = try g.File.open(a, io, path, .{});
@@ -83,23 +85,41 @@ pub const File = struct {
     pub fn view(f: *const File, key: []const u8) !views.View {
         return views.resolve(&f.source.document, f.plan, key);
     }
-    pub fn values(f: *File, a: std.mem.Allocator, key: []const u8, shape: []const usize) ![]f32 {
-        const v = try f.view(key);
-        if (v.name.role != .mla_key_transposed) return @import("cpu_gguf_values.zig").small(a, v, shape);
-        if (!std.mem.eql(usize, shape, &.{ 4096, 512 })) return error.BadLingGgufTensorShape;
-        const prefix = "model.layers.";
-        if (!std.mem.startsWith(u8, key, prefix)) return error.MissingLingGgufTensor;
-        const tail = key[prefix.len..];
-        const end = std.mem.indexOfScalar(u8, tail, '.') orelse return error.MissingLingGgufTensor;
-        const layer = try std.fmt.parseInt(usize, tail[0..end], 10);
-        if (layer >= 24 or layer % 4 != 3) return error.BadLingGgufTensorShape;
-        if (f.joined_mla[layer] == null) {
-            var buf: [64]u8 = undefined;
-            const name = try std.fmt.bufPrint(&buf, "blk.{d}.attn_v_b.weight", .{layer});
-            const value = f.source.document.getTensor(name) orelse return error.MissingLingGgufTensor;
-            f.joined_mla[layer] = try @import("cpu_gguf_values.zig").joinMla(f.arena.child_allocator, v.tensor, value);
+    pub fn values(f: *File, _: std.mem.Allocator, key: []const u8, shape: []const usize) ![]f32 {
+        if (f.cached_values.get(key)) |entry| {
+            if (shape.len != entry.rank or !std.mem.eql(usize, shape, entry.shape[0..entry.rank])) return error.BadLingGgufTensorShape;
+            return entry.data;
         }
-        return f.joined_mla[layer].?;
+        const v = try f.view(key);
+        const data: []f32 = if (v.name.role != .mla_key_transposed)
+            try @import("cpu_gguf_values.zig").small(f.arena.allocator(), v, shape)
+        else blk: {
+            if (!std.mem.eql(usize, shape, &.{ 4096, 512 })) return error.BadLingGgufTensorShape;
+            const prefix = "model.layers.";
+            if (!std.mem.startsWith(u8, key, prefix)) return error.MissingLingGgufTensor;
+            const tail = key[prefix.len..];
+            const end = std.mem.indexOfScalar(u8, tail, '.') orelse return error.MissingLingGgufTensor;
+            const layer = try std.fmt.parseInt(usize, tail[0..end], 10);
+            if (layer >= 24 or layer % 4 != 3) return error.BadLingGgufTensorShape;
+            if (f.joined_mla[layer] == null) {
+                var buf: [64]u8 = undefined;
+                const name = try std.fmt.bufPrint(&buf, "blk.{d}.attn_v_b.weight", .{layer});
+                const value = f.source.document.getTensor(name) orelse return error.MissingLingGgufTensor;
+                f.joined_mla[layer] = try @import("cpu_gguf_values.zig").joinMla(f.arena.child_allocator, v.tensor, value);
+            }
+            break :blk f.joined_mla[layer].?;
+        };
+        if (shape.len <= 4) {
+            var stored_shape: [4]usize = @splat(0);
+            @memcpy(stored_shape[0..shape.len], shape);
+            const dup = try f.arena.allocator().dupe(u8, key);
+            try f.cached_values.put(f.arena.allocator(), dup, .{
+                .data = data,
+                .rank = @intCast(shape.len),
+                .shape = stored_shape,
+            });
+        }
+        return data;
     }
     pub fn project(f: *File, key: []const u8, input: []const f32, output: []f32, count: usize, width: usize, n: usize, rounded: bool, threads: usize) !void {
         const v = try f.view(key);
