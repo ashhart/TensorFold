@@ -619,7 +619,6 @@ on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; an
 hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
 steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
 Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
->>>>>>> qwen27 metal: srpt counts a reply that is still reasoning by its answer quota plus the reasoning left
 whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
