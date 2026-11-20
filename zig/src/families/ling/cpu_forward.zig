@@ -3,7 +3,9 @@ const std = @import("std");
 const config = @import("config.zig");
 const op = @import("cpu_rows.zig");
 const kda = @import("kda.zig");
+const kda_fast = @import("kda_fast.zig");
 const mla = @import("cpu_mla.zig");
+const mla_fast = @import("cpu_mla_fast.zig");
 const route = @import("route.zig");
 const State = @import("cpu_state.zig").State;
 
@@ -26,6 +28,10 @@ pub fn Forward(comptime Source: type) type {
             threads: usize,
             count: usize,
             state: ?*State = null,
+
+            fn isFast(self: Run) bool {
+                return if (comptime @hasField(Source, "fast_mode")) self.source.fast_mode else false;
+            }
 
             fn name(self: Run, p: []const u8, n: []const u8) ![]const u8 {
                 return std.mem.concat(self.a, u8, &.{ p, n });
@@ -100,7 +106,15 @@ pub fn Forward(comptime Source: type) type {
                 }
                 const y = try self.alloc(W);
                 const shape = kda.Shape{ .heads = c.kda_heads, .lower_bound = c.lower_bound, .stored_rate = true, .eps = c.eps };
-                try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                if (self.isFast()) {
+                    if (comptime @hasDecl(Source, "workers")) if (self.threads > 1) {
+                        try kda_fast.mixStateOnPool(try self.source.workers(self.threads), y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                        return self.linear(p, "o_proj.weight", y, W, c.hidden, true);
+                    };
+                    try kda_fast.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                } else {
+                    try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                }
                 return self.linear(p, "o_proj.weight", y, W, c.hidden, true);
             }
 
@@ -115,7 +129,17 @@ pub fn Forward(comptime Source: type) type {
                 const b = try self.values(p, "kv_b_proj.weight", &.{ c.mla_heads * 256, 512 });
                 const y = try self.alloc(c.mla_heads * 128);
                 const shape = mla.Shape{ .heads = c.mla_heads, .eps = c.eps, .theta = c.rope_theta };
-                if (self.state) |state| {
+                if (self.isFast()) {
+                    if (self.state) |state| {
+                        if (comptime @hasDecl(Source, "workers")) if (self.threads > 1) {
+                            try mla_fast.appendOnPool(try self.source.workers(self.threads), self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
+                            return self.linear(p, "dense.weight", y, c.mla_heads * 128, c.hidden, true);
+                        };
+                        try mla_fast.append(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
+                    } else if (comptime @hasDecl(Source, "workers")) {
+                        if (self.threads > 1) try mla_fast.mixOnPool(try self.source.workers(self.threads), self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0) else try mla_fast.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
+                    } else try mla_fast.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
+                } else if (self.state) |state| {
                     try mla.append(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), &state.layers[layer].mla);
                 } else try mla.mix(self.a, y, q, kv, w, b, g, shape, @intCast(self.count), 0);
                 return self.linear(p, "dense.weight", y, c.mla_heads * 128, c.hidden, true);
