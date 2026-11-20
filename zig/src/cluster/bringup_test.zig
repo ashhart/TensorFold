@@ -169,6 +169,8 @@ test "two ranks settle on one lockstep clock and agree on one plan and view; a g
     const lost = p.ranks[1].lost.?;
     try std.testing.expectEqualStrings("a", lost.name.str());
     try std.testing.expectEqual(@import("membership.zig").State.left, lost.state);
+    try std.testing.expectEqual(@as(usize, 1), p.ranks[1].live.m.ids.items.len);
+    try std.testing.expect(p.ranks[1].live.m.me.digest != y.view);
     try std.testing.expectEqualStrings("a", p.ranks[1].live.nameOf(node.idFrom("a")));
 }
 
