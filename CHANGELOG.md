@@ -10,6 +10,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
+
+
 - App: only the owner token resolves a tool approval on the remote-control server (#3034).
 
 - Qwen3.8-27B: the DSpine drafter `tencent/Qwen3.8-27B-DSpine-b16`, whose current revision names its architecture `DSpineDraftModel`, loads again on Metal and CUDA instead of stopping with `UnsupportedDraftConfig`; any other name is still refused (#3959, fixes #3819).
