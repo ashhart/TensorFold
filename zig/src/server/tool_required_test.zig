@@ -249,7 +249,13 @@ test "required tools: required without tools, unknown names and competing gramma
         _ = missing.object.swapRemove("tools");
         try std.testing.expectError(error.Refused, openai.chatInput(srv, &cx, missing));
         const unknown = if (response) "{\"type\":\"function\",\"name\":\"absent\"}" else "{\"type\":\"function\",\"function\":{\"name\":\"absent\"}}";
-        try std.testing.expectError(error.Refused, openai.chatInput(srv, &cx, try body(&cx, response, unknown)));
+        unknown_refusal: {
+            const requested = body(&cx, response, unknown) catch |err| {
+                try std.testing.expectEqual(error.Refused, err);
+                break :unknown_refusal;
+            };
+            try std.testing.expectError(error.Refused, openai.chatInput(srv, &cx, requested));
+        }
         const conflict = try body(&cx, response, "\"required\"");
         try conflict.object.put(cx.a, "guided_regex", .{ .string = "x" });
         try std.testing.expectError(error.Refused, openai.chatInput(srv, &cx, conflict));

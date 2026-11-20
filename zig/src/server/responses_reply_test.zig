@@ -7,7 +7,10 @@ const tool_parse = @import("tool_parse.zig");
 const Server = @import("server.zig").Server;
 const t = std.testing;
 
-const blank_key: ids.Key = .of(ids.test_key_text);
+const blank_key: ids.Key = key: {
+    @setEvalBranchQuota(100_000);
+    break :key .of(ids.test_key_text);
+};
 
 fn blankReply(a: std.mem.Allocator, cx: *errors.Cx, srv: *Server, streaming: bool, sink: @import("responses_sink.zig").Sink, chat: json.Value) !responses.Reply {
     return .{ .srv = srv, .a = a, .sink = sink, .base = try json.newObject(a), .streaming = streaming, .keep = false, .added = &.{}, .cx = cx, .owner = null, .call_ids = .{ .key = &blank_key, .body = chat } };
@@ -125,5 +128,5 @@ test "Responses custom calls keep IDs and indices, and a partial second call end
     try t.expectEqualStrings("{\"partial", output[2].get("input").?.string);
     try t.expectEqualStrings("incomplete", output[2].get("status").?.string);
     try t.expect(std.mem.startsWith(u8, output[1].get("id").?.string, "ctc_"));
-    for (capture.events.items, 0..) |event, i| try t.expectEqual(@as(u64, @intCast(i)), event.payload.get("sequence_number").?.uint64() orelse 0);
+    for (capture.events.items, 0..) |event, i| try t.expectEqual(@as(i64, @intCast(i)), event.payload.get("sequence_number").?.int64() orelse 0);
 }
