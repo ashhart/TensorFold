@@ -5,9 +5,9 @@ const policy = @import("native/qwen27_prompt_rows.zig");
 const Stream = @import("core/lanes/stream.zig").Stream;
 const a = std.testing.allocator;
 
-test "qwen27 rows: every qualified chip sizes its dense frame to the unchanged prompt width" {
-    for ([_]u32{ 13, 14, 15, 16, 17, 18 }, [_]u32{ 128, 128, 128, 128, 2048, 512 }) |generation, expected| {
-        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = generation >= 17 };
+test "qwen27 rows: the qualified shared-prefix frame keeps each chip's prompt width" {
+    for ([_]u32{ 13, 14, 15, 16, 17, 18 }, [_]u32{ 512, 512, 512, 512, 2048, 512 }) |generation, expected| {
+        const geometry = @import("families/qwen27/attention_plan.zig").Geometry{ .shared_prefix = true };
         const chosen = rows.frameRequested(generation, false, null, geometry);
         try std.testing.expectEqual(expected, chosen);
         try std.testing.expectEqual(geometry.promptRows(rows.requested(generation, false, null)), geometry.promptRows(chosen));

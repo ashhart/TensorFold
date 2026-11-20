@@ -79,10 +79,10 @@ scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the
 Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding. The dense 27B and 9B default
-frame follows the attention geometry at model load and serving: M1-M4 use 128 rows, matching their prompt passes.
-A wider supported prompt geometry can raise that default again. Valid `TF_PROMPT_ROWS` values and a caller's
-explicit row count remain unchanged, as do M5 and routed defaults. Less unused scratch may let a tight startup
-fit or admit more streams and leave more room for retained prompt state.
+frame follows the attention geometry at model load and serving. The qualified shared-prefix path keeps the
+512-row default before M5; `TF_QWEN27_SHARED_PREFIX=0` on those chips uses a 128-row frame for its 128-row passes.
+Valid `TF_PROMPT_ROWS` values and a caller's explicit row count remain unchanged, as do M5 and routed defaults.
+Less unused scratch on the unshared path may let a tight startup fit or admit more streams.
 The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.

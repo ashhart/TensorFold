@@ -143,7 +143,7 @@ pub const Model = struct {
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, m.device.tensorUnits());
+        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation(), geometry)));
         errdefer m.frame.deinit();
         allocation.end();
