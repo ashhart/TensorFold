@@ -40,6 +40,7 @@ pub const Sets = struct {
     sparse_index: *@import("contract_sparse_index.zig").Set,
     sparse_attn: *@import("contract_sparse_attn.zig").Set,
     hy4_route_rows: *@import("contract_hy4_route_rows.zig").Set,
+    glp: *@import("contract_glp.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -122,6 +123,7 @@ pub const Sets = struct {
             a,
             list,
         );
+        const glp = try @import("contract_glp.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -143,6 +145,7 @@ pub const Sets = struct {
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
+            .glp = glp,
             .muse = muse,
             .a = a,
             .idol_decoder = idol_decoder,
@@ -162,6 +165,7 @@ pub const Sets = struct {
         sets.sparse_index.deinit();
         sets.topk_rows.deinit();
         sets.hy4_ihc_hc.deinit();
+        sets.glp.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();

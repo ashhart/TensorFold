@@ -1,16 +1,16 @@
 # Control vectors
 
-A control vector steers a model's residual stream at inference time. It is a
-direction per layer: at the output of a block, the direction, scaled by the
-strength, is added to the residual stream as a bias. Nothing is written to the
-checkpoint. Steering is disabled unless the server starts with `--glp`.
+A control vector changes activations at inference time, without changing checkpoint
+weights. Steering is disabled unless the server starts with `--glp`. No trained
+vector file is distributed here, and useful steering or preserved capability is
+not established by a successful load.
 
-TensorFold reads these vectors on Metal for Qwen3.8-27B. The container, the
-kernel and the serve surface are all native Zig. The engine ships the mechanism
-only: a vector file is supplied by the operator, and the repository carries no
-derived direction files.
+Two additive-only sites are distinct: Qwen3.8-27B on Metal uses the legacy
+post-block residual hook; the experimental standalone DeepSeek-V4.1 EXL3 CUDA
+pair uses the GLP v3 paired fold/writer hook described below. Native Zig reads
+the container and serves requests; Metal/CUDA kernels apply the edits.
 
-## Serving one
+## Qwen3.8-27B on Metal
 
 ```
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --glp vector.gguf --glp-alpha 1.0
@@ -62,7 +62,7 @@ whose mode is missing is an `add` file, as the format specifies, so a llama.cpp
 control vector works as it stands. A file that names another mode is refused,
 `project` included, and is never read as an `add` file.
 
-## What the server refuses
+## What the Qwen Metal path refuses
 
 The reader fails closed rather than guessing.
 
@@ -80,8 +80,8 @@ The reader fails closed rather than guessing.
 | The width does not match the checkpoint | The vector is for another model. |
 | The base model does not match | The vector was derived from another checkpoint. The names are compared without their owners, because a checkpoint is often a quantization of another repo's model under a new name. |
 | A Gemma checkpoint | A Gemma is never steered. |
-| A CUDA or ROCm backend | Only the Metal engine steers. |
-| Any other model family | Only Qwen3.8-27B takes a control vector. |
+| A CUDA or ROCm backend | Qwen steering is Metal-only. The DeepSeek CUDA exception below is a different site and engine. |
+| Any other model family | This residual hook applies only to Qwen3.8-27B. |
 
 A file whose `glp.derived_at` differs from its `glp.hook_point` is a warning,
 not a refusal: the vector is applied at the residual stream either way.
@@ -125,7 +125,7 @@ kernel's own fp32 arithmetic is checked against. The GPU half of that contract
 (`zig/tests/contract/metal_qwen27_steer.zig`) needs a Mac and has to be run
 there; this page carries no timing or output measurement for it.
 
-## The file
+## The Qwen legacy file
 
 The container is GGUF v3, read by `zig/src/core/glp_container.zig`, the GLP
 reader for the subset a vector needs. The metadata follows the GLP standard:
@@ -176,6 +176,69 @@ the name the file carries changes. That is a claim the operator makes, not one
 the reader verifies: the check is a name comparison, so only re-stamp a file
 for a checkpoint that holds the same weights.
 
+## DeepSeek-V4.1 EXL3: experimental CUDA pair
+
+This extends the existing `dsv41-serve` experimental pair, not the ordinary
+release CUDA server. The release's DeepSeek refusal and whole-model landing
+gate remain in place. No new DeepSeek Metal backend, project/ablation mode,
+ROCm path or mixed-device consumer is introduced.
+
+Follow the [DeepSeek CUDA setup](recipes/deepseek-v41-cuda.md), including its
+checkpoint/assets, experimental guard, TP configuration and normal memory
+admission. Use whole prefill on every rank:
+
+```sh
+TF_DSV41_PREFILL=whole tensorfold-dsv41 serve "$PACK" --backend cuda \
+    --glp "$VECTOR" --glp-alpha 1
+TF_DSV41_PREFILL=whole tf-dsv41 follow "$PACK" "$ASSETS" \
+    --glp "$VECTOR" --glp-alpha 1
+```
+
+These are the rank-0 and follower commands, respectively; the existing TP
+environment still places each rank. Every rank loads the same file and
+effective strength. The follower reports its escaped filename, full file hash
+and active/inactive status. There is no per-request switch or live reload.
+
+The required file is **GLP v3, rank 1, add**, with
+`glp.hook_point = hc_fold_pre_engram`. A Qwen residual file is not relabelled
+as compatible. For the Flash EXL3 geometry targeted here, directions are H=5120,
+`direction.N` names zero-based backbone block N, and valid ids are 1–39.
+Layer 0 and MTP/drafter weights are not edited.
+
+The same direction and strength apply at both sites:
+
+1. The completed FFN post's four-copy stream is edited before the next
+   Engram/site reads it. This lagged fold of block N runs at block N+1;
+   the final backbone fold runs before the head.
+2. Block N's complete TP-reduced attention writer is edited before its mHC post,
+   not once per partial rank sum.
+
+Each residual copy receives `alpha*d` in FP32, with BF16 round-to-nearest-even
+storage. Directions upload once, remain owned through queued work and graphs,
+and add no per-token allocation or CPU readback. Strength is finite,
+nonnegative and either zero or normal FP32. Zero creates no GPU steering plan;
+a loaded zero-strength file nevertheless remains a distinct state policy.
+
+Full file SHA-256, site/version and effective strength bind rank agreement and
+disk-session identity before execution. An absent file preserves the old
+unsteered path and policy key. Mismatched ranks, geometry, hooks, versions,
+scales or content digests fail closed. Known checkpoint repo/revision metadata
+must match; a local conversion without retained provenance is not proof of
+vector compatibility.
+
+Active steering refuses replay prefill, TBO and traced unsteered folds. Do not
+lower memory safety floors to obtain a receipt. Qualification needs the actual
+source-built image's arithmetic/reference, planted-control and resource gates,
+then real TP2 default-off/zero/add, within-policy sampling/drafting/concurrency
+and restored-versus-fresh state checks. Prior fork experiments do not qualify
+this upstream source.
+
+Derive later style/topic vectors for the exact DeepSeek checkpoint, quantization
+and paired site. Publish their authors/licence, checkpoint and conversion pins,
+derivation and prompt provenance, tensor/file hashes, layer ids, strength ladder,
+norm-matched/random controls and held-out capability results separately.
+Synthetic arithmetic directions are mechanism fixtures, not semantic vectors.
+
 ## The integration test
 
 A file that one implementation accepts has to mean the same thing to another.
@@ -212,11 +275,22 @@ is supplied when the test runs.
 
 ## Credits
 
-The GLP container format and its reference reader are the `weightless` project's
-(@msuiche); this reader implements that format. The additive convention, a
-direction added to the residual stream as a bias and read from `direction.N`,
-follows llama.cpp's control vectors. Directional steering of a residual stream
-comes from the research of Arditi et al., "Refusal in Language Models Is
-Mediated by a Single Direction"; this page claims none of that paper's results
-for any vector, and a vector's effect is measured by whoever derives it. The
-native Zig implementation is TensorFold #1835 by @BlivionIaG.
+**Matt Suiche (@msuiche), weightless** originated the GLP concept/format and
+DeepSeek paired-site principles. This reader implements the format defined by
+that project; see the [pinned specification
+`b181a07d3980fc48abe39d95ddb044459dd0b868`](https://github.com/msuiche/weightless/blob/b181a07d3980fc48abe39d95ddb044459dd0b868/docs/spec/GLP.md).
+The additive GGUF `direction.N` convention follows **llama.cpp's authors and
+contributors**.
+
+**Andy Arditi, Oscar Obeso, Aaquib Syed, Daniel Paleka, Nina Panickssery,
+Wes Gurnee and Neel Nanda** authored the original directional research,
+[*Refusal in Language Models Is Mediated by a Single Direction*](https://arxiv.org/abs/2406.11717).
+This is research attribution, not an implementation of project mode or a claim
+to their experimental results.
+
+The TensorFold-native reader and Qwen foundation reuse
+[#1835](https://github.com/ashhart/TensorFold/pull/1835), source
+`c5947a8d2e9543e6c6a11bd30dc4c43c32f3b0fb`, by @BlivionIaG, adapted to current
+upstream. External serving plugins, engine kernels, checkpoint tensors and
+trained vector assets are not vendored. TensorFold code remains Apache-2.0;
+future vectors require their own publication provenance and licence.

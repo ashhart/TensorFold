@@ -26,6 +26,8 @@ fn hashValue(h: *std.crypto.hash.sha2.Sha256, item: anytype) void {
     switch (@typeInfo(T)) {
         .@"struct" => if (@hasDecl(T, "items")) hashValue(h, item.items()) else {
             inline for (@typeInfo(T).@"struct".field_names) |field| {
+                // The GLP pointer is bound separately into the checkpoint; preserve the old off-path options schema.
+                if (comptime T == @import("block.zig").Options and std.mem.eql(u8, field, "glp")) continue;
                 bytes(h, field);
                 hashValue(h, @field(item, field));
             }

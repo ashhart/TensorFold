@@ -32,8 +32,11 @@ pub const units = [_]cuda_build.Kernel{
     .{ .name = "dsv41_topk_b", .src = "deepseek_v41/topk_b", .min_sm = 90, .flags = &.{ "-O3", "--fmad=false" } }, // ours: topk_cuda.cu row-bounded
 };
 
-/// Optional images: the keyed sampler (TF_DSV41_SAMPLING) and two-tile linears (TF_DSV41_LIN2); empty, they refuse.
+/// Optional images: the keyed sampler (TF_DSV41_SAMPLING), two-tile linears (TF_DSV41_LIN2) and GLPv3 additive
+/// steering (--glp) with its planted-fault controls (loaded only by the contract and tf-dsv41-test glp); empty, they refuse.
 pub const optional = [_]cuda_build.Kernel{
     .{ .name = "dsv41_sampling", .src = "deepseek_v41/sampling", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "dsv41_lin2", .src = "exl3_block/lin2", .min_sm = 90, .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
+    .{ .name = "dsv41_glp_add", .src = "deepseek_v41/glp", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "dsv41_glp_add_controls", .src = "deepseek_v41/glp_controls", .flags = &.{ "-O3", "--fmad=false" } },
 };
