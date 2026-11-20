@@ -199,7 +199,8 @@ $('pronounce').addEventListener('click', () => {
   if (phones) insertAt('[[' + phones.replace(/\s+/g, '') + ']]');
 });
 
-const controls = [];  // {id, dose, span: [start, end) in code points, or null}
+// {id, dose, span: [start, end) in code points or null; words, and wire: the text sent when they were selected}
+const controls = [];
 function drawControls() {
   $('controls').replaceChildren(...controls.map((c, i) => {
     const row = document.createElement('div'); row.className = 'control';
@@ -221,9 +222,9 @@ function addControl(span) {
   if (span) {
     const el = $('text'); if (el.selectionStart === el.selectionEnd) return say('status', 'Select some text first.', true);
     span = [points(el.value, el.selectionStart), points(el.value, el.selectionEnd)];
-    var words = el.value.slice(el.selectionStart, el.selectionEnd);
+    var words = el.value.slice(el.selectionStart, el.selectionEnd), wire = toWire(el.value);
   }
-  controls.push({ id, dose: Number($('dose').value), span, words }); drawControls();
+  controls.push({ id, dose: Number($('dose').value), span, words, wire }); drawControls();
 }
 $('add-whole').addEventListener('click', () => addControl(false));
 $('add-span').addEventListener('click', () => addControl(true));
@@ -292,7 +293,15 @@ function speechBody() {
   if (spans.length) { body.control_spans = spans; if ($('follow').value) body.control_span_follow = $('follow').value; }
   if (num('hold') !== null) body.steer_hold = num('hold');
   if (num('cguidance') !== null && num('cguidance') !== 1) body.controls_cfg_scale = num('cguidance');
-  if ($('extra').value.trim()) Object.assign(body, JSON.parse($('extra').value));
+  let extra = {};
+  if ($('extra').value.trim()) {
+    try { extra = JSON.parse($('extra').value); } catch (e) { throw new Error('Other request fields: ' + e.message); }
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('Other request fields: give a JSON object.');
+  }
+  Object.assign(body, extra);
+  // a span counts code points of the text it was selected in: a changed text would steer other words, or none
+  const stale = 'control_spans' in extra ? null : controls.find(c => c.span && c.wire !== body.input);
+  if (stale) throw new Error(`The text changed after “${stale.words}” was selected for ${stale.id}: remove that control and select the words again.`);
   return body;
 }
 
@@ -320,7 +329,7 @@ function addTake(title, text, blob, extra) {
 
 async function speak() {
   if (!$('text').value.trim()) return say('status', 'Type some text first.', true);
-  let body; try { body = speechBody(); } catch (e) { return say('status', 'Other request fields: ' + e.message, true); }
+  let body; try { body = speechBody(); } catch (e) { return say('status', e.message, true); }
   $('speak').disabled = true; say('status', 'Speaking…');
   const t0 = performance.now();
   try {
