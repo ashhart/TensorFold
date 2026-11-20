@@ -18,6 +18,12 @@ pub const Result = struct {
     }
 };
 
+/// Borrowed output slices owned by a Session and valid until the next step, reset, or deinit.
+pub const StepView = struct {
+    logits: []f32,
+    picks: []u32,
+};
+
 /// A source gives values, project, embed and optionally projectExperts; KDA rates are stored as exp(A_log).
 pub fn Forward(comptime Source: type) type {
     return struct {
@@ -181,18 +187,10 @@ pub fn Forward(comptime Source: type) type {
             }
         };
 
-        /// One to eight rows through every layer; without a state each call starts from position 0.
-        pub fn run(a: std.mem.Allocator, source: *Source, c: *const config.Config, ids: []const u32, threads: usize, state: ?*State, scratch: ?*std.heap.ArenaAllocator) !Result {
-            if (ids.len == 0 or ids.len > 8) return error.CpuRows;
-            if (threads == 0 or threads > 8) return error.CpuThreadCount;
-            var arena = std.heap.ArenaAllocator.init(a);
-            errdefer arena.deinit();
-            const out_a = arena.allocator();
-            const work_a = if (scratch) |s| s.allocator() else out_a;
+        fn runInto(work_a: std.mem.Allocator, source: *Source, c: *const config.Config, ids: []const u32, threads: usize, state: ?*State, logits: []f32, picks: []u32) !void {
             const r = Run{ .a = work_a, .source = source, .c = c, .threads = threads, .count = ids.len, .state = state };
             const x = try r.alloc(c.hidden);
             try source.embed(ids, x);
-            const picks = try out_a.alloc(u32, (c.layers - c.dense_layers) * ids.len * c.topk);
             for (0..c.layers) |i| {
                 const p = try std.fmt.allocPrint(r.a, "model.layers.{d}.", .{i});
                 const h = try r.norm(x, p, "input_layernorm.weight", c.hidden);
@@ -205,23 +203,38 @@ pub fn Forward(comptime Source: type) type {
                 for (x, y) |*v, z| v.* = op.round(v.* + z);
             }
             const final = try r.norm(x, "model.", "norm.weight", c.hidden);
-            const logits = try out_a.alloc(f32, ids.len * c.vocab);
             try r.linearInto("", "lm_head.weight", final, logits, c.hidden, c.vocab, false);
             for (logits) |v| if (!std.math.isFinite(v)) return error.NonfiniteCpuLogits;
+        }
+
+        /// One to eight rows through every layer; without a state each call starts from position 0.
+        pub fn run(a: std.mem.Allocator, source: *Source, c: *const config.Config, ids: []const u32, threads: usize, state: ?*State, scratch: ?*std.heap.ArenaAllocator) !Result {
+            if (ids.len == 0 or ids.len > 8) return error.CpuRows;
+            if (threads == 0 or threads > 8) return error.CpuThreadCount;
+            var arena = std.heap.ArenaAllocator.init(a);
+            errdefer arena.deinit();
+            const out_a = arena.allocator();
+            const work_a = if (scratch) |s| s.allocator() else out_a;
+            const picks = try out_a.alloc(u32, (c.layers - c.dense_layers) * ids.len * c.topk);
+            const logits = try out_a.alloc(f32, ids.len * c.vocab);
+            try runInto(work_a, source, c, ids, threads, state, logits, picks);
             return .{ .arena = arena, .logits = logits, .picks = picks };
         }
 
         /// Serialized stream; a failed layer poisons its partial state until reset rather than reusing it silently.
         pub const Session = struct {
+            a: std.mem.Allocator,
             source: *Source,
             config: config.Config,
             state: State,
             scratch: std.heap.ArenaAllocator,
+            logits_buf: []f32 = &.{},
+            picks_buf: []u32 = &.{},
             threads: usize,
 
             pub fn init(a: std.mem.Allocator, source: *Source, c: config.Config, capacity: u32, threads: usize) !Session {
                 if (threads == 0 or threads > 8) return error.CpuThreadCount;
-                return .{ .source = source, .config = c, .state = try State.init(a, c, capacity), .scratch = std.heap.ArenaAllocator.init(a), .threads = threads };
+                return .{ .a = a, .source = source, .config = c, .state = try State.init(a, c, capacity), .scratch = std.heap.ArenaAllocator.init(a), .threads = threads };
             }
 
             pub fn run(self: *Session, a: std.mem.Allocator, ids: []const u32) !Result {
@@ -236,12 +249,41 @@ pub fn Forward(comptime Source: type) type {
                 return result;
             }
 
+            /// Runs a step into session-owned output buffers reused across tokens without per-step allocation.
+            pub fn step(self: *Session, ids: []const u32) !StepView {
+                if (self.state.poisoned) return error.CpuPoisonedState;
+                if (ids.len == 0 or ids.len > 8) return error.CpuRows;
+                if (ids.len > self.state.capacity - self.state.position) return error.CpuContextCapacity;
+                for (ids) |id| if (id >= self.config.vocab) return error.InvalidToken;
+                const need_logits = ids.len * self.config.vocab;
+                if (self.logits_buf.len < need_logits) {
+                    const next_logits = try self.a.alloc(f32, need_logits);
+                    if (self.logits_buf.len > 0) self.a.free(self.logits_buf);
+                    self.logits_buf = next_logits;
+                }
+                const need_picks = (self.config.layers - self.config.dense_layers) * ids.len * self.config.topk;
+                if (self.picks_buf.len < need_picks) {
+                    const next_picks = try self.a.alloc(u32, need_picks);
+                    if (self.picks_buf.len > 0) self.a.free(self.picks_buf);
+                    self.picks_buf = next_picks;
+                }
+                _ = self.scratch.reset(.retain_capacity);
+                errdefer self.state.poisoned = true;
+                const logits = self.logits_buf[0..need_logits];
+                const picks = self.picks_buf[0..need_picks];
+                try runInto(self.scratch.allocator(), self.source, &self.config, ids, self.threads, &self.state, logits, picks);
+                self.state.position += @intCast(ids.len);
+                return .{ .logits = logits, .picks = picks };
+            }
+
             pub fn reset(self: *Session) void {
                 self.state.reset();
                 _ = self.scratch.reset(.retain_capacity);
             }
 
             pub fn deinit(self: *Session) void {
+                if (self.logits_buf.len > 0) self.a.free(self.logits_buf);
+                if (self.picks_buf.len > 0) self.a.free(self.picks_buf);
                 self.scratch.deinit();
                 self.state.deinit();
             }
