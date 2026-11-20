@@ -8,6 +8,7 @@ const g = @import("core").contract.gates;
 pub const Set = struct {
     gpa: std.mem.Allocator,
     attn: @import("contract_inkling2_attn.zig").Set = .{},
+    ops: @import("contract_inkling2_ops.zig").Set = .{},
 
     /// The set, its kernels appended to `list`.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -15,10 +16,13 @@ pub const Set = struct {
         errdefer gpu.gpa.destroy(set);
         set.* = .{ .gpa = gpu.gpa };
         try set.attn.init(gpu, s, a, list);
+        errdefer set.attn.deinit();
+        try set.ops.init(gpu, s, a, list);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.ops.deinit();
         set.attn.deinit();
         set.gpa.destroy(set);
     }
