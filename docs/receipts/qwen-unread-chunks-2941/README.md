@@ -9,7 +9,7 @@ cold prefill on one GB10.
 - Device binaries: base `0591c4e85dca440749063d171d4305d65a6edb50` and head `4a7a7f127`, one `zig build native
   -Dsm=121 -Dnvcc=/usr/local/cuda/bin/nvcc` build an arm. Binary md5: base `6720d18b2b1d8875477d5520b95dc26c`,
   head `fe92ed6a93d7ede5c7a6bb6fa42a3cff`. The prompt-cache state rows below were measured after the rebase, on
-  current main `34cecd17e` against the review head `ee145a532`.
+  current main `f794b26a8` against the review head `5d1f494cfe`.
 - One NVIDIA GB10 (sm_121), CUDA 13.0 (V13.0.88), Zig 0.17.0, Linux 7.0.
 - Checkpoint `nvidia/Qwen3.6-35B-A3B-NVFP4`, revision `491c2f1ea524c639598bf8fa787a93fed5a6fbce`.
 - Serve flags: `--parallel 1 --context 40960 --no-update-check --prompt-cache-gib 0` for cold, sampled and drafted
@@ -81,9 +81,9 @@ same reply, so the resumed path equals a fresh one.
 
 The runs are `runs/{base,head}-chat8k.json`, `runs/{base,head}-chat16k.json` and `runs/head-chat-fresh.json`.
 
-The kept states at those two marks were then compared on base `34cecd17e` (current main, binary md5
-`570ce5ffe8eacad2243504d2ba007e55`) against head `ee145a532` (binary md5
-`ec9243bfe3cd65a08e66e9925eaab5e3`), a fresh server an arm with `--prompt-cache-gib 4 --prompt-cache-disk`, and the
+The kept states at those two marks were then compared on base `f794b26a8` (current main, binary md5
+`4f84a3a4c4fc72d7904cc5aa62b533f1`) against head `5d1f494cfe` (binary md5
+`b52e931eaa1e922f239d33f67564a877`), a fresh server an arm with `--prompt-cache-gib 4 --prompt-cache-disk`, and the
 same commands. `states.py` reads the disk tier's `.st` file and every `.blk` file it names, and hashes payloads only:
 the files' trailers carry the build's own block names. The recurrence and convolution state is the state file's
 payload past its 16-byte position, shift and format words; the K/V digest covers each named block's payload. Both
