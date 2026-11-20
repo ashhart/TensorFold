@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4-flash on CUDA: `tf-hy4-cuda-generate` runs the whole text model on a GB10 from an EXL3 routed-expert checkpoint (`.mul1` experts, BF16 elsewhere, Engram rows by O_DIRECT) and its table's row count is checked against the config's for that layer, so a wrong or repacked Engram shard fails at load instead of addressing in-range rows mid-forward (#4004).
+
 - Hy4-flash (`hy_v4_flash`) on Metal: `tensorfold-native serve` takes Tencent's 4- and 8-bit MLX checkpoints with DFly2 drafts, contexts to 256K tokens (128K by default; the compressed indexer recalls 2,048 keys a sparse layer past 2,048 tokens), and a following prompt that starts with the last one's tokens prefills only the rest; Hy4's chat template needs `str.format()` from #3816 (Refs #3797).
 
 - Tests: the Zig cache restat tests read `.lib_dir` from `zig env` instead of guessing a `lib` folder beside the executable, so they work with Homebrew Zig (#3786, fixes #3785). Thanks to @AIFlowML.

@@ -24,6 +24,7 @@ pub const Error = std.mem.Allocator.Error || error{
     ReadFailed, // pread failed, including O_DIRECT EINVAL (never a buffered retry)
     ShortRow, // a selected row extends past end of file (truncated data)
     BadOutput, // caller's output has the wrong length
+    RowCountMismatch, // the table's rows are not the count the config implies for this layer
 };
 
 /// File geometry a plan builds against; `data_start` (row 0) may be unaligned, extents are not.
@@ -238,8 +239,8 @@ fn readDirect(fd: linux.fd_t, buf: []align(alignment) u8, off: u64, len: usize, 
     return readExtent(g, buf, off, len);
 }
 
-/// Open a one-tensor BF16 safetensors table O_DIRECT; even the JSON header is read direct.
-pub fn openDirect(a: std.mem.Allocator, path: [:0]const u8, tensor: []const u8, map: engram.TokenMap, hash: engram.Layer) Error!Table {
+/// Open a one-tensor BF16 table O_DIRECT; `expected_rows` is the count the config implies for this layer.
+pub fn openDirect(a: std.mem.Allocator, path: [:0]const u8, tensor: []const u8, map: engram.TokenMap, hash: engram.Layer, expected_rows: usize) Error!Table {
     const rc = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECT = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
     const fd: linux.fd_t = @intCast(rc);
@@ -296,6 +297,7 @@ pub fn openDirect(a: std.mem.Allocator, path: [:0]const u8, tensor: []const u8, 
     const data_start = std.math.add(u64, header_end, lo) catch return error.BadTable;
     const payload_end = std.math.add(u64, data_start, bytes) catch return error.BadTable;
     if (payload_end > size or count > std.math.maxInt(u32)) return error.BadTable;
+    if (count != expected_rows) return error.RowCountMismatch;
 
     return .{
         .geometry = .{ .fd = fd, .size = size, .data_start = data_start, .count = count, .ctx = &no_ctx, .read = sysPread },

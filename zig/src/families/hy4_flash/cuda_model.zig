@@ -367,7 +367,9 @@ pub const Model = struct {
             var tb: [128]u8 = undefined;
             const table_name = try std.fmt.bufPrint(&tb, e ++ "multi_head_embedding.embedding.weight", .{i});
             const shard = try shardOf(a, io, dir, table_name);
-            eng = .{ .w = w, .table = try direct.openDirect(a, shard, table_name, map, hash) };
+            // The config's per-layer row count, so a wrong or repacked table fails here and not mid-forward.
+            const rows_expected = try t.engramRows(@intCast(i + 1));
+            eng = .{ .w = w, .table = try direct.openDirect(a, shard, table_name, map, hash, rows_expected) };
         }
         return .{ .engram = eng, .attention = att, .feed = feed };
     }
