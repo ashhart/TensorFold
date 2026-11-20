@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Orchestrator guide says a custom `VONTRA_HOME` on macOS must be the canonical path (`pwd -P` gives it, so `/tmp/profile` is `/private/tmp/profile`), since the alias stops startup as linked (#4088, fixes #4084). Thanks to @AIFlowML.
+
 - CUDA sampler: with a small `top_k`, the fallback selects and sorts only that many candidates instead of 1,024, with the same tokens and probabilities (#4099, fixes #3712).
 
 - Qwen3.5 on CUDA: the message-start decision has its own module, and a family can declare its starts on by default; Qwen's stay opt-in, so only `TF_QWEN_REQUEST_STARTS=1` turns them on and an unset switch serves as before, shared KV included (#3896, refs #3870). Thanks to @joshuaswarren.
