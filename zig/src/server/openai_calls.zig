@@ -21,6 +21,8 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
         reply.finish_reason = "tool_calls";
         reply.tool_calls_streamed = false;
+        // calls the model wrote no ids for (Inkling 2) take the request's, as parsed calls do; Kimi's keep their own
+        for (calls, 0..) |c, i| if (c == .object and !c.object.contains("id")) try c.object.put(r.a, "id", .{ .string = try r.call_ids.id(r.a, choice, i) });
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
     }
     const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());

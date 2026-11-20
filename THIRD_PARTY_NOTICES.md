@@ -572,3 +572,10 @@ these layers of Hugging Face transformers' `src/transformers/models/inkling2/mod
 `Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
 `Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
 are TensorFold's own.
+
+## Inkling 2 reply blocks
+
+`zig/src/server/inkling_reply.zig` and `zig/src/server/chat_inkling.zig` follow the state table of vLLM's Inkling
+parser, `vllm/parser/inkling.py` at commit `abb8194dc35e` of [vllm-project/vllm](https://github.com/vllm-project/vllm)
+(Apache-2.0). The table says which marker opens which block in each state, which markers stay text, and that a block
+header's text counts as content only when the header closes without a block. The code is TensorFold's own.
