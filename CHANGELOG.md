@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: served checks reject unexercised draft, seed, cache, cancellation and logit comparisons, covered by 11 served and constraint regression tests, and benchmark receipts name vacuous comparisons (#3772, refs #2460). Thanks to @jschmied.
+
 - App: a Solo Kanban ticket can be assigned a saved bot, which builds with that bot's model, instructions and permissions while keeping the ticket's capability limits (#3737, fixes #3336). Thanks to @jamesadcock.
 
 - Living Weights: in a container that refuses file clones with a permission error (LXC), lessons and rollbacks copy the files instead of failing (#4147).
