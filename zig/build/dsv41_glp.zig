@@ -7,7 +7,7 @@ const family = @import("dsv41_cuda.zig");
 
 /// The aggregate `test-dsv41-glp-host` step, returned so the caller can also hang it on a larger host step.
 pub fn steps(b: *std.Build) *std.Build.Step {
-    const step = b.step("test-dsv41-glp-host", "GLPv3 additive plan, launch checks, host models, contract fixtures and registry rows, no device");
+    const step = b.step("test-dsv41-glp-host", "GLPv3 additive plans, launch checks and contract models without device work");
     const plan = family.module(b, b.graph.host, "glp_plan.zig", false);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plan })).step);
     // glp_ops.zig's launch checks and layout, among the kernel module's own tests
@@ -24,8 +24,5 @@ pub fn steps(b: *std.Build) *std.Build.Step {
     contract.addImport("core", plan.import_table.get("core").?);
     @import("cuda_contract_deepseek.zig").inert(b, contract);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract })).step);
-    // the registry rows: unmeasured launches refuse qualification (the contract module's own tests, by name)
-    const registry = @import("kernel_contract.zig").module(b, b.graph.host, .Debug);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = registry, .filters = &.{"glp records"} })).step);
     return step;
 }

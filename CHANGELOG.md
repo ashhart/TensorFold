@@ -39,6 +39,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLP control vectors: ports #1835's opt-in additive Qwen3.8-27B/Metal path and extends it to the experimental standalone DeepSeek-V4.1 EXL3 CUDA pair with GLPv3 paired-site addition. DeepSeek's ordinary release guard stays unchanged; project mode and the fork-only Metal backend are not included. Startup and saved-state identity bind the exact vector file and strength; no trained vectors ship. `tf-glp-check` also refuses malformed arguments with usage and status 2. Original format: Matt Suiche's `weightless` project; native foundation: #1835. See [scope, attribution and qualification limits](docs/control-vectors.md). Thanks to @BlivionIaG and @AIFlowML.
 
+- DeepSeek-V4.1 CUDA: whole-prefill usage receipts report the prompt rows actually restored from saved state instead of zero; rejected prompts clear the previous count. Model arithmetic and the saved-state identity are unchanged.
+
 ## 1.3.2
 
 - Metal: Nemotron 3.5 Bolt (`nemotron_h_puzzle`, MLX affine 4-bit) serves text on M1 to M4 Macs, with its per-layer expert counts, latent MoE, bf16 head and Bolt-width Mamba kernels under the kernel contract; an M5 refuses it by name before any weight file is opened, and images and drafts stay deferred (#4162, lands #1038, part of #962).

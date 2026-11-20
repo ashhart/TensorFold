@@ -60,6 +60,9 @@ pub const records = [_]r.Override{
     .{ .name = "qwen4_projection tf_qwen4_projection_bad_sums", .usage = .{ .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 39, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 } } },
     .{ .name = "qwen4_projection tf_qwen4_projection_bad_tail", .usage = .{ .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 38, .static = 0, .bound = 128 }, .{ .regs = 38, .static = 0, .bound = 128 } } },
     .{ .name = "tf_q35_attn_rows8_mt2", .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 243, .static = 36992, .bound = 128 }, .{ .regs = 243, .static = 36992, .bound = 128 } } },
+    .{ .name = "dsv41_glp_add dsv41_glp_add_stream", .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 42, .static = 0, .bound = 320 } } },
+    .{ .name = "dsv41_glp_add dsv41_glp_add_writer", .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 44, .static = 0, .bound = 320 } } },
+    .{ .name = "dsv41_glp_add dsv41_glp_add_final", .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 48, .static = 176, .bound = 320 } } },
 };
 
 pub fn lookup(name: []const u8) ?[5]@import("../limits.zig").Usage {

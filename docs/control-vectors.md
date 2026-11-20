@@ -233,6 +233,36 @@ then real TP2 default-off/zero/add, within-policy sampling/drafting/concurrency
 and restored-versus-fresh state checks. Prior fork experiments do not qualify
 this upstream source.
 
+The native session store snapshots the last complete 16-row group before the
+prompt end: an 8192-token prompt therefore reuses 8176 saved rows, not 8191.
+Whole-prefill usage reports that actual restored count. With multiple live
+slots, saved-state reuse additionally needs `TF_DSV41_SESSION_SLOTS=1`; qualify
+that explicit profile rather than treating the default-off option as a hit.
+
+### Recorded device mechanism check
+
+Kernel source `4da7c1439291b64996409da42ebd8393fe671f0d`, GB10 sm_121,
+nvcc 13.0.88 and driver 580.173.02: the family runner passed 195 cases.
+The public contract passed gates 1–4 for all six variants, all ten planted
+controls were red as intended, and the live driver reported no limit problems.
+Other SMs and later compiler versions remain unmeasured.
+
+| Add-only kernel | Registers | Driver static shared bytes | Dynamic shared bytes | Threads |
+| --- | ---: | ---: | ---: | ---: |
+| Stream | 42 | 0 | 0 | 320 |
+| Writer | 44 | 0 | 0 | 320 |
+| Final norm | 48 | 176 | 10240 | 320 |
+
+Image SHA-256: `fa3e9d61b0c8facb4503f9dca64f1b9f1848a9667854d1223cb24fe66648f766`.
+Control image: `470e9b6fe4e1a4db6d1e90a8cb9b2dfc52b28b90e97a804719b6aae39d76ca1f`.
+Memcheck, initcheck and synccheck reported zero device errors on both runners;
+racecheck exited zero. Full leak checking reported a shared-runtime pinned
+staging allocation at process exit: 4 MiB for the family runner and 256 KiB for
+the public runner. This is not a zero-leak receipt.
+
+These operator and graph-replay results do not alone qualify full-model token
+identity, persisted-cache reuse, performance or a trained vector's effect.
+
 Derive later style/topic vectors for the exact DeepSeek checkpoint, quantization
 and paired site. Publish their authors/licence, checkpoint and conversion pins,
 derivation and prompt provenance, tensor/file hashes, layer ids, strength ladder,
