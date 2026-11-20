@@ -4,6 +4,7 @@ const std = @import("std");
 const calls = @import("block_calls.zig");
 const moe = @import("block_moe.zig");
 const prefill = @import("block_prefill.zig");
+const glp = @import("block_glp.zig");
 const E = prefill.E;
 const Arg = calls.Arg;
 const pf_rows = prefill.pf_rows;
@@ -186,15 +187,22 @@ pub fn postOnly(s: *Seg, xout: Arg) !void {
 pub fn final(s: *Seg) !void {
     const e = s.e;
     s.pend = 0;
-    if (s.short) return moe.finish(e); // mhc_cuda's final, then the same head
+    const steer: ?u32 = if (glp.steers(e, e.cfg.layers - 1)) e.cfg.layers - 1 else null;
+    if (s.short) return if (steer) |layer| glp.finish(e, layer) else moe.finish(e);
     const n = e.n;
     const D: i64 = e.cfg.hidden;
     const x = try e.streams();
-    const prev = try coefs(e, e.coef);
-    const part = try e.buf("L.mhc.part", .{}, .f32, &.{ n, 4, 40, 32 });
-    const c = try e.buf("L.mhc.c", .{}, .bf16, &.{ n, D });
-    try s.siteTriton(x, x, try gathered(e, ""), prev, prev[0], null, part, c, null, 2, false);
-    try s.finish(null, prev, try e.weight("norm", .{}, .f32, &.{D}), part, c, 0);
+    if (steer) |layer| {
+        try s.postOnly(x);
+        try glp.fold(e, layer, null);
+        try glp.final(e);
+    } else {
+        const prev = try coefs(e, e.coef);
+        const part = try e.buf("L.mhc.part", .{}, .f32, &.{ n, 4, 40, 32 });
+        const c = try e.buf("L.mhc.c", .{}, .bf16, &.{ n, D });
+        try s.siteTriton(x, x, try gathered(e, ""), prev, prev[0], null, part, c, null, 2, false);
+        try s.finish(null, prev, try e.weight("norm", .{}, .f32, &.{D}), part, c, 0);
+    }
     // the head: the decode path's linear (prefill_mm.fast off), upstream's 128 rows a launch
     const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     var a: i64 = 0;

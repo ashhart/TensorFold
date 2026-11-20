@@ -63,6 +63,7 @@ test {
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");
     _ = @import("contract/ling_mla_records.zig");
+    _ = @import("contract/glp_cuda_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;

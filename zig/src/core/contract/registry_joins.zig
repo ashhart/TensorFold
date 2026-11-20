@@ -155,7 +155,8 @@ pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
 pub const dsv41_pending = @import("registry_union.zig").extra(
     landed_cuda,
     @import("dsv41_pending_1.zig").records ++
-        @import("dsv41_pending_2.zig").records,
+        @import("dsv41_pending_2.zig").records ++
+        @import("glp_cuda_records.zig").records,
 );
 
 test {
@@ -171,4 +172,5 @@ test {
     _ = @import("h3_image_cuda_records.zig");
     _ = @import("inkling2_vision_metal_records.zig");
     _ = @import("zonos3_cuda_records.zig");
+    _ = @import("glp_cuda_records.zig"); // its own test: unmeasured additive GLP launches refuse qualification
 }

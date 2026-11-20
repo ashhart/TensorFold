@@ -69,7 +69,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     const n = lines.items.len;
     if (n == 0 or n > 16) return error.BadTrace;
     const drafts = try @import("sys").environment.read(bool, "TF_DSV41_DRAFTS", false);
-    const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null);
+    const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null, null);
     defer se.Served.close(s);
     const eng = s.engine();
     const eos = s.m.cfg.eos;

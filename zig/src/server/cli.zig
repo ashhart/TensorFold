@@ -326,7 +326,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return;
     }
     if (is(name, "--glp-alpha")) {
-        out.glp = glp_startup.withAlpha(out.glp, glp_startup.strength(v) orelse return fail(u, a, "argument --glp-alpha: expected a finite strength above 0: '{s}'", .{v}));
+        out.glp = glp_startup.withAlpha(out.glp, glp_startup.strength(v) orelse return fail(u, a, "argument --glp-alpha: expected a finite strength from 0: '{s}'", .{v}));
         return;
     }
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;

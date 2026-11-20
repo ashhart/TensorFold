@@ -35,6 +35,7 @@ const dspark_rows = @import("dspark_rows.zig");
 const dspark_slots = @import("dspark_slots.zig");
 const l2pf_mod = @import("l2pf.zig");
 const iface = @import("draft/iface.zig");
+const glp_boot = @import("glp_boot.zig");
 
 /// The files `boot` opens under TF_DSV41_ASSETS, and the refusal that names them when it is unset (serve_engine.zig).
 pub const asset_names = struct {
@@ -54,6 +55,7 @@ pub const Options = struct {
     layers: ?[]const u32 = null,
     /// the server's --prompt-cache-gib on rank 0: every rank's resident limit (session_budget.zig)
     prompt_cache_gib: ?f64 = null,
+    glp: ?*const glp_boot.Source = null,
 };
 
 /// TF_DSV41_LAYERS=<lo>-<hi>: load and run only that backbone prefix (a reference prefix's model; null: every layer)
@@ -121,6 +123,8 @@ pub const Model = struct {
     grammar: ?*gg.Masks = null,
     /// TF_DSV41_L2PF (l2pf.zig): the filled prefetch tables and the runner's side stream
     l2pf: ?*l2pf_mod.L2pf = null,
+    glp: ?@import("glp_plan.zig").Plan = null,
+    glp_policy: [8]i64 = @splat(0),
 
     /// The served engine's DSpark pass: several slots' (slot_pass), else the one-slot pass; null without drafts.
     pub fn draftPass(m: *Model) ?iface.Pass {
@@ -162,6 +166,7 @@ pub const Model = struct {
         m.grammar = null;
         m.dev_arena = null;
         m.supervisor = null;
+        glp_boot.init(m);
         m.arena = std.heap.ArenaAllocator.init(gpa);
         errdefer if (!keep_owner) m.arena.deinit();
         const a = m.arena.allocator();
@@ -232,6 +237,7 @@ pub const Model = struct {
         }
         try @import("block_admission.zig").serving(&m.cfg, world);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
+        try glp_boot.open(m, a, o.glp, o.layers != null);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
             const all = try a.alloc(u32, m.cfg.layers);
@@ -315,7 +321,7 @@ pub const Model = struct {
         const topp = try @import("sys").environment.read(?f64, "TF_DSV41_EXPERT_TOPP", null);
         // TF_DSV41_R1=1, or the eight separate R1 knobs (the knob reader's r1)
         const r1 = try @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
-        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .rank = m.tcfg.rank, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
+        m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .rank = m.tcfg.rank, .expert_topp = topp, .r1 = r1, .taps = o.drafts, .glp = if (m.glp) |*g| g else null }, &m.runner, comm);
         try @import("engine_hooks.zig").open(&m.f); // the forward's later-layer hooks and prefill state
         m.f.layers = backbone;
         // the rope tables cover the limit + a prefill segment (the assets' rope.bin)
@@ -324,12 +330,14 @@ pub const Model = struct {
             m.f.opts.rope_rows = c + 2048;
         }
         try @import("serve_knobs_apply.zig").apply(&m.f, a, io, m.tcfg.rank);
+        if (m.glp != null) try glp_boot.refuseKnobs(m);
         m.slots = try slots_mod.countFromEnv();
         if (try kvs.optionsFromEnv(@intCast(m.f.opts.limit), world)) |ko_| {
             var ko = ko_;
             ko.slots = m.slots;
             // the long-prompt stream scratch the buffer plan will hold (not in the measured terms)
             ko.resident = if ((try longpf.lazyEnv())) 0 else @import("serve_knobs.zig").streamScratch(&m.cfg, m.f.opts.limit, m.f.opts.prefill_rows);
+            ko.resident += glp_boot.resident(m);
             // TF_DSV41_PF_4K / _PF_TBO: the prefill workspace a long prompt allocates, priced on top of the worst point
             if (o.own_prefill) ko.workspace = try @import("forward_prefill.zig").workspaceBytes(&m.f, @intCast(m.f.opts.prefill_rows));
             tr.step("forward", cuda.usage(false));
@@ -365,8 +373,10 @@ pub const Model = struct {
             const ws = &pf.state(&m.f).k4ws.plan;
             _ = try forms_inplace.bind(gpa, &m.runner, &m.weights, if (ws.*) |*w| &.{ &bp, w } else &.{&bp});
         }
+        if (m.glp) |*g| try g.reserve(&bp);
         tr.plan(bp.totals());
         try m.runner.bind(&bp);
+        if (m.glp) |*g| try glp_boot.upload(m, gpa, g);
         tr.step("buffer plan", cuda.usage(false));
         const src: forms.Source = .{ .d = &m.driver, .weights = &m.weights, .plan = &m.pl };
         for (bp.sizes.keys()) |role| {
@@ -408,7 +418,8 @@ pub const Model = struct {
             // the drafter's blocks (the snapshot carries their rows: the RAM tier's measure)
             var dsb: [8]u32 = undefined;
             const ds_blocks: u32 = if (o.drafts) @intCast(dspark_emit.blocks(&m.cfg, &dsb).len) else 0;
-            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = if (so.disk != null) try prepared.packIdentity(io, &m.pack, if (cache) |*c| c else null) else null });
+            const checkpoint = try glp_boot.checkpoint(io, &m.pack, if (cache) |*c| c else null, m.glp_policy, so.disk != null);
+            m.sessions = try sg.Sessions.init(gpa, io, &m.f, &bp, so, .{ .slots = m.slots, .ds_blocks = ds_blocks, .checkpoint = checkpoint });
         }
         tr.step("engram host and sessions", cuda.usage(false));
         m.gt = .{ .f = &m.f, .prefill_rows = o.prefill_rows, .max_rows = nb, .own_prefill = o.own_prefill, .sessions = m.sessions };
