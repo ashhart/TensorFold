@@ -181,6 +181,7 @@ pub const glm_select = @embedFile("glm_select.metal");
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
+pub const core_tree_round = @embedFile("core/tree_round.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
@@ -194,6 +195,8 @@ pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
+/// qk: the M5's 4-bit g64 products on the lane layout as load leaves it, tf_lane_reg's words (core/qk_projection.zig).
+pub const core_qk = @embedFile("core/qk.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
@@ -270,3 +273,6 @@ pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
 
 /// Qwen3 embeddings' projected-head RMS norm (128-wide Q and K, V unchanged).
 pub const qwen3_heads = @embedFile("qwen3/heads.metal");
+
+/// Qwen27 flat activation shares the production specialization with its contract.
+pub const q27_mlp_xs = @embedFile("qwen27/mlp_xs.metal");

@@ -57,7 +57,10 @@ pub const metal_before = @import("fsr_records.zig").metal ++
 pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("attention_pv_records.zig").records ++
     registry.metal ++
+    @import("q27_mixed_records.zig").records ++
+    @import("q27_qk_records.zig").records ++
     @import("delta_slots_records.zig").records ++
+    @import("delta_slots_records.zig").columns ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
     @import("simd_half_records.zig").records ++
@@ -70,6 +73,8 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("prompt_index_records.zig").metal ++
     @import("hc_activation_records.zig").metal ++
     @import("qwen4_records.zig").metal ++
+    @import("tree_round_metal_records.zig").records ++
+    @import("q27_stack_records.zig").records ++
     @import("lfm2_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
