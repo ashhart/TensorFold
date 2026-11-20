@@ -161,7 +161,7 @@ pub const Attn = struct {
 /// The worst |got - want| / boundExact over the outputs, as gate 4 counts it (a non-finite sum misses infinitely).
 fn worst(got: []const f64, want: []const f64) f64 {
     var most: f64 = 0;
-    for (got, want) |x, w| most = @max(most, if (std.math.isFinite(x)) @abs(x - w) / c.boundExact(spec("host"), w) else std.math.inf(f64));
+    for (got, want) |x, w| most = @max(most, if (std.math.isFinite(x)) @abs(x - w) / c.boundExact(spec("host", &served), w) else std.math.inf(f64));
     return most;
 }
 
