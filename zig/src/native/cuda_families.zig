@@ -65,3 +65,17 @@ test "capability audit: CUDA Qwen3.5 lists BF16 under decisions only, the MoE en
         } else try std.testing.expectEqual(@as(usize, 0), f.decision_formats.len);
     }
 }
+
+test "capability audit: dense Qwen3.5 lists the ModelOpt formats its loader reads" {
+    for (families) |f| if (std.mem.eql(u8, f.model_type, "qwen3_5")) {
+        var nvfp4 = false;
+        var mixed = false;
+        for (f.formats) |format| {
+            nvfp4 = nvfp4 or std.mem.eql(u8, format, "modelopt-nvfp4");
+            mixed = mixed or std.mem.eql(u8, format, "modelopt-mixed");
+        }
+        try std.testing.expect(nvfp4 and mixed);
+        return;
+    };
+    return error.NoQwen35Family;
+}
