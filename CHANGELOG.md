@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
+
 - Docs: the optimization ledger adds rows 34 to 37 (FP8 KV prefill waits, Qwen normalization and head, text metadata uploads and greedy readback), each `failed` on one GB10 against the 3% served-speed bar with equal tokens, and the SM120 follow-up as inconclusive (#4054, fixes #3741). Thanks to @devopsfortunato.
 
 - Qwen 3.5/3.6/3.8 on CUDA: `TF_QWEN35_CHUNK_SOLO=8192` lets a foreground prompt pass take up to 8,192 rows while no other stream decodes, back to 4,096 once one does and in background warm passes; unset or 4096 is off, and tokens match it off (#3294). Thanks to @jschmied.
