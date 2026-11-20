@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Build: the three bounded top-k selection tests run in the fast `test-lanes-topk-host` step, with a planted failure confirming they can fail by name (#4095, refs #2460). Thanks to @jschmied.
+
+- Lanes: an optional normalized-row view of the prompt features, whose `null` default keeps every existing drafter path as it is (#4132, refs #2485). Thanks to @tacosta.
+
 - App: a packaged build ignores `VITE_DEV_SERVER_URL` (#3049).
 
 - App: Explore and Oracle child agents refuse a tool outside the list they were given, so a Read-only run stays read-only (#3040).
