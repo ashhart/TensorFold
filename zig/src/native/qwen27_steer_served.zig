@@ -9,7 +9,7 @@ pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
-    api.glp.checkModel(g.vector, model.config.hidden, repoId(arena.allocator(), dir), &reason) catch |err| {
+    api.glp.checkModel(g.vector, model.config.hidden, try repoId(arena.allocator(), dir), &reason) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
         return err;
     };
@@ -50,13 +50,9 @@ pub fn report(g: api.glp.Glp) void {
 }
 
 /// The repo id a cached checkpoint came from ("Org/Name"); empty when the folder is not a cache snapshot.
-fn repoId(a: Allocator, dir: []const u8) []const u8 {
-    const at = std.mem.lastIndexOf(u8, dir, "models--") orelse return "";
-    const rest = dir[at + "models--".len ..];
-    const sep = std.mem.indexOf(u8, rest, "/snapshots/") orelse return "";
-    const owner = rest[0..sep];
-    const dash = std.mem.indexOf(u8, owner, "--") orelse return "";
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ owner[0..dash], owner[dash + 2 ..] }) catch "";
+fn repoId(a: Allocator, dir: []const u8) ![]const u8 {
+    const source = (try api.glp.checkpoint.source(a, dir)) orelse return "";
+    return source.repo;
 }
 
 /// Why a vector's directions cannot be prepared, as the operator reads it.

@@ -36,11 +36,11 @@ const Fixture = struct {
     /// The vector the file holds, read once.
     g: ?serve.Vec,
 
-    fn make(a: std.mem.Allocator, w: usize, hidden: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
+    fn make(a: std.mem.Allocator, w: usize, hidden: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f32) !Fixture {
         return makeDepth(a, w, hidden, depth, ids, spec, alpha);
     }
 
-    fn makeDepth(a: std.mem.Allocator, w: usize, hidden: usize, layers: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
+    fn makeDepth(a: std.mem.Allocator, w: usize, hidden: usize, layers: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f32) !Fixture {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         const model = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
@@ -112,14 +112,19 @@ test "--glp-alpha without --glp is refused" {
     try std.testing.expect(std.mem.indexOf(u8, why, "needs --glp") != null);
 }
 
-test "the strength must be finite and above 0" {
-    try std.testing.expect(serve.strength("0.5") != null);
-    try std.testing.expect(serve.strength("0") == null);
+test "the strength is zero or a normal float from 0, and nothing else" {
+    try std.testing.expectEqual(@as(?f32, 0.5), serve.strength("0.5"));
+    // zero bypasses every edit: it is a strength, and -0 is the same one
+    try std.testing.expectEqual(@as(?f32, 0), serve.strength("0"));
+    try std.testing.expectEqual(@as(?f32, 0), serve.strength("0.0"));
+    const negative_zero = serve.strength("-0").?;
+    try std.testing.expect(negative_zero == 0 and !std.math.signbit(negative_zero));
     try std.testing.expect(serve.strength("-1") == null);
     try std.testing.expect(serve.strength("inf") == null);
     try std.testing.expect(serve.strength("nan") == null);
     try std.testing.expect(serve.strength("1e100") == null);
     try std.testing.expect(serve.strength("1e-100") == null);
+    try std.testing.expect(serve.strength("1e-40") == null);
     try std.testing.expect(serve.strength("abc") == null);
 }
 
@@ -286,4 +291,8 @@ test "a vector derived at another site is not refused where the engine steers" {
     // The site's warning is not the refusal here; the engine is.
     try std.testing.expect(why != null);
     try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
+}
+
+test {
+    _ = @import("glp_startup_paired_test.zig");
 }

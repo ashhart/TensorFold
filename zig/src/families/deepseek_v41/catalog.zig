@@ -6,7 +6,7 @@ const abi = cuda.abi;
 pub const Entry = struct { image: []const u8, name: [512]u8 = undefined, len: usize, shared: u32 = 0, threads: u32 = 0, cluster: u32 = 1, optional_shared: bool = false, available: bool = true, opt_in: bool = false };
 pub var entries: [2048]Entry = undefined;
 pub var count: usize = 0;
-const images = [_][]const u8{ "dsv41_exl3_experts", "dsv41_x3ld", "dsv41_x3pf", "dsv41_x3gm", "dsv41_linear", "dsv41_x3seg", "dsv41_dense3", "dsv41_attn", "dsv41_topk", "dsv41_mhc", "dsv41_mhc_pf", "dsv41_router_gemv", "dsv41_pfdense_k8", "dsv41_pfdense_k10", "dsv41_pfdense_k12", "dsv41_pfdense_k16", "dsv41_engram_gate", "dsv41_l2pace", "dsv41_l2pf", "dsv41_x3gm_plan", "dsv41_topk_keys", "dsv41_pointwise", "dsv41_kvsplit", "dsv41_glue", "dsv41_x3gm3", "dsv41_pfglue", "dsv41_router_glue", "dsv41_kv_glue", "dsv41_x3ld_epi", "dsv41_topk_b", "dsv41_lin2", "dsv41_sampling", "exl3_linear", "exl3_experts", "exl3_candidate" };
+const images = [_][]const u8{ "dsv41_exl3_experts", "dsv41_x3ld", "dsv41_x3pf", "dsv41_x3gm", "dsv41_linear", "dsv41_x3seg", "dsv41_dense3", "dsv41_attn", "dsv41_topk", "dsv41_mhc", "dsv41_mhc_pf", "dsv41_router_gemv", "dsv41_pfdense_k8", "dsv41_pfdense_k10", "dsv41_pfdense_k12", "dsv41_pfdense_k16", "dsv41_engram_gate", "dsv41_l2pace", "dsv41_l2pf", "dsv41_x3gm_plan", "dsv41_topk_keys", "dsv41_pointwise", "dsv41_kvsplit", "dsv41_glue", "dsv41_x3gm3", "dsv41_pfglue", "dsv41_router_glue", "dsv41_kv_glue", "dsv41_x3ld_epi", "dsv41_topk_b", "dsv41_lin2", "dsv41_sampling", "exl3_linear", "exl3_experts", "exl3_candidate", "dsv41_glp_add" };
 fn function(out: *abi.Function, module: abi.Module, name: [*:0]const u8) callconv(.c) abi.Result {
     const image = images[@intFromPtr(module.?) - 1];
     const text = std.mem.span(name);
@@ -76,6 +76,10 @@ pub fn collectWithLimit(optin: u32) !void {
     inline for (cuda.exl3.variants) |v| _ = try m[32].function(cuda.exl3.symbol(v.halves, v.codebook, v.warps));
     inline for (.{ "tf_exl3_group", "tf_exl3_experts_rot_in", "tf_exl3_grouped_0", "tf_exl3_grouped_1", "tf_exl3_grouped_2", "tf_exl3_gateup_epilogue", "tf_exl3_down_combine", "tf_exl3_plan_rotate", "tf_exl3_plan_finish" }) |name| _ = try m[33].function(name);
     inline for (.{ "tf_exl3_rotate_f", "tf_exl3_rotate_h", "tf_exl3_codebook", "tf_exl3_unpack", "tf_exl3_tc_0", "tf_exl3_tc_1", "tf_exl3_tc_2", "tf_exl3_prompt_0", "tf_exl3_prompt_1", "tf_exl3_prompt_2" }) |name| _ = try m[34].function(name);
+    const steering = try dk.glp.Functions.resolve(m[35]);
+    inline for (.{ steering.stream, steering.writer, steering.final }) |f|
+        entries[@intFromPtr(f.handle.?) - 1].threads = dk.glp.NT;
+    entries[@intFromPtr(steering.final.handle.?) - 1].shared = 2 * dk.glp.max_width;
     for (entries[0..count]) |entry| @import("catalog_geometry.zig").base(entry.image, entry.name[0..entry.len]);
 }
 pub fn main(init: std.process.Init) !void {

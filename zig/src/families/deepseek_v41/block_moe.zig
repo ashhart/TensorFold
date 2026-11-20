@@ -311,6 +311,11 @@ pub fn engram(e: *E, L: u32) !void {
 /// The final norm (mHC final) and this rank's head columns (fp32 logits).
 pub fn finish(e: *E) !void {
     try mhc(e, null, "", .final);
+    try head(e);
+}
+
+/// The vocabulary projection after either the ordinary or the steered final norm.
+pub fn head(e: *E) !void {
     const D: i64 = e.cfg.hidden;
     const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     const logits = try e.buf("w.logits", .{}, .f32, &.{ e.n, V });

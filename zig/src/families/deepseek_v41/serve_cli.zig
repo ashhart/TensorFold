@@ -4,13 +4,16 @@ const std = @import("std");
 const api = @import("engine_api");
 const model = @import("cuda_model.zig");
 const se = @import("serve_engine.zig");
+const glp_boot = @import("glp_boot.zig");
 
 fn drafts() !bool {
     return @import("sys").environment.read(bool, "TF_DSV41_DRAFTS", true);
 }
 
-pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {
-    const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa) });
+pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8, steer: ?api.glp.Glp) !u8 {
+    var source = try glp_boot.Source.init(gpa, steer);
+    defer if (source) |*g| g.deinit(gpa);
+    const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa), .glp = if (source) |*g| g else null });
     defer m.close();
     return followLoaded(m, followStartup) catch |err| {
         if (m.rank() != 0) std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
@@ -71,12 +74,12 @@ const Box = struct {
     }
 };
 
-pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8, trace: []const u8) !u8 {
+pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8, trace: []const u8, steer: ?api.glp.Glp) !u8 {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(io, trace, a, .limited(1 << 30));
-    const s = try se.Served.open(gpa, io, pack, assets, try drafts(), null, null);
+    const s = try se.Served.open(gpa, io, pack, assets, try drafts(), null, null, steer);
     defer se.Served.close(s);
     const eng = s.engine();
     const Keyed = struct { seed: u64, temperature: f64, top_k: u32, top_p: f64, min_p: f64 = 0 };

@@ -85,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
         .rewrite => |p| {
             // The checkpoint the file names may be re-stamped: the same weights under another name.
             const out = try glp.write(a, .{
+                .spec_version = vector.spec_version,
                 .alpha = vector.alpha,
                 .hook_point = vector.hook_point,
                 .derived_at = vector.derived_at,
@@ -106,6 +107,7 @@ pub fn main(init: std.process.Init) !void {
             var ids: std.ArrayList(u32) = .empty;
             for (vector.layers) |l| try ids.append(a, l.id);
             const receipt = try std.json.Stringify.valueAlloc(a, .{
+                .spec_version = vector.spec_version,
                 .alpha = vector.alpha,
                 .hook_point = vector.hook_point,
                 .derived_at = vector.derived_at,

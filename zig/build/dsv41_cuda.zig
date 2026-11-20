@@ -57,6 +57,7 @@ pub fn steps(b: *std.Build) void {
     const common_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("cuda").? }));
     const host = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, "cuda_test.zig", false) }));
     const host_step = b.step("test-dsv41-cuda-host", "DeepSeek launch plans and binding contracts without device calls");
+    host_step.dependOn(@import("dsv41_glp.zig").steps(b));
     host_step.dependOn(&host.step);
     host_step.dependOn(&binding_tests.step);
     host_step.dependOn(&common_tests.step);
