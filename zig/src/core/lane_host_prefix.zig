@@ -1,4 +1,4 @@
-//! The prefix wait: a request whose prompt shares a cut another prompt is filling waits for that fill to keep it.
+//! The prefix wait: a cut another prompt fills waits to keep it; an identical prompt joins the whole fill.
 const std = @import("std");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
@@ -47,9 +47,9 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
-        // a single-flight join: the leader's prompt is the waiter's own, and its last mark would serve it whole
-        if (joinable(store, h, r, spans, l)) {
-            best = .{ .leader = l, .id = l.id, .at = l.marks[l.marks.len - 1], .whole = true };
+        // a single-flight join: the leader's prompt is the waiter's own, by identity alone
+        if (joinable(h, r, spans, l) and room(h, job, l)) {
+            best = .{ .leader = l, .id = l.id, .whole = true };
             break; // filling order: the oldest leader
         }
         for (l.marks) |at| {
@@ -67,14 +67,22 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     return true;
 }
 
-/// Whether filling `l` is the waiter's own prompt, key tokens and spans, its last mark serving whole (lock held).
-fn joinable(store: *const @import("prompt_cache.zig").Store, h: *LaneHost, r: *const api.Request, spans: []const [2]u32, l: *const Job) bool {
-    if (l.marks.len == 0) return false;
+/// Whether filling `l` is the waiter's own prompt: key tokens, raw tokens and spans, no mark consulted (lock held).
+fn joinable(h: *LaneHost, r: *const api.Request, spans: []const [2]u32, l: *const Job) bool {
     if (!std.mem.eql(u32, r.cacheKey(), l.request.cacheKey())) return false;
     if (!std.mem.eql(u32, r.prompt, l.request.prompt)) return false;
-    const spans_l = h.spans(l.request);
-    if (!modes.equal(spans, spans_l, @intCast(l.request.prompt.len))) return false;
-    return store.wouldServe(r.cacheKey(), r.chunks, spans, l.request.cacheKey(), spans_l, l.marks[l.marks.len - 1]);
+    return modes.equal(spans, h.spans(l.request), @intCast(l.request.prompt.len));
+}
+
+/// Whether `l` holds fewer whole-fill waiters than the admission cap (lock held).
+fn room(h: *LaneHost, job: *const Job, l: *const Job) bool {
+    const cap = @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes);
+    var held: usize = 0;
+    for (h.queued.items) |j| {
+        if (j == job) continue;
+        if (j.prefix.whole and j.prefix.leader == l and j.prefix.id == l.id) held += 1;
+    }
+    return held < cap;
 }
 
 /// A request whose states the cache keys by its tokens alone, as the host's lookup does (no pictures).
