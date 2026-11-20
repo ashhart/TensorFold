@@ -52,6 +52,15 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
     const schedule_run = b.addRunArtifact(schedule);
     b.step("test-glm-scheduling-host", "Actual GLM prefill chunks and lane-host decode fairness using a fake engine").dependOn(&schedule_run.step);
     b.step("test-glm-prefill-widths-host", "Actual GLM pass widths, restore cuts and shared lane stats without devices").dependOn(&schedule_run.step);
+    const dsa = b.addTest(.{ .filters = &.{"glm_dsa prefill:"}, .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/glm_dsa_prefill_tests.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes } },
+    }) });
+    if (b.graph.host.result.os.tag == .macos) dsa.root_module.linkSystemLibrary("objc", .{});
+    b.step("test-glm-dsa-prefill-host", "GLM DSA prompt progress and cancelled-prefix retention without devices").dependOn(&b.addRunArtifact(dsa).step);
     if (b.graph.host.result.os.tag == .macos) {
         const comp_mod = hostMod(b, "zig/src/glm_restore_compile.zig", metal, lanes, fabric, sources, core);
         const compile = b.addObject(.{ .name = "glm-restore-host", .root_module = comp_mod });
