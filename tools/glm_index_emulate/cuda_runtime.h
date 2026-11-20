@@ -79,6 +79,13 @@ inline int __float_as_int(float f) { int i; std::memcpy(&i, &f, 4); return i; }
 inline float __fadd_rn(float a, float b) { return a + b; }
 inline float __fmul_rn(float a, float b) { return a * b; }
 inline float __fmaf_rn(float a, float b, float c) { return std::fma(a, b, c); }
+#ifdef __APPLE__
+// glibc's sincosf, which Apple's libm does not declare (model and kernel both turn through it, so they stay equal)
+inline void sincosf(float x, float* s, float* c) {
+  *s = std::sin(x);
+  *c = std::cos(x);
+}
+#endif
 using std::fmaxf;
 using std::max;
 using std::min;
