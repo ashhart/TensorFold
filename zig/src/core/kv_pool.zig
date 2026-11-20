@@ -25,9 +25,7 @@ pub const Layout = struct {
     full_layers: u32 = 0,
     /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
     window: ?groups.Group = null,
-    /// Owner classes: ids c, c + W, c + 2W ... form class c, and a lease takes every id from one (1: today's pool).
     classes: u32 = 1,
-    /// Owner classes: a token's bytes with every row on the rank (0: unnamed), which plans an unasked cache.
     whole_bytes: u64 = 0,
 
     /// A layout whose full group is `full`, sized by its bytes a row over its layers.
@@ -147,11 +145,9 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
-
 pub const planClasses = owners.plan; // `plan` over `l.classes` owner classes (kv_pool_classes.zig)
 pub const fitClasses = owners.fit; // an unasked cache lowered until every class holds a window
 pub const max_classes = owners.max; // the classes a pool holds at most
-
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
 pub fn holds(l: Layout, b: Budget) bool {
     const own = ownPages(l, b);
@@ -251,12 +247,9 @@ pub const Pool = struct {
     cap: usize = 0, // ids a class holds
     cfree: [max_classes]usize = @splat(0), // class c's free stack is free[c * cap ..][0..cfree[c]]; nfree their sum
     cpromised: [max_classes]usize = @splat(0), // promised to class c's leases; promised their sum
-
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
         return initClasses(gpa, count, page_bytes, 1) catch |e| if (e == error.BadClasses) unreachable else error.OutOfMemory;
     }
-
-    /// `count` ids in `classes` owner classes (1 to max_classes): class c's ids c, c + classes ..., lowest on top.
     pub fn initClasses(gpa: Allocator, count: usize, page_bytes: u64, classes: u32) !Pool {
         if (classes == 0 or classes > max_classes or count % classes != 0) return error.BadClasses;
         const refs = try gpa.alloc(u32, count);

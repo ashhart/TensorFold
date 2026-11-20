@@ -215,7 +215,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_QWEN_KEEP_LATE", "2" },          .{ "TF_TIMING", "2" },
         .{ "TF_NO_TREES", "true" },             .{ "TF_MTP_TREES", "yes" },
         .{ "TF_MTP_BATCH", "off" },             .{ "TF_QWEN_POOL_LOG", "true" },
-        .{ "TF_COST_KEY_TRACE", "on" },           .{ "TF_GLM_KV_SPLIT", "ON" },
+        .{ "TF_COST_KEY_TRACE", "on" },         .{ "TF_GLM_KV_SPLIT", "ON" },
         .{ "TF_GLM_KV_SPLIT", "true" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
