@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel Arc (XPU): `tensorfold-native serve --tp 2` or `--tp 4` splits all 64 layers, the head and DFlash2 drafting across two or four GPUs over Level Zero peer collectives, other `--tp` values are refused at startup, and `--vision` is refused up front (#3586, part of #3583). Thanks to @supernovae.
+
 - Flash Next on CUDA: `TF_FLASHNEXT_SPLIT_DENSE` and `TF_FLASHNEXT_SHARD_HEAD` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted forms, and an empty or blank value reads as unset; valid values and defaults are unchanged (#3749, refs #2370). Thanks to @devopsfortunato.
 
 - Tests: the Web loopback startup regression sets its stand-in past the three-second warm-up, so it passes standalone and in the full suite alike (#4086, fixes #3752).
