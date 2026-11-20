@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: a reply that ends on its own end-of-sequence inside a think block it never closed now returns that text as its answer only when the request asked for reasoning and no tool call was required, no grammar applied and no call was streamed, and the server logs a warning when it does (#3721, refs #3687). Thanks to @joshuaswarren.
+
 - Docs: the Flash Next CUDA recipe pulls the checkpoint and serves it by name, and supported models gives it as a 105.5 GiB download of which 73.3 GiB goes to the GPU (#4024). Thanks to @jayleaton.
 
 - Docs: the Nemotron 3.5 Super VL recipe pulls the checkpoint before serving it by name on one GB10 (#3993). Thanks to @jayleaton.
