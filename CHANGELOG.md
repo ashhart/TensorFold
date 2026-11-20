@@ -4,13 +4,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- qwen27: two Macs serve one Qwen3.8-27B pair with a 128-row seam cap, named refusals for requests a pair cannot keep, and both ranks stopping when the link dies (#1434). Thanks to @akol1.
+
 - Qwen3.8-27B on Metal with `--thinking-reserve`: the shorter-reply-first order no longer counts a reply that is still reasoning as the whole limit the reserve gave it. It estimates the reply as its answer quota plus the reasoning left, taken from the think blocks this server has seen close; until one has, and for requests without `--thinking-reserve` or with thinking off, nothing changes. Replies are the same tokens. On an M5 Ultra, once the server has seen a think block close, a reasoning chat reply beside a 110,000-token cold prompt streams 7.3 chunks a second instead of 2.0, and the prompt's fill takes 17% longer (#3371, fixes #3270). Thanks to @CodingEmil for the report.
 
 - CUDA: an opt-in slab mode carves small uploads from shared slabs instead of one 2 MiB-rounded allocation each, and identical trellis bytes upload once, so Hy4-flash EXL3 4bpw loads all 42 layers on one GB10 (85.38 GiB, 29 GiB left) where it ran out at layer 30 (#4003). Thanks to @shantanugoel.
 
 - Tests: for Qwen3.5 dense EXL3 at TP=2, a rank's column cut of a weight can keep the whole weight's K-split plan (`Weight.pinnedColumns`), and `tf-cuda-test qwen35-tp-cut PACK` compares each rank's columns with one GPU's whole-weight bytes; `--tp 1` is unchanged and `--tp 2` stays refused (#3602). Thanks to @Nipale-ai.
-
-
 
 - Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
@@ -359,8 +359,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 ## 1.2.10
-
-- Qwen3.8-27B on two Macs (opt-in, `--speed-up`): a pair serves one greedy stream over MCDMA with attention whole on each Mac and the MLP and lm_head split, and its tokens equal one Mac's on the recorded fixtures; `--drafter` runs on it (rank 0 drafts, rank 1 replays the tree). Both ranks refuse to start, naming the difference, when their build, GPU family, checkpoint, weight format or command protocol differ, and a pair's `/health` names the two-Mac mode. A pair decodes slower than one Mac: 4.58 against 14.41 tokens a second at plain greedy decode on the contributor's two Macs. `tf-qwen27-tp-check` checks a pair against one Mac on one Mac, and `tools/qwen27/pair_accept.py` against a recorded single-Mac oracle (#1434, with #1435, #1436, #1437 and #2529). Thanks to @akol1.
 
 - Server: every chat request records where each message starts in the rendered prompt, at exact token boundaries; nothing uses the starts yet, so replies are unchanged (#3679, step 0 of #3617).
 
