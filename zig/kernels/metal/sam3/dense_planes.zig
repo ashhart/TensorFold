@@ -14,9 +14,7 @@ pub fn restoreOffset(n: usize) usize {
 
 pub const Epilogue = enum(u32) { none, gelu_planes, residual, tile_residual };
 
-// pipes: names in order, then the projection; refs: input, weight, bias, output, planes, plan, residual, projected.
-// The projection writes refs[7] for gelu_planes and refs[3] otherwise; the fallback always writes refs[7].
-// A fallback first rebuilds every FP32 input in the planes buffer's restore area.
+// refs: input, weight, bias, output, planes, plan, residual, projected; gelu_planes and fallbacks write refs[7].
 pub fn encode(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [9]mtl.Pipeline, refs: anytype, shape: [3]u32, packing: bool, epilogue: Epilogue) void {
     const rows: usize = shape[0];
     const cols: usize = shape[1];

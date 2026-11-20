@@ -19,8 +19,7 @@ const Size = gpu.mtl.Size;
 
 const norm_eps: f32 = 1e-5;
 
-/// One trunk block on the grid-ordered residual stream `[G², width]` FP32; returns the new stream in grid order.
-/// `table` is the block's `rotary.trunkTable`, prepared before the trunk batch opened.
+/// One trunk block on the grid-ordered `[G², width]` FP32 stream; `table` is its prepared `rotary.trunkTable`.
 pub fn run(rt: *Runtime, block: Scope, x: Tensor, full_grid: bool, table: rotary.Table) !Tensor {
     const c = rt.config;
     const side = c.featureSide();

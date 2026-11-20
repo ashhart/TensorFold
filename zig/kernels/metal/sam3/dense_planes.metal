@@ -73,8 +73,7 @@ void sam_dense_planes_gelu(const device float* x, device half* planes, constant 
     if (invalid) atomic_fetch_or_explicit(sam_planes_flags(planes, count), 1u, memory_order_relaxed);
 }
 
-// KC 0 accumulates each plane over the whole depth; otherwise the high plane is compensated per KC-deep chunk.
-// EPI 0: FP32 output; 2: residual added; 3: residual added at the grid row of a tile-ordered row.
+// KC 0: plain accumulation, else KC-deep compensated high plane. EPI 0 FP32, 2 residual, 3 residual at the grid row.
 template<ushort M, ushort N, ushort SG, ushort KC, ushort EPI>
 inline void sam_dense_planes_impl(const device half* planes, const device half* weight, const device float* bias,
     device float* output, constant SamDenseShape& shape, const device uint* plan, const device float* residual, uint2 group) {
