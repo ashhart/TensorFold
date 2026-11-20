@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
+
 - Qwen 3.5/3.6/3.8 on HIP: a prompt chunk before the last stops its last layer after the keys and values, and the final chunk runs that layer only over the rows that are read, through the shared prompt-tail rule CUDA and Metal use (#2845, for #2829).
 
 - Qwen3.8-27B on Metal: on a prompt's last chunk, the last layer's q projection, o projection, MLP and final norm run only over the 128-row block that holds the row the head reads, while every row still writes its keys, values and recurrent state; a chunk whose last layer has another reader (drafter taps, images, MoE, a tensor-parallel pair, the ANE share) runs every row as before, and a new `test-qwen27-prompt-tail` step checks the block byte for byte against an every-row pass (#2826, refs #2165). Thanks to @GumbiiDigital.
