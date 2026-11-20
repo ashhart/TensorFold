@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: dots.mocr's reference oracle runs the image tower on SDPA when flash-attn is not installed, `oracle` and `score` gain `--sdpa-backend auto|math` (default `auto`) and record it, and a new `stages` mode compares native tower taps with the reference; `tf-cuda-test dots-projections` with `tools/zig/dots_projection_check.py` checks the CUDA projections against FP64 and Torch, through a tap that served passes leave unset (#2772, refs #1927). Thanks to @laudney.
+
 - CUDA (GB10): `TF_CUDA_CARVEOUT_SOURCE=daemon` takes the display carveout from a display-memory daemon that lends it in 2 MiB slices, for a box whose driver refuses a DRM dumb buffer; `drm` stays the default, nothing changes with the carveout off, and a daemon that does not answer, a refused claim or a bad key file stops the load with the cause named (#2762, closes #2747). Thanks to @bertholomus.
 
 - LFM3-1.7B on CUDA: the ModelOpt NVFP4 text export (`LiquidAI/LFM3-1.7B-NVFP4`) is served weight-only (the FFN's FP4 weights as stored, bf16 activations), and `TENSORFOLD_LFM3_KV_PAGES=0` gives each stream fixed pages; the MLX affine and FP8 exports are refused by name on CUDA for now, Metal and the Intel GPU engine refuse the NVFP4 export by name before reading weights, and LFM2.5-24B-A2B on CUDA moves to the same shared Liquid backend (#1508, part of #1491). Thanks to @jschmied.
