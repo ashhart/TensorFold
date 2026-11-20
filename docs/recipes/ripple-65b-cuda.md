@@ -1,14 +1,17 @@
 # Ripple-65B-Preview, CUDA
 
 This recipe covers text generation with ricursiveAI's Ripple-65B-Preview (model_type `ricursive`; see
-[the Metal recipe](ripple-65b-metal.md) for the model) on the CUDA engine. One release is served as published,
-read in place from its shards with nothing converted:
+[the Metal recipe](ripple-65b-metal.md) for the model) on the CUDA engine. Two checkpoints are served as published,
+read in place from their shards with nothing converted:
 
 - [`ricursiveAI/Ripple-65B-Preview-NVFP4`](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-NVFP4) (revision
   `99eea4477a001a41b86914e41feb4b2ed86105e5`, 53 GiB): ModelOpt NVFP4 MLPs, attention, embeddings and head in bf16.
+- [`ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw`](https://huggingface.co/ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw)
+  (revision `1d260f752b753d2b17571de237029b5e2251db07`, 39 GB): an ExLlamaV3 pack of the bf16 release, 5.0 bits a
+  weight with an 8-bit head (see [EXL3 pack](#exl3-pack)).
 
 The bf16 release is refused by name (`RicursiveCudaNeedsNvfp4`): at 121 GiB it does not fit a GB10, and the CUDA
-family reads only the NVFP4 MLPs. The publisher's DFlash2 drafter,
+family reads only the NVFP4 MLPs or the EXL3 pack. The publisher's DFlash2 drafter,
 [`ricursiveAI/Ripple-65B-Preview-DFlash2`](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2) (revision
 `35609b3be3dd08a822b3ba1257c1ea5dd6f87632`, 7.5 GiB, bf16), drafts with `--drafter`; a drafted reply equals the plain
 one.
@@ -38,7 +41,7 @@ Thinking follows the chat template, as on Metal: Ripple writes `<think>` itself 
 otherwise, and the server files a reply without the block as answer. Its think markers are spelled from several
 tokens, so a thinking budget and logprobs are refused by name.
 
-## EXL3 packs
+## EXL3 pack
 
 One ExLlamaV3 pack of the bf16 release loads too: `ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw` at the revision
 below. It averages 5.0 bits a weight with an 8-bit head (`quant_method` `exl3`, mul1 codebook, exllamav3 1.6.6), and it
@@ -159,4 +162,5 @@ run. Only GB10 was run. Draft trees (several drafts a stream) are not done, and 
 
 ## Licence
 
-Ripple-65B-Preview and its NVFP4 release are published under Apache-2.0 at the revisions measured here.
+Ripple-65B-Preview, its NVFP4 release and the 5.0 bpw EXL3 pack are published under Apache-2.0 at the revisions
+measured here.
