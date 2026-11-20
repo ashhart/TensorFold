@@ -92,4 +92,5 @@ test {
     _ = metal_dflash_same;
     _ = metal_dflash_inline;
     _ = metal_dflash_head_depth;
+    _ = @import("mtp_opt_test.zig");
 }
