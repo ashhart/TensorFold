@@ -282,7 +282,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.wide = null;
     const m3_fast = !device.tensorUnits();
     k.m3_fast = m3_fast;
-    var jobs: [generated.len + 27]Job = undefined;
+    var jobs: [generated.len + 28]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -393,12 +393,17 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
 
+    const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true }) else try gpa.dupe(u8, "");
+    defer gpa.free(m3_src);
+    var m3_out: affine_mm.Pipes = undefined;
+    if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
+    const all = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
-        for (jobs) |j| try visitor.raw("glm", j.names[0], j.source);
+        for (all) |j| try visitor.raw("glm", j.names[0], j.source);
         return;
     }
     var sources_seen = std.hash.Wyhash.init(0x6b);
-    for (jobs) |j| sources_seen.update(j.source);
+    for (all) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
@@ -411,17 +416,17 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
         }
     };
     var threads: [8]?std.Thread = @splat(null);
-    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ &jobs, &next }) catch null;
-    Worker.run(&jobs, &next);
+    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ all, &next }) catch null;
+    Worker.run(all, &next);
     for (threads) |t| if (t) |th| th.join();
-    for (jobs) |j| if (j.failed) return error.KernelCompile;
+    for (all) |j| if (j.failed) return error.KernelCompile;
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
     k.sample = sample_out[0]; // the shared sampler's own library: glm_glue's table never named it
     k.latent_scores = attn_out[0];
     k.latent_values = attn_out[1];
     k.latent_scores_rows = attn_out[2];
     k.latent_values_rows = attn_out[3];
-    k.mm_bf16 = m16_out[0..affine_mm.names.len].*;
+    k.mm_bf16 = if (m3_fast) m3_out else m16_out[0..affine_mm.names.len].*;
     k.mm_groups = m16_out[affine_mm.names.len..].*;
     k.route_logits = route_out[0];
     k.route_select = route_out[1];
