@@ -279,6 +279,27 @@ kernel void glm_stream_mean(const device bfloat* x [[buffer(0)]], device bfloat*
   y[size_t(p.y) * D + p.x] = bfloat(raw * 0.25f);
 }
 
+#ifndef TF_CTL_TAP
+#define TF_CTL_TAP 0
+#endif
+
+struct GlmTapRingArgs {
+  uint hidden, rows, skip, pos, window, plane_off, ring_stride;
+};
+
+// The streams' fp32 mean scattered directly into the drafter ring's plane, replacing stream_mean + n copies.
+kernel void glm_tap_mean_ring(const device bfloat* x [[buffer(0)]], device bfloat* ring [[buffer(1)]],
+                              constant GlmTapRingArgs& a [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
+  const uint D = a.hidden;
+  if (p.x >= D || p.y >= a.rows) return;
+  const device bfloat* r = x + size_t(a.skip + p.y) * 4 * D + p.x;
+  float raw = float(r[0]);
+  for (int s = 1; s < 4; s++) raw = raw + float(r[s * D]);
+  const uint slot = (TF_CTL_TAP == 2) ? (a.skip + p.y) : ((a.pos + a.skip + p.y) % a.window);
+  if (TF_CTL_TAP == 1 && p.x == 0u && p.y == 0u) ((device bfloat*)x)[0] = bfloat(0.0f);
+  ring[size_t(slot) * a.ring_stride + a.plane_off + p.x] = bfloat(raw * (TF_CTL_TAP == 3 ? 0.5f : 0.25f));
+}
+
 // out = bf16(a + b): the MTP block's residual adds.
 kernel void glm_add(const device bfloat* a [[buffer(0)]], const device bfloat* b [[buffer(1)]],
                     device bfloat* out [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) {

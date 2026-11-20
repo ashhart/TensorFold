@@ -15,6 +15,7 @@ const catchup = @import("../qwen27/dflash/catchup.zig");
 const execution = @import("../qwen27/dflash/execution.zig");
 const Cache = backend_mod.Cache;
 const prepared = @import("metal_dflash_prepared.zig");
+const encode_mod = @import("metal_dflash_encode.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// --drafter-bits: 0 reads the bf16 weights as published, 4 quantizes each linear at load.
 pub const Bits = enum { bf16, q4 };
@@ -162,8 +163,44 @@ pub const Model = struct {
         const first = try m.session.firstDraw();
         return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, options);
     }
+    /// Draft `options.nodes` steps using a `block`-row bidirectional pass (head/topk run only over active draft rows).
+    pub fn proposeBlock(m: *Model, pending: u32, block: u32, options: selector.Options) !selector.Tree {
+        const metric = mtl.pass_metrics.phase(.drafter);
+        defer metric.end();
+        const nodes = options.nodes;
+        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or block < 2 or block > m.tree_block) return error.BadDraftOptions;
+        if (nodes == 0) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
+        if (m.committed_end == 0) return error.DraftContextNotReady;
+        const depth = @min(nodes, block - 1);
+        const fresh_tap = m.fresh();
+        if (fresh_tap == null) {
+            if (m.session.context.end < m.committed_end) try m.flush();
+            _ = try m.session.firstDraw();
+        }
+        const ops = m.backend.ops();
+        const cur = if (fresh_tap) |f| f.next else m.session.context;
+        var caches_slice = [1][]Cache{m.backend.caches};
+        if (fresh_tap != null) m.backend.batch = &caches_slice;
+        defer m.backend.batch = &.{};
+        const frame = try ops.vtable.begin(ops.ptr);
+        defer ops.vtable.release(ops.ptr, frame);
+        if (fresh_tap) |f| {
+            try m.absorbAll(ops, frame, &.{f});
+            m.backend.context = f.next;
+        }
+        var lattice = try encode_mod.single(ops, &m.backend, &m.graph, m.preparation, .{ .context = cur, .anchor = pending }, frame, block, depth);
+        defer lattice.deinit();
+        if (fresh_tap) |f| {
+            m.session.context = f.next;
+            m.session.ready = true;
+            m.backend.context = f.next;
+        }
+        const sel = mtl.pass_metrics.phase(.selector);
+        defer sel.end();
+        return selector.propose(m.allocator, &m.graph, lattice, pending, cur.end + 1, options);
+    }
     /// One stream of a batched pass: its parked context (null: the model's own), pending token and tree options.
-    pub const Proposal = struct { context: ?*Context, pending: u32, options: selector.Options };
+    pub const Proposal = struct { context: ?*Context, pending: u32, options: selector.Options, block: u32 = 0 };
 
     /// The block rows a stream's tree of `nodes` drafts takes: a batch's streams share one block size.
     pub fn blockFor(m: *const Model, nodes: u32) u32 {
@@ -181,13 +218,17 @@ pub const Model = struct {
         const n = entries.len;
         if (n < 2 or n > 8 or out.len != n or m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadDraftOptions;
         const c = m.graph.config;
-        const block = m.blockFor(entries[0].options.nodes);
+        const sliced = entries[0].block > 0;
+        const block = if (sliced) @min(m.tree_block, entries[0].block) else m.blockFor(entries[0].options.nodes);
         if (block < 2 or n * block > 128) return error.BadDraftOptions;
         var streams: [8]execution.Stream = undefined;
         var caches: [8][]Cache = undefined;
         var news: [8]?Fresh = @splat(null);
+        var depths: [8]u32 = undefined;
         for (entries, 0..) |en, k| {
-            if (en.pending >= c.vocab or en.options.nodes > max_nodes or m.blockFor(en.options.nodes) != block) return error.BadDraftOptions;
+            const en_block = if (en.block > 0) @min(m.tree_block, en.block) else m.blockFor(en.options.nodes);
+            if (en.pending >= c.vocab or en.options.nodes > max_nodes or en_block != block) return error.BadDraftOptions;
+            depths[k] = @max(1, @min(en.options.nodes, block - 1));
             if (en.context) |x| try m.swap(x);
             const ready = m.committed_end > 0;
             news[k] = if (ready) m.fresh() else null;
@@ -212,7 +253,11 @@ pub const Model = struct {
         try m.absorbAll(ops, frame, news[0..n]);
         const absorbs: [8]?execution.Absorb = @splat(null); // absorbed above, every stream's taps in one product
         var lattices: [8]op.Lattice = undefined;
-        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+        if (sliced) {
+            try encode_mod.batch(ops, &m.backend, &m.graph, m.preparation, streams[0..n], frame, block, depths[0..n], lattices[0..n]);
+        } else {
+            try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+        }
         defer for (lattices[0..n]) |*l| l.deinit();
         // the frame completed, so an absorbing stream's context now covers its new taps
         for (entries, news[0..n]) |en, f| if (f) |x| {
