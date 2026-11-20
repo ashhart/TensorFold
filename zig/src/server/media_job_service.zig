@@ -5,15 +5,21 @@ const media = @import("media_job.zig");
 const images = @import("images_generations.zig");
 const json = @import("json");
 const errors = @import("errors.zig");
+const request_gate = @import("request_gate.zig");
 const Allocator = std.mem.Allocator;
-const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
+const Server = @import("server.zig").Server;
 
 const Active = struct {
     serial: u64,
     engine_id: ?api.Id = null,
     cancelled: bool = false,
+    ended: bool = false,
+    thread: ?std.Thread = null,
 };
+
+/// Deterministic host coverage for cancellation before Active registration.
+pub var before_active_hook: ?*const fn (media.Invocation) void = null;
 
 pub const Service = struct {
     srv: *Server = undefined,
@@ -27,16 +33,16 @@ pub const Service = struct {
         errdefer s.active.deinit(srv.gpa);
         try s.registry.init(srv.gpa, srv.io, directory, limits);
         errdefer {
-            s.registry.shutdown() catch {};
+            s.shutdown();
             s.registry.deinit();
         }
-        try s.registry.attach(.{ .ctx = s, .start = start, .cancel = cancel });
+        try s.registry.attach(.{ .ctx = s, .start = start, .cancel = cancel, .join = join });
         s.enabled = true;
     }
 
     pub fn deinit(s: *Service) void {
         if (!s.enabled) return;
-        s.registry.shutdown() catch |e| std.log.err("durable media shutdown: {t}", .{e});
+        s.shutdown();
         s.active.deinit(s.srv.gpa);
         s.registry.deinit();
         s.* = .{};
@@ -47,14 +53,35 @@ pub const Service = struct {
         return null;
     }
 
+    fn reapEnded(s: *Service) void {
+        var index: usize = 0;
+        while (index < s.active.items.len) {
+            if (!s.active.items[index].ended) {
+                index += 1;
+                continue;
+            }
+            const job = s.active.items[index];
+            job.thread.?.join(); // ended is published after the worker's final use of this mutex
+            _ = s.active.swapRemove(index);
+        }
+    }
+
+    fn shutdown(s: *Service) void {
+        s.registry.shutdown() catch |e| std.log.err("durable media shutdown: {t}", .{e});
+    }
+
     fn start(ctx: *anyopaque, invocation: media.Invocation) media.StartError!void {
         const s: *Service = @ptrCast(@alignCast(ctx));
+        if (@import("builtin").is_test) if (before_active_hook) |hook| hook(invocation);
         s.mutex.lockUncancelable(s.srv.io);
+        s.reapEnded();
         defer s.mutex.unlock(s.srv.io);
         s.active.append(s.srv.gpa, .{ .serial = invocation.serial }) catch return error.Busy;
+        // A cancel that found no Active entry above is durable in the registry and must win here.
+        s.active.items[s.active.items.len - 1].cancelled = invocation.cancelRequested();
         errdefer _ = s.active.pop();
         const thread = std.Thread.spawn(.{}, work, .{ s, invocation }) catch return error.Busy;
-        thread.detach();
+        s.active.items[s.active.items.len - 1].thread = thread;
     }
 
     fn cancelled(s: *Service, serial: u64) bool {
@@ -88,7 +115,25 @@ pub const Service = struct {
         s.mutex.lockUncancelable(s.srv.io);
         defer s.mutex.unlock(s.srv.io);
         const index = s.find(serial) orelse return;
-        _ = s.active.swapRemove(index);
+        // The next admission or shutdown joins the handle after the thread really exits.
+        s.active.items[index].ended = true;
+    }
+
+    fn join(ctx: *anyopaque) void {
+        const s: *Service = @ptrCast(@alignCast(ctx));
+        while (true) {
+            s.mutex.lockUncancelable(s.srv.io);
+            if (s.active.items.len == 0) {
+                s.mutex.unlock(s.srv.io);
+                return;
+            }
+            const job = s.active.items[0];
+            s.mutex.unlock(s.srv.io);
+            job.thread.?.join();
+            s.mutex.lockUncancelable(s.srv.io);
+            _ = s.active.swapRemove(0);
+            s.mutex.unlock(s.srv.io);
+        }
     }
 
     fn alive(_: *anyopaque) bool {
@@ -96,14 +141,23 @@ pub const Service = struct {
     }
 
     fn work(s: *Service, invocation: media.Invocation) void {
-        var arena: std.heap.ArenaAllocator = .init(s.srv.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var pngs: std.ArrayList(std.ArrayList(u8)) = .empty;
-        defer for (pngs.items) |*png| png.deinit(s.srv.gpa);
-        const outcome = execute(s, invocation, a, &pngs) catch |e| media.Outcome{ .failed = @errorName(e) };
+        {
+            var arena: std.heap.ArenaAllocator = .init(s.srv.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var entered = request_gate.enter(s.srv, a, invocation.owner, .other, .{ .text = false, .embedding = false, .rerank = false, .systemone = false });
+            defer entered.held.release();
+            var pngs: std.ArrayList(std.ArrayList(u8)) = .empty;
+            defer for (pngs.items) |*png| png.deinit(s.srv.gpa);
+            const outcome = if (entered.refusal) |refusal| media.Outcome{ .failed = switch (refusal) {
+                .draining => "the durable media service is shutting down",
+                .overloaded => |refused| @import("request_admission.zig").message(refused.reason),
+                .model_kind => "the loaded model does not serve images",
+                .waiting => |waiting| waiting.problem,
+            } } else execute(s, invocation, a, &pngs) catch |e| media.Outcome{ .failed = @errorName(e) };
+            invocation.finish(outcome) catch |e| std.log.err("durable media completion {s}: {t}", .{ invocation.id, e });
+        }
         s.leave(invocation.serial);
-        invocation.finish(outcome) catch |e| std.log.err("durable media completion {s}: {t}", .{ invocation.id, e });
     }
 
     fn execute(s: *Service, invocation: media.Invocation, a: Allocator, pngs: *std.ArrayList(std.ArrayList(u8))) !media.Outcome {

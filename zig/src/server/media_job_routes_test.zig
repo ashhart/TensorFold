@@ -10,10 +10,18 @@ const Allocator = std.mem.Allocator;
 const t = std.testing;
 var bytes: Bytes = .{};
 
+var cancel_hook_server: ?*Server = null;
+fn cancelBeforeActive(invocation: @import("media_job.zig").Invocation) void {
+    _ = cancel_hook_server.?.media_jobs.registry.cancel(invocation.id, owner(6)) catch {};
+}
+
 const Reply = struct {
     status: u16,
     body: []const u8,
     value: ?json.Value,
+    head: []const u8,
+    unread: usize,
+    connection_close: bool,
 };
 
 fn ask(a: Allocator, srv: *Server, stub: *h.Stub, method: []const u8, route_path: []const u8, body: []const u8, principal: ?[32]u8) !Reply {
@@ -35,9 +43,18 @@ fn ask(a: Allocator, srv: *Server, stub: *h.Stub, method: []const u8, route_path
     };
     defer conn.deinit();
     @import("routes.zig").dispatch(srv, &conn, a);
+    const unread = conn.pending().len;
+    const connection_close = conn.close;
     const split = std.mem.indexOf(u8, wire.bytes.items, "\r\n\r\n") orelse return error.NoReply;
     const payload = wire.bytes.items[split + 4 ..];
-    const parsed = json.parse(a, payload) catch return .{ .status = try std.fmt.parseInt(u16, wire.bytes.items[9..12], 10), .body = payload, .value = null };
+    const parsed = json.parse(a, payload) catch return .{
+        .status = try std.fmt.parseInt(u16, wire.bytes.items[9..12], 10),
+        .body = payload,
+        .value = null,
+        .head = wire.bytes.items[0..split],
+        .unread = unread,
+        .connection_close = connection_close,
+    };
     return .{
         .status = try std.fmt.parseInt(u16, wire.bytes.items[9..12], 10),
         .body = payload,
@@ -45,6 +62,9 @@ fn ask(a: Allocator, srv: *Server, stub: *h.Stub, method: []const u8, route_path
             .ok => |value| value,
             .err => null,
         },
+        .head = wire.bytes.items[0..split],
+        .unread = unread,
+        .connection_close = connection_close,
     };
 }
 
@@ -185,4 +205,216 @@ test "media jobs: serve CLI carries the opt-in directory and publishes its flag"
     var output: std.Io.Writer.Allocating = .init(a);
     try cli.capabilities(&output.writer, .{ .version = "test" });
     try t.expect(std.mem.indexOf(u8, output.written(), "\"--media-jobs-dir\"") != null);
+}
+
+test "media jobs: cancel before Active registration cannot run stale generation" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stub: h.Stub = .{};
+    const srv = try makeServer(&stub, try tempRoot(a, &tmp));
+    defer srv.deinit();
+    cancel_hook_server = srv;
+    const service = @import("media_job_service.zig");
+    service.before_active_hook = cancelBeforeActive;
+    defer {
+        service.before_active_hook = null;
+        cancel_hook_server = null;
+    }
+    const submitted = try ask(a, srv, &stub, "POST", "/v1/images/jobs", "{\"model\":\"m\",\"prompt\":\"hi\"}", owner(6));
+    try t.expectEqual(@as(u16, 202), submitted.status);
+    const id = submitted.value.?.get("id").?.string;
+    _ = try waitFor(a, srv, &stub, id, owner(6), "cancelled");
+    try t.expectEqual(@as(usize, 0), stub.calls);
+    try t.expectEqual(@as(usize, 0), stub.finished);
+    for (0..2000) |_| {
+        if (srv.generating.load(.seq_cst) == 0) break;
+        std.Thread.yield() catch {};
+    }
+    try t.expectEqual(@as(u32, 0), srv.generating.load(.seq_cst));
+}
+
+test "media jobs: draining refuses submission without accepting durable work" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stub: h.Stub = .{};
+    const srv = try makeServer(&stub, try tempRoot(a, &tmp));
+    defer srv.deinit();
+    srv.draining.store(true, .seq_cst);
+    const refused = try ask(a, srv, &stub, "POST", "/v1/images/jobs", "{\"model\":\"m\",\"prompt\":\"hi\"}", owner(1));
+    try t.expectEqual(@as(u16, 503), refused.status);
+    try t.expectEqual(@as(usize, 0), refused.unread);
+    try t.expect(refused.connection_close);
+    try t.expectEqual(@as(usize, 0), srv.media_jobs.registry.stats().active);
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
+test "media jobs: DELETE consumes its framed body and closes on uncertain framing" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stub: h.Stub = .{};
+    const srv = try makeServer(&stub, try tempRoot(a, &tmp));
+    defer srv.deinit();
+    const id = "media-0123456789abcdef0123456789abcdef";
+    const deleted = try ask(a, srv, &stub, "DELETE", try path(a, id, ""), "discard me", owner(1));
+    try t.expectEqual(@as(u16, 404), deleted.status);
+    try t.expectEqual(@as(usize, 0), deleted.unread);
+
+    var wire: h.Wire = .{ .a = a };
+    var headers = [_]@import("http_conn.zig").Header{
+        .{ .name = "Content-Length", .value = "0" },
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+    };
+    var conn: Conn = .{
+        .fd = -1,
+        .peer = "",
+        .buf = try a.dupe(u8, ""),
+        .gpa = a,
+        .method = "DELETE",
+        .path = try path(a, id, ""),
+        .version = "HTTP/1.1",
+        .headers = &headers,
+        .key_digest = owner(1),
+        .write_hooks = .{ .ctx = &wire, .write = h.Wire.write },
+        .gone_hook = .{ .ctx = &stub, .call = h.Stub.gone },
+    };
+    defer conn.deinit();
+    @import("routes.zig").dispatch(srv, &conn, a);
+    try t.expect(std.mem.indexOf(u8, wire.bytes.items, " 400 ") != null);
+    try t.expect(std.mem.indexOf(u8, wire.bytes.items, "Content-Length and Transfer-Encoding cannot be combined") != null);
+    try t.expect(std.mem.indexOf(u8, wire.bytes.items, "Connection: close\r\n") != null);
+    try t.expect(conn.close);
+}
+
+const Reload = struct {
+    stub: *h.Stub,
+    opens: std.atomic.Value(u32) = .init(0),
+    closes: std.atomic.Value(u32) = .init(0),
+    replacements: std.atomic.Value(u32) = .init(0),
+    fail: bool = false,
+
+    fn reopen(r: *Reload) @import("idle_unload.zig").Reopen {
+        return .{ .ctx = r, .open = open, .close_held = closeHeld, .replace = replace };
+    }
+    fn cast(ctx: *anyopaque) *Reload {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn open(ctx: *anyopaque, _: Allocator, _: Allocator, _: std.Io, _: []const u8, _: []const u8, _: @import("cli.zig").Args, problem: *[]const u8) anyerror!?@import("engine_api").Opened {
+        const r = cast(ctx);
+        _ = r.opens.fetchAdd(1, .acq_rel);
+        if (r.fail) {
+            problem.* = "the fake image engine could not reopen";
+            return null;
+        }
+        return .{ .engine = r.stub.engine(), .close = closeCandidate, .ctx = r.stub };
+    }
+    fn closeCandidate(_: *anyopaque) void {}
+    fn closeHeld(ctx: *anyopaque) void {
+        _ = cast(ctx).closes.fetchAdd(1, .acq_rel);
+    }
+    fn replace(ctx: *anyopaque, opened: @import("engine_api").Opened, scratch: *std.heap.ArenaAllocator) void {
+        _ = opened;
+        _ = cast(ctx).replacements.fetchAdd(1, .acq_rel);
+        @import("idle_unload_closer.zig").destroyScratch(scratch);
+    }
+};
+
+fn expireIdle(srv: *Server) void {
+    const m = srv.idle_manager.?;
+    m.mutex.lockUncancelable(srv.io);
+    const now: i64 = @intCast(std.Io.Clock.awake.now(srv.io).toNanoseconds());
+    m.last_activity_ns = now -% (m.idle_s * std.time.ns_per_s) -% 1;
+    m.mutex.unlock(srv.io);
+    m.cond.broadcast(srv.io);
+}
+
+fn waitUnloaded(srv: *Server) !void {
+    const m = srv.idle_manager.?;
+    for (0..2000) |_| {
+        m.mutex.lockUncancelable(srv.io);
+        const unloaded = m.state == .unloaded;
+        m.mutex.unlock(srv.io);
+        if (unloaded) return;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    return error.MediaJobTimeout;
+}
+
+fn waitLeaseReleased(srv: *Server) !void {
+    for (0..2000) |_| {
+        if (srv.generating.load(.seq_cst) == 0) return;
+        std.Thread.yield() catch {};
+    }
+    return error.MediaJobTimeout;
+}
+
+test "media jobs: workers reload parked engines and hold both leases through failure" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stub: h.Stub = .{};
+    var reload: Reload = .{ .stub = &stub };
+    const srv = try makeServer(&stub, try tempRoot(a, &tmp));
+    srv.load.attach(srv.engine);
+    var args: @import("cli.zig").Args = .{};
+    args.idle_unload = 60;
+    try t.expectEqual(@import("idle_unload.zig").Startup.enabled, @import("idle_unload.zig").startServer(srv, args, reload.reopen(), "d", "image"));
+    defer {
+        srv.media_jobs.deinit();
+        @import("idle_unload.zig").stopServer(srv);
+        srv.deinit();
+    }
+    expireIdle(srv);
+    try waitUnloaded(srv);
+    try t.expectEqual(@as(u32, 1), reload.closes.load(.acquire));
+
+    const first = try ask(a, srv, &stub, "POST", "/v1/images/jobs", "{\"model\":\"m\",\"prompt\":\"reload\"}", owner(1));
+    const first_id = first.value.?.get("id").?.string;
+    _ = try waitFor(a, srv, &stub, first_id, owner(1), "succeeded");
+    try waitLeaseReleased(srv);
+    try t.expectEqual(@as(u32, 1), reload.opens.load(.acquire));
+    try t.expectEqual(@as(u32, 1), reload.replacements.load(.acquire));
+    try t.expectEqual(@as(usize, 1), stub.calls);
+
+    stub.hold_at = 2;
+    const second = try ask(a, srv, &stub, "POST", "/v1/images/jobs", "{\"model\":\"m\",\"prompt\":\"hold\"}", owner(1));
+    const second_id = second.value.?.get("id").?.string;
+    for (0..2000) |_| {
+        if (stub.pending != null) break;
+        std.Thread.yield() catch {};
+    }
+    try t.expect(stub.pending != null);
+    expireIdle(srv);
+    std.Io.sleep(t.io, .fromMilliseconds(50), .awake) catch {};
+    try t.expectEqual(@as(u32, 1), reload.closes.load(.acquire));
+    try t.expect(!srv.idle_manager.?.isParked());
+    _ = try ask(a, srv, &stub, "POST", try path(a, second_id, "/cancel"), "", owner(1));
+    _ = try waitFor(a, srv, &stub, second_id, owner(1), "cancelled");
+    try waitLeaseReleased(srv);
+
+    reload.fail = true;
+    expireIdle(srv);
+    try waitUnloaded(srv);
+    const third = try ask(a, srv, &stub, "POST", "/v1/images/jobs", "{\"model\":\"m\",\"prompt\":\"fail load\"}", owner(1));
+    const third_id = third.value.?.get("id").?.string;
+    _ = try waitFor(a, srv, &stub, third_id, owner(1), "failed");
+    try waitLeaseReleased(srv);
+    const m = srv.idle_manager.?;
+    m.mutex.lockUncancelable(srv.io);
+    const active = m.active;
+    m.mutex.unlock(srv.io);
+    try t.expectEqual(@as(u32, 0), active);
+    try t.expectEqual(@as(u32, 2), reload.opens.load(.acquire));
+    try t.expectEqual(@as(u32, 1), reload.replacements.load(.acquire));
+    try t.expectEqual(@as(usize, 2), stub.calls);
 }

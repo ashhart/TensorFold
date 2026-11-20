@@ -90,6 +90,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, id: ?[]const u8) void {
         .ok => |bytes| bytes,
         .refused => |message| return sendError(conn, a, 400, message),
     };
+    if (srv.draining.load(.seq_cst)) return routes.draining(conn, false);
     const parsed = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return sendError(conn, a, 500, "out of memory")) {
         .ok => |value| value,
         .err => |message| return sendError(conn, a, 400, message),
@@ -161,6 +162,18 @@ pub fn get(srv: *Server, conn: *Conn, a: Allocator, content: ?ContentPath, id: ?
 }
 
 pub fn remove(srv: *Server, conn: *Conn, a: Allocator, id: []const u8) void {
+    const body = http_body.read(conn, a, http_body.unread_limit) catch {
+        conn.close = true;
+        conn.sendError(a, 500, "out of memory", null) catch {};
+        return;
+    };
+    switch (body) {
+        .ok => {},
+        .refused => |message| {
+            conn.sendError(a, 400, message, null) catch {};
+            return;
+        },
+    }
     if (!enabled(srv)) return unavailable(srv, conn, a);
     const removed = srv.media_jobs.registry.remove(id, conn.key_digest) catch |e| switch (e) {
         error.JobActive => return sendError(conn, a, 409, "an active media job must be cancelled before deletion"),

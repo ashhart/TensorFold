@@ -10,7 +10,7 @@ const Fake = struct {
     cancels: usize = 0,
 
     fn runner(f: *Fake) media.Runner {
-        return .{ .ctx = f, .start = start, .cancel = cancel };
+        return .{ .ctx = f, .start = start, .cancel = cancel, .join = join };
     }
 
     fn start(ctx: *anyopaque, invocation: media.Invocation) media.StartError!void {
@@ -23,9 +23,10 @@ const Fake = struct {
         const f: *Fake = @ptrCast(@alignCast(ctx));
         var found = false;
         for (f.serials[0..f.starts]) |started| found = found or started == serial;
-        std.debug.assert(found);
         f.cancels += 1;
     }
+
+    fn join(_: *anyopaque) void {}
 };
 
 fn directory(a: Allocator, tmp: std.testing.TmpDir) ![]u8 {
@@ -246,4 +247,219 @@ test "media jobs: result count and byte retention remove payloads and records" {
     try t.expectError(error.FileNotFound, tmp.dir.access(t.io, try blob(a, second.id), .{}));
     try t.expectError(error.FileNotFound, tmp.dir.access(t.io, try blob(a, third.id), .{}));
     try t.expect(!(try registry.remove(second.id, owner(1))));
+}
+
+test "media jobs: terminal persistence failure still releases waiters and exposes failure" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try directory(a, tmp);
+    var registry: media.Registry = undefined;
+    try registry.init(t.allocator, t.io, root, .{ .running = 1 });
+    defer registry.deinit();
+    var fake: Fake = .{};
+    try registry.attach(fake.runner());
+    const submitted = try add(&registry, a, owner(1), "request");
+    try std.Io.Dir.cwd().deleteTree(t.io, root);
+    try t.expectError(error.ShardWrite, registry.finish(submitted.serial, .{ .failed = "engine failed" }));
+    const settled = registry.stats();
+    try t.expectEqual(@as(usize, 0), settled.running);
+    try t.expectEqual(@as(usize, 0), settled.active);
+    try t.expectEqual(@as(usize, 0), settled.request_bytes);
+    try t.expectEqual(@as(usize, 1), settled.retained);
+    try expectState(&registry, a, submitted.id, owner(1), .failed);
+    try registry.shutdown(); // must not wait on the running count the failed save used to strand
+}
+
+test "media jobs: transient executor Busy has an independent delayed dispatch" {
+    const BusyRunner = struct {
+        starts: std.atomic.Value(usize) = .init(0),
+        serial: std.atomic.Value(u64) = .init(0),
+
+        fn runner(f: *@This()) media.Runner {
+            return .{ .ctx = f, .start = start, .join = join };
+        }
+        fn cast(ctx: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn start(ctx: *anyopaque, invocation: media.Invocation) media.StartError!void {
+            const f = cast(ctx);
+            if (f.starts.fetchAdd(1, .acq_rel) == 0) return error.Busy;
+            f.serial.store(invocation.serial, .release);
+        }
+        fn join(_: *anyopaque) void {}
+    };
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: media.Registry = undefined;
+    try registry.init(t.allocator, t.io, try directory(a, tmp), .{ .running = 1 });
+    defer registry.deinit();
+    var busy: BusyRunner = .{};
+    try registry.attach(busy.runner());
+    const submitted = try add(&registry, a, owner(1), "request");
+    try t.expectEqual(@as(usize, 1), busy.starts.load(.acquire));
+    for (0..2000) |_| {
+        if (busy.starts.load(.acquire) == 2) break;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try t.expectEqual(@as(usize, 2), busy.starts.load(.acquire));
+    try t.expectEqual(submitted.serial, busy.serial.load(.acquire));
+    try succeed(&registry, submitted.serial, "done");
+    try registry.shutdown();
+    try t.expectEqual(@as(usize, 2), busy.starts.load(.acquire)); // one accepted generation, never a duplicate
+}
+
+test "media jobs: shutdown joins the actual executor thread" {
+    const ThreadRunner = struct {
+        thread: ?std.Thread = null,
+        joined: bool = false,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn runner(f: *@This()) media.Runner {
+            return .{ .ctx = f, .start = start, .join = join };
+        }
+        fn cast(ctx: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn start(ctx: *anyopaque, invocation: media.Invocation) media.StartError!void {
+            const f = cast(ctx);
+            f.thread = std.Thread.spawn(.{}, work, .{ f, invocation }) catch return error.Busy;
+        }
+        fn work(f: *@This(), invocation: media.Invocation) void {
+            invocation.finish(.cancelled) catch {};
+            f.done.store(true, .release);
+        }
+        fn join(ctx: *anyopaque) void {
+            const f = cast(ctx);
+            if (f.thread) |thread| thread.join();
+            f.thread = null;
+            f.joined = true;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: media.Registry = undefined;
+    try registry.init(t.allocator, t.io, try directory(a, tmp), .{ .running = 1 });
+    defer registry.deinit();
+    var threaded: ThreadRunner = .{};
+    try registry.attach(threaded.runner());
+    _ = try add(&registry, a, owner(1), "request");
+    try registry.shutdown();
+    try t.expect(threaded.joined);
+    try t.expect(threaded.done.load(.acquire));
+    try t.expectEqual(@as(usize, 0), registry.stats().running);
+}
+
+test "media jobs: an admitted content read finishes before retention reclaims its blob" {
+    const Race = struct {
+        registry: *media.Registry,
+        id: []const u8,
+        second_serial: u64,
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        retention_done: std.atomic.Value(bool) = .init(false),
+        read_error: ?anyerror = null,
+        retention_error: ?anyerror = null,
+        got: ?media.Result = null,
+
+        fn pause(ctx: *anyopaque) void {
+            const race: *@This() = @ptrCast(@alignCast(ctx));
+            race.entered.store(true, .release);
+            while (!race.release.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn read(race: *@This()) void {
+            race.got = race.registry.result(t.allocator, race.id, owner(1), 0) catch |e| {
+                race.read_error = e;
+                return;
+            };
+        }
+        fn retain(race: *@This()) void {
+            succeed(race.registry, race.second_serial, "new") catch |e| {
+                race.retention_error = e;
+            };
+            race.retention_done.store(true, .release);
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var registry: media.Registry = undefined;
+    try registry.init(t.allocator, t.io, try directory(a, tmp), .{ .running = 1, .retained_results = 1, .result_bytes = 16 });
+    defer registry.deinit();
+    var fake: Fake = .{};
+    try registry.attach(fake.runner());
+    const first = try add(&registry, a, owner(1), "first");
+    try succeed(&registry, first.serial, "old");
+    const second = try add(&registry, a, owner(1), "second");
+    var race: Race = .{ .registry = &registry, .id = first.id, .second_serial = second.serial };
+    registry.store.read_hook = .{ .ctx = &race, .call = Race.pause };
+    const reader = try std.Thread.spawn(.{}, Race.read, .{&race});
+    var reader_live = true;
+    var retainer: ?std.Thread = null;
+    errdefer {
+        race.release.store(true, .release);
+        if (reader_live) reader.join();
+        if (retainer) |thread| thread.join();
+    }
+    while (!race.entered.load(.acquire)) std.Thread.yield() catch {};
+    retainer = try std.Thread.spawn(.{}, Race.retain, .{&race});
+    for (0..20) |_| {
+        // The old unlocked read lets retention finish here; the fixed read cannot.
+        if (race.retention_done.load(.acquire)) break;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try t.expect(!race.retention_done.load(.acquire));
+    race.release.store(true, .release);
+    reader.join();
+    reader_live = false;
+    retainer.?.join();
+    retainer = null;
+    registry.store.read_hook = null;
+    if (race.read_error) |e| return e;
+    if (race.retention_error) |e| return e;
+    defer race.got.?.deinit(t.allocator);
+    try t.expectEqualStrings("old", race.got.?.bytes);
+    try t.expect((try registry.inspect(a, first.id, owner(1))) == null);
+}
+
+test "media jobs: interrupted delete keeps a valid tombstone and restart completes cleanup" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try directory(a, tmp);
+    var registry: media.Registry = undefined;
+    try registry.init(t.allocator, t.io, root, .{ .running = 1, .retained_results = 2, .result_bytes = 16 });
+    var fake: Fake = .{};
+    try registry.attach(fake.runner());
+    const submitted = try add(&registry, a, owner(1), "request");
+    const outputs = [_]media.Output{ .{ .media_type = "image/png", .bytes = "one" }, .{ .media_type = "image/png", .bytes = "two" } };
+    try registry.finish(submitted.serial, .{ .succeeded = &outputs });
+    const blocked = try std.fmt.allocPrint(a, "media/{s}.00000001.blob", .{submitted.id});
+    try tmp.dir.deleteFile(t.io, blocked);
+    try tmp.dir.createDir(t.io, blocked, .default_dir);
+    try t.expectError(error.DeleteIncomplete, registry.remove(submitted.id, owner(1)));
+    try expectState(&registry, a, submitted.id, owner(1), .cancelled);
+    try t.expect((try registry.result(a, submitted.id, owner(1), 0)) == null);
+    registry.deinit();
+
+    var recovered: media.Registry = undefined;
+    try recovered.init(t.allocator, t.io, root, .{ .running = 1, .retained_results = 2, .result_bytes = 16 });
+    defer recovered.deinit();
+    try expectState(&recovered, a, submitted.id, owner(1), .cancelled);
+    try tmp.dir.deleteDir(t.io, blocked);
+    try t.expect(try recovered.remove(submitted.id, owner(1)));
+    try t.expect((try recovered.inspect(a, submitted.id, owner(1))) == null);
+    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, try job(a, submitted.id), .{}));
 }

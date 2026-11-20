@@ -170,12 +170,12 @@ pub fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Ref
             return cx.refuse("seed plus n - 1 must fit in an unsigned 64-bit integer");
     }
     var steps: u32 = default_steps;
+    const steps_most = @min(max_steps, cap.max_steps);
     if (raw.get("steps")) |v| {
         const given = v.int64() orelse return cx.refuse("steps must be an integer");
-        const steps_most = @min(max_steps, cap.max_steps);
         if (given < 1 or given > steps_most) return cx.fail(.request, "steps must be from 1 to {d}", .{steps_most});
         steps = @intCast(given);
-    }
+    } else if (default_steps > steps_most) return cx.fail(.request, "the default steps {d} exceeds this model's limit of {d}: send steps explicitly", .{ default_steps, steps_most });
     var stream = false;
     if (raw.get("stream")) |v| {
         if (v != .bool) return cx.refuse("stream must be a boolean");

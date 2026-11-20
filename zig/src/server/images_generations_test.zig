@@ -297,6 +297,20 @@ test "omitted seed, steps, guidance, negative_prompt and size reach the engine a
     try t.expectEqual(@as(u16, 1024), stub.height);
 }
 
+test "omitted steps past a smaller host limit are refused before the engine" {
+    var stub: Stub = .{ .caps = .{ .max_side = 1536, .max_pixels = 1572864, .max_steps = 49, .max_prompt_tokens = 4096 } };
+    const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try expectRefusal(&reply, "the default steps 50 exceeds this model's limit of 49: send steps explicitly");
+    const explicit = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\",\"steps\":1}");
+    defer gpa.free(explicit.head);
+    defer gpa.free(explicit.body);
+    try t.expect(std.mem.startsWith(u8, explicit.head, "HTTP/1.1 200"));
+    try t.expectEqual(@as(u32, 1), stub.steps);
+    try t.expectEqual(@as(usize, 1), stub.calls);
+}
+
 test "an omitted size past a smaller host's limits is the route's own refusal naming them" {
     var stub: Stub = .{ .caps = .{ .max_side = 768, .max_pixels = 589824, .max_steps = 200, .max_prompt_tokens = 4096 } };
     const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");

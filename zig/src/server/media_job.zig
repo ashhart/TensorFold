@@ -27,10 +27,16 @@ pub const Invocation = struct {
     serial: u64,
     id: []const u8,
     kind: Kind,
+    owner: Owner,
     request: []const u8,
 
     pub fn finish(inv: Invocation, outcome: Outcome) !void {
         return inv.registry.finish(inv.serial, outcome);
+    }
+
+    /// Closes the cancel window between the registry's running state and an executor's active registration.
+    pub fn cancelRequested(inv: Invocation) bool {
+        return inv.registry.cancelRequested(inv.serial);
     }
 };
 
@@ -38,6 +44,8 @@ pub const Runner = struct {
     ctx: *anyopaque,
     start: *const fn (*anyopaque, Invocation) StartError!void,
     cancel: ?*const fn (*anyopaque, u64) void = null,
+    /// Joins every executor thread before the registry and server can be destroyed.
+    join: *const fn (*anyopaque) void,
 };
 
 pub const Submission = struct { id: []u8, serial: u64 };
@@ -93,6 +101,8 @@ pub const Registry = struct {
     next_serial: u64 = 1,
     runner: ?Runner = null,
     dispatching: bool = false,
+    retry_scheduled: bool = false,
+    retry_threads: usize = 0,
     closed: bool = false,
     last_error: ?anyerror = null,
 
@@ -253,16 +263,6 @@ pub const Registry = struct {
         return answer;
     }
 
-    fn note(r: *Registry, e: anyerror) void {
-        r.mutex.lockUncancelable(r.io);
-        if (r.last_error == null) r.last_error = e;
-        r.mutex.unlock(r.io);
-    }
-
-    fn kick(r: *Registry) void {
-        r.dispatch() catch |e| r.note(e);
-    }
-
     pub fn attach(r: *Registry, runner: Runner) !void {
         r.mutex.lockUncancelable(r.io);
         var held = true;
@@ -274,68 +274,8 @@ pub const Registry = struct {
         return r.dispatch();
     }
 
-    pub fn dispatch(r: *Registry) !void {
-        r.mutex.lockUncancelable(r.io);
-        if (r.dispatching or r.closed or r.runner == null) {
-            r.mutex.unlock(r.io);
-            return;
-        }
-        r.dispatching = true;
-        while (!r.closed and r.running < r.limits.running) {
-            var selected: ?*Record = null;
-            for (r.jobs.items) |record| if (record.state == .queued) {
-                selected = record;
-                break;
-            };
-            const record = selected orelse break;
-            const runner = r.runner.?;
-            var next = record.*;
-            next.state = .running;
-            r.store.save(&next) catch |e| {
-                r.dispatching = false;
-                r.mutex.unlock(r.io);
-                return e;
-            };
-            record.state = .running;
-            r.running += 1;
-            const invocation: Invocation = .{ .registry = r, .serial = record.serial, .id = record.id, .kind = record.kind, .request = record.request };
-            r.mutex.unlock(r.io);
-            runner.start(runner.ctx, invocation) catch |e| {
-                r.mutex.lockUncancelable(r.io);
-                r.dispatching = false;
-                const current = r.serialRecord(invocation.serial);
-                if (current == null or current.?.state != .running) {
-                    r.mutex.unlock(r.io);
-                    return;
-                }
-                switch (e) {
-                    error.Busy => {
-                        if (current.?.cancel_requested) {
-                            r.mutex.unlock(r.io);
-                            return r.finish(invocation.serial, .cancelled);
-                        }
-                        var queued = current.?.*;
-                        queued.state = .queued;
-                        r.store.save(&queued) catch |save_error| {
-                            r.mutex.unlock(r.io);
-                            return save_error;
-                        };
-                        current.?.state = .queued;
-                        r.running -= 1;
-                        r.mutex.unlock(r.io);
-                        return;
-                    },
-                    error.Closed => {
-                        r.mutex.unlock(r.io);
-                        return r.finish(invocation.serial, .{ .failed = "the media executor is closed" });
-                    },
-                }
-            };
-            r.mutex.lockUncancelable(r.io);
-        }
-        r.dispatching = false;
-        r.mutex.unlock(r.io);
-    }
+    pub const dispatch = @import("media_job_dispatch.zig").dispatch;
+    pub const kick = @import("media_job_dispatch.zig").kick;
 
     fn normalizedFailure(message: []const u8) []const u8 {
         if (message.len == 0) return "media generation failed";
@@ -370,12 +310,21 @@ pub const Registry = struct {
         const record = r.serialRecord(serial) orelse return error.StaleCompletion;
         if (record.state != .running) return error.StaleCompletion;
         const request_bytes = record.request.len;
+        var committed = false;
+        var released = false;
+        defer if (committed and !released) {
+            r.releaseTerminal(record, request_bytes);
+            r.ended.broadcast(r.io);
+        };
+        var persistence_failure: ?anyerror = null;
         var next = record.*;
         {
-            errdefer if (next.message) |message| r.gpa.free(message);
-            errdefer if (next.artifacts.ptr != record.artifacts.ptr) {
-                for (next.artifacts, 0..) |_, index| r.store.deleteArtifact(next.id, index) catch {};
-                freeArtifacts(r, next.artifacts);
+            errdefer if (!committed) {
+                if (next.message) |message| r.gpa.free(message);
+                if (next.artifacts.ptr != record.artifacts.ptr) {
+                    for (next.artifacts, 0..) |_, index| r.store.deleteArtifact(next.id, index) catch {};
+                    freeArtifacts(r, next.artifacts);
+                }
             };
             next.request = &.{};
             next.cancel_requested = false;
@@ -408,21 +357,30 @@ pub const Registry = struct {
                     }
                 },
             }
-            try r.store.save(&next);
+            r.store.save(&next) catch |e| {
+                persistence_failure = e;
+            };
         }
         if (record.request.len > 0) r.gpa.free(record.request);
         record.* = next;
-        r.running -= 1;
-        r.active -= 1;
-        r.request_bytes -= request_bytes;
-        r.retained += 1;
-        r.result_bytes += record.resultBytes();
+        committed = true;
+        r.releaseTerminal(record, request_bytes);
+        released = true;
         r.ended.broadcast(r.io);
         const retention = r.enforceRetention();
         held = false;
         r.mutex.unlock(r.io);
         r.kick();
+        if (persistence_failure) |e| return e;
         return retention;
+    }
+
+    fn releaseTerminal(r: *Registry, record: *Record, request_bytes: usize) void {
+        r.running -= 1;
+        r.active -= 1;
+        r.request_bytes -= request_bytes;
+        r.retained += 1;
+        r.result_bytes += record.resultBytes();
     }
 
     pub fn cancel(r: *Registry, id: []const u8, owner: Owner) !?CancelStatus {
@@ -468,6 +426,25 @@ pub const Registry = struct {
         r.gpa.destroy(record);
     }
 
+    fn clearResult(r: *Registry, record: *Record) void {
+        r.result_bytes -= record.resultBytes();
+        if (record.message) |message| if (message.len > 0) r.gpa.free(message);
+        freeArtifacts(r, record.artifacts);
+        record.state = .cancelled;
+        record.cancel_requested = false;
+        record.message = null;
+        record.artifacts = &.{};
+    }
+
+    fn removeIndex(r: *Registry, index: usize) !void {
+        const record = r.jobs.items[index];
+        r.store.remove(record) catch |e| {
+            if (e == error.DeleteIncomplete) r.clearResult(record);
+            return e;
+        };
+        removeAt(r, index);
+    }
+
     fn enforceRetention(r: *Registry) !void {
         while (r.retained > r.limits.retained_results or r.result_bytes > r.limits.result_bytes) {
             var oldest: ?usize = null;
@@ -475,8 +452,7 @@ pub const Registry = struct {
                 if (oldest == null or record.serial < r.jobs.items[oldest.?].serial) oldest = index;
             };
             const index = oldest orelse return error.RetentionOverflow;
-            try r.store.remove(r.jobs.items[index]);
-            removeAt(r, index);
+            try r.removeIndex(index);
         }
     }
 
@@ -488,8 +464,7 @@ pub const Registry = struct {
         if (!record.state.terminal()) return error.JobActive;
         var index: usize = 0;
         while (r.jobs.items[index] != record) : (index += 1) {}
-        try r.store.remove(record);
-        removeAt(r, index);
+        try r.removeIndex(index);
         held = false;
         r.mutex.unlock(r.io);
         return true;
@@ -516,15 +491,13 @@ pub const Registry = struct {
 
     pub fn result(r: *Registry, a: Allocator, id: []const u8, owner: Owner, index: usize) !?Result {
         r.mutex.lockUncancelable(r.io);
-        var held = true;
-        defer if (held) r.mutex.unlock(r.io);
+        defer r.mutex.unlock(r.io);
         const record = r.find(id, owner) orelse return null;
         if (record.state != .succeeded or index >= record.artifacts.len) return null;
         const artifact = record.artifacts[index];
         const media_type = try a.dupe(u8, artifact.media_type);
-        held = false;
-        r.mutex.unlock(r.io);
         errdefer a.free(media_type);
+        // Keep retention and DELETE out until both metadata and bytes are safely copied.
         const bytes = try r.store.readArtifact(a, id, index, artifact);
         return .{ .media_type = media_type, .bytes = bytes, .digest = artifact.digest };
     }
@@ -543,6 +516,13 @@ pub const Registry = struct {
         const failure = r.last_error;
         r.last_error = null;
         return failure;
+    }
+
+    fn cancelRequested(r: *Registry, serial: u64) bool {
+        r.mutex.lockUncancelable(r.io);
+        defer r.mutex.unlock(r.io);
+        const record = r.serialRecord(serial) orelse return true;
+        return record.cancel_requested;
     }
 
     pub fn shutdown(r: *Registry) !void {
@@ -571,10 +551,13 @@ pub const Registry = struct {
             r.mutex.lockUncancelable(r.io);
         }
         while (r.running > 0) r.ended.waitUncancelable(r.io, &r.mutex);
+        const runner = r.runner;
         r.runner = null;
         r.dispatching = false;
+        while (r.retry_threads > 0) r.ended.waitUncancelable(r.io, &r.mutex);
         held = false;
         r.mutex.unlock(r.io);
+        if (runner) |active| active.join(active.ctx);
         if (failure) |e| return e;
     }
 };

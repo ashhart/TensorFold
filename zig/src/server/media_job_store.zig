@@ -214,10 +214,13 @@ fn fullPath(a: Allocator, dir: []const u8, name: []const u8) ![]u8 {
 }
 
 pub const Store = struct {
+    pub const ReadHook = struct { ctx: *anyopaque, call: *const fn (*anyopaque) void };
+
     gpa: Allocator,
     io: std.Io,
     dir: []const u8,
     max_record_bytes: usize,
+    read_hook: ?ReadHook = null, // host tests pause the production read without replacing its file or verifier
 
     pub fn init(s: *Store, gpa: Allocator, io: std.Io, dir: []const u8, max_record_bytes: usize) !void {
         s.* = .{ .gpa = gpa, .io = io, .dir = try gpa.dupe(u8, dir), .max_record_bytes = max_record_bytes };
@@ -257,6 +260,7 @@ pub const Store = struct {
         defer s.gpa.free(path);
         const expected = std.math.cast(usize, artifact.bytes) orelse return error.CorruptResult;
         const limit = std.math.add(usize, expected, 1) catch return error.CorruptResult;
+        if (@import("builtin").is_test) if (s.read_hook) |hook| hook.call(hook.ctx);
         const bytes = std.Io.Dir.cwd().readFileAlloc(s.io, path, a, .limited(limit)) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.CorruptResult,
@@ -281,21 +285,32 @@ pub const Store = struct {
         try s.delete(name);
     }
 
+    /// Tombstone first: every later failure leaves a valid visible receipt, and restart sweeps unreferenced blobs.
     pub fn remove(s: *Store, r: *const Record) !void {
-        const name = try recordName(s.gpa, r.id);
-        defer s.gpa.free(name);
-        var failure: ?anyerror = null;
-        s.delete(name) catch |e| {
-            failure = e;
-        };
-        for (r.artifacts, 0..) |_, index| {
-            const artifact = artifactName(s.gpa, r.id, index) catch |e| return e;
-            defer s.gpa.free(artifact);
-            s.delete(artifact) catch |e| if (failure == null) {
-                failure = e;
+        var tombstone = r.*;
+        tombstone.state = .cancelled;
+        tombstone.cancel_requested = false;
+        tombstone.request = &.{};
+        tombstone.message = null;
+        tombstone.artifacts = &.{};
+        try s.save(&tombstone);
+
+        const prefix = std.fmt.allocPrint(s.gpa, "{s}.", .{r.id}) catch return error.DeleteIncomplete;
+        defer s.gpa.free(prefix);
+        var dir = std.Io.Dir.cwd().openDir(s.io, s.dir, .{ .iterate = true }) catch return error.DeleteIncomplete;
+        defer dir.close(s.io);
+        var failure = false;
+        var it = dir.iterate();
+        while (it.next(s.io) catch return error.DeleteIncomplete) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, prefix) or !std.mem.endsWith(u8, entry.name, ".blob")) continue;
+            dir.deleteFile(s.io, entry.name) catch |e| if (e != error.FileNotFound) {
+                failure = true;
             };
         }
-        if (failure) |e| return e;
+        if (failure) return error.DeleteIncomplete;
+        const name = recordName(s.gpa, r.id) catch return error.DeleteIncomplete;
+        defer s.gpa.free(name);
+        s.delete(name) catch return error.DeleteIncomplete;
     }
 
     pub fn load(s: *Store, max_records: usize) !std.ArrayList(Record) {

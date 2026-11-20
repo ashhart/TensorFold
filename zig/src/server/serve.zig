@@ -483,6 +483,7 @@ test "Failure boundaries: drain and SSE duration settings refuse non-finite or u
 
 fn closeIdle(srv: *server_mod.Server, stop: ?EngineStop) bool {
     if (srv.open_connections.load(.acquire) != 0 or srv.generating.load(.seq_cst) != 0) return false;
+    srv.media_jobs.deinit(); // cancels and joins detached generation before the engine leaves
     srv.stopKeepalive();
     srv.load.detach(false); // the engine stops writing to the ledger before it closes
     if (stop) |st| st.close(st.ctx);
@@ -500,6 +501,7 @@ test "Failure boundaries: engine close waits for handlers and connections to lea
     var server: server_mod.Server = undefined;
     server.open_connections = .init(1);
     server.generating = .init(0);
+    server.media_jobs = .{};
     server.keepalive = null;
     server.load = .init(std.testing.io);
     const stop: EngineStop = .{ .ctx = &count, .close = Count.close };
