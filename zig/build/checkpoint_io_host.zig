@@ -15,6 +15,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"fp8 block:"} })).step);
         if (mode == .debug) b.step("test-gptq-reader-host", "The shared GPTQ reader on a synthetic checkpoint, against binary64 (core/quant/gptq.zig)")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"gptq:"} })).step);
+        if (mode == .debug) b.step("test-artifact-resolution-host", "Pinned target/proposal tuple resolution before model replacement")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"artifact resolution"} })).step);
         const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"Qwen shard integrity:"} })).step);
     }
