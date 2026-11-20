@@ -85,6 +85,7 @@ pub const flags = [_]Flag{
     .{ .name = "--thinking-reserve", .native = true },
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
     .{ .name = "--loop-guard-stop", .kind = .store_true, .native = true },
+    .{ .name = "--tool-think-close", .kind = .store_true, .native = true },
     .{ .name = "--no-drafts", .kind = .store_true, .native = true },
     .{ .name = "--keep-warm", .native = true },
     .{ .name = "--silence-floor-dbfs", .native = true },
@@ -228,6 +229,7 @@ pub const Args = struct {
     thinking_reserve: i64 = 0,
     loop_guard: bool = false,
     loop_guard_stop: bool = false, // the reply ends where the loop guard fires (implies --loop-guard)
+    tool_think_close: bool = false, // a required or named tool call closes thinking in time for the call
     no_drafts: bool = false,
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
     idle_unload: i64 = 0, // seconds of idle past the last request before the engine closes (0: never; the next request reloads)
@@ -371,11 +373,9 @@ fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!voi
 fn spills(args: Args) bool {
     return (args.spill_gib orelse 0) > 0;
 }
-
 pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
 }
-
 pub fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     return @import("fields.zig").pyFloat(v) orelse fail(u, a, "argument {s}: invalid float value: '{s}'", .{ name, v });
 }
@@ -481,7 +481,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--decode-share")) {
         out.decode_share = try float(u, a, name, v);
         if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
-    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--tool-think-close")) out.tool_think_close = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         out.compact_auto = std.mem.eql(u8, v, "auto"); // each occurrence replaces both fields, so the last one wins
         out.compact_fraction = null;
         if (!out.compact_auto) {

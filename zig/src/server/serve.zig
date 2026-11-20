@@ -201,6 +201,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .thinking_reserve = args.thinking_reserve,
         .loop_guard = args.loop_guard or args.loop_guard_stop,
         .loop_stop = args.loop_guard_stop,
+        .tool_think_close = args.tool_think_close,
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
