@@ -550,6 +550,7 @@ pub const Registry = struct {
         var held = true;
         defer if (held) r.mutex.unlock(r.io);
         r.closed = true;
+        var failure: ?anyerror = null;
         while (true) {
             var selected: ?*Record = null;
             for (r.jobs.items) |record| if (record.state == .running and !record.cancel_requested) {
@@ -559,7 +560,9 @@ pub const Registry = struct {
             const record = selected orelse break;
             var next = record.*;
             next.cancel_requested = true;
-            try r.store.save(&next);
+            r.store.save(&next) catch |e| {
+                failure = e;
+            };
             record.cancel_requested = true;
             const runner = r.runner;
             const serial = record.serial;
@@ -572,6 +575,7 @@ pub const Registry = struct {
         r.dispatching = false;
         held = false;
         r.mutex.unlock(r.io);
+        if (failure) |e| return e;
     }
 };
 

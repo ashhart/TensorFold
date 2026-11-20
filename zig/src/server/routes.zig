@@ -25,6 +25,7 @@ const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const flush = @import("cache_flush.zig");
 const slide_forget = @import("slide_forget.zig");
+const media_jobs = @import("media_job_routes.zig");
 const voice_routes = @import("drama_voice_routes.zig");
 const Server = @import("server.zig").Server;
 const request_gate = @import("request_gate.zig");
@@ -43,7 +44,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
     const path = auth.routePath(conn.path);
     const delete_body = std.mem.eql(u8, m, "DELETE") and
-        (std.mem.eql(u8, path, "/v1/slide/facts") or std.mem.startsWith(u8, path, fact_path));
+        (std.mem.eql(u8, path, "/v1/slide/facts") or std.mem.startsWith(u8, path, fact_path) or media_jobs.itemPath(path) != null);
     // SGLang takes its rerank route by PUT as well as POST: the same handler, admission and key scope
     const put_rerank = std.mem.eql(u8, m, "PUT") and auth_scope.putRoute(path);
     if (!std.mem.eql(u8, m, "POST") and !put_rerank and !delete_body and !consumeBody(conn, a)) return;
@@ -57,6 +58,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
         if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
         if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);
         if (srv.config.voice.manage and std.mem.startsWith(u8, route, voice_path)) return voice_routes.delete(srv, conn, a, route[voice_path.len..]);
+        if (media_jobs.itemPath(route)) |id| return media_jobs.remove(srv, conn, a, id);
         return responses.delete(srv, conn, a, responses.route(route));
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
@@ -103,6 +105,8 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
         if (rid.len > 0) return responses.get(srv, conn, a, rid);
         if (@import("ws_upgrade.zig").requested(conn)) return @import("responses_ws.zig").serve(srv, conn, a);
     }
+    if (media_jobs.contentPath(route)) |content| return media_jobs.get(srv, conn, a, content, null);
+    if (media_jobs.itemPath(route)) |id| return media_jobs.get(srv, conn, a, null, id);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/load")) return @import("load_metrics.zig").get(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
@@ -142,6 +146,11 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         discardBody(conn, a);
         return flush.post(srv, conn, a);
     }
+    if (media_jobs.cancelPath(route)) |id| {
+        discardBody(conn, a);
+        return media_jobs.post(srv, conn, a, id);
+    }
+    if (std.mem.eql(u8, route, media_jobs.collection)) return media_jobs.post(srv, conn, a, null);
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
     const is_voices = srv.config.voice.manage and std.mem.eql(u8, route, "/v1/voices");

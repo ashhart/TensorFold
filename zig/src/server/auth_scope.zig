@@ -74,12 +74,17 @@ const inferring = [_][]const u8{
 pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     if (scopes.admin) return true;
     const route = routePath(raw_path);
+    if (std.mem.startsWith(u8, route, "/v1/images/jobs/")) {
+        if (std.mem.eql(u8, method, "GET")) return scopes.inference or scopes.read;
+        if (std.mem.eql(u8, method, "DELETE")) return scopes.admin;
+        return scopes.inference and std.mem.eql(u8, method, "POST");
+    }
     if (std.mem.eql(u8, method, "GET")) {
         if ((scopes.inference or scopes.read) and (oneOf(route, &listing) or modelId(route) != null)) return true;
         return scopes.read and oneOf(route, &reading);
     }
     const put = std.mem.eql(u8, method, "PUT") and putRoute(route);
-    return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
+    return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and (oneOf(route, &inferring) or std.mem.eql(u8, route, "/v1/images/jobs"));
 }
 
 /// The id in GET /v1/models/{id} or /models/{id}, still escaped; a path ending in /models stays the listing's alias.
