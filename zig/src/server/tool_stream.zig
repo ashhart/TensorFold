@@ -22,13 +22,17 @@ pub const Policy = tool_policy.Policy;
 const space = reply_text.isSpaceByte;
 
 /// ``\s*<TAG=([^>\n]+)>\n?`` at the start of ``rest``: the name and the bytes matched.
-fn opening(rest: []const u8, tag: []const u8) ?struct { name: []const u8, len: usize, newline: bool } {
+fn opening(rest: []const u8, tag: []const u8, scanned: *usize) ?struct { name: []const u8, len: usize, newline: bool } {
+    const previous = scanned.*;
+    scanned.* = 0;
     var i: usize = 0;
     while (i < rest.len and space(rest[i])) i += 1;
     if (!std.mem.startsWith(u8, rest[i..], tag)) return null;
     i += tag.len;
     const start = i;
+    i = @max(i, @min(previous, rest.len));
     while (i < rest.len and rest[i] != '>' and rest[i] != '\n') i += 1;
+    if (i >= rest.len) scanned.* = i;
     if (i == start or i >= rest.len or rest[i] != '>') return null;
     const name = rest[start..i];
     i += 1;
@@ -57,8 +61,9 @@ pub const Streamer = struct {
     index: i64 = -1,
     args_open: bool = false,
     lead: bool = false,
-    held: []const u8 = "",
+    held: usize = 0, // trailing value bytes retained in the reply
     streamed: bool = false,
+    opening_scanned: usize = 0, // relative bytes of an incomplete XML name already examined
     searched: usize = 0, // the answer is only ever extended, so prose already searched holds no opener
     tools: []const Value,
     dsml_start: ?usize = null,
@@ -216,7 +221,7 @@ pub const Streamer = struct {
                     }
                 },
                 .call => {
-                    if (opening(rest, "<function=")) |m| {
+                    if (opening(rest, "<function=", &s.opening_scanned)) |m| {
                         const lower = try std.ascii.allocLowerString(s.a, reply_text.pyStrip(m.name));
                         const name = s.known.get(lower) orelse {
                             s.buffered_close = "</tool_call>";
@@ -267,7 +272,7 @@ pub const Streamer = struct {
                     if (parsed.calls) |calls| try s.emitCalls(calls, out);
                 },
                 .function => {
-                    if (opening(rest, "<parameter=")) |m| {
+                    if (opening(rest, "<parameter=", &s.opening_scanned)) |m| {
                         const key = reply_text.pyStrip(m.name);
                         s.value_schema = try tool_params.schemaOf(&s.schemas, s.current, key, s.a);
                         s.typed = try typedSchema(s.a, s.value_schema);
@@ -278,7 +283,7 @@ pub const Streamer = struct {
                         s.pos += m.len;
                         s.state = .value;
                         s.lead = !m.newline;
-                        s.held = "";
+                        s.held = 0;
                         continue;
                     }
                     if (closing(rest, "</function>")) |n| {
@@ -293,19 +298,26 @@ pub const Streamer = struct {
                     const tail = "</parameter>";
                     const end = reply_text.findTag(rest, 0, tail);
                     const chunk = if (end) |e| rest[0..e] else rest[0..trimTail(rest, tail.len)];
+                    const held_from = s.pos - s.held;
                     s.pos += chunk.len;
-                    var piece = try std.mem.concat(s.a, u8, &.{ s.held, chunk });
+                    var piece = text[held_from..s.pos];
+                    var lead_cut: usize = 0;
                     if (s.lead and piece.len > 0) {
-                        if (piece[0] == '\n') piece = piece[1..];
+                        if (piece[0] == '\n') {
+                            piece = piece[1..];
+                            lead_cut = 1;
+                        }
                         s.lead = false;
                     }
                     var keep: []const u8 = undefined;
                     if (end != null) {
                         keep = if (std.mem.endsWith(u8, piece, "\n")) piece[0 .. piece.len - 1] else piece; // the framing newline
-                        s.held = "";
+                        s.held = 0;
                     } else {
-                        keep = reply_text.pyRstrip(piece); // its last newline may be the framing one
-                        s.held = piece[keep.len..];
+                        const fresh = piece[piece.len + lead_cut - chunk.len ..];
+                        const trailing = fresh.len - reply_text.pyRstrip(fresh).len;
+                        keep = if (trailing == fresh.len) piece[0..0] else piece[0 .. piece.len - trailing];
+                        s.held = piece.len - keep.len;
                     }
                     if (s.typed) {
                         try s.buffer.appendSlice(s.a, keep);
@@ -387,11 +399,11 @@ pub const Streamer = struct {
         if (s.state == .glm) return tool_glm_stream.cut(s, text, out); // a GLM value's held bytes
         if (s.state == .dsml) return tool_dsml_stream.cut(s, text, out); // a DSML value's held bytes
         if (s.state != .value) return;
-        var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
+        var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", text[s.pos - s.held .. s.pos], text[@min(s.pos, text.len)..] });
         if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
         s.lead = false;
         s.pos = text.len;
-        s.held = "";
+        s.held = 0;
         s.buffer.clearRetainingCapacity();
         if (cut.len > 0) try out.append(s.a, try s.args(if (s.typed) cut else try s.esc(cut)));
     }
@@ -451,4 +463,5 @@ const wrap = @import("tool_parse.zig").wrapCalls;
 
 test {
     _ = @import("tool_stream_test.zig");
+    _ = @import("tool_stream_scale_test.zig");
 }

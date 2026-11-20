@@ -226,6 +226,7 @@ pub const Stream = struct {
     sep_id: u32,
     end_id: u32,
     at: usize = 0,
+    header_at: usize = 0, // next ordinary token of an incomplete control header to inspect
     ended: bool = false,
     revised: bool = false,
     fallback: bool = false, // an id with no bytes: the reply goes to the whole parse, which decodes it as main does
@@ -307,8 +308,9 @@ pub const Stream = struct {
                 s.preview = 0;
                 if (token == s.open_id or token == s.close_id) {
                     const start = s.at + 1;
-                    var end = start;
+                    var end = @max(start, s.header_at);
                     while (end < ids.len and !text.isAdded(ids[end])) : (end += 1) {}
+                    s.header_at = end;
                     if (end == ids.len) break;
                     const h = if (ids[end] == s.sep_id) try header(r.a, try text.decode(r.a, ids[start..end])) else null;
                     if (h) |tag| {
@@ -318,6 +320,7 @@ pub const Stream = struct {
                         r.bad_call = true;
                     }
                     s.at = end + 1;
+                    s.header_at = s.at;
                 } else {
                     r.rejected = true;
                     r.bad_call = true;

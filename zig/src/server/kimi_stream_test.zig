@@ -77,3 +77,115 @@ test "Server recovery: Kimi incremental: an id with no bytes hands the reply to 
     try std.testing.expect(stream.fallback);
     _ = try reply.parse(a, t.text(), &ids, false, &.{});
 }
+
+const CountingText = struct {
+    inner: mt.Text,
+    vtable: mt.Text.VTable,
+    added_calls: usize = 0,
+
+    fn init(inner: mt.Text) CountingText {
+        var vtable = inner.vtable.*;
+        vtable.token_id = tokenId;
+        vtable.added = added;
+        vtable.decode = decode;
+        vtable.token_bytes = if (inner.vtable.token_bytes != null) tokenBytes else null;
+        return .{ .inner = inner, .vtable = vtable };
+    }
+
+    fn text(c: *CountingText) mt.Text {
+        return .{ .native_deepseek = c.inner.native_deepseek, .ctx = c, .vtable = &c.vtable };
+    }
+
+    fn tokenId(ctx: *anyopaque, piece: []const u8) ?u32 {
+        const c: *CountingText = @ptrCast(@alignCast(ctx));
+        return c.inner.tokenId(piece);
+    }
+
+    fn added(ctx: *anyopaque, id: u32) bool {
+        const c: *CountingText = @ptrCast(@alignCast(ctx));
+        c.added_calls += 1;
+        return c.inner.isAdded(id);
+    }
+
+    fn decode(ctx: *anyopaque, a: A, ids: []const u32) A.Error![]u8 {
+        const c: *CountingText = @ptrCast(@alignCast(ctx));
+        return c.inner.decode(a, ids);
+    }
+
+    fn tokenBytes(ctx: *anyopaque, a: A, id: u32) A.Error!?[]u8 {
+        const c: *CountingText = @ptrCast(@alignCast(ctx));
+        return c.inner.tokenBytes(a, id);
+    }
+};
+
+fn expectFinal(a: A, text: mt.Text, ids: []const u32, thinking: bool, tools: []const json.Value, got: reply.Result) !void {
+    const want = try reply.parse(a, text, ids, thinking, tools);
+    try std.testing.expectEqualStrings(want.content, got.content);
+    try std.testing.expectEqualStrings(want.reasoning, got.reasoning);
+    try std.testing.expectEqual(want.reasoning_tokens, got.reasoning_tokens);
+    try std.testing.expectEqual(want.rejected, got.rejected);
+    try std.testing.expectEqualStrings(try json.stringify(a, if (want.calls) |v| .{ .array = v } else .null, .{}), try json.stringify(a, if (got.calls) |v| .{ .array = v } else .null, .{}));
+}
+
+test "Server recovery: Kimi incremental: incomplete headers advance their cursor without decoding" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try @import("kimi_text_test.zig").synthetic(std.testing.allocator);
+    defer t.deinit();
+    for ([_]usize{ 1024, 16 * 1024, 64 * 1024 }) |size| {
+        var name: std.ArrayList(u8) = .empty;
+        for (0..size) |_| try name.append(a, 'k');
+        const text = try std.mem.concat(a, u8, &.{ "<|open|>call tool=\"", name.items });
+        const ids = try t.text().encode(a, text, false);
+        var storage: [1024]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+        var counting: CountingText = .init(t.text());
+        var stream = (try reply.Stream.init(fixed.allocator(), counting.text(), false, &.{})).?;
+        const allocated = fixed.end_index;
+        for (1..ids.len + 1) |n| {
+            _ = try stream.extend(ids[0..n]);
+            try std.testing.expectEqual(n, stream.header_at);
+            try std.testing.expectEqual(allocated, fixed.end_index);
+            try std.testing.expectEqual(1 + @as(usize, @intFromBool(n > 1)), counting.added_calls);
+            counting.added_calls = 0;
+        }
+    }
+}
+
+test "Server recovery: Kimi incremental: large late names and split Unicode preserve multiple calls" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try @import("kimi_text_test.zig").synthetic(std.testing.allocator);
+    defer t.deinit();
+    for ([_]usize{ 1024, 16 * 1024, 64 * 1024 }) |size| {
+        var first: std.ArrayList(u8) = .empty;
+        var second: std.ArrayList(u8) = .empty;
+        for (0..size) |_| {
+            try first.append(a, 'k');
+            try second.append(a, 'm');
+        }
+        const names = [_][]const u8{ first.items, second.items };
+        const tools_json = try std.mem.concat(a, u8, &.{ "[{\"type\":\"function\",\"function\":{\"name\":\"", first.items, "\"}},{\"type\":\"function\",\"function\":{\"name\":\"", second.items, "\"}}]" });
+        const tools = (try json.parse(a, tools_json)).ok.array;
+        var text: std.ArrayList(u8) = .empty;
+        try text.appendSlice(a, "<|close|>response<|sep|><|open|>tools<|sep|>");
+        for (names, 0..) |name, i| {
+            try text.appendSlice(a, "<|open|>call tool=\"");
+            try text.appendSlice(a, name);
+            try text.appendSlice(a, try std.fmt.allocPrint(a, "\" index=\"{d}\"<|sep|>", .{i + 1}));
+            try text.appendSlice(a, "<|open|>argument key=\"q\" type=\"string\"<|sep|>😀é &lt;|open|&gt; &quot;quoted&quot; \\ path");
+            const close = "<|" ++ "close" ++ "|>";
+            try text.appendSlice(a, close ++ "argument<|sep|>");
+            try text.appendSlice(a, close ++ "call<|sep|>");
+        }
+        try text.appendSlice(a, ("<|" ++ "close" ++ "|>") ++ "tools<|sep|>");
+        try text.appendSlice(a, ("<|" ++ "close" ++ "|>") ++ "message<|sep|><|end_of_msg|>");
+        const ids = try t.text().encode(a, text.items, false);
+        var stream = (try reply.Stream.init(a, t.text(), false, tools)).?;
+        var got: reply.Result = undefined;
+        for (1..ids.len + 1) |n| got = try stream.extend(ids[0..n]);
+        try expectFinal(a, t.text(), ids, false, tools, got);
+    }
+}
