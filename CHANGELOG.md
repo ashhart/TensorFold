@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_MTP_WEIGHTS=mxfp8` (opt-in) re-codes the MTP drafter's BF16 linears to MXFP8 as they load, so a draft pass reads about half their bytes; replies are unchanged because the verify forward checks every draft. `checkpoint`, the default (also unset or blank), keeps the rows as stored; any other value, `mxfp8` on Metal or HIP, or a drafter linear stored as anything but BF16 stops the start naming the setting (#3218, refs #3162). Thanks to @BadAd84.
+
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
 - Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
 
