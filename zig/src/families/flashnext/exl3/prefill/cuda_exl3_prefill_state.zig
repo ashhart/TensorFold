@@ -105,8 +105,9 @@ pub fn deviceBytesAt(rows: usize, world: usize) usize {
     return Layout.of(rows, world).total;
 }
 
+// A lone rank writes the canonical root directly to the branch and allocates no partial region.
+
 /// The reduction's branch [rows, D] fp32, then TP ranks' fp64 block partials (`leaves.partials(world)` per rank).
-/// A lone rank writes the canonical root directly to the branch and allocates no partial region.
 pub fn sumBytes(rows: usize, world: usize) usize {
     return rows * dims * 4 + gatherBytes(rows, world);
 }

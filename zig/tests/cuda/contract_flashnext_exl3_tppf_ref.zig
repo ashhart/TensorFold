@@ -1,5 +1,4 @@
-//! Host cases of Flash Next EXL3's TP prefill reduction launches: inputs, float64 and bit oracles, stress, faults. The combine's
-//! partials and the finish's inputs are f64 words; the finish's output is the f32 its one rounding gives.
+//! Host cases of Flash Next EXL3's TP prefill reduction launches: inputs, float64/bit oracles, stress, faults.
 const std = @import("std");
 const core = @import("core");
 const flash = @import("flashnext");
@@ -14,8 +13,7 @@ pub const dims = 2560;
 /// A planted fault of a control kernel (contract_tppf_controls.cuh); none is the shipped kernel.
 pub const Fault = enum { none, flat, nan_dropped, writes_input, bf16_adds, wrong, f32_partials };
 
-/// The gate a planted fault must turn red in `Case`. A case whose outputs are f64 words (`f64_words`: the combine's partials)
-/// has no gate 4 (an f64 accumulator is beyond what that gate proves), so its bf16 tree adds go red at gate 3's bit check.
+/// The gate a planted fault must turn red in `Case`; f64-word outputs (`f64_words`) skip gate 4, red at gate 3.
 pub fn controlGate(comptime Case: type, f: Fault) ?g.Gate {
     return switch (f) {
         .none => null,
@@ -62,8 +60,7 @@ fn big(rng: std.Random) f64 {
 
 const stated = "the bytes of the host canonical tree (NaN payloads aside) and float64's class on every output";
 
-/// Each output against the host's f64 value as the kernel stores it (`wide`: the f64 partial as is; else its one rounding to
-/// f32), then float64's class and bound (gate 1: some finite and some not).
+/// Each output vs the host's f64 value as stored (`wide`: f64 as is, else one f32 rounding), class and bound (gate 1).
 fn verifyWords(wide: bool, msg: []u8, s: c.Spec, shape: c.Shape, gate: g.Gate, out: []const u8, want: []const f64, mag: []const f64, ctx: anytype, comptime expected: anytype) !?[]const u8 {
     var finite: usize = 0;
     for (want, mag, 0..) |w, m, i| {
@@ -102,9 +99,7 @@ fn plantRows(rows: usize, n: usize, y: []f32, w: []f32, pieces: usize) void {
     };
 }
 
-/// A row's value of one block as the kernel's leaf chains and tree give it, in f64 (absent leaves are +0, never -0). Each f32
-/// product is exact in f64, so a leaf is the fma chain of its slots; a fault changes the chain (NaN products dropped), the
-/// tree (one chain, bf16 adds) or the store (through f32).
+/// A block's f64 value as the kernel's leaf chains and tree give it (absent leaves +0); a fault hits chain, tree,store.
 pub fn blockSum(y: *const [slots]f32, w: *const [slots]f32, p: *const [slots]i32, start: usize, log: u8, fault: Fault) f64 {
     var leaf: [canon.leaves]f64 = @splat(0);
     const size = @as(usize, 1) << @intCast(log);
@@ -134,8 +129,7 @@ pub fn rankBlocks(buf: *[canon.max_blocks]canon.Block, world: usize, rank: usize
     return canon.blocks(buf, r.lo, r.hi);
 }
 
-/// The f64 partial against the reference's own f64 sum: each is within a leaf's fma chain (at most 11 slots) and the 6 levels
-/// of the tree above it of the exact value.
+/// The f64 partial vs the reference's own f64 sum: within a leaf's fma chain (at most 11 slots) and the 6 tree levels.
 fn partialDepth(_: c.Shape) usize {
     return 2 * (slots + canon.leaf_log);
 }
@@ -252,10 +246,11 @@ pub const Combine = struct {
         if (fill == .nonfinite) {
             plantRows(self.shape.rows, self.shape.n, self.y, self.w, slots);
         } else {
-            // Row 0, one leaf a slot (0-9, the shared expert in 63), every product y / 16, four planted columns:
-            //  0: a negative subnormal, a nonzero f64 product that f32 underflows; 1: all -0 products, the block is +0;
-            //  2: 1.25e8, 1, -1.25e8, 1 (f32 loses the 1s, f64 sums 2); 3: 2^60, 1, -2^60, 1 (f64 loses them too, so a flat
-            //  chain gives 1 where the tree gives 0: a fault the random columns cannot always show)
+            // Row 0, one leaf a slot (0-9, the shared expert in 63), every product y / 16; four planted columns:
+
+            //  0: negative subnormal (f64 product f32-underflows); 1: all -0 products, the block +0; 2: +-1.25e8,1
+
+            //  (f32 loses the 1s, f64 sums 2); 3: +-2^60,1 — f64 loses them too, flat gives 1 where the tree gives 0.
             const n = self.shape.n;
             const cancel = [2][4]f32{ .{ 2e9, 16, -2e9, 16 }, .{ 0x1p64, 16, -0x1p64, 16 } };
             for (0..slots) |k| {
@@ -401,8 +396,9 @@ const finish_served = [_]c.Shape{
 };
 pub const max_finish_rows = 4096;
 
-/// The tree finished from the gathered f64 partials of one region: world x M partial blocks a row, merged in leaf order in f64
-/// and rounded once to f32.
+// world x M partial blocks a row, merged in leaf order in f64 and rounded once to f32.
+
+/// The tree finished from the gathered f64 partials of one region.
 pub const Finish = struct {
     gpa: std.mem.Allocator,
     fault: Fault = .none,
@@ -474,7 +470,7 @@ pub const Finish = struct {
         return self.slotOf(self.ps[piece]) * self.count() + i;
     }
 
-    /// Partials of different magnitudes and a full 53-bit mantissa (a merge in f32 or a flat chain shows), a few negative zeros.
+    /// Partials of varied magnitudes and a full 53-bit mantissa (a merge in f32 or a flat chain shows), a few -0s.
     fn random(self: *Finish, rng: std.Random, fill: g.Fill) void {
         for (self.vals) |*v| {
             const scale: f64 = @floatFromInt(@as(u32, 1) << rng.uintLessThan(u5, 10));
@@ -499,7 +495,7 @@ pub const Finish = struct {
         };
     }
 
-    /// Integer partials of 2^19 to 2^20 in shuffled negated pairs (odd one out 3): exact in f64 and fp32, ruinous in fp16/bf16.
+    /// Integer partials of 2^19..2^20 in shuffled negated pairs (odd one out 3): exact in f64/fp32, ruinous in fp16.
     fn stress(self: *Finish, rng: std.Random) void {
         for (0..self.count()) |i| {
             var v: [canon.max_pieces]f64 = undefined;

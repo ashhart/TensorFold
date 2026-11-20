@@ -95,8 +95,9 @@ pub fn maskOwned(picks: []i32, r: ?tp_.Rank) void {
     };
 }
 
-/// TP partials stay fp64 through the all-gather and finish, then round once to fp32. TP1 runs the same root kernel as
-/// decode directly into the branch: no gathered-partial allocation or extra finish pass.
+// TP1 runs the same root kernel as decode into the branch: no gathered-partial allocation or extra finish pass.
+
+/// TP partials stay fp64 through the all-gather and finish, then round once to fp32.
 pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usize) !void {
     const st = p.stream;
     const sum = dp.dptr(dp.lay.sum);

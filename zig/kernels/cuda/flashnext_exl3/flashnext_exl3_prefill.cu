@@ -352,9 +352,11 @@ __device__ __forceinline__ int pf_blocks(int lo, int hi, int* st, int* sz) {
     return n;
 }
 
-// Block partials of one rank into out[sub-block][rank * M + j][row][D], in double: a sub-block's slice is one all-gather's
-// region. A block's value is the decode kernels' fn_exl3_leaf_value_f64 (a leaf is an fma chain of its slots in slot order,
-// the tree above it binary adds), so no partial is rounded: the finish merges what one rank's whole tree would hold.
+// A rank's block partials into out[sub-block][rank*M + j][row][D] in double; a sub-block slice is an all-gather region.
+
+// A block's value is fn_exl3_leaf_value_f64 (a leaf is an fma chain of its slots in order, the tree binary-adds),
+
+// so no partial is rounded: the finish merges what one rank's whole tree would hold.
 extern "C" __global__ void __launch_bounds__(256) tf_exl3pf_tp_combine(const float* __restrict__ y, const float* __restrict__ wts,
         const int* __restrict__ pick, double* __restrict__ out, int slots, int D, int n, int sub, int world, int rank, int M) {
     const int r = blockIdx.x;
@@ -372,7 +374,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_exl3pf_tp_combine(const flo
     }
 }
 
-// The tree finished from the gathered double partials: equal adjacent aligned blocks merge by dadd_rn until one is left,
+// The tree finished from the gathered double partials: equal adjacent aligned blocks merge by dadd_rn until one is left
+
 // rounded once to float (to nearest even) at the root.
 extern "C" __global__ void __launch_bounds__(256) tf_exl3pf_tp_finish(const double* __restrict__ gath, float* __restrict__ sum,
         int D, int m, int world, int M) {

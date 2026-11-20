@@ -74,9 +74,13 @@ __device__ __forceinline__ int blocks(int lo, int hi, int* st, int* sz) {
     return n;
 }
 
-// A block's value as fn_exl3_leaf_value_f64 computes it (an fma chain a leaf in slot order from +0, the tree above it binary
-// adds, an empty sibling +0), then the fault: FLAT one chain a block, NAN_DROPPED skips NaN products, BF16_ADDS rounds
-// merges, F32_PARTIALS stores the block through float.
+// A block's value as fn_exl3_leaf_value_f64 computes it: an fma chain a leaf in slot order from +0,
+
+// the tree above it binary adds, an empty sibling +0.
+
+// Then the fault: FLAT one chain a block, NAN_DROPPED skips NaN products, BF16_ADDS rounds merges.
+
+// F32_PARTIALS stores the block through float.
 template <int F>
 __device__ __forceinline__ double block_value(const float* y, const float* wts, const int* pick, int r, int d, int D, int slots,
                                               int start, int log) {
@@ -136,8 +140,9 @@ __device__ __forceinline__ double block_value(const float* y, const float* wts, 
     return F == F32_PARTIALS ? static_cast<double>(__double2float_rn(value)) : value;
 }
 
-// tf_exl3pf_tp_combine, then the fault: FLAT one chain a block (3), NAN_DROPPED (1), WRITES_INPUT (2), BF16_ADDS (3: the
-// partials are double words, which gate 4 does not read), F32_PARTIALS (3).
+// tf_exl3pf_tp_combine, then the fault: FLAT one chain a block (3), NAN_DROPPED (1), WRITES_INPUT (2),
+
+// BF16_ADDS (3: the partials are double words, which gate 4 does not read), F32_PARTIALS (3).
 template <int F>
 __device__ __forceinline__ void combine(float* y, const float* wts, const int* pick, double* out, int slots, int D, int n,
                                         int sub, int world, int rank, int M) {
@@ -160,6 +165,7 @@ __device__ __forceinline__ void combine(float* y, const float* wts, const int* p
 }
 
 // tf_exl3pf_tp_finish, then the fault: FLAT adds every piece in one chain (gate 3), WRITES_INPUT (2), BF16_ADDS (4),
+
 // F32_PARTIALS reads every gathered piece through float, as an f32-typed gather would carry it (3).
 template <int F>
 __device__ __forceinline__ void finish(double* gath, float* sum, int D, int m, int world, int M) {
