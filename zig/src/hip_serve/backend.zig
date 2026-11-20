@@ -22,6 +22,7 @@ pub const Fill = struct {
     pub fn init(from: usize, marks: []const u32) Fill {
         var f: Fill = .{ .at = from, .count = @min(marks.len, 16) };
         @memcpy(f.stops[0..f.count], marks[0..f.count]);
+        while (f.next < f.count and f.stops[f.next] <= from) f.next += 1;
         return f;
     }
 
@@ -375,6 +376,14 @@ test "a prompt pass stops at its cuts, then the prompt's end" {
     try std.testing.expect(f.cut(128));
     try std.testing.expectEqual(@as(usize, 256), f.limit(1000));
     try std.testing.expect(f.cut(256));
+    try std.testing.expectEqual(@as(usize, 1000), f.limit(1000));
+}
+
+test "a resumed prompt pass skips cuts at and before its restored row" {
+    var f = Fill.init(64, &.{ 32, 64, 128 });
+    try std.testing.expectEqual(@as(usize, 128), f.limit(1000));
+    try std.testing.expect(!f.cut(64));
+    try std.testing.expect(f.cut(128));
     try std.testing.expectEqual(@as(usize, 1000), f.limit(1000));
 }
 
