@@ -26,6 +26,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, api: *std.Build.Module) *st
         .link_libc = true,
         .imports = &.{.{ .name = "json", .module = @import("server.zig").json(b, limits.resolved_target.?, .debug) }},
     });
+    _ = @import("product.zig").windowsCompile(b);
     b.step("check-chat-windows-host", "Compile tensorfold chat's --url path for Windows without linking or running").dependOn(&b.addObject(.{ .name = "chat-windows", .root_module = chat }).step);
     return step;
 }
