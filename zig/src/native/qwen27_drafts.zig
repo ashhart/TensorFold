@@ -22,6 +22,11 @@ pub const Draw = struct {
     }
 };
 
+/// A shared round reads each node's chance from its tree's scores, so only a lone stream's tree takes the noise.
+pub fn followsDraw(lone: bool, s: *const lanes.Stream) bool {
+    return lone and s.sampling != null;
+}
+
 /// Only slots that currently draft compete for rows in the next shared allocation.
 fn live(b: *const Metal) usize {
     var n: usize = 0;
@@ -74,12 +79,13 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
             continue;
         };
         batch[n] = .{ .context = if (slot == 0) null else b.contexts[slot].?, .pending = pending, .nodes = nodes, .costs = if (lone) costs[0..b.window] else &.{}, .overhead_ms = if (lone) @max(0, r.stream.tree_over orelse r.stream.round_over orelse 0) else 0, .defer_price = lone };
-        // a sampled stream's tree ranks its candidates as the target's keyed race will draw them
-        if (r.position == stands + 1) if (r.stream.sampling) |x| {
+        // a lone sampled stream's tree ranks its candidates as the target's keyed race will draw them
+        if (r.position == stands + 1 and followsDraw(lone, r.stream)) {
+            const x = r.stream.sampling.?;
             draws[n] = .{ .seed = x.seed };
             batch[n].noise = draws[n].noise();
             batch[n].temperature = x.temperature;
-        };
+        }
         owners[n] = slot;
         n += 1;
         if (n == batch.len) {
