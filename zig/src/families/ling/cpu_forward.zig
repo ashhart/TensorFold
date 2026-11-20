@@ -209,7 +209,9 @@ pub fn Forward(comptime Source: type) type {
             }
         };
 
-        fn runInto(work_a: std.mem.Allocator, source: *Source, c: *const config.Config, ids: []const u32, threads: usize, state: ?*State, logits: []f32, picks: []u32) !void {
+        const LogitsMode = enum { all, last, none };
+
+        fn runInto(work_a: std.mem.Allocator, source: *Source, c: *const config.Config, ids: []const u32, threads: usize, state: ?*State, logits_mode: LogitsMode, logits: []f32, picks: []u32) !void {
             const r = Run{ .a = work_a, .source = source, .c = c, .threads = threads, .count = ids.len, .state = state };
             const x = try r.alloc(c.hidden);
             try source.embed(ids, x);
@@ -224,9 +226,21 @@ pub fn Forward(comptime Source: type) type {
                 const y = if (i < c.dense_layers) try r.mlp(n, m, c.dense_inter, 0) else try r.moe(n, m, i, picks[(i - c.dense_layers) * ids.len * c.topk ..][0 .. ids.len * c.topk]);
                 for (x, y) |*v, z| v.* = op.round(v.* + z);
             }
-            const final = try r.norm(x, "model.", "norm.weight", c.hidden);
-            try r.linearInto("", "lm_head.weight", final, logits, c.hidden, c.vocab, false);
-            for (logits) |v| if (!std.math.isFinite(v)) return error.NonfiniteCpuLogits;
+            switch (logits_mode) {
+                .none => {},
+                .all => {
+                    const final = try r.norm(x, "model.", "norm.weight", c.hidden);
+                    try r.linearInto("", "lm_head.weight", final, logits, c.hidden, c.vocab, false);
+                    for (logits) |v| if (!std.math.isFinite(v)) return error.NonfiniteCpuLogits;
+                },
+                .last => {
+                    const last_x = x[(ids.len - 1) * c.hidden ..][0..c.hidden];
+                    const one = Run{ .a = r.a, .source = r.source, .c = r.c, .threads = r.threads, .count = 1, .state = r.state };
+                    const final = try one.norm(last_x, "model.", "norm.weight", c.hidden);
+                    try one.linearInto("", "lm_head.weight", final, logits, c.hidden, c.vocab, false);
+                    for (logits) |v| if (!std.math.isFinite(v)) return error.NonfiniteCpuLogits;
+                },
+            }
         }
 
         /// One to eight rows through every layer; without a state each call starts from position 0.
@@ -239,7 +253,7 @@ pub fn Forward(comptime Source: type) type {
             const work_a = if (scratch) |s| s.allocator() else out_a;
             const picks = try out_a.alloc(u32, (c.layers - c.dense_layers) * ids.len * c.topk);
             const logits = try out_a.alloc(f32, ids.len * c.vocab);
-            try runInto(work_a, source, c, ids, threads, state, logits, picks);
+            try runInto(work_a, source, c, ids, threads, state, .all, logits, picks);
             return .{ .arena = arena, .logits = logits, .picks = picks };
         }
 
@@ -271,13 +285,16 @@ pub fn Forward(comptime Source: type) type {
                 return result;
             }
 
-            /// Runs a step into session-owned output buffers reused across tokens without per-step allocation.
-            pub fn step(self: *Session, ids: []const u32) !StepView {
+            fn stepMode(self: *Session, ids: []const u32, mode: LogitsMode) !StepView {
                 if (self.state.poisoned) return error.CpuPoisonedState;
                 if (ids.len == 0 or ids.len > 8) return error.CpuRows;
                 if (ids.len > self.state.capacity - self.state.position) return error.CpuContextCapacity;
                 for (ids) |id| if (id >= self.config.vocab) return error.InvalidToken;
-                const need_logits = ids.len * self.config.vocab;
+                const need_logits: usize = switch (mode) {
+                    .none => 0,
+                    .last => self.config.vocab,
+                    .all => ids.len * self.config.vocab,
+                };
                 if (self.logits_buf.len < need_logits) {
                     const next_logits = try self.a.alloc(f32, need_logits);
                     if (self.logits_buf.len > 0) self.a.free(self.logits_buf);
@@ -291,11 +308,21 @@ pub fn Forward(comptime Source: type) type {
                 }
                 _ = self.scratch.reset(.retain_capacity);
                 errdefer self.state.poisoned = true;
-                const logits = self.logits_buf[0..need_logits];
+                const logits: []f32 = if (need_logits > 0) self.logits_buf[0..need_logits] else &.{};
                 const picks = self.picks_buf[0..need_picks];
-                try runInto(self.scratch.allocator(), self.source, &self.config, ids, self.threads, &self.state, logits, picks);
+                try runInto(self.scratch.allocator(), self.source, &self.config, ids, self.threads, &self.state, mode, logits, picks);
                 self.state.position += @intCast(ids.len);
                 return .{ .logits = logits, .picks = picks };
+            }
+
+            /// Runs a step into session-owned output buffers reused across tokens without per-step allocation.
+            pub fn step(self: *Session, ids: []const u32) !StepView {
+                return self.stepMode(ids, .all);
+            }
+
+            /// Advances state over a prompt chunk, skipping discarded lm_head projections on non-final prompt rows.
+            pub fn prefillChunk(self: *Session, ids: []const u32, want_last_logits: bool) !StepView {
+                return self.stepMode(ids, if (want_last_logits) .last else .none);
             }
 
             pub fn reset(self: *Session) void {
