@@ -1,4 +1,4 @@
-//! Portable BF16/F32 dense rows for the Ling CPU path; F32 GGUF tensors project through these.
+//! Portable BF16/F32 dense rows and RMS normalization for the Ling CPU path.
 const std = @import("std");
 const st = @import("core").safetensors;
 const rounding = @import("bf16_round");
@@ -22,6 +22,12 @@ pub fn check(t: st.Tensor, shape: []const usize) !void {
 
 pub fn round(x: f32) f32 {
     return rounding.round32(x);
+}
+
+pub fn sigmoid(x: f32) f32 {
+    if (x >= 0) return 1 / (1 + @exp(-x));
+    const e = @exp(x);
+    return e / (1 + e);
 }
 
 pub fn project(t: st.Tensor, x: []const f32, y: []f32, rows: usize, width: usize, outputs: usize, rounded: bool) !void {
@@ -92,6 +98,17 @@ pub fn projectOn(t: st.Tensor, x: []const f32, y: []f32, rows: usize, width: usi
         made += 1;
     }
     projectRange(t, x, y, rows, width, outputs, rounded, (n - 1) * outputs / n, outputs);
+}
+
+pub fn norm(x: []const f32, w: []const f32, y: []f32, rows: usize, width: usize, eps: f32) !void {
+    if (width == 0 or w.len != width or x.len != rows * width or y.len != x.len) return error.CpuRowShape;
+    for (0..rows) |r| {
+        const row = x[r * width ..][0..width];
+        var ss: f32 = 0;
+        for (row) |v| ss += v * v;
+        const inv = 1 / @sqrt(ss / @as(f32, @floatFromInt(width)) + eps);
+        for (row, w, y[r * width ..][0..width]) |v, weight, *out| out.* = round(round(v * inv) * weight);
+    }
 }
 
 test "dense rows reject malformed views and preserve nonfinite inputs" {
