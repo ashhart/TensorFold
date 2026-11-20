@@ -18,6 +18,7 @@ test {
     _ = @import("cpu_gguf_rows.zig");
     _ = @import("cpu_gguf_rows_test.zig");
     _ = @import("cpu_gguf_pool_test.zig");
+    _ = @import("cpu_gguf_pool_fast_test.zig");
     _ = @import("cpu_gguf_q4_sdot.zig");
     _ = @import("cpu_gguf_q4_sdot_test.zig");
     _ = @import("cpu_gguf_repack8.zig");
