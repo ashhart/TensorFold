@@ -7,3 +7,4 @@
 #include "contract_nemo_audio_controls.cuh"
 #include "contract_idol_controls.cuh"
 #include "contract_embed_controls.cuh"
+#include "contract_int4_controls.cuh"
