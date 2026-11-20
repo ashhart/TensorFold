@@ -276,6 +276,10 @@ pub const ComputeEncoder = struct {
     /// Declare several resources in one call (useResources:count:usage:).
     pub fn useResources(self: ComputeEncoder, ids: []const objc.Id, usage: usize) void {
         if (ids.len == 0) return;
+        if (self.slot()) |s| {
+            for (ids) |id| _ = s.q.address(id);
+            return;
+        }
         objc.msg(void, self.id, "useResources:count:usage:", .{ ids.ptr, ids.len, usage });
     }
 
