@@ -397,13 +397,13 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(m3_src);
     var m3_out: affine_mm.Pipes = undefined;
     if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
-    const all = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
+    const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
-        for (all) |j| try visitor.raw("glm", j.names[0], j.source);
+        for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
         return;
     }
     var sources_seen = std.hash.Wyhash.init(0x6b);
-    for (all) |j| sources_seen.update(j.source);
+    for (active_jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
     var next = std.atomic.Value(usize).init(0);
     const Worker = struct {
@@ -416,10 +416,10 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
         }
     };
     var threads: [8]?std.Thread = @splat(null);
-    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ all, &next }) catch null;
-    Worker.run(all, &next);
+    for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ active_jobs, &next }) catch null;
+    Worker.run(active_jobs, &next);
     for (threads) |t| if (t) |th| th.join();
-    for (all) |j| if (j.failed) return error.KernelCompile;
+    for (active_jobs) |j| if (j.failed) return error.KernelCompile;
     inline for (glue, 0..) |g, i| @field(k, g.field) = glue_out[i];
     k.sample = sample_out[0]; // the shared sampler's own library: glm_glue's table never named it
     k.latent_scores = attn_out[0];
