@@ -438,17 +438,14 @@ HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
 
-Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
-`id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
-angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
-Its decoders' own kernels (`metal_idol_decoder*.zig`) are checked too: the point embedding, the stem's fp16 cast,
-`to_kv`, the heads' RMS norm, the attention's four forms (P V as fp16 P hi + lo) and its fp32 short form. Each is checked
-at idol-sdk's fp32 and fp16 points, with 15 controls. One drops P's lo half and must go red on heads built so that O is
-P's fp16 remainder alone.
-Its image encoder (`metal_idol_vae*.zig`, FLUX.2's VAE encoder in fp32) registers its convolutions (direct, implicit
-GEMM and Winograd), GroupNorm's passes, the 512-wide attention and the condition rows against float64 (12 controls).
-Metal also checks Idol's DINOv3 encoder (`metal_idol_dino*.zig`): its bf16 projections, LayerNorm and final F.layer_norm,
-the RoPE heads, LayerScale with the residual, SwiGLU and the attention, each at transformers' bf16 points (11 controls).
+Metal also checks Idol (`metal_idol*.zig`, each part's controls in [its recipe](recipes/idol.md)): the denoiser's fp16
+projections and GELU form, split-K fp32 rows, LayerNorms, RePo's angles, heads, elementwise steps and four attention
+forms at idol-sdk's fp16 points, and `id_gemm32`'s true fp32 sums, where the NAX fp32 path is a gate-4 control (19
+controls); the decoders' point embedding, fp16 stem cast, `to_kv`, RMS-normed heads and attention, P V as fp16 P hi +
+lo, which a control without the lo half must fail on heads whose O is that remainder alone (15); the FLUX.2 VAE
+encoder's convolutions (direct, implicit GEMM, Winograd), GroupNorm, 512-wide attention and condition rows in fp32
+against float64 (12); and DINOv3's bf16 projections, LayerNorms, RoPE heads, LayerScale, SwiGLU and attention at
+transformers' bf16 points (11).
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
