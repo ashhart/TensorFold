@@ -57,6 +57,8 @@ Fast mode (requires a dot-product build; uses integer SDOT, 8x4 repacked weights
 ling-cpu-decode --fast ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
+On a `.tf_repack8.v4` cache hit, `--fast` verifies the cache header, entry table bounds, and the GGUF's size, inode, mtime, and ctime against the header without re-hashing the GGUF or re-scanning raw quantized scales. The cache is built from validated blocks and stores the GGUF's SHA-256 in its header; any change to the file's stat identity (or removing the cache file) triggers a rebuild.
+
 The arguments are the GGUF, the prompt's token IDs separated by commas (`PROMPT_IDS=ID,ID,...`), the number of tokens
 to generate, and the thread count (1 to 8, default 1). The output has this shape:
 
