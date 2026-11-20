@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: a decode window's EXL3 routed experts launch on the 16-pair item plan instead of the group kernel's grid of mostly idle blocks, with the same output bytes (#2044). Thanks to @BadAd84.
+
 - Server: `/v1/metrics` reports a `tensorfold:open_connections` gauge, the client connections admitted over TCP or the Unix socket and not yet closed, including idle keep-alive ones (#3925). Thanks to @plotarmordev.
 
 - Tools: served checks reject unexercised draft, seed, cache, cancellation and logit comparisons, covered by 11 served and constraint regression tests, and benchmark receipts name vacuous comparisons (#3772, refs #2460). Thanks to @jschmied.
