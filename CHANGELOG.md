@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Windows: when a checkpoint load releases the pages it has finished with, the process's working set is trimmed too, so those pages stop crowding a unified-memory budget; Linux and macOS are unchanged (#3866). Thanks to @ElderOrb.
+
 - Flash Next on CUDA: `TF_FLASHNEXT_READOUT_FUSED=1` (off by default) runs a prompt pass's BF16 hyper-connection read-out from 768 rows in three launches instead of five, with every output byte the same (#3413, refs #3392). Thanks to @BadAd84.
 
 - Docs: the optimization ledger records the rows-together dense 4-bit stream tile on gfx1151 as `failed` for Nemotron on HIP: its launches got faster, but the draft policy then drafted shallower and two greedy Lightning streams got slower (#3395, refs #3305). Thanks to @gilby.
