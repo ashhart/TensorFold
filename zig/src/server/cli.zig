@@ -64,6 +64,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-max-images", .native = true },
     .{ .name = "--vision-max-videos", .native = true },
     .{ .name = "--vision-image-tokens", .native = true },
+    .{ .name = "--vision-image-share", .choices = &.{ "request", "fixed" }, .native = true },
     .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
     .{ .name = "--profile", .choices = &.{"stable"}, .native = true },
@@ -273,6 +274,7 @@ pub const Args = struct {
     vision_max_videos: u32 = 2,
     vision_image_tokens: u32 = 4096,
     vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
+    vision_image_share: api.ImageShare = .request, // --vision-image-share: the request's own count, or the fixed share
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
 };
 
@@ -338,6 +340,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
+    if (out.vision_image_share != .request and !out.vision) return fail(u, a, "--vision-image-share needs --vision", .{});
     try @import("cli_late.zig").check(a, out, &repeated, u);
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
@@ -396,12 +399,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
             return std.mem.eql(u8, x, y);
         }
     }.f;
-    if (is(name, "--silence-floor-dbfs")) {
-        out.silence.floor_dbfs = try float(u, a, name, v);
-        return;
-    }
-    if (is(name, "--silence-seconds")) {
-        out.silence.seconds = try float(u, a, name, v);
+    if (is(name, "--silence-floor-dbfs") or is(name, "--silence-seconds")) {
+        const level = try float(u, a, name, v);
+        if (is(name, "--silence-floor-dbfs")) out.silence.floor_dbfs = level else out.silence.seconds = level;
         return;
     }
     if (is(name, "--silence-mid-s") or is(name, "--silence-mid-min-voiced-s")) {
@@ -493,7 +493,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -577,7 +577,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
-        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
+        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens, .image_share = args.vision_image_share } else null,
     });
 }
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
