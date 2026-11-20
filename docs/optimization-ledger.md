@@ -83,10 +83,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
 | 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
 | 34. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
-| 34. FP8 KV prefill waits | failed C[#3741] | ? | ? | ? | ? |
-| 35. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
-| 36. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
-| 37. Greedy readback | ? | ? | ? | ? | ? |
+| 35. FP8 KV prefill waits | failed C[#3741] | ? | ? | ? | ? |
+| 36. Qwen normalization and head | failed C[#3741] | ? | ? | ? | ? |
+| 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -124,10 +124,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
-| 34. FP8 KV prefill waits | ? | ? | ? | ? | ? |
-| 35. Qwen normalization and head | ? | ? | ? | ? | ? |
-| 36. Text metadata uploads | ? | ? | ? | ? | ? |
-| 37. Greedy readback | ? | ? | ? | ? | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -165,10 +165,10 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
-| 34. FP8 KV prefill waits | ? | ? | ? | ? |
-| 35. Qwen normalization and head | ? | ? | ? | ? |
-| 36. Text metadata uploads | ? | ? | ? | ? |
-| 37. Greedy readback | ? | ? | ? | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -212,10 +212,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
 | 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
-| 34. FP8 KV prefill waits | ? | ? | ? | ? |
-| 35. Qwen normalization and head | ? | ? | ? | ? |
-| 36. Text metadata uploads | ? | ? | ? | ? |
-| 37. Greedy readback | ? | ? | ? | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -253,10 +253,10 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 32. Filled-item prompt grid | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? |
 | 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
-| 34. FP8 KV prefill waits | ? | ? | ? |
-| 35. Qwen normalization and head | ? | ? | ? |
-| 36. Text metadata uploads | ? | ? | ? |
-| 37. Greedy readback | ? | ? | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -308,10 +308,10 @@ below; these are estimates for planning a port, not results.
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
 | 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
 | 34. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
-| 34. FP8 KV prefill waits | none | none | none | CUDA qwen3_5: +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) |
-| 35. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
-| 36. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
-| 37. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
+| 35. FP8 KV prefill waits | none | none | none | CUDA qwen3_5: +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) |
+| 36. Qwen normalization and head | none | none | none | CUDA qwen3_5: −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) |
+| 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
+| 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
 
 ## The optimizations
 
@@ -576,14 +576,14 @@ below; these are estimates for planning a port, not results.
     | nemotron (H), Lightning 4-bit | dense launches 3..16 % faster; one stream's decode +3.4..+5.9 %, two greedy streams −3.2 % and −2.3 % (2.98 against 3.08 tokens a chunk), same tokens; not proposed | measured on a Strix Halo, [#3305] |
     | flashnext (H), Flash Next oQ4e | picks nothing: its dense weights are 5, 6 and 8 bits | measured on a Strix Halo, no PR |
 
-34. **FP8 KV prefill waits.** Experiment: FP8 KV prefill waits; Nsight showed the FP8 path executed. On one GB10
+35. **FP8 KV prefill waits.** Experiment: FP8 KV prefill waits; Nsight showed the FP8 path executed. On one GB10
     (SM121) it fell under the 3 % bar, so the row is `failed` ([#3741]).
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
     | qwen3_5 (27B) | +0.240 % median paired gain (separate absolute medians 0.8675 → 0.8642 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
 
-35. **Qwen normalization and head.** Experiment: Qwen normalization and head; Nsight showed standalone group-sum
+36. **Qwen normalization and head.** Experiment: Qwen normalization and head; Nsight showed standalone group-sum
     launches removed in the normalization trace. On one GB10 (SM121) it fell under the 3 % bar, so the row is `failed`
     ([#3741]).
 
@@ -591,7 +591,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | qwen3_5 (27B) | −0.519 % median paired gain (separate absolute medians 0.8619 → 0.8659 s TTFT) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
 
-36. **Text metadata uploads.** Experiment: Qwen text metadata and snapshots; Nsight showed a typical Qwen
+37. **Text metadata uploads.** Experiment: Qwen text metadata and snapshots; Nsight showed a typical Qwen
     text-metadata upload shrink from 183,328 to 70,192 bytes. On one GB10 (SM121) it fell under the 3 % bar, so the
     row is `failed` ([#3741]).
 
@@ -599,7 +599,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | qwen3_5 (27B) | −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) at one greedy stream; tokens equal on all 196 paired requests | [#3741], one GB10 (SM121); no SM120 round met the clock criteria, so that timing is inconclusive |
 
-37. **Greedy readback.** Experiment: dots.mocr greedy readback; Nsight showed 48 four-byte device-to-host copies
+38. **Greedy readback.** Experiment: dots.mocr greedy readback; Nsight showed 48 four-byte device-to-host copies
     eliminated in the dots trace. On one GB10 (SM121) the one-stream gain did not carry to four streams, so the change
     is `failed` ([#3741]). `dots_mocr` is an OCR family named under "Not in the table" above and has no column of its
     own, so this entry is the only place it is recorded.
