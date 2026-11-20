@@ -563,3 +563,10 @@ model and states no licence; no weights are included. `tools/zig/inkling2_fixtur
 from `Inkling2L2Clip` and `Inkling2ScaledL2Clip`, the relative-position logits from `Inkling2RelativeLogits`, and the
 sinks and sigmoid output gate from `Inkling2SlidingAttention` and `Inkling2FullAttention`. The kernels, their chunked
 layout and their rounding points are TensorFold's own.
+
+## Inkling 2 reply blocks
+
+`zig/src/server/inkling_reply.zig` and `zig/src/server/chat_inkling.zig` follow the state table of vLLM's Inkling
+parser, `vllm/parser/inkling.py` at commit `abb8194dc35e` of [vllm-project/vllm](https://github.com/vllm-project/vllm)
+(Apache-2.0). The table says which marker opens which block in each state, which markers stay text, and that a block
+header's text counts as content only when the header closes without a block. The code is TensorFold's own.
