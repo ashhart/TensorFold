@@ -121,6 +121,7 @@ pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
 pub const VisionOpen = vision_types.VisionOpen;
+pub const ImageShare = vision_types.ImageShare;
 pub const Size = vision_types.Size;
 pub const ocr = @import("engine_ocr.zig");
 
