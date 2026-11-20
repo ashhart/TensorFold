@@ -9,6 +9,7 @@ pub const Set = struct {
     gpa: std.mem.Allocator,
     attn: @import("contract_inkling2_attn.zig").Set = .{},
     ops: @import("contract_inkling2_ops.zig").Set = .{},
+    dspark: @import("contract_inkling2_dspark.zig").Set = .{},
     experts: @import("contract_inkling2_experts.zig").Set = .{},
 
     /// The set, its kernels appended to `list`.
@@ -20,12 +21,15 @@ pub const Set = struct {
         errdefer set.attn.deinit();
         try set.ops.init(gpu, s, a, list);
         errdefer set.ops.deinit();
+        try set.dspark.init(gpu, s, a, list);
+        errdefer set.dspark.deinit();
         try set.experts.init(gpu, s, a, list);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
         set.experts.deinit();
+        set.dspark.deinit();
         set.ops.deinit();
         set.attn.deinit();
         set.gpa.destroy(set);

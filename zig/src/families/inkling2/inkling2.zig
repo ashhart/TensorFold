@@ -5,6 +5,7 @@ pub const vision = @import("vision.zig");
 pub const kernels = @import("kernels.zig");
 pub const ops = @import("ops.zig");
 pub const experts = @import("experts.zig");
+pub const dspark_ops = @import("dspark_ops.zig");
 
 /// config.json's name in the release.
 pub const model_type = "inkling2";
@@ -15,4 +16,5 @@ test {
     _ = kernels;
     _ = ops;
     _ = experts;
+    _ = dspark_ops;
 }

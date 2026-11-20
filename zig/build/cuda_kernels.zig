@@ -166,6 +166,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_pattn", .src = "inkling2/prompt_attention", .flags = &.{"-O3"} }, // ours: Inkling 2's global-layer prompt attention
     .{ .name = "inkling2_ops", .src = "inkling2/ops", .flags = glue }, // ours: Inkling 2's residual mix, convs, router
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
+    // ours: Inkling 2's DSpark drafter glue
+    .{ .name = "inkling2_dspark", .src = "inkling2/dspark", .flags = glue },
     // ours: Inkling 2's vision tower glue
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
