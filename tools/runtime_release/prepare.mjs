@@ -80,7 +80,8 @@ async function nativeProbe(directory, pkg) {
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const [tag, directory] = process.argv.slice(2);
   if (!directory) throw new Error('Usage: prepare.mjs TAG_OR_LATEST NEW_OUTPUT_DIRECTORY');
-  try { console.log(JSON.stringify(await prepare(tag === 'latest' ? null : tag, path.resolve(directory)))); }
+  const network = process.env.GH_TOKEN ? { token: process.env.GH_TOKEN } : undefined;
+  try { console.log(JSON.stringify(await prepare(tag === 'latest' ? null : tag, path.resolve(directory), { network }))); }
   catch (error) {
     process.exitCode = 1;
     console.error(`Runtime preparation failed: ${error?.message ?? error}. No feed or release assets were changed.`);
