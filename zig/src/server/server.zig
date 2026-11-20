@@ -61,6 +61,7 @@ pub const Server = struct {
     text: model_text.Text,
     config: Config,
     voices: @import("drama_voice_store.zig").Store = .{},
+    zonos: ?*@import("zonos_speech.zig").State = null, // a ZONOS3 Mini release's voices; Drama 3's stay in `voices`
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,

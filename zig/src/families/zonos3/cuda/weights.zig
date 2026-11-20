@@ -1,7 +1,7 @@
 //! ZONOS3 Mini's weights as published (model.pth, bf16) on the device; the speaker and condition rows stay on the host.
 const std = @import("std");
 const cuda = @import("cuda");
-const pth = @import("torch_pth");
+const pth = @import("core").torch_pth;
 const cfg = @import("../config.zig");
 
 const D = cfg.dim;
