@@ -169,7 +169,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
     @import("hip_followers.zig").steps(b, &.{ host.serve, host.flashnext, host.nemotron });
-    @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
+    @import("dots_mocr.zig").hipTests(b, host.hip, host.native.import_table.get("dots_mocr").?, test_step);
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     @import("lighton_hip.zig").host(b, host.lighton, test_step);
     const qwen_vision_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family.import_table.get("qwen_hip_vision").? }));
