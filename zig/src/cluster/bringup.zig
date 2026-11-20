@@ -90,6 +90,10 @@ pub const Live = struct {
     plan_beat: ?u64 = null,
     /// This node's beat counter when it marked itself planned; up once a later beat carried the mark.
     planned_beat: ?u64 = null,
+    /// The view digest, epoch and leader at the planned point, as every member agreed; `up` reports these.
+    agreed_view: u64 = 0,
+    agreed_epoch: u64 = 0,
+    agreed_leader: node.NodeId = 0,
     /// Membership events already read.
     seen: usize = 0,
     culprit: Culprit = .{},
@@ -132,9 +136,12 @@ pub const Live = struct {
                 if (l.planned_beat == null and l.m.ids.items.len == n and l.m.agreed(l.plan)) {
                     l.m.setProgress(.planned, 0);
                     l.planned_beat = l.m.me.counter;
+                    l.agreed_view = l.m.me.digest;
+                    l.agreed_epoch = l.m.me.epoch;
+                    l.agreed_leader = l.m.leader;
                 }
                 if (l.planned_beat) |c| if (l.m.me.counter > c and l.allPlanned()) {
-                    return .{ .nodes = @intCast(n), .leader = l.m.leader, .epoch = l.m.me.epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = l.m.me.digest };
+                    return .{ .nodes = @intCast(n), .leader = l.agreed_leader, .epoch = l.agreed_epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = l.agreed_view };
                 };
             }
             if (l.nextLost()) |x| {
