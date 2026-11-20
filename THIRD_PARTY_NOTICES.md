@@ -534,6 +534,21 @@ own code as the reference.
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
 and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
 
+## Hy4-flash test fixtures and build scripts
+
+`zig/src/families/hy4_flash/fixtures/` holds files and values taken from Tencent's Hy4-flash release
+([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
+under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)): `chat_template.jinja`,
+`mini_tokenizer.json` (its `tokenizer.json` keeping the merges the cases need) and the prompts and ids in `prompt_cases.json`,
+`tokenizer_cases.json` and `engram_hashes.json`, which the Hugging Face transformers and tokenizers libraries produced from
+those files. `config.json` and the tensor table `header.txt` are those of the NVFP4 build
+[atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) at revision
+`30f201acf0b4f9ba178817bcbc04ccfa3ec473f9`, made from that release under the same licence. `tiny_config.json` and
+`tiny_header.txt` describe a randomly initialised three-layer model that `tools/hy4_flash/reference.py` builds; no
+weights are included. `tools/zig/hy4_flash_fixtures.py` and `tools/hy4_flash/engram_hashes.py` rebuild the fixtures, and
+`tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild the NVFP4 checkpoint
+(`docs/receipts/hy4-flash-nvfp4/`).
+
 ## Inkling 2 Small test fixtures
 
 `zig/src/families/inkling2/fixtures/` holds files and values taken from Thinking Machines' Inkling 2 Small release at

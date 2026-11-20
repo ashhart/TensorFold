@@ -1,0 +1,238 @@
+[
+ {
+  "name": "one user turn",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is 17 * 23?"
+   }
+  ],
+  "context": {},
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>What is 17 * 23?<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>",
+  "ids": [
+   120000,
+   13251,
+   120001,
+   120039,
+   59785,
+   287,
+   62,
+   4138,
+   506,
+   25,
+   19369,
+   120025,
+   120000,
+   3717,
+   120001,
+   3462,
+   341,
+   220,
+   1162,
+   843,
+   220,
+   1498,
+   30,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029
+  ]
+ },
+ {
+  "name": "thinking off",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is 17 * 23?"
+   }
+  ],
+  "context": {
+   "reasoning_effort": "no_think"
+  },
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>What is 17 * 23?<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>",
+  "ids": [
+   120000,
+   13251,
+   120001,
+   120039,
+   59785,
+   287,
+   62,
+   4138,
+   506,
+   25,
+   3202,
+   32980,
+   1121,
+   120025,
+   120000,
+   3717,
+   120001,
+   3462,
+   341,
+   220,
+   1162,
+   843,
+   220,
+   1498,
+   30,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029,
+   120030
+  ]
+ },
+ {
+  "name": "thinking at max",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Plan a trip."
+   }
+  ],
+  "context": {
+   "reasoning_effort": "max"
+  },
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:max<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>Plan a trip.<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>",
+  "ids": [
+   120000,
+   13251,
+   120001,
+   120039,
+   59785,
+   287,
+   62,
+   4138,
+   506,
+   25,
+   6292,
+   120025,
+   120000,
+   3717,
+   120001,
+   27900,
+   259,
+   13229,
+   13,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029
+  ]
+ },
+ {
+  "name": "a system prompt",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Answer in one line."
+   },
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "context": {},
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜>Answer in one line.<｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>Hi<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>",
+  "ids": [
+   120000,
+   13251,
+   120001,
+   5294,
+   297,
+   936,
+   2021,
+   13,
+   120039,
+   59785,
+   287,
+   62,
+   4138,
+   506,
+   25,
+   19369,
+   120025,
+   120000,
+   3717,
+   120001,
+   10648,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029
+  ]
+ },
+ {
+  "name": "a second turn",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   },
+   {
+    "role": "assistant",
+    "content": "Hello."
+   },
+   {
+    "role": "user",
+    "content": "Again?"
+   }
+  ],
+  "context": {
+   "reasoning_effort": "no_think"
+  },
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>Hi<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>Hello.<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>Again?<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>",
+  "ids": [
+   120000,
+   13251,
+   120001,
+   120039,
+   59785,
+   287,
+   62,
+   4138,
+   506,
+   25,
+   3202,
+   32980,
+   1121,
+   120025,
+   120000,
+   3717,
+   120001,
+   10648,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029,
+   120030,
+   12433,
+   13,
+   120025,
+   120000,
+   3717,
+   120001,
+   41459,
+   30,
+   120025,
+   120000,
+   611,
+   10372,
+   120001,
+   120029,
+   120030
+  ]
+ }
+]
