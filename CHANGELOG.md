@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Release tooling: the runtime feed's preparation step names the error when it fails, instead of only saying that it failed.
+
 - Lanes: an optional normalized-row view of the prompt features, whose `null` default keeps every existing drafter path as it is (#4132, refs #2485). Thanks to @tacosta.
 
 - App: only the owner token resolves a tool approval on the remote-control server (#3034).
