@@ -139,16 +139,27 @@ pub const File = struct {
         }
         return data;
     }
+    fn validateOnce(f: *File, key: []const u8, t: g.Tensor) !void {
+        if (t.kind != .f32 and !f.validated.contains(key)) {
+            try g.affine.validate(t.kind, t.bytes);
+            const dup = try f.arena.allocator().dupe(u8, key);
+            try f.validated.put(f.arena.allocator(), dup, {});
+        }
+    }
     /// A matrix view whose quantized scales have been validated once.
     fn matrix(f: *File, key: []const u8, width: usize, n: usize) !g.Tensor {
         const v = try f.view(key);
         if (v.tensor.rank != 2 or v.tensor.shape[0] != width or v.tensor.shape[1] != n) return error.BadLingGgufMatrix;
-        if (v.tensor.kind != .f32 and !f.validated.contains(key)) {
-            try g.affine.validate(v.tensor.kind, v.tensor.bytes);
-            const dup = try f.arena.allocator().dupe(u8, key);
-            try f.validated.put(f.arena.allocator(), dup, {});
-        }
+        try f.validateOnce(key, v.tensor);
         return v.tensor;
+    }
+    /// Fast-mode matrix lookup: returns immediately on repack cache hit without faulting cold raw GGUF pages.
+    fn fastMatrix(f: *File, key: []const u8, width: usize, n: usize) !struct { tensor: g.Tensor, rep: ?gguf_repack8.Repacked } {
+        const v = try f.view(key);
+        if (v.tensor.rank != 2 or v.tensor.shape[0] != width or v.tensor.shape[1] != n) return error.BadLingGgufMatrix;
+        if (f.lookupRepacked(v.tensor)) |rep| return .{ .tensor = v.tensor, .rep = rep };
+        try f.validateOnce(key, v.tensor);
+        return .{ .tensor = v.tensor, .rep = null };
     }
     /// The persistent workers for this thread count, made on first use and replaced when the count changes.
     pub fn workers(f: *File, threads: usize) !*Pool {
@@ -167,15 +178,20 @@ pub const File = struct {
         return cache.lookup(src_off, t.bytes.len, t.kind);
     }
     pub fn project(f: *File, key: []const u8, input: []const f32, output: []f32, count: usize, width: usize, n: usize, rounded: bool, threads: usize) !void {
-        const t = try f.matrix(key, width, n);
-        if (f.fast_mode and (t.kind == .q4_k or t.kind == .q6_k or t.kind == .q5_0)) {
-            if (f.lookupRepacked(t)) |rep| {
-                if (threads > 1) return (try f.workers(threads)).projectSdotRepacked(f.arena.child_allocator, rep, t, input, output, count, rounded);
-                return gguf_repack8.projectBatch(f.arena.child_allocator, rep, t, input, output, count, rounded);
+        if (f.fast_mode) {
+            const m = try f.fastMatrix(key, width, n);
+            if (m.rep) |rep| {
+                if (threads > 1) return (try f.workers(threads)).projectSdotRepacked(f.arena.child_allocator, rep, m.tensor, input, output, count, rounded);
+                return gguf_repack8.projectBatch(f.arena.child_allocator, rep, m.tensor, input, output, count, rounded);
             }
-            if (threads > 1) return (try f.workers(threads)).projectSdot(f.arena.child_allocator, t, input, output, count, rounded);
-            return gguf_sdot.projectBatch(f.arena.child_allocator, t, input, output, count, rounded);
+            if (m.tensor.kind == .q4_k or m.tensor.kind == .q6_k or m.tensor.kind == .q5_0) {
+                if (threads > 1) return (try f.workers(threads)).projectSdot(f.arena.child_allocator, m.tensor, input, output, count, rounded);
+                return gguf_sdot.projectBatch(f.arena.child_allocator, m.tensor, input, output, count, rounded);
+            }
+            if (threads > 1) return (try f.workers(threads)).project(m.tensor, input, output, count, rounded);
+            return @import("cpu_gguf_rows.zig").projectValidatedOn(m.tensor, input, output, count, rounded, 1);
         }
+        const t = try f.matrix(key, width, n);
         if (threads > 1) return (try f.workers(threads)).project(t, input, output, count, rounded);
         try @import("cpu_gguf_rows.zig").projectValidatedOn(t, input, output, count, rounded, 1);
     }
@@ -191,20 +207,20 @@ pub const File = struct {
             var any_sdot = false;
             var buf: [128]u8 = undefined;
             for (ids, 0..) |id, j| {
-                const gate = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.gate_proj.weight", .{ prefix, id }), hidden, inter);
-                const up = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.up_proj.weight", .{ prefix, id }), hidden, inter);
-                const down = try f.matrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.down_proj.weight", .{ prefix, id }), inter, hidden);
-                const use_g = can_sdot_in and (gate.kind == .q4_k or gate.kind == .q6_k);
-                const use_u = can_sdot_in and (up.kind == .q4_k or up.kind == .q6_k);
-                const use_d = can_sdot_down and (down.kind == .q4_k or down.kind == .q6_k);
+                const gm = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.gate_proj.weight", .{ prefix, id }), hidden, inter);
+                const um = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.up_proj.weight", .{ prefix, id }), hidden, inter);
+                const dm = try f.fastMatrix(try std.fmt.bufPrint(&buf, "{s}experts.{d}.down_proj.weight", .{ prefix, id }), inter, hidden);
+                const use_g = can_sdot_in and (gm.tensor.kind == .q4_k or gm.tensor.kind == .q6_k);
+                const use_u = can_sdot_in and (um.tensor.kind == .q4_k or um.tensor.kind == .q6_k);
+                const use_d = can_sdot_down and (dm.tensor.kind == .q4_k or dm.tensor.kind == .q6_k);
                 if (use_g or use_u) any_sdot = true;
                 list[j] = .{
-                    .gate = gate,
-                    .up = up,
-                    .down = down,
-                    .gate_rep = if (use_g) f.lookupRepacked(gate) else null,
-                    .up_rep = if (use_u) f.lookupRepacked(up) else null,
-                    .down_rep = if (use_d) f.lookupRepacked(down) else null,
+                    .gate = gm.tensor,
+                    .up = um.tensor,
+                    .down = dm.tensor,
+                    .gate_rep = if (use_g) gm.rep else null,
+                    .up_rep = if (use_u) um.rep else null,
+                    .down_rep = if (use_d) dm.rep else null,
                     .use_sdot_gate = use_g,
                     .use_sdot_up = use_u,
                     .use_sdot_down = use_d,
