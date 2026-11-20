@@ -3,10 +3,6 @@ const std = @import("std");
 const core = @import("core");
 const fp8 = @import("cuda_ple_fp8.zig");
 pub const Mode = enum { mmap, pread };
-pub fn mode(text: ?[]const u8) !Mode {
-    const value = text orelse return if (@import("builtin").os.tag == .linux) .pread else .mmap;
-    return std.meta.stringToEnum(Mode, value) orelse error.BadPleIoMode;
-}
 /// A row's bytes in the shard file.
 pub const Span = struct { at: u64, len: u64 };
 pub const Reader = struct {
@@ -74,12 +70,6 @@ pub const Reader = struct {
         }
     }
 };
-
-test "PLE positional reader: explicit modes and invalid settings" {
-    try std.testing.expectEqual(Mode.mmap, try mode("mmap"));
-    try std.testing.expectEqual(Mode.pread, try mode("pread"));
-    for ([_][]const u8{ "", "auto", "0" }) |text| try std.testing.expectError(error.BadPleIoMode, mode(text));
-}
 
 fn overlap(a: []const u8, b: []const u8) bool {
     if (a.len == 0 or b.len == 0) return false;

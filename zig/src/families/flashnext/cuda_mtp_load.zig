@@ -7,10 +7,12 @@ const projection = @import("cuda_projection.zig");
 
 pub const Mode = enum { bf16, affine4 };
 pub fn mode() !Mode {
-    const value = if (std.c.getenv("TF_FLASHNEXT_DRAFT_HEAD")) |v| std.mem.span(v) else "bf16";
-    if (std.mem.eql(u8, value, "bf16")) return .bf16;
-    if (std.mem.eql(u8, value, "affine4")) return .affine4;
-    return error.BadDraftHead;
+    const value = try @import("sys").environment.read(u32, "TF_FLASHNEXT_DRAFT_HEAD", 0);
+    return switch (value) {
+        0 => .bf16,
+        1 => .affine4,
+        else => unreachable,
+    };
 }
 pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: *const core.proposal_vocab.Artifact, role: Mode) !wt.Q4 {
     const ids = artifact.ids();

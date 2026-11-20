@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const environment = @import("sys").environment;
 const wt = @import("cuda_prompt_wt.zig");
 const prompt = @import("cuda_prompt.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -86,13 +87,11 @@ pub fn serial(comptime Tri: type, o: Ops(Tri), seq: *prompt.Seq, out: *std.Array
 }
 
 fn envUsize(name: [:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
+    return environment.value(usize, name, (environment.Process{}).get(name), default) catch default;
 }
 
 fn envF64(name: [:0]const u8, default: f64) f64 {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch default;
+    return environment.value(f64, name, (environment.Process{}).get(name), default) catch default;
 }
 
 /// The drafted check (TF_FLASHNEXT_DRAFTS): serial and drafted decoding of `count` tokens a prompt, token for token.
@@ -104,8 +103,9 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
     const o: Ops(Tri) = .{ .e = e, .tri = tri, .h = h };
     const depth = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);
     const confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", default_confidence);
-    const sm: ?Sampling = if (std.c.getenv("TF_FLASHNEXT_SEED")) |seed| .{
-        .seed = std.fmt.parseInt(u64, std.mem.span(seed), 10) catch 0,
+    const seed = try environment.value(?u64, "TF_FLASHNEXT_SEED", (environment.Process{}).get("TF_FLASHNEXT_SEED"), null);
+    const sm: ?Sampling = if (seed) |s| .{
+        .seed = s,
         .temperature = envF64("TF_FLASHNEXT_TEMPERATURE", 1.0),
         .top_p = envF64("TF_FLASHNEXT_TOP_P", 0.95),
         .top_k = @intCast(envUsize("TF_FLASHNEXT_TOP_K", 20)),

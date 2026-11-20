@@ -95,7 +95,8 @@ pub const Kernels = struct {
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
-        const tile_mode = try cuda.experts_tile.mode(if (std.c.getenv("TF_FLASHNEXT_PROMPT_EXPERT_TILE")) |v| std.mem.span(v) else null);
+        // the setting's words 0, 1 and 2 are Mode's off, up and both, in order
+        const tile_mode: cuda.experts_tile.Mode = @fromBackingInt(@intCast(try @import("sys").environment.read(u32, "TF_FLASHNEXT_PROMPT_EXPERT_TILE", 0)));
         var k: Kernels = undefined;
         k.forms = Forms.resolve();
         k.expert_tile = null;

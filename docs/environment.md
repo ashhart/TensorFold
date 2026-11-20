@@ -128,6 +128,7 @@ Direct family readers also refuse malformed values when called without the serve
 ## Flash Next
 
 Flash Next checks these 33 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 48 settings before device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -165,6 +166,23 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
 | `TF_FLASHNEXT_PROMPT` | Exactly `rows` for the rows path; unset or blank keeps the plain path |
+| `FZ_BATCH_MTP_CHAIN` | Exactly `0` or `1`; `1` chains a batch's MTP drafts; default 0 |
+| `FZ_BATCH_MTP_SERIAL` | Exactly `0` or `1`; `1` gives each stream its own draft command buffers; default 0 |
+| `FZ_VERIFY_OVERLAP` | Exactly `0` or `1`; `0` verifies on a serial encoder; default 1 |
+| `FZ_SETTLE_SYNC` | Exactly `0` or `1`; set drops the cross-round fence; default unset |
+| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | Exactly `0`, `1` or `2` (off, up, both up and down); default 0 |
+| `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; `0` keeps every dense projection whole; default 1 |
+| `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; `1` partitions the vocabulary head across ranks; default 0 |
+| `TF_FLASHNEXT_LOAD_THREADS` | Whole load-thread count 1 through 32; default 8 |
+| `TF_FLASHNEXT_TEMPERATURE` | Finite sampling temperature; default 1 |
+| `TF_FLASHNEXT_TOP_P` | Finite nucleus probability; default 0.95 |
+| `TF_FLASHNEXT_TOP_K` | Whole top-k count 0 through 4294967295; default 20 |
+| `TF_FLASHNEXT_REPEAT` | Whole decode repeat count; default 1 |
+| `TF_FLASHNEXT_SEED` | Whole unsigned 64-bit sampling seed; unset keeps sampling off |
+| `TF_FLASHNEXT_DRAFT_HEAD` | Exactly `bf16` or `affine4`; default `bf16` |
+| `TF_FLASHNEXT_PLE_IO` | Exactly `mmap` or `pread`; unset picks by platform |
+| `TENSORFOLD_CHECKPOINT_SHA256` | 64 hex digits of the checkpoint digest; unset hashes the checkpoint |
+| `TENSORFOLD_PREFILL_SHARE` | Finite share greater than 0 and at most 1 (the lane host takes 0.01 to 1); presence selects decode sharing |
 
 An on-by-default switch keeps the same kernels and bits as off; only the launch count changes.
 The two row counts and the two draft counts keep their existing clamps after parsing.
@@ -191,6 +209,8 @@ These settings retain their existing boolean policies rather than gaining new al
   `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence,
   and the tool-only sampling settings of the MTP check and the `FZ_` developer switches keep their semantics.
 The fabric/tp config helper keeps its runtime-name lookup instead of gaining a startup row: it carries the lenient switches above and transport names read only by tools, which no server would set.
+  `TF_FLASHNEXT_OWNED` a list, `TF_FLASHNEXT_DEPTH_LOG` and `TF_TP_TRACE`/`TF_TP_LOCAL`/`TF_TP_STATS` select by presence.
+  The tool-only sampling settings of the MTP check and the `FZ_` developer switches are now strict rows above.
 
 The profile registry reports selected arithmetic/experimental overrides; it does not change their parsing or defaults.
 See [profiles](profiles.md) for classes, scopes and grouped slide-learning names.

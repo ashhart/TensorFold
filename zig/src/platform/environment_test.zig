@@ -168,6 +168,8 @@ const valid = [_]Case{
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
+    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .raw = "abababababababababababababababababababababababababababababababab", .n = 0 },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .raw = "0.5", .n = @bitCast(@as(f64, 0.5)) },
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
