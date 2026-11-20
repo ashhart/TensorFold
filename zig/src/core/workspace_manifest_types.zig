@@ -23,6 +23,8 @@ pub const Identity = struct {
 pub const Source = struct {
     path: []const u8,
     tokens: []const u32,
+    size: u64,
+    sha256: Digest,
 };
 
 pub const File = struct {

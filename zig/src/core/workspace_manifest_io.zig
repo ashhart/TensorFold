@@ -141,7 +141,9 @@ pub fn capture(
         @memcpy(prompt[prompt_at..][0..source.tokens.len], source.tokens);
         prompt_at += source.tokens.len;
         f.prompt_end = @intCast(prompt_at);
-        try digestFile(io, root, source.path, null, f, stop);
+        f.size = source.size;
+        f.sha256 = source.sha256;
+        try digestFile(io, root, source.path, f, f, stop);
     }
     return .{
         .gpa = gpa,

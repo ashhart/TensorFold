@@ -60,6 +60,12 @@ fn stop() wm.Stop {
     return .{ .ptr = &Context.value, .check = cancelled };
 }
 
+fn source(path: []const u8, tokens: []const u32, bytes: []const u8) wm.Source {
+    var sha256: wm.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &sha256, .{});
+    return .{ .path = path, .tokens = tokens, .size = @intCast(bytes.len), .sha256 = sha256 };
+}
+
 fn cancelledAfterFirst(ptr: *anyopaque) bool {
     const checks: *usize = @ptrCast(@alignCast(ptr));
     checks.* += 1;
@@ -72,8 +78,8 @@ test "workspace manifest cold and warm reuse exact ordered prefixes with stable 
     try f.write("b.txt", "bravo");
     try f.write("a.txt", "alpha");
     var cold = try f.store.cold(id, &.{1}, &.{
-        .{ .path = "b.txt", .tokens = &.{ 4, 5 } },
-        .{ .path = "a.txt", .tokens = &.{ 2, 3 } },
+        source("b.txt", &.{ 4, 5 }, "bravo"),
+        source("a.txt", &.{ 2, 3 }, "alpha"),
     }, null);
     defer cold.deinit();
     try std.testing.expectEqual(@as(u32, 0), cold.reused_tokens);
@@ -104,17 +110,17 @@ test "workspace manifest one edit reuses only the exact unchanged prefix" {
     try f.write("b.txt", "bravo");
     try f.write("c.txt", "charlie");
     var cold = try f.store.cold(id, &.{10}, &.{
-        .{ .path = "a.txt", .tokens = &.{ 1, 2 } },
-        .{ .path = "b.txt", .tokens = &.{ 3, 4 } },
-        .{ .path = "c.txt", .tokens = &.{ 5, 6 } },
+        source("a.txt", &.{ 1, 2 }, "alpha"),
+        source("b.txt", &.{ 3, 4 }, "bravo"),
+        source("c.txt", &.{ 5, 6 }, "charlie"),
     }, null);
     defer cold.deinit();
     const old_provenance = cold.manifest.provenance;
     try f.write("b.txt", "changed");
     var edited = try f.store.edit(id, &.{10}, &.{
-        .{ .path = "a.txt", .tokens = &.{ 1, 2 } },
-        .{ .path = "b.txt", .tokens = &.{9} },
-        .{ .path = "c.txt", .tokens = &.{ 5, 6 } },
+        source("a.txt", &.{ 1, 2 }, "alpha"),
+        source("b.txt", &.{9}, "changed"),
+        source("c.txt", &.{ 5, 6 }, "charlie"),
     }, null);
     defer edited.deinit();
     try std.testing.expectEqual(@as(u32, 3), edited.reused_tokens);
@@ -132,8 +138,8 @@ test "workspace manifest stale and missing files fail closed" {
     try f.write("a.txt", "alpha");
     try f.write("b.txt", "bravo");
     var cold = try f.store.cold(id, &.{1}, &.{
-        .{ .path = "a.txt", .tokens = &.{2} },
-        .{ .path = "b.txt", .tokens = &.{3} },
+        source("a.txt", &.{2}, "alpha"),
+        source("b.txt", &.{3}, "bravo"),
     }, null);
     defer cold.deinit();
     try f.write("a.txt", "Alpha");
@@ -145,11 +151,20 @@ test "workspace manifest stale and missing files fail closed" {
     try std.testing.expectError(error.WorkspaceFileMissing, f.store.warm(id, null));
 }
 
+test "workspace manifest cold rejects a source binding from different same-length bytes" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    const sources = [_]wm.Source{source("a.txt", &.{2}, "Alpha")};
+    try std.testing.expectError(error.WorkspaceFileChanged, f.store.cold(id, &.{1}, &sources, null));
+    try expectStateEmpty(&f);
+}
+
 test "workspace manifest namespaces cannot cross model or workspace roots" {
     var f = try Fixture.init();
     defer f.deinit();
     try f.write("a.txt", "alpha");
-    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    var cold = try f.store.cold(id, &.{1}, &.{source("a.txt", &.{2}, "alpha")}, null);
     defer cold.deinit();
     const other_model: wm.Identity = .{ .model = "other-model", .template = id.template, .cache = id.cache };
     try std.testing.expectError(error.NamespaceMismatch, f.store.warm(other_model, null));
@@ -169,7 +184,7 @@ test "workspace manifest provenance depends on content and identity not state lo
     var f = try Fixture.init();
     defer f.deinit();
     try f.write("a.txt", "alpha");
-    const sources = [_]wm.Source{.{ .path = "a.txt", .tokens = &.{2} }};
+    const sources = [_]wm.Source{source("a.txt", &.{2}, "alpha")};
     var first = try f.store.cold(id, &.{1}, &sources, null);
     defer first.deinit();
     try f.tmp.dir.createDirPath(io, "second-state");
@@ -195,11 +210,11 @@ test "workspace manifest rejects relative traversal and escaping symlinks" {
     try f.tmp.dir.createDirPath(io, "outside-dir");
     try f.tmp.dir.writeFile(io, .{ .sub_path = "outside-dir/file.txt", .data = "outside" });
     try f.tmp.dir.symLink(io, "../outside-dir", "repo/nested", .{ .is_directory = true });
-    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{.{ .path = "nested/file.txt", .tokens = &.{2} }}, null));
-    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{.{ .path = "link.txt", .tokens = &.{2} }}, null));
+    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{source("nested/file.txt", &.{2}, "outside")}, null));
+    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{source("link.txt", &.{2}, "outside")}, null));
     const invalid = [_][]const u8{ "../outside.txt", "/absolute", "sub/../outside.txt", "C:outside.txt", "", "sub//file" };
     for (invalid) |path| {
-        try std.testing.expectError(error.InvalidRelativePath, f.store.cold(id, &.{1}, &.{.{ .path = path, .tokens = &.{2} }}, null));
+        try std.testing.expectError(error.InvalidRelativePath, f.store.cold(id, &.{1}, &.{source(path, &.{2}, "unused")}, null));
     }
     try expectStateEmpty(&f);
 }
@@ -210,7 +225,7 @@ test "workspace manifest warm refuses a file replaced by an escaping symlink" {
     defer f.deinit();
     try f.write("a.txt", "alpha");
     try f.tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "outside" });
-    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    var cold = try f.store.cold(id, &.{1}, &.{source("a.txt", &.{2}, "alpha")}, null);
     defer cold.deinit();
     try f.remove("a.txt");
     try f.tmp.dir.symLink(io, "../outside.txt", "repo/a.txt", .{});
@@ -221,7 +236,7 @@ test "workspace manifest cancellation leaves neither publication nor temporary f
     var f = try Fixture.init();
     defer f.deinit();
     try f.write("a.txt", "alpha");
-    const sources = [_]wm.Source{.{ .path = "a.txt", .tokens = &.{2} }};
+    const sources = [_]wm.Source{source("a.txt", &.{2}, "alpha")};
     try std.testing.expectError(error.Cancelled, f.store.cold(id, &.{1}, &sources, stop()));
     try expectStateEmpty(&f);
     var captured = try disk.capture(a, io, f.store.workspace, id, &.{1}, &sources, null);
@@ -237,7 +252,7 @@ test "workspace manifest corruption is not admitted as warm state" {
     var f = try Fixture.init();
     defer f.deinit();
     try f.write("a.txt", "alpha");
-    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    var cold = try f.store.cold(id, &.{1}, &.{source("a.txt", &.{2}, "alpha")}, null);
     defer cold.deinit();
     var dir = try f.tmp.dir.openDir(io, "state", .{});
     defer dir.close(io);
