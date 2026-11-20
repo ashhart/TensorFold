@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: with `TF_ROCE=1`, the RoCE all-gather pairs each peer's stripes with the HCA on that peer's IPv4 /24 (the rule `fabric/tp` uses, now one copy for both) when every rank's plan holds, so three GB10s cabled as a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL; a switch or two ranks keep the same-numbered pairs, and a `TF_ROCE_HCA` of more than two names is refused by name instead of cut to two (#3518, fixes #3411). Thanks to @ultradaoto.
+
 - Docs: the Qwen3.8-27B recipe pulls the checkpoint and its drafter one repository at a time, since the native `pull` takes one (#3982). Thanks to @jayleaton.
 
 - Docs: the Nemotron 3.5 recipe gives the pull and serve commands for NVIDIA's NVFP4 export of Lightning, and its CUDA section no longer says the export is not read (#3981). Thanks to @jayleaton.
@@ -18,8 +20,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Docs: on unified memory, `MemAvailable` can settle a little above the reserve after start-up and the pool's page count can differ by a few tens between launches with the same settings, because the room is read once while the host is still settling (#4079, fixes #3940). Thanks to @Bizuayeu.
 
-
-
 - Web: the development stand-in reports native 1.3.0, in a checkout and in the built wheel, where it still said 1.2.10 (#4077, fixes #4074). Thanks to @AIFlowML.
 
 - CI: a landing train's pull request skips GitHub's hosted checks, which our own runners already run on its tip (a red local run still starts them by hand), and a newer push cancels an older Zig format run, so main's and contributors' checks no longer queue behind trains (#4106).
@@ -28,21 +28,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: a request cancelled during its prompt pass, a drafted round or a streamed reply keeps the prompt state it completed when the prompt cache has room, so a follow-up on the same conversation resumes there instead of re-reading the history; after a cancelled reply, slot 0 first rewinds to its saved prompt state, and in the shared lane core a cancelled pass gives up only its own cache reservation (#3643, for #3618).
 
-
-
 - Server: every prompt-cache lookup records why it did not resume further (for example `cold`, `evicted`, `shed`, `prompt_changed` or `reply_changed`), and `/metrics` counts them as `prompt_cache_miss_total{reason}` over a fixed list of reason names (#3706, for #3686). Thanks to @bikepresentball.
 
 - DeepSeek-V4.1 on Metal: the prompt layer's compressor, indexer key and weight, and MoE gate projections run on a new simdgroup-matrix kernel (`tf_dsv41_mv_mma`) at 16 or more rows, bit-equal to the matrix-vector kernel it replaces (#3668, refs #2984). Thanks to @gilby.
-
-
 
 - Qwen on CUDA: a development build for sm_110 (`-Dsm=110`, NVIDIA Thor) refuses by name, before paging or weight loading, the modes not qualified there: `--slide`, a DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES`; the default path and the DFlash2 drafter are still served, and other GPUs are unchanged (#3057, refs #2319). Thanks to @yguanrong.
 
 - CUDA: a Flash Next prompt pass holds 3,072 rows while other streams decode (it held 1,536), so a long prompt beside running streams takes half as many passes (#3726). Thanks to @BadAd84.
 
 - GLM-5.3-Flash on CUDA: the sampled draw takes its rule from the shared `cuda.sample.rule`, as MiniMax M3 does, instead of building its own copy with a fixed `near` value (#3705, part of #2680). Thanks to @jschmied.
-
-
 
 - Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
 
@@ -56,8 +50,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: GLM's kernels and qmmf's decode linears launch as programmatic dependent launches, so a decode token's kernels lose most of their launch gaps; experts, the router plan and the RoCE exchange stay plain launches, a prompt chunk's KDA chain launches plain from 64 rows, and `TF_GLM_PDL=0` launches everything plain (#3776, refs #3652). Thanks to @ultradaoto.
 
-
-
 - dots.mocr on CUDA: `--vision` now serves images through the image tower instead of refusing them, within the request's `--vision-image-tokens` budget; text-only replies keep their pinned hashes, and the GB10 runner gains `tf-cuda-test dots-text` (three prompts of our own, served with and without `--vision`, against pinned reply hashes) and `dots-invariants` (image prompts cut into chunks against the uncut run) (#2771, refs #1927). Thanks to @laudney.
 
 - Qwen3.8-27B on Metal before M5: decode rounds read their cached keys through the prefix kernels, as on an M5, and prompt passes size their memory the same way; `TF_QWEN27_SHARED_PREFIX=0` keeps cached keys on the tail kernel (#3677, refs #3604). Thanks to @hobbesd.
@@ -70,13 +62,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: an MCP server's startup diagnostics reach the Plugins preview as whole lines, masked as a whole and capped at 64 KiB, instead of one row per stderr write (#3759). Thanks to @AIFlowML.
 
-
-
 - Flash Next on HIP: the prompt chunk fallback counts the window plan's slot bytes as used before deciding whether a smaller chunk admits more streams, where it counted them as free and could keep the larger chunk (#3419). Thanks to @gilby.
 
 - DeepSeek-V4.1 on Metal: its GPU work goes through a Metal 4 command queue by default where the Mac has one (macOS 26 and later), with the same kernels in the same order and bit-identical outputs; `TF_METAL4=0` keeps Metal 3, `TF_METAL4_TIMELINE=n` logs per-stage GPU times for n rounds of each kind, and `TF_DSV41_ROUND_PROF=1` logs decode rounds' host and GPU milliseconds (#3374).
-
-
 
 - Flash Next on HIP: the verify window holds eight rows instead of four, so a stream alone in a round can land copy drafts of up to seven tokens a round; rounds shared by several streams keep three-token copies, MTP still drafts at most three, and each stream's window snapshots take more device memory, which admission counts (#2730). Thanks to @gilby.
 
@@ -492,8 +480,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the Qwen3.8-27B reply-end keep test names its history, as the keep pin added on 10 Nov requires, and `test-qwen27-reply-cache-host` now runs it (#3012).
 
 - Lanes: shared rounds price a plain (undrafted) round apart from drafted rows, from trial rounds whose first is a dropped warm-up, and fit row costs from plain and drafted widths, so only how many drafts a round asks for changes; on gfx1151 with Qwen3.6-35B-A3B and MTP it is level with main with tokens unchanged, and opt-in `TF_SHARED_PRICE_LOG=1` prints each shared round's prices (#2687, refs #2605).
-
-- CUDA RoCE all-gather (`TF_ROCE=1`): each peer's stripes go on the HCAs that share its IPv4 /24, the rule `fabric/tp` already uses (now one copy for both), so three GB10s cabled port 0 to port 1 in a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL: there, GLM-5.3-Flash decodes about 2% faster at one stream and 3–4% at four than with NCCL, level with `TF_GLM_ROCE_MULTI=1`, with the same replies. A switch and two ranks keep their queue pairs, layout and kernel arguments. Every CUDA server now checks `TF_ROCE_HCA` at startup, even when the RoCE path never opens: more than two names stop it, by name, where they were cut to two before (#3518, fixes #3411).
 
 - Docs: strict tools under `tool_choice: "auto"` and `TENSORFOLD_TOOL_GRAMMAR`: what a strict tool's schema holds, what is served unconstrained and what is refused, and the legacy DeepSeek alias (#3235, fixes #3177).
 
