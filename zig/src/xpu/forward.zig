@@ -317,7 +317,6 @@ pub var gdn_probe: ?*const fn (*Dev, *Acts, *anyopaque, u32, usize) anyerror!voi
 
 pub const RunnerMode = struct { prompt: bool = false, want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi_max_pos: ?u32 = null, rows_out: ?*[16]i32 = null, cand: ?cand.Mode = null };
 
-
 /// Multi-GPU TP={1,2,4} forward over `ids` (< q.maxRows() rows) at p0..; returns last row's greedy token.
 pub fn forwardRunner(r: *q.Runner, ids: []const i32, p0: u32, mode: RunnerMode) !?i32 {
     const sh = q.tpShape();
