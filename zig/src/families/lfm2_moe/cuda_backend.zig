@@ -342,28 +342,10 @@ pub const Lfm = struct {
         return c;
     }
 
-    fn cancelledPrefix(s: *Stream, at: usize) !void {
+    pub fn cancelledPrefix(s: *Stream, at: usize) !void {
         if (!s.isCancelled()) return;
         s.keepInterruptedPrefill(@intCast(at));
         return error.Cancelled;
-    }
-
-    test "lfm2 moe prefill: cancellation keeps a completed prefix for exact resume" {
-        const Kept = struct {
-            at: u32 = 0,
-            fn interrupted(ctx: *anyopaque, _: *Stream, at: u32) void {
-                const k: *@This() = @ptrCast(@alignCast(ctx));
-                k.at = at;
-            }
-            fn cancelled(_: *anyopaque) bool {
-                return true;
-            }
-        };
-        var stored: Kept = .{};
-        var s = try Stream.init(std.testing.allocator, .{ .id = "stopped", .prompt = &.{ 3, 1, 4, 1, 5, 9 }, .max_new = 1, .reuse = .{ .hook = .{ .ptr = &stored, .at = Kept.interrupted, .interrupted = Kept.interrupted } }, .cancel_check = .{ .ptr = &stored, .check = Kept.cancelled } });
-        defer s.deinit(std.testing.allocator);
-        try std.testing.expectError(error.Cancelled, cancelledPrefix(&s, 2));
-        try std.testing.expectEqual(@as(u32, 2), stored.at);
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
