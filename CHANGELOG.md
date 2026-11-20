@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/responses` accepts one level of `namespace` tools: each function is offered to the model as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket; requests without namespace tools are unchanged (#3610, fixes #3266). Thanks to @devopsfortunato.
+
 - CUDA: a long prompt shares its steps with running replies by default: a filling prompt with more than 32,768 rows left takes a decode share of 0.25 and the 512-row chunk hint, as `--decode-share 0.25` does, while a shorter prompt fills whole as before; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings (#3486, refs #3397). Thanks to @bikepresentball.
 
 
@@ -577,7 +579,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on CUDA: with paged KV and the shared prompt store, streams resumed from one prompt read each shared prefix key tile once a forward instead of once a stream, through join variants of the rows kernels that only such forwards take; on a GB10 at a 32K shared prefix, decode is 57% faster at eight streams and 28% at four with every reply equal to main's, and every other forward runs main's kernels byte for byte (#3653).
 - Docs: `docs/openclaw.md` shows how to use TensorFold from OpenClaw through the [openclaw-tensorfold](https://github.com/ashhart/openclaw-tensorfold) plugin: OpenClaw starts `tensorfold serve` on demand through its local model service and stops it when OpenClaw exits or the server sits idle, or connects to a server you run; each model's context window, image input and reasoning efforts come from `/v1/models`. Checked on Metal with Nemotron 3.5 Lightning and Qwen3.8-27B (#3341).
 
-- Server: `/v1/responses` accepts one level of `namespace` tools, as Codex CLI sends its MCP and multi-agent tools: each function is offered as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket (#3610, fixes #3266). Thanks to @devopsfortunato, and to @tiziano-contorno for the report.
 - Docs: the GLM-5.3-Flash CUDA recipe's Verified copy drafts section lists, for one checkpoint at TP=2 with `--parallel 4`, the loads that `TF_GLM_COPIES=1` sped up and the ones it slowed, and says the default stays off (#3335). Thanks to @Bizuayeu.
 - Tests: the Qwen 3.8 27B Metal residency fixtures compile again on macOS after the DFlash2 target became a value (#3572).
 - Tests: the kernel contract's Llama `gemm_untransposed` control edits the `TF_GEMM_NAX_KERNEL` instance line again, so its planted fault fails as it should (#3157, thanks @gilby, who found and fixed it first).
