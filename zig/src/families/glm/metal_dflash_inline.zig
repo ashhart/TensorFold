@@ -190,5 +190,5 @@ test "a landed pass serves every matching job up to the fixed block, and misses 
     jobs[0].anchor = 9;
     jobs[0].depth = 3; // fixed-block pass covers any positive depth up to 7
     try std.testing.expect(match(&entries, &kept, 8, Blocks{}, &jobs, &at));
-    try std.testing.expect(match(&entries, &kept, 8, Blocks{}, jobs[0..1], at[0..1])); // a subset (finished sibling) serves
+    try std.testing.expect(match(&entries, &kept, 8, Blocks{}, jobs[0..1], at[0..1])); // subset after sibling ends
 }

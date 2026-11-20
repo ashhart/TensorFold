@@ -240,7 +240,7 @@ test "a sampled code stream that leaves DFlash2 on a poor start returns at its n
     for (0..200) |i| {
         const s = if (i == 0) Source.mtp else c.next(rule, true);
         dflash_rounds += @intFromBool(s == .dflash);
-        const tokens: u32 = if (s == .mtp) 2 else if (dflash_rounds <= 8) 1 else 4; // eight unlucky drafter rounds first
+        const tokens: u32 = if (s == .mtp) 2 else if (dflash_rounds <= 8) 1 else 4; // eight poor drafter rounds
         c.observe(s, @floatFromInt(tokens), if (s == .mtp) 27.1 else 40.5);
         if (i >= 100 and s == .dflash) on_dflash += 1;
     }
