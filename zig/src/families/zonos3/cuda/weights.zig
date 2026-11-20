@@ -32,6 +32,10 @@ pub const Weights = struct {
     speaker_w: []f32, // [D][speaker_dim]
     speaker_b: []f32, // [D]
     conditions: [cfg.conditions][]f32, // [buckets + 1][D]
+    /// The release's extra text rows (phoneme, start and pause tokens) in fp32, ids from `text_rows` on; none: empty.
+    extra: []f32 = &.{},
+    /// The ten audio tables' padding rows summed in codebook order: a text row's embedding beside its text row.
+    pad_sum: [D]f32 = @splat(0),
 
     pub fn deinit(w: *Weights) void {
         for (w.bufs.items) |*b| b.free();
@@ -39,6 +43,17 @@ pub const Weights = struct {
         w.gpa.free(w.speaker_w);
         w.gpa.free(w.speaker_b);
         for (w.conditions) |c| w.gpa.free(c);
+        w.gpa.free(w.extra);
+    }
+
+    /// A text row whose id is an extra one: the padding rows' sum plus its row, the embedding sum's last add.
+    pub fn extraRow(w: *const Weights, id: usize, out: *[D]f32) void {
+        for (out, w.pad_sum, w.extra[(id - w.text_rows) * D ..][0..D]) |*o, pad, x| o.* = pad + x;
+    }
+
+    /// Text ids this model takes: its table's rows, then the extra ones.
+    pub fn textIds(w: *const Weights) usize {
+        return w.text_rows + w.extra.len / D;
     }
 
     /// The speaker row: speaker_projection(vec) in fp32.
@@ -85,6 +100,25 @@ fn fmt(buf: []u8, comptime f: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, f, args) catch unreachable;
 }
 
+/// The release's zonos-text-extra/1 rows beside the model, fp32, which follow the text table's; none: empty.
+fn extraRows(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, text_rows: usize) ![]f32 {
+    const path = try std.fs.path.join(gpa, &.{ dir, extra_rows_file });
+    defer gpa.free(path);
+    var archive = pth.Archive.openNested(gpa, io, path) catch |e| switch (e) {
+        error.FileNotFound => return &.{},
+        else => return e,
+    };
+    defer archive.close();
+    const rows = try archive.tensor("rows");
+    if (rows.shape.len != 2 or rows.shape[1] != D or rows.shape[0] == 0 or text_rows != cfg.text_vocab + 1) return error.ShapeMismatch;
+    const out = try archive.readF32(gpa, "rows", rows.shape);
+    for (out) |x| if (!std.math.isFinite(x)) return error.BadExtraTextRows;
+    return out;
+}
+
+/// Where a release keeps its phoneme, start and pause tokens, under the model's folder.
+pub const extra_rows_file = "text_rows/pause_tokens_s5000.pt";
+
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, c: cfg.Config) !*Weights {
     const path = try std.fs.path.join(gpa, &.{ dir, "model.pth" });
     defer gpa.free(path);
@@ -115,12 +149,19 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
             const raw = try archive.readRaw(gpa, fmt(&nb, "multi_embedder.embedders.{d}.weight", .{cb}), .bf16, &.{ cfg.audio_vocab, D });
             defer gpa.free(raw);
             @memcpy(all[cb * audio ..][0..audio], raw);
+            // the sum starts from the first table's row, as the reference's does
+            for (&w.pad_sum, 0..) |*o, i| {
+                const bits = std.mem.readInt(u16, raw[(cfg.audio_pad_id * D + i) * 2 ..][0..2], .little);
+                const x: f32 = @bitCast(@as(u32, bits) << 16);
+                o.* = if (cb == 0) x else o.* + x;
+            }
         }
         const raw = try archive.readRaw(gpa, "multi_embedder.embedders.10.weight", .bf16, &.{ w.text_rows, D });
         defer gpa.free(raw);
         @memcpy(all[cfg.codebooks * audio ..], raw);
         w.tables = try l.device(all);
     }
+    w.extra = try extraRows(gpa, io, dir, w.text_rows);
     w.queries = try l.one("block_attnres_queries", &.{ cfg.sources, D });
     w.out_norm = try l.one("out_norm.weight", &.{D});
     w.head = try l.one("multi_output.weight", &.{ cfg.head_rows, D });
