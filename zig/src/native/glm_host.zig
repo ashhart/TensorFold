@@ -87,7 +87,7 @@ fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Eng
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, decode_share: ?f64, learn: ?Learn, vision: ?api.VisionOpen, drafter: ?[]const u8, drafter_name: ?[]const u8, drafter_bits: u8) !*Host {
     // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
-    const eng = try ge.Engine.loadWith(gpa, io, dir, window + 64, speed_up, learn != null, limits, true);
+    const eng = try ge.Engine.loadWith(gpa, io, dir, window + 64, speed_up, learn != null, limits, true, drafter != null);
     errdefer eng.deinit();
     if (drafter) |d| try glm.metal_dflash_load.load(gpa, io, eng, d, drafter_bits); // freed with the engine
     var toks: [96]u32 = undefined;
