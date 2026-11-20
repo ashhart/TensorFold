@@ -54,6 +54,8 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit GiB count (capped at 16777216)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
+    .{ .name = "TENSORFOLD_PULL_CONNECT_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's connect timeout; default 30)" },
+    .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's no-progress timeout; default 60)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
