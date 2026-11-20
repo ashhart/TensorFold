@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: the load races the classic and factored expert forms, which give the same bits, at each of its ten timed decode window widths and keeps the faster one at each (classic unless factored is more than 1% faster), instead of one form for every window; a window takes the form of the narrowest timed width that holds it, and `TF_GLM_EXPERT_FORM` names one form for every width (#3249). Thanks to @Bizuayeu.
+
 - Server: `--tp` takes a world from 1 to 64 instead of 1, 2, 4 or 8, each family still admitting only its own (Flash Next on CUDA refuses a world other than 1 or 2 by name before admission); `--pp` is new and takes 1 only; unranked CUDA families refuse a nonzero `--rank` as well as `--tp`; and the GLM, MiniMax and Nemotron rank and world variables get environment rows naming the flag that replaces each (#2917, refs #2560). Thanks to @laudney.
 
 - Pull: gated and private Hugging Face repos come down with your token: `HF_TOKEN`, then `HUGGING_FACE_HUB_TOKEN`, then the one token file the `hf` tools read (`HF_TOKEN_PATH`, else `$HF_HOME/token`, else `~/.cache/huggingface/token`). The token goes only to the hub's own host (`huggingface.co`, or `HF_ENDPOINT`'s), never to the storage hosts downloads are redirected to, and is never printed; a repo the hub refuses is named, with whether a token is missing or lacks access (#3524).
