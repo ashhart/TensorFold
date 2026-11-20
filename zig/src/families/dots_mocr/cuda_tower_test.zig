@@ -65,7 +65,7 @@ test "dots tower bytes: weights 2,524,194,816 on the device, the scratch and wor
     const open = 57600 * 39592 + 256 + (32 << 20);
     try t.expectEqual(@as(u64, 2_314_053_888), open);
     try t.expectEqual(@as(u64, open), try Tower.openBytes(a, io, d.path));
-    try t.expectEqual(@as(u64, 2_524_194_816 + open), try native.visionBytes(a, io, d.path));
+    try t.expectEqual(@as(u64, 2_524_194_816 + open), try native.visionBytes(a, io, d.path, 0, 1));
     var bare = try Dir.init(false, null); // no shards: nothing to count
     defer bare.deinit();
     try t.expectError(error.FileNotFound, Tower.weightBytes(a, io, bare.path));
