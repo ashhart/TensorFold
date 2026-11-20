@@ -140,6 +140,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: `TF_FLASHNEXT_READOUT_FUSED=1` (off by default) runs a prompt pass's BF16 hyper-connection read-out from 768 rows in three launches instead of five, with every output byte the same (#3413, refs #3392). Thanks to @BadAd84.
 
+- CUDA: a non-final Qwen 3.5/3.6/3.8 prompt chunk that nothing reads stops its last layer after its keys and values, so cold 32K prompts finish 28-35 ms sooner and 8K about 3 ms sooner on a quiet GB10, with identical replies (#3060, fixes #2941).
+
 - Flash Next on M5: kept DeltaNet states (as M1-M4 have) and the half-nibble 4-bit converts M3 and M4 use are enabled with tensor units too; one stream measured about 6.5% faster on an M5 Ultra (16 prompts of 512 tokens, main and this PR alternating with one server per arm), tokens equal on 32 of 32 replies (#3271).
 
 - LFM3 and Flash Next: LFM3's sampled and grammar-masked row draws and Flash Next's host reference draw call core's one row sampler with the same errors and messages, and an empty Flash Next reference row is refused by name instead of panicking (#2679, refs #2460). Thanks to @jschmied.
@@ -396,8 +398,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Drama voices: `--manage-voices` (off by default) lets admin keys add a voice with `POST /v1/voices` (a WAV with its transcript, or an attested voice file, checked and encoded by the loaded model's own codec) and delete one with `DELETE /v1/voices/NAME`, and `--request-voices` lets a request carry an inline voice object; a running request keeps the voice it copied when it arrived (#3140).
 
 - Idol on Metal: Idol's released denoiser runs as a native Metal family, `idol`, with fp16 block projections and attention inputs summed in fp32 and fp32 norms, softmax and RePo as the SDK splits them; `tf-idol` checks it step by step against idol-sdk's float32 run, and its 27 kernels are in the kernel contract with 19 planted controls. The image encoders and decoders are separate changes (#1766, for #1757). Thanks to @jayleaton.
-
-- CUDA: a non-final Qwen 3.5/3.6/3.8 prompt chunk that nothing reads stops its last layer after its keys and values, so cold 32K prompts finish 28-35 ms sooner and 8K about 3 ms sooner on a quiet GB10, with identical replies (#3060, fixes #2941).
 
 - Code: a GPTQ reader in `core/quant` reads AutoGPTQ v1 4-bit symmetric group-128 weights as stored (`qweight`, fp16 `scales`, a `qzeros` zero point of 8) into an fp64 reference, and refuses every other GPTQ field, rule or tensor by name; host only, with no caller yet (#3611, refs #3368).
 
