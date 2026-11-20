@@ -70,6 +70,8 @@ test {
     _ = @import("tool_lfm2.zig");
     _ = @import("tool_lfm2_stream_test.zig");
     _ = @import("tool_minimax.zig");
+    _ = @import("inkling_reply.zig");
+    _ = @import("inkling_route_test.zig");
     _ = @import("tool_stream.zig");
     _ = @import("tool_params.zig");
     _ = @import("tool_grammar.zig");
