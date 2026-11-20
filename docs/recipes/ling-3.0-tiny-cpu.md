@@ -1,0 +1,70 @@
+# Ling-3.0-tiny on the CPU
+
+This page describes the native Zig engine running inclusionAI's Ling-3.0-tiny (`bailingmoe3`) on a CPU, aimed at
+aarch64 Linux boards. Ling-3.0-tiny has 24 layers: 18 of KDA linear attention (16 heads, a 4-tap convolution and a
+recurrent state) and an MLA layer every fourth layer (16 heads, a 512-wide latent cache), one dense SwiGLU layer, then
+23 layers of 128 routed experts (8 a token, grouped sigmoid routing) beside a shared expert. Token IDs in, greedy
+token IDs out: there is no server, tokenizer or sampling here yet.
+
+## Weights
+
+The engine reads the community Q4_K_M GGUF published with the model: `Ling-3.0-tiny-Q4_K_M.gguf` from
+`inclusionAI/Ling-3.0-tiny-GGUF`, 4,823,894,944 bytes, with 272 Q4_K, 33 Q6_K, 6 Q5_0 and 215 F32 tensors. Another
+publisher's file has the same name and a different size; only this one has been checked. The reader refuses a file
+whose metadata, tensor names, shapes or kinds differ from this geometry.
+
+```bash
+hf download inclusionAI/Ling-3.0-tiny-GGUF Ling-3.0-tiny-Q4_K_M.gguf --local-dir ~/models
+```
+
+The file is mapped read-only. Weights stay in their 4-bit blocks and are decoded block by block inside each
+projection, never expanded to an F32 model.
+
+## Build
+
+With Zig 0.17.0, natively on the board:
+
+```bash
+zig build tf-ling-cpu-decode
+```
+
+or from a Mac, for the board:
+
+```bash
+zig build tf-ling-cpu-decode -Dtarget=aarch64-linux-gnu
+```
+
+Either way the tool is `zig-out/bin/ling-cpu-decode`, built ReleaseSafe whatever `-Doptimize` says; copy it to the
+board from a Mac. `-Dtarget=aarch64-linux-musl` gives a static binary.
+
+## Run
+
+```bash
+ling-cpu-decode ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
+```
+
+The arguments are the GGUF, the prompt's token IDs separated by commas (`PROMPT_IDS=ID,ID,...`), the number of tokens
+to generate, and the thread count (1 to 8, default 1). The output has this shape:
+
+```
+model opened in S s, 4 threads, exact
+prefill P tokens in S s (R tokens/s)
+generated: ID ID ID ...
+decode 32 tokens in S s (R tokens/s), finish length
+```
+
+Decoding stops early, with `finish stop`, at the GGUF's end-of-sequence tokens. A prompt and its generated tokens fit
+in 4,096 positions. The tool does not tokenize: take the IDs from any tokenizer for Ling-3.0-tiny, for example
+llama.cpp's `llama-tokenize` on the same file.
+
+- **Exact.** Every projection equals a scalar block-decode reference bit for bit, and threads split output rows
+  only, so 1 to 8 threads give the same token IDs. Activations round to BF16 where the reference model does.
+- **Prompt rows.** The prompt runs 8 rows a call; whole, chunked and one-row prompts give the same logits.
+- **Speed.** Not yet measured from this tool. The integer-dot path that trades exactness for speed is a separate
+  change.
+
+## Checks
+
+`zig build test-ling-cpu-host` runs the reader, kernel and forward checks on any host: decoded blocks against the
+independent FP64 source definition, projections against expanded weights at 1 to 8 threads, and the forward on a
+small synthetic model, whose whole, chunked and one-row prompts and 1 and 3 threads give the same bytes.

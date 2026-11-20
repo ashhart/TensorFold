@@ -36,6 +36,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Unlimited-OCR-2 | [Native Metal, the bf16 release: page images to structured text, 131k context](unlimited-ocr-metal.md) |
 | Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
 | Ripple-65B-Preview | [Native CUDA, the publisher's NVFP4 release](ripple-65b-cuda.md), [native Metal, the publisher's NVFP4 and bf16 releases](ripple-65b-metal.md) |
+| Ling-3.0-tiny | [Native CPU on aarch64 Linux, the Q4_K_M GGUF, exact greedy decode from token IDs](ling-3.0-tiny-cpu.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
