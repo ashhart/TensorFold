@@ -325,7 +325,7 @@ pub const Pool = struct {
             return error.BadLingGgufMatrix;
         const bpr = s.width / 256;
         const total_acts = count * bpr;
-        var small_buf: [8]sdot.Activation256 = undefined;
+        var small_buf: [64]sdot.Activation256 = undefined;
         const acts = if (total_acts <= small_buf.len) small_buf[0..total_acts] else try a.alloc(sdot.Activation256, total_acts);
         defer if (total_acts > small_buf.len) a.free(acts);
         for (0..count) |r| try sdot.quantize256(input[r * s.width ..][0..s.width], acts[r * bpr ..][0..bpr], true);
