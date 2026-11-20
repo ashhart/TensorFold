@@ -25,7 +25,7 @@ pub fn client(a: std.mem.Allocator, io: Io) std.http.Client {
 
 /// The threaded I/O with pull's connector, lookups and reads; macOS also waits out an interrupted connect.
 pub fn forClient(io: Io) Io {
-    if (builtin.os.tag == .windows or io.vtable != threaded_vtable) return io;
+    if (io.vtable != threaded_vtable) return io;
     return .{ .userdata = io.userdata, .vtable = &vtable };
 }
 
@@ -44,7 +44,8 @@ fn connectIp(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.
 /// A TCP connect bounded by the pull connect timeout; `via` names the proxy it reaches, if any.
 pub fn timed(io: Io, address: *const net.IpAddress, via: ?route.Proxy) Error!net.Socket {
     const limit_ms = @as(u64, route.settings.connect_s) * 1000;
-    return connectWith(Posix, inner(io.userdata), address, limit_ms) catch |err| {
+    const SocketOps = if (builtin.os.tag == .windows) @import("pull_windows.zig") else Posix;
+    return connectWith(SocketOps, inner(io.userdata), address, limit_ms) catch |err| {
         if (err == error.Timeout) route.fail(io, .{ .connect_timeout = via });
         return err;
     };
@@ -61,7 +62,14 @@ fn lookup(userdata: ?*anyopaque, name: net.HostName, results: *Io.Queue(net.Host
 
 /// A socket read waits for bytes at most the stall timeout, then fails as timed out instead of waiting on.
 fn operate(userdata: ?*anyopaque, op: Io.Operation) Io.Cancelable!Io.Operation.Result {
-    if (op == .net_read and !ready(op.net_read.socket_handle, route.settings.stall_s)) {
+    const available = if (op == .net_read) blk: {
+        if (builtin.os.tag != .windows) break :blk ready(op.net_read.socket_handle, route.settings.stall_s);
+        break :blk @import("pull_windows.zig").ready(inner(userdata), op.net_read.socket_handle, route.settings.stall_s) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => |e| return .{ .net_read = e },
+        };
+    } else true;
+    if (!available) {
         route.stalled();
         return .{ .net_read = error.ConnectionTimedOut };
     }
@@ -219,4 +227,5 @@ const Posix = struct {
 test {
     _ = @import("pull_http_test.zig");
     _ = @import("pull_proxy_test.zig");
+    _ = @import("pull_windows_test.zig");
 }
