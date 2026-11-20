@@ -5,6 +5,7 @@ const ckpt = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
 const host4 = @import("../../core/affine4_host.zig");
 const cfg = @import("config.zig");
+const bolt_dense = @import("weights_bolt.zig");
 
 const Tensor = ckpt.Tensor;
 const Width = cfg.Width;
@@ -32,8 +33,7 @@ pub const Linear = struct {
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
 pub const Tiles = struct { w: mtl.Buffer, sbt: mtl.Buffer };
 
-/// A plain bf16 matrix [n, k] a gemv reads in place (nemotron_h_puzzle's latent projections; no scales).
-pub const Dense = struct { w: mtl.Buffer, off: usize, n: usize, k: usize };
+pub const Dense = @import("weights_bolt.zig").Dense;
 
 /// One matrix of a fused stack, written from column `first` of the stack's output rows.
 pub const Member = struct { first: usize, rows: row.Weights };
@@ -132,10 +132,7 @@ pub const Weights = struct {
     }
 };
 
-/// MLX quantizes a module only where {path}.scales exists: Bolt's lm_head stays bf16 and is read as a dense head.
-pub fn denseHead(c: cfg.Config, ck: *const ckpt.Checkpoint) bool {
-    return c.bolt and !ck.has("lm_head.scales");
-}
+pub const denseHead = @import("weights_bolt.zig").denseHead;
 
 /// Every tensor the kernels read, checked and laid out for them.
 pub const Builder = struct {
@@ -316,26 +313,9 @@ pub const Builder = struct {
             .shared_down = if (four) try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}) else try self.rowLinear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}),
             .shared_raw = .{ own_up.t, own_down.t },
             .pocket = if (c.pocket > 0) try self.pocketOf(up.t, down.t) else null,
-            .into = if (latent > 0) try self.dense(prefix ++ ".fc1_latent_proj.weight", args, latent, c.hidden) else null,
-            .out = if (latent > 0) try self.dense(prefix ++ ".fc2_latent_proj.weight", args, c.hidden, latent) else null,
+            .into = if (latent > 0) try bolt_dense.dense(self, prefix ++ ".fc1_latent_proj.weight", args, latent, c.hidden) else null,
+            .out = if (latent > 0) try bolt_dense.dense(self, prefix ++ ".fc2_latent_proj.weight", args, c.hidden, latent) else null,
         };
-    }
-
-    /// A plain bf16 matrix [n, k] referenced in place (the puzzle latent projections; no scales to read).
-    fn dense(self: *Builder, comptime fmt: []const u8, args: anytype, n: usize, k: usize) !Dense {
-        var name: [160]u8 = undefined;
-        const full = try std.fmt.bufPrint(&name, fmt, args);
-        var scales: [168]u8 = undefined;
-        if (self.ck.has(try std.fmt.bufPrint(&scales, "{s}.scales", .{full[0 .. full.len - ".weight".len]}))) {
-            self.why.set("{s} is quantized; the Metal dense kernel reads it as bf16 [{d}, {d}] with no scales", .{ full, n, k });
-            return error.UnsupportedQuantization;
-        }
-        if (!self.ck.has(full)) {
-            self.why.set("the checkpoint has no {s}, a bf16 [{d}, {d}] the Metal dense kernel reads", .{ full, n, k });
-            return error.MissingTensor;
-        }
-        const t = try self.typed(fmt, args, .bf16, &.{ n, k });
-        return .{ .w = t.buffer, .off = t.offset, .n = n, .k = k };
     }
 
     /// A shared expert's learned neurons (its last up_proj rows, down_proj columns) as f32, in use to the last nonzero.

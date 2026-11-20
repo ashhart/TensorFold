@@ -37,3 +37,34 @@ pub fn offTile(c: Config) ?usize {
     for (0..c.layers) |i| if (c.kinds[i] == .moe and c.moe[i].experts % expert_tile != 0) return i;
     return null;
 }
+
+/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
+pub fn puzzle(c: *Config, blocks: []const std.json.Value, why: *cfg.Why) !void {
+    if (blocks.len > cfg.max_layers) {
+        why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, cfg.max_layers });
+        return error.BadConfig;
+    }
+    c.bolt = true;
+    c.experts = 0;
+    c.expert_width = 0;
+    for (blocks, 0..) |b, i| {
+        if (b != .object) return error.BadConfig;
+        c.kinds[i] = try cfg.kindOf((b.object.get("block_type") orelse return error.BadConfig).string);
+        if (c.kinds[i] != .moe) continue;
+        const m: cfg.Moe = .{ .experts = try cfg.int(b.object, "n_routed_experts"), .width = try cfg.int(b.object, "moe_intermediate_size") };
+        const k = try cfg.int(b.object, "num_experts_per_tok");
+        if (c.top_k == 0) c.top_k = k;
+        if (k != c.top_k) {
+            why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
+            return error.BadConfig;
+        }
+        if (k < 1 or k > m.experts) {
+            why.set("layer {d} picks {d} of its {d} experts; top-k must be 1 to the layer's own expert count", .{ i, k, m.experts });
+            return error.BadConfig;
+        }
+        c.moe[i] = m;
+        c.experts = @max(c.experts, m.experts);
+        c.expert_width = @max(c.expert_width, m.width);
+    }
+    c.layers = blocks.len;
+}
