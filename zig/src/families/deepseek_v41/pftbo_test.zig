@@ -8,6 +8,7 @@ const branches = @import("branches.zig");
 const check = @import("calls_check.zig");
 const pk = @import("serve_knobs.zig");
 const fp = @import("forward_prefill.zig");
+const ws = @import("forward_prefill_k4.zig");
 const Config = @import("config.zig").Config;
 
 const Fake = struct {
@@ -257,4 +258,45 @@ test "TF_DSV41_PF_TBO with TF_DSV41_PF_4K: 4,096-row micro-batches, each its 4K 
     // a 4K pair split from a short prompt rest
     try testing.expectEqual([2]usize{ 4096, 4096 }, fp.pairSplit(4096, 8192).?);
     try testing.expectEqual([2]usize{ 3008, 3008 }, fp.pairSplit(4096, 6016).?);
+}
+
+test "TF_DSV41_PF_TBO with image bias plans sequential replay images and its supported text pairs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const cfg: Config = .{};
+    const w = try widths(aa);
+    var layers: [25]u32 = undefined;
+    for (&layers, 0..) |*l, i| l.* = @intCast(i);
+    const enc = layers[0..21];
+    const base: block.Options = .{ .gm_v2 = .one, .branches = true, .pf_tbo = true, .limit = 1 << 16, .rope_rows = (1 << 16) + 4096, .index_budget = 64 << 20, .taps = true };
+    var f = @import("forward.zig").Forward.init(aa, &cfg, &w, base, undefined, undefined);
+    f.layers = &layers;
+    f.images = true;
+    f.image_bias = true;
+    var state: fp.State = .{ .mode = .replay, .k4 = true };
+    f.prefill_state = &state;
+    var planned: buffers.Plan = .{ .a = aa };
+    try ws.planWorkspace(&f, &planned, 2048, &layers);
+    const bytes = ws.planBytes(&planned);
+    try testing.expect(bytes > 0);
+    try testing.expectEqual(bytes, try fp.workspaceBytes(&f, 2048));
+    const text = fp.k4Options(base);
+    var image = text;
+    image.image_keep = true;
+    image.image_rows = 4096;
+    var image_pair = image;
+    image_pair.image_rows = 8192;
+    try testing.expectError(error.Unsupported, bp.emitTbo(aa, &cfg, &w, image_pair, enc, 4096, 4096, 32768));
+    var needed: buffers.Plan = .{ .a = aa };
+    try needed.add(try bp.ownCalls(aa, try bp.emitReplay(aa, &cfg, &w, image, enc, 4096, 32768, .encoder), fp.K4.tag));
+    try needed.add(try ws.wsPair(aa, try bp.emitTbo(aa, &cfg, &w, text, enc, 4096, 4096, 32768), true));
+    for (needed.sizes.keys(), needed.sizes.values()) |role, size| {
+        if (std.mem.indexOf(u8, role, fp.K4.tag) == null) continue;
+        const have = planned.sizes.get(role) orelse {
+            std.debug.print("image replay workspace misses {s} ({d} bytes)\n", .{ role, size });
+            return error.TestUnexpectedResult;
+        };
+        try testing.expect(have >= size);
+    }
 }
