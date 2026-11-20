@@ -50,7 +50,7 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, coun
         const lane = try open(&self, s);
         try std.testing.expect(s.drafts);
         try std.testing.expect(lane.draft != null);
-        try std.testing.expect(lane.seq.cap >= s.prompt().len + s.max_new + mtp.max_rows);
+        try std.testing.expect(lane.seq.cap >= s.prompt().len + s.max_new + mtp.bufferRows());
     }
     try std.testing.expectEqual(count, self.lanes.count());
     for (streams[0..count]) |*s| {

@@ -114,7 +114,7 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
     const stop: []const u32 = &.{};
     var same = true;
     for (prompts, 0..) |ids, pi| {
-        const cap = ids.len + count + max_rows;
+        const cap = ids.len + count + mtp.bufferRows();
         var seq = try e.newSeq(cap);
         defer seq.deinit(gpa);
         var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk, e.heads);
@@ -161,6 +161,89 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
         }
     }
     return same;
+}
+
+/// One row's scores read back from the device.
+fn downloadRow(stream: cuda.Stream, dst: []u16, src: u64) !void {
+    try stream.synchronize();
+    try cuda.memory.download(stream.d, src, std.mem.sliceAsBytes(dst));
+}
+
+/// Each width's rows must score byte-equal to their one-token steps; `bad` takes each width's differing count.
+pub fn windowCheck(comptime Tri: type, o: Ops(Tri), seq: *prompt.Seq, d: *Draft, prompt_ids: []const u32, widths: []const usize, bad: []usize) !usize {
+    if (widths.len == 0 or widths[widths.len - 1] > d.layout.rows) return error.WindowRowsTooWide;
+    const gpa = o.e.gpa;
+    const rows = widths[widths.len - 1];
+    var cont: [max_rows]u32 = undefined;
+    var ref = try gpa.alloc(u16, rows * vocab);
+    defer gpa.free(ref);
+    const row = try gpa.alloc(u16, vocab);
+    defer gpa.free(row);
+    const got = try gpa.alloc(u16, vocab);
+    defer gpa.free(got);
+    // the greedy continuation, then every row's scores from a one-token step
+    try o.e.predict(Tri, o.tri, seq, prompt_ids);
+    for (row, 0..) |*v, i| v.* = std.mem.readInt(u16, seq.logits[2 * i ..][0..2], .little);
+    cont[0] = try drawRow(gpa, row, null, seq.fed, null);
+    for (0..rows) |r| {
+        var one = [_]u32{cont[r]};
+        try o.e.predict(Tri, o.tri, seq, &one);
+        for (row, 0..) |*v, i| v.* = std.mem.readInt(u16, seq.logits[2 * i ..][0..2], .little);
+        @memcpy(ref[r * vocab ..][0..vocab], row);
+        if (r + 1 < rows) cont[r + 1] = try drawRow(gpa, row, null, seq.fed, null);
+    }
+    var total: usize = 0;
+    for (widths, bad) |w, *b| {
+        d.settle(seq); // the last window's spares back to the sequence before its reset
+        seq.fed = 0;
+        seq.history = .{ o.e.eos, o.e.eos };
+        try resetSeq(seq, o.e.stream.*);
+        try o.e.predict(Tri, o.tri, seq, prompt_ids);
+        for (row, 0..) |*v, i| v.* = std.mem.readInt(u16, seq.logits[2 * i ..][0..2], .little);
+        if ((try drawRow(gpa, row, null, seq.fed, null)) != cont[0]) return error.FirstTokenDiffers;
+        try o.verify(seq, d, cont[0..w]);
+        var differ: usize = 0;
+        for (0..w) |r| {
+            try downloadRow(o.e.stream.*, got, d.logits.ptr + r * vocab * 2);
+            total += 1;
+            if (!std.mem.eql(u16, got, ref[r * vocab ..][0..vocab])) differ += 1;
+        }
+        b.* = differ;
+    }
+    return total;
+}
+
+/// The boot self-check: sweeps every width the buffers hold on a synthetic prompt; returns the largest row-exact one.
+pub fn probeServed(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, e: *prompt.Engine, h: *Head) !usize {
+    var ids: [96]u32 = undefined;
+    for (&ids, 0..) |*t, i| t.* = @intCast(1000 + (i * 7919) % 200_000);
+    const cap = ids.len + 2 * mtp.bufferRows();
+    var seq = try e.newSeq(cap);
+    defer seq.deinit(gpa);
+    var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk, e.heads);
+    defer d.deinit();
+    const o: Ops(Tri) = .{ .e = e, .tri = tri, .h = h };
+    var widths: [max_rows]usize = undefined;
+    const n = mtp.probeWidths(&widths);
+    var bad: [max_rows]usize = @splat(0);
+    const compared = try windowCheck(Tri, o, &seq, &d, &ids, widths[0..n], bad[0..n]);
+    var differing: usize = 0;
+    var first_bad: usize = 0;
+    for (bad[0..n], 0..) |b, i| {
+        differing += b;
+        if (b > 0 and first_bad == 0) first_bad = i + 1;
+    }
+    std.log.info("flashnext: window self-check: {d} of {d} rows byte-equal to their one-token steps (widths 1-{d})", .{ compared - differing, compared, n });
+    if (first_bad > 0) std.log.warn("flashnext: width {d} is the first with rows differing from their one-token steps", .{first_bad});
+    if (differing == 0) return n;
+    // the largest width whose every row is byte-equal; past it some differ
+    var run: usize = 0;
+    for (bad[0..n], 0..) |b, i| {
+        if (b != 0) break;
+        run = i + 1;
+    }
+    std.log.info("flashnext: widths 1-{d} are row-equal at every row", .{run});
+    return run;
 }
 
 /// A sequence's caches back to empty (the check reruns a prompt on one allocation).

@@ -29,11 +29,12 @@ fn noSums(_: c.Shape) usize {
     return 0;
 }
 
-/// A verify window's rows: one, a greedy window and the widest a window may be (mtp.max_rows).
+/// A verify window's rows: one, a greedy window, the shipped 32 and the widest a window may be (the log's rows).
 const served = [_]c.Shape{
     .{ .rows = 1, .n = nv * dv, .k = dk },
     .{ .rows = 9, .n = nv * dv, .k = dk },
     .{ .rows = 32, .n = nv * dv, .k = dk },
+    .{ .rows = lr, .n = nv * dv, .k = dk },
 };
 
 pub fn spec(kind: Kind) c.Spec {
@@ -110,7 +111,7 @@ pub const Late = struct {
         self.nout = 0;
         self.shape = shape;
         const m = shape.rows;
-        if (m == 0 or m > 32 or shape.n != nv * dv or shape.k != dk) return false;
+        if (m == 0 or m > lr or shape.n != nv * dv or shape.k != dk) return false;
         var prng = std.Random.DefaultPrng.init(seed ^ 0x6c617465);
         const r = prng.random();
         const a = self.rig.gpu.gpa;
