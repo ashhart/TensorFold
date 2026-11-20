@@ -1,0 +1,249 @@
+const std = @import("std");
+const disk = @import("workspace_manifest_io.zig");
+const wm = @import("workspace_manifest.zig");
+
+const a = std.testing.allocator;
+const io = std.testing.io;
+const id: wm.Identity = .{ .model = "model-sha256", .template = "chat-v3", .cache = "kv-geometry-v7" };
+
+const Fixture = struct {
+    tmp: std.testing.TmpDir,
+    store: wm.Store,
+
+    fn init() !Fixture {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.createDirPath(io, "repo");
+        try tmp.dir.createDirPath(io, "state");
+        const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(root);
+        const repo = try std.fs.path.join(a, &.{ root, "repo" });
+        defer a.free(repo);
+        const state = try std.fs.path.join(a, &.{ root, "state" });
+        defer a.free(state);
+        return .{ .tmp = tmp, .store = try wm.Store.init(a, io, repo, state) };
+    }
+
+    fn deinit(f: *Fixture) void {
+        f.store.deinit();
+        f.tmp.cleanup();
+    }
+
+    fn write(f: *Fixture, relative: []const u8, bytes: []const u8) !void {
+        const path = try std.fs.path.join(a, &.{ "repo", relative });
+        defer a.free(path);
+        try f.tmp.dir.writeFile(io, .{ .sub_path = path, .data = bytes });
+    }
+
+    fn remove(f: *Fixture, relative: []const u8) !void {
+        const path = try std.fs.path.join(a, &.{ "repo", relative });
+        defer a.free(path);
+        try f.tmp.dir.deleteFile(io, path);
+    }
+};
+
+fn expectStateEmpty(f: *Fixture) !void {
+    var dir = try f.tmp.dir.openDir(io, "state", .{ .iterate = true });
+    defer dir.close(io);
+    var entries = dir.iterate();
+    try std.testing.expect((try entries.next(io)) == null);
+}
+
+fn cancelled(_: *anyopaque) bool {
+    return true;
+}
+
+fn stop() wm.Stop {
+    const Context = struct {
+        var value: u8 = 0;
+    };
+    return .{ .ptr = &Context.value, .check = cancelled };
+}
+
+fn cancelledAfterFirst(ptr: *anyopaque) bool {
+    const checks: *usize = @ptrCast(@alignCast(ptr));
+    checks.* += 1;
+    return checks.* > 1;
+}
+
+test "workspace manifest cold and warm reuse exact ordered prefixes with stable provenance" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("b.txt", "bravo");
+    try f.write("a.txt", "alpha");
+    var cold = try f.store.cold(id, &.{1}, &.{
+        .{ .path = "b.txt", .tokens = &.{ 4, 5 } },
+        .{ .path = "a.txt", .tokens = &.{ 2, 3 } },
+    }, null);
+    defer cold.deinit();
+    try std.testing.expectEqual(@as(u32, 0), cold.reused_tokens);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4, 5 }, cold.manifest.prompt);
+    try std.testing.expectEqualStrings("a.txt", cold.manifest.files[0].path);
+    try std.testing.expectEqualStrings("b.txt", cold.manifest.files[1].path);
+    try std.testing.expectEqual(@as(u32, 3), cold.manifest.files[0].prompt_end);
+    try std.testing.expectEqual(@as(u32, 5), cold.manifest.files[1].prompt_end);
+    var alpha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("alpha", &alpha, .{});
+    try std.testing.expectEqualSlices(u8, &alpha, &cold.manifest.files[0].sha256);
+    const provenance = cold.manifest.provenance;
+    const workspace_id = cold.manifest.workspaceId();
+    const namespace_id = cold.manifest.namespaceId();
+    var warm = try f.store.warm(id, null);
+    defer warm.deinit();
+    try std.testing.expectEqual(@as(u32, 5), warm.reused_tokens);
+    try std.testing.expectEqual(@as(u32, 0), warm.changed_files);
+    try std.testing.expectEqualSlices(u8, &provenance, &warm.manifest.provenance);
+    try std.testing.expectEqualSlices(u8, &workspace_id, &warm.manifest.workspaceId());
+    try std.testing.expectEqualSlices(u8, &namespace_id, &warm.manifest.namespaceId());
+}
+
+test "workspace manifest one edit reuses only the exact unchanged prefix" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    try f.write("b.txt", "bravo");
+    try f.write("c.txt", "charlie");
+    var cold = try f.store.cold(id, &.{10}, &.{
+        .{ .path = "a.txt", .tokens = &.{ 1, 2 } },
+        .{ .path = "b.txt", .tokens = &.{ 3, 4 } },
+        .{ .path = "c.txt", .tokens = &.{ 5, 6 } },
+    }, null);
+    defer cold.deinit();
+    const old_provenance = cold.manifest.provenance;
+    try f.write("b.txt", "changed");
+    var edited = try f.store.edit(id, &.{10}, &.{
+        .{ .path = "a.txt", .tokens = &.{ 1, 2 } },
+        .{ .path = "b.txt", .tokens = &.{9} },
+        .{ .path = "c.txt", .tokens = &.{ 5, 6 } },
+    }, null);
+    defer edited.deinit();
+    try std.testing.expectEqual(@as(u32, 3), edited.reused_tokens);
+    try std.testing.expectEqual(@as(u32, 1), edited.changed_files);
+    try std.testing.expectEqualSlices(u32, &.{ 10, 1, 2, 9, 5, 6 }, edited.manifest.prompt);
+    try std.testing.expect(!std.mem.eql(u8, &old_provenance, &edited.manifest.provenance));
+    var warm = try f.store.warm(id, null);
+    defer warm.deinit();
+    try std.testing.expectEqual(@as(u32, 6), warm.reused_tokens);
+}
+
+test "workspace manifest stale and missing files fail closed" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    try f.write("b.txt", "bravo");
+    var cold = try f.store.cold(id, &.{1}, &.{
+        .{ .path = "a.txt", .tokens = &.{2} },
+        .{ .path = "b.txt", .tokens = &.{3} },
+    }, null);
+    defer cold.deinit();
+    try f.write("a.txt", "Alpha");
+    try std.testing.expectError(error.WorkspaceFileChanged, f.store.warm(id, null));
+    try f.write("a.txt", "alpha");
+    var restored = try f.store.warm(id, null);
+    restored.deinit();
+    try f.remove("b.txt");
+    try std.testing.expectError(error.WorkspaceFileMissing, f.store.warm(id, null));
+}
+
+test "workspace manifest namespaces cannot cross model or workspace roots" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    defer cold.deinit();
+    const other_model: wm.Identity = .{ .model = "other-model", .template = id.template, .cache = id.cache };
+    try std.testing.expectError(error.NamespaceMismatch, f.store.warm(other_model, null));
+    try f.tmp.dir.createDirPath(io, "other-repo");
+    const root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const other_repo = try std.fs.path.join(a, &.{ root, "other-repo" });
+    defer a.free(other_repo);
+    const state = try std.fs.path.join(a, &.{ root, "state" });
+    defer a.free(state);
+    var other = try wm.Store.init(a, io, other_repo, state);
+    defer other.deinit();
+    try std.testing.expectError(error.NamespaceMismatch, other.warm(id, null));
+}
+
+test "workspace manifest provenance depends on content and identity not state location" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    const sources = [_]wm.Source{.{ .path = "a.txt", .tokens = &.{2} }};
+    var first = try f.store.cold(id, &.{1}, &sources, null);
+    defer first.deinit();
+    try f.tmp.dir.createDirPath(io, "second-state");
+    const root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const second_state = try std.fs.path.join(a, &.{ root, "second-state" });
+    defer a.free(second_state);
+    var second_store = try wm.Store.init(a, io, f.store.workspace, second_state);
+    defer second_store.deinit();
+    var second = try second_store.cold(id, &.{1}, &sources, null);
+    defer second.deinit();
+    try std.testing.expectEqualSlices(u8, &first.manifest.provenance, &second.manifest.provenance);
+    const other_cache: wm.Identity = .{ .model = id.model, .template = id.template, .cache = "other-cache" };
+    try std.testing.expectError(error.NamespaceMismatch, second_store.warm(other_cache, null));
+}
+
+test "workspace manifest rejects relative traversal and escaping symlinks" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "outside" });
+    try f.tmp.dir.symLink(io, "../outside.txt", "repo/link.txt", .{});
+    try f.tmp.dir.createDirPath(io, "outside-dir");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "outside-dir/file.txt", .data = "outside" });
+    try f.tmp.dir.symLink(io, "../outside-dir", "repo/nested", .{ .is_directory = true });
+    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{.{ .path = "nested/file.txt", .tokens = &.{2} }}, null));
+    try std.testing.expectError(error.WorkspacePathRefused, f.store.cold(id, &.{1}, &.{.{ .path = "link.txt", .tokens = &.{2} }}, null));
+    const invalid = [_][]const u8{ "../outside.txt", "/absolute", "sub/../outside.txt", "C:outside.txt", "", "sub//file" };
+    for (invalid) |path| {
+        try std.testing.expectError(error.InvalidRelativePath, f.store.cold(id, &.{1}, &.{.{ .path = path, .tokens = &.{2} }}, null));
+    }
+    try expectStateEmpty(&f);
+}
+
+test "workspace manifest warm refuses a file replaced by an escaping symlink" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "outside" });
+    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    defer cold.deinit();
+    try f.remove("a.txt");
+    try f.tmp.dir.symLink(io, "../outside.txt", "repo/a.txt", .{});
+    try std.testing.expectError(error.WorkspacePathRefused, f.store.warm(id, null));
+}
+
+test "workspace manifest cancellation leaves neither publication nor temporary files" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    const sources = [_]wm.Source{.{ .path = "a.txt", .tokens = &.{2} }};
+    try std.testing.expectError(error.Cancelled, f.store.cold(id, &.{1}, &sources, stop()));
+    try expectStateEmpty(&f);
+    var captured = try disk.capture(a, io, f.store.workspace, id, &.{1}, &sources, null);
+    defer captured.deinit();
+    var checks: usize = 0;
+    const trip: wm.Stop = .{ .ptr = &checks, .check = cancelledAfterFirst };
+    try std.testing.expectError(error.Cancelled, disk.publish(a, io, f.store.state, &captured, false, trip));
+    try std.testing.expectEqual(@as(usize, 2), checks);
+    try expectStateEmpty(&f);
+}
+
+test "workspace manifest corruption is not admitted as warm state" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    var cold = try f.store.cold(id, &.{1}, &.{.{ .path = "a.txt", .tokens = &.{2} }}, null);
+    defer cold.deinit();
+    var dir = try f.tmp.dir.openDir(io, "state", .{});
+    defer dir.close(io);
+    const bytes = try dir.readFileAlloc(io, wm.manifest_name, a, .limited(1 << 20));
+    defer a.free(bytes);
+    bytes[12] ^= 1;
+    try dir.writeFile(io, .{ .sub_path = wm.manifest_name, .data = bytes });
+    try std.testing.expectError(error.ManifestCorrupt, f.store.warm(id, null));
+}

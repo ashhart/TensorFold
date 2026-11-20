@@ -16,6 +16,7 @@ pub const artifact_resolution = @import("artifact_resolution.zig");
 pub const deployment_fit = @import("deployment_fit.zig");
 pub const low_memory_plan = @import("low_memory_plan.zig");
 pub const expert_strip = @import("expert_strip.zig");
+pub const workspace_manifest = @import("workspace_manifest.zig");
 pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const dfloat11_config = @import("dfloat11_config.zig");
@@ -136,6 +137,7 @@ test {
     _ = deployment_fit;
     _ = low_memory_plan;
     _ = @import("expert_strip_test.zig");
+    _ = @import("workspace_manifest_test.zig");
     _ = direct_io;
     _ = direct_gather;
     _ = frame_rounds;
