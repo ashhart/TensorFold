@@ -67,6 +67,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on CUDA: drafted decoding past 64K cached tokens uses the MT2 attention tile for 2-16-row windows up to 131,071 cached tokens, the same tokens and about 5% faster on an RTX 5090 at 129K (#4149).
 
+- Build: the macOS host tests build without Xcode's Metal compiler; the Metal native server has its own build file and the shader, Kimi K3 and Drama quant programs stop cleanly without it (@plotarmordev, #3923).
+
+- Hy4-flash (`hy_v4_flash`) on Metal: `tensorfold-native serve` takes Tencent's 4- and 8-bit MLX checkpoints with DFly2 drafts, contexts to 256K tokens (128K by default; the compressed indexer recalls 2,048 keys a sparse layer past 2,048 tokens), and a following prompt that starts with the last one's tokens prefills only the rest; Hy4's chat template needs `str.format()` from #3816 (Refs #3797).
 - CLI: `tensorfold log` reads the request journal read-only while a server runs: `list` with tokens, time to first token and decode rate, `show ID` with the reply decoded, `follow` across rotations and `--json`; journal `finish` records carry the queue wait, time to first token, decode rate and token counts (#4160, part of #3666).
 
 - Engine: under SRPT scheduling, a prompt that finishes on its last fill step no longer writes its lent time to freed scheduler memory (#4159, fixes #3709).
