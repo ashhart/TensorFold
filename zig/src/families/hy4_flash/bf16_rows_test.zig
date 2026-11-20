@@ -230,7 +230,7 @@ test "openDirect reads a real safetensors table through O_DIRECT (small and mult
         defer a.free(real);
         const path = try a.dupeSentinel(u8, real, 0);
         defer a.free(path);
-        var table = bf16.openDirect(a, path, "emb", map, hash) catch |err| switch (err) {
+        var table = bf16.openDirect(a, path, "emb", map, hash, 32) catch |err| switch (err) {
             error.OpenFailed, error.ReadFailed => return, // file system refuses O_DIRECT
             else => return err,
         };
@@ -260,7 +260,7 @@ fn expectBadTable(a: std.mem.Allocator, bytes: []const u8) !void {
     defer a.free(real);
     const path = try a.dupeSentinel(u8, real, 0);
     defer a.free(path);
-    var table = bf16.openDirect(a, path, "emb", fixtureMap(), fixtureHash()) catch |err| switch (err) {
+    var table = bf16.openDirect(a, path, "emb", fixtureMap(), fixtureHash(), 1) catch |err| switch (err) {
         error.BadTable => return,
         error.OpenFailed, error.ReadFailed => return, // file system refuses O_DIRECT
         else => return err,
@@ -287,4 +287,28 @@ test "openDirect refuses negative offsets, wrong shape, header overflow and trun
     var prefix: [8]u8 = undefined;
     std.mem.writeInt(u64, &prefix, 1 << 20, .little);
     try expectBadTable(a, &prefix);
+}
+
+test "openDirect refuses a table whose row count is not the config's for that layer" {
+    const a = std.testing.allocator;
+    // Released tables hold 164,994,380 / 164,999,008 / 165,004,086 / 165,008,942 rows, so a wrong shard stays in range.
+    const image = try safetensorsImage(a, 32, 0);
+    defer a.free(image.bytes);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "emb.safetensors", .data = image.bytes });
+    const real = try tmp.dir.realPathFileAlloc(io, "emb.safetensors", a);
+    defer a.free(real);
+    const path = try a.dupeSentinel(u8, real, 0);
+    defer a.free(path);
+    for ([_]usize{ 31, 33 }) |wrong| {
+        var table = bf16.openDirect(a, path, "emb", fixtureMap(), fixtureHash(), wrong) catch |err| switch (err) {
+            error.RowCountMismatch => continue,
+            error.OpenFailed, error.ReadFailed => return, // file system refuses O_DIRECT
+            else => return err,
+        };
+        table.close();
+        return error.TestUnexpectedResult;
+    }
 }
