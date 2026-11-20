@@ -3,6 +3,8 @@ const std = @import("std");
 
 pub const V = @Vector(16, i8);
 pub const I = @Vector(4, i32);
+pub const has_dotprod = @import("builtin").cpu.arch == .aarch64 and
+    std.Target.aarch64.featureSetHas(@import("builtin").cpu.features, .dotprod);
 
 extern fn @"llvm.aarch64.neon.sdot.v4i32.v16i8"(I, V, V) I;
 
@@ -19,7 +21,7 @@ pub const Activation32 = struct {
 };
 
 pub inline fn sdotAcc(acc: I, a: V, b: V) I {
-    if (@import("builtin").cpu.arch == .aarch64) {
+    if (comptime has_dotprod) {
         return @"llvm.aarch64.neon.sdot.v4i32.v16i8"(acc, a, b);
     }
     const prod = @as(@Vector(16, i32), a) *% @as(@Vector(16, i32), b);
@@ -32,7 +34,7 @@ pub inline fn sdotAcc(acc: I, a: V, b: V) I {
 }
 
 pub fn checkTarget() !void {
-    if (comptime @import("builtin").cpu.arch == .aarch64 and !std.Target.aarch64.featureSetHas(@import("builtin").cpu.features, .dotprod)) {
+    if (comptime @import("builtin").cpu.arch == .aarch64 and !has_dotprod) {
         return error.DotprodTargetRequired;
     }
 }
