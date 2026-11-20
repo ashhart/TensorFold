@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on CUDA: drafted decoding past 64K cached tokens uses the MT2 attention tile for 2-16-row windows up to 131,071 cached tokens, the same tokens and about 5% faster on an RTX 5090 at 129K (#4149).
+
 - Checkpoints: a bf16 weight stored in DFloat11's lossless form is read under its own name and decoded on the host at load to the bf16 bytes it was coded from, where such a checkpoint was refused by the missing tensor's name; GLM-5.3-Flash on CUDA is the one loader that attaches it, a damaged group is refused by name, and a checkpoint with no coded tensor loads as before (#3807, refs #3649). Thanks to @Bizuayeu.
 
 - Idol's octree and Gaussian decoders now run natively on M5 Metal, from the denoiser's latent to the 3DGS PLY and camera. On an M5 Ultra, 262,144 Gaussians decode in 0.343 s against the SDK's 0.739 s, and 1,048,576 in 1.963 s against 4.653 s, at a 2.43 GB peak footprint against 5.64 GB. Given the SDK's probabilities and draws, every octree level's counts match, and the PLY's header and rows equal the SDK's. Both decoders sit as close to an fp32 run as the SDK's own; `tf-idol-decode` runs those gates from a `tools/zig/idol_case.py decode` case. The decoders' nine kernels are registered with the kernel contract (#1773, after #1766, for #1757). Thanks to @jayleaton.
@@ -13,15 +15,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: Replay launches one task at a time: a second click while a launch is pending creates no new task, the button shows the pending state and is available again after a failure, and a late result from an earlier panel cannot close a reopened one (#3848, fixes #3845). Thanks to @AIFlowML.
 
-
-
 - Qwen3.8-27B on Metal with `--thinking-reserve`: the shorter-reply-first order no longer counts a reply that is still reasoning as the whole limit the reserve gave it. It estimates the reply as its answer quota plus the reasoning left, taken from the think blocks this server has seen close; until one has, and for requests without `--thinking-reserve` or with thinking off, nothing changes. Replies are the same tokens. On an M5 Ultra, once the server has seen a think block close, a reasoning chat reply beside a 110,000-token cold prompt streams 7.3 chunks a second instead of 2.0, and the prompt's fill takes 17% longer (#3371, fixes #3270). Thanks to @CodingEmil for the report.
 
 - CUDA: an opt-in slab mode carves small uploads from shared slabs instead of one 2 MiB-rounded allocation each, and identical trellis bytes upload once, so Hy4-flash EXL3 4bpw loads all 42 layers on one GB10 (85.38 GiB, 29 GiB left) where it ran out at layer 30 (#4003). Thanks to @shantanugoel.
 
 - Tests: for Qwen3.5 dense EXL3 at TP=2, a rank's column cut of a weight can keep the whole weight's K-split plan (`Weight.pinnedColumns`), and `tf-cuda-test qwen35-tp-cut PACK` compares each rank's columns with one GPU's whole-weight bytes; `--tp 1` is unchanged and `--tp 2` stays refused (#3602). Thanks to @Nipale-ai.
-
-
 
 - Server: a checkpoint no native backend serves is pointed to the Python engine 0.6.6 only when 0.6.6 serves its model type (DeepSeek V4, Gemma 4, GLM5-Next, Nemotron-H, Prism Hadamard Qwen3.5, Qwen3.5, Qwen3.5-MoE, Qwen3.8 Flash Next and Qwen4); any other type, such as `hy_v4_flash`, is told no TensorFold release serves it yet and pointed to the recipe book and the runbook (#4008).
 
@@ -90,7 +88,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: the lean check on a run started by hand compares against main instead of failing (#4151).
 
 - Living Weights: in a container that refuses file clones with a permission error (LXC), lessons and rollbacks copy the files instead of failing (#4147).
-- Qwen3.8-27B on CUDA: drafted decoding past 64K cached tokens uses the MT2 attention tile for 2-16-row windows up to 131,071 cached tokens, the same tokens and about 5% faster on an RTX 5090 at 129K (#4149).
 
 - Build: the Qwen ModelOpt admission host test gets the `living` module, so `test-cuda-host` compiles on Windows again after #3294 (#4146).
 
