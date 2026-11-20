@@ -112,8 +112,8 @@ test "the head's depth is main's: the same rule, facts and order (a round priced
         try std.testing.expectEqual(@as(u32, @intCast(want)), d);
         try std.testing.expect(d <= 4); // main's facts hold four at most, not the drafter's seven
         const kept: u32 = @min(d, prng.random().uintLessThan(u32, 4));
-        const ms = 13.0 + 5.4 * @as(f64, @floatFromInt(d)) + 8 * prng.random().float(f64); // timing noise: order matters
-        if (i > 0) try main_rule.observeCost(last.held, last.ms, last.first, mw); // main prices a round after the next depth
+        const ms = 13.0 + 5.4 * @as(f64, @floatFromInt(d)) + 8 * prng.random().float(f64); // jittered timing
+        if (i > 0) try main_rule.observeCost(last.held, last.ms, last.first, mw); // main prices next depth
         s.held = d;
         try h.observe(&s, kept, ms);
         if (d > 0) try main_rule.observeDepth(mw, d, kept);

@@ -97,7 +97,7 @@ const Same = struct {
     fn init(a: std.mem.Allocator, h: *speed.Harness, m: *Model, n: usize, args: speed.Args) !Same {
         const opts = mtl.ResourceOptions.shared;
         var x: Same = .{ .n = n, .kernel = try glm.metal_dflash_follow.Follow.init(a, h.device, null), .acc = try glm.metal_dflash_accept.Accept.init(a, h.device, null), .tokens = try h.device.buffer(128 * 4, opts), .picks = try h.device.buffer(128 * 4, opts), .table = try h.device.buffer(64, opts), .words = try h.device.buffer(64, opts) };
-        const kept = @min(@max(args.accepted, 1), rows) - 1; // the window keeps `accepted` rows: its first and kept drafts
+        const kept = @min(@max(args.accepted, 1), rows) - 1; // window keeps first row plus accepted drafts
         for (0..n) |k| {
             x.ctx[k] = try Context.init(a, m);
             try x.ctx[k].reset(stock, 0);

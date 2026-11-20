@@ -242,7 +242,7 @@ pub const Rounds = struct {
     /// The slot left the rounds: its tap route goes now.
     pub fn release(r: *Rounds, slot: u32) void {
         if (slot >= r.streams.len) return;
-        if (r.streams[slot] != null) r.taps.clearRoute(&r.sl.slots[slot].s); // its context stays for the slot's next stream
+        if (r.streams[slot] != null) r.taps.clearRoute(&r.sl.slots[slot].s); // keep context for slot's next stream
     }
 
     /// The slot's rounds and context freed (a context that failed to reset).
