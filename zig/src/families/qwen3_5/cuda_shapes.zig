@@ -31,10 +31,10 @@ pub const Shape = struct {
     }
 };
 
-/// The measured FP8 row-tile envelope: 8,192+ cached tokens, one row included; limits and prompt tiles unchanged.
+/// The measured FP8 row-tile envelope: 8,192+ cached tokens; 2-16 rows through 131,071 cached; prompt tiles unchanged.
 pub fn useMt2(qualified: bool, fp8: bool, prompt: bool, rows: usize, segments: usize, cached: usize) bool {
     return qualified and fp8 and !prompt and segments == 1 and rows > 0 and
-        cached >= 8192 and (rows == 1 or (rows <= 16 and cached < 65536));
+        cached >= 8192 and (rows == 1 or (rows <= 16 and cached <= 131071));
 }
 
 test "MT2 dispatch keeps context boundaries and graph identities separate" {
@@ -42,15 +42,16 @@ test "MT2 dispatch keeps context boundaries and graph identities separate" {
     var after = before;
     after.mt2 = true;
     try std.testing.expectEqual(@as(u64, 1) << 29, before.key() ^ after.key());
-    for ([_]usize{ 8192, 32768, 65535 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
-    for ([_]usize{ 0, 8191, 65536, 131071 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
+    for ([_]usize{ 8192, 32768, 65535, 65536, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
+    for ([_]usize{ 0, 8191, 131072 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
     for ([_]usize{ 0, 1, 512, 8191 }) |n| try std.testing.expect(!useMt2(true, true, false, 1, 1, n));
-    for ([_]usize{ 8192, 32768, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
+    for ([_]usize{ 8192, 32768, 131071, 131072, 262144 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
     try std.testing.expect(!useMt2(false, true, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, false, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, true, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, false, 16, 2, 8192));
     try std.testing.expect(!useMt2(true, true, false, 17, 1, 8192));
+    try std.testing.expect(!useMt2(true, true, false, 17, 1, 65536));
 }
 
 test "Qwen stage: the head piece keys its own graph, apart from the layers' and the whole model's" {
