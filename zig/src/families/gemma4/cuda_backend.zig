@@ -126,7 +126,7 @@ pub const Gemma = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features, .prefill_features = prefillFeatures };
 
     /// The drafter's taps: those layers' outputs (before the next norm), kept by every forward from now on.
     fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
@@ -343,7 +343,10 @@ pub const Gemma = struct {
     fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
-        if (s.isCancelled()) return error.Cancelled;
+        if (s.isCancelled()) {
+            s.keepInterruptedPrefill(@intCast(at));
+            return error.Cancelled;
+        }
         // solo passes (TF_GEMMA4_CHUNK_SOLO) only without a drafter's taps, at most `injects` images a pass
         const solo = lanes.solo_chunk.passRows(&x.lanes, s, "fill", x.m.prompt_most, prompt_rows);
         const rows = if (x.tapped or s.images.len > max_injects) prompt_rows else solo;
@@ -413,6 +416,11 @@ pub const Gemma = struct {
             if (done) x.marked(s, s.prompt().len) else l.mark = l.fill;
         }
         return done;
+    }
+
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const l = self(ptr).lanes.getPtr(s) orelse return;
+        if (l.fill) |at| s.keepInterruptedPrefill(@intCast(at));
     }
 
     fn handle(x: *Gemma) usize {
