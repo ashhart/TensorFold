@@ -24,7 +24,7 @@ pub const FastExpert = struct {
 };
 
 const Job = struct {
-    mode: enum { rows, experts, sdot_q4k, sdot_q6k, sdot_q50, sdot_q4k_x8, sdot_q6k_x8, fast_experts },
+    mode: enum { rows, experts, sdot_q4k, sdot_q6k, sdot_q50, sdot_q4k_x8, sdot_q6k_x8, fast_experts, heads },
     tensor: g.Tensor = undefined,
     q4k_x8: [*]const repack8.BlockQ4Kx8 = undefined,
     q6k_x8: [*]const repack8.BlockQ6Kx8 = undefined,
@@ -41,6 +41,8 @@ const Job = struct {
     limit: f32 = 0,
     experts: [*]const Expert = undefined,
     fast_experts: [*]const FastExpert = undefined,
+    head_ctx: *anyopaque = undefined,
+    head_fn: *const fn (*anyopaque, usize, usize) void = undefined,
     units: usize = 0,
     chunk: usize = 1,
 };
@@ -141,6 +143,7 @@ fn runJob(j: *const Job, lo: usize, hi: usize) void {
         .sdot_q4k_x8 => repack8.projectRangeQ4Kx8(j.q4k_x8, j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
         .sdot_q6k_x8 => repack8.projectRangeQ6Kx8(j.q6k_x8, j.tensor.bytes.ptr, j.acts256, j.output, j.count, j.blocks_per_row, j.n, j.rounded, lo, hi),
         .fast_experts => for (lo..hi) |i| fastExpert(j, j.fast_experts[i]),
+        .heads => j.head_fn(j.head_ctx, lo, hi),
     }
 }
 
@@ -384,5 +387,15 @@ pub const Pool = struct {
         const job = Job{ .mode = .experts, .input = input.ptr, .width = hidden, .inter = inter, .limit = limit, .experts = list.ptr, .units = list.len, .chunk = 1 };
         if (p.made == 0) return runJob(&job, 0, list.len);
         p.dispatch(job);
+    }
+
+    /// Run an independent per-head callback across workers, claiming `chunk` heads at a time.
+    pub fn runHeads(p: *Pool, ctx: *anyopaque, callback: *const fn (*anyopaque, usize, usize) void, count: usize, chunk: usize) void {
+        if (count == 0) return;
+        if (p.made == 0 or count == 1) {
+            callback(ctx, 0, count);
+            return;
+        }
+        p.dispatch(.{ .mode = .heads, .head_ctx = ctx, .head_fn = callback, .units = count, .chunk = @max(@as(usize, 1), chunk) });
     }
 };

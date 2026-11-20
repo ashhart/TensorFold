@@ -24,6 +24,9 @@ test {
     _ = @import("cpu_gguf_repack8.zig");
     _ = @import("cpu_gguf_repack_cache.zig");
     _ = @import("cpu_mla.zig");
+    _ = @import("kda_fast.zig");
+    _ = @import("kda_fast_pool_test.zig");
+    _ = @import("cpu_mla_fast.zig");
     _ = @import("cpu_forward_test.zig");
     _ = @import("gguf_names.zig");
     @import("std").testing.refAllDecls(gguf.File);
