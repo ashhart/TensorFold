@@ -79,6 +79,7 @@ pub const Args = struct {
     drafter_bits: u8 = 4,
     rope_yarn: ?f64 = null, // YaRN with this factor over the checkpoint's trained window (Qwen3.5/3.6 on CUDA)
     record: ?[]const u8 = null, // drafter training rows written under this folder
+    glp: ?@import("glp_startup.zig").Vec = null, // --glp: the control vector file and the strength in force
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
     prompt_precision: []const u8 = "bf16", // int8: prompt matmuls quantize their inputs to int8 a 64-input group
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
