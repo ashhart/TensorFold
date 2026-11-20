@@ -58,6 +58,7 @@ const linux_compile = [_][]const u8{
     "compile-h3-library",
     "compile-modelopt-startup",
     "compile-moss-teacher-cuda",
+    "compile-native-cuda-windows",
     "compile-omni-video-host",
     "compile-proposal-metal-host",
     "compile-qwen35-learn",
