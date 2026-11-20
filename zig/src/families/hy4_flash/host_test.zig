@@ -6,7 +6,6 @@ test {
     _ = @import("engram.zig");
     _ = @import("names.zig");
     _ = @import("names_test.zig");
-    _ = @import("refusal.zig");
     _ = @import("template_test.zig");
     _ = @import("tokenizer_test.zig");
 }
