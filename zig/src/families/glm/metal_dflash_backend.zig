@@ -284,6 +284,18 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
         return .{ .logits = y, .token_ids = null };
     }
     var x_ctx = b.shim();
+    if (b.batch_block == 0) {
+        var s: u32 = 0;
+        while (s < x.rows) {
+            const step = @min(x.rows - s, 16);
+            const at = @as(usize, s) * x.stride * 2;
+            const to = @as(usize, s) * b.target.w.head.n * 2;
+            fwd.qmv(&x_ctx, e, b.target.k.qmv_head, .{ .buf = input.buf, .off = input.off + at }, b.target.w.head, .{ .buf = output.buf, .off = output.off + to }, step);
+            s += step;
+        }
+        e.barrier();
+        return .{ .logits = y, .token_ids = null };
+    }
     // the row kernels take a lone stream's mask rows as its own pass does: a batch heads each stream's apart
     const block = if (b.batch_block > 1 and x.rows % b.batch_block == 0) b.batch_block else x.rows;
     const first: u32 = if (block == x.rows) 0 else 1;
@@ -372,8 +384,22 @@ pub fn readLattices(b: *Backend, h: op.Head, topk: op.View, projected: op.View, 
         made += 1;
     }
 }
+/// Commit the open draft frame, wait for completion, and record host/GPU stamp times.
+pub fn finishStamped(b: *Backend) !void {
+    b.stamps.commit = ticks();
+    b.frame.finish() catch |err| {
+        b.failed = true;
+        return err;
+    };
+    b.stamps.waited = ticks();
+    b.stamps.gpu = span(&b.frame);
+}
+/// Read stamp after lattice readback.
+pub fn stampRead(b: *Backend) void {
+    b.stamps.read = ticks();
+}
 /// Rows [first, first + rows) of `x`, an alias in the frame.
-fn rowsOf(b: *Backend, x: op.View, first: u32, rows: u32) !op.View {
+pub fn rowsOf(b: *Backend, x: op.View, first: u32, rows: u32) !op.View {
     if (first > x.rows or rows > x.rows - first) return error.DraftOperatorShape;
     const r = try b.frame.ref(x);
     return b.frame.add(.{ .buf = r.buf, .off = r.off + @as(usize, first) * x.stride * x.dtype.size() }, rows, x.width, x.stride, x.dtype);

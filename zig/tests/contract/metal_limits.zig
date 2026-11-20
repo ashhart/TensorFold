@@ -299,6 +299,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "glm dflash2 attention ")) {
         if (!assemble) return undefined;
         text = try tf.glm.metal_dflash_attention.source(a, .{ .heads = 32, .kv_heads = 8, .dim = 128 });
+    } else if (std.mem.startsWith(u8, d.name, "glm tap ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_glue;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         if (!assemble) return undefined;
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];

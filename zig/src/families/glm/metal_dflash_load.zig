@@ -39,7 +39,7 @@ pub const Drafter = struct {
 /// Device bytes the drafter holds beside the weights (none without one).
 pub fn heldBytes(e: *const Engine) u64 {
     const d = e.dflash orelse return 0;
-    return d.model.bytes + d.taps.stage.length();
+    return d.model.bytes;
 }
 
 /// Device bytes a stream's own drafter context takes (none without a drafter).
@@ -62,11 +62,10 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, bit
     errdefer gpa.destroy(taps);
     taps.* = try Taps.init(e.device, m.pending, m.graph.config.window, m.graph.config.hidden, gpa, st.max_rows);
     errdefer taps.deinit(gpa);
-    const drafter_bytes = m.bytes + taps.stage.length();
-    const used = e.w.bytes + e.arena.bytes + drafter_bytes + vision.heldBytes(e.vision);
+    const used = e.w.bytes + e.arena.bytes + m.bytes + vision.heldBytes(e.vision);
     if (used > e.limit.bytes) {
         const gb = 1e9;
-        std.log.err("glm drafter: the --drafter checkpoint's {d:.1} GB pass the {d:.1} GB load limit beside the weights (lower --context, or unset --drafter)", .{ @as(f64, @floatFromInt(drafter_bytes)) / gb, @as(f64, @floatFromInt(e.limit.bytes)) / gb });
+        std.log.err("glm drafter: the --drafter checkpoint's {d:.1} GB pass the {d:.1} GB load limit beside the weights (lower --context, or unset --drafter)", .{ @as(f64, @floatFromInt(m.bytes)) / gb, @as(f64, @floatFromInt(e.limit.bytes)) / gb });
         return error.OverMemoryLimit;
     }
     const d = try gpa.create(Drafter);
@@ -84,24 +83,9 @@ pub fn joinResidency(gpa: std.mem.Allocator, e: *Engine) !void {
     if (d.model.backend.copies) |*c| try c.appendBuffers(&list);
     for (d.model.backend.caches) |c| try list.appendSlice(gpa, &.{ c.keys, c.values });
     for (d.model.backend.frame.pool.items) |b| try list.append(gpa, b);
-    try list.appendSlice(gpa, &.{ d.model.pending, d.taps.stage });
+    try list.append(gpa, d.model.pending);
     @import("residency.zig").joinDrafter(e, list.items);
     d.model.backend.frame.setResident(r.follow());
-}
-
-test "heldBytes and load accounting include the tap-stage buffer beside drafter model bytes" {
-    const device = mtl.Device.init() catch return error.SkipZigTest;
-    defer device.deinit();
-    const ring = try device.buffer(64 * 5 * 512 * 2, mtl.ResourceOptions.shared);
-    defer ring.deinit();
-    var taps = try Taps.init(device, ring, 64, 512, std.testing.allocator, 1);
-    defer taps.deinit(std.testing.allocator);
-    var m: model_mod.Model = undefined;
-    m.bytes = 1024;
-    var d: Drafter = .{ .gpa = std.testing.allocator, .model = &m, .taps = &taps, .target = undefined };
-    var e: Engine = undefined;
-    e.dflash = &d;
-    try std.testing.expectEqual(@as(u64, 1024 + taps.stage.length()), heldBytes(&e));
 }
 
 test "the drafter is refused beside the pair and with bits other than 0 or 4, and opens without them" {
