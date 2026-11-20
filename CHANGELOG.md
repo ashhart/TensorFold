@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: a Solo Kanban ticket can be assigned a saved bot, which builds with that bot's model, instructions and permissions while keeping the ticket's capability limits (#3737, fixes #3336). Thanks to @jamesadcock.
+
 - Living Weights: in a container that refuses file clones with a permission error (LXC), lessons and rollbacks copy the files instead of failing (#4147).
 
 - Build: the Qwen ModelOpt admission host test gets the `living` module, so `test-cuda-host` compiles on Windows again after #3294 (#4146).
