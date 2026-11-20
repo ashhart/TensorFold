@@ -80,8 +80,57 @@ test "the stop rule: per draft above zero, the running product below it, every d
     var all: Stop = .{ .c = 0 };
     try std.testing.expect(all.take(5, 0.01).propose and all.take(6, 0.01).more);
 }
-/// A verify window's rows at most: the pending token and a chain, or a copied continuation.
-pub const max_rows: usize = 32;
+/// A verify window's rows at most: a window's rows are the pending-row log's, and that log holds this many.
+pub const max_rows: usize = batch.late_rows;
+/// The verify window's rows a load serves before the boot check proves more: the width the engine ships.
+pub const base_rows: usize = 32;
+/// The rows a load's window buffers hold: `max_rows` for a load whose boot check runs, else `base_rows`.
+pub var buffer_rows: usize = base_rows;
+/// The window a load serves: the boot check's largest row-exact width past `base_rows`, else `base_rows`.
+pub var served_rows: usize = base_rows;
+
+pub fn window() usize {
+    return served_rows;
+}
+
+pub fn bufferRows() usize {
+    return buffer_rows;
+}
+
+/// The rows a load's window buffers hold: the pending-row log's `max_rows` only when its boot check runs.
+pub fn bufferWidth(check_runs: bool) usize {
+    return if (check_runs) max_rows else base_rows;
+}
+
+/// Sizes every window buffer a load makes from here on, the check's own first: set before any is sized.
+pub fn sizeWindow(check_runs: bool) void {
+    buffer_rows = bufferWidth(check_runs);
+}
+
+/// Sets the window a load serves from the boot check's outcome (null: it did not run, or it failed).
+pub fn serveWindow(check_on: bool, proved: ?usize) void {
+    served_rows = servedWidth(check_on, proved);
+}
+
+/// The width a load serves: a run past `base_rows` only when the boot check ran and proved it, within the buffers.
+pub fn servedWidth(check_on: bool, proved: ?usize) usize {
+    if (!check_on) return base_rows;
+    const run = proved orelse return base_rows;
+    return @min(@max(run, base_rows), buffer_rows);
+}
+
+/// Whether a verify window of `n` rows is served: one row to the served window's, the engine's one bound.
+pub fn rowsOk(n: usize) bool {
+    return n >= 1 and n <= served_rows;
+}
+
+/// The boot check's widths and the window it measures them in: every width the buffers hold, served meanwhile.
+pub fn probeWidths(rows: *[max_rows]usize) usize {
+    served_rows = buffer_rows; // the sweep measures every width its own draft holds, so it serves them all
+    for (rows[0..buffer_rows], 0..) |*w, i| w.* = i + 1;
+    return buffer_rows;
+}
+
 /// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
 pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
@@ -461,10 +510,72 @@ test "a masked row draws only allowed tokens, greedy the best of them" {
 
 test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
-    try std.testing.expectEqual(@as(usize, 32), max_rows);
-    try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
+    try std.testing.expectEqual(@as(usize, 48), max_rows);
+    try std.testing.expectEqual(@as(usize, 32), base_rows);
+    try std.testing.expect(max_chain + 1 <= base_rows and base_rows < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
+}
+
+test "the served copy window widens only to a width the boot check proved past the shipped rows" {
+    // the widest window is the pending-row log's own rows: a wider one overwrites the kept rows its rollback needs
+    try std.testing.expectEqual(@as(usize, 48), max_rows);
+    defer {
+        served_rows = base_rows;
+        buffer_rows = base_rows;
+    }
+    // a load whose check runs holds every width the check can prove; with the switch off, the shipped rows
+    try std.testing.expectEqual(max_rows, bufferWidth(true));
+    try std.testing.expectEqual(base_rows, bufferWidth(false));
+    sizeWindow(true);
+    const Case = struct { check: bool, proved: ?usize, want: usize };
+    for ([_]Case{
+        .{ .check = false, .proved = null, .want = base_rows },
+        .{ .check = false, .proved = 48, .want = base_rows },
+        .{ .check = true, .proved = null, .want = base_rows },
+        .{ .check = true, .proved = base_rows, .want = base_rows },
+        .{ .check = true, .proved = 40, .want = 40 },
+        .{ .check = true, .proved = max_rows, .want = max_rows },
+        .{ .check = true, .proved = 8, .want = base_rows },
+    }) |c| try std.testing.expectEqual(c.want, servedWidth(c.check, c.proved));
+    serveWindow(true, 40);
+    try std.testing.expectEqual(@as(usize, 40), window());
+    serveWindow(false, 40);
+    try std.testing.expectEqual(base_rows, window());
+    serveWindow(true, null);
+    try std.testing.expectEqual(base_rows, window());
+    // no proved width is served past the rows the load's buffers hold
+    sizeWindow(false);
+    try std.testing.expectEqual(base_rows, servedWidth(true, max_rows));
+}
+
+test "the boot check's sweep is served every width a window holds, so its own verify accepts each" {
+    defer {
+        served_rows = base_rows;
+        buffer_rows = base_rows;
+    }
+    // a load whose check runs sizes its buffers for the sweep and serves the shipped width until the sweep ends
+    sizeWindow(true);
+    serveWindow(false, null);
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(rowsOk(1) and rowsOk(base_rows) and !rowsOk(0));
+    // there the engine's verify refuses the 33rd row, the deadlock the sweep met
+    try std.testing.expect(!rowsOk(base_rows + 1));
+    var widths: [max_rows]usize = undefined;
+    const n = probeWidths(&widths);
+    try std.testing.expectEqual(max_rows, n);
+    try std.testing.expectEqual(max_rows, window());
+    for (widths[0..n], 0..) |w, i| try std.testing.expectEqual(i + 1, w);
+    for (widths[0..n]) |w| try std.testing.expect(rowsOk(w));
+    // a sweep that fails afterwards leaves the load at the shipped width, and the guard narrows with it
+    serveWindow(true, null);
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(!rowsOk(max_rows));
+    // buffers of the shipped rows: the sweep holds to them, so it never asks a width its draft cannot hold
+    sizeWindow(false);
+    try std.testing.expectEqual(base_rows, probeWidths(&widths));
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(rowsOk(base_rows) and !rowsOk(base_rows + 1));
 }
 
 test {

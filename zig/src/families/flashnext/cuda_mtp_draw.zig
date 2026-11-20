@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
+const mtp_draft = @import("cuda_mtp_draft.zig");
 const lanes = @import("lanes");
 
 const vocab = wt.vocab;
@@ -73,11 +74,11 @@ fn finite(row: []const u16) bool {
 
 /// The candidates of `rows` rows of `v` scores `ld` apart, k a row, into d.best past its best values, then to d.host.
 fn candidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, scores: u64, v: usize, ld: usize, rows: usize, k: usize) !struct { vals: []u16, cols: []i32 } {
-    const tv = d.best.ptr + max_rows * 16;
-    const tc = tv + max_rows * topk_max * 2;
+    const tv = d.best.ptr + mtp_draft.valsAt(d.layout.rows);
+    const tc = d.best.ptr + mtp_draft.colsAt(d.layout.rows);
     try h.topk(st, scores, v, ld, rows, k, tv, tc);
     const vals = d.host[0 .. rows * k];
-    const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[max_rows * topk_max ..][0 .. 2 * rows * k])));
+    const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[d.layout.rows * topk_max ..][0 .. 2 * rows * k])));
     try st.synchronize();
     try copyReady(st, std.mem.sliceAsBytes(vals), tv);
     try copyReady(st, std.mem.sliceAsBytes(cols), tc);
