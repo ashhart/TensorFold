@@ -82,7 +82,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
 | 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
-| 33. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
+| 34. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -119,7 +119,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? | ? |
-| 33. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -156,7 +156,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
-| 33. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -199,7 +199,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 31. Stream-tile prefetch | ? | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? | ? |
-| 33. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -236,7 +236,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 31. Stream-tile prefetch | ? | ? | ? |
 | 32. Filled-item prompt grid | ? | ? | ? |
 | 33. Dependent launches | ? | ? | ? |
-| 33. Rows together | no (Metal) | no (Metal) | no (prompt) |
+| 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -287,7 +287,7 @@ below; these are estimates for planning a port, not results.
 | 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
 | 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
-| 33. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
+| 34. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
 
 ## The optimizations
 
@@ -541,7 +541,7 @@ below; these are estimates for planning a port, not results.
     +6.8 % plain and +4.0 % drafted at TP=2 on GB10, the same tokens. An input a predecessor writes must not be
     `const __restrict__`, or ptxas may place its non-coherent load above the wait; `zig build check-pdl-loads`
     checks the SASS.
-33. **Rows together on HIP's stream tile.** In a dense 4-bit product of 3 or 4 rows, every row's dot chains advance
+34. **Rows together on HIP's stream tile.** In a dense 4-bit product of 3 or 4 rows, every row's dot chains advance
     one code pair at a time on gfx1151, so the rows' chains hide each other's latency; each output keeps its order of
     operations, so the bits are unchanged. The launches are faster, but cheaper 3- and 4-row windows make the draft
     policy draft shallower, and two greedy streams lose more than one stream gains.
