@@ -48,6 +48,7 @@ Memory, estimated from the config and not measured:
 
 - The loop's reference code is not released: it is in Transformers' open pull request huggingface/transformers#51050 (head `6173a2f6` on 2026-11-20), on top of the released `inkling2` model.
 - That pull request dequantizes the NVFP4 and MXFP8 experts on load and marks this as temporary. So it runs the stored experts with float activations, not with the activation quantization `hf_quant_config.json` asks for. Decision 2 is whether that is the reference.
+- SGLang's open pull request sgl-project/sglang#51926 is a second candidate for decision 2. As reported in this plan's review, it quantizes the experts' inputs as the checkpoint asks, and its rounding differs between its SM100-series and SM120 paths; neither point is checked here. If it is chosen, H3, C3 and M3 name the path and its rounding points.
 - llama.cpp merged the model on 2026-11-20 (ggml-org/llama.cpp#32694), so it is one candidate for the standard server on both backends. vLLM is another on NVIDIA.
 - No speed for a DGX Spark or for Apple silicon was found published; the receipt's baseline has to be measured on the claimant's machine.
 
