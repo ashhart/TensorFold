@@ -194,8 +194,8 @@ test "world three: the default configuration plans every rank, each with its own
                 try testing.expectEqual(own.lo + seen, g.slice);
                 seen += 1;
             },
-            .wq_b => try testing.expectEqual(own.len * per_group * c.head_dim, g.part.group.n()),
-            .wo_b => try testing.expectEqual(own.len * c.o_lora, g.part.group.k()),
+            .wq_b => try testing.expectEqual(own.len * per_group * c.head_dim, g.form.exl3.part.group.n()),
+            .wo_b => try testing.expectEqual(own.len * c.o_lora, g.form.exl3.part.group.k()),
             else => {},
         };
         try testing.expectEqual(own.len, seen);
@@ -265,11 +265,11 @@ fn partsTileTheCheckpoint(gpa: std.mem.Allocator, f: *const Fixture) !void {
         var p = try plan.build(gpa, &f.c, &f.pack, .{ .rank = @intCast(r), .world = 3 });
         defer p.deinit();
         for (p.layers) |*l| {
-            for (l.groups) |g| try markPart(a, &seen, &f.pack, g.prefix, g.part);
-            for (&l.experts) |*x| for (x.parts, x.prefixes) |part, prefix| try markPart(a, &seen, &f.pack, prefix, part);
+            for (l.groups) |g| try markPart(a, &seen, &f.pack, g.prefix, g.form.exl3.part);
+            for (&l.experts) |*x| for (x.form.exl3.parts, x.form.exl3.prefixes) |part, prefix| try markPart(a, &seen, &f.pack, prefix, part);
         }
-        if (p.head) |h| try markPart(a, &seen, &f.pack, h.prefix, h.part);
-        if (p.dspark) |d| try markPart(a, &seen, &f.pack, d.main_proj.prefix, d.main_proj.part);
+        if (p.head) |h| try markPart(a, &seen, &f.pack, h.prefix, h.form.exl3.part);
+        if (p.dspark) |d| try markPart(a, &seen, &f.pack, d.main_proj.prefix, d.main_proj.form.exl3.part);
     }
     var it = seen.iterator();
     while (it.next()) |e| {
@@ -399,10 +399,10 @@ fn raggedMatchesStored(a: std.mem.Allocator, io: Io, f: *const Fixture) !void {
         defer b.deinit();
         try b.all(&p, f.c.o_groups);
         for (p.layers) |*l| for (&l.experts, [_][]const u8{ "w1", "w2", "w3" }) |*x, w| {
-            if (x.layout.kind == .stack) continue;
+            if (x.form.exl3.layout.kind == .stack) continue;
             const got = b.find(try std.fmt.bufPrint(&nb, "L{d}.moe.{s}.data", .{ l.index, w })) orelse return error.TestMissingEntry;
             var at: usize = 0;
-            for (x.parts, x.prefixes) |part, prefix| {
+            for (x.form.exl3.parts, x.form.exl3.prefixes) |part, prefix| {
                 const bytes = try a.alloc(u8, @intCast(part.trellis.bytes()));
                 defer a.free(bytes);
                 try f.pack.read(io, try f.pack.need(try std.fmt.bufPrint(&nb, "{s}.trellis", .{prefix})), part.trellis, bytes);

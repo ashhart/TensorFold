@@ -67,6 +67,29 @@ fn release(p: *const pk.Pack, prefix: []const u8, w: pk.Info) !Projection {
         else => return error.UnsupportedProjection,
     }
 }
+/// A release projection as stored: FP8 blocks, MXFP4 experts, or a raw BF16 matrix (no rotation scales).
+pub const Release = union(enum) {
+    fp8_block: struct { weight: pk.Info, scale: pk.Info, k: usize, n: usize },
+    mxfp4: struct { weight: pk.Info, scale: pk.Info, k: usize, n: usize },
+    bf16: struct { weight: pk.Info, k: usize, n: usize },
+};
+
+/// The release's `{prefix}.weight` by its stored class; the EXL3 readers (`read`, `cudaGroup`) are unaffected.
+pub fn releaseOf(p: *const pk.Pack, prefix: []const u8) !Release {
+    var buf: [256]u8 = undefined;
+    const w = try p.need(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}));
+    if (w.dtype == .bf16) {
+        if (w.rank != 2 or w.shape[0] == 0 or w.shape[1] == 0) return error.UnsupportedProjection;
+        return .{ .bf16 = .{ .weight = w, .k = w.shape[1], .n = w.shape[0] } };
+    }
+    if (w.dtype != .f8_e4m3 and w.dtype != .i8) return error.UnsupportedProjection;
+    return switch (try release(p, prefix, w)) {
+        .fp8_block => |f| .{ .fp8_block = .{ .weight = f.weight, .scale = f.scale, .k = f.k, .n = f.n } },
+        .mxfp4 => |f| .{ .mxfp4 = .{ .weight = f.weight, .scale = f.scale, .k = f.k, .n = f.n } },
+        else => error.UnsupportedProjection,
+    };
+}
+
 /// Kept dense weights take precedence, matching the Metal matrixAny contract. They still require rotation scales.
 pub fn read(p: *const pk.Pack, prefix: []const u8) !Projection {
     var buf: [256]u8 = undefined;

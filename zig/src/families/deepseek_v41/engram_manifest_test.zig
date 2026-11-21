@@ -35,13 +35,17 @@ fn packRelease(a: std.mem.Allocator, io: std.Io, src: []const u8, out: std.Io.Di
     defer a.free(layers);
     var plans: std.ArrayList(ep.Plan) = .empty;
     defer plans.deinit(a);
+    var spans: std.ArrayList(ep.Span) = .empty;
+    defer spans.deinit(a);
     for (layers) |l| {
-        _ = try ep.pack(a, io, &p, out, l, 77, null);
-        try plans.append(a, try ep.tableOf(&p, l));
+        const tab = try ep.tableOf(&p, l);
+        _ = try ep.pack(a, io, &p, out, l, ep.Span.whole(tab.rows), 77, null);
+        try plans.append(a, tab);
+        try spans.append(a, ep.Span.whole(tab.rows));
     }
     const out_dir = try out.realPathFileAlloc(io, ".", a);
     defer a.free(out_dir);
-    const m = try em.Manifest.build(a, io, out_dir, &p, plans.items, seed);
+    const m = try em.Manifest.build(a, io, out_dir, &p, plans.items, spans.items, seed);
     defer m.deinit();
     try m.write(a, io, out_dir);
 }
@@ -264,4 +268,40 @@ fn checkShifted() !void {
 // In a child: if checkText's `x * er.row_bytes` is unchecked, a safe build panics and only this test fails
 test "engram manifest: a table whose rows start at 2^62 is refused, not read at offsets that wrap past 2^64" {
     try t.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(checkShifted, .{}));
+}
+
+test "engram manifest: a rank's shard that starts past row 0 reads at its own offsets and guards both end rows" {
+    const a = t.allocator;
+    const io = t.io;
+    var src = t.tmpDir(.{});
+    defer src.cleanup();
+    var out = t.tmpDir(.{});
+    defer out.cleanup();
+    try release(a, io, src.dir, 1, 7, 3);
+    const sdir = try src.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(sdir);
+    const odir = try out.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(odir);
+    var p = try pk.Pack.open(a, io, sdir);
+    defer p.deinit();
+    const span: ep.Span = .{ .rank = 1, .world = 3, .lo = 100, .hi = 233, .total = rows };
+    _ = try ep.pack(a, io, &p, out.dir, 1, span, 50, null);
+    const m = try em.Manifest.build(a, io, odir, &p, &.{try ep.tableOf(&p, 1)}, &.{span}, 5);
+    defer m.deinit();
+    try m.write(a, io, odir);
+    const got = try em.check(a, io, sdir, odir, false);
+    try t.expect(got.samples >= 2); // the two end rows at least, whatever the seeded rows hit
+    for ([_]u64{ 0, span.hi - span.lo - 1 }) |local| {
+        var f = try out.dir.openFile(io, "engram-l1-r1of3.bin", .{ .mode = .read_write });
+        defer f.close(io);
+        var b: [1]u8 = undefined;
+        const at = er.header_bytes + local * er.row_bytes + 17;
+        _ = try f.readPositionalAll(io, &b, at);
+        b[0] +%= 1;
+        try f.writePositionalAll(io, &b, at);
+        try t.expectError(error.EngramSampleMismatch, em.check(a, io, sdir, odir, false));
+        b[0] -%= 1;
+        try f.writePositionalAll(io, &b, at);
+        _ = try em.check(a, io, sdir, odir, false);
+    }
 }

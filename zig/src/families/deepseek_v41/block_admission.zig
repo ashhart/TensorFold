@@ -15,7 +15,7 @@ pub fn nativePrefill(c: *const Config, world: u32) !void {
 
 pub fn options(c: *const Config, o: anytype, layers: []const u32, n: i64) !void {
     const rank = if (@hasField(@TypeOf(o), "rank")) o.rank else 0;
-    const part = @import("partition.zig").share(c.expert_width, rank, o.world) catch return error.InvalidBlock;
+    const part = @import("partition.zig").expertShare(c, rank, o.world) catch return error.InvalidBlock;
     if (o.expert_rows < 0 or o.dspark_rows < 0 or o.branch_rows < 0 or o.prefill_rows < 0 or o.image_rows < -1) return error.InvalidBlock;
     for (layers) |l| {
         if (l >= c.allLayers()) return error.InvalidBlock;

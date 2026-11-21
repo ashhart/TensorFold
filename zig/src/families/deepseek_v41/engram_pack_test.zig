@@ -43,11 +43,11 @@ test "engram pack: the shard is the header then each row's 256 codes and 8 scale
     defer a.free(layers);
     try t.expectEqualSlices(u32, &.{ 1, 14 }, layers);
     // 300 rows in chunks of 77 (a short last chunk) and in one chunk
-    try t.expectEqual(@as(u64, rows), try ep.pack(a, io, &p, out.dir, 1, 77, null));
-    try t.expectEqual(@as(u64, rows), try ep.pack(a, io, &p, out.dir, 14, 1 << 20, null));
+    try t.expectEqual(@as(u64, rows), try ep.pack(a, io, &p, out.dir, 1, ep.Span.whole(rows), 77, null));
+    try t.expectEqual(@as(u64, rows), try ep.pack(a, io, &p, out.dir, 14, ep.Span.whole(rows), 1 << 20, null));
     for (layers) |l| {
         var nb: [64]u8 = undefined;
-        const bytes = try out.dir.readFileAlloc(io, try ep.shardName(&nb, l), a, .limited(1 << 24));
+        const bytes = try out.dir.readFileAlloc(io, try ep.shardName(&nb, l, ep.Span.whole(rows)), a, .limited(1 << 24));
         defer a.free(bytes);
         const h = try er.Header.parse(bytes[0..48], bytes.len);
         try t.expectEqual(@as(u64, rows), h.hi);
@@ -67,7 +67,8 @@ test "engram pack: the shard is the header then each row's 256 codes and 8 scale
     try t.expectError(error.FileNotFound, out.dir.access(io, "engram-l1-r0of1.bin.part", .{}));
     const odir = try out.dir.realPathFileAlloc(io, ".", a);
     defer a.free(odir);
-    const good = try ep.verify(a, io, &p, odir, layers, 64, 3);
+    const whole = [_]ep.Span{ ep.Span.whole(rows), ep.Span.whole(rows) };
+    const good = try ep.verify(a, io, &p, odir, layers, &whole, 64, 3);
     try t.expectEqual(@as(u64, 0), good.bad);
     try t.expectEqual(@as(u64, 2 * 66), good.rows);
     // every row of a table with one byte flipped in row 123's scales: exactly that row differs
@@ -78,7 +79,48 @@ test "engram pack: the shard is the header then each row's 256 codes and 8 scale
     _ = try f.readPositionalAll(io, &b, at);
     b[0] +%= 1;
     try f.writePositionalAll(io, &b, at);
-    const bad = try ep.verify(a, io, &p, odir, layers, rows, 3);
+    const bad = try ep.verify(a, io, &p, odir, layers, &whole, rows, 3);
     try t.expectEqual(@as(u64, 2 * rows), bad.rows);
     try t.expectEqual(@as(u64, 1), bad.bad);
+}
+
+test "engram pack: rank r of w writes only its rows, at shard-relative offsets, and reads back through the server's reader" {
+    const a = t.allocator;
+    const io = t.io;
+    var src = t.tmpDir(.{});
+    defer src.cleanup();
+    var out = t.tmpDir(.{});
+    defer out.cleanup();
+    try release(a, io, src.dir, 1, 7);
+    const sdir = try src.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(sdir);
+    var p = try pk.Pack.open(a, io, sdir);
+    defer p.deinit();
+    const odir = try out.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(odir);
+    const tab = try ep.tableOf(&p, 1);
+    var w: [rows * 256]u8 = undefined;
+    try p.read(io, tab.weight, .{ .offset = 0, .len = w.len }, &w);
+    const spans = [_]ep.Span{
+        .{ .rank = 0, .world = 3, .lo = 0, .hi = 100, .total = rows },
+        .{ .rank = 1, .world = 3, .lo = 100, .hi = 233, .total = rows },
+        .{ .rank = 2, .world = 3, .lo = 233, .hi = rows, .total = rows },
+    };
+    for (spans) |sp| {
+        try t.expectEqual(sp.hi - sp.lo, try ep.pack(a, io, &p, out.dir, 1, sp, 41, null));
+        var nb: [64]u8 = undefined;
+        const name = try ep.shardName(&nb, 1, sp);
+        const bytes = try out.dir.readFileAlloc(io, name, a, .limited(1 << 24));
+        defer a.free(bytes);
+        const h = try er.Header.parse(bytes[0..48], bytes.len);
+        try t.expectEqual(sp.lo, h.lo);
+        try t.expectEqual(sp.hi, h.hi);
+        try t.expectEqual(@as(u64, rows), h.total);
+        try t.expectEqualSlices(u8, w[sp.lo * 256 ..][0..256], bytes[er.header_bytes..][0..256]);
+        const v = try ep.verify(a, io, &p, odir, &.{1}, &.{sp}, sp.hi - sp.lo, 5);
+        try t.expectEqual(sp.hi - sp.lo, v.rows);
+        try t.expectEqual(@as(u64, 0), v.bad);
+    }
+    try t.expectError(error.InvalidEngramSpan, ep.pack(a, io, &p, out.dir, 1, .{ .lo = 0, .hi = rows + 1, .total = rows }, 41, null));
+    try t.expectError(error.InvalidEngramSpan, ep.verify(a, io, &p, odir, &.{1}, &.{}, 4, 5));
 }
