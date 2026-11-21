@@ -23,7 +23,6 @@ const Engine = api.Engine;
 const Info = api.Info;
 const Reason = api.Reason;
 const Stats = api.Stats;
-
 pub const Rounds = rounds.Rounds;
 pub const Proposers = rounds.Proposers;
 const rounds = @import("lane_rounds.zig");
