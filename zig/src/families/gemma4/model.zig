@@ -1,10 +1,11 @@
-//! A native Gemma 4 dense model (31B or 12B): admitted config, packed weights, the glue pipelines, lane projections.
+//! A native Gemma 4 model (31B, 12B or E4B): admitted config, packed weights, the glue pipelines, lane projections.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const weights = @import("weights.zig");
+const weight_loader = @import("weight_loader.zig");
 const kernels = @import("kernels.zig");
 const affine_mm = @import("affine_mm.zig");
 const round = @import("tree_round_gpu");
@@ -51,6 +52,17 @@ pub const Tower = union(enum) {
     }
 };
 
+/// What this backend serves: the E-series (per-layer inputs), else the dense models; else `requireDense` refuses.
+pub fn admit(c: cfg.Config) cfg.Error!void {
+    if (c.geo.layer_input != 0 and c.geo.shared_layers != 0 and !c.geo.keys_are_values) return;
+    return c.requireDense();
+}
+
+/// The E-series runs on the row path of chips without tensor units (M1 to M4); a chip with them (M5) is refused.
+pub fn admitChip(geo: cfg.Geometry, tensor_units: bool) error{GemmaE4bNotQualifiedWithTensorUnits}!void {
+    if (geo.layer_input != 0 and tensor_units) return error.GemmaE4bNotQualifiedWithTensorUnits;
+}
+
 pub const Model = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -85,21 +97,23 @@ pub const Model = struct {
         m.vision = null;
         m.mm = @splat(null);
         m.config = try cfg.Config.read(gpa, io, dir);
-        try m.config.requireDense();
-        m.projections = .{ .geo = m.config.geo };
+        try admit(m.config);
+        m.projections = .{ .gpa = gpa, .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
-        // the fused one-row path is the reg lane kernel: M5 only. Before it the row path serves the projections.
-        m.fuse = @import("fused_lane.zig").available(m.device) and m.config.widths.allFast(m.config.geo.layers);
+        try admitChip(m.config.geo, m.device.tensorUnits());
+        // the fused one-row path is the reg lane kernel: M5 only, not the E-series; before the M5 the row path serves.
+        m.fuse = @import("fused_lane.zig").available(m.device) and m.config.widths.allFast(m.config.geo.layers) and m.config.geo.layer_input == 0;
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        // the layers' linears stay in their files, read once into the packs: the shards keep the embed and norms alone
-        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", weights.later);
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config.geo, &m.config.widths);
+        // the E-series on a chip without tensor units also leaves its tied table in its files until the head pack
+        const lean = m.config.geo.layer_input != 0 and !m.device.tensorUnits();
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weight_loader.laterLean else weight_loader.later);
+        m.weights = try weight_loader.load(gpa, m.device, &m.checkpoint, m.config, lean);
         m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
@@ -190,6 +204,15 @@ pub const Model = struct {
         m.taps = @intCast(layers.len);
     }
 
+    /// The first layer whose output feeds no cache and no tap: past the cache-owning layers and the drafter's last tap.
+    pub fn deepFrom(m: *const Model) usize {
+        var from = m.config.geo.cacheLayers();
+        for (m.tap_of[0..m.config.geo.layers], 0..) |t, i| {
+            if (t >= 0) from = @max(from, i + 1);
+        }
+        return from;
+    }
+
     pub fn deinit(m: *Model) void {
         if (m.vision) |v| v.deinit();
         m.inv_sliding.deinit();
@@ -234,4 +257,29 @@ test "a tower that fails to load leaves the model without one, so deinit frees n
     for (&m.mm) |*p| p.* = @as(affine_mm.Pipes, undefined); // never read: the refusal comes first
     try std.testing.expectError(error.UnexpectedGemmaVisionTensor, m.loadVision(std.testing.io, dir));
     try std.testing.expect(m.vision == null);
+}
+
+test "the E-series is admitted whole and every other layout keeps its refusal" {
+    for ([_]cfg.Geometry{ cfg.dense31b, cfg.unified12b, cfg.e4b }) |g| try admit(.{ .geo = g, .context = 1 });
+    var geo = cfg.e4b;
+    geo.layer_input = 0;
+    try std.testing.expectError(error.GemmaSharedKvNotServed, admit(.{ .geo = geo, .context = 1 }));
+    geo = cfg.e4b;
+    geo.shared_layers = 0;
+    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, admit(.{ .geo = geo, .context = 1 }));
+    geo = cfg.e4b;
+    geo.keys_are_values = true;
+    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, admit(.{ .geo = geo, .context = 1 }));
+    geo = cfg.dense31b;
+    geo.shared_layers = 18;
+    try std.testing.expectError(error.GemmaSharedKvNotServed, admit(.{ .geo = geo, .context = 1 }));
+    geo = cfg.dense31b;
+    geo.keys_are_values = false;
+    try std.testing.expectError(error.GemmaKeysNotValues, admit(.{ .geo = geo, .context = 1 }));
+}
+
+test "the E-series is refused on a chip with tensor units, the dense models are not" {
+    try std.testing.expectError(error.GemmaE4bNotQualifiedWithTensorUnits, admitChip(cfg.e4b, true));
+    try admitChip(cfg.e4b, false);
+    for ([_]cfg.Geometry{ cfg.dense31b, cfg.unified12b }) |g| for ([_]bool{ true, false }) |units| try admitChip(g, units);
 }

@@ -107,7 +107,7 @@ pub const Drafter = struct {
         d.pending = null;
         d.follow = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
-        d.projections = .{ .geo = geo };
+        d.projections = .{ .gpa = gpa, .geo = geo };
         errdefer d.projections.deinit(gpa); // warm's chains fill it
         d.config = try aw.Config.read(gpa, io, dir, geo);
         const c = &d.config;

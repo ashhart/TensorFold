@@ -8,7 +8,7 @@ const gcfg = @import("../src/families/gemma4/config.zig");
 const gmm = @import("../src/families/gemma4/affine_mm.zig");
 pub fn add(s: *Set, device: mtl.Device) !void {
     const precise = mtl.CompileOptions{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise };
-    for ([_]gcfg.Geometry{ gcfg.dense31b, gcfg.unified12b }) |geo| {
+    for ([_]gcfg.Geometry{ gcfg.dense31b, gcfg.unified12b, gcfg.e4b }) |geo| {
         for ([_]bool{ false, true }) |global| {
             for ([_]bool{ false, true }) |assistant| {
                 if (assistant and !g4.draftAvailable(device)) continue;
@@ -16,8 +16,10 @@ pub fn add(s: *Set, device: mtl.Device) !void {
             }
             try s.raw("gemma4", "prompt-attention", try g4.promptSource(device, s.a, geo, global));
         }
-        try s.raw("gemma4", "vision", try @import("../src/families/gemma4/vision_source.zig").source(device, s.a, geo.hidden));
+        if (geo.layer_input == 0) try s.raw("gemma4", "vision", try @import("../src/families/gemma4/vision_source.zig").source(device, s.a, geo.hidden));
     }
+    try s.raw("gemma4", "E4B-ple", try g4.Ple.source(s.a, gcfg.e4b));
+    try s.raw("gemma4", "E4B-dense", g4.Ple.dense_text);
     for (gcfg.widths.bit_widths) |bits| for ([_]u16{ 32, 64 }) |group| for ([_]bool{ false, true }) |out_f32| for (std.enums.values(gmm.Glu)) |glu|
         try s.raw("gemma4", "affine", try gmm.source(device, s.a, .{ .bits = bits, .group = group, .out_f32 = out_f32, .glu = glu }));
     for (@import("../src/families/gemma4/contracts.zig").entries) |v| if (v.kind != 0 and @import("../src/families/gemma4/fused_lane.zig").available(device))

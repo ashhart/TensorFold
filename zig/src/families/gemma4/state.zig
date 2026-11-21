@@ -13,7 +13,18 @@ pub const prompt_rows = 128;
 pub const meta_ints = 8;
 /// Rows a prompt chunk takes (prompt.zig), and a sliding layer's ring: the window plus a chunk written past it.
 pub const chunk_rows = 512;
+/// The 31B's and 12B's ring (the MTP assistant reads theirs).
 pub const ring = cfg.window + chunk_rows;
+
+/// A geometry's sliding ring.
+pub fn ringOf(geo: cfg.Geometry) usize {
+    return geo.sliding_window + chunk_rows;
+}
+
+/// The layer whose cache layer `i` reads: itself, or (the E-series' trailing layers) the last earlier one of its kind.
+pub fn kvSource(geo: cfg.Geometry, i: usize) usize {
+    return cfg.cacheOwner(i, geo.cacheLayers()).?;
+}
 
 /// Where a stream's latest tapped rows sit: `rows` rows from cache position `start`, current while `gen` matches.
 pub const Tap = struct { buf: ?mtl.Buffer = null, off: usize = 0, start: u64 = 0, rows: usize = 0, gen: ?u64 = null };
@@ -38,12 +49,17 @@ pub const Cache = struct {
         var c: Cache = .{ .k = undefined, .v = undefined, .geo = geo, .capacity = capacity, .logits = try device.buffer(cfg.vocab * 2, shared) };
         errdefer c.logits.deinit();
         var made: usize = 0;
-        errdefer for (0..made) |i| {
+        errdefer for (0..made) |i| { // the owned layers come first
             c.k[i].deinit();
             c.v[i].deinit();
         };
         for (0..geo.layers) |i| {
-            const slots = slotsOf(i, capacity);
+            if (kvSource(geo, i) != i) { // a shared layer reads an earlier layer's buffers, never writes them
+                c.k[i] = c.k[kvSource(geo, i)];
+                c.v[i] = c.v[kvSource(geo, i)];
+                continue;
+            }
+            const slots = slotsOfGeo(geo, i, capacity);
             const bytes = geo.kvHeads(i) * slots * cfg.headDim(i) * 2;
             c.k[i] = try device.buffer(bytes, opts);
             c.v[i] = device.buffer(bytes, opts) catch |e| {
@@ -59,10 +75,10 @@ pub const Cache = struct {
         c.setResident(null);
         c.logits.deinit();
         if (c.last_tap) |b| b.deinit();
-        for (0..c.geo.layers) |i| {
+        for (0..c.geo.layers) |i| if (kvSource(c.geo, i) == i) {
             c.k[i].deinit();
             c.v[i].deinit();
-        }
+        };
     }
 
     pub fn setResident(c: *Cache, hook: ?mtl.ResidencySet.Follow) void {
@@ -73,11 +89,11 @@ pub const Cache = struct {
             buffers[count] = b;
             count += 1;
         }
-        for (0..c.geo.layers) |i| {
+        for (0..c.geo.layers) |i| if (kvSource(c.geo, i) == i) {
             buffers[count] = c.k[i];
             buffers[count + 1] = c.v[i];
             count += 2;
-        }
+        };
         if (c.follow) |f| for (buffers[0..count]) |b| f.leave(f.ctx, b);
         c.follow = hook;
         if (hook) |f| for (buffers[0..count]) |b| f.join(f.ctx, b);
@@ -96,13 +112,20 @@ pub const Cache = struct {
 /// Bytes a stream's caches take at `capacity` (Cache.init's buffers).
 pub fn cacheBytes(geo: cfg.Geometry, capacity: usize) u64 {
     var total: u64 = cfg.vocab * 2;
-    for (0..geo.layers) |i| total += 2 * geo.kvHeads(i) * slotsOf(i, capacity) * cfg.headDim(i) * 2;
+    for (0..geo.layers) |i| if (kvSource(geo, i) == i) {
+        total += 2 * geo.kvHeads(i) * slotsOfGeo(geo, i, capacity) * cfg.headDim(i) * 2;
+    };
     return total;
 }
 
-/// Cache slots for layer `i`: the ring on a sliding layer, the whole capacity on a global one.
+/// Cache slots for layer `i` of the 31B or 12B: the ring on a sliding layer, the whole capacity on a global one.
 pub fn slotsOf(i: usize, capacity: usize) usize {
     return if (cfg.global(i)) capacity else ring;
+}
+
+/// Cache slots for layer `i` of `geo`.
+pub fn slotsOfGeo(geo: cfg.Geometry, i: usize, capacity: usize) usize {
+    return if (cfg.global(i)) capacity else ringOf(geo);
 }
 
 /// Activations for one window of up to `max_rows` rows, shared by every layer.
@@ -137,16 +160,48 @@ pub const Scratch = struct {
     picks: mtl.Buffer,
     /// Attention partial slots: heads x rows x chunks (256 keys a chunk on global layers; sliding ones in the window).
     slots: usize,
+    /// The E-series' per-layer inputs for the window's rows, and its per-layer gate's scratch.
+    ple: ?Ple = null,
+
+    pub const Ple = struct {
+        /// The table's rows [rows, layers x width], the embeddings' projection, and the combined inputs layers read.
+        tok: mtl.Buffer,
+        prj: mtl.Buffer,
+        pli: mtl.Buffer,
+        /// A layer's gate [rows, width] and the gelu(gate) x input that its projection reads.
+        gate: mtl.Buffer,
+        mid: mtl.Buffer,
+        /// bf16 1.0: the MLP's dense tail leaves the residual unscaled; the layer scalar follows the per-layer input.
+        one: mtl.Buffer,
+
+        pub fn init(device: mtl.Device, geo: cfg.Geometry, rows: usize) !Ple {
+            const wide = rows * geo.layers * geo.layer_input * 2;
+            var p: Ple = undefined;
+            var made: usize = 0;
+            errdefer inline for (.{ "tok", "prj", "pli", "gate", "mid", "one" }, 0..) |f, i| if (i < made) @field(p, f).deinit();
+            inline for (.{ .{ "tok", wide }, .{ "prj", wide }, .{ "pli", wide }, .{ "gate", rows * geo.layer_input * 2 }, .{ "mid", rows * geo.layer_input * 2 }, .{ "one", 2 } }) |f| {
+                @field(p, f[0]) = try device.buffer(f[1], if (std.mem.eql(u8, f[0], "one")) shared else opts);
+                made += 1;
+            }
+            p.one.slice(u16, 1)[0] = 0x3f80;
+            return p;
+        }
+
+        pub fn deinit(p: Ple) void {
+            inline for (.{ "tok", "prj", "pli", "gate", "mid", "one" }) |f| @field(p, f).deinit();
+        }
+    };
 
     pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Scratch {
         const r = prompt_rows;
         const d = geo.hidden;
         const qd = geo.queryWidth();
         const kv = geo.kvWidth();
-        const slots = geo.query_heads * max_rows * @max(capacity / 256 + 2, (cfg.window + max_rows) / 128 + 2);
+        const slots = geo.query_heads * max_rows * @max(capacity / 256 + 2, (geo.sliding_window + max_rows) / 128 + 2);
         var s: Scratch = undefined;
         s.slots = slots;
         s.taps = null;
+        s.ple = null;
         var made: usize = 0;
         errdefer s.release(made);
         inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * kv) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * kv * 2, false }, .{ "v", r * kv * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * geo.intermediate * 2, false }, .{ "act", r * geo.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (geo.intermediate / 64) * 4, false }, .{ "picks", r * 8, true } }) |f| {
@@ -165,12 +220,14 @@ pub const Scratch = struct {
             b.* = try device.buffer(r * d * 2, opts);
             made += 1;
         };
+        if (geo.layer_input != 0) s.ple = try Ple.init(device, geo, r);
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
         s.release(std.math.maxInt(usize));
         if (s.taps) |b| b.deinit();
+        if (s.ple) |p| p.deinit();
     }
 
     /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
