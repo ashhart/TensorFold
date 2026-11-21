@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "status": "diagnostic-only-no-fidelity-waiver",
+  "scope": "TEXT4 M5 FFN-only residual prompt matrix, actual128-row prompt then16 fixed teacher-forced steps. Four selected positions127,135,136,142. Public decode and nonFFN projections unchanged.",
+  "trace_validation": {
+    "native_baseline_and_candidate_logits_exactly_match_saved_untraced_outputs": true,
+    "independent_FP32_logits_exactly_match_saved_untraced_F": true,
+    "candidate_prompt_matrix_calls": 72,
+    "all_native_and_FP32_capture_hashes_verified": true,
+    "controller_and_all_three_children_exit_zero": true,
+    "lock_released": true
+  },
+  "first_selected_prompt_divergence": {
+    "same_genuine_input_row": true,
+    "changed_gate_words": [
+      {
+        "column": 2154,
+        "public": -0.36328125,
+        "candidate": -0.361328125,
+        "held_input_FP32": -0.3623046875,
+        "public_error": 0.0009765625,
+        "candidate_error": 0.0009765625
+      },
+      {
+        "column": 2295,
+        "public": -0.302734375,
+        "candidate": -0.30078125,
+        "held_input_FP32": -0.3017578125,
+        "public_error": 0.0009765625,
+        "candidate_error": 0.0009765625
+      }
+    ]
+  },
+  "interpretation": "At selected prompt row127 two layer0 gate words choose opposite BF16 neighbors at exact held-input FP32 midpoints. Their absolute operator errors are equal. At selected continuation rows135/136/142 first baseline/candidate difference appears at layer2 post-operator output, the first full-attention layer. This is consistent with changed prompt history propagating through the cache; selected-row traces do not establish every contributing source across the full history.",
+  "policy": "No tie waiver, threshold change, coordinate-specific patch or full-model acceptance follows. Better/equal held-input operator metrics do not guarantee better propagated model metrics.",
+  "phases": {
+    "prompt_boundary": {
+      "native": {
+        "mean_absolute_error": 0.02342551249439329,
+        "rms_error": 0.029859538470363673,
+        "relative_rms": 0.008588605253210563,
+        "maximum_absolute_error": 0.15762969851493835,
+        "maximum_coordinate": [
+          0,
+          36890
+        ]
+      },
+      "reference_bf16": {
+        "mean_absolute_error": 0.03884851189472984,
+        "rms_error": 0.04764064939088356,
+        "relative_rms": 0.01370304943028551,
+        "maximum_absolute_error": 0.20851778984069824,
+        "maximum_coordinate": [
+          0,
+          91107
+        ]
+      },
+      "proposed_metric_results": {
+        "rms_error": true,
+        "maximum_absolute_error": true,
+        "top20_probability_mean": false,
+        "top20_probability_max": false
+      }
+    },
+    "teacher_forced_continuation": {
+      "native": {
+        "mean_absolute_error": 0.03108298368196589,
+        "rms_error": 0.039936400975985005,
+        "relative_rms": 0.01140387012815813,
+        "maximum_absolute_error": 0.26453685760498047,
+        "maximum_coordinate": [
+          7,
+          6292
+        ]
+      },
+      "reference_bf16": {
+        "mean_absolute_error": 0.032687712900759155,
+        "rms_error": 0.0425864734405558,
+        "relative_rms": 0.01216060036617698,
+        "maximum_absolute_error": 0.256467342376709,
+        "maximum_coordinate": [
+          14,
+          4438
+        ]
+      },
+      "proposed_metric_results": {
+        "rms_error": true,
+        "maximum_absolute_error": false,
+        "top20_probability_mean": true,
+        "top20_probability_max": true
+      }
+    }
+  },
+  "provenance": {
+    "tokens_npy_sha256": "1dcb73fe69abc9d3042d528514b912a18c3e5f9cec5a5ff275c6fed58a4ffa70",
+    "native_trace_manifest_sha256": "2bc6db07654bfc07faba3d8c70978346a6c106461ebc903e1a039b70159e0794",
+    "native_trace_identity_sha256": "5e6caff5dd9ec6c35eb539888f2f0dd7a7e58d3c6379a76a64a1da5a63054d5d",
+    "FP32_trace_receipt_sha256": "29f040ff54ed4524a595c465d92b7d3caabd7d3d821bf75b1255d822ac367a39",
+    "analysis_sha256": "85a588b79afb291fc5cb2e3c1cafd93935c86ac741e0be0e2abc6b87df069184",
+    "analysis_script_sha256": "6a8c5610f0eb98e12783b58bc0dd6b430076a1ac08b634552972a544d482c9c0"
+  }
+}

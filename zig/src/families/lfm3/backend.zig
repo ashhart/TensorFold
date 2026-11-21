@@ -28,11 +28,11 @@ pub const Metal = struct {
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
-    /// Streams whose prompt passes are in progress: each one's next row and its images, prepared once (#3021).
+    /// Streams whose prompt passes are in progress: each one's next row (#3021), images prepared a chunk at a time.
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Pass) = .empty,
 
-    /// A prompt pass in progress: the next chunk's first row, and the image rows prepared at its first call.
-    const Pass = struct { at: usize, images: ?image_rows.Images };
+    /// A prompt pass in progress: the next chunk's first row.
+    const Pass = struct { at: usize };
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
@@ -103,7 +103,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true }, .chunk_invariant = true };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -126,7 +126,7 @@ pub const Metal = struct {
         const self = cast(ptr);
         const p = try self.opening(stream, true);
         errdefer self.drop(stream);
-        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream) };
         while (!try steps.step(r, stream, &p.at, self.options.chunk, true)) {}
         _ = self.fills.remove(stream);
         try prefill_control.finished(stream);
@@ -136,11 +136,12 @@ pub const Metal = struct {
     const Run = struct {
         m: *Metal,
         cache: *st.Cache,
-        images: ?image_rows.Images,
 
         pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
             const ids = stream.prompt();
-            try fwd.runWithImages(r.m.model, &r.m.scratch, &.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last, r.images);
+            // images are prepared a chunk at a time so a long vision prompt never needs every row at once
+            const images = if (r.m.images) |provider| try provider.prepare(provider.ctx, stream, at, end) else null;
+            try fwd.runWithImages(r.m.model, &r.m.scratch, &.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last, images);
         }
 
         pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
@@ -148,7 +149,7 @@ pub const Metal = struct {
         }
     };
 
-    /// The stream's cache made, a kept state restored and its images prepared: its pass from the returned row.
+    /// The stream's cache made and a kept state restored: its pass from the returned row.
     fn opening(self: *Metal, stream: *lanes.Stream, whole: bool) !*Pass {
         const ids = stream.prompt();
         if (stream.images.len != 0 and self.images == null) return error.Lfm3VisionNotImplemented;
@@ -172,8 +173,7 @@ pub const Metal = struct {
             stream.reuse_failed = at == 0;
         }
         prefill_control.completed(stream, at);
-        const images = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at) else null;
-        try self.fills.put(self.gpa, stream, .{ .at = at, .images = images });
+        try self.fills.put(self.gpa, stream, .{ .at = at });
         return self.fills.getPtr(stream).?;
     }
 
@@ -186,13 +186,14 @@ pub const Metal = struct {
         }
     }
 
-    /// One chunk a call at the whole pass's cuts (`max_rows` is never set: this family declares no chunk_invariant).
-    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+    /// One chunk a call at the whole pass's cuts: `max_rows`, when a host caps it, narrows the engine's cut.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
         const self = cast(ptr);
         const p = self.fills.getPtr(stream) orelse try self.opening(stream, false);
         errdefer self.drop(stream);
-        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
-        const done = try steps.step(r, stream, &p.at, self.options.chunk, false);
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream) };
+        const rows: usize = if (max_rows == 0) self.options.chunk else @min(self.options.chunk, max_rows);
+        const done = try steps.step(r, stream, &p.at, rows, false);
         if (done) _ = self.fills.remove(stream);
         return done;
     }

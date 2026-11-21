@@ -1,16 +1,36 @@
 # LFM3 Metal qualification receipts
 
+## Vision-only #1502 head
+
+This branch carries LFM3-VL-2B's image tower and projector above the existing text decoder, with the stepped
+prefill the image rows use. The development tensor-unit prompt route, tiled and split attention, wide prompt rows,
+the risk-fast attention predicate and the deferred prompt head are not part of this PR.
+The native server loads the tower only when started with `--vision`; without the flag a VL checkpoint serves text
+and refuses image parts.
+Host checks on this head are recorded on the PR; the maintainer's main-against-branch device comparison remains owed,
+and the older receipts below stay tied to their recorded sources.
+
 These receipts cover native LFM3-1.7B and LFM3-VL-2B from the official MLX exports.
 They distinguish implementation checks from the still-required maintainer model/performance gate.
 Checkpoint revisions and run instructions are in the [family recipe](../../recipes/lfm3-native.md).
+
+## M5 long-context checks
+
+[`current-m5-long-context.json`](current-m5-long-context.json) records all 26 completed requests:
+VL6/8 text prompts at 32k/64k, text4/6/8 at 131072/262128 prompt tokens, and VL4/6/8 at 127984 prompt tokens.
+Each cell has two fresh-process legs. All requests return 16 tokens with zero cached input;
+all 13 repeated output-token hashes match. All 16 servers exit zero, and all three packets release their leases.
+The receipt includes artifact/checkpoint pins, exact input and output hashes, timings and process memory measurements.
+These are native text-context checks, including VL checkpoints; they do not establish image-context, FP64 or comparative speed acceptance.
+The earlier 20-request snapshot remains in `current-m5-long-context-partial.json`.
 
 ## Qualification ledger
 
 The recipe's [qualification rules](../../recipes/lfm3-native.md#qualification-rules) and
 [evidence ledger](../../recipes/lfm3-native.md#evidence-ledger) record what each receipt ran, on what,
-and what it showed, one table beside the run instructions. Rows for the pending
-[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added there once that PR
-lands and its files are on main.
+and what it showed, one table beside the run instructions. Rows for
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) are added there once that PR lands and its files
+are on main.
 
 ## Runner-only maintenance
 
@@ -53,6 +73,15 @@ SUMMARY 50 kernels: 50 pass gates 1-4, 0 fail, 0 known findings; 13 controls: 13
 The full earlier M5 runner reported 272/273 kernels passing, two known findings, all 298 controls red and zero limit problems.
 Its Qwen4 HC activation failure reproduces exactly in a separate build of pinned base `b30d5b9d3`.
 That is not a global pass or a final-source global-suite receipt.
+
+## Shared-stream attention follow-up
+
+`shared-attention.json` records the subsequent shared-dispatch source and binary identity.
+Full and sliding attention reuse the serial partial and merge arithmetic, with stream-local cache addresses and row maps.
+All 52 LFM3 kernels passed gates 1–4, all 14 controls were red as planted, and launch limits had zero problems.
+The real text4 default exactness suite passed 68/68, including unequal two/four-stream state and logits.
+All six sampled/cancellation serving suites on the M5 passed 303/303 with zero failures or skips.
+This follow-up is byte-preserving shared scheduling; it does not qualify tensor-unit prompt attention or a speed gate.
 
 ## Numerical evidence
 

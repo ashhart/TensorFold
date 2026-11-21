@@ -1,0 +1,139 @@
+{
+  "scope": "M5 genuine TEXT4 layer00 R128 full7680 gate+up+BF16activation standalone completegraph. No model integration, serving win, or nonlinear/full-model FP64 fidelity claim.",
+  "fixture": {
+    "checkpoint": "LiquidAI/LFM3-1.7B-MLX-4bit",
+    "rows": 128,
+    "k": 2048,
+    "n": 7680,
+    "group": 64,
+    "bits": 4,
+    "source": "Genuine contiguous128-row layer00 normalized input; no duplicated64 rows"
+  },
+  "candidate": "One prepare reused by sequential gate and up producers/inline-error repairs; same scratch reused under encoder barriers; original BF16activation kernel.",
+  "dispatches": {
+    "public_dual_plus_activation": 2,
+    "candidate_shared_prepare_gate_up_plus_activation": 6
+  },
+  "persistent_candidate_scratch_bytes": 71892996,
+  "numerical": {
+    "five_repeat_full_outputs": true,
+    "words_each_projection": 983040,
+    "public_three_outputs_match_native_capture": true,
+    "candidate_gate_up_match_independently_primary_qualified_words": true,
+    "candidate_activation_reference": "Unchanged production activation kernel on frozen corrected gate/up; not independent nonlinear FP64 oracle",
+    "input_output_guards": 26,
+    "internal_scratch_guard_padded": false,
+    "unresolved_error_checked": true,
+    "wrong_up_and_omitted_activation_controls": "Both actual exit1 CanonicalMismatch"
+  },
+  "protocol": {
+    "balanced_rounds": 5,
+    "legs_per_round": 4,
+    "common_repetitions": true,
+    "minimum_calibration_seconds": 0.025,
+    "minimum_recorded_gpu_seconds": 0.02,
+    "maximum_recorded_gpu_seconds": 1,
+    "five_correctness_passes_and_calibration_warm_gpu": true,
+    "explicit_per_leg_warmup": false,
+    "host_error_check": "Once per repeated timed batch; not per operator",
+    "no_hidden_retries": true
+  },
+  "cost": {
+    "scope": "Public dual+activation versus shared-prepare certified gate+up+activation; fixedR128TEXT4; no model fidelity or serving claim",
+    "complete_graph": true,
+    "candidate_scratch_bytes": 71892996,
+    "rounds": [
+      {
+        "False": {
+          "median": 0.0009558476522215642,
+          "spread": 4.0877529885241515e-05
+        },
+        "True": {
+          "median": 0.0009216764301527292,
+          "spread": 7.073286096170861e-06
+        }
+      },
+      {
+        "False": {
+          "median": 0.0009558418023516424,
+          "spread": 4.09531493850146e-06
+        },
+        "True": {
+          "median": 0.0009218072955263779,
+          "spread": 0.0018606278883588345
+        }
+      },
+      {
+        "False": {
+          "median": 0.0009558587189530954,
+          "spread": 6.820338743329657e-06
+        },
+        "True": {
+          "median": 0.0009217154947691597,
+          "spread": 0.0009851264653157887
+        }
+      },
+      {
+        "False": {
+          "median": 0.000955830080783926,
+          "spread": 4.080140723505821e-06
+        },
+        "True": {
+          "median": 0.0009215664103976451,
+          "spread": 0.0003589331458864198
+        }
+      },
+      {
+        "False": {
+          "median": 0.0009558821693644859,
+          "spread": 9.126931718150821e-05
+        },
+        "True": {
+          "median": 0.0009214635356329381,
+          "spread": 0.0005597366075464905
+        }
+      }
+    ],
+    "limits": {
+      "round_spread": 0.05,
+      "round_median_spread": 0.05,
+      "first_last_drift": 0.05
+    },
+    "baseline": {
+      "seconds_per_op": 0.0009558476522215642,
+      "first_last_drift": 3.6111552757844834e-05,
+      "median_spread": 5.4495648972752164e-05,
+      "max_round_spread": 9.126931718150821e-05
+    },
+    "candidate": {
+      "seconds_per_op": 0.0009216764301527292,
+      "first_last_drift": -0.00023098618216343958,
+      "median_spread": 0.00037305859661995733,
+      "max_round_spread": 0.0018606278883588345
+    },
+    "candidate_over_public_throughput": 1.037075074235296,
+    "stable": true,
+    "raw_sha256": "0be31dab07b41e5cc36695be2918fb05b53cd53b7c978f570e66ee83091e72f5"
+  },
+  "gpu_latency_reduction_fraction": 0.03574965318941248,
+  "limitations": [
+    "Prior gate-only model integration regressed TTFT despite a standalone projection gain. Joint operator gain does not establish a serving gain.",
+    "Joint gate-only sticky-error control passed; private full-model integration still requires actual binding, publication/poison and downstream observation before serving timing.",
+    "Full-model FP64no-worse remains open; prior model observation matched16tokens but had substantial logits/state differences."
+  ],
+  "raw_receipt_sha256": {
+    "positive": "b75de4b91ae664d98299b062f91e1caa184d0e920c7b12b6572ecf9029bb800b",
+    "controls": "dfbe06d45513e84c18dab9be0a2b7c5c84fb78f05e4921a7f2cd4d5e42fb5f5b",
+    "cost": "761d49511ebd89f630ced5d2ed44e66c30be9e8f23e6c87e6d26cbf2a1261376"
+  },
+  "independent_verification": "All raw log hashes, actual exits, final lease release and frozen costanalyzer verified locally.",
+  "joint_sticky_error_control": {
+    "positive": "Five repetitions inject actual final repairflag2 in gate only; up succeeds and all its final flags are zero, all outputs canonical, shared failure remains1 and check rejects.",
+    "negative": "Planted error reset in UP actualexit1 MissingStickyFailure",
+    "receipt_sha256": "77ec655d82c1a8415ed14d5e030dfe21ea3fbd01935f9798787ef924e2810e4e",
+    "events_sha256": "aaed52a6cbc4ca558d47d1ebfae800211492e363ca9df64beb7ff0166809e865",
+    "positive_log_sha256": "d12c3e65d67abc17e4de9d204a97f3bf2862510f8771191d92d5b305a07d6903",
+    "negative_log_sha256": "732fca853c6f7e81872b3e25d36efb49925b5763d7e302861277734fcb645ec2",
+    "independent_actual_exits_log_hashes_and_lease_release_verified": true
+  }
+}

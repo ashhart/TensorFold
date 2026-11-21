@@ -1,0 +1,50 @@
+{
+  "scope": "Apple M4 Pro exploratory complete legacy SIMD-matrix FFN gate route, actual TEXT4 rows64 K2048 first2048 of7680 columns. Negative bounded screen; no promotion/model qualification.",
+  "rows": 64,
+  "n": 2048,
+  "group": 64,
+  "bits": 4,
+  "equal_useful_matrix_work_per_sample": true,
+  "common_repetitions": 128,
+  "median_gpu_seconds_per_op": {
+    "public_row_pairs": 0.0002627867834235076,
+    "tile_fullroute": 0.0003518678386171814
+  },
+  "candidate_throughput_vs_public": {
+    "tile": 0.7468337670650527
+  },
+  "baseline_first_last_drift_fraction": 0.0004791987765457966,
+  "exploratory_drift_limit": 0.05,
+  "stable_for_exploratory_screen": true,
+  "actual_selected_outputs": [
+    238,
+    0
+  ],
+  "actual_repair_fractions": [
+    0.0018157958984375,
+    0.0
+  ],
+  "diagnostics_in_timed_work": {
+    "centers_bounds_stores": true,
+    "raw_groupdot_capture": false,
+    "snapshot": false,
+    "prepare_each_op": true,
+    "actual_repair_dispatch": true
+  },
+  "final_performance_qualification": false,
+  "implementation": "Unchanged pre-MPP fused-finish exact-band producer, ordered compensated combine and cooperative global53 repair; legacy simdgroup matrix operations; no device capability bypass.",
+  "numerical": {
+    "primary_all_columns_no_worse": true,
+    "strict_gate_errors": 0,
+    "tile_twin_word_differences": 0,
+    "negative_controls": 4,
+    "five_cost_output_selector_route_identity": true
+  },
+  "provenance": {
+    "numeric_manifest_sha256": "098bd80398394934a9d37418ebf055872cb46cb2d0ae24c9b476cf63438f7936",
+    "cost_manifest_sha256": "c93763920151ef0584ca5be2e28e9311541c002172fd2af78b9d1ef0e1642ed6",
+    "cost_analysis_sha256": "761615daedff89e0b89831f29eca83473f5e9f57c30c5d37fce7ec05211c1d9f",
+    "shader_sha256": "a866ccc63d61a9454f078d0255a131a7c7d41c9e9561a65bb3ca818d52b7d44e"
+  },
+  "cleanup": "All stages completed; owned children exited and local lock released."
+}

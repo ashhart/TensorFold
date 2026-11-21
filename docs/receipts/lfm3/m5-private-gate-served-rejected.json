@@ -1,0 +1,185 @@
+{
+  "scope": "Rejected private M5 TEXT4 layer0 gate integration. Same-source native ABBA cold2k8k diagnostic with default-off candidate. No public integration or promotion.",
+  "outcome": "Stable TTFT regression despite prior standalone gate operator gain; complete model path includes failure scan, separate up dispatch, and per-prefill hit logging in both variants. These components are not individually attributed.",
+  "qualification": "Exact integrated firstgate matches standalone primary-qualified output; full-model FP64 no-worse remains open because downstream logits/state differ. Separate observation matches16 greedy IDs; serving response text hashes match.",
+  "protocol": {
+    "order": [
+      "public",
+      "candidate",
+      "candidate",
+      "public"
+    ],
+    "legs": 4,
+    "cold_output_tokens": 16,
+    "prompt_cache": 0,
+    "baseline_drift_limit": 0.05,
+    "no_hidden_retries": true,
+    "both_routes_exact_tokenize_ids": true,
+    "fixture": "Pinned text-only chat fixtures against exact TEXT4 checkpoint; no image"
+  },
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.8589870408177376,
+        0.8586471672169864
+      ],
+      "candidate_ttft_s": [
+        0.8639319580979645,
+        0.8644525003619492
+      ],
+      "baseline_median_s": 0.858817104017362,
+      "candidate_median_s": 0.8641922292299569,
+      "baseline_over_candidate": 0.9937801740969316,
+      "baseline_first_last_drift": -0.00039566790254208506,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate observation matches16 IDs but logits differ and full-model fidelity remains open",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_ttft_increase_fraction": 0.006258754264966582
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        4.619476750027388,
+        4.619642375037074
+      ],
+      "candidate_ttft_s": [
+        4.658193541225046,
+        4.6532827080227435
+      ],
+      "baseline_median_s": 4.619559562532231,
+      "candidate_median_s": 4.655738124623895,
+      "baseline_over_candidate": 0.9922292532089987,
+      "baseline_first_last_drift": 3.5853629891002825e-05,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "not emitted by cold client; separate observation matches16 IDs but logits differ and full-model fidelity remains open",
+      "prompt_ids": "both routes /tokenize exact pinned arrays",
+      "candidate_ttft_increase_fraction": 0.007831604204239673
+    }
+  ],
+  "route_hit_logs": [
+    {
+      "event": "candidate_route_counts",
+      "tag": "text-4-0-public",
+      "counts": [
+        [
+          0,
+          2048
+        ],
+        [
+          0,
+          8192
+        ]
+      ]
+    },
+    {
+      "event": "candidate_route_counts",
+      "tag": "text-4-1-candidate",
+      "counts": [
+        [
+          16,
+          2048
+        ],
+        [
+          64,
+          8192
+        ]
+      ]
+    },
+    {
+      "event": "candidate_route_counts",
+      "tag": "text-4-2-candidate",
+      "counts": [
+        [
+          16,
+          2048
+        ],
+        [
+          64,
+          8192
+        ]
+      ]
+    },
+    {
+      "event": "candidate_route_counts",
+      "tag": "text-4-3-public",
+      "counts": [
+        [
+          0,
+          2048
+        ],
+        [
+          0,
+          8192
+        ]
+      ]
+    }
+  ],
+  "server_prefill_metric_deltas": [
+    {
+      "leg": 0,
+      "mode": "public",
+      "server_prefill_seconds_sum_delta": 5.465842,
+      "request_count_delta": 2.0,
+      "scope": "combined two requests (2048 and8192); not separate per-length prefill timing"
+    },
+    {
+      "leg": 1,
+      "mode": "candidate",
+      "server_prefill_seconds_sum_delta": 5.50936,
+      "request_count_delta": 2.0,
+      "scope": "combined two requests (2048 and8192); not separate per-length prefill timing"
+    },
+    {
+      "leg": 2,
+      "mode": "candidate",
+      "server_prefill_seconds_sum_delta": 5.505171,
+      "request_count_delta": 2.0,
+      "scope": "combined two requests (2048 and8192); not separate per-length prefill timing"
+    },
+    {
+      "leg": 3,
+      "mode": "public",
+      "server_prefill_seconds_sum_delta": 5.465736,
+      "request_count_delta": 2.0,
+      "scope": "combined two requests (2048 and8192); not separate per-length prefill timing"
+    }
+  ],
+  "cleanup": {
+    "all_four_owned_servers_exit_zero": true,
+    "lock_released": true,
+    "raw_hashes_independently_verified": true,
+    "frozen_analysis_rerun_matches_remote": true
+  },
+  "memory_observations": [
+    {
+      "leg": "text-4-0-public",
+      "max_rss_bytes": 1217200128,
+      "peak_physical_footprint_bytes": 1630881448
+    },
+    {
+      "leg": "text-4-1-candidate",
+      "max_rss_bytes": 1223245824,
+      "peak_physical_footprint_bytes": 1706362560
+    },
+    {
+      "leg": "text-4-2-candidate",
+      "max_rss_bytes": 1221017600,
+      "peak_physical_footprint_bytes": 1704199944
+    },
+    {
+      "leg": "text-4-3-public",
+      "max_rss_bytes": 1216495616,
+      "peak_physical_footprint_bytes": 1630144192
+    }
+  ],
+  "raw_sha256": {
+    "summary": "ebe922d66c372fd385cf4f252820bb4edb1546c0a6f9143b6250eff7dda63af1",
+    "records": "986edd0faea9cb358d191db160dd407a1bff9ea04cbab43703508d92e7ce5238",
+    "events": "b1c92932edaeef38c04163342a05594c08014b667b5e9e0ce26079f65b0f2fb8",
+    "manifest": "01ae2203ec9140de442dc1d0cc5e7ca53926174dfcae7b9f19a2e5aeec7939d6"
+  },
+  "next_constraint": "Do not infer a serving win from a projection-only gain. Any changed scan, dual-projection or joint gate/up implementation requires fresh numerical and complete-path measurements."
+}

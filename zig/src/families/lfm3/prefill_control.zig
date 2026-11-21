@@ -1,9 +1,12 @@
 //! Chunk-boundary cancellation, background yield and completed prompt progress.
-pub fn before(stream: anytype, at: usize) !void {
+pub fn cancelled(stream: anytype, at: usize) !void {
     if (stream.isCancelled()) {
         stream.keepInterruptedPrefill(@intCast(at));
         return error.Cancelled;
     }
+}
+pub fn before(stream: anytype, at: usize) !void {
+    try cancelled(stream, at);
     if (stream.yields()) {
         stream.keepInterruptedPrefill(@intCast(at));
         return error.Yielded;

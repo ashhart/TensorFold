@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "scope": "Corrected CPU pixel normalization and NEW fixed-input vision-only requalification; decoder/serving requalification is separate",
+  "public_pixel_source": "50b4e0da3",
+  "PNG_sha256": "005500792ee8ea6f35ac369d900fc788cd77667f145e7100c2cff57fae5355d9",
+  "grid": [
+    14,
+    20
+  ],
+  "corrected_input": {
+    "type": "CPU processor FP32patch matrix; not GPU model activations",
+    "shape": [
+      280,
+      1536
+    ],
+    "sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473"
+  },
+  "host_processor_regression": {
+    "change": {
+      "before": "(f32(pixel)*f32(1/255)-0.5)/0.5",
+      "after": "(f32(pixel)-127.5)/127.5",
+      "changed_lut_entries": 207,
+      "lut_entries": 256,
+      "max_absolute_difference": 1.1920928955078125e-07
+    },
+    "reference_fixture": {
+      "source": "https://github.com/jschmied/TensorFold/blob/1325da3bfab19d2ada499e613f1f0c90b7d95dd3/zig/src/core/picture/patches_test.zig",
+      "processor": "transformers 5.19.0 / torchvision 0.29.0 as recorded by fixture author",
+      "input": "RGB217x300; (7*x+13*y+50*c+(x*y)%31)%256",
+      "grid": [
+        14,
+        20
+      ],
+      "pixel_values_sha256": "53153c22eb4e065031bbdf4de0f038db37ef736a880e3438ac8e0d73f82dcea8"
+    },
+    "regression": {
+      "before_exit": 1,
+      "before_pixel_values_sha256": "6e7d91ab24b4b18bc383dc5fcf441e2a973904f5a9b6a2af0272f34c48cf0229",
+      "after_exit": 0,
+      "after_pixel_values_sha256": "53153c22eb4e065031bbdf4de0f038db37ef736a880e3438ac8e0d73f82dcea8",
+      "command": "zig build test-lfm3-host -Dcpu=apple_m1 --summary all",
+      "after_build_steps": [
+        12,
+        12
+      ],
+      "image_tests": [
+        26,
+        26
+      ],
+      "optional_JPEG_cases": "three unavailable JPEG fixture cases; unrelated to RGB preparation regression",
+      "logs_sha256": {
+        "lfm3-pixel-parity-before.log": "ac5bdb487acc143649eb9db314387148d2deeb4c0d2f49efd17580e67ef70941",
+        "lfm3-pixel-parity-after.log": "028c13fb4b3378574ce6f140297c4352ecf7b72f2c8053916e82c37be349a57d"
+      }
+    },
+    "source_receipt": "pixel-normalization.json"
+  },
+  "actual_new_native_vision": [
+    {
+      "bits": 4,
+      "projection_bytes": 286720,
+      "projection_sha256": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e",
+      "patches_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473"
+    },
+    {
+      "bits": 6,
+      "projection_bytes": 286720,
+      "projection_sha256": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+      "patches_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473"
+    },
+    {
+      "bits": 8,
+      "projection_bytes": 286720,
+      "projection_sha256": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+      "patches_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473"
+    }
+  ],
+  "independent_graphs": {
+    "4": {
+      "scope": "NEW corrected fixed CPU-processor patches into independent idealFP64 and prescribedFP32/SFU vision graphs; no projected/native activation injection",
+      "values": 143360,
+      "named_native_equal_words": 143360,
+      "native_sha256": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e",
+      "named_sha256": "ffa0401f452f39a07833d6692ac9eff0d5485cc93a14fb3433bdad74c42ab05e",
+      "ideal_sha256": "a67172521a00ffc5c50b848769a92f732f12456276cf484e76509f91c703d0c8",
+      "native_vs_ideal_FP64": {
+        "RMS": 0.0005607575567752688,
+        "relative_RMS": 0.015839316732953166,
+        "maximum_absolute_error": 0.005889892578125,
+        "BF16_equal_words": 17164
+      },
+      "compared_native_stages": 0,
+      "receipt_sha256": "98556f6663ca894b3f185e7873f145fb199f76d32a24bf62b6a5db6023b35bd3",
+      "runner_sha256": "64a55e7515edd2e0bd0f92a169487a7e6d2727449e67173ba9d0a2619e0824ee",
+      "reference_source_sha256": {
+        "tools/lfm3/fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+        "tools/lfm3/vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+        "tools/lfm3/elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+        "tools/lfm3/row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+        "tools/lfm3/text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+        "tools/lfm3/vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4"
+      },
+      "provider_sha256": "97aec6e37977bbef32c60e7f86253c29c7b8161159dd6c9aded657e4bd69ddd0",
+      "optional_accelerator_sha256": "11ad0f66632bfcba548dbede9027ffdb112cd418ff2be80610af56a957424753",
+      "production_primitive_executable_sha256": "ce433fcac7b724cb14b22d8f5392373e950bf3e3347633c96bdc89cc06934048"
+    },
+    "6": {
+      "scope": "NEW corrected fixed CPU-processor patches into independent idealFP64 and prescribedFP32/SFU vision graphs; no projected/native activation injection",
+      "values": 143360,
+      "named_native_equal_words": 143360,
+      "native_sha256": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+      "named_sha256": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+      "ideal_sha256": "221133d871ce2db48dfcb28af88f8e3facb80f604d9fa8b4e37afef07e04fde4",
+      "native_vs_ideal_FP64": {
+        "RMS": 0.0006593466304518665,
+        "relative_RMS": 0.018721776792383023,
+        "maximum_absolute_error": 0.015380859375,
+        "BF16_equal_words": 16385
+      },
+      "compared_native_stages": 0,
+      "receipt_sha256": "cd65b824e33a1e20bd635c4f7500819b36e4c6702135d3a75e409943cdb3fc13",
+      "runner_sha256": "64a55e7515edd2e0bd0f92a169487a7e6d2727449e67173ba9d0a2619e0824ee",
+      "reference_source_sha256": {
+        "tools/lfm3/fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+        "tools/lfm3/vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+        "tools/lfm3/elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+        "tools/lfm3/row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+        "tools/lfm3/text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+        "tools/lfm3/vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4"
+      },
+      "provider_sha256": "97aec6e37977bbef32c60e7f86253c29c7b8161159dd6c9aded657e4bd69ddd0",
+      "optional_accelerator_sha256": "11ad0f66632bfcba548dbede9027ffdb112cd418ff2be80610af56a957424753",
+      "production_primitive_executable_sha256": "ce433fcac7b724cb14b22d8f5392373e950bf3e3347633c96bdc89cc06934048"
+    }
+  },
+  "six_to_eight_vision_identity_transfer": {
+    "scope": "6\u21928 corrected-input vision only; no decoder or old-image-output transfer",
+    "tensor_count": 138,
+    "tensor_bytes": 378760704,
+    "named_metadata_content_sha256": "be7e3c3f041f78b3f01218a0b9900f0750f26b5ed5c3b496c07abe9e0efb6ae1",
+    "corrected_CPU_input_sha256": "9d39c11551f105b8982e3a9acceffcdf687d360c17a7931b7fff21757a6e5473",
+    "actual_native70_sha256": "0bfbdb4d6e8f3485609f0b6e8cf4b84bd8daba4c2ae62f56a4861aad3688b4df",
+    "identity_receipt_sha256": "6e28b34d17c1b5ff57811e1375bf8292fdbe18b2ddeeebe78d12191c64ebab98",
+    "same_reference_graph_as": "6",
+    "reference_source_sha256": {
+      "tools/lfm3/fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+      "tools/lfm3/vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+      "tools/lfm3/elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+      "tools/lfm3/row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+      "tools/lfm3/text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+      "tools/lfm3/vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4"
+    },
+    "native_vs_ideal_FP64": {
+      "RMS": 0.0006593466304518665,
+      "relative_RMS": 0.018721776792383023,
+      "maximum_absolute_error": 0.015380859375,
+      "BF16_equal_words": 16385
+    },
+    "named_native_equal_words": 143360
+  },
+  "all_requested_vision_scopes_complete": true,
+  "limits": [
+    "Ideal FP64 RMS/maxabs/BF16 differences retained; no tolerance or fidelity acceptance gate changed.",
+    "These are new corrected-input image outputs; historical old-pixel image receipts are not byte-transferred.",
+    "Fixed CPU-processor matrix is the vision operator input; independent Pillow preprocessing differed from Torch uint8resizing and was not used.",
+    "No native intermediate stage comparisons or decoder/image-conditioned serving assertion from these vision-only graphs.",
+    "The 6\u21928 transfer, when present, requires actual identical current vision tensor bytes, relevant parameters, new patch input and current native output."
+  ],
+  "fidelity_pass": null,
+  "performance_claim": false
+}

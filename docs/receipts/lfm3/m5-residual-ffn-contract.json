@@ -1,0 +1,53 @@
+{
+  "scope": "Targeted M5 residual FFN mechanical kernel contract diagnostic; legacy FP64 formula checks are not the approved independent FP32/official-BF16 fidelity gate.",
+  "runtime_source_commit": "8df18abc47568246c0d38b70c2e280521a24b31a",
+  "shader_sha256": "add7140a9ec0589fe674c2066317b9e511430596892cbeb1b831feadd465c86b",
+  "command": "tf-kernel-contract --only \"LFM3 residual FFN\" --no-limits",
+  "result": {
+    "exit": 0,
+    "elapsed_s": 60.50941908406094,
+    "binary_sha256": "7dfcad20f56cb8aebe5458d385e821a645183b998f6a90f1c3152cd3d3128a26",
+    "scope": "Targeted diagnostic; full runner and independent FP32/BF16 fidelity separate."
+  },
+  "summary": "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 60138 ms, limits 0 ms",
+  "log": [
+    "tf-kernel-contract on Apple M5 Ultra (applegpu_g17, tensor units true), seed 0x6b63",
+    "FIXTURE metal LFM3 residual FFN: nonfinite rows 8 expanded to 33 for the enabled route",
+    "PASS nonfinite metal LFM3 residual FFN: 30720 non-finite and 222720 finite outputs match the float64 classes",
+    "PASS repeat metal LFM3 residual FFN: five runs byte-identical (983040 bytes), inputs and guards untouched, no overlap",
+    "PASS shapes metal LFM3 residual FFN: 12 shapes within the float64 bound (worst 0.991 of the bound), 0 edges refused by the kernel",
+    "FIXTURE metal LFM3 residual FFN: stress rows 4 expanded to 33 for the enabled route",
+    "PASS sums metal LFM3 residual FFN: exact sums at k 7680, where fp16 sums would miss by 16990x and bf16 by 256x",
+    "FAIL shapes control: LFM3 residual FFN pack: at 128x7680x2048 output 0 is -1.710938e0 where float64 gives -1.231283e0: 14.02 of its bound",
+    "CONTROL control: LFM3 residual FFN pack: red at shapes, as planted",
+    "FIXTURE control: LFM3 residual FFN nonfinite: nonfinite rows 8 expanded to 33 for the enabled route",
+    "FAIL nonfinite control: LFM3 residual FFN nonfinite: 30720 of 253440 outputs differ in class; first at 0: finite where float64 gives nan",
+    "CONTROL control: LFM3 residual FFN nonfinite: red at nonfinite, as planted",
+    "SUMMARY 1 kernels: 1 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 60138 ms, limits 0 ms"
+  ],
+  "fixture_note": "Generic single-case gates request fewer rows than the production fast-path minimum. Nonfinite/stress fixtures are explicitly expanded to 33 rows and all references/counts use the actual expanded shape.",
+  "served_shapes": [
+    {
+      "rows": 128,
+      "n": 7680,
+      "k": 2048
+    },
+    {
+      "rows": 128,
+      "n": 2048,
+      "k": 7680
+    },
+    {
+      "rows": 33,
+      "n": 128,
+      "k": 64
+    }
+  ],
+  "initial_invalid_attempt": {
+    "sha256": "d4da8e4ba9416fdd911d1de5c351df5fea453cf2fc3a9f0d1d537b5242ece8eb",
+    "reason": "NF/stress fixture refused before launch. The initial nominal red NF control is invalid evidence and is not counted. Corrected attempt above exercises real arithmetic failure."
+  },
+  "limits": "Runtime reflection checked in the probe; global full runner/launch-limit qualification not run by this targeted command. Zero limit problems in its SUMMARY means skipped limits, not a pass.",
+  "raw_log_sha256": "8f8a0226ee146ff7a7e47aa46c487a804ffe31174089bfe1e3abc6879955d59f",
+  "qualification": false
+}

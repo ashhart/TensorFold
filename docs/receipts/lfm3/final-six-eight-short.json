@@ -1,0 +1,1164 @@
+{
+  "scope": "Final current-source M4 6/8-bit checkpoint short qualification and minimal VL6 prescribed-rounded graph reproductions. No performance experiment.",
+  "source": {
+    "runtime_equivalent_to": "20947578c08ead20e8e0a18790b1fd5f5fb3b6e3",
+    "runtime_base": "2e97b1fbbe80f2446e49893fc297da9be914fc71",
+    "artifact_note": "Native/forward/exact match prior final-M4 artifact pins; current vision diagnostic built from runtime-equivalent public snapshot. Later public commits are receipt-only.",
+    "sha256": {
+      "zig-out/native/bin/tensorfold-native": "d264f089879e343344dd4ccc1bfd7fef94d5b81baeb089eee51b12fd847cce3f",
+      "zig-out/bin/tf-lfm3-exact": "48db4c47bddef21348c140350e2abf2f38d559f0b0040216dc7a9fd7fba7caf9",
+      "zig-out/bin/tf-lfm3-forward": "22bf8d07c555fb8756c8afab288ce52b4edb5cfd0a3306ee405e93e775ccd33b",
+      "zig-out/bin/tf-lfm3-vision": "de95c303e941bcf4b0c4c9a91383772cb644a0f55d0b2d2d9f54dbefc1798998",
+      "tools/lfm3/serve_check.py": "87327328ef1a1fcc35536efa0c18829779ee278a4d325f2af69356bc68a71f5c",
+      "tools/lfm3/compare_logits.py": "b1bf273c8f3ce89591bccb8f098c82763cddff11373dbe850302450fcee1502c"
+    }
+  },
+  "hardware": {
+    "device": "Apple M4 Pro",
+    "physical_memory_bytes": 51539607552,
+    "os": "26.5.1",
+    "os_build": "25F80",
+    "production_elementary_language": 262144,
+    "production_elementary_math_mode": "safe",
+    "production_elementary_math_functions": "fast"
+  },
+  "checkpoint_revisions": {
+    "LFM3-1.7B-MLX-6bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "revision": "26be898c36b545d625d84ac0761c6c3eb664aef3",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 2423,
+          "sha256": "2b5879bf6d1d99b43e17726c7ee3fb4868e4c2e29c4a49784803df90f494fc2e",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 328,
+          "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 1405187179,
+          "sha256": "503d68675793fba64907842e176d066c8c3adca22e14c8b3538f9ffb76bd5e0e",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 50701,
+          "sha256": "940f7e7b4133162a48fbca232e663c32240364aea9d60f1715b62bed41a81e2c",
+          "verified_against_pinned_revision": true
+        },
+        "special_tokens_map.json": {
+          "bytes": 92,
+          "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908634,
+          "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1859,
+          "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+          "verified_against_pinned_revision": true
+        }
+      }
+    },
+    "LFM3-1.7B-MLX-8bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "revision": "ee7667f3cfccb2a41725f91820531823fcabc6b7",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 2423,
+          "sha256": "4ef95e289e7105a09bf010b3ceaa015d3f01163104c039a4e7948739d5b9035b",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 328,
+          "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 1837290805,
+          "sha256": "2b06cea98d75527c248a0b04383f7cf0a1c72fb4ed7b45096618fc4e59d015ad",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 50701,
+          "sha256": "0f4f85710fd22ffb8a1977520a734cb7dc7e1f7858a0f91d9c8b56e6d36b78cc",
+          "verified_against_pinned_revision": true
+        },
+        "special_tokens_map.json": {
+          "bytes": 92,
+          "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908634,
+          "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1859,
+          "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+          "verified_against_pinned_revision": true
+        }
+      }
+    },
+    "LFM3-VL-2B-MLX-6bit": {
+      "repository": "LiquidAI/LFM3-VL-2B-MLX-6bit",
+      "revision": "6d71bfae121abedc75f6d531fc7f6ceb4f5e3501",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 4138,
+          "sha256": "4c03aa298372cbcb478eb08be0a4a59be917b4949756066ce4eac06033d200bc",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 323,
+          "sha256": "30b1115bcdc4e5671567a5b1255a2f3d2f5a912a79292051c6f1e9db81b5e8c4",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 1783964482,
+          "sha256": "838c39147541b12e86a4f1b43d6a7814d7fb4efe9d5ff8a151c85ac06f321eef",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 61255,
+          "sha256": "abc29f6e9809c65c5ce62e6b1754b3f103d82266adf74d6d661dd3f8cd443cb5",
+          "verified_against_pinned_revision": true
+        },
+        "processor_config.json": {
+          "bytes": 1254,
+          "sha256": "f183f5a5e5b3a32e666fce05033e6cb7ca496d26e709a2cee611a13eb7d6b610",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908258,
+          "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1759,
+          "sha256": "d63d1ce2f332047e398764b4170352b96629a5194643105bfd6d70c90b750396",
+          "verified_against_pinned_revision": true
+        }
+      }
+    },
+    "LFM3-VL-2B-MLX-8bit": {
+      "repository": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+      "revision": "83336d5be3874a2bdd3297bde77b2114dbd3a816",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 4138,
+          "sha256": "9f7dc06d04d0610c7e27fb6a110c42a3a09b686a6ec53b0eb383f30a8be5a457",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 323,
+          "sha256": "30b1115bcdc4e5671567a5b1255a2f3d2f5a912a79292051c6f1e9db81b5e8c4",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 2216068156,
+          "sha256": "50c9476a7f00f5349e81b42ab88b47635b9eba3c7ab5851c598d270cda4c6857",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 61255,
+          "sha256": "31fe8faaf68bfc2fbce07e9d97ff47c1abad234d783ed615f2d938392b7cf6f0",
+          "verified_against_pinned_revision": true
+        },
+        "processor_config.json": {
+          "bytes": 1254,
+          "sha256": "f183f5a5e5b3a32e666fce05033e6cb7ca496d26e709a2cee611a13eb7d6b610",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908258,
+          "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1759,
+          "sha256": "d63d1ce2f332047e398764b4170352b96629a5194643105bfd6d70c90b750396",
+          "verified_against_pinned_revision": true
+        }
+      }
+    }
+  },
+  "native_checks": [
+    {
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "state_skipped": 0,
+      "served": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6
+    },
+    {
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "state_skipped": 0,
+      "served": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6
+    },
+    {
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-6bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "state_skipped": 0,
+      "served": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9
+    },
+    {
+      "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+      "state_passed": 68,
+      "state_failed": 0,
+      "state_skipped": 0,
+      "served": {
+        "passed": 61,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 9
+    }
+  ],
+  "native_totals": {
+    "state_passed": 272,
+    "state_failed": 0,
+    "served_passed": 202,
+    "served_failed": 0,
+    "served_skipped": 0,
+    "cancellation_checks": 30,
+    "owned_children_exit0": 26
+  },
+  "historical_native_endpoint_bridges": [
+    {
+      "cell": "1.7B-6-prompt",
+      "bytes": 16384000,
+      "sha256": "f94b78c965c874c13fee175b036265f5691b7711b57559f942ecad80e3f1d4a3",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "1.7B-6-decode",
+      "bytes": 256000,
+      "sha256": "e86739c46d55e1f137ac55c9e43119fda97914902334f12df9069907c1a0cab9",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "1.7B-8-prompt",
+      "bytes": 16384000,
+      "sha256": "c0bc4bfb20a4a24abe52d4b8366c9a4acdabd597b68f627552bc0d9b06c7450b",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "1.7B-8-decode",
+      "bytes": 256000,
+      "sha256": "03d2ff5c67ec8bb02539d7fe526dd0bc4f0e9833a8d6474cd1174874fe79c905",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-prompt",
+      "bytes": 16384000,
+      "sha256": "02225f1c8c7f5de05ebd44bd49948ad000aac040f3d6025d6655a9772ed08f9b",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-decode",
+      "bytes": 256000,
+      "sha256": "1a033068012e72b9b60be106be6eee6058faaece4b0d439a151b683c1b94c1ef",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-8-prompt",
+      "bytes": 16384000,
+      "sha256": "cb2b3a0590dbcb1ee4ea5914786a9a9954fb06e8ef9f16230cc0f097b5c2bb64",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-8-decode",
+      "bytes": 256000,
+      "sha256": "472b3ad8ec2237267664292acae4be66f78e80271830962d2d4570e088fcec04",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-image70",
+      "bytes": 286720,
+      "sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-image90",
+      "bytes": 23040000,
+      "sha256": "35336ed8641fd2f93ffa3af62b1b9ebeb3c1de39a17d138a2021fc2fa297360e",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-8-image70",
+      "bytes": 286720,
+      "sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-8-image90",
+      "bytes": 23040000,
+      "sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-prose64",
+      "bytes": 16384000,
+      "sha256": "e494f59f8738cb12a4329b1ba0c034861541e2d11fc8b31401b9ed212f3c67ae",
+      "historical_native_byte_equal": true
+    },
+    {
+      "cell": "VL-2B-6-reasoning64",
+      "bytes": 16384000,
+      "sha256": "128b568000f7ac49b194d340bfea43df9950db1dbadc3da8983b2100252da128",
+      "historical_native_byte_equal": true
+    }
+  ],
+  "historical_bridge_total_bytes": 145981440,
+  "fp64_prompt_decode_image_metrics": [
+    {
+      "checkpoint": "1.7B-6",
+      "mode": "prompt",
+      "rows": 64,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.026689922049396048,
+      "maximum_absolute_error": 0.75,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "1.7B-6",
+      "mode": "decode",
+      "rows": 1,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.021845787266094638,
+      "maximum_absolute_error": 0.328125,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "1.7B-8",
+      "mode": "prompt",
+      "rows": 64,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.0220501312407529,
+      "maximum_absolute_error": 0.6640625,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "1.7B-8",
+      "mode": "decode",
+      "rows": 1,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.03398969064458055,
+      "maximum_absolute_error": 0.35546875,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-6",
+      "mode": "prompt",
+      "rows": 64,
+      "top1_differences": 2,
+      "disjoint_maximum_sets": 1,
+      "relative_rms": 0.015377440488712887,
+      "maximum_absolute_error": 0.96484375,
+      "all_top_differences": [
+        {
+          "row": 13,
+          "native_top": 22,
+          "reference_top": 63908,
+          "native_maximum_set": [
+            22,
+            63908
+          ],
+          "reference_maximum_set": [
+            63908
+          ],
+          "maximum_sets_overlap": true,
+          "native_margin": 0.0,
+          "reference_margin": 0.0625,
+          "native_reference_contender_gap": 0.0,
+          "reference_native_contender_gap": 0.0625
+        },
+        {
+          "row": 22,
+          "native_top": 16033,
+          "reference_top": 91,
+          "native_maximum_set": [
+            16033
+          ],
+          "reference_maximum_set": [
+            91
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.1875,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.1875
+        }
+      ],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-6",
+      "mode": "decode",
+      "rows": 1,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.013336827988498537,
+      "maximum_absolute_error": 0.16796875,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-6",
+      "mode": "image90",
+      "rows": 90,
+      "top1_differences": 4,
+      "disjoint_maximum_sets": 3,
+      "relative_rms": 0.023126652059064244,
+      "maximum_absolute_error": 1.6484375,
+      "all_top_differences": [
+        {
+          "row": 21,
+          "native_top": 415,
+          "reference_top": 20,
+          "native_maximum_set": [
+            415
+          ],
+          "reference_maximum_set": [
+            20
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.0625,
+          "reference_margin": 0.0625,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.0625
+        },
+        {
+          "row": 24,
+          "native_top": 21,
+          "reference_top": 13279,
+          "native_maximum_set": [
+            21
+          ],
+          "reference_maximum_set": [
+            13279
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.28125,
+          "reference_margin": 0.03125,
+          "native_reference_contender_gap": 0.28125,
+          "reference_native_contender_gap": 0.03125
+        },
+        {
+          "row": 52,
+          "native_top": 933,
+          "reference_top": 1628,
+          "native_maximum_set": [
+            933
+          ],
+          "reference_maximum_set": [
+            1628
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.3125,
+          "reference_margin": 0.1875,
+          "native_reference_contender_gap": 0.3125,
+          "reference_native_contender_gap": 0.28125
+        },
+        {
+          "row": 54,
+          "native_top": 7832,
+          "reference_top": 1683,
+          "native_maximum_set": [
+            7832
+          ],
+          "reference_maximum_set": [
+            1683,
+            7832
+          ],
+          "maximum_sets_overlap": true,
+          "native_margin": 0.03125,
+          "reference_margin": 0.0,
+          "native_reference_contender_gap": 0.03125,
+          "reference_native_contender_gap": 0.0
+        }
+      ],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-8",
+      "mode": "prompt",
+      "rows": 64,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.015466008538336544,
+      "maximum_absolute_error": 0.6201171875,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-8",
+      "mode": "decode",
+      "rows": 1,
+      "top1_differences": 0,
+      "disjoint_maximum_sets": 0,
+      "relative_rms": 0.013220059903007179,
+      "maximum_absolute_error": 0.15625,
+      "all_top_differences": [],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    },
+    {
+      "checkpoint": "VL-2B-8",
+      "mode": "image90",
+      "rows": 90,
+      "top1_differences": 7,
+      "disjoint_maximum_sets": 7,
+      "relative_rms": 0.022216577726492024,
+      "maximum_absolute_error": 1.59375,
+      "all_top_differences": [
+        {
+          "row": 14,
+          "native_top": 594,
+          "reference_top": 73,
+          "native_maximum_set": [
+            594
+          ],
+          "reference_maximum_set": [
+            73
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.03125,
+          "reference_margin": 0.125,
+          "native_reference_contender_gap": 0.03125,
+          "reference_native_contender_gap": 0.125
+        },
+        {
+          "row": 16,
+          "native_top": 296,
+          "reference_top": 5434,
+          "native_maximum_set": [
+            296
+          ],
+          "reference_maximum_set": [
+            5434
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.03125,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.03125
+        },
+        {
+          "row": 30,
+          "native_top": 442,
+          "reference_top": 933,
+          "native_maximum_set": [
+            442
+          ],
+          "reference_maximum_set": [
+            933
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.0625,
+          "reference_margin": 0.375,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.375
+        },
+        {
+          "row": 43,
+          "native_top": 10,
+          "reference_top": 76,
+          "native_maximum_set": [
+            10
+          ],
+          "reference_maximum_set": [
+            76
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.03125,
+          "reference_margin": 0.09375,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.1875
+        },
+        {
+          "row": 52,
+          "native_top": 933,
+          "reference_top": 1628,
+          "native_maximum_set": [
+            933
+          ],
+          "reference_maximum_set": [
+            1628
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.125,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.125
+        },
+        {
+          "row": 81,
+          "native_top": 78,
+          "reference_top": 851,
+          "native_maximum_set": [
+            78
+          ],
+          "reference_maximum_set": [
+            851
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.125,
+          "reference_margin": 0.40625,
+          "native_reference_contender_gap": 0.125,
+          "reference_native_contender_gap": 0.40625
+        },
+        {
+          "row": 88,
+          "native_top": 309,
+          "reference_top": 22,
+          "native_maximum_set": [
+            309
+          ],
+          "reference_maximum_set": [
+            22
+          ],
+          "maximum_sets_overlap": false,
+          "native_margin": 0.0625,
+          "reference_margin": 0.0625,
+          "native_reference_contender_gap": 0.0625,
+          "reference_native_contender_gap": 0.0625
+        }
+      ],
+      "fidelity_pass": null,
+      "accepted_threshold": null
+    }
+  ],
+  "VL6_prescribed_graphs": {
+    "independent_inputs": "Pinned checkpoint weights plus token IDs; image graph computes all70projected rows from pinned pixels and weights, then feeds its own first49rows to decoderprefix53. Captured native data are comparison-only.",
+    "graphs": [
+      {
+        "graph": "code",
+        "rows": [
+          {
+            "row": 22,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 16033,
+            "independent_named_top": 16033,
+            "ideal_FP64_top": 91,
+            "contenders": {
+              "91": {
+                "native": 12.375,
+                "independent_named": 12.375,
+                "ideal_FP64": 12.4375
+              },
+              "16033": {
+                "native": 12.5,
+                "independent_named": 12.5,
+                "ideal_FP64": 12.25
+              }
+            }
+          }
+        ],
+        "image": null,
+        "scalar_calls": 264,
+        "scalar_values": 4503083,
+        "ordered_chunk_groups": 0,
+        "compared_native_stages": 0,
+        "graph_receipt_sha256": "7b099f81056fede98825dd2c84453468ee880a34367caf0f56a77c3d5d953b72",
+        "selected_heads_sha256": "3729aae8d4da12180a384064be3c74dbb6edfb70c09d25a390c3b072648363e9",
+        "calls_sha256": "77649da5da4514e02c3324853c87a7dd41a499394cf047d3129e965d7e16040a",
+        "groups_sha256": null,
+        "loaded_reference_modules_sha256": {
+          "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+          "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+          "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+          "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+          "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+        },
+        "prefix_token_ids": [
+          22497,
+          267,
+          21516,
+          1446,
+          395,
+          16033,
+          273,
+          1046,
+          38076,
+          15493,
+          2129,
+          8864,
+          3520,
+          5635,
+          22,
+          42847,
+          851,
+          893,
+          309,
+          2993,
+          16318,
+          63908,
+          3162
+        ],
+        "token_fixture_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748"
+      },
+      {
+        "graph": "prose",
+        "rows": [
+          {
+            "row": 17,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 3547,
+            "independent_named_top": 3547,
+            "ideal_FP64_top": 3983,
+            "contenders": {
+              "3547": {
+                "native": 11.25,
+                "independent_named": 11.25,
+                "ideal_FP64": 11.1875
+              },
+              "3983": {
+                "native": 11.1875,
+                "independent_named": 11.1875,
+                "ideal_FP64": 11.25
+              }
+            }
+          }
+        ],
+        "image": null,
+        "scalar_calls": 264,
+        "scalar_values": 3492778,
+        "ordered_chunk_groups": 0,
+        "compared_native_stages": 0,
+        "graph_receipt_sha256": "2cca3f69c3f9212bfbe693cc33269637d622d1f77019905243884fbd92468d13",
+        "selected_heads_sha256": "14869cca8343f4fbda76b376cd49ea9c40777746b3630efc1c05b3634cbfccd4",
+        "calls_sha256": "bc20802e1de292a6fcbbf3b8548a5477ea9d4404a443eea76a0e762628ccf644",
+        "groups_sha256": null,
+        "loaded_reference_modules_sha256": {
+          "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+          "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+          "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+          "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+          "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+        },
+        "prefix_token_ids": [
+          89509,
+          3420,
+          278,
+          11622,
+          355,
+          6542,
+          20,
+          1256,
+          7986,
+          1030,
+          278,
+          3599,
+          3306,
+          462,
+          49422,
+          22,
+          27407,
+          267
+        ],
+        "token_fixture_sha256": "9c3636ee22fb5d1a9d4d6e3cc0b8e47cce20cb4288bb16f2970de8d55ee27708"
+      },
+      {
+        "graph": "reasoning",
+        "rows": [
+          {
+            "row": 24,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 27,
+            "independent_named_top": 27,
+            "ideal_FP64_top": 1325,
+            "contenders": {
+              "27": {
+                "native": 5.40625,
+                "independent_named": 5.40625,
+                "ideal_FP64": 5.25
+              },
+              "1325": {
+                "native": 5.3125,
+                "independent_named": 5.3125,
+                "ideal_FP64": 5.40625
+              }
+            }
+          }
+        ],
+        "image": null,
+        "scalar_calls": 264,
+        "scalar_values": 4912133,
+        "ordered_chunk_groups": 0,
+        "compared_native_stages": 0,
+        "graph_receipt_sha256": "8ce808c3b2c5b472fefc3f6517edc0794cdbe62c9b5370e07f1186e754206365",
+        "selected_heads_sha256": "186dce805cb068694bff6138da53d895603a8cee70f1b41516ea76a2a788235f",
+        "calls_sha256": "5bafcf18fc68aeea35f5e023554f1d13639e5398b9860a33ae662ed3f724fc3c",
+        "groups_sha256": null,
+        "loaded_reference_modules_sha256": {
+          "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+          "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+          "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+          "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+          "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+        },
+        "prefix_token_ids": [
+          41,
+          9798,
+          677,
+          1703,
+          50474,
+          22,
+          440,
+          1008,
+          10494,
+          229,
+          1325,
+          5435,
+          20,
+          278,
+          1840,
+          10494,
+          10625,
+          405,
+          1196,
+          20,
+          309,
+          278,
+          4475,
+          677,
+          229
+        ],
+        "token_fixture_sha256": "f3b50ade94353156b86075d186c03eae5a91e007593c314c55e19575b9c8f8eb"
+      },
+      {
+        "graph": "ownvision",
+        "rows": [
+          {
+            "row": 21,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 415,
+            "independent_named_top": 415,
+            "ideal_FP64_top": 20,
+            "contenders": {
+              "20": {
+                "native": 8.125,
+                "independent_named": 8.125,
+                "ideal_FP64": 8.25
+              },
+              "415": {
+                "native": 8.1875,
+                "independent_named": 8.1875,
+                "ideal_FP64": 8.1875
+              }
+            }
+          },
+          {
+            "row": 24,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 21,
+            "independent_named_top": 21,
+            "ideal_FP64_top": 13279,
+            "contenders": {
+              "21": {
+                "native": 7.1875,
+                "independent_named": 7.1875,
+                "ideal_FP64": 6.71875
+              },
+              "13279": {
+                "native": 6.90625,
+                "independent_named": 6.90625,
+                "ideal_FP64": 6.75
+              }
+            }
+          },
+          {
+            "row": 52,
+            "native_equal_logits": 128000,
+            "values": 128000,
+            "native_top": 933,
+            "independent_named_top": 933,
+            "ideal_FP64_top": 1628,
+            "contenders": {
+              "933": {
+                "native": 6.96875,
+                "independent_named": 6.96875,
+                "ideal_FP64": 6.875
+              },
+              "1628": {
+                "native": 6.65625,
+                "independent_named": 6.65625,
+                "ideal_FP64": 7.15625
+              }
+            }
+          }
+        ],
+        "image": {
+          "equal_words": 143360,
+          "values": 143360
+        },
+        "scalar_calls": 670,
+        "scalar_values": 36573377,
+        "ordered_chunk_groups": 39,
+        "compared_native_stages": 0,
+        "graph_receipt_sha256": "b532a899d588afe13556abdb2617023e902b8e9732d138f17e9be07f7218d78f",
+        "selected_heads_sha256": "4fd9f8a5bbd74bbb145afbe38a39444dc9413f0110d0d50ff28061f039e70b1b",
+        "calls_sha256": "d8ef1d073b2fbb65436ac943fcd9013d5cbd0f3ed7c776c1ecb4402ab67770ed",
+        "groups_sha256": "54a30a39347ac8b9000e0ef85ce24dd667562abf9ef70e620470a2ed11a32586",
+        "loaded_reference_modules_sha256": {
+          "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+          "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+          "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+          "vision_fp64_reference.py": "742b8b4f44dde824c3a5c2d72a632401a0f9df7b7f23a8d3729d15f4f8c6a4d2",
+          "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+          "vision_rounding_reference.py": "8b2f5679bbd3f05b3e86a5748c3803f744502cffd0159bee2a218da38bd6f1c4",
+          "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+        },
+        "prefix_token_ids": [
+          124899,
+          5922,
+          207,
+          125009,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030,
+          125030
+        ],
+        "token_fixture_sha256": "54c970db8c6ba82895cb2f18a48d397ea568ae885241129e9c5ee7dbbc91a24d"
+      }
+    ],
+    "totals": {
+      "selected_head_words": 768000,
+      "vision_words": 143360,
+      "scalar_calls": 1462,
+      "scalar_values": 49481371,
+      "ordered_chunk_groups": 39,
+      "operation_call_counts": {
+        "rsqrt": 518,
+        "exp": 644,
+        "exp2": 100,
+        "cos": 100,
+        "sin": 100
+      }
+    },
+    "native_stage_comparisons": 0,
+    "source_limitations": [
+      "CPU graph delegates named elementary APIs to production-options Metal primitives; not an independent SFU algorithm.",
+      "Ordinary attention reference lacks selected integer-exponent replay.",
+      "Some Python fma helpers use FP64multiply/add then FP32 and are not universally correctly rounded fmaf.",
+      "Observed endpoint equality only; idealFP64 top differences and thresholds remain unchanged.",
+      "C accelerator source and binary identity pinned; complete original compiler-command provenance is not reconstructed."
+    ],
+    "source_sha256": {
+      "runner": "f10f6d654018ff94d2a5a9ab370d78826cb5f6e263e65a24e4ded6f014c70109",
+      "bounded_provider": "97aec6e37977bbef32c60e7f86253c29c7b8161159dd6c9aded657e4bd69ddd0",
+      "production_options_elementary_executable": "ce433fcac7b724cb14b22d8f5392373e950bf3e3347633c96bdc89cc06934048",
+      "row_accelerator_binary": "11ad0f66632bfcba548dbede9027ffdb112cd418ff2be80610af56a957424753",
+      "row_accelerator_C_source": "ff336f75fcf0a4f6c0ac92ed627bc1a6abb0b36b8f4cc95d876f2a8bb2f5cc42",
+      "pixel_patches_npy": "f1c55a0dd28b91d9929f074995adadea79d7c0862c8cdcd0be6dbfda57383dc1"
+    }
+  },
+  "protocol": {
+    "lease_path": "/tmp/tensorfold-model.lock",
+    "inode": 46835039,
+    "single_model_admission": true,
+    "checkpoint_lfs_and_git_blob_verification": true,
+    "all_artifact_input_reference_pins_checked_before_and_after_each_child": true,
+    "owned_process_group_cleanup": true,
+    "lease_released": true,
+    "timing_fields_not_used_for_performance": true,
+    "borrowed_inventory_file_sha256_recorded_after_run": "959eda8cc9ebba01f01d0850c3fb59f1bec26a6b9d288581ecc2f95617febe18",
+    "borrowed_inventory_function_sha256_recorded_after_run": "305c20fc2dcfe5f4c06c126647ae4ed85174b08e60423729c766c7187a7b1f66",
+    "guard_source_sha256_recorded_after_run": "0145717ffc373c5cfed39dd11a9943154d9b61d33badef6cd27c4a866e7c6057"
+  },
+  "raw_evidence_sha256": {
+    "graph_code_receipt": "7b099f81056fede98825dd2c84453468ee880a34367caf0f56a77c3d5d953b72",
+    "graph_prose_receipt": "2cca3f69c3f9212bfbe693cc33269637d622d1f77019905243884fbd92468d13",
+    "graph_reasoning_receipt": "8ce808c3b2c5b472fefc3f6517edc0794cdbe62c9b5370e07f1186e754206365",
+    "graph_ownvision_receipt": "b532a899d588afe13556abdb2617023e902b8e9732d138f17e9be07f7218d78f",
+    "manifest.json": "bd621fee865800a55363c2095bf76f6e48b684f27e3f0676ebe1c39a1eca3670",
+    "events.json": "ca6acb87e847cbabe2caf46493198f8d94b29accbb364bedaeee2a881cf83f8b",
+    "receipt.json": "41a2e1fc1323b54b310979488a71b4c7aeb84392a01a85259ea7b95402bbc205",
+    "metrics.json": "3483197f7c3e225c9f776648c0719ae046afb1ba0a5280d2f6108fe10c915581",
+    "checkpoint-inventory.json": "ce17ea0ff32a5a0b085b787b591139b6501dc0a4af3226c78b166aecef0c8ad6",
+    "1.7B-6-state.log": "2e8199017c7b6a9bdee3775ae2c01dbb0c9f2a4ce3d1dd72a1e1456ec4b73b2a",
+    "VL-2B-8-state.log": "0d5f7b30c9e0ef0c50ff3ead7c9a99d8f1f4d6dfc9a1a30d914eb479dff8cfa7",
+    "1.7B-8-state.log": "d2cacd120597d9c6f57c6b5f6ed4a02209340135e9e8af74b748b9c3df9aeea0",
+    "VL-2B-6-state.log": "299e56edb3897cab27a5cffb7ef6a4ad8c6b9909d886f3c2edfaca2840cf78c7",
+    "VL-2B-6-served.json": "df23374b1d5b1897baf53bab90cf6145b2d9f3ad83076ce30e11e9319c3fc1f6",
+    "1.7B-8-served.json": "a1fad43b1a256a417f38b9a556eb349e1ff6498051dc20a94de641023911e04b",
+    "1.7B-6-served.json": "cf56206794a227df1da6d22bca183e53fac5baed1c7b777f8afe5113cc2f17d8",
+    "VL-2B-8-served.json": "473c121d92b35b1db359cb159eebda68d9a235c830bb14e18b9a9031e2482e73"
+  },
+  "remaining_checks": [
+    "Missing long-context measurements remain separate; context-packet transfer awaits explicit authorization following automatic review refusal.",
+    "Full M5 backend result is recorded separately:315/316,one historical Qwen case,two known findings,321controls red,zero limits.",
+    "Same-machine standard performance values remain in prior receipts; this adds no speed measurement."
+  ],
+  "performance_pass": false,
+  "ideal_FP64_fidelity_pass": null,
+  "historical_VL8_prescribed_graph_transfer": {
+    "receipt": "real-image-rounding-reproduction.json",
+    "receipt_sha256": "ab1673ef9eee0929fcc229dbd2b8fd6b8ed3cf627c551a6c6ae3f4e803c63f33",
+    "historical_scope": "Independent ownvision70 plus full90decoder prescribed-rounding reproduction, with delegated Metal elementary functions; no independentFP64pass",
+    "current_endpoint_transfer": {
+      "image70_words": 143360,
+      "decoder90_words": 11520000,
+      "historical_native_byte_equal": true,
+      "image70_sha256": "aceb2b880177abfae718bdd660398b3cd7ee990d2dfcdce2a110d08dc4e33135",
+      "decoder90_sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642"
+    },
+    "all_historical_reference_source_hashes_match_current": {
+      "tools/lfm3/fp64_reference.py": true,
+      "tools/lfm3/row_projection_reference.py": true,
+      "tools/lfm3/row_projection_replay.c": true,
+      "tools/lfm3/elementary_reference.py": true,
+      "tools/lfm3/text_rounding_reference.py": true,
+      "tools/lfm3/text_attention_rounding.py": true,
+      "tools/lfm3/vision_fp64_reference.py": true,
+      "tools/lfm3/vision_rounding_reference.py": true,
+      "tools/lfm3/vision_attention_rounding.py": true
+    },
+    "new_VL8_prescribed_graph_execution": false,
+    "historical_ideal_FP64_suffix_differences_retained": [
+      {
+        "row": 81,
+        "native_top": 78,
+        "reference_top": 851,
+        "native_maximum_set": [
+          78
+        ],
+        "reference_maximum_set": [
+          851
+        ],
+        "maximum_sets_overlap": false,
+        "native_margin": 0.125,
+        "reference_margin": 0.40625,
+        "native_reference_contender_gap": 0.125,
+        "reference_native_contender_gap": 0.40625
+      },
+      {
+        "row": 88,
+        "native_top": 309,
+        "reference_top": 22,
+        "native_maximum_set": [
+          309
+        ],
+        "reference_maximum_set": [
+          22
+        ],
+        "maximum_sets_overlap": false,
+        "native_margin": 0.0625,
+        "reference_margin": 0.0625,
+        "native_reference_contender_gap": 0.0625,
+        "reference_native_contender_gap": 0.0625
+      }
+    ]
+  }
+}

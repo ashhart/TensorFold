@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "scope": "Private exact-band MPP full gate exploratory operator screen; source-free aggregate receipt",
+  "production_default_changed": false,
+  "candidate_source_published": false,
+  "shape": {
+    "rows": 128,
+    "k": 2048,
+    "n": 7680,
+    "group": 64,
+    "bits": 4,
+    "checkpoint": "LFM3 TEXT 1.7B 4-bit",
+    "layer": 0,
+    "activation": "Genuine first128 contiguous cold prompt rows; not repeated64-row input"
+  },
+  "comparison": "Public native row-pair projection versus private complete prepare/producer/fused-finish route; not an MLX comparison",
+  "numeric": {
+    "outputs": 983040,
+    "strict_gate_errors": 0,
+    "worse_columns": 0,
+    "candidate_word_differences_from_rounded_fp64": 0,
+    "baseline_word_differences_from_rounded_fp64": 125,
+    "captured_public_gate_word_differences": 0,
+    "selected_global53_repairs": 1068,
+    "serial_fallback": 0,
+    "all_eight_controls_rejected": true,
+    "control_verification": "Every final word compared to SHA-pinned positive proved exact roundedFP64, plus original selector-validity and combine-order-field gates. Complete raw control FP64 analysis not claimed. Initial checker omitted selector gate and correctly failed; revised checker preserved that failure and applied the original gate."
+  },
+  "timing": {
+    "rounds": 2,
+    "order_each_round": "ABBA",
+    "samples_per_variant": 4,
+    "common_repetitions": 64,
+    "public_median_us": 478.0885428772308,
+    "candidate_median_us": 449.91634422331117,
+    "candidate_latency_reduction_fraction": 0.058926738725788685,
+    "candidate_throughput_ratio": 1.0626165264179348,
+    "baseline_first_last_drift_fraction": 3.2676115740963116e-05,
+    "five_exact_timed_graph_identity_checks": true,
+    "persistent_partial_scratch_bytes": 62914560,
+    "raw_samples": [
+      {
+        "round": 0,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030596500262618065,
+        "warm_gpu_seconds": 0.030599375255405903
+      },
+      {
+        "round": 0,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.02879870869219303,
+        "warm_gpu_seconds": 0.057600791566073895
+      },
+      {
+        "round": 0,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028804750181734562,
+        "warm_gpu_seconds": 0.05757950013503432
+      },
+      {
+        "round": 0,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030601374804973602,
+        "warm_gpu_seconds": 0.030597624834626913
+      },
+      {
+        "round": 1,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030597833450883627,
+        "warm_gpu_seconds": 0.030608083587139845
+      },
+      {
+        "round": 1,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.0287905833683908,
+        "warm_gpu_seconds": 0.057665541768074036
+      },
+      {
+        "round": 1,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028774041682481766,
+        "warm_gpu_seconds": 0.05762825021520257
+      },
+      {
+        "round": 1,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030597500037401915,
+        "warm_gpu_seconds": 0.030597875360399485
+      }
+    ]
+  },
+  "limits": [
+    "Exploratory two-round result; five balanced confirmation rounds pending.",
+    "Only this actual full-width gate tested; no fullmodel, up/down projection, HTTP or image performance qualification.",
+    "Conditional device MPP exactness/reduction assumptions remain open; empirical primary and every-column gates unchanged.",
+    "Small64-row/2048-column slice remained slower than native. No general speedup extrapolation."
+  ],
+  "evidence_sha256": {
+    "raw_cost": "d585b26f6bf1a01e6ab6abd7eb8891191e08b13c29a9c3f2ab84072f729968eb",
+    "primary_analysis": "a230b2cc51dae65b638fb38d95cd9e4f0c372a863988f9c027098780eab8844a",
+    "bounded_control_summary": "cf157d45c9bb28a7aa89d2090d2117c04101f400909b9e2f9edd59f8aacbab99"
+  }
+}
