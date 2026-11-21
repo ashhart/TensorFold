@@ -403,7 +403,6 @@ pub const Engine = struct {
         const cfg = @import("cuda_pdl.zig").config(base, @import("cuda_pdl.zig").on());
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
-
     pub fn promptAttention(e: *Engine, layer: usize, from: usize, end: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.attn);
         return @import("cuda_prompt.zig").runFrom(e, layer, from, end);
