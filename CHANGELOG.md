@@ -4,19 +4,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
+
 - Lane host: concurrent identical prompts join a leader that is filling a prompt state it will keep, so they reuse its whole fill and return the same tokens they would alone; a prompt whose state would not be kept, a zero budget, the leader's cancellation or a timeout still runs on its own (#3693, refs #3397, #3487). Thanks to @bikepresentbal.
-
-
-
-
 
 - Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
 
 - Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
 
 - Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass; it has not yet run on a GPU (#1858, after #1773 and #1767, for #1757). Thanks to @jayleaton.
-
-
 
 - TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
 
@@ -415,8 +411,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the Metal kernel-contract gate checks the four `dsv41 xmma units` launches only where tensor units exist, so Gate 5 limits pass on Macs without them while the four simdgroup launches stay checked everywhere (#3522). Thanks to @gilby.
 
 - `tensorfold device`: a saved macOS profile is refreshed when the live GPU wired-memory limit changes, so the reported available weight bytes match the current limit (#3780, fixes #3778). Thanks to @AIFlowML.
-
-- Qwen3.8-27B on Metal: a sampled reply served alone ranks its draft tree's candidates with the draw's own keyed noise, as on CUDA, so it needs fewer rounds for the same tokens (replies sharing a round draft as before): on an M4 Max with the MLX 4-bit checkpoint and DFlash2 at temperature 1, about 6% fewer rounds and 7% less decode time; greedy replies are unchanged (#3978).
 
 - GLM-5.3-Flash on CUDA: while rank 0's vision tower encodes a prompt's images, the other ranks sleep on their liveness lines instead of waiting in a collective receive for the whole pass, so a long image pass no longer trips a net plugin's operation timeout and stops every rank; replies are unchanged (#3675, for #3614). Thanks to @ultradaoto.
 - Desktop: a Qwen3.8-27B checkpoint is offered and loads, where the library applied the 2B geometry to every `qwen3_5` checkpoint and rejected the supported 27B at hidden size 5,120 (#3771). Thanks to @AIFlowML.
