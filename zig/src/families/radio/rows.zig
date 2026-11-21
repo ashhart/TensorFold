@@ -2,10 +2,11 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const Image = @import("lanes").stream.Image;
+const image_rows = @import("core").image_rows;
 const Allocator = std.mem.Allocator;
 
-/// An image's placeholder rows [at, at + n) of the prompt, its rows from `row` of the buffer, `image` its index.
-pub const Span = struct { at: u32, n: u32, row: u32, image: u32 };
+pub const Span = image_rows.Span;
+pub const total = image_rows.total;
 
 /// The images a prompt pass from `from` reads, in prompt order, their rows back to back from row 0.
 pub fn plan(a: Allocator, images: []const Image, from: u32) ![]Span {
@@ -21,13 +22,6 @@ pub fn plan(a: Allocator, images: []const Image, from: u32) ![]Span {
         row = std.math.add(u32, row, img.tokens) catch return error.ImageSpans;
     }
     return out.toOwnedSlice(a);
-}
-
-/// Rows the spans hold in all.
-pub fn total(spans: []const Span) u32 {
-    var n: u32 = 0;
-    for (spans) |s| n += s.n;
-    return n;
 }
 
 /// bf16 [limit, hidden] row-major: a pass's image rows, filled on rank 0 and broadcast whole to the others.
@@ -63,26 +57,12 @@ pub const Rows = struct {
         const w = r.hidden * 2;
         for (spans) |sp| {
             if (sp.row + sp.n > r.limit) return error.ImageRows;
-            const from, const row, const n = cut(sp, lo, hi) orelse continue;
-            const src = r.buf.ptr + @as(u64, row) * w;
-            try r.d.check(r.d.api.cuMemcpyDtoDAsync_v2(emb + @as(u64, from - lo) * w, src, @as(usize, n) * w, s.handle), "cuMemcpyDtoDAsync");
+            const c = image_rows.cut(sp, lo, hi) orelse continue;
+            const src = r.buf.ptr + @as(u64, c.row) * w;
+            try r.d.check(r.d.api.cuMemcpyDtoDAsync_v2(emb + @as(u64, c.at - lo) * w, src, c.n * w, s.handle), "cuMemcpyDtoDAsync");
         }
     }
 };
-
-/// The part of `sp` prompt rows [lo, hi) cross: its first prompt row, its first buffer row, its rows; null for none.
-pub fn cut(sp: Span, lo: u32, hi: u32) ?[3]u32 {
-    const from = @max(lo, sp.at);
-    const to = @min(hi, sp.at + sp.n);
-    return if (from < to) .{ from, sp.row + (from - sp.at), to - from } else null; // the offset first: no u32 overflow
-}
-
-test "a cut near the top of the u32 range takes its offset before adding the buffer row" {
-    const sp: Span = .{ .at = 0xffffff00, .n = 128, .row = 256, .image = 0 };
-    try std.testing.expectEqual([3]u32{ 0xffffff00, 256, 0x40 }, cut(sp, 0xffffff00, 0xffffff40).?);
-    try std.testing.expectEqual([3]u32{ 0xffffff40, 320, 0x40 }, cut(sp, 0xffffff40, 0xffffffff).?);
-    try std.testing.expect(cut(sp, 0xffffff80, 0xffffffff) == null);
-}
 
 test "a pass from a restored point plans only the images that end past it, rows back to back" {
     const a = std.testing.allocator;
@@ -100,13 +80,4 @@ test "a pass from a restored point plans only the images that end past it, rows 
     try std.testing.expectEqual(@as(u32, 556), total(later));
     const overlapping = [_]Image{ imgs[1], imgs[0] };
     try std.testing.expectError(error.ImageSpans, plan(a, &overlapping, 0));
-}
-
-test "a chunk takes the rows it crosses: a span cut at both ends, and none past it" {
-    const first: Span = .{ .at = 5, .n = 256, .row = 0, .image = 0 };
-    const second: Span = .{ .at = 300, .n = 300, .row = 256, .image = 1 };
-    try std.testing.expectEqual([3]u32{ 200, 195, 61 }, cut(first, 200, 400).?);
-    try std.testing.expectEqual([3]u32{ 300, 256, 100 }, cut(second, 200, 400).?);
-    try std.testing.expectEqual([3]u32{ 5, 0, 256 }, cut(first, 0, 1000).?);
-    try std.testing.expect(cut(first, 261, 300) == null and cut(second, 600, 700) == null);
 }
