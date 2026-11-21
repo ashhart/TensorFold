@@ -74,6 +74,7 @@ pub const Boot = struct {
 
     /// The checkpoint in `dir` loaded and served by a `serve.Metal` (the caller's `serve_lanes.Served` closes it).
     pub fn open(a: Allocator, io: std.Io, dir: []const u8, o: Options) !*serve.Metal {
+        const cache_prefix = try environment.read(u32, "TF_DSV41_CACHE_PREFIX", 0);
         const b = try a.create(Boot);
         errdefer a.destroy(b);
         b.a = a;
@@ -108,7 +109,7 @@ pub const Boot = struct {
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .cache_prefix = cache_prefix, .steps = o.steps, .decode_share = o.decode_share });
     }
 
     /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.

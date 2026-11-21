@@ -183,6 +183,7 @@ const valid = [_]Case{
     .{ .name = "TF_METAL4_TIMELINE", .raw = "3", .n = 3 },
     .{ .name = "TF_DSV41_ROUND_PROF", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_SMALL", .raw = "1", .n = 1 },
+    .{ .name = "TF_DSV41_CACHE_PREFIX", .raw = " 20000 ", .n = 20000 },
     .{ .name = "TF_DSV41_ASSETS", .raw = "deepseek assets", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_DIR", .raw = "engram-rows", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .raw = "full", .n = 1 },

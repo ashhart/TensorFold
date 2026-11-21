@@ -239,8 +239,8 @@ inline void tf_attn_window(thread TfAcc& s, thread const TfQ& q, const device ui
 }
 
 // A chunk's (max, sum, weighted sum) joined to the running result of head hh: both rescaled to the larger max.
-template <uint HS>
-inline void tf_attn_join(thread TfAccN<HS>& t, uint hh, float mc, float lc, thread const float* ac) {
+template <uint HS, typename Partial>
+inline void tf_attn_join(thread TfAccN<HS>& t, uint hh, float mc, float lc, Partial ac) {
   const float nm = mc > t.m[hh] ? mc : t.m[hh];
   const float a = precise::exp(t.m[hh] - nm);
   const float b = precise::exp(mc - nm);
@@ -305,32 +305,33 @@ inline void tf_attn_dec_row(const device uint4* Q, const device uint4* W, const 
   threadgroup auto& tidx = sh.tidx;
   const uint r = tg.x, h0 = tg.y * TF_ATTN_HS;
   if (r >= a.rows || h0 >= a.heads) return;
+  const TfAttnMeta m = M[r];
   if (sg != 0)
     for (uint u = 0; u < TF_ATTN_RUN / 32; ++u) {
       const uint j = (sg - 1) * TF_ATTN_RUN + 32 * u + lane;
-      tidx[j] = I[ulong(r) * TF_ATTN_SEL + j];
+      if (int(j) < m.ncomp) tidx[j] = I[ulong(r) * TF_ATTN_SEL + j];
     }
   simdgroup_barrier(mem_flags::mem_threadgroup);
-  const TfAttnMeta m = M[r];
   TfQ q;
   tf_attn_loadq(q, Q, r, h0, a.heads, lane);
   TfAcc s;
   tf_attn_zero(s);
   if (sg == 0) tf_attn_window<PF>(s, q, W, m, a.scale, lane);
   else tf_attn_selected<PF>(s, q, C, (const threadgroup int*)tidx, m, sg - 1, a.scale, lane);
-  for (uint hh = 0; hh < TF_ATTN_HS; ++hh)
-    for (uint i = 0; i < 16; ++i) tacc[sg][hh][16 * lane + i] = s.acc[hh][i];
-  if (lane < 2 * TF_ATTN_HS) tml[sg][lane / 2][lane % 2] = (lane % 2) ? s.l[lane / 2] : s.m[lane / 2];
-  if (lane == 0) tn[sg] = s.n;
+  if (sg != 0) {
+    if (s.n != 0) {
+      for (uint hh = 0; hh < TF_ATTN_HS; ++hh)
+        for (uint i = 0; i < 16; ++i) tacc[sg][hh][16 * lane + i] = s.acc[hh][i];
+      if (lane < 2 * TF_ATTN_HS) tml[sg][lane / 2][lane % 2] = (lane % 2) ? s.l[lane / 2] : s.m[lane / 2];
+    }
+    if (lane == 0) tn[sg] = s.n;
+  }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (sg != 0) return;
   for (uint c = 1; c < TF_ATTN_NCH; ++c) {
     if (tn[c] == 0) continue;
-    for (uint hh = 0; hh < TF_ATTN_HS; ++hh) {
-      float ac[16];
-      for (uint i = 0; i < 16; ++i) ac[i] = tacc[c][hh][16 * lane + i];
-      tf_attn_join(s, hh, tml[c][hh][0], tml[c][hh][1], ac);
-    }
+    for (uint hh = 0; hh < TF_ATTN_HS; ++hh)
+      tf_attn_join(s, hh, tml[c][hh][0], tml[c][hh][1], &tacc[c][hh][16 * lane]);
   }
   for (uint hh = 0; hh < TF_ATTN_HS; ++hh)
     tf_attn_store(s, hh, SK[h0 + hh], CS + ulong(m.pos + m.rope) * 64, O + (ulong(r) * a.heads + h0 + hh) * TF_ATTN_D,

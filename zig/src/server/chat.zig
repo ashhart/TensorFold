@@ -188,6 +188,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
         if (cut >= 512) try shared.append(a, @intCast(cut));
     };
+    const prefix = srv.info.prompt_cache_prefix;
+    if (prefix > 0 and prefix < rendered.ids.len and rendered.images.len == 0) try shared.append(a, prefix);
     const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids, instruct);
     const draft_field = f.get("draft");
     const drafts = srv.config.use_drafts and !(draft_field != null and draft_field.? == .bool and !draft_field.?.bool);

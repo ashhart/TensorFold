@@ -242,3 +242,45 @@ test "dsv41 metal steps: two prompts' pieces taking turns at the same positions 
     }
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+test "dsv41 metal cache prefix: edited continuations resume exactly in whole and stepped prompts" {
+    const c = fs.config();
+    const prefix = 320;
+    const original = try ff.ids(gpa, &c, 700, 81);
+    defer gpa.free(original);
+    for (original) |*id| if (id.* == c.user) {
+        id.* = (id.* + 1) % c.vocab;
+    };
+    const edited = try gpa.dupe(u32, original);
+    defer gpa.free(edited);
+    edited[prefix + 1] = (edited[prefix + 1] + 1) % c.vocab;
+    const fresh = try reference(edited);
+    defer fresh.free();
+
+    for ([_]bool{ false, true }) |stepped| {
+        const m = try fs.open(gpa, io, seed, .{ .slots = 2, .cache_bytes = 1 << 30, .cache_prefix = prefix, .steps = stepped });
+        defer fs.close(m);
+        const tg = m.t.target();
+        if (stepped) {
+            const b = try tg.begin(0, original);
+            try testing.expectEqual(@as(u64, 0), b.at);
+            try tg.piece(0, original, b.at, prefix + 19, false);
+            _ = try tg.finish(0, original, null, original.len);
+        } else _ = try tg.prefill(0, original, null, original.len);
+        tg.release(0);
+        const first = if (stepped) blk: {
+            const b = try tg.begin(1, edited);
+            try testing.expectEqual(@as(u64, prefix), b.at);
+            try tg.piece(1, edited, b.at, b.at + 47, false);
+            break :blk try tg.finish(1, edited, null, edited.len);
+        } else try tg.prefill(1, edited, null, edited.len);
+        try testing.expectEqual(@as(u64, prefix), m.t.stats.cached_rows);
+        const state = try bytesOf(&m.t.slots[1], false);
+        defer gpa.free(state);
+        try testing.expectEqualSlices(u8, fresh.kv, state);
+        var tokens: [n_decode]u32 = undefined;
+        try decode(tg, 1, edited.len, first, &tokens);
+        try testing.expectEqualSlices(u32, &fresh.toks, &tokens);
+        tg.release(1);
+    }
+}

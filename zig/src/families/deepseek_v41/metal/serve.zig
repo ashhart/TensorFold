@@ -39,6 +39,7 @@ pub const Options = struct {
     /// DSpark's pass when the checkpoint has one (false: serial windows through the same lanes)
     drafts: bool = true,
     cache_bytes: u64 = 0,
+    cache_prefix: u32 = 0,
     prompt: prompt.Opts = .{},
     /// prompts a chunk at a time between the other streams' rounds (serve_lanes.stepsFromEnv); false: whole prompts
     steps: bool = false,
@@ -66,7 +67,7 @@ pub const Metal = struct {
         const m = try a.create(Metal);
         errdefer a.destroy(m);
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
-        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident });
+        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .cache_prefix = opt.cache_prefix, .resident = parts.resident });
         errdefer m.t.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {

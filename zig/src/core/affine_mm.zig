@@ -5,8 +5,8 @@ const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 const bf16_round = @import("bf16_round");
 
-/// SwiGLU variants for clipped BF16 intermediates, directly rounded SiLU, and compiled MLX SiLU.
-pub const Glu = enum { clipped, clipped_silu, plain };
+/// The SwiGLU epilogue, with route weighting for DeepSeek's affine experts.
+pub const Glu = enum { clipped, clipped_silu, plain, weighted };
 
 /// The weights' bits (2-6 or 8) and group (32, 64 or 128), the output's type and the GLU epilogue.
 pub const Format = struct {
@@ -28,6 +28,7 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
         .plain => "#define TF_GLU_PLAIN 1\n",
         .clipped_silu => "#define TF_GLU_ROUND_SILU 1\n",
         .clipped => "",
+        .weighted => "#define TF_GLU_WEIGHTED 1\n",
     };
     const map = if (f.mapped_experts) "#define TF_AM_MAPPED_EXPERTS 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";

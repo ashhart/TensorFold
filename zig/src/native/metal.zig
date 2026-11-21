@@ -41,8 +41,8 @@ const affine_widths = blk: {
 };
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
-
 pub const families: []const api.Family = &.{
+    .{ .model_type = "deepseek_v41", .formats = &.{"mlx-q8g64"}, .raw_text = false },
     .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
     .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
     .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
@@ -126,8 +126,6 @@ const Host = struct {
         h.gpa.destroy(h);
     }
 };
-
-/// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
@@ -159,6 +157,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return @import("uocr.zig").open(a, gpa, io, o, problem);
     if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl") and !std.mem.eql(u8, o.model_type, "minimax_m3_vl")) {
+        if (std.mem.eql(u8, o.model_type, "deepseek_v41")) return @import("deepseek_v41_affine.zig").open(a, gpa, io, o, problem);
         problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4, Step-5, MiniMax-M3.1-Flash and Unlimited-OCR-2 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
@@ -171,6 +170,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h") and !std.mem.eql(u8, o.model_type, "nemotron_h_puzzle")) {
+        if (std.mem.eql(u8, o.model_type, "deepseek_v41")) return @import("deepseek_v41_affine.zig").open(a, gpa, io, o, problem);
         problem.* = try @import("no_backend.zig").message(a, o.model_type);
         return null;
     }
