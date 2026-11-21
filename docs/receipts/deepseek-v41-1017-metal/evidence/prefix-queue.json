@@ -1,0 +1,144 @@
+{
+  "exact": {
+    "cold": true,
+    "prefix_seed": true,
+    "prefix_replay": true,
+    "queue_seed": true,
+    "queued_turn": true,
+    "competing": true,
+    "long_cold": true
+  },
+  "metrics": {
+    "cold": {
+      "before": {
+        "n": 8646,
+        "cached": 0,
+        "pp": 2.96643275,
+        "ttft": 2.969287292,
+        "queued": 0.0,
+        "decode": 84.63895209321149
+      },
+      "after": {
+        "n": 8646,
+        "cached": 0,
+        "pp": 2.966889584,
+        "ttft": 2.970003333,
+        "queued": 0.0,
+        "decode": 87.55917176436394
+      }
+    },
+    "prefix_seed": {
+      "before": {
+        "n": 20573,
+        "cached": 2,
+        "pp": 5.966349667,
+        "ttft": 5.980380208,
+        "queued": 0.0,
+        "decode": 108.3230038465533
+      },
+      "after": {
+        "n": 20573,
+        "cached": 2,
+        "pp": 6.260746041,
+        "ttft": 6.274072125,
+        "queued": 0.0,
+        "decode": 109.8777239701525
+      }
+    },
+    "prefix_replay": {
+      "before": {
+        "n": 20574,
+        "cached": 2,
+        "pp": 5.929231209,
+        "ttft": 5.942485875,
+        "queued": 0.0,
+        "decode": 100.40438133381323
+      },
+      "after": {
+        "n": 20574,
+        "cached": 20000,
+        "pp": 0.52070675,
+        "ttft": 0.534043625,
+        "queued": 0.0,
+        "decode": 102.36169045353944
+      }
+    },
+    "queue_seed": {
+      "before": {
+        "n": 8418,
+        "cached": 0,
+        "pp": 3.601142416,
+        "ttft": 3.609573916,
+        "queued": 0.0,
+        "decode": 74.56814196139696
+      },
+      "after": {
+        "n": 8418,
+        "cached": 0,
+        "pp": 3.595121375,
+        "ttft": 3.603970958,
+        "queued": 0.0,
+        "decode": 77.12280521350164
+      }
+    },
+    "queued_turn": {
+      "before": {
+        "n": 8424,
+        "cached": 8408,
+        "pp": 0.107758834,
+        "ttft": 6.791018959,
+        "queued": 6.677,
+        "decode": 91.5806303000825
+      },
+      "after": {
+        "n": 8424,
+        "cached": 8408,
+        "pp": 0.46474675,
+        "ttft": 0.475271792,
+        "queued": 0.005,
+        "decode": 47.20251901631995
+      }
+    },
+    "competing": {
+      "before": {
+        "n": 3446,
+        "cached": 2,
+        "pp": 2.571608666,
+        "ttft": 2.575108291,
+        "queued": 0.0,
+        "decode": 95.2735497784317
+      },
+      "after": {
+        "n": 3446,
+        "cached": 2,
+        "pp": 2.584105208,
+        "ttft": 2.587701833,
+        "queued": 0.0,
+        "decode": 82.1621164457886
+      }
+    },
+    "long_cold": {
+      "before": {
+        "n": 17639,
+        "cached": 2,
+        "pp": 5.167577875,
+        "ttft": 5.173595459,
+        "queued": 0.0,
+        "decode": 95.97059216822143
+      },
+      "after": {
+        "n": 17639,
+        "cached": 2,
+        "pp": 5.204251916,
+        "ttft": 5.209985834,
+        "queued": 0.0,
+        "decode": 95.61126712502627
+      }
+    }
+  },
+  "checks": {
+    "shared_prefix_restored": true,
+    "queue_reduced": true,
+    "long_prefill_preserved": true
+  }
+}

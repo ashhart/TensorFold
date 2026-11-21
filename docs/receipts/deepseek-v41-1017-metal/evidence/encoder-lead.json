@@ -1,0 +1,14 @@
+{
+  "encoder-lead-phase": {
+    "prefill_tps": 3401.0184357570365,
+    "ttft_seconds": 5.1981733125,
+    "decode_tps": 95.44303675448967,
+    "coding_exact": true,
+    "cache_exact": true,
+    "independent_fresh_exact": true,
+    "prompt_rates": [
+      3390.6861614941877,
+      3411.3507100198854
+    ]
+  }
+}
