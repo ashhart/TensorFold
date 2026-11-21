@@ -348,6 +348,8 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("multipart_test.zig");
+    _ = @import("query_test.zig");
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
@@ -355,13 +357,16 @@ test {
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");
     _ = @import("ocr/run_pdf_test.zig");
+    _ = @import("ocr/route_test.zig");
     _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/liteparse_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");
