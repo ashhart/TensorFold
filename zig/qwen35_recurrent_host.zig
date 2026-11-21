@@ -85,7 +85,7 @@ fn engine(e: *q.engine.Engine, d: *cuda.Driver) void {
     e.kv8 = false;
     e.geo = .{ .hid = 5120, .nk = 16, .nv = 48, .qh = 24, .kvh = 4, .nl = 48 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
-    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f };
+    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f, .apply_table = f, .apply_pend_table = f, .conv_table = f };
     e.rec_scratch = rec.Pool.init(a, @intFromPtr(e));
 }
 fn finish(e: *q.engine.Engine, c: *q.engine.Cache) void {
@@ -110,8 +110,8 @@ test "Shared verification: recurrent scratch is absent from an idle real 27B cac
     engine(&e, &d);
     var c = try q.engine.Cache.init(a, &e, 1);
     defer finish(&e, &c);
-    try std.testing.expectEqual(@as(usize, 2), Driver.allocs);
-    try std.testing.expectEqual(e.g.stateBytes() + e.g.kvBytes(1, false), Driver.bytes);
+    try std.testing.expectEqual(@as(usize, 3), Driver.allocs); // kv, state and the state table
+    try std.testing.expectEqual(e.g.stateBytes() + e.g.kvBytes(1, false) + q.cache.States.bytes(e.g), Driver.bytes);
     try std.testing.expect(c.before == null);
     try std.testing.expectEqual(@as(usize, 0), c.log.ptr);
 }
@@ -136,7 +136,7 @@ test "Shared verification: all window transitions keep log capacity within the o
         try std.testing.expect(c.log.len >= e.g.logBytes(rows));
         try std.testing.expect((c.before != null) == (rows == 1));
         try std.testing.expect(e.rec_scratch.residentBytes() <= bound);
-        const sg = c.seg(&e, c.len, 0, rows);
+        const sg = try c.seg(&e, c.len, 0, rows);
         try std.testing.expectEqual(c.log.ptr, sg.log);
         try std.testing.expectEqual(if (c.before) |b| b.ptr else 0, sg.before);
         try forwardDone(&e, &c, rows);
@@ -186,7 +186,7 @@ test "Shared verification: a served one-row step leases no rollback copy and an 
     // a fresh cache: no copy leased, and the staged segment reads none
     try rec.prepare(&e, &c, 1, true, false);
     try std.testing.expect(c.before == null);
-    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try std.testing.expectEqual(@as(u64, 0), (try q.engine.Engine.stagedSeg(&c, &e, null, c.len, 0, 1, false)).before);
     try rec.mark(&c, false);
     c.advanced(1, true, false);
     _ = Driver.sync(e.stream.handle);
@@ -201,7 +201,7 @@ test "Shared verification: a served one-row step leases no rollback copy and an 
     try std.testing.expect(c.before != null);
     try rec.prepare(&e, &c, 1, true, false);
     try std.testing.expect(c.before != null);
-    try std.testing.expectEqual(@as(u64, 0), q.engine.Engine.stagedSeg(&c, &e, c.len, 0, 1, false).before);
+    try std.testing.expectEqual(@as(u64, 0), (try q.engine.Engine.stagedSeg(&c, &e, null, c.len, 0, 1, false)).before);
     try rec.mark(&c, false);
     c.advanced(1, true, false);
     _ = Driver.sync(e.stream.handle);

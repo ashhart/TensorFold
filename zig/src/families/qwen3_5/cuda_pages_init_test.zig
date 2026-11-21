@@ -88,6 +88,9 @@ fn engine(d: *cuda.Driver) E {
     e.d = d;
     e.stream = .{ .d = d, .handle = Device.stream };
     e.g.vocab = 8;
+    e.g.layers = 0; // no linear layer: a lane's state table holds only the log rows' entries
+    e.g.first = 0; // one engine, the whole model: Geometry.deltas reads first
+    e.g.whole = 0;
     return e;
 }
 
@@ -119,7 +122,7 @@ test "kv safety: Qwen second table allocation refusal precedes every fill" {
     var d = Device.driver();
     var e = engine(&d);
     defer finish(&d, e.stream);
-    Device.fail_alloc = 3;
+    Device.fail_alloc = 4; // the arena, lane 0's page and state tables, then lane 1's page table
     try expectPoolError(error.NotReady, pages.Pages.init(gpa, &e, layout, 64, 0, 2, 8), &d, e.stream);
     try Device.released();
     try std.testing.expectEqual(@as(usize, 0), Device.fills);
@@ -129,11 +132,12 @@ test "kv safety: Qwen initPaged logits allocation failure precedes every fill" {
     var d = Device.driver();
     var e = engine(&d);
     defer finish(&d, e.stream);
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    // the state table's host copy, then the logits
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 });
     try std.testing.expectError(error.OutOfMemory, caches.Cache.initPaged(failing.allocator(), &e, 3, 16, 0x1000));
     try Device.released();
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 1), Device.allocs);
+    try std.testing.expectEqual(@as(usize, 2), Device.allocs);
     try std.testing.expectEqual(@as(usize, 0), Device.fills);
 }
 
