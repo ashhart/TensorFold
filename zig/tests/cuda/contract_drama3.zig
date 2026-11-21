@@ -99,17 +99,18 @@ pub fn mixSpec() c.Spec {
     return .{ .name = "cuda drama3 d3_cfg_mix (semantic CFG, gamma 2.5)", .accum = .none, .depth = noSums, .out = .f32, .tiles = .{ .{}, .{ .size = 256 }, .{} }, .served = &.{.{ .rows = 1, .n = 4097, .k = 1 }} };
 }
 
-/// d3_cfg_mix updates the conditional logits in place: each run starts from a fresh copy of them.
+/// d3_cfg_mix mixes in place from a fresh copy each run; the control passes gamma - 1 (cond + gamma * (cond - uncond)).
 pub const Mix = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    control: bool = false,
     cond: []f32 = &.{},
     uncond: []f32 = &.{},
     u: u64 = 0,
     out: u64 = 0,
 
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module) !Mix {
-        return .{ .rig = .{ .gpu = gpu, .s = s }, .f = try mod.function("d3_cfg_mix") };
+    pub fn init(gpu: check.Gpu, s: cuda.Stream, mod: cuda.Module, control: bool) !Mix {
+        return .{ .rig = .{ .gpu = gpu, .s = s }, .f = try mod.function("d3_cfg_mix"), .control = control };
     }
 
     pub fn deinit(self: *Mix) void {
@@ -125,7 +126,9 @@ pub const Mix = struct {
     }
 
     pub fn kernel(self: *Mix) g.Kernel {
-        return .{ .spec = mixSpec(), .ctx = self, .vt = &mix_vt };
+        var k: g.Kernel = .{ .spec = mixSpec(), .ctx = self, .vt = &mix_vt, .control = if (self.control) .shapes else null };
+        if (self.control) k.spec.name = "cuda drama3 d3_cfg_mix control: launched with gamma - 1";
+        return k;
     }
 
     const mix_vt = g.hooks(Mix);
@@ -163,7 +166,7 @@ pub const Mix = struct {
         a.add(self.out);
         a.add(self.u);
         a.add(@as(c_int, @intCast(n)));
-        a.add(mix_gamma);
+        a.add(if (self.control) mix_gamma - 1 else mix_gamma);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast((n + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -186,13 +189,13 @@ pub const Mix = struct {
     }
 };
 
-/// The drama3 image's registrations onto `kernels`: norm rows, compact router with unmasked control, CFG mix.
+/// The drama3 image's registrations onto `kernels`: norm rows, then compact router and CFG mix each with its control.
 pub const Group = struct {
     a: std.mem.Allocator,
     mod: cuda.Module,
     norm: Norm,
     routers: [2]router_k.Router,
-    mix: Mix,
+    mixes: [2]Mix,
 
     pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel)) !*Group {
         const self = try a.create(Group);
@@ -201,18 +204,18 @@ pub const Group = struct {
         self.mod = try cuda.Module.load(gpu.d, cuda.kernels.drama3);
         errdefer self.mod.unload();
         self.norm = try Norm.init(gpu, s, self.mod);
-        self.mix = try Mix.init(gpu, s, self.mod);
+        self.mixes = .{ try .init(gpu, s, self.mod, false), try .init(gpu, s, self.mod, true) };
         self.routers = .{ try .init(gpu, s, self.mod, false), try .init(gpu, s, self.mod, true) };
         try kernels.append(a, self.norm.kernel());
         for (&self.routers) |*r| try kernels.append(a, r.kernel());
-        try kernels.append(a, self.mix.kernel());
+        for (&self.mixes) |*m| try kernels.append(a, m.kernel());
         return self;
     }
 
     pub fn destroy(self: *Group) void {
         self.norm.deinit();
         for (&self.routers) |*r| r.deinit();
-        self.mix.deinit();
+        for (&self.mixes) |*m| m.deinit();
         self.mod.unload();
         self.a.destroy(self);
     }

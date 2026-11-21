@@ -12,13 +12,15 @@ CFG = ["--cfg-gamma", "1.5", "--cfg-allow-request-gamma", "--cfg-force-guided"]
 MODES = {"plain": [], "separate": CFG, "paired": [*CFG, "--cfg-batched"]}
 # One row a chunk, and chunks longer than a reference so a voice's later requests resume its cached reference.
 ROWS = (1, 64)
+# The concurrent lanes: text index and gamma each.
+LANES = {"lane-a": (3, "3"), "lane-b": (4, "1.5")}
 
 
 def plan(voice):
-    """(step, voice, text, headers) per fixed text and gamma, then two guided lanes at once."""
+    """(step, voice, text, headers) per fixed text and gamma, each lane alone, then the lanes at once."""
     steps = [(f"t{t}-g{g}", voice, TEXTS[t], {"X-Cfg-Gamma": g}) for t in range(3) for g in GAMMAS]
-    return [*steps, [("lane-a", voice, TEXTS[3], {"X-Cfg-Gamma": "3"}),
-                     ("lane-b", voice, TEXTS[4], {"X-Cfg-Gamma": "1.5"})]]
+    lanes = [(name, voice, TEXTS[t], {"X-Cfg-Gamma": g}) for name, (t, g) in LANES.items()]
+    return [*steps, *[(f"solo-{name}", *rest) for name, *rest in lanes], lanes]
 
 
 def require_reference(voices, voice):
@@ -29,7 +31,7 @@ def require_reference(voices, voice):
 
 
 def verdict(runs):
-    """Per prefill size: PCM everywhere, paired equals separate, gamma 1 is plain, gamma above 1 differs, cache hit."""
+    """Per prefill size: PCM, paired equals separate, gamma 1 is plain, above 1 differs, lanes equal solo, cache hit."""
     problems = []
     for rows, modes in runs.items():
         separate, paired, plain = modes["separate"], modes["paired"], modes["plain"]
@@ -49,6 +51,9 @@ def verdict(runs):
                     if guided[mixed]["sha256"] == guided[name]["sha256"]:
                         problems.append(f"rows={rows} {mixed}: {mode} PCM equals gamma 1, so guidance changed nothing")
         for mode in ("separate", "paired"):
+            guided = modes[mode]["replies"]
+            problems += [f"rows={rows} {name}: {mode} concurrent PCM differs from its solo run" for name in LANES
+                         if guided[name]["sha256"] != guided[f"solo-{name}"]["sha256"]]
             if modes[mode]["cache_hits"] == 0:
                 problems.append(f"rows={rows}: {mode} never resumed a cached reference")
     return problems

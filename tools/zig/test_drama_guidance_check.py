@@ -9,7 +9,8 @@ import drama_guidance_check as check
 
 
 def replies(names):
-    return {name: {"sha256": name, "bytes": 4, "first_audio_s": 0.1, "total_s": 0.2} for name in names}
+    return {name: {"sha256": name.removeprefix("solo-"), "bytes": 4, "first_audio_s": 0.1, "total_s": 0.2}
+            for name in names}
 
 
 def matching():
@@ -26,8 +27,15 @@ class VerdictTests(unittest.TestCase):
 
     def test_paired_that_differs_from_separate_fails(self):
         runs = matching()
-        runs[64]["paired"]["replies"]["lane-b"]["sha256"] = "other"
-        self.assertEqual(check.verdict(runs), ["rows=64 lane-b: paired PCM differs from separate"])
+        runs[64]["paired"]["replies"]["t1-g3"]["sha256"] = "other"
+        self.assertEqual(check.verdict(runs), ["rows=64 t1-g3: paired PCM differs from separate"])
+
+    def test_a_concurrent_lane_that_differs_from_its_solo_run_fails(self):
+        runs = matching()
+        runs[1]["separate"]["replies"]["lane-a"]["sha256"] = "other"
+        runs[1]["paired"]["replies"]["lane-a"]["sha256"] = "other"
+        self.assertEqual(check.verdict(runs), ["rows=1 lane-a: separate concurrent PCM differs from its solo run",
+                                               "rows=1 lane-a: paired concurrent PCM differs from its solo run"])
 
     def test_gamma_one_that_differs_from_plain_fails(self):
         runs = matching()
