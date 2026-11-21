@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the idle-unload host tests wait on the ticker's event and the manager's condition instead of a 2-second real-clock bound, so a loaded CI host no longer fails them (#4352).
+
 - Tests: three host tests (Qwen3.5 CUDA kept-state read-back, the grammar compile deadline, the chats resume store) wait on events instead of real-clock bounds, so a loaded CI host no longer fails them (#4358).
 
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
