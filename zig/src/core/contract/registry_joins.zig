@@ -56,6 +56,11 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
     @import("qwen4_records.zig").cuda ++
+    @import("ricursive_cuda_records.zig").cuda ++
+    @import("ricursive_prep_records.zig").cuda ++
+    @import("ricursive_attn_records.zig").cuda ++
+    @import("ricursive_dflash2_attn_records.zig").cuda ++
+    @import("ricursive_dflash2_records.zig").cuda ++
     @import("registry_media.zig").cuda_pending;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
@@ -87,6 +92,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("flashnext_attention_records.zig").records ++
     @import("spark25_records.zig").records ++
     @import("gemma_attention_records.zig").records ++
+    @import("ricursive_records.zig").records ++
     @import("moss_image_records.zig").records ++
     @import("idol_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++

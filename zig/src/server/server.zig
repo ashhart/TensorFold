@@ -230,7 +230,7 @@ pub const Server = struct {
         srv.eos = try a.dupe(u32, text.eosIds());
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
-        if (minimax) srv.markers = reply_text.mm_markers;
+        if (minimax) srv.markers = reply_text.mm_markers else if (srv.info.reasoning_optional and std.mem.eql(u8, srv.markers.close, reply_text.think_markers.close)) srv.markers.optional = true;
         srv.close_id = text.tokenId(srv.markers.close);
         srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();

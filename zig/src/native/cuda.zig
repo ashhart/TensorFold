@@ -477,7 +477,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
-        .structures = served.backend.vtable.first_masked != null,
+        .structures = if (comptime std.mem.eql(u8, F.model_type, "ricursive")) loaded.backend.vtable.first_masked != null else served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,
         .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
@@ -488,6 +488,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     }), .{ .ctx = loaded.ctx, .text = F.explain }, snaps.warmQuiet(F));
     opened = true;
     if (h.witness) |w| w.adopted = true;
+    if (@hasDecl(F, "thinking")) F.thinking(&h.host.info_); // a family's own think block rules
     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
