@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: after a chat reply a quiet background pass keeps its state so the next turn resumes past the reply instead of prefilling it; the pass runs on one rank and yields when a request arrives (#3219).
+
 - DeepSeek-V4.1 on Metal: cold prompts read the early Engram rows beside the first rows of a chunk, the Engram row cache keeps more records by default, and the keepalive probes residency while a request runs; prompt bits stay equal to decode bits (#3459).
 
 - drama3: a host test runs the codec's decode and encode schedules over a recording binding and pins their call lists, so a schedule change fails the test without a GPU; the lists are fixtures beside the test and it runs in `test-drama-host` (#2962). Thanks to @jschmied.
