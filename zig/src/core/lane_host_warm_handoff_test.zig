@@ -241,7 +241,7 @@ test "queued cache: progress a warm handoff keeps other promises and never repla
         queue.interrupted(&host, &warm, &warm.stream, 8);
         const want: u32 = if (mode == .matching or mode == .reserved) 8 else 4;
         try t.expectEqual(want, store.find(&words, &.{}, &.{}).?.at);
-        try t.expectEqual(@as(u64, if (mode == .different) 16 else 0), warm.cache_promise.bytes);
+        try t.expectEqual(@as(u64, 0), warm.cache_promise.bytes); // cancellation abandons it even without a warm handoff
         try t.expectEqual(@as(u64, if (mode == .full) 120 else 80), later.cache_promise.bytes);
         try t.expectEqual(@as(usize, 1), later.cache_promise.slots);
         const promised: u64 = if (mode == .reserved or mode == .full) later.cache_promise.bytes else 0;
