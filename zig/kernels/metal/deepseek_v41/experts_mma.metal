@@ -9,6 +9,7 @@ struct XmArgs {
   uint K, N, topk, pairs;
   float limit;
 };
+static_assert(sizeof(XmArgs) == 20, "XmArgs must mirror metal/experts_mma.zig's XmArgs");
 
 // One tile per (expert, 16 consecutive pair positions of a slot): {expert, first position, rows}; entry 0 is the count.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_xm_tiles(

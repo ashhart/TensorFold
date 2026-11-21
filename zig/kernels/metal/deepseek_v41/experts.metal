@@ -9,6 +9,7 @@ struct DsArgs {
   uint K, N, topk, rows_max;
   float limit;
 };
+static_assert(sizeof(DsArgs) == 20, "DsArgs must mirror metal/experts.zig's UpArgs");
 
 constant constexpr uint DS_KMAX = 5120;
 

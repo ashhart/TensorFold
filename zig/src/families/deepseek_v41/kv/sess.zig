@@ -45,7 +45,7 @@ pub const keep: u64 = 127;
 pub const Measure = struct {
     /// SWA rings in the snapshot: replay mode the layers below the decoder, full mode every one
     rings: u64,
-    /// the SWA window (cfg.sliding_window: the rings' rows and the drafter's)
+    /// the SWA window (cfg.window: the rings' rows and the drafter's)
     window: u64,
     /// ratio-2 kv sources (their float32 [2 x head_dim] carries)
     carries: u64,

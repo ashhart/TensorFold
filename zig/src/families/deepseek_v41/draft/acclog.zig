@@ -1,6 +1,7 @@
 //! TF_DSV41_ACCEPT_LOG=<path>: one JSON line per draft-policy event (rank 0) for draft-depth studies; off when unset.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const quiet = @import("builtin").is_test; // a test's stderr is the build runner's channel
 
 var fd: c_int = -2; // -2: not looked up yet, -1: off
@@ -19,6 +20,7 @@ fn on() bool {
 }
 
 fn nowNs() u64 {
+    if (comptime builtin.os.tag == .windows) return 0;
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));

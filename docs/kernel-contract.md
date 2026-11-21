@@ -61,8 +61,10 @@ Direct `one` callers remain responsible for cleanup.
 5. Limits. Every registered launch against each chip we serve, from its declaration and recorded compiles, so this part
    runs with no GPU in `zig build test`. Metal: threads a group and threadgroup bytes against M1 to M5; on M1 and M2 a
    pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so every launch
-   records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves the threads. A
-   tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA: registers a thread
+   records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves the threads.
+   A tensor-op kernel served on those chips but not buildable offline stays at 256 threads. `min_gen` records an
+   engine-enforced generation boundary; earlier chips are explicitly skipped, not reported as qualified. It defaults
+   to M1 (13); the EXL3 tensor-unit-only projection paths start at M5 (17). CUDA: registers a thread
    (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_80, sm_86, sm_89, sm_120
    and sm_121. HIP: VGPRs a wave (a workgroup's waves spread over the WGP's four SIMDs, each rounded to the chip's
    allocation step), static plus dynamic LDS bytes, the kernel's `__launch_bounds__` and its wave size against gfx1030,

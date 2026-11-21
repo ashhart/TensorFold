@@ -68,6 +68,34 @@ test "every byte counts: one bit at 8 KiB into a 1 MiB expert payload changes th
     try std.testing.expectError(error.ShardBytesDiffer, contentOf(io, path[4], true));
 }
 
+test "a trimmed inference directory hashes its index but opens only the shards it carries" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "trim");
+    var d = try tmp.dir.openDir(io, "trim", .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = "{\"hidden_size\":8}" });
+    try d.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"shard-a.safetensors\",\"b\":\"shard-b.safetensors\"}}" });
+    const head = "{\"t\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+    var bytes: [512]u8 = @splat(0);
+    std.mem.writeInt(u64, bytes[0..8], head.len, .little);
+    @memcpy(bytes[8..][0..head.len], head);
+    @memcpy(bytes[8 + head.len ..][0..4], &[_]u8{ 1, 2, 3, 4 });
+    try d.writeFile(io, .{ .sub_path = "shard-a.safetensors", .data = bytes[0 .. 8 + head.len + 4] });
+    const path = try tmp.dir.realPathFileAlloc(io, "trim", gpa);
+    defer gpa.free(path);
+    const one = try production.identityPresent(gpa, io, path);
+    // The payload is not part of a metadata identity; a header byte is.
+    bytes[8 + head.len] ^= 0xFF;
+    try d.writeFile(io, .{ .sub_path = "shard-a.safetensors", .data = bytes[0 .. 8 + head.len + 4] });
+    try std.testing.expectEqual(one, try production.identityPresent(gpa, io, path));
+    bytes[8] = 'x';
+    try d.writeFile(io, .{ .sub_path = "shard-a.safetensors", .data = bytes[0 .. 8 + head.len + 4] });
+    try std.testing.expect(!std.mem.eql(u8, &one, &try production.identityPresent(gpa, io, path)));
+}
+
 test "a Hugging Face snapshot's shard is checked against its blob name: the right sha256 passes, another refuses" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

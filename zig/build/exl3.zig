@@ -2,9 +2,36 @@ const std = @import("std");
 
 pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, host_tests: *std.Build.Step) void {
     const files = b.addWriteFiles();
-    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection.metal"), "exl3_projection.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_core.metal"), "exl3_projection_core.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_wide.metal"), "exl3_projection_wide.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_chain.metal"), "exl3_projection_chain.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_base.metal"), "exl3_projection_nax_base.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill_body.metal"), "exl3_projection_nax_prefill_body.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill_ku.metal"), "exl3_projection_nax_prefill_ku.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill.metal"), "exl3_projection_nax_prefill.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_variants_a.metal"), "exl3_projection_nax_variants_a.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_variants_b.metal"), "exl3_projection_nax_variants_b.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_variants_c.metal"), "exl3_projection_nax_variants_c.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_fma.metal"), "exl3_projection_nax_fma.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_fma_static_a.metal"), "exl3_projection_nax_fma_static_a.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_fma_static_b.metal"), "exl3_projection_nax_fma_static_b.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_fma_t.metal"), "exl3_projection_nax_fma_t.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_fp8.metal"), "exl3_projection_nax_fp8.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_i8.metal"), "exl3_projection_i8.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/nax.h"), "nax.h");
+    // The engine activation glue, for the fused SwiGLU+rotate differential (its precise silu is the reference).
+    _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/ops.metal"), "deepseek_v41_ops.metal");
+    // The query RoPE, for the fused wq_b epilogue differential (dsv41_rope is the reference).
+    _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/rope.metal"), "deepseek_v41_rope.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/kv_glue.metal"), "deepseek_v41_kv_glue.metal");
     const sources = b.createModule(.{
-        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection.metal\");\n"),
+        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection_core.metal\") ++ @embedFile(\"exl3_projection_wide.metal\") ++ @embedFile(\"exl3_projection_chain.metal\");\n" ++
+            "pub const core_exl3_projection_i8 = @embedFile(\"exl3_projection_i8.metal\");\n" ++
+            "pub const core_exl3_projection_nax = @embedFile(\"exl3_projection_nax_base.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_body.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_ku.metal\") ++ @embedFile(\"exl3_projection_nax_prefill.metal\") ++ @embedFile(\"exl3_projection_nax_variants_a.metal\") ++ @embedFile(\"exl3_projection_nax_variants_b.metal\") ++ @embedFile(\"exl3_projection_nax_variants_c.metal\") ++ @embedFile(\"exl3_projection_nax_fma.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_a.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_b.metal\") ++ @embedFile(\"exl3_projection_nax_fma_t.metal\") ++ @embedFile(\"exl3_projection_nax_fp8.metal\");\n" ++
+            "pub const nax = @embedFile(\"nax.h\");\n" ++
+            "pub const deepseek_v41_ops = @embedFile(\"deepseek_v41_ops.metal\");\n" ++
+            "pub const deepseek_v41_rope = @embedFile(\"deepseek_v41_rope.metal\");\n" ++
+            "pub const deepseek_v41_kv_glue = @embedFile(\"deepseek_v41_kv_glue.metal\");\n"),
     });
     const imports: []const std.Build.Module.Import =
         &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } };
@@ -39,6 +66,44 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     host_step.dependOn(&host.step);
     host_step.dependOn(&oracle_tests.step);
     host_tests.dependOn(host_step);
+    const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/exl3_projection_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "exl3_format", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/exl3_format.zig") }) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    }) }));
+    b.step("test-exl3-contract-host", "EXL3 independent full-shape oracle and reduced-precision plants")
+        .dependOn(&reference.step);
+    host_step.dependOn(&reference.step);
+    const chains = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/exl3_chain_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }},
+    }) }));
+    host_step.dependOn(&chains.step);
+    b.step("test-exl3-chain-host", "EXL3 chain float64 rounding and accumulator discrimination")
+        .dependOn(&chains.step);
+    const contract = @import("kernel_contract.zig").module(b, target, optimize);
+    const chain_contract = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_exl3_chain.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "contract", .module = contract } },
+    });
+    const chain_gpu = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/exl3_chain_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exl3_projection", .module = projection }, .{ .name = "contract", .module = contract }, .{ .name = "chain_contract", .module = chain_contract } },
+    }) }));
+    b.step("test-exl3-chain-contract", "Registered EXL3 chain gates and actual production-body fault controls")
+        .dependOn(&chain_gpu.step);
     const gpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/exl3_projection_gpu_test.zig"),
         .target = target,
@@ -50,4 +115,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     gpu_run.setCwd(b.path("."));
     b.step("test-exl3-gpu", "EXL3 Metal arithmetic, row windows, routes and validation regressions")
         .dependOn(&gpu_run.step);
+    const moe = b.addTest(.{ .root_module = gpu.root_module, .filters = &.{ "the fused gate+up pass", "the shared expert's down" } });
+    b.step("test-exl3-moe", "EXL3 gate/up and eligible shared-down fusions against separate calls")
+        .dependOn(&b.addRunArtifact(moe).step);
 }
