@@ -310,8 +310,8 @@ fn admit(p: image.Prepared, max_tokens: u32) !void {
     if (T > max_tokens) return error.ImageTooLarge;
 }
 
-/// Prompt rows [at, at + n) take image rows [row, row + n) (rows of the encoded pictures, in prompt order).
-pub const Span = struct { at: u32, n: u32, row: u32 };
+const image_rows = core.image_rows;
+pub const Span = image_rows.Span;
 
 /// The placeholder runs of a prompt's ids: each maximal run of image_token is one picture's rows, in order.
 pub fn spans(a: std.mem.Allocator, ids: []const u32) ![]Span {
@@ -333,32 +333,19 @@ pub fn spans(a: std.mem.Allocator, ids: []const u32) ![]Span {
 pub fn check(list: []const Span, pictures: []const image.Prepared) !void {
     var want: usize = 0;
     for (pictures) |p| want += p.tokens();
-    var have: usize = 0;
-    for (list) |sp| have += sp.n;
-    if (have != want) return error.ImagePlaceholders;
+    if (image_rows.total(list) != want) return error.ImagePlaceholders;
 }
 
-/// One copy into a pass: pass row `dst` on takes image rows from `src`, `n` of them.
-pub const Copy = struct { dst: u32, src: u32, n: u32 };
-
-/// The part of a placeholder run inside a pass over prompt positions [lo, hi), if any.
-pub fn cut(sp: Span, lo: usize, hi: usize) ?Copy {
-    const a = @max(lo, sp.at);
-    const b = @min(hi, sp.at + sp.n);
-    if (a >= b) return null;
-    return .{ .dst = @intCast(a - lo), .src = @intCast(sp.row + (a - sp.at)), .n = @intCast(b - a) };
-}
-
-/// A copy's bytes for bf16 rows `hidden` wide: the offset into the pass, the offset into the image rows, the length.
-pub fn copyBytes(c: Copy, hidden: u32) [3]u64 {
+/// A cut's bytes for a pass from `lo`, bf16 rows `hidden` wide: offsets into the pass and the image rows, the length.
+pub fn copyBytes(c: image_rows.Cut, lo: usize, hidden: u32) [3]u64 {
     const row: u64 = @as(u64, hidden) * 2;
-    return .{ c.dst * row, c.src * row, c.n * row };
+    return .{ (c.at - lo) * row, c.row * row, c.n * row };
 }
 
 /// After the normed embedding, a pass's rows at positions [lo, hi) (bf16 at `x`) take their image rows (at `rows`).
 pub fn splice(d: *const cuda.Driver, s: cuda.Stream, hidden: u32, rows: u64, list: []const Span, lo: usize, hi: usize, x: u64) !void {
     for (list) |sp| {
-        const b = copyBytes(cut(sp, lo, hi) orelse continue, hidden);
+        const b = copyBytes(image_rows.cut(sp, lo, hi) orelse continue, lo, hidden);
         try d.check(d.api.cuMemcpyDtoDAsync_v2(x + b[0], rows + b[1], b[2], s.handle), "cuMemcpyDtoDAsync");
     }
 }
@@ -388,8 +375,8 @@ test "chunked passes give every placeholder the row masked_scatter gives it" {
         var lo: usize = 0;
         while (lo < ids.len) : (lo += chunk) {
             const hi = @min(ids.len, lo + chunk);
-            for (list) |sp| if (cut(sp, lo, hi)) |c| for (0..c.n) |i| {
-                got[lo + c.dst + i] = @intCast(c.src + i);
+            for (list) |sp| if (image_rows.cut(sp, lo, hi)) |c| for (0..c.n) |i| {
+                got[c.at + i] = @intCast(c.row + i);
             };
         }
         var next: i32 = 0; // masked_scatter: the k-th placeholder in the prompt takes feature row k
@@ -413,7 +400,7 @@ test "the splice copies rows as wide as the config's decoder, Small's 4608 and M
     const sp: Span = .{ .at = 3, .n = 5, .row = 7 };
     for ([_]u32{ 4608, 2304 }) |h| {
         const v = testVision(h);
-        const b = copyBytes(cut(sp, 4, 6).?, v.text_hidden);
+        const b = copyBytes(image_rows.cut(sp, 4, 6).?, 4, v.text_hidden);
         try std.testing.expectEqual([3]u64{ 0, 8 * @as(u64, h) * 2, 2 * @as(u64, h) * 2 }, b);
     }
     // the projector's scratch row is projection_hidden_dim wide (4096 in both releases)
