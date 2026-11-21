@@ -4,6 +4,9 @@ const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const table = @import("table.zig");
 const projection = @import("projection.zig");
+const host = @import("host.zig");
+const modelopt = @import("modelopt.zig");
+const qcfg = @import("config.zig");
 const convert = @import("core").quant.convert;
 
 const io = std.testing.io;
@@ -26,6 +29,8 @@ const File = struct {
     names: std.ArrayList([]const u8) = .empty,
     header: std.ArrayList(u8) = .empty,
     data: std.ArrayList(u8) = .empty,
+    /// Plant E4M3's 0x7f NaN as the first code of every FP8 tensor written after this is set.
+    fp8_nan: bool = false,
 
     fn init() File {
         return .{ .arena = .init(gpa) };
@@ -47,6 +52,12 @@ const File = struct {
             const v: f32 = 0.25 + @as(f32, @floatFromInt((seed +% @as(u16, @truncate(i * 7))) % 64)) / 256.0;
             if (std.mem.eql(u8, dtype, "F32")) {
                 try f.data.appendSlice(a, &std.mem.toBytes(v));
+            } else if (std.mem.eql(u8, dtype, "U8")) {
+                try f.data.append(a, @truncate(seed +% @as(u16, @truncate(i))));
+            } else if (std.mem.eql(u8, dtype, "F8_E4M3")) {
+                // codes below 0x7f are finite E4M3: only 0x7f and 0xff are nan, so the planted one is the only refusal
+                const code: u8 = @intCast((seed +% @as(u16, @truncate(i))) % 0x7f);
+                try f.data.append(a, if (f.fp8_nan and i == 0) 0x7f else code);
             } else try f.data.appendSlice(a, &std.mem.toBytes(convert.bf16(v)));
         }
         try f.header.print(a, "{s}\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ if (f.names.items.len > 0) "," else "", name, dtype });
@@ -67,8 +78,20 @@ const File = struct {
     }
 };
 
-/// What to plant: one text tensor as F32, the conv weight in another layout, or an index entry of a vision-only shard.
-const Plant = struct { f32_tensor: ?[]const u8 = null, conv: []const usize = &.{ 96, 1, 4 }, vision_shard: bool = false };
+/// What to plant: an F32 text tensor, a conv in another layout, a vision-only shard entry, or ModelOpt's format.
+const Plant = struct {
+    f32_tensor: ?[]const u8 = null,
+    conv: []const usize = &.{ 96, 1, 4 },
+    vision_shard: bool = false,
+    modelopt: bool = false,
+};
+
+/// `config` with ModelOpt's NVFP4 block after the opening brace: the same geometry, declaring its format.
+fn modeloptConfig(buf: []u8) ![]const u8 {
+    const block = "\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\", " ++
+        "\"config_groups\": {\"group_0\": {\"weights\": {\"num_bits\": 4, \"group_size\": 16, \"type\": \"float\"}}}}, ";
+    return std.fmt.bufPrint(buf, "{{{s}{s}", .{ block, config[1..] });
+}
 
 /// Two shards and their index, a vision tensor among them, and a joint head file the index does not name.
 fn write(dir: std.Io.Dir, plant: Plant) !void {
@@ -131,7 +154,9 @@ fn write(dir: std.Io.Dir, plant: Plant) !void {
     if (plant.vision_shard) try index.appendSlice(gpa, ",\"model.visual.blocks.0.attn.qkv.weight\": \"model-vision.safetensors\"");
     try index.appendSlice(gpa, "}}");
     try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
-    try dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    var conf: [1024]u8 = undefined;
+    const text = if (plant.modelopt) try modeloptConfig(&conf) else config;
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = text });
 }
 
 fn rootOf(tmp: std.testing.TmpDir) ![]u8 {
@@ -304,4 +329,104 @@ test "a shard the index names only for vision tensors is not opened, even when i
     var ck = try checkpoint.Checkpoint.open(gpa, io, root);
     ck.close();
     try std.testing.expect(try table.textBytes(gpa, io, root) > 0);
+}
+
+test "device bytes count a ModelOpt checkpoint's widened tables, not its stored bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var f = File.init();
+    defer f.deinit();
+    try f.put(M ++ "layers.0.mlp.up_proj.weight", "U8", &.{ 8, 16 });
+    try f.put(M ++ "layers.0.mlp.up_proj.weight_scale", "F8_E4M3", &.{ 8, 2 });
+    try f.put(M ++ "layers.0.mlp.up_proj.weight_scale_2", "F32", &.{1});
+    try f.put(M ++ "embed_tokens.weight", "BF16", &.{ 8, 4 });
+    try f.put("model.visual.patch_embed.proj.weight", "BF16", &.{ 8, 8 });
+    try f.write(tmp.dir, "model.safetensors");
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(gpa);
+    try index.appendSlice(gpa, "{\"metadata\": {}, \"weight_map\": {");
+    for (f.names.items, 0..) |n, i| try index.print(gpa, "{s}\"{s}\": \"model.safetensors\"", .{ if (i > 0) "," else "", n });
+    try index.appendSlice(gpa, "}}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    const root = try rootOf(tmp);
+    defer gpa.free(root);
+    // stored: codes 128, E4M3 table 16, global 4, text 64; the table doubles to 32 on the device, the tower stays out
+    try std.testing.expectEqual(@as(u64, 228), try table.deviceBytes(gpa, io, root));
+}
+
+test "a ModelOpt qwen3_5_moe checkpoint is refused by name before its shards are read" {
+    // the same MoE shape config.zig's own test parses, with ModelOpt's quantization block beside it
+    const text =
+        \\{"model_type": "qwen3_5_moe",
+        \\ "hidden_size": 2048, "num_hidden_layers": 4, "num_attention_heads": 16, "num_key_value_heads": 2,
+        \\ "linear_num_key_heads": 16, "linear_num_value_heads": 32, "linear_key_head_dim": 128,
+        \\ "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 1000, "rope_theta": 5000000,
+        \\ "partial_rotary_factor": 0.5, "num_experts": 256, "num_experts_per_tok": 8,
+        \\ "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512, "eos_token_id": 1,
+        \\ "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
+        \\  "config_groups": {"group_0": {"weights": {"num_bits": 4, "group_size": 16, "type": "float"}}}}}
+    ;
+    var cfg = try qcfg.Config.parse(gpa, text, null);
+    defer cfg.deinit();
+    try std.testing.expect(cfg.modelopt and cfg.spec.experts > 0);
+    // before this refusal the same checkpoint opened and its stack reached experts.routed, which is not read
+    const why = checkpoint.modelOptExpertsWhy(&cfg) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, why, "routed experts") != null);
+}
+
+test "a ModelOpt checkpoint's own bf16 layers read dense, not rocBLAS BF16" {
+    // the same BF16 tensor: an unquantized checkpoint keeps it on rocBLAS, a ModelOpt one on the dense kernels
+    const cases = [_]struct { modelopt: bool, want: std.meta.Tag(host.Projection) }{
+        .{ .modelopt = false, .want = .bf16 },
+        .{ .modelopt = true, .want = .dense },
+    };
+    for (cases) |c| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try write(tmp.dir, .{ .modelopt = c.modelopt });
+        const root = try rootOf(tmp);
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        // the flag is the config's: an NVFP4 block in config.json, read by open(), not set on the table by the test
+        try std.testing.expectEqual(c.modelopt, ck.main.modelopt);
+        var l1 = try ck.layer(1);
+        defer l1.deinit();
+        try std.testing.expectEqual(c.want, std.meta.activeTag(l1.body.full.mlp.dense.gate));
+    }
+}
+
+test "an FP8 weight holding an E4M3 nan code is refused; the same FP8 weight reads when it is finite" {
+    const nan = [_]struct { plant: bool, want_nan: bool }{
+        .{ .plant = false, .want_nan = false },
+        .{ .plant = true, .want_nan = true },
+    };
+    for (nan) |c| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var f = File.init();
+        defer f.deinit();
+        f.fp8_nan = c.plant;
+        try f.put("lm_head.weight", "F8_E4M3", &.{ 16, 64 });
+        try f.put("lm_head.weight_scale", "F32", &.{1});
+        try f.write(tmp.dir, "model.safetensors");
+        const root = try rootOf(tmp);
+        defer gpa.free(root);
+        var files: table.Files = undefined;
+        var t = try rawTable(root, &files);
+        defer files.deinit();
+        defer t.close(io);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var why: modelopt.Why = .{};
+        const got = modelopt.readWhy(arena.allocator(), &t, "lm_head", .fp8, &why);
+        if (c.want_nan) {
+            try std.testing.expectError(error.UnexpectedTensor, got);
+            // the refusal names the tensor, not a half-filled buffer
+            try std.testing.expectEqualStrings("lm_head.weight: an FP8 weight holds an E4M3 nan code", why.text());
+        } else {
+            try std.testing.expectEqual(std.meta.Tag(host.Projection).fp8, std.meta.activeTag(try got));
+            try std.testing.expectEqual(@as(usize, 0), why.len);
+        }
+    }
 }
