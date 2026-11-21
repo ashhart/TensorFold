@@ -38,6 +38,16 @@ pub fn capsBuilt(l: Layer) !void {
     if (l.width % 32 != 0 or l.dims % 32 != 0) return error.UnexpectedShape; // whole blocks of 32 both ways
 }
 
+/// Inkling's w13 interleaves rows (2j gate j, 2j + 1 up j): one expert's rows of `row_bytes` split into gate, up.
+pub fn splitGateUp(rows: []const u8, row_bytes: usize, gate: []u8, up: []u8) void {
+    const pairs = rows.len / (2 * row_bytes);
+    std.debug.assert(rows.len == 2 * pairs * row_bytes and gate.len == pairs * row_bytes and up.len == gate.len);
+    for (0..pairs) |j| {
+        @memcpy(gate[j * row_bytes ..][0..row_bytes], rows[2 * j * row_bytes ..][0..row_bytes]);
+        @memcpy(up[j * row_bytes ..][0..row_bytes], rows[(2 * j + 1) * row_bytes ..][0..row_bytes]);
+    }
+}
+
 /// An expert call's arguments as the soft-capped and MXFP8 entries take them; `scale` null for MXFP8 (in its blocks).
 pub fn argsOf(in: Rows, gate: bool, w: u64, scale: ?u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, caps: [2]f32, skip: i32) launch_.Args {
     var a: launch_.Args = .{};
@@ -174,6 +184,30 @@ test "the NVFP4 factor rounds amax and the denominator to bf16 before it divides
     const want = @as(f32, 0.33203125) / 2688.0; // bf16(amax) is 0.33203125; 2688 = 6 x 448 is a bf16
     try std.testing.expectEqual(want, nvfp4Factor(amax, 2688));
     try std.testing.expect(nvfp4Factor(amax, 2688) != amax / 2688);
+}
+
+test "w13's row 1 is up row 0 and row 2 gate row 1: a code planted in row 1 lands in the up part, never the gate" {
+    const n = 32; // gate and up rows each
+    const k = 32;
+    var rows: [2 * n * k]u8 = @splat(0x00);
+    var sc: [2 * n]u8 = @splat(127);
+    rows[1 * k + 5] = 0x38; // stored row 1 (up row 0), input 5
+    rows[2 * k + 7] = 0x40; // stored row 2 (gate row 1), input 7
+    var g: [n * k]u8 = undefined;
+    var u: [n * k]u8 = undefined;
+    var gs: [n]u8 = undefined;
+    var us: [n]u8 = undefined;
+    splitGateUp(&rows, k, &g, &u);
+    splitGateUp(&sc, 1, &gs, &us);
+    try std.testing.expectEqual(@as(u8, 0x38), u[5]);
+    try std.testing.expectEqual(@as(u8, 0x40), g[k + 7]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, &u, &.{0x38}) + std.mem.count(u8, &u, &.{0x40}));
+    var out: [2 * Mxfp8Experts.words]u32 = undefined;
+    Mxfp8Experts.packGateUp(&out, .{ &g, &gs }, .{ &u, &us }, n, k);
+    // row 0, input 5 = lane (gq 0, t 1), half 0, tile j 0, byte 1 of the word; part 1 (up) holds it, part 0 not
+    const at = ((0 * 4 + 1) * 2 + 0) * 4 + 0;
+    try std.testing.expectEqual(@as(u32, 0x38), (out[Mxfp8Experts.words + at] >> 8) & 0xFF);
+    try std.testing.expectEqual(@as(u32, 0), (out[at] >> 8) & 0xFF);
 }
 
 test "a packed MXFP8 block holds fp8g's code words and each row's scale at byte 4 gq + j" {
