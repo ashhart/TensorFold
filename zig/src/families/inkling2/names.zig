@@ -1,6 +1,6 @@
 //! Inkling 2 weight maps: each tensor the config implies, with dtype and shape, checked against headers.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const config = @import("config.zig");
 const plan = @import("plan.zig");
 

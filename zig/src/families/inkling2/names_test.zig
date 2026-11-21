@@ -3,7 +3,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const config_test = @import("config_test.zig");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const names = @import("names.zig");
 const plan = @import("plan.zig");
 
