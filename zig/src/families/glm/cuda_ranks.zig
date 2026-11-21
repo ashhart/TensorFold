@@ -226,7 +226,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 22, // this struct's version (21, roce_wide's, plus draft_split)
+    layout: u32 = 23, // this struct's version (22, main 5df57c025's draft_split, plus TF_GLM_KV_SPLIT)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
