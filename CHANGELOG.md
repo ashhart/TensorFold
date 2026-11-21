@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/imprint/forget` forgets one conversation's kept prompt states, in RAM and on disk, given that conversation as a chat completion body; states other conversations build on stay, requests already running end first, a conversation never kept answers `found: false`, and it takes a full or `[admin]` key, or without keys a direct loopback caller with no proxy headers (#3226, fixes #3197).
+
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
 
 - Lane host: concurrent identical prompts join a leader that is filling a prompt state it will keep, so they reuse its whole fill and return the same tokens they would alone; a prompt whose state would not be kept, a zero budget, the leader's cancellation or a timeout still runs on its own (#3693, refs #3397, #3487). Thanks to @bikepresentbal.
