@@ -179,7 +179,7 @@ const sources = .{
     .{ "src/families/qwen3_5/cuda_modelopt.zig", 1 },
     .{ "src/families/qwen3_5/cuda_quant_admission_test.zig", 1 },
     .{ "src/families/qwen3_5/pocket_shards_test.zig", 1 },
-    .{ "src/families/qwen27/config_test.zig", 2 }, // with #1125's Ornith-1.5-122B (qwen3_5_moe)
+    .{ "src/families/qwen27/config_test.zig", 3 }, // with #1125's Ornith-1.5-122B and Qwen3.6-35B-A3B (qwen3_5_moe)
     .{ "src/families/qwen27/weights_test.zig", 1 },
     .{ "qwen35_formats_host.zig", 1 },
 };
@@ -248,6 +248,31 @@ fn config(a: std.mem.Allocator, file: []const u8, text: []const u8) !?Real {
     return .{ .file = file, .json = try a.dupe(u8, text), .tower = tower, .layers = @intCast(n.integer) };
 }
 
+/// Qwen3.6-35B-A3B's config (qwen27/config_test.zig's `a3b_json`): 40 layers over a 2,048 hidden width.
+pub fn a3b(a: std.mem.Allocator) !Real {
+    for (try reals(a)) |r| if (r.layers == 40 and r.tower.get("hidden_size").?.integer == 2048) return r;
+    return error.NoA3bConfig;
+}
+
+test "qwen35 layers: Qwen3.6-35B-A3B, every fourth of 40 through Metal's 27B and HIP, refused by the others" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const r = try a3b(arena.allocator());
+    const want = std.EnumArray(Backend, Outcome).init(.{
+        .metal27 = .every(4, 40),
+        .hip = .every(4, 40),
+        .metal2b = .{ .refused = error.UnsupportedQwenConfig },
+        .cuda = .{ .refused = error.UnsupportedActivation },
+        .xpu = .{ .refused = error.UnsupportedQwenShape },
+    });
+    for (std.enums.values(Backend)) |b| {
+        const now = entry(b, r.json);
+        errdefer std.debug.print("{s}: {any}\n", .{ @tagName(b), now });
+        const w = want.get(b);
+        if (w == .pattern) try t.expect(Outcome.same(w, now)) else try t.expect(now == .refused and now.refused == w.refused);
+    }
+}
+
 test "qwen35 layers: real configs, each entry point admits the pattern its old rule read, by the shared reader" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
@@ -267,7 +292,7 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
             relaxed += @intFromBool(now == .pattern and was == .refused);
         }
     }
-    try t.expectEqual(@as(usize, 21), admitted); // (config, backend) pairs, with #2046's and LightOnOCR-3's HIP BF16 and #1125's Ornith
+    try t.expectEqual(@as(usize, 23), admitted); // (config, backend) pairs, with #2046's and LightOnOCR-3's HIP BF16, #1125's Ornith and the 35B-A3B
     try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
 }
 

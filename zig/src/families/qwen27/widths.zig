@@ -278,6 +278,25 @@ fn testAdmitRouted(quantization: []const u8, why: *Why) !void {
     return admit(&w, c, .{ .tensor_units = true, .row_bits = &all_rows }, why);
 }
 
+/// Qwen3.6-35B-A3B's shapes (no intermediate_size) at `quantization`, on a chip with or without tensor units.
+fn testAdmitA3b(quantization: []const u8, units: bool, why: *Why) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5_moe","text_config":{{"model_type":"qwen3_5_moe_text","hidden_size":2048,
+        \\"moe_intermediate_size":512,"shared_expert_intermediate_size":512,"num_experts":256,"num_experts_per_tok":8,
+        \\"num_hidden_layers":40,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}},"quantization":{s}}}
+    , .{quantization});
+    defer a.free(text);
+    const c = try cfg.parse(a, text, null);
+    var f = try affine.Formats.init(a, text);
+    defer f.deinit();
+    var w = try Widths.resolve(a, &f, c);
+    defer w.deinit();
+    return admit(&w, c, .{ .tensor_units = units, .row_bits = &all_rows }, why);
+}
+
 /// TensorFold/Qwen3.8-27B-oQ4 override shapes: 4-bit g64, 5-bit GDN, MLP and attention members, one 6-bit v.
 const oq4 =
     \\{"group_size":64,"bits":4,"mode":"affine",
@@ -417,4 +436,24 @@ test "a shared expert whose width differs from the experts' is refused at admiss
     try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmitRouted(mixed, &why));
     try std.testing.expectEqual(error.SharedExpertWidth, why.reason);
     try std.testing.expectEqualStrings("mlp.shared_expert.down_proj", why.module);
+}
+
+test "Qwen3.6-35B-A3B's published widths are admitted with and without tensor units" {
+    var why: Why = .{};
+    // mlx-community/Qwen3.6-35B-A3B-4bit: 4-bit g64, every layer's router and shared gate at 8 bits
+    const published =
+        \\{"group_size":64,"bits":4,"mode":"affine",
+        \\"language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.0.mlp.shared_expert_gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.39.mlp.gate":{"group_size":64,"bits":8},
+        \\"language_model.model.layers.39.mlp.shared_expert_gate":{"group_size":64,"bits":8}}
+    ;
+    for ([_]bool{ true, false }) |units| try testAdmitA3b(published, units, &why);
+    // a router at 8 bits with its shared gate left at 4 cannot share one matrix
+    const split_gate =
+        \\{"group_size":64,"bits":4,"mode":"affine",
+        \\"language_model.model.layers.0.mlp.gate":{"group_size":64,"bits":8}}
+    ;
+    try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmitA3b(split_gate, false, &why));
+    try std.testing.expectEqual(error.SharedGateWidth, why.reason);
 }

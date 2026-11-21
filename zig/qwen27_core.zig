@@ -11,6 +11,8 @@ pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 
 pub const segments = @import("src/core/segments.zig");
 pub const prompt_tail = @import("src/core/prompt_tail.zig");
+/// Staged references: the qwen3_5 forward's stages and their on-disk layout (tools/zig/qwen36_stage_ref.py).
+pub const qwen35_stages = @import("src/families/qwen3_5/stages.zig");
 
 pub const checkpoint_host = checkpoint;
 pub const lane_projection = @import("core_lane");
