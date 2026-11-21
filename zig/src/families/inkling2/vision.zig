@@ -25,7 +25,6 @@ pub const Kernels = struct {
     mod: cuda.Module,
     embed: cuda.Function,
     rope: cuda.Function,
-    scale_add: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -35,7 +34,6 @@ pub const Kernels = struct {
             .mod = mod,
             .embed = try mod.function("tf_ink2v_embed"),
             .rope = try mod.function("tf_ink2v_rope"),
-            .scale_add = try mod.function("tf_ink2v_scale_add"),
         };
         return k;
     }
@@ -286,20 +284,11 @@ pub const Tower = struct {
         try go(t.k.rope, s, .{ .x = @intCast(R) }, 256, 0, &a);
         try t.fa.full(s, t.qkv, t.att, R, heads, head_dim, 1.0 / @sqrt(@as(f32, head_dim)));
         try vit.linear(&t.g, &t.vk, s, t.acc, t.att, l.out_w, l.out_b, t.y, R, width, width);
-        try t.scaleAdd(s, l.ls1, R);
+        try t.vk.pointwiseGamma(s, t.y, t.x, t.x, R * width, .none, l.ls1, width); // torch's `x + gamma * h`
         try t.vk.layerNorm(s, t.x, l.ln2_w, l.ln2_b, t.xn, R, width, eps);
         try vit.linearAct(&t.g, &t.vk, s, t.acc, t.xn, l.fc1_w, l.fc1_b, t.mid, R, mlp_inter, width, null, t.mid, .gelu);
         try vit.linear(&t.g, &t.vk, s, t.acc, t.mid, l.fc2_w, l.fc2_b, t.y, R, width, mlp_inter);
-        try t.scaleAdd(s, l.ls2, R);
-    }
-
-    /// x = bf16(x + bf16(gamma y)), the layer scale of torch's `residual + lambda * h`.
-    fn scaleAdd(t: *Tower, s: cuda.Stream, gamma: u64, R: usize) !void {
-        const n = R * width;
-        var a: cuda.Args = .{};
-        for ([_]u64{ t.x, t.y, gamma }) |v| a.add(v);
-        a.add(@as(i64, @intCast(n)));
-        try go(t.k.scale_add, s, .{ .x = @intCast((n + 255) / 256) }, 256, 0, &a);
+        try t.vk.pointwiseGamma(s, t.y, t.x, t.x, R * width, .none, l.ls2, width);
     }
 };
 
