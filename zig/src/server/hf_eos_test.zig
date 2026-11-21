@@ -44,3 +44,27 @@ test "EOS policy: HfText validates present model EOS and the model head bound as
         try std.testing.expect(std.mem.indexOf(u8, problem, "EOS") != null);
     }
 }
+
+test "HfText opens a tokenizer holding Inkling 2's markers as the .inkling format and any other as .template" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const markers = @import("inkling_reply.zig").markers;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const plain = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"H\":0},\"merges\":[]},\"added_tokens\":[]}";
+    const inkling = "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"H\":0},\"merges\":[]},\"added_tokens\":[" ++
+        "{\"id\":1,\"content\":\"" ++ markers.model ++ "\",\"special\":true}," ++
+        "{\"id\":2,\"content\":\"" ++ markers.end_sampling ++ "\",\"special\":true}]}";
+    for ([_]struct { json: []const u8, want: @import("model_text.zig").Text.Format }{
+        .{ .json = plain, .want = .template },
+        .{ .json = inkling, .want = .inkling },
+    }) |c| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data = c.json });
+        var problem: []const u8 = "";
+        const t = try HfText.load(a, io, dir, null, a, &problem);
+        defer t.deinit();
+        try std.testing.expectEqual(c.want, t.text().vtable.format);
+    }
+}
