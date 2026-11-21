@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1: its 118 runtime settings (the `TF_DSV41_*` names and `TF_TP_KERNEL_IMAGE`) are declared in the shared environment validator, so a malformed value is refused by name at startup before any resource opens; valid values and existing modes are unchanged, and a blank value reads as unset like every other validated setting (#3557).
+
 - TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
 
 - Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
