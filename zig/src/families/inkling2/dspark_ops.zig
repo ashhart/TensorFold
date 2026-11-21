@@ -85,7 +85,7 @@ pub const Kernels = struct {
             .ctx = try mod.function("tf_ink2_dsp_ctx"),
             .rnn = try mod.function("tf_ink2_dsp_rnn"),
             .vocab = try mod.function("tf_ink2_dsp_vocab"),
-            .pick = try mod.function("tf_ink2_dsp_pick"),
+            .pick = try mod.function("tf_ink2_dsp_pick_merge"),
         };
     }
 
@@ -207,13 +207,15 @@ pub fn vocab(k: *const Kernels, s: cuda.Stream, base: u64, latent: u64, fold: u6
     try go(k.vocab, s, .{ .x = @intCast((nv + 7) / 8) }, 256, &a);
 }
 
+/// Every rank's (value, id), 16 bytes a rank, into walk[j + 1]: one warp, as MiniMax M3 launches the shared merge.
 pub fn pick(k: *const Kernels, s: cuda.Stream, picks: u64, world: usize, walk: u64, j: usize) !void {
     var a: cuda.Args = .{};
     a.add(picks);
     a.add(int(world));
+    a.add(int(16));
     a.add(walk);
     a.add(int(j));
-    try go(k.pick, s, .{ .x = 1 }, 1, &a);
+    try go(k.pick, s, .{ .x = 1 }, 32, &a);
 }
 
 test "dspark ops: argument structs keep dspark.cu's layouts; chunks by absolute position" {

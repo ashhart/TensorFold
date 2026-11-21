@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cuda_bf16.h>
 
+#include "common/dspark_pick.cuh"
 #include "common/reduce.cuh"
 
 namespace ink2d {
@@ -297,17 +298,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_vocab(const uint16
     out[v] = v < valid ? bfr(tanhf(x / cap) * cap) : -INFINITY;
 }
 
-// The ranks' (value, id) picks, 16 bytes apart: the largest value, the lowest id among equals, into walk[j + 1].
-extern "C" __global__ void tf_ink2_dsp_pick(const float* __restrict__ picks, int world, int* __restrict__ walk, int j) {
-    float bv = -INFINITY;
-    int bi = 0x7fffffff;
-    for (int q = 0; q < world; ++q) {
-        const float v = picks[q * 4];
-        const int i = reinterpret_cast<const int*>(picks)[q * 4 + 1];
-        if (v > bv || (v == bv && i < bi)) {
-            bv = v;
-            bi = i;
-        }
-    }
-    walk[j + 1] = bi;
+// The ranks' (value, id) picks to walk[j + 1]: MiniMax M3's merge, with 0x7fffffff when no value beats -Inf.
+extern "C" __global__ void tf_ink2_dsp_pick_merge(const unsigned char* __restrict__ picks, int world, int stride,
+                                                  int* __restrict__ walk, int j) {
+    tf_common::dspark_pick<0x7fffffff>(picks, world, stride, walk, j);
 }

@@ -1,4 +1,4 @@
-//! The DSpark SiLU, core's tf_swiglu_rows_expf, and the ranks' pick, tf_ink2_dsp_pick, under the contract.
+//! The DSpark SiLU, core's tf_swiglu_rows_expf, and the ranks' pick, tf_ink2_dsp_pick_merge, under the contract.
 const std = @import("std");
 const core = @import("core");
 const dk = @import("inkling2").dspark_ops;
@@ -94,7 +94,7 @@ const pick_rule = "walk[j + 1]: the largest value over the ranks, the lowest id 
 
 /// Drafts (a launch each) x ranks (TP=2) x 1: every rank's (value, id) 16 bytes apart.
 pub fn pickSpec(alone: bool) c.Spec {
-    const name = if (alone) "inkling2 dspark control: the pick reads rank 0's entry alone" else "inkling2 dspark tf_ink2_dsp_pick (the ranks' best into the walk)";
+    const name = if (alone) "inkling2 dspark control: the pick reads rank 0's entry alone" else "inkling2 dspark tf_ink2_dsp_pick_merge (the ranks' best into the walk)";
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = pick_rule }, .served = &.{ .{ .rows = 7, .n = 2, .k = 1 }, .{ .rows = 1, .n = 2, .k = 1 } } };
 }
 
