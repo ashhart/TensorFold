@@ -40,9 +40,7 @@ pub const Set = struct {
         set.vt = try cuda.vit.Kernels.load(gpu.d);
         errdefer set.vt.unload();
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
-        for (&set.groups, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .wrong_run = i == 1 };
-        const forms = [4]@import("contract_inkling2_experts_ref.zig").Form{ .rows, .rows, .wide, .wide };
-        for (&set.projections, forms, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = &set.ek, .form = f, .fault = if (i == 1) .short else if (i == 3) .swapped else .none };
+        for (&set.projections, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .fault = if (i == 1) .swapped else .none };
         const prompt = [13]bool{ false, true, false, true, false, true, false, false, false, true, false, false, false };
         for (&set.moe, 0..) |*x, i| x.* = .{
             .rig = rig,
@@ -65,7 +63,6 @@ pub const Set = struct {
         for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vt, .late = i == 1 } };
         for (&set.attns, 0..) |*x, i| x.* = .{ .rig = rig, .att = &set.fa, .wide = i == 1 };
         set.live = true;
-        for (&set.groups) |*x| try list.append(a, x.kernel());
         for (&set.projections) |*x| try list.append(a, x.kernel());
         for (&set.moe) |*x| try list.append(a, x.kernel());
         for (&set.embeds) |*x| try list.append(a, x.kernel());
