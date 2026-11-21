@@ -119,7 +119,7 @@ pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: R
 
 /// One row because M2's AR ABI is [sources,H] -> [queries,H]. Batch composition never mixes rows.
 fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: ck.Tensor, sources: usize, rows: usize) void {
-    for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(queries), row(s.mlp_ar, i, state.hidden * 4), @intCast(sources), 1);
+    glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(queries), at(s.mlp_ar, 0), @intCast(sources), 1, @intCast(rows));
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -140,19 +140,16 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         widen(m, e, at(s.p, 0), at(s.ar, 0), rows * state.hidden);
     } else {
         const q = m.weights.attn_queries[v.layer - 1];
-        for (0..lp.attn_queries) |role| {
-            const query = at(q.buffer, q.offset + role * state.hidden * 4);
-            for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), query, arRow(s, role, rows, i, false), lp.attn_sources, 1);
-        }
+        glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(q), at(s.ar, 0), lp.attn_sources, @intCast(lp.attn_queries), @intCast(rows));
     }
     if (v.hasMessages()) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        for (0..3) |role| for (0..rows) |i| {
+        for (0..3) |role| {
             const c = controllers[role];
             const source_role = if (lp.kind == .local) 0 else role;
-            loop.gates(&m.loop, e, l(arRow(s, source_role, rows, i, false)), l(messageRow(s, core, role, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(arRow(s, role, rows, i, true)), 1);
-        };
+            loop.gatesStrided(&m.loop, e, l(arRow(s, source_role, rows, 0, false)), l(messageRow(s, core, role, 0)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(arRow(s, role, rows, 0, true)), @intCast(rows), state.message_entries * state.hidden);
+        }
     }
     const gated = v.hasMessages();
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
@@ -270,7 +267,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        for (0..rows) |i| loop.gates(&m.loop, e, l(row(s.mlp_ar, i, state.hidden * 4)), l(messageRow(s, core, 3, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(row(s.mlp_gated, i, state.hidden * 4)), 1);
+        loop.gatesStrided(&m.loop, e, l(at(s.mlp_ar, 0)), l(messageRow(s, core, 3, 0)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(at(s.mlp_gated, 0)), @intCast(rows), state.message_entries * state.hidden);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
@@ -325,9 +322,11 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);
-    for (0..final.work_rows) |j| {
-        const i = if (final.work_rows == rows) j else rows - 1;
-        glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(m.weights.output_query), row(s.mlp_ar, j, state.hidden * 4), m.weight_plan.final_sources, 1);
+    if (final.work_rows == rows) {
+        glue.arRows(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, @intCast(rows));
+    } else {
+        const i = rows - 1;
+        glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1);
     }
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
