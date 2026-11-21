@@ -311,3 +311,6 @@ pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
 pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
+
+/// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
+pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");
