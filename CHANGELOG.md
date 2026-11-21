@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/audio/speech` accepts `speed` absent, `null` or `1` and sends the same audio as before, where it used to refuse any `speed`; with the new `--speech-speed` flag (off by default), a `speed` from 0.25 to 4 stretches the finished take to its length divided by `speed` with its pitch kept, and a streamed reply takes speed 1 only (#3137).
+
 - Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
 
 - GLM on Metal: vectorized prompt, KDA and indexer kernels on Macs without tensor units cut cold prompt time 5.17% to 5.68% (2K to 64K tokens) with 0/64 token differences (#3921, refs #3152). Thanks to @gilby.
