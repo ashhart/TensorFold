@@ -104,6 +104,7 @@ const weights: []const u8 = &weights_storage;
 const Hub = struct {
     cdn: ?[]const u8 = null,
     stalls: std.atomic.Value(u32) = .init(0),
+    failures: std.atomic.Value(u32) = .init(0),
     resumed_at: std.atomic.Value(u64) = .init(0),
     requests: std.atomic.Value(u32) = .init(0),
 
@@ -150,6 +151,8 @@ const Hub = struct {
             status, weights.len - from, from, weights.len - 1, weights.len,
         }) catch return;
         send(io, conn, head_out);
+        const failure = h.failures.load(.monotonic) > 0 and h.failures.fetchSub(1, .monotonic) > 0;
+        if (failure) return send(io, conn, weights[from..@min(weights.len - 1, from + 500)]);
         const stall = h.stalls.load(.monotonic) > 0 and h.stalls.fetchSub(1, .monotonic) > 0;
         if (!stall) return send(io, conn, weights[from..]);
         send(io, conn, weights[from..@min(weights.len - 1, from + 500)]);
@@ -353,6 +356,26 @@ test "pull proxy: a stalled body times out and the .incomplete file resumes with
     const r = try runPull(a, io, &.{
         .{ "HF_ENDPOINT", try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{hs.port()}) },
         .{ "TENSORFOLD_PULL_STALL_SECONDS", "1" },
+    });
+    defer Io.Dir.cwd().deleteTree(io, r.root) catch {};
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    try weightsLanded(a, io, r.root);
+    try std.testing.expectEqual(@as(u64, 500), hub.resumed_at.load(.monotonic));
+}
+test "pull download: a close-delimited read failure persists buffered bytes before range resume" {
+    var client: TestClient = undefined;
+    client.init();
+    defer client.deinit();
+    var arena = std.heap.ArenaAllocator.init(client.allocator());
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = client.io();
+    var hub: Hub = .{};
+    hub.failures.store(1, .monotonic);
+    const hs = try Server(Hub).start(&hub);
+    defer hs.finish();
+    const r = try runPull(a, io, &.{
+        .{ "HF_ENDPOINT", try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{hs.port()}) },
     });
     defer Io.Dir.cwd().deleteTree(io, r.root) catch {};
     try std.testing.expectEqual(@as(u8, 0), r.code);
