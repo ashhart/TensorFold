@@ -41,15 +41,5 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Erro
 pub fn stream(g: anytype, sink: chat.Sink) chat.Failure!void {
     const ids = reply_text.stripTrailing(g.collected.items, g.srv.eos);
     const r = try read(g, ids, false);
-    const thought = reply_text.pyStrip(r.reasoning);
-    const reason = g.streamed_reasoning.after(thought, false);
-    if (reason.len > 0) {
-        try g.streamed_reasoning.set(g.a, thought, reason);
-        try g.emit(sink, try reply_text.deltaOf(g.a, "reasoning_content", reason));
-    }
-    const delta = g.streamed.after(r.content, false);
-    if (delta.len > 0) {
-        try g.streamed.set(g.a, r.content, delta);
-        try g.emit(sink, .{ .string = delta });
-    }
+    try @import("chat_kimi.zig").emitDeltas(g, sink, r, false);
 }
