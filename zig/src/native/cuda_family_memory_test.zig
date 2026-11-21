@@ -3,6 +3,7 @@ const cuda = @import("cuda");
 const poolFor = @import("cuda_family_memory.zig").poolFor;
 const poolForCached = @import("cuda_family_memory.zig").poolForCached;
 const toGib = @import("cuda_family_memory.zig").toGib;
+const cacheBytes = @import("cuda_memory.zig").cacheBytes;
 const t = std.testing;
 const Fake = struct {
     var integrated: c_int = 1;
@@ -206,6 +207,8 @@ test "a just-read 60 GB checkpoint keeps 1.3.2's budget without a pre-load page 
     try t.expectEqual(host, p.free); // the checkpoint's cached bytes are added back, not dropped
     try t.expectApproxEqAbs(103.44, toGib(p.room(0)), 0.005); // 1.3.2's grant; the weights fit
     try t.expect(p.room(0) > weights);
+    const streams = 8 * (2 * g); // --parallel 8's rough stream reserve for this check
+    try t.expectApproxEqAbs(43.72, toGib(cacheBytes(null, p.room(0), streams)), 0.01); // half the room, 16 GiB floor
 }
 
 test "a discrete card keeps its own counts: /proc is not read and its free is taken as reported" {
