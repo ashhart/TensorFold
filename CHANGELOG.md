@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen dense and MoE hybrids on CUDA: opt-in `TF_QWEN_KV_HOST=1` keeps the KV pages in mapped pinned host memory, with the state and verify runs on the device, so a long window can fit on a card with little room left beside the weights; it needs `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1` and a discrete GPU, takes an optional `TF_QWEN_KV_HOST_GIB` cap, refuses spill, disk snapshots and `TF_QWEN_KV_SHARE` by name, and trades speed for room, since attention reads the pages over the device interconnect; unset, the plan and every path stay as they were (#2637). Thanks to @MaverickKB.
+
 
 
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
