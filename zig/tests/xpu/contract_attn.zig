@@ -111,7 +111,8 @@ pub const Attn = struct {
             self.q,              self.kc,   self.vc, b.pm, b.pl,        b.po, p0, @as(i32, @intCast(ns)),
             @as(f32, ref.scale), self.tree, nil,     nil,  @as(i32, 0),
         });
-        try self.rig.launch(if (old) self.old_merge else self.merge, .{ ref.q_heads, t, 1 }, .{
+        const merge_groups: u32 = if (old or self.plant == .drop_slice) ref.q_heads else ref.q_heads * 16;
+        try self.rig.launch(if (old) self.old_merge else self.merge, .{ merge_groups, t, 1 }, .{
             b.pm, b.pl, b.po, b.out, p0, @as(i32, @intCast(ns)), self.tree, nil,
         });
     }
