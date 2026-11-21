@@ -19,7 +19,6 @@ const vt = @import("vision_tower.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
 const pick = @import("pick.zig");
-
 const iface = host.iface;
 const lanes = host.lanes;
 const Config = host.config.Config;
@@ -27,7 +26,6 @@ const Allocator = std.mem.Allocator;
 const R = pipelines.max_rows;
 /// The shortest system part kept on its own for later conversations.
 const min_shared: usize = 256;
-
 /// What the target reads and borrows: the device, kernels, RoPE tables, layer scratch, weights and Engram rows.
 pub const Env = struct {
     device: mtl.Device,
@@ -41,9 +39,7 @@ pub const Env = struct {
     /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
     vision: ?VisionRefs = null,
 };
-
 pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
-
 pub const Options = struct {
     slots: u32,
     /// positions a slot holds (the context limit)
@@ -54,19 +50,15 @@ pub const Options = struct {
     /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
     resident: ?*mtl.resident.Resident = null,
 };
-
 /// The drafter's work behind a window: `queue` right after its command buffers, `drain` before the target writes.
 pub const Behind = struct {
     ctx: *anyopaque,
     queue: *const fn (ctx: *anyopaque, group: []const iface.Segment, logits: mtl.Buffer, off: usize, taps: mtl.Buffer) void,
     drain: *const fn (ctx: *anyopaque) anyerror!void,
 };
-
 /// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
 pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
-
 pub const Slot = @import("target_slot.zig").Slot;
-
 pub const Target = struct {
     a: Allocator,
     env: Env,
@@ -89,7 +81,6 @@ pub const Target = struct {
     pick_ids: []u64 = &.{},
     /// the drafter's work behind a window (null: none)
     behind: ?Behind = null,
-
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
@@ -129,7 +120,6 @@ pub const Target = struct {
         t.joinResident() catch {};
         return t;
     }
-
     /// Every buffer the target binds besides the weights joins their residency owner, so none waits to be mapped.
     fn joinResident(t: *Target) !void {
         const r = t.opt.resident orelse return;
@@ -142,7 +132,6 @@ pub const Target = struct {
         t.joined = r.tryAddNow(bufs.items);
         if (t.joined) std.log.info("dsv41 target: {d:.1} GiB of buffers joined the weights' residency set", .{mtl.ResidencySet.gibs(bytes)});
     }
-
     fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
         try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
         for (t.slots) |*s| {
@@ -154,7 +143,6 @@ pub const Target = struct {
             try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
         }
     }
-
     fn freeSlot(a: Allocator, s: *Slot) void {
         s.kv.deinit();
         s.tail.deinit();
@@ -165,7 +153,6 @@ pub const Target = struct {
         a.free(s.images);
         if (s.image_rows) |*r| r.deinit();
     }
-
     pub fn deinit(t: *Target) void {
         t.tree.deinit(t);
         if (t.joined) {
