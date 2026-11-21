@@ -7,6 +7,10 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     m.addImport("cuda", cuda);
     m.addImport("core", core);
     m.addImport("lanes", lanes);
+    // the host files' imports by name (config, plan, names), here through core
+    const parts = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/core_parts.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    parts.addImport("core", core);
+    for ([_][]const u8{ "safetensors", "visit_plan", "modelopt" }) |name| m.addImport(name, parts);
     return m;
 }
 
