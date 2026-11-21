@@ -20,9 +20,17 @@ const Text = struct {
     fn text(x: *Text) model_text.Text {
         return .{ .ctx = x, .vtable = &.{ .format = .inkling, .encode = preflight.TestText.encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
+    /// A character the ids end inside reads as U+FFFD, as a byte-level tokenizer's decode reads it.
     fn decode(_: *anyopaque, a: A, ids: []const u32) A.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
         for (ids) |id| try out.appendSlice(a, if (id < 256) &[_]u8{@intCast(id)} else specials[id - 256]);
+        var lead = out.items.len;
+        while (lead > 0 and lead + 4 > out.items.len and out.items[lead - 1] & 0xc0 == 0x80) lead -= 1;
+        const n = if (lead > 0) std.unicode.utf8ByteSequenceLength(out.items[lead - 1]) catch 1 else 0;
+        if (lead > 0 and lead - 1 + n > out.items.len) {
+            out.shrinkRetainingCapacity(lead - 1);
+            try out.appendSlice(a, "\u{fffd}");
+        }
         return out.toOwnedSlice(a);
     }
     fn tokenId(_: *anyopaque, piece: []const u8) ?u32 {
@@ -288,5 +296,17 @@ test "an Inkling 2 tool block that is not JSON is content, not a call, whole and
         try t.expectEqual(@as(usize, 0), got.ids.items.len);
         try t.expectEqualStrings(broken, got.content.items);
         try t.expectEqualStrings("stop", got.finish);
+    }
+}
+
+test "an Inkling 2 stream fed a byte at a time keeps a character split across steps whole" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parts = [_][]const u8{ markers.thinking, "Caf\u{e9} \u{1f600}.", markers.end, markers.model, markers.text, "D\u{e9}j\u{e0} vu \u{1f600}", markers.end, markers.end_sampling };
+    for ([_]bool{ false, true }) |stream| {
+        const got = try postReply(a, &parts, try request(a, "x", stream), stream, true);
+        try t.expectEqualStrings("Caf\u{e9} \u{1f600}.", got.reasoning.items);
+        try t.expectEqualStrings("D\u{e9}j\u{e0} vu \u{1f600}", got.content.items);
     }
 }

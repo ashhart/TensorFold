@@ -296,8 +296,8 @@ test "inkling2 reply: a stream fed a byte at a time splits each prefix as the wh
     defer arena.deinit();
     const a = arena.allocator();
     const tools = try toolsT(a, offered_t);
-    const reply = "<|message_model|><|content_thinking|>a <|content_text|>b<|end_message|><|message_model|><|content_text|>" ++
-        "x <|content_te y<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"k\":1}}" ++
+    const reply = "<|message_model|><|content_thinking|>a \u{e9}<|content_text|>b<|end_message|><|message_model|><|content_text|>" ++
+        "x <|content_te y\u{1f600}<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"k\":1}}" ++
         "<|end_message|><|message_model|>h<|content_invoke_tool_json|>{\"name\":\"h\"}<|end_message|><|message_model|>f" ++
         "<|content_invoke_tool_json|>{\"name\":<|end_message|><|message_model|>g<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{\"q\":\"<|\"";
     var s: Stream = .{ .a = a, .offered = tools };
