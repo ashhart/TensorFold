@@ -7,6 +7,7 @@ const lanes = tf.lanes;
 const glm = tf.glm;
 const ge = glm.engine;
 const glm_disk = @import("glm_disk.zig");
+const glm_staging = @import("glm_staging.zig");
 const cache_fit = @import("cache_fit.zig");
 const Allocator = std.mem.Allocator;
 
@@ -157,7 +158,10 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         if (eng.ep != null) return error.LearnConversationsOnPair;
         if (h.cache) |*store| {
             const id = try glm_disk.identity(gpa, io, dir, eng, &h.slots);
-            const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots });
+            // the permit prices the deepest save's whole image, so a long conversation keeps deepening its disk anchor
+            const base = glm.snapshot.bytes(&eng.c, window, false); // instead of a StagingFull skip (#4114): floor 1 GiB, cap --learn-gib
+            const staged = try @import("sys").environment.read(?u64, "TF_GLM_STAGING_GIB", null);
+            const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots, .staging_bytes = glm_staging.stagingPermit(l.cap, base, staged) });
             r.prefill_rate = id.rate;
         }
     } else {
