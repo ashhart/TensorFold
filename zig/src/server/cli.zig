@@ -420,6 +420,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
 
+pub const parallel = @import("cli_parallel.zig").parallel;
+pub const parallelFixed = @import("cli_parallel.zig").parallelFixed;
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
