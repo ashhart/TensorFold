@@ -69,12 +69,10 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} },
     .{ .model_type = "ricursive", .formats = &.{ "bf16", "modelopt-nvfp4-mlp" } },
 };
-
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
 }
-
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
