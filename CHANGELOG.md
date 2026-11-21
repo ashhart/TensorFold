@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: `tf-h3-image-encoder` turns an edit's reference pictures into their clean rows with the VAE's encoder in fp32 on any Apple GPU, with a selftest of each kernel against a float64 host reference; the reference rules (sizes, crops, grids, encoder layers, clean and anchor rows) run on the host (#2778, on #2775).
+
 - MiniMax-H3-Image on Metal: `tf-h3-image` runs its transformer (MiniMax H3's, without the audio layers, on M5 tensor units) from a picture case through its six distilled steps, each with its own output head, beside the engine; the VAE's rules (config, tiles and blend, latent statistics, pixels) run on the host, and core/picture gains Pillow's Lanczos-3 resampling. Clip cases run as before (#2775).
 
 - GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
