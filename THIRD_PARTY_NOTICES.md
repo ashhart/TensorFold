@@ -583,4 +583,3 @@ arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2
 vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
 `Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
 in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
-
