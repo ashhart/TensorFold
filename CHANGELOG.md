@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tokenizer: a request gap with no normalized added spelling reuses the tokenizer's memo instead of re-encoding cold, so long multi-message requests on tokenizers with normalized added tokens (DeepSeek-style ones) cost less per call; gaps carrying a spelling keep the mask and every id is unchanged (#2844).
 
+
+
 - DeepSeek V4.1 on Metal selects DSpark drafts over the whole vocabulary on the GPU with an adaptive block size (#3405).
 
 - Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
