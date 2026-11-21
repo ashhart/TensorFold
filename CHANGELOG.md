@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - DeepSeek V4.1 on Metal keeps sampling scratch between picks and scans greedy logits in vectors with the same chosen IDs (#3288).
 
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
@@ -11,8 +13,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
 
 - CUDA: Drama 3 loads compact NVFP4 checkpoints as stored, stages held experts in slot order, and masks routing to their original ids (#4144). Thanks to @plotarmordev.
-
-
 
 - CUDA: opt-in TF_DSV41_FLOAT_LINEAR runs DeepSeek-V4.1 backbone projections kept as float matrices on the plain path; with it unset, such a pack is still refused (#4076). Thanks to @BadAd84.
 
@@ -27,7 +27,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
 
 - CI: the Zig format and TensorFold Web workflows cancel a pull request's older run when it gets a newer push, so superseded runs no longer queue; main pushes all run (#3850).
-- DeepSeek-V4.1 on Metal: the Metal family's host tests compile on macOS again (the vision rows take the prompt length as u32).
 
 - Server: chat and legacy completions requests take `deadline_s` (seconds, more than 0 and at most 1,000,000; any other value is refused before the engine): at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave and its usage; a reply the engine ended first, or a cancel that came first, keeps its own ending, and without the field nothing changes (#3438). Thanks to @jayleaton.
 
