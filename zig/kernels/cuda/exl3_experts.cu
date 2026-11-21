@@ -29,6 +29,10 @@ extern "C" __global__ void tf_exl3_grouped_2(tf_exl3::GroupedArgs a) {  // mul1,
     tf_exl3::grouped_body<2, 8, 4, GROUPED_LOAD>(a, blockIdx.x, blockIdx.y, blockIdx.z);
 }
 
+extern "C" __global__ void tf_exl3_grouped_wide_2(tf_exl3::GroupedArgs a) {  // mul1, 64 columns by 32 members
+    tf_exl3::grouped_body<2, 4, 4, GROUPED_LOAD, 2>(a, blockIdx.x, blockIdx.y, blockIdx.z);
+}
+
 namespace tf_exl3 {
 
 // Grouping in one block: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last.
