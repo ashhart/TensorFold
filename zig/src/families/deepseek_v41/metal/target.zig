@@ -84,6 +84,7 @@ pub const Target = struct {
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
+        _ = try prompt.check(c);
         const t = try a.create(Target);
         errdefer a.destroy(t);
         t.* = .{ .a = a, .env = env, .opt = opt, .b = undefined, .pr = undefined, .slots = &.{}, .cache = .{ .a = a, .cap = opt.cache_bytes } };
