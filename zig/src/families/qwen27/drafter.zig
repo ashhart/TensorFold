@@ -24,7 +24,7 @@ pub const Any = union(Kind) {
     dspine: *ds.Model,
 
     /// The drafter at `dir` for `target` (whose files `target_dir` holds: DSpine reads its LM head again).
-    pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, bits: u8, target_dir: []const u8) !Any {
+    pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, bits: u8, target_dir: ?[]const u8) !Any {
         return switch (try kindOf(a, io, dir)) {
             .dflash2 => .{ .dflash2 = try df.Model.load(a, io, target, dir, if (bits == 4) .prepared_q4_reference else .bf16_reference) },
             .dspine => .{ .dspine = try ds.Model.load(a, io, target, dir, if (bits == 4) .q4 else .bf16, target_dir) },
@@ -87,6 +87,12 @@ pub const Any = union(Kind) {
     pub fn propose(d: *Any, pending: u32, nodes: u32) !Tree {
         return switch (d.*) {
             inline else => |m| m.propose(pending, nodes),
+        };
+    }
+    pub fn proposeOptions(d: *Any, pending: u32, options: @import("dflash/selector.zig").Options) !Tree {
+        return switch (d.*) {
+            .dflash2 => |m| m.proposeOptions(pending, options),
+            .dspine => |m| m.propose(pending, options.nodes),
         };
     }
     /// The committed taps as the ring a lane's state copies.
