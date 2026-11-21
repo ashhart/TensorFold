@@ -1,6 +1,6 @@
 # What's new in TensorFold
 
-Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details.
+Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details. For Desktop installers and changes awaiting a Desktop build, see the [Desktop changelog](app/CHANGELOG.md).
 
 ## Unreleased
 
