@@ -40,6 +40,8 @@ For boards with ARM dot-product support (check `grep -o asimddp /proc/cpuinfo` o
 zig build tf-ling-cpu-decode -Dtarget=aarch64-linux-gnu -Dcpu=baseline+dotprod
 ```
 
+If `/proc/cpuinfo` also lists `sha2`, `-Dcpu=baseline+dotprod+sha2` makes the cache check below faster.
+
 Either way the tool is `zig-out/bin/ling-cpu-decode`, built ReleaseSafe whatever `-Doptimize` says; copy it to the
 board from a Mac. `-Dtarget=aarch64-linux-musl` gives a static binary.
 
@@ -57,7 +59,13 @@ Fast mode (requires a dot-product build; uses integer SDOT, weights repacked eig
 ling-cpu-decode --fast ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
-On a `.tf_repack8.v5` cache hit, `--fast` verifies the cache header, entry table bounds, and the GGUF's size, inode, mtime, and ctime against the header without re-hashing the GGUF or re-scanning raw quantized scales. The cache is built from validated blocks and stores the GGUF's SHA-256 in its header; any change to the file's stat identity (or removing the cache file) triggers a rebuild.
+The first `--fast` run builds the cache from validated blocks; on the board below that took 137 s before the first
+token. On every later run `--fast` checks the cache before using it: the header and the GGUF's size, inode, mtime and
+ctime, the bounds of every table entry, the SHA-256 of the whole GGUF against the one stored at build time, and the
+SHA-256 of the cache's table and payload. Any mismatch rebuilds the cache. These checks read the GGUF and the cache in
+full, about 9 GB, so a cache hit on the board below spends about 50 s opening the model (a build with the ARM SHA2
+extension, `+sha2`, if `/proc/cpuinfo` lists `sha2`; more without it). Exact mode has no cache and opens in under a
+second.
 
 The arguments are the GGUF, the prompt's token IDs separated by commas (`PROMPT_IDS=ID,ID,...`), the number of tokens
 to generate, and the thread count (1 to 8, default 1). The output has this shape:
@@ -88,9 +96,29 @@ llama.cpp's `llama-tokenize` on the same file.
   `taskset -c LIST` with `LIST` set to the fast cores (on the Qualcomm board measured below, `taskset -c 0,3,5,7` with
   4 threads); the cores with the highest `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` are the fast ones.
 
+- **More threads than cores.** Because workers spin, a thread count above the cores they run on is much slower, not a
+  little: in exact mode, 8 threads held to 4 cores decoded at 0.7 tokens a second, against 5.3 with 4 threads.
+
 ## Measured
 
-FIGURES_AT_FINAL_HEAD
+On an eight-core Qualcomm board (four fast cores, dot product, no i8mm), `taskset -c 0,3,5,7`, with the 37-token prompt
+whose IDs are in the PR description and 32 generated tokens. Each figure is from a run timed by the tool on an otherwise
+idle board; model opening is not included.
+
+Exact mode, one run each; every run below generated the same 32 IDs:
+
+| Build | Threads | Decode tokens/s | Prompt s |
+| --- | --- | --- | --- |
+| baseline | 1 | 1.68 | 35.0 |
+| baseline | 4 | 5.26 | 5.5 |
+| baseline | 8 | 0.69 | 14.7 |
+| `+dotprod` | 1 | 1.96 | 11.5 |
+| `+dotprod` | 4 | 5.30 | 5.2 |
+| `+dotprod` | 8 | 0.71 | 14.6 |
+
+Fast mode, `+dotprod+sha2` build, four threads, in the shape of `llama-bench -p 512 -n 128`: 38.4 tokens a second reading
+the 512-token prompt and 21.2 generating 128 tokens (means of three runs, cache warm, opening excluded). These are not
+exact-mode figures, and fast mode's token IDs can differ from exact mode's.
 
 ## Checks
 
