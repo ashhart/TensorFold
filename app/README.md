@@ -4,8 +4,9 @@ An agentic AI coding app for the Mac, with the TensorFold engine built in. It al
 any OpenAI‑compatible LLM endpoint, local or cloud. The look comes from the TensorFold brand:
 graphite and navy surfaces, an electric-blue primary and the fold gradient.
 
-The current desktop release is [beta 9](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.9).
-It launches the bundled native Zig engine directly.
+Download [TensorFold for Mac 1.0.0](https://github.com/ashhart/TensorFold/releases/tag/app-v1.0.0),
+the current Desktop release. It launches the bundled native Zig engine directly.
+See the [Desktop changelog](CHANGELOG.md) for shipped and unreleased app changes.
 
 It reads, edits, and runs your code through a tool‑use loop, with streaming responses,
 live diffs, and per‑action approval.
