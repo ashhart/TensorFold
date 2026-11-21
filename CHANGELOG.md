@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
 
-- Server: `TENSORFOLD_PARALLEL` sets the default lanes when `serve` has no `--parallel`: a whole number 1 to 4096 or `auto`; the flag wins when both are given, a blank value keeps the default, and any other value is refused by name at startup (#3685, for #3684). Thanks to @bikepresentball.
-
-- Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
-
-
-
 - Flash Next on HIP: the first stream's caches are made at load, so the first prompt no longer waits on allocating them; each layer's weights are read past the page cache by threads, the next layer's read under way, and the n-gram gather spreads over all of the pool's parts instead of at most 32 (#3644).
 
 - App on Linux: with `TENSORFOLD_LINUX_SANDBOX=1` and bubblewrap installed, agent commands run in a bubblewrap sandbox that keeps every repository's `config`, `config.worktree`, `hooks` and `info` read-only, nested repositories included, and freezes worktree `.git` pointers; a workspace with no repository, a worktree whose gitdir or shared directory lies outside the workspace, a path the sandbox cannot inspect, or a walk past 32 levels or 50,000 directories is refused with code 126 before anything runs. Without the setting, Linux commands stay refused as before (#3364, fixes #1693). Thanks to @eXsoR65.
