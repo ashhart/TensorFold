@@ -42,14 +42,16 @@ pub const Layer = struct {
     shared_input: bool = false, // the loader verified identical gate/up input scales across every expert
     gu_stride: usize = 0, // gate/up trellis row stride in tiles (0: contiguous per projection)
     limit: f32 = 0, // the SwiGLU clamp (0: none)
-    act_mode: i32 = 0, // 0: GLM's bf16 roundings (the route RED-SNOW runs), 1: fp32, 2: SwiGLU-OAI (Grouped only)
+    act_mode: i32 = 0, // 0: GLM's bf16 roundings (the route RED-SNOW runs), 1: fp32, 2: SwiGLU-OAI (Grouped only), 3: softcaps
     alpha: f32 = 0, // SwiGLU-OAI's sigmoid scale (act_mode 2)
+    caps: [2]f32 = .{ 0, 0 }, // the gate and up softcaps (act_mode 3, Inkling 2)
 };
 
-/// The item plan a decode window takes: the family's Router and the plan buffer the caller holds.
+/// The item plan a call takes: the family's Router, the plan buffer the caller holds, and members an item.
 pub const Items = struct {
     router: *const grouped.Router,
     plan: grouped.Plan,
+    tile: usize = 16, // 16, or 32 for the 64-column wide kernel (mul1 only)
 };
 
 /// What one projection launches (experts.py default_config): the 8-tile 4-warp K splits, shape-fixed; n % 128 required.
@@ -143,6 +145,8 @@ pub const Experts = struct {
     grouped: [3]Function, // one per codebook
     gateup: Function,
     down_combine: Function,
+    wide: Function = undefined, // tf_exl3_grouped_wide_2: 32-member items by 64 columns, mul1
+    capped: Function = undefined, // the gate/up epilogue for act_mode 3
     prompt: prompt.Kernels = undefined,
     plan_rotate: Function = undefined,
     plan_finish: Function = undefined,
@@ -172,6 +176,8 @@ pub const Experts = struct {
             try e.mod.function("tf_exl3_grouped_2"),
         };
         e.gateup = try e.mod.function("tf_exl3_gateup_epilogue");
+        e.wide = try e.mod.function("tf_exl3_grouped_wide_2");
+        e.capped = try e.mod.function("tf_exl3_gateup_capped");
         e.down_combine = try e.mod.function("tf_exl3_down_combine");
         return e;
     }
@@ -190,7 +196,7 @@ pub const Experts = struct {
         try e.runWith(s, l, x, x_stride, x_dtype, pick, wts, rows, out, sc, 0, null);
     }
 
-    /// run() on a decode window's item plan (`it`): the grouped kernels in standard mode, the slot rows in `ey`.
+    /// run() on an item plan (`it`): the grouped kernels in standard mode, the slot rows in `ey` (0: scratch y).
     pub fn runWith(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch, ey: u64, it: ?Items) !void {
         const d = l.dims;
         const w = l.width;
@@ -198,7 +204,7 @@ pub const Experts = struct {
         std.debug.assert(rows >= 1 and rows <= sc.rows);
         std.debug.assert(slots >= 1 and slots <= 32);
         std.debug.assert(l.experts >= 1 and l.experts <= 4096);
-        if (l.act_mode != 0 and l.act_mode != 1) return error.BadExperts; // SwiGLU-OAI runs through Grouped only
+        if (l.act_mode != 0 and l.act_mode != 1 and l.act_mode != 3) return error.BadExperts; // SwiGLU-OAI: Grouped only
         const g_sk = try plan(d, w, true);
         const d_sk = try plan(w, d, false);
         const p = rows * slots;
@@ -209,20 +215,25 @@ pub const Experts = struct {
                 return @intCast(v);
             }
         }.f;
-        // A decode window's item plan: the picks grouped into 16-pair items, the grouped kernels in standard mode.
-        const items = it != null; // one codebook a launch, a plan, and ey to write the slot rows into: nothing else
-        if (items and (l.codebook != .mcg or wts != 0 or out != 0 or ey == 0 or it.?.plan.members == 0 or it.?.plan.items == 0 or it.?.plan.counts == 0)) return error.TileNotBuilt;
-        const nx: usize = if (items) grouped.maxItems(p, l.experts + 1, 16) else maxu; // grid x and nexp_max
-        const mtu: usize = if (items) 1 else mt; // member tiles a program (a 16-pair item, or ceil(rows/16))
+        // An item plan: the picks grouped into 16- or 32-pair items, the grouped kernels in standard mode.
+        const items = it != null;
+        const tile: usize = if (items) it.?.tile else 16;
+        const wide = tile == 32; // 32-pair items take the wide kernel, built for mul1
+        if (items and (it.?.plan.members == 0 or it.?.plan.items == 0 or it.?.plan.counts == 0)) return error.TileNotBuilt;
+        if ((tile != 16 and !wide) or (wide and l.codebook != .mul1)) return error.TileNotBuilt;
+        const nx: usize = if (items) grouped.maxItems(p, l.experts + 1, tile) else maxu; // grid x and nexp_max
+        const mtu: usize = if (items) 1 else mt; // member tiles a program (one item, or ceil(rows/16))
         const uids = if (items) it.?.plan.items else sc.ids;
         const ucount = if (items) it.?.plan.counts else sc.count;
         const members = if (items) it.?.plan.members else sc.members;
-        const maxm_a: i32 = if (items) 16 else i32d(rows);
+        const maxm_a: i32 = if (items) i32d(tile) else i32d(rows);
+        const proj = if (wide) e.wide else e.grouped[@backingInt(l.codebook)];
+        const cols: usize = if (wide) 64 else 128;
         const std_a: i32 = if (items) 1 else 0;
         const skip_a: i32 = if (items) i32d(l.experts) else -1;
 
         if (items) {
-            try it.?.router.route(s, pick, p, l.experts + 1, 16, it.?.plan);
+            try it.?.router.route(s, pick, p, l.experts + 1, tile, it.?.plan);
         } else {
             var a: launch_.Args = .{};
             a.add(pick);
@@ -272,7 +283,7 @@ pub const Experts = struct {
         g.add(i32d(l.gu_stride));
         g.add(std_a);
         g.add(skip_a);
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+        try launch_.launch(proj, .{ .grid = .{ .x = @intCast(nx), .y = @intCast(w / cols), .z = @intCast(2 * g_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
 
         var ep: launch_.Args = .{};
         ep.add(sc.z);
@@ -287,7 +298,8 @@ pub const Experts = struct {
         ep.add(i32d(l.experts));
         ep.add(l.limit);
         ep.add(l.act_mode);
-        try launch_.launch(e.gateup, .{ .grid = .{ .x = @intCast(p), .y = @intCast(w / 128), .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &ep);
+        if (l.act_mode == 3) for (l.caps) |c| ep.add(c); // tf_exl3_gateup_capped's CappedArgs
+        try launch_.launch(if (l.act_mode == 3) e.capped else e.gateup, .{ .grid = .{ .x = @intCast(p), .y = @intCast(w / 128), .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &ep);
 
         var dn: launch_.Args = .{};
         dn.add(sc.xd);
@@ -311,13 +323,13 @@ pub const Experts = struct {
         dn.add(@as(i32, 0));
         dn.add(std_a);
         dn.add(skip_a);
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(nx), .y = @intCast(d / 128), .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+        try launch_.launch(proj, .{ .grid = .{ .x = @intCast(nx), .y = @intCast(d / cols), .z = @intCast(d_sk * mtu) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
 
         var cb: launch_.Args = .{};
         cb.add(sc.z);
         cb.add(pick);
         cb.add(l.svh_d);
-        cb.add(if (items) ey else sc.y); // items: write ey's routed slot rows in place (no copy back)
+        cb.add(if (ey != 0) ey else sc.y); // ey: write the caller's routed slot rows in place (no copy back)
         cb.add(wts);
         cb.add(out);
         cb.add(i32d(p));
