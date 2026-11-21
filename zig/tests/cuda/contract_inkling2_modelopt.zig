@@ -269,7 +269,7 @@ pub const ModelOpt = struct {
         if (fill == .nonfinite) x[0] = 0x7fc0;
         if (fill == .stress) for (0..shape.rows) |row| for (0..h) |col| {
             const v: f32 = 4 * @as(f32, @floatFromInt(1 + col % 64));
-            x[row * h + col] = c.toBf16(v + (if (col >= h / 2 and col < h / 2 + 8) 4 else 0));
+            x[row * h + col] = c.toBf16(v + @as(f32, if (col >= h / 2 and col < h / 2 + 8) 4 else 0));
         };
         self.x = x;
         const p13 = try projectionRef(a, self.format, experts, 2 * m, h, true, fill);
