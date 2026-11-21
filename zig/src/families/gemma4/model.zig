@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const weights = @import("weights.zig");
+const weight_loader = @import("weight_loader.zig");
 const kernels = @import("kernels.zig");
 const affine_mm = @import("affine_mm.zig");
 const round = @import("tree_round_gpu");
@@ -111,8 +112,8 @@ pub const Model = struct {
         defer shards.freeShardFiles(gpa, files);
         // the E-series on a chip without tensor units also leaves its tied table in its files until the head pack
         const lean = m.config.geo.layer_input != 0 and !m.device.tensorUnits();
-        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weights.laterLean else weights.later);
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config, lean);
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weight_loader.laterLean else weight_loader.later);
+        m.weights = try weight_loader.load(gpa, m.device, &m.checkpoint, m.config, lean);
         m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
