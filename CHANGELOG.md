@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `"kept_probs": true` on `/v1/chat/completions` (with `logprobs: true`) and `/v1/completions` (with a `logprobs` count) adds a `kept_probs` list for each reply token: the tokens left after temperature, `top_k`, `top_p` and `min_p`, renormalized to sum to 1; a sampled request needs `top_k` from 1 to 20, and a nonzero `presence_penalty` or `frequency_penalty` or a grammar returns HTTP 400; the reply's tokens and every other field are the same with the option on or off (#3207, fixes #3182).
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_ROUND_PROF=1` times every decode round (host prepare, encode, wait and choose, each command buffer's GPU span and the gaps between them, and the drafter's ingest, propose and finish) and logs mean, p50 and p95 by slots, rows and drafted or plain every 4096 rounds and at close; it is off by default and changes no token (#2951, refs #2984). Thanks to @gilby.
 
 - Kernel contract: the GLM Metal contract runs to the end on M1 to M4 Macs again (its KDA and index texts carry the pre-M5 define the loader adds), and gate 5 resolves GLM's routed-expert row launches on every Mac instead of stopping with `UnknownLaunch` (#4397).
