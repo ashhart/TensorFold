@@ -4,19 +4,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the GLM record for `df_sumn` under nvcc 13.3 (40 registers) is the one checked; a stale generic 33-register entry no longer overrides it (#4291). Thanks to @Bizuayeu.
+
 - Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
-
-
-
-
 
 - Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
 
 - Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
 
 - Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass; it has not yet run on a GPU (#1858, after #1773 and #1767, for #1757). Thanks to @jayleaton.
-
-
 
 - TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
 
@@ -166,8 +162,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Release tooling: the runtime feed's preparation step names the error when it fails, instead of only saying that it failed.
 
 - HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
-
-- CUDA contract: `df_sumn` is recorded at nvcc 13.3 with 40 registers on sm_120 and sm_121 again, as `glm_cuda_records.zig` holds it; the line #3953 added for it, measured before the kernel gained its dependent-launch wait, read 33 and is removed (#4291, refs #3953).
 
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
