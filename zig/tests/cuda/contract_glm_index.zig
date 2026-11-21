@@ -26,15 +26,13 @@ fn scoreDepth(_: c.Shape) usize {
     return dk + heads;
 }
 
-const nan_relu = "relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN";
-
 /// A decode window's served shapes: decodeLoop's 2, 4 and 1 tiles a CTA, as cuda_sparse launches Set.dscore.
 const decode_served = [_]c.Shape{ .{ .rows = 8, .n = 4096, .k = dk }, .{ .rows = 16, .n = 51200, .k = dk }, .{ .rows = 4, .n = 131072, .k = dk } };
 
 /// scores: rows x pool columns (k: an index key's width); tokens: rows x K pools a row.
 pub fn spec(comptime which: enum { scores, tokens }) c.Spec {
     return switch (which) {
-        .scores => .{ .name = "cuda glm tf_glm_scores on pages out of order", .accum = .f32, .depth = scoreDepth, .ops = 2, .out = .f32, .served = &.{ .{ .rows = 8, .n = 2048, .k = dk }, .{ .rows = 64, .n = 1024, .k = dk } }, .known = .{ .gate = .nonfinite, .finding = nan_relu } },
+        .scores => .{ .name = "cuda glm tf_glm_scores on pages out of order", .accum = .f32, .depth = scoreDepth, .ops = 2, .out = .f32, .served = &.{ .{ .rows = 8, .n = 2048, .k = dk }, .{ .rows = 64, .n = 1024, .k = dk } } },
         .tokens => .{ .name = "cuda glm tf_glm_dsa_tokens on pages out of order", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "integers only: pool ids, positions and page ids" }, .served = &.{ .{ .rows = 8, .n = sparse.topk_pools, .k = 1 }, .{ .rows = 64, .n = sparse.topk_pools, .k = 1 } } },
     };
 }
