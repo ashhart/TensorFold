@@ -26,7 +26,9 @@ const Gpu = struct {
 
     fn init() !Gpu {
         const device = mtl.Device.init() catch return error.SkipZigTest;
+        errdefer device.deinit();
         const queue = device.queue() catch return error.SkipZigTest;
+        errdefer queue.deinit();
         const src = try frags.source(device, t.allocator, ks.inkling2_draft);
         defer t.allocator.free(src);
         return .{ .device = device, .queue = queue, .lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx()) };
@@ -35,6 +37,7 @@ const Gpu = struct {
     fn deinit(g: Gpu) void {
         g.lib.deinit();
         g.queue.deinit();
+        g.device.deinit();
     }
 
     fn buffer(g: Gpu, comptime T: type, values: []const T) !mtl.Buffer {

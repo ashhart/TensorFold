@@ -18,10 +18,12 @@ pub const Gpu = struct {
 
     pub fn init() !Gpu {
         const device = mtl.Device.init() catch return error.SkipZigTest;
+        errdefer device.deinit();
         return .{ .device = device, .queue = device.queue() catch return error.SkipZigTest };
     }
     pub fn deinit(g: Gpu) void {
         g.queue.deinit();
+        g.device.deinit();
     }
 };
 
