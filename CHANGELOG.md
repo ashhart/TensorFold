@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: `TF_GLM_DRAFT_SPLIT=1` splits the DFlash2 drafter's MLP across three ranks or more where each share is 256-aligned, without `TF_ROCE=1`; the ranks must set it alike, two ranks split as before, and unset changes nothing. On three GB10s whose gathers stay on NCCL, decode with `--drafter` is about 5% faster at one stream (four streams within their start-to-start spread), with the same replies and the same tokens a round on the measured prompts. As with `TF_ROCE=1`, the split drafter adds its down projection's rank shares in another order, so its proposals can differ at near-ties (#3616, for #3581).
+
 - Flash Next on HIP: on an integrated GPU that shares the host's pages (no firmware carve-out), the default kept-prompt cache takes no more than the memory the streams leave, at most 16 GiB and none when nothing is left; an explicit `--prompt-cache-gib` still sets it (#3645).
 
 - Tests: the Web loopback startup test sets its fixture ready before probing, so its health, model-list and relay checks no longer depend on warm-up timing (#3753, fixes #3752). Thanks to @AIFlowML.
