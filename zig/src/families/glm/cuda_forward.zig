@@ -7,6 +7,7 @@ const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
 const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
+const cuda_pdl = @import("cuda_pdl.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
 const sparse = @import("cuda_sparse.zig");
@@ -57,6 +58,7 @@ pub const Modules = struct {
 
     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
+        try cuda_pdl.bind(ctx);
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;

@@ -5,6 +5,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
+    b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
+    step.dependOn(&pdl.step);
     const exl3 = b.createModule(.{ .root_source_file = b.path("zig/glm_exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
     const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
     b.step("test-glm-exl3-prompt-host", "Actual EXL3 whole prompt calls, shared-slot ABI and scratch without a GPU").dependOn(&exl3_run.step);
