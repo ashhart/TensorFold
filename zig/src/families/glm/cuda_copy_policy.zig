@@ -1,6 +1,25 @@
 //! GLM's opt-in copy facts; acceptance estimates and cost allocation stay in the shared lane core.
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
+const environment = @import("sys").environment;
+
+/// TF_GLM_COPY_SHARE=1: TF_GLM_COPIES=1's copies in shared rounds take the lone ramp, to a stream's share of the rows.
+pub const share_switch = "TF_GLM_COPY_SHARE";
+
+/// What the open read: copies on (TF_GLM_COPIES=1 and drafts), and their shared-round ramp (TF_GLM_COPY_SHARE=1).
+pub const Policy = struct { copies: bool = false, share: bool = false };
+
+/// The open's policy from TF_GLM_COPIES (its own reader) and TF_GLM_COPY_SHARE (the shared parser's row).
+pub fn read(drafts: bool) !Policy {
+    return policy(drafts, try @import("cuda").priority_copies.read("TF_GLM_COPIES", true), environment.Process.get(.{}, share_switch));
+}
+
+/// `asked`: TF_GLM_COPIES=1. SHARE=1 without it is refused, not read as off; drafts off turns both off.
+pub fn policy(drafts: bool, asked: bool, share: ?[]const u8) !Policy {
+    const wide = try environment.value(bool, share_switch, share, false);
+    if (wide and !asked) return error.GlmCopyShareWithoutCopies;
+    return .{ .copies = asked and drafts, .share = wide and drafts };
+}
 
 /// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
 pub const window_costs = costTable(@import("cuda_forward.zig").window_rows, 52.0, 6.8);
@@ -13,8 +32,8 @@ fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.c
 }
 
 /// The serving drafts switch wins; unset keeps the family's facts. `measured`: timed prices, so no seed tables.
-pub fn apply(base: lanes.Model, enabled: bool, measured: bool) lanes.Model {
-    if (!enabled or !base.mtp) return base;
+pub fn apply(base: lanes.Model, p: Policy, measured: bool) lanes.Model {
+    if (!p.copies or !base.mtp) return base;
     var m = base;
     m.root_copies = true;
     m.context_copies = true;
@@ -27,6 +46,7 @@ pub fn apply(base: lanes.Model, enabled: bool, measured: bool) lanes.Model {
     m.shared_drafts = 0;
     // Keep head confidence in the backend's probabilities so every copy still pays its target-window cost.
     m.draft_confidence = null;
+    m.shared_copy_ramp = p.share;
     return m;
 }
 

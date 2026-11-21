@@ -6,14 +6,7 @@ const be = lanes.backend;
 const Family = enum { gemma4, spark25, kolibri1, dory, minimax, minimax_head, glm_mtp, glm_block };
 fn facts(family: Family, enabled: bool) lanes.Model {
     switch (family) {
-        .glm_mtp, .glm_block => {
-            const f = @import("glm_cuda");
-            var e: f.engine.Engine = undefined;
-            e.mtp = true;
-            e.drafter = if (family == .glm_block) @ptrFromInt(16) else null;
-            var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-            return b.factsWithCopies(enabled);
-        },
+        .glm_mtp, .glm_block => return glmFacts(family == .glm_block, enabled, false),
         .gemma4 => {
             const f = @import("gemma4_cuda");
             var m: f.forward.Model = undefined;
@@ -65,6 +58,16 @@ fn facts(family: Family, enabled: bool) lanes.Model {
     }
 }
 const families = std.enums.values(Family);
+
+/// GLM's facts with TF_GLM_COPIES=1 (`copies`) and TF_GLM_COPY_SHARE=1 (`share`), for MTP or DFlash2 (`block`).
+fn glmFacts(block: bool, copies: bool, share: bool) lanes.Model {
+    const f = @import("glm_cuda");
+    var e: f.engine.Engine = undefined;
+    e.mtp = true;
+    e.drafter = if (block) @ptrFromInt(16) else null;
+    var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };
+    return b.factsWithCopies(.{ .copies = copies, .share = share });
+}
 
 // Literal main facts for eight slots; independent of the candidate adapters' facts.
 fn mainFacts(family: Family) lanes.Model {
@@ -152,7 +155,7 @@ test "CUDA lane copies: three matches refuse, four enter, disabled copies and mi
     }
 }
 
-const Stats = struct { zeros: usize = 0, heads: usize = 0, copied: usize = 0, rejected: usize = 0, trace: u64 = 0 };
+const Stats = struct { zeros: usize = 0, heads: usize = 0, copied: usize = 0, rejected: usize = 0, widest: usize = 0, trace: u64 = 0 };
 threadlocal var current: ?*Stats = null;
 
 fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) !void {
@@ -172,6 +175,7 @@ fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void
         current.?.trace = std.hash.Wyhash.hash(current.?.trace, std.mem.sliceAsBytes(w.tokens));
         if (w.held == 0 and w.tokens.len > 0) {
             current.?.copied += 1;
+            current.?.widest = @max(current.?.widest, w.rows());
             if (!std.mem.eql(u32, w.tokens, o.sampled[0..w.tokens.len])) current.?.rejected += 1;
         }
     }
@@ -252,6 +256,36 @@ test "CUDA lane copies: real core copies equal plain tokens solo shared sampled 
             const before = try run(mainFacts(family), count, sampled, false, breaks, restored);
             const after = try run(m, count, sampled, false, breaks, restored);
             try std.testing.expectEqualDeep(before, after);
+        }
+    };
+}
+
+test "CUDA lane copies: GLM's TF_GLM_COPY_SHARE adds only the shared ramp, and nothing without TF_GLM_COPIES" {
+    for ([_]bool{ false, true }) |block| {
+        var want = glmFacts(block, true, false);
+        try std.testing.expect(!want.shared_copy_ramp);
+        want.shared_copy_ramp = true;
+        try std.testing.expectEqualDeep(want, glmFacts(block, true, true));
+        try std.testing.expectEqualDeep(mainFacts(if (block) .glm_block else .glm_mtp), glmFacts(block, false, true));
+        var cfg = try lanes.Config.init(a, want, want.exact_width, want.exact_width - 1);
+        defer cfg.deinit(a);
+        try std.testing.expect(cfg.shared_copy_ramp and cfg.family_streams);
+    }
+}
+
+test "CUDA lane copies: GLM's shared ramp widens shared rounds' copies past four rows and keeps plain tokens" {
+    for ([_]bool{ false, true }) |block| for ([_]bool{ false, true }) |sampled| {
+        const plain = try run(glmFacts(block, true, false), 1, sampled, false, false, false);
+        for ([_]usize{ 2, 4 }) |count| {
+            const narrow = try run(glmFacts(block, true, false), count, sampled, true, false, false);
+            const wide = try run(glmFacts(block, true, true), count, sampled, true, false, false);
+            for (narrow.tokens[0..count], wide.tokens[0..count]) |n, w| {
+                try std.testing.expectEqualSlices(u32, &plain.tokens[0], &n);
+                try std.testing.expectEqualSlices(u32, &plain.tokens[0], &w);
+            }
+            // the prompt repeats every four tokens: a shared copy is three at first_copy, four on the ramp
+            try std.testing.expect(narrow.stats.copied > 0 and narrow.stats.widest <= 4);
+            try std.testing.expectEqual(@as(usize, 5), wide.stats.widest);
         }
     };
 }
@@ -346,7 +380,7 @@ test "CUDA lane copies: GLM uses paid target costs and expensive copies get zero
     const backend = b.backend();
     try std.testing.expect(try backend.vtable.probabilities.?(backend.ptr, &s, &probabilities));
     try std.testing.expect(probabilities[1] > 0.6 and probabilities[2] > 0.5);
-    const on = b.factsWithCopies(true);
+    const on = b.factsWithCopies(.{ .copies = true });
     try std.testing.expect(try backend.vtable.probabilities.?(backend.ptr, &s, &probabilities));
     try std.testing.expectEqualSlices(f64, &.{ 0.8, 0, 0 }, &probabilities);
     try std.testing.expectEqual(@as(?f64, 0.7), b.facts().draft_confidence);
@@ -354,7 +388,7 @@ test "CUDA lane copies: GLM uses paid target costs and expensive copies get zero
     try std.testing.expectEqual(@as(usize, 0), costly[0]);
     try std.testing.expectEqual(@as(?f64, null), on.draft_confidence);
     target.mtp = false;
-    try std.testing.expectEqualDeep(b.facts(), b.factsWithCopies(true));
+    try std.testing.expectEqualDeep(b.facts(), b.factsWithCopies(.{ .copies = true }));
     try std.testing.expectEqualStrings("TF_GLM_COPIES: expected 0 or 1 for verified root/context copies", f.native.explain(null, error.BadCopyPolicy).?);
 }
 
@@ -400,7 +434,7 @@ test "CUDA lane copies: GLM confidence bounds the actual held offer even when wi
     target.drafter = null;
     var b: f.lanes.Lanes = .{ .x = .{ .e = &target, .link = undefined }, .mtp_confidence = 0.7 };
     defer b.lanes.deinit(a);
-    var m = b.factsWithCopies(true);
+    var m = b.factsWithCopies(.{ .copies = true });
     m.shared_costs = &.{ .{ .width = 1, .ms = 10 }, .{ .width = 2, .ms = 10 }, .{ .width = 3, .ms = 0.1 }, .{ .width = 4, .ms = 0.1 } };
     var cfg = try lanes.Config.init(a, m, 8, 3);
     defer cfg.deinit(a);
@@ -423,7 +457,7 @@ test "CUDA lane copies: GLM confidence bounds the actual held offer even when wi
         try std.testing.expect(plans[0].count() <= count);
     }
     b.mtp_confidence = 0.7;
-    _ = b.factsWithCopies(false);
+    _ = b.factsWithCopies(.{});
     try lanes.Engine.testing.askDrafts(&e, &.{.{ .stream = &s, .depth = 3, .position = 1, .follow = &.{}, .rows = null, .start = 0 }});
     try std.testing.expectEqual(@as(u32, 3), s.next.?.count);
 }
@@ -456,11 +490,11 @@ test "GLM window prices: MTP takes timed prices and DFlash2 keeps every consumed
     for ([_]?*@TypeOf(e.drafter.?.*){ null, @ptrFromInt(16) }) |drafter| {
         e.drafter = drafter;
         var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-        const seeded = b.factsWithCopies(true);
+        const seeded = b.factsWithCopies(.{ .copies = true });
         try std.testing.expect(seeded.window_costs[0].ms > 50);
         b.costs = f.lane_costs.table(k);
         for ([_]bool{ false, true }) |copies| {
-            const m = b.factsWithCopies(copies);
+            const m = b.factsWithCopies(.{ .copies = copies });
             try std.testing.expectEqual(@as(usize, f.lanes.max_rows), m.window_costs.len);
             const family: Family = if (drafter == null) .glm_mtp else .glm_block;
             const main = mainFacts(family);
