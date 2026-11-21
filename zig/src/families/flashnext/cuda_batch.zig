@@ -128,6 +128,15 @@ pub fn Pass(comptime Tri: type) type {
 
         /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
+            if (w.tail) |t| {
+                // the FP8G rows over the whole output, its zero rows where the tail goes, then the tail copied in
+                if (sk != 1) return error.UnexpectedTensor;
+                const used = try tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
+                if (used != 1) return error.UnexpectedTensor;
+                try self.k.nativeMatmul(self.stream, x, w.k, m, t.native, self.s.tail, self.s.native_part, .bf16);
+                try ops.copyCols(self.k, self.stream, self.s.tail, t.n, out + t.at * 2, w.n, t.n, m);
+                return 1;
+            }
             if (try zs.lane(self.k, self.stream, self.s, self.zero_slices, x, w, part, m, sk)) |one| return one;
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }

@@ -1,4 +1,4 @@
-//! Projection loading preserves dense BF16 bits and MXFP8 codes/scales; affine layouts keep their existing packer.
+//! Projection loading preserves dense BF16 bits, MXFP8 codes/scales and block-FP8 planes; affine keeps its packer.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -70,6 +70,99 @@ fn uploadMicro(a: std.mem.Allocator, d: *const cuda.Driver, value: Micro) !wt.Q4
     return projection.mxfp8(a, d, .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ value.n, value.k, 1, 1, 1 }, .bytes = value.codes }, .{ .dtype = .u8, .rank = 2, .shape = .{ value.n, value.k / 32, 1, 1, 1 }, .bytes = value.scales });
 }
 
+/// Block-FP8 (e4m3 weight, fp32 weight_scale_inv per 128x128 block) parts of one projection, rows stacked in order.
+pub const Block8 = struct {
+    n: usize,
+    k: usize,
+    codes: []u8,
+    sinv: []f32,
+
+    pub fn deinit(self: *Block8, a: std.mem.Allocator) void {
+        a.free(self.codes);
+        a.free(self.sinv);
+        self.* = undefined;
+    }
+};
+
+/// Whether `{prefix}.weight_scale_inv` is there: the one tensor a block-FP8 projection carries and the rest do not.
+pub fn isBlock8(store: anytype, prefix: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    return store.has(std.fmt.bufPrint(&buf, "{s}.weight_scale_inv", .{prefix}) catch return false);
+}
+
+/// How many leading parts of a stitched projection are block FP8, and so where a BF16 tail could start.
+pub fn block8Parts(store: anytype, prefix: []const u8, names: []const []const u8) usize {
+    var buf: [512]u8 = undefined;
+    var heads: usize = 0;
+    while (heads < names.len and isBlock8(store, std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, names[heads] }) catch return heads)) heads += 1;
+    return heads;
+}
+
+/// A projection's leading block-FP8 parts: e4m3 codes [n, k] and fp32 scales [n / 128, k / 128], stacked in order.
+pub fn readBlock8(a: std.mem.Allocator, store: anytype, prefix: []const u8, names: []const []const u8) !Block8 {
+    var buf: [512]u8 = undefined;
+    var n: usize = 0;
+    var k: usize = 0;
+    for (names) |name| {
+        const w = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }));
+        if (w.dtype != .f8_e4m3 or w.rank != 2 or w.dim(0) % 128 != 0 or w.dim(1) % 128 != 0) return error.UnexpectedTensor;
+        if (k != 0 and k != w.dim(1)) return error.UnexpectedTensor;
+        k = w.dim(1);
+        n = std.math.add(usize, n, w.dim(0)) catch return error.UnexpectedTensor;
+    }
+    const kb = k / 128;
+    const codes = try a.alloc(u8, std.math.mul(usize, n, k) catch return error.UnexpectedTensor);
+    errdefer a.free(codes);
+    const sinv = try a.alloc(f32, (n / 128) * kb);
+    errdefer a.free(sinv);
+    var row: usize = 0;
+    for (names) |name| {
+        defer store.release();
+        const pn = (try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }))).dim(0);
+        const h = try core.quant.fp8.read(store, try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, name }), pn, k, .f32, null);
+        if (h.weight.bytes.len != pn * k) return error.UnexpectedTensor;
+        @memcpy(codes[row * k ..][0 .. pn * k], h.weight.bytes);
+        try core.quant.fp8.widen(h.scale_inv, sinv[(row / 128) * kb ..][0 .. (pn / 128) * kb], true);
+        row += pn;
+    }
+    if (row != n) return error.UnexpectedTensor;
+    return .{ .n = n, .k = k, .codes = codes, .sinv = sinv };
+}
+
+/// A projection's trailing BF16 parts [nt, k], stacked in order: the exact stored rows the tail's own matmul runs on.
+pub fn readTail(a: std.mem.Allocator, store: anytype, prefix: []const u8, names: []const []const u8, k: usize, nt: usize) ![]u8 {
+    var buf: [512]u8 = undefined;
+    const bytes = std.math.mul(usize, nt, k * 2) catch return error.UnexpectedTensor;
+    const out = try a.alloc(u8, bytes);
+    errdefer a.free(out);
+    var at: usize = 0;
+    for (names) |name| {
+        const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }));
+        if (t.dtype != .bf16 or t.rank != 2 or t.dim(1) != k) return error.UnexpectedTensor;
+        if (t.bytes.len > bytes - at) return error.UnexpectedTensor;
+        @memcpy(out[at..][0..t.bytes.len], t.bytes);
+        at += t.bytes.len;
+    }
+    if (at != bytes) return error.UnexpectedTensor;
+    return out;
+}
+
+/// A projection whose leading parts are block FP8 and whose trailing parts are BF16, as INT4-AutoRound's mixers are.
+pub fn loadBlock8(a: std.mem.Allocator, d: *cuda.Driver, store: anytype, prefix: []const u8, names: []const []const u8, n: usize, k: usize) !wt.Q4 {
+    const heads = block8Parts(store, prefix, names);
+    if (heads == 0) return error.UnexpectedTensor;
+    var head = try readBlock8(a, store, prefix, names[0..heads]);
+    defer head.deinit(a);
+    if (head.k != k or head.n > n) return error.UnexpectedTensor;
+    const nt = n - head.n;
+    if (nt == 0) return projection.fp8g(a, d, head.codes, head.sinv, head.n, k, null, 0);
+    // the scratch's tail holds wt.tail_n columns; a wider one has no buffer to be copied out of
+    if (nt > wt.tail_n) return error.UnexpectedTensor;
+    const tail = try readTail(a, store, prefix, names[heads..], k, nt);
+    defer a.free(tail);
+    return projection.fp8g(a, d, head.codes, head.sinv, head.n, k, tail, nt);
+}
+
 pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, n: usize, k: usize) !wt.Q4 {
     var buf: [512]u8 = undefined;
     const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}));
@@ -79,6 +172,7 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
             return projection.dense(a, d, t);
         },
         .f8_e4m3 => {
+            if (isBlock8(store, prefix)) return loadBlock8(a, d, store, prefix, &.{""}, n, k);
             var value = try readMicro(a, store, prefix);
             defer value.deinit(a);
             if (value.n != n or value.k != k) return error.UnexpectedTensor;
@@ -100,6 +194,7 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
     if (names.len == 0) return error.UnexpectedTensor;
     var buf: [512]u8 = undefined;
     const first = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, names[0] }));
+    if (first.dtype == .f8_e4m3 and isBlock8(store, try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, names[0] }))) return loadBlock8(a, d, store, prefix, names, n, k);
     if (first.dtype == .f8_e4m3) {
         var value = try readStitched(a, store, prefix, names);
         defer value.deinit(a);

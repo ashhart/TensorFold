@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const Cut = @import("cuda_modelopt_experts.zig").Cut;
 const source = @import("cuda_projection_load.zig");
+const projection = @import("cuda_projection.zig");
 const Tensor = core.safetensors.Tensor;
 
 const Fake = struct {
@@ -319,4 +320,270 @@ test "stitched cuts refuse MXFP8 and affine parts, other widths and a wrong loca
     var past = s.ranges;
     past[2] = Ranges.of(&.{.{ .from = 40, .to = 64 }});
     try std.testing.expectError(error.UnexpectedTensor, source.stitchCut(a, &fake, "root", &heads_cut.delta_parts, &past, s.n, k64));
+}
+
+const block_k = 256;
+const block_kb = block_k / 128;
+/// The fixture's BF16 tail: more rows than wt.tail_n, so the loader's width guard can be told from a short read.
+const tail_rows = 768;
+
+/// e4m3 codes whose binary64 values are exact: 0x38 1.0, 0x3c 1.5, 0x40 2.0, 0x34 0.75, 0xb8 -1.0.
+const code_values = [_]u8{ 0x38, 0x3c, 0x40, 0x34, 0xb8 };
+
+/// A block-FP8 part of the fixture: e4m3 codes [rows, block_k] and one fp32 scale a 128 x 128 block.
+const Part = struct { rows: usize, codes: []u8, inv: []f32 };
+
+fn fixturePart(a: std.mem.Allocator, rows: usize, seed: usize) !Part {
+    const codes = try a.alloc(u8, rows * block_k);
+    errdefer a.free(codes);
+    for (0..rows) |r| for (0..block_k) |c| {
+        codes[r * block_k + c] = code_values[(r + c + seed) % code_values.len];
+    };
+    const inv = try a.alloc(f32, (rows / 128) * block_kb);
+    for (0..rows / 128) |i| for (0..block_kb) |j| {
+        inv[i * block_kb + j] = @floatFromInt(i * 10 + j + 1 + seed * 3);
+    };
+    return .{ .rows = rows, .codes = codes, .inv = inv };
+}
+
+fn freePart(a: std.mem.Allocator, p: *Part) void {
+    a.free(p.codes);
+    a.free(p.inv);
+}
+
+const Bad = enum { none, weight_dtype, rows, cols, scale_shape, scale_nan, tail_dtype, tail_cols, tail_short };
+
+/// One stitched projection's store: two block-FP8 parts, ".q" and ".k", and the BF16 indexer tail, with faults.
+const Blocky = struct {
+    k: usize,
+    parts: [2]Part,
+    tail: []u8,
+    bad: Bad = .none,
+
+    /// The part a name selects, and whether it is the scale tensor beside that part's weight.
+    fn select(name: []const u8) ?struct { i: usize, scale: bool } {
+        const i: usize = if (std.mem.startsWith(u8, name, "m.q.")) 0 else if (std.mem.startsWith(u8, name, "m.k.")) 1 else return null;
+        if (std.mem.endsWith(u8, name, ".weight_scale_inv")) return .{ .i = i, .scale = true };
+        if (std.mem.endsWith(u8, name, ".weight")) return .{ .i = i, .scale = false };
+        return null;
+    }
+
+    /// Only a block-FP8 projection carries a scale_inv beside its weight: what selects this loader's arm.
+    pub fn has(self: *Blocky, name: []const u8) bool {
+        _ = self;
+        const s = select(name) orelse return false;
+        return s.scale;
+    }
+
+    /// The checkpoint-reader adapter the shared block-FP8 reader takes (fp8.read -> get).
+    pub fn get(self: *Blocky, name: []const u8) !Tensor {
+        return self.tensor(name);
+    }
+
+    /// A reading borrow's pages would go here; this store keeps its bytes in memory.
+    pub fn release(self: *Blocky) void {
+        _ = self;
+    }
+
+    pub fn tensor(self: *Blocky, name: []const u8) !Tensor {
+        if (std.mem.startsWith(u8, name, "m.idx.weight")) {
+            const cols: usize = if (self.bad == .tail_cols) block_k / 2 else block_k;
+            const want = self.tail.len / 2;
+            const bytes = if (self.bad == .tail_short) self.tail[0 .. want - 1] else self.tail;
+            const dtype: core.safetensors.DType = if (self.bad == .tail_dtype) .f16 else .bf16;
+            return .{ .dtype = dtype, .rank = 2, .shape = .{ self.tail.len / (block_k * 2), cols, 1, 1, 1 }, .bytes = bytes };
+        }
+        const s = select(name) orelse return error.MissingTensor;
+        const p = self.parts[s.i];
+        if (!s.scale) {
+            const rows = if (self.bad == .rows and s.i == 0) 200 else p.rows;
+            const cols = if (self.bad == .cols and s.i == 0) 128 else self.k;
+            const dtype: core.safetensors.DType = if (self.bad == .weight_dtype and s.i == 0) .bf16 else .f8_e4m3;
+            return .{ .dtype = dtype, .rank = 2, .shape = .{ rows, cols, 1, 1, 1 }, .bytes = p.codes[0 .. rows * cols] };
+        }
+        // a wrong block count, whole entries so the fake's own slice stays inside its buffer
+        const cols: usize = if (self.bad == .scale_shape and s.i == 0) 1 else block_kb;
+        const rows = p.rows / 128;
+        return .{ .dtype = .f32, .rank = 2, .shape = .{ rows, cols, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(p.inv[0 .. rows * cols]) };
+    }
+};
+
+fn blocky(a: std.mem.Allocator) !Blocky {
+    var out: Blocky = .{ .k = block_k, .parts = undefined, .tail = &.{} };
+    out.parts[0] = try fixturePart(a, 256, 0);
+    errdefer freePart(a, &out.parts[0]);
+    out.parts[1] = try fixturePart(a, 128, 1);
+    errdefer freePart(a, &out.parts[1]);
+    out.tail = try a.alloc(u8, tail_rows * block_k * 2);
+    for (0..out.tail.len / 2) |i| std.mem.writeInt(u16, out.tail[i * 2 ..][0..2], @truncate(i * 37 + 3), .little);
+    return out;
+}
+
+fn freeBlocky(a: std.mem.Allocator, b: *Blocky) void {
+    for (&b.parts) |*p| freePart(a, p);
+    a.free(b.tail);
+}
+
+test "block FP8: a projection's FP8 parts and its BF16 tail are the stored bytes the binary64 reference reads" {
+    const a = std.testing.allocator;
+    var fake = try blocky(a);
+    defer freeBlocky(a, &fake);
+    try std.testing.expectEqual(@as(usize, 2), source.block8Parts(&fake, "m", &.{ ".q", ".k", ".idx" }));
+    try std.testing.expectEqual(@as(usize, 0), source.block8Parts(&fake, "m", &.{ ".idx", ".q" }));
+    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" });
+    defer head.deinit(a);
+    try std.testing.expectEqual(@as(usize, 384), head.n);
+    try std.testing.expectEqual(block_k, head.k);
+    try std.testing.expectEqualSlices(u8, fake.parts[0].codes, head.codes[0 .. 256 * block_k]);
+    try std.testing.expectEqualSlices(u8, fake.parts[1].codes, head.codes[256 * block_k ..]);
+    try std.testing.expectEqualSlices(f32, fake.parts[0].inv, head.sinv[0..4]);
+    try std.testing.expectEqualSlices(f32, fake.parts[1].inv, head.sinv[4..]);
+    const tail = try source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows);
+    defer a.free(tail);
+    try std.testing.expectEqualSlices(u8, fake.tail, tail);
+    // the served tail is whole 128-row blocks, or the plane builder above could not splice it
+    try std.testing.expectEqual(@as(usize, 640), @import("cuda_prompt_wt.zig").tail_n);
+    try std.testing.expectEqual(@as(usize, 0), @import("cuda_prompt_wt.zig").tail_n % 128);
+    try std.testing.expect(@import("cuda_prompt_wt.zig").tail_n <= @import("cuda_prompt_wt.zig").proj_n);
+
+    // the lane's planes: the packed codes and per-64-input scale tiles of those stored rows, then the tail's zeros
+    const n = 384 + tail_rows;
+    const rows = try a.alloc(u8, n * block_k);
+    defer a.free(rows);
+    @memcpy(rows[0..head.codes.len], head.codes);
+    @memset(rows[head.codes.len..], 0);
+    const inv = try a.alloc(f32, (n / 128) * block_kb);
+    defer a.free(inv);
+    @memcpy(inv[0..head.sinv.len], head.sinv);
+    @memset(inv[head.sinv.len..], 1.0);
+    const want_codes = try a.alloc(u8, cuda.fp8.padded(n) * block_k);
+    defer a.free(want_codes);
+    cuda.fp8.packCodes(want_codes, rows, n, block_k);
+    const want_scales = try a.alloc(f32, cuda.fp8.padded(n) * (block_k / cuda.fp8.group));
+    defer a.free(want_scales);
+    cuda.fp8.packScales(want_scales, inv, n, block_k);
+    var planes = try projection.fp8gPlanes(a, head.codes, head.sinv, head.n, block_k, tail_rows);
+    defer planes.deinit(a);
+    try std.testing.expectEqualSlices(u8, want_codes, planes.codes);
+    try std.testing.expectEqualSlices(f32, want_scales, planes.scales);
+
+    // the reference of the checkpoint's own tensors, code x its block scale, exact in binary64
+    const ref = try a.alloc(f64, 256 * block_k);
+    defer a.free(ref);
+    try core.quant.fp8.reference(.{
+        .weight = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 256, block_k, 1, 1, 1 }, .bytes = fake.parts[0].codes },
+        .scale_inv = .{ .dtype = .f32, .rank = 2, .shape = .{ 2, block_kb, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(fake.parts[0].inv) },
+    }, ref);
+    try std.testing.expectEqual(@as(f64, 1.0), ref[0]); // 1.0 x 1
+    try std.testing.expectEqual(@as(f64, 1.5), ref[1]); // 1.5 x 1
+    try std.testing.expectEqual(@as(f64, 1.5), ref[128]); // 0.75 x 2
+    try std.testing.expectEqual(@as(f64, 8.25), ref[128 * block_k]); // 0.75 x 11
+    try std.testing.expectEqual(@as(f64, 18.0), ref[128 * block_k + 128]); // 1.5 x 12
+
+    // a tail row on the lane is a zero code times a scale of one: its binary64 contribution is exactly +0
+    const zero_codes = try a.alloc(u8, 128 * block_k);
+    defer a.free(zero_codes);
+    @memset(zero_codes, 0);
+    const one_scale = try a.alloc(f32, block_kb);
+    defer a.free(one_scale);
+    @memset(one_scale, 1.0);
+    const tail_ref = try a.alloc(f64, zero_codes.len);
+    defer a.free(tail_ref);
+    try core.quant.fp8.reference(.{
+        .weight = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 128, block_k, 1, 1, 1 }, .bytes = zero_codes },
+        .scale_inv = .{ .dtype = .f32, .rank = 2, .shape = .{ 1, block_kb, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(one_scale) },
+    }, tail_ref);
+    for (tail_ref) |v| try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(v)));
+    for (inv[head.sinv.len..]) |s| try std.testing.expectEqual(@as(f32, 1.0), s);
+}
+
+/// A store holding one MXFP8 projection (e4m3 weight, u8 group-32 weight_scale) or its affine form (u32 words).
+const MicroStore = struct {
+    dtype: core.safetensors.DType = .f8_e4m3,
+    scratch: [64 * 256]u8 = undefined,
+
+    /// Neither form carries a scale_inv a 128 x 128 block covers: the block-FP8 arm is not this projection's.
+    pub fn has(self: *MicroStore, name: []const u8) bool {
+        _ = self;
+        _ = name;
+        return false;
+    }
+
+    pub fn tensor(self: *MicroStore, name: []const u8) !Tensor {
+        @memset(&self.scratch, 0x5a);
+        if (std.mem.endsWith(u8, name, ".weight_scale")) return .{ .dtype = .u8, .rank = 2, .shape = .{ 64, 8, 1, 1, 1 }, .bytes = self.scratch[0 .. 64 * 8] };
+        if (!std.mem.endsWith(u8, name, ".weight")) return error.MissingTensor;
+        const affine = self.dtype == .u32;
+        const cols: usize = if (affine) 32 else 256;
+        const words: usize = if (affine) 4 else 1;
+        const len = 64 * cols * words;
+        return .{ .dtype = self.dtype, .rank = 2, .shape = .{ 64, cols, 1, 1, 1 }, .bytes = self.scratch[0..len] };
+    }
+};
+
+test "block FP8: MXFP8 and affine projections are not block FP8 and take the reader they took before" {
+    const a = std.testing.allocator;
+    var fake: MicroStore = .{};
+    try std.testing.expect(!source.isBlock8(&fake, "m.q"));
+    var value = try source.readMicro(a, &fake, "m.q");
+    defer value.deinit(a);
+    try std.testing.expectEqual(@as(usize, 64), value.n);
+    try std.testing.expectEqual(@as(usize, 256), value.k);
+    try std.testing.expectEqual(@as(usize, 64 * 256), value.codes.len);
+    try std.testing.expectEqual(@as(usize, 64 * 8), value.scales.len);
+    fake.dtype = .u32;
+    try std.testing.expect(!source.isBlock8(&fake, "m.q"));
+    try std.testing.expectError(error.UnexpectedTensor, source.readMicro(a, &fake, "m.q"));
+}
+
+test "block FP8: the loader refuses the shapes and the planes it cannot splice, before any device call" {
+    const a = std.testing.allocator;
+    var fake = try blocky(a);
+    defer freeBlocky(a, &fake);
+    for ([_]Bad{ .weight_dtype, .rows, .cols, .scale_shape }) |bad| {
+        fake.bad = bad;
+        try std.testing.expectError(error.UnexpectedTensor, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }));
+    }
+    fake.bad = .scale_nan;
+    fake.parts[0].inv[0] = std.math.nan(f32);
+    try std.testing.expectError(error.UnsupportedQuantization, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }));
+    fake.bad = .none;
+    fake.parts[0].inv[0] = 1.0;
+    {
+        const d: *cuda.Driver = undefined;
+        for ([_]usize{ 0, 383, 641 }) |n| try std.testing.expectError(error.UnexpectedTensor, source.loadBlock8(a, d, &fake, "m", &.{ ".q", ".k" }, n, block_k));
+        try std.testing.expectError(error.UnexpectedTensor, source.loadBlock8(a, d, &fake, "m", &.{ ".q", ".k" }, 640, block_k / 2));
+        try std.testing.expectError(error.UnexpectedTensor, source.loadBlock8(a, d, &fake, "m", &.{".idx"}, 256, block_k));
+        // a tail the scratch cannot hold is refused before it is read, though this store could serve it whole
+        try std.testing.expectError(error.UnexpectedTensor, source.loadBlock8(a, d, &fake, "m", &.{ ".q", ".k", ".idx" }, 384 + tail_rows, block_k));
+    }
+    for ([_]Bad{ .tail_dtype, .tail_cols, .tail_short }) |bad| {
+        fake.bad = bad;
+        try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, 256));
+    }
+    fake.bad = .none;
+    try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, 512));
+    // the plane builder's own guards: whole 128-row blocks, a k of scale blocks, and lengths that agree
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv, 0, block_k, 0));
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv, 256, 192, 0));
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes[1..], fake.parts[0].inv, 256, block_k, 0));
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv[1..], 256, block_k, 0));
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv, 256, block_k, 64));
+    // 192 rows cannot lead a 128-row tail: the last head block would carry the tail's rows
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes[0 .. 192 * block_k], fake.parts[0].inv[0..2], 192, block_k, 128));
+}
+
+fn blockTrial(a: std.mem.Allocator) !void {
+    var fake = try blocky(a);
+    defer freeBlocky(a, &fake);
+    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" });
+    defer head.deinit(a);
+    const tail = try source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows);
+    a.free(tail);
+    var planes = try projection.fp8gPlanes(a, head.codes, head.sinv, head.n, block_k, tail_rows);
+    planes.deinit(a);
+}
+
+test "block FP8: every partial allocation on the way to the planes is freed" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, blockTrial, .{});
 }
