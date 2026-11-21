@@ -526,7 +526,6 @@ pub fn parallel(text: []const u8) ?u32 {
     const n = std.fmt.parseInt(i64, t, 10) catch return null;
     return @intCast(@max(1, @min(n, 4096)));
 }
-
 /// ``--parallel`` named a number (an engine that fits fewer refuses), not "auto" (it serves what fits).
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
