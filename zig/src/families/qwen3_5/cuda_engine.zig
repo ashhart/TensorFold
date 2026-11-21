@@ -325,7 +325,6 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
@@ -355,18 +354,15 @@ pub const Engine = struct {
         e.stream.deinit();
         e.gpa.destroy(e);
     }
-
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         return e.streamBytesWithTaps(cap, e.n_taps);
     }
-
     /// The same allocation plan for a tap count known before `setTaps` mutates the engine.
     pub fn streamBytesWithTaps(e: *const Engine, cap: usize, taps: usize) usize {
         const c = @import("cuda_cache.zig");
         return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapRows() * taps * e.g.hidden * 2 + c.pendBytes(e.g);
     }
-
     /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
     pub fn tapBytes(e: *const Engine) usize {
         return e.tapRows() * e.n_taps * e.g.hidden * 2;
