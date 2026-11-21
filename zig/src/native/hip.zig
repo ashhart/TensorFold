@@ -537,15 +537,15 @@ test "--drafter on qwen3_5 passes the group check on one rank; a group, another 
     var problem: []const u8 = "";
     const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
     try std.testing.expect(flagRefused(qwen35.native, drafted) == null and flagRefused(qwen35.native_moe, drafted) != null);
-    try checkGroup(a, drafted, &problem);
+    try checkGroup(qwen35.native, a, drafted, &problem);
     const follower: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter", .tp = 2, .rank = 1, .master = "node0" };
-    try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, follower, &problem));
     try std.testing.expectStringStartsWith(problem, "--drafter with --tp 2:");
     // three drafts and fewer are not refused
     var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 };
-    try checkGroup(a, o, &problem);
+    try checkGroup(qwen35.native, a, o, &problem);
     o.mtp_drafts = 4;
-    try std.testing.expectError(error.Refused, checkGroup(a, o, &problem));
+    try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, o, &problem));
     try std.testing.expectEqualStrings("--mtp-drafts 4: the HIP engine drafts at most 3", problem);
 }
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
