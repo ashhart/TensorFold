@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `response_format: {"type": "structural_tag", ...}` on the native server keeps the reply free text while each structure's `begin` opens a region that must be JSON matching its `schema` and close with its `end`, with optional `triggers`; past 64 structures or triggers, 256-byte tags or the 512 KiB grammar limit the request is refused with HTTP 400 before any stream starts (#3208).
+
 - MiniMax-M3 on Metal: the DFlash2 and DSpark drafters hold up to eight streams' blocks in one pass and one wait instead of a pass per stream, and absorb no longer waits for the GPU; drafted replies are unchanged (#3121).
 
 - MiniMax-M3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a stepping drafter absorbs each chunk before the next; a pass can be cancelled keeping the state at the last chunk's end, and chunks are cut exactly as before, so replies are unchanged (#3089, part of #3021).
