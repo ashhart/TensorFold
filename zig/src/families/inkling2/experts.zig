@@ -8,6 +8,9 @@ const ex = cuda.exl3_experts;
 /// The two SwiGLU softcaps (config.json mlp_gate_softcap, mlp_up_softcap).
 pub const Caps = struct { gate: f32, up: f32 };
 
+/// The least and most half-bit widths (k2) among a layer's expert tensors, as the loader read them.
+pub const Bits = struct { lo: u32, hi: u32 };
+
 /// Calls of at least this many rows take an item list (runs of one expert's members), not one item an expert.
 pub const listed_from = 17;
 /// Calls of at least this many rows take the prompt kernel (32 members by 64 columns a block).
@@ -66,12 +69,13 @@ fn itemsAt(l: ex.Layer, sc: ex.Scratch) u64 {
 }
 
 /// exl3_experts.Experts.run's launches in its order: the family's grouped projections, ops.cu's tf_ink2_gateup.
-pub fn run(e: *const Kernels, k: *const ops.Kernels, s: cuda.Stream, l: ex.Layer, caps: Caps, x: u64, x_stride: usize, x_dtype: ex.DType, pick: u64, wts: u64, rows: usize, out: u64, sc: ex.Scratch) !void {
+pub fn run(e: *const Kernels, k: *const ops.Kernels, s: cuda.Stream, l: ex.Layer, caps: Caps, bits: Bits, x: u64, x_stride: usize, x_dtype: ex.DType, pick: u64, wts: u64, rows: usize, out: u64, sc: ex.Scratch) !void {
     const d = l.dims;
     const w = l.width;
     const slots = sc.slots;
     if (rows < 1 or rows > sc.rows or slots < 1 or slots > 32) return error.BadExperts;
     if (l.experts < 1 or l.experts > 512 or l.codebook != .mul1 or l.gu_stride != 0) return error.BadExperts;
+    if (bits.lo < 2 or bits.hi > 8 or bits.lo > bits.hi) return error.BadExpertBits; // the kernels decode 1 to 4 bits
     const g_sk = try ex.plan(d, w, true);
     const d_sk = try ex.plan(w, d, false);
     const p = rows * slots;
@@ -145,4 +149,17 @@ test "experts: the item list sits past main's scratch and holds a 2,048-row call
     try std.testing.expect(at + 256 + maxItems(l, 2048, 8) * 12 <= bytes);
     // the kernels' column blocks: the rows kernel 128 columns, the wide one 64, of a rank's 1152 and the 4608 width
     try std.testing.expect(1152 % 128 == 0 and 4608 % 128 == 0);
+}
+
+test "experts: run refuses expert widths outside the kernels' 1 to 4 bits on the host" {
+    var l = std.mem.zeroes(ex.Layer);
+    l.experts = 384;
+    l.dims = 4608;
+    l.width = 1152;
+    l.codebook = .mul1;
+    const sc = try ex.scratch(0, l, 4, 8);
+    const caps: Caps = .{ .gate = 0, .up = 0 };
+    for ([_]Bits{ .{ .lo = 1, .hi = 8 }, .{ .lo = 2, .hi = 9 }, .{ .lo = 6, .hi = 4 } }) |b| {
+        try std.testing.expectError(error.BadExpertBits, run(undefined, undefined, undefined, l, caps, b, 0, 0, .f16, 0, 0, 4, 0, sc));
+    }
 }
