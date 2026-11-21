@@ -51,6 +51,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: with `--execution-witness`, native Qwen3.5-2B on CUDA (one rank, MLX affine 4-bit, text only) attests its path: once the server is ready it reads every checkpoint shard, after stamping the files before the load, and binds them with the kernel images, GPU, driver, family facts and resolved profile values; other engines still read `unsupported` (#2956, refs #2741). Thanks to @kotevcode.
 
 
+- Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#PR).
 
 - Server: every image takes a fixed share of the visual-token budget, `--vision-image-tokens / --vision-max-images` (1,024 tokens at the defaults), whatever the request's image count, so a turn that adds an image no longer re-sizes earlier ones and the prompt cache can resume from the first image; a lone image gets that share, not the whole budget, and a budget that leaves no share is refused by name, naming the image and both flags (#2717, fixes #2510). Thanks to @devopsfortunato.
 
