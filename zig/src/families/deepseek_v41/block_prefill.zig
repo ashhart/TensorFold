@@ -8,6 +8,7 @@ const calls = @import("block_calls.zig");
 const block = @import("block.zig");
 const config = @import("config.zig");
 const moe = @import("block_moe.zig");
+const glp = @import("block_glp.zig");
 const longpf = @import("longpf.zig");
 const gm2pf = @import("gm2pf.zig");
 const ced = @import("ced.zig");
@@ -292,6 +293,7 @@ pub const Seg = struct {
 
     pub fn run(s: *Seg, layers: []const u32, head: bool) !void {
         const e = s.e;
+        try glp.check(e, layers, s.part == .whole);
         const n = e.n;
         const D: i64 = e.cfg.hidden;
         if (s.part == .decoder and s.multi != null) {
@@ -324,9 +326,16 @@ pub const Seg = struct {
                 // entered (forward._layers): the first block's attention site is the stash's
             } else if (i == 0 or e.cfg.isEngram(L)) {
                 // the run's first block, or an Engram block: post alone, Engram, then a site collapsing with the pre
-                if (i > 0) try s.postOnly(try e.streams());
+                if (i > 0) {
+                    try s.postOnly(try e.streams());
+                    if (glp.steers(e, layers[i - 1])) try glp.fold(e, layers[i - 1], null);
+                }
                 if (e.cfg.isEngram(L)) try s.engram(L);
                 try s.site(L, "hc_attn", if (i == 0) .site1 else .site2);
+            } else if (glp.steers(e, layers[i - 1])) {
+                try s.postOnly(try e.streams());
+                try glp.fold(e, layers[i - 1], try glp.tap(e, L));
+                try s.site(L, "hc_attn", .site2);
             } else try s.site(L, "hc_attn", .boundary);
             // CED's encoder pass stops at the decoder's first layer once its site and compressor ran (`upto`)
             if (s.part == .encoder and i + 1 == layers.len) return s.encoderEnd(L);
@@ -336,6 +345,10 @@ pub const Seg = struct {
             if (!s.sent_attn) try e.glue("exchange", &.{ try e.buf("L.part", .{}, .bf16, &.{ n, D }), try s.recv("attn") });
             s.sent_attn = false;
             if (e.marks) |m| try m.append(e.a, e.out.items.len); // its MoE part
+            if (glp.steers(e, L)) {
+                s.pend = 0;
+                try glp.writer(e, L, try s.recv("attn"));
+            }
             try s.site(L, "hc_ffn", .boundary);
             try s.moeBlock(L);
             if (s.short and i + 1 < layers.len) try e.prefetchX(layers[i + 1]);

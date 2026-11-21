@@ -150,6 +150,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B: the DSpine drafter `tencent/Qwen3.8-27B-DSpine-b16`, whose current revision names its architecture `DSpineDraftModel`, loads again on Metal and CUDA instead of stopping with `UnsupportedDraftConfig`; any other name is still refused (#3959, fixes #3819).
 
+- GLP control vectors: ports #1835's opt-in additive Qwen3.8-27B/Metal path and extends it to the experimental standalone DeepSeek-V4.1 EXL3 CUDA pair with GLPv3 paired-site addition. DeepSeek's ordinary release guard stays unchanged; project mode and the fork-only Metal backend are not included. Startup and saved-state identity bind the exact vector file and strength; no trained vectors ship. `tf-glp-check` also refuses malformed arguments with usage and status 2 (#4273). Original format: Matt Suiche's `weightless` project (@msuiche); native foundation: #1835. See [scope, attribution and qualification limits](docs/control-vectors.md). Thanks to @BlivionIaG and @AIFlowML.
+
+- DeepSeek-V4.1 CUDA: whole-prefill usage receipts report the prompt rows actually restored from saved state instead of zero; rejected prompts clear the previous count. Model arithmetic and the saved-state identity are unchanged.
+
+- GLP provenance: Hugging Face snapshot repository/revision checks recognize native Windows paths as well as forward slashes, rather than treating a Windows snapshot as an unnamed local conversion (#4273).
+
+- Tests: attached benchmark manifest checks separate their streamed text deliveries without timed sleeps, so receipt qualification does not depend on runner scheduling (#4273).
+
 - Server: `/v1/responses` accepts one level of `namespace` tools: each function is offered to the model as `<namespace>__<name>`, and its calls come back with `name` and `namespace`, whole, streamed, stored and over WebSocket; requests without namespace tools are unchanged (#3610, fixes #3266). Thanks to @devopsfortunato.
 
 - CUDA: a long prompt shares its steps with running replies by default: a filling prompt with more than 32,768 rows left takes a decode share of 0.25 and the 512-row chunk hint, as `--decode-share 0.25` does, while a shorter prompt fills whole as before; `--decode-share` and `TENSORFOLD_PREFILL_SHARE` keep their meanings (#3486, refs #3397). Thanks to @bikepresentball.
@@ -176,6 +184,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
+
 
 
 ## 1.3.2

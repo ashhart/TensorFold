@@ -108,7 +108,12 @@ pub const Stages = struct {
         const e = lane.enc;
         const layer = m.weights.layers[index];
         const h: u32 = @intCast(m.config.hidden);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        // The direction for the block before this one rides along with the norm that adds that block's output.
+        if (if (s.pending != null) s.direction(index - 1) else null) |d| {
+            try m.kernels.normSteer(e, s.hidden, s.pending.?, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), d.buffer, d.alpha, h, s.rows);
+        } else {
+            try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        }
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
@@ -256,7 +261,12 @@ pub const Stages = struct {
         const h: u32 = @intCast(m.config.hidden);
         const t = s.rowsAt(m.config.layers - 1);
         const pending: ?Ref = if (s.pending) |p| t.at(p, h) else null;
-        try m.kernels.norm(e, t.at(s.hidden, h), pending, wts.ref(m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n);
+        // The last block's output is layer `layers - 1`, and the direction for it rides along with the norm.
+        if (if (s.pending != null) s.direction(m.config.layers - 1) else null) |d| {
+            try m.kernels.normSteer(e, t.at(s.hidden, h), pending.?, wts.ref(m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), d.buffer, d.alpha, h, t.n);
+        } else {
+            try m.kernels.norm(e, t.at(s.hidden, h), pending, wts.ref(m.weights.norm), f.get(.eps), t.dims, t.at(s.residual, h), t.at(f.get(.input), h), t.sums(f.get(.sums)), h, t.n);
+        }
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
@@ -284,6 +294,16 @@ pub const Stages = struct {
         }
         if (s.tail) |tail| try tail.encode(tail.ptr, e);
     }
+
+    /// The direction that steers the layer whose output just landed; none in force means nothing to add.
+    fn direction(s: *const Stages, layer: usize) ?Direction {
+        const plan = s.model.steer orelse return null;
+        const buffer = plan.dir(@intCast(layer)) orelse return null;
+        return .{ .buffer = buffer, .alpha = plan.alpha };
+    }
+
+    /// A direction on the device with the strength it is added at.
+    const Direction = struct { buffer: mtl.Buffer, alpha: f32 };
 };
 
 /// `e` is the caller's encoder, but seams reopen it: the final one is written back through the pointer, so commit it.

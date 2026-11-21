@@ -6,6 +6,8 @@ const calls = @import("block_calls.zig");
 const config = @import("config.zig");
 const knob_types = @import("knob_types.zig");
 const moe = @import("block_moe.zig");
+const glp = @import("block_glp.zig");
+const glp_plan = @import("glp_plan.zig");
 const block_prefetch = @import("block_prefetch.zig");
 const float_linear = @import("float_linear.zig");
 const partition = @import("partition.zig");
@@ -114,6 +116,8 @@ pub const Options = struct {
     index_budget: i64 = 256 << 20,
     /// a row-mode program (batch.zig, rowmode.zig): row blocks score the context bucket's keys; no streamed top-k
     rows: bool = false,
+    /// Immutable paired-site directions; absent and zero-strength loads have no active plan.
+    glp: ?*const glp_plan.Plan = null,
 
     /// TF_DSV41_MHC_DEFER_AT(_ROWS): a program of `rows` rows issues its deferred launches at the next exchange.
     pub fn holdsDeferred(o: Options, rows: i64) bool {
@@ -493,22 +497,29 @@ pub const Emitter = struct {
 
     /// Every launch of a decode window of `n` rows from `start` over `layers` (ascending), and the head when `head`.
     pub fn window(e: *Emitter, layers: []const u32, head: bool) !void {
+        try glp.check(e, layers, true);
         // the window's positions and streams (this rank's embedding rows, their all-sum: the first exchange)
         try e.glue("positions", &.{ try e.pos(), try e.buf("w.pos64", .{}, .i64, &.{e.n}), try e.buf("w.lo", .{}, .i32, &.{e.n}) });
         try e.glue("embed", &.{ try e.streams(), try e.buf("w.recv.moe", .{}, .bf16, &.{ e.o.world, e.n, e.cfg.hidden }) });
         for (layers, 0..) |L, i| {
             if (i > 0) e.begin = .layer;
             e.layer_ratio = e.cfg.compressRatio(L);
+            const steered = i > 0 and glp.steers(e, layers[i - 1]);
             if (e.cfg.isEngram(L)) {
-                // an Engram block after the first: the last exchange's post alone, Engram, then a site2 collapse
                 if (i > 0) try moe.postOnly(e, null);
+                if (steered) try glp.fold(e, layers[i - 1], null);
                 try moe.engram(e, L);
                 try moe.mhc(e, L, "hc_attn", if (i == 0) .site1 else .site2);
+            } else if (steered) {
+                try moe.postOnly(e, null);
+                try glp.fold(e, layers[i - 1], try glp.tap(e, L));
+                try moe.mhc(e, L, "hc_attn", .site2);
             } else try moe.mhc(e, L, "hc_attn", if (i == 0) .site1 else .boundary);
             try e.attention(L);
             try e.prefetchF(L);
             const D: i64 = e.cfg.hidden;
             try e.glue("exchange", &.{ try e.buf("L.part", .{}, .bf16, &.{ e.n, D }), try e.buf("w.recv.attn", .{}, .bf16, &.{ e.o.world, e.n, D }) });
+            if (glp.steers(e, L)) try glp.writer(e, L, try e.buf("w.recv.attn", .{}, .bf16, &.{ e.o.world, e.n, D }));
             try moe.mhc(e, L, "hc_ffn", .boundary);
             try moe.moe(e, L);
             if (i + 1 < layers.len) try e.prefetchX(layers[i + 1]);
@@ -523,7 +534,9 @@ pub const Emitter = struct {
                 try e.glue("trace", &.{ y, .{ .i = L } });
             }
         }
-        if (head) try moe.finish(e);
+        if (head) {
+            if (layers.len > 0 and glp.steers(e, layers[layers.len - 1])) try glp.finish(e, layers[layers.len - 1]) else try moe.finish(e);
+        }
     }
 };
 
