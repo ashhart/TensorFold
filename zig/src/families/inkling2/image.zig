@@ -72,19 +72,9 @@ pub fn over(c: u8, alpha: u8, bg: u32) u8 {
 
 /// picture.finish's transpose of 4-channel samples into `out`.
 fn orient4(s: picture.Samples, out: []u8) struct { w: usize, h: usize } {
-    const o = if (s.orientation >= 2 and s.orientation <= 8) s.orientation else 1;
-    const w, const h = if (o >= 5) .{ s.height, s.width } else .{ s.width, s.height };
+    const w, const h = picture.orientedSize(s);
     for (0..h) |y| for (0..w) |x| {
-        const sx, const sy = switch (o) {
-            2 => .{ s.width - 1 - x, y },
-            3 => .{ s.width - 1 - x, s.height - 1 - y },
-            4 => .{ x, s.height - 1 - y },
-            5 => .{ y, x },
-            6 => .{ y, s.height - 1 - x },
-            7 => .{ s.width - 1 - y, s.height - 1 - x },
-            8 => .{ s.width - 1 - y, x },
-            else => .{ x, y },
-        };
+        const sx, const sy = picture.orientedFrom(s, x, y);
         @memcpy(out[(y * w + x) * 4 ..][0..4], s.data[(sy * s.width + sx) * 4 ..][0..4]);
     };
     return .{ .w = w, .h = h };
@@ -239,4 +229,19 @@ test "patches: padding reads -1 on the 0-255 scale, the patch rows reorder by 20
     defer a.free(rows);
     patchRows(p, rows);
     try std.testing.expectEqual(b16.bits(1), rows[4 * patch_width]); // token 1's first patch, pixel (0, 0)
+}
+
+test "the alpha turns with the colours: orient4 places pixels as picture.finish does" {
+    const a = std.testing.allocator;
+    var px: [3 * 2 * 4]u8 = undefined;
+    for (&px, 0..) |*v, i| v.* = if (i % 4 == 3) 255 else @intCast(i);
+    for (0..10) |o| {
+        const s: picture.Samples = .{ .width = 3, .height = 2, .channels = 4, .data = &px, .orientation = @intCast(o) };
+        var want = try picture.finish(a, s);
+        defer want.deinit(a);
+        var got: [px.len]u8 = undefined;
+        const size = orient4(s, &got);
+        try std.testing.expectEqual(want.width, size.w);
+        for (0..size.w * size.h) |i| try std.testing.expectEqualSlices(u8, want.pixels[i * 3 ..][0..3], got[i * 4 ..][0..3]);
+    }
 }

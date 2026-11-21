@@ -116,23 +116,31 @@ pub fn decoderProblem(err: anyerror) ?[]const u8 {
     };
 }
 
+/// The width and height of `s` once oriented: orientations 5-8 swap them.
+pub fn orientedSize(s: Samples) [2]usize {
+    return if (s.orientation >= 5 and s.orientation <= 8) .{ s.height, s.width } else .{ s.width, s.height };
+}
+
+/// The stored (column, row) the oriented pixel (x, y) reads; an orientation outside 2-8 keeps the picture as stored.
+pub fn orientedFrom(s: Samples, x: usize, y: usize) [2]usize {
+    return switch (s.orientation) {
+        2 => .{ s.width - 1 - x, y },
+        3 => .{ s.width - 1 - x, s.height - 1 - y },
+        4 => .{ x, s.height - 1 - y },
+        5 => .{ y, x },
+        6 => .{ y, s.height - 1 - x },
+        7 => .{ s.width - 1 - y, s.height - 1 - x },
+        8 => .{ s.width - 1 - y, x },
+        else => .{ x, y },
+    };
+}
+
 /// The transpose for an orientation (2-8; any other value keeps the picture as stored), then alpha over white.
 pub fn finish(a: Allocator, s: Samples) Allocator.Error!Rgb {
-    const o = if (s.orientation >= 2 and s.orientation <= 8) s.orientation else 1;
-    const turned = o >= 5;
-    const w, const h = if (turned) .{ s.height, s.width } else .{ s.width, s.height };
+    const w, const h = orientedSize(s);
     const out = try a.alloc(u8, w * h * 3);
     for (0..h) |y| for (0..w) |x| {
-        const sx, const sy = switch (o) {
-            2 => .{ s.width - 1 - x, y },
-            3 => .{ s.width - 1 - x, s.height - 1 - y },
-            4 => .{ x, s.height - 1 - y },
-            5 => .{ y, x },
-            6 => .{ y, s.height - 1 - x },
-            7 => .{ s.width - 1 - y, s.height - 1 - x },
-            8 => .{ s.width - 1 - y, x },
-            else => .{ x, y },
-        };
+        const sx, const sy = orientedFrom(s, x, y);
         const px = s.data[(sy * s.width + sx) * s.channels ..][0..s.channels];
         const alpha: u8 = if (s.channels == 4) px[3] else 255;
         for (out[(y * w + x) * 3 ..][0..3], px[0..3]) |*c, v| c.* = overWhite(v, alpha);
