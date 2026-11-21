@@ -35,12 +35,10 @@ def bf16_float(r: np.ndarray) -> np.ndarray:
 
 
 def quantize(w: np.ndarray, bits: int):
-    """w [rows, K] float32 of bf16 values: packed uint32 [rows, K*bits/32], scales and biases bf16 bits, codes.
-
-    A numpy port of quantizeGroup (zig/src/families/gemma4/dflash_weights.zig). Its two departures from that
-    function, rint and codes from the unrounded scale and bias, were chosen by comparing variants with
-    mx.quantize's outputs (--check-mlx), not taken from MLX's code.
-    """
+    """w [rows, K] float32 of bf16 values: packed uint32 [rows, K*bits/32], scales and biases bf16 bits, codes."""
+    # A numpy port of quantizeGroup (zig/src/families/gemma4/dflash_weights.zig). Its two departures from that
+    # function, rint and codes from the unrounded scale and bias, were chosen by comparing variants with
+    # mx.quantize's outputs (--check-mlx), not taken from MLX's code.
     rows, k = w.shape
     g = w.reshape(rows, k // GROUP, GROUP)
     bins = np.float32((1 << bits) - 1)
