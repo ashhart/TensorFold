@@ -227,11 +227,13 @@ pub const Suite = struct {
         if (!s.device.tensorUnits()) return;
         for (std.enums.values(Which)) |w| {
             if (only) |o| if (std.mem.indexOf(u8, spec(w).name, o) == null) continue;
+            try s.list.ensureUnusedCapacity(s.a, 1);
             const x = try s.a.create(H3);
             errdefer s.a.destroy(x);
             x.* = try H3.init(s.a, s.device, s.queue, w);
-            try s.list.append(s.a, x);
+            errdefer x.deinit();
             try s.kernels.append(s.a, x.kernel());
+            s.list.appendAssumeCapacity(x);
         }
     }
 

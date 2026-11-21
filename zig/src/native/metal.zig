@@ -310,12 +310,10 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const or_talks: []const u8 = if (dense and std.mem.eql(u8, t, "qwen3_5")) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
-
 /// Whether `dir` opens on the Qwen3.8-27B-class engine: the 27B-class qwen3_5 checkpoints, and Qwen3.5-MoE.
 fn ownsQwen27(a: Allocator, io: std.Io, t: []const u8, dir: []const u8) bool {
     return (std.mem.eql(u8, t, "qwen3_5") and @import("qwen27_engine.zig").owns(a, io, dir)) or std.mem.eql(u8, t, "qwen3_5_moe");
 }
-
 /// The context a Qwen3.8-27B-class start serves (--context, else 32,768); null with `problem` set past 1 to 262,144.
 fn qwen27Context(a: Allocator, context: ?i64, problem: *[]const u8) !?u32 {
     const n = context orelse 32768;
