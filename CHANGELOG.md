@@ -4,11 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - Docs: the optimization ledger adds rows 34 to 37 (FP8 KV prefill waits, Qwen normalization and head, text metadata uploads and greedy readback), each `failed` on one GB10 against the 3% served-speed bar with equal tokens, and the SM120 follow-up as inconclusive (#4054, fixes #3741). Thanks to @devopsfortunato.
 
 - CUDA: with `TF_ROCE=1`, the RoCE all-gather pairs each peer's stripes with the HCA on that peer's IPv4 /24 (the rule `fabric/tp` uses, now one copy for both) when every rank's plan holds, so three GB10s cabled as a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL; a switch or two ranks keep the same-numbered pairs, and a `TF_ROCE_HCA` of more than two names is refused by name instead of cut to two (#3518, fixes #3411). Thanks to @ultradaoto.
-
-
 
 - DeepSeek-V4.1 on CUDA: opt-in `TF_DSV41_COPY_DRAFTER=1` turns on the lookup planner with a copy drafter that ranks matches within a length band by how much continuation they offer, offers 8 drafts and widens to 15 after a round that keeps every copy, and offers a copy only when it is expected to keep at least as many tokens as the other drafter; it is refused when `TF_DSV41_LOOKUP` is off or blank, and unset leaves `TF_DSV41_LOOKUP_PLAN=1` as it was (#2638). Thanks to @christopherowen.
 
@@ -16,21 +16,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tokenizer: a request gap with no normalized added spelling reuses the tokenizer's memo instead of re-encoding cold, so long multi-message requests on tokenizers with normalized added tokens (DeepSeek-style ones) cost less per call; gaps carrying a spelling keep the mask and every id is unchanged (#2844).
 
-
-
 - DeepSeek V4.1 on Metal selects DSpark drafts over the whole vocabulary on the GPU with an adaptive block size (#3405).
 
 - Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
-
-
 
 - GLM on Metal: DFlash2 decoding skips inactive draft rows and their tap capture, and the tap mean writes into its ring in place, cutting sampling overhead without changing verified tokens (#4257). Thanks to @gilby.
 
 - MOSS-Image on CUDA: the checkpoint's Qwen3.5 prompt encoder and VAE decoder run beside the transformer, so the native server serves pictures through `POST /v1/images/generations`, the same request twice giving the same bytes (#2281, part of #1573). Thanks to @devopsfortunato.
 
 - MOSS-Image and Step-5: the vision encoders take their RoPE frequencies from the shared exact helper; MOSS-Image's bf16 cos and sin tables change only from row 565, so shorter prompts read the same tables, Step-5's bf16 tables are unchanged, and `zig build test-moss-image-rotary-host` checks the MOSS-Image tables without a device (#1998, part of #1852).
-
-
 
 - Drama 3 on CUDA and Metal: the codec's weight map, decoder stage plan and decode and encode schedules live once in `codec_net.zig`, and each backend binds only its own kernels; a new `check-drama-codec-bindings` build step, run by `zig build test`, compiles both bindings on any host, and the waveform and codes are byte-identical to before on the author's CUDA and Metal runs (#2893, refs #2118). Thanks to @jschmied.
 
@@ -40,13 +34,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: with `--execution-witness`, native Qwen3.5-2B on CUDA (one rank, MLX affine 4-bit, text only) attests its path: once the server is ready it reads every checkpoint shard, after stamping the files before the load, and binds them with the kernel images, GPU, driver, family facts and resolved profile values; other engines still read `unsupported` (#2956, refs #2741). Thanks to @kotevcode.
 
-
-
 - Server: every image takes a fixed share of the visual-token budget, `--vision-image-tokens / --vision-max-images` (1,024 tokens at the defaults), whatever the request's image count, so a turn that adds an image no longer re-sizes earlier ones and the prompt cache can resume from the first image; a lone image gets that share, not the whole budget, and a budget that leaves no share is refused by name, naming the image and both flags (#2717, fixes #2510). Thanks to @devopsfortunato.
 
 - OCR: GLM-OCR on native HIP serves `POST /v1/ocr`, returning normalized page Markdown with pipe or spanned-HTML tables and `$`/`$$` math, `blocks: []` because it has no geometry, and named refusals for header/footer extraction (#2572). Thanks to @laudney.
-
-
 
 - MiniMax-H3-Image on Metal: `tf-h3-image-encoder` turns an edit's reference pictures into their clean rows with the VAE's encoder in fp32 on any Apple GPU, with a selftest of each kernel against a float64 host reference; the reference rules (sizes, crops, grids, encoder layers, clean and anchor rows) run on the host (#2778, on #2775).
 
@@ -113,7 +103,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2-MoE on Metal: prefill runs one chunk a call with decode rounds between chunks, so a new prompt no longer stalls other streams' replies; the backend declares `prefill_step` and `cancel_prefill` beside `reports_fill` (#3058).
 
 - Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
-- Torch .pth checkpoints: a tensor whose element count overflows u64 is refused as a bad archive instead of panicking or wrapping the count.
 
 - CI: the Zig format and TensorFold Web workflows cancel a pull request's older run when it gets a newer push, so superseded runs no longer queue; main pushes all run (#3850).
 
