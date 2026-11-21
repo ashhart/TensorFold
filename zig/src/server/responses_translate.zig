@@ -207,6 +207,8 @@ pub fn messagesMode(cx: *Cx, items: []const Value, strict: bool) errors.Refused!
             try out.append(a, m);
         } else if (std.mem.eql(u8, k, "function_call") or std.mem.eql(u8, k, "custom_tool_call")) {
             const custom = std.mem.eql(u8, k, "custom_tool_call");
+            if (!strict and !custom and (item.strField("call_id") == null or item.strField("name") == null))
+                return cx.refuse("a function_call item needs a call_id and a name");
             const call_id = item.strField("call_id") orelse return cx.refuse("a tool call item needs a call_id");
             const call_name = item.strField("name") orelse return cx.refuse("a tool call item needs a name");
             const supplied = if (custom) item.get("input") else item.get("arguments");
@@ -441,7 +443,7 @@ test "background Responses: pending reasoning stays ahead of following user and 
     const items = (try json.parse(cx.a,
         \\[{"type":"reasoning","content":[{"text":"first"}]},{"role":"user","content":"next"},{"type":"reasoning","content":[{"text":"second"}]},{"type":"function_call_output","call_id":"call_1","output":"done"}]
     )).ok.array;
-    const got = try messages(&cx, items);
+    const got = try messagesMode(&cx, items, true);
     try std.testing.expectEqual(@as(usize, 4), got.len);
     for ([_][]const u8{ "assistant", "user", "assistant", "tool" }, got) |role, m| try std.testing.expectEqualStrings(role, m.strField("role").?);
     try std.testing.expectEqualStrings("first", got[0].strField("reasoning_content").?);

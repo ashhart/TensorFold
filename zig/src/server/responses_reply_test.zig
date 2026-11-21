@@ -13,6 +13,7 @@ const blank_key: ids.Key = key: {
 };
 
 fn blankReply(a: std.mem.Allocator, cx: *errors.Cx, srv: *Server, streaming: bool, sink: @import("responses_sink.zig").Sink, chat: json.Value) !responses.Reply {
+    srv.io = t.io;
     return .{ .srv = srv, .a = a, .sink = sink, .base = try json.newObject(a), .streaming = streaming, .strict = true, .keep = false, .added = &.{}, .cx = cx, .owner = null, .call_ids = .{ .key = &blank_key, .body = chat } };
 }
 

@@ -53,6 +53,8 @@ pub fn toolsMode(cx: *Cx, raw: ?Value, strict: bool) errors.Refused!?[]Value {
     var out: std.ArrayList(Value) = .empty;
     for (value.array, 0..) |tool, i| {
         if (tool != .object) return cx.fail(.request, "tools[{d}] must be an object", .{i});
+        if (!strict and !std.mem.eql(u8, kind(tool), "function") and !std.mem.eql(u8, kind(tool), "custom"))
+            return cx.fail(.request, "tools of type {s} are not supported: this server runs function tools only", .{try pyrepr.repr(cx.a, kindOf(tool))});
         const tool_name = tool.strField("name") orelse "";
         if (tool_name.len == 0) return cx.refuse("a function or custom tool needs a name");
         if (strict) if (tool.get("defer_loading")) |d| if (d != .bool) return cx.refuse("defer_loading must be a boolean");

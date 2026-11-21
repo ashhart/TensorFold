@@ -102,12 +102,12 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
-    const strict = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses strict", "Responses custom", "Responses deferred", "Responses foreground streamed failures", "Responses continuation flushes" } }));
+    const strict = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses strict", "Responses custom", "Responses deferred", "Responses foreground streamed failures", "Responses continuation flushes", "Responses interleaved" } }));
     strict.has_side_effects = true;
     b.step("test-responses-strict-host", "Responses default compatibility, explicit strict policy and per-request custom tools").dependOn(&strict.step);
-    const complete_server = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Responses", "responses", "workspace", "tool_", "Kimi", "kimi_" } }));
+    const complete_server = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "responses_background", "responses_durable", "responses_event_log", "responses_render", "responses_reply", "responses_tools", "responses_translate", "responses_strict", "responses_namespace", "tool_parse.", "tool_specs.", "tool_custom.", "tool_json_cut.", "tool_stream.", "tool_stream_test.", "tool_stream_scale_test.", "tool_streaming.", "tool_required_test.", "kimi_stream_test.", "kimi_reply.", "workspace_test.", "workspace_read.", "workspace_manifest" } }));
     complete_server.has_side_effects = true;
-    b.step("test-responses-server-host", "Responses, tool stream and workspace CPU contracts with the actual server modules").dependOn(&complete_server.step);
+    b.step("test-responses-server-host", "Responses, tool parsers and workspace contracts through the actual server modules").dependOn(&complete_server.step);
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
     const media_jobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"media jobs:"} }));
