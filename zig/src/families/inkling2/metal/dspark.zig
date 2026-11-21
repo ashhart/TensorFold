@@ -185,7 +185,7 @@ pub const Drafter = struct {
         try failed(cb, "absorb");
     }
 
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const state.Lane, pending: u32, anchor: u64) void {
+    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const state.Lane, pending: u32, anchor: u64, depth: u32) void {
         const s = &d.scratch;
         s.ids.slice(u32, 1)[0] = pending;
         glue.embedNorm(&d.target.glue, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.x, 0), 1);
@@ -206,8 +206,8 @@ pub const Drafter = struct {
             const next_norm = if (i + 1 < d.weights.weights.layers.len) d.weights.weights.layers[i + 1].input_norm else d.weights.weights.norm;
             k.residualNorm(&d.pipelines, e, at(s.y, 0), at(s.next_resid, 0), r(next_norm), at(s.resid, 0), at(s.x, 0), 8, false);
         }
-        k.base(&d.pipelines, e, r(d.target.weights.unembed), at(s.x, state.hidden * 2), at(s.base, 0), 7, state.vocabulary);
-        k.kappa(&d.pipelines, e, at(s.x, state.hidden * 2), at(lane.newest, 0), r(d.weights.weights.rnn), r(d.weights.weights.rnn_bias), at(s.kappa, 0), 7);
+        k.base(&d.pipelines, e, r(d.target.weights.unembed), at(s.x, state.hidden * 2), at(s.base, 0), depth, state.vocabulary);
+        k.kappa(&d.pipelines, e, at(s.x, state.hidden * 2), at(lane.newest, 0), r(d.weights.weights.rnn), r(d.weights.weights.rnn_bias), at(s.kappa, 0), depth);
     }
 
     fn recurrent(d: *Drafter, e: mtl.ComputeEncoder, step: usize, previous: u32, second_bank: bool) void {
@@ -231,7 +231,7 @@ pub const Drafter = struct {
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            d.encodeBlock(e, lane, item.pending, anchor);
+            d.encodeBlock(e, lane, item.pending, anchor, @intCast(depth));
             d.recurrent(e, 0, item.pending, false);
             e.end();
             cb.commit();
