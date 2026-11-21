@@ -436,7 +436,7 @@ pub const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
-            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions } else null,
+            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions, .opts = l.opts } else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
             .reasoning_recovered = recovered,
