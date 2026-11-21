@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
+
 - CUDA: at `--tp 2` a Flash Next rank now waits for its peer to finish loading before the first collective, up to 10 minutes instead of failing at the collective's 30 s bound; a peer that fails or closes its link ends the wait with `RankDisconnected` (#2972, fixes #2970). Thanks to @swbiggart.
 
 - CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
