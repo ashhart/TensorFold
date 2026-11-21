@@ -1,8 +1,4 @@
-// Inkling 2 Mini native routed expert dots. Each SIMDgroup handles four adjacent weight rows of one (token, route)
-// pair. Lanes own successive K blocks, folding their FP32 partials in a fixed tree regardless of batch size.
-//
-// Decode packed weights through BF16 before multiplying by BF16 activations. The FP32 dot rounds to BF16 once.
-// Packed gate/up rows are interleaved; SwiGLU evaluates in FP32 and rounds to BF16 for the down projection.
+// Each SIMDgroup decodes four adjacent packed weight rows to BF16 and reduces K in a fixed FP32 tree.
 #define I2X_DOT_THREADS 256u
 #define I2X_COMBINE_THREADS 256u
 
@@ -110,8 +106,7 @@ inline uint i2x_route_order(const device uint* ids, uint topk, uint experts) {
   uint order = 0xffffffffu;
   uint remaining = (1u << topk) - 1u;
   uint shift = 0u;
-  // Eager adds experts in ascending id, with ties in route-slot order.
-  // One nibble per sorted slot (topk <= 8); 0xf is inactive.
+  // Pack active slots in ascending expert order with stable ties; 0xf marks the end.
   while (remaining != 0u) {
     uint expert = experts;
     uint slot = 0u;

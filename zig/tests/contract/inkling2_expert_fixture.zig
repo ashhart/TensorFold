@@ -37,8 +37,7 @@ pub fn support(f: Format, fill: u.g.Fill, gate_up: bool, index: usize, expert: u
             out[0] = .{ .at = 0, .code = one, .scale = scale_one };
             return out[0..1];
         }
-        // All four activation columns are identical. The large terms cancel in FP32 without
-        // rounding; adding either small term to either large term loses it in FP16 or BF16.
+        // Large terms cancel in FP32; FP16 and BF16 lose a small term before cancellation.
         const b = f.block();
         const large: u8 = if (nv) 7 else one;
         const big_scale: u8 = if (nv) 0x78 else 137;
@@ -74,8 +73,7 @@ pub fn support(f: Format, fill: u.g.Fill, gate_up: bool, index: usize, expert: u
         return out[0..1];
     }
     if (nv and expert == 3 and j == 0) {
-        // Down weight 26/21 rounds to 79/64; with the unit-projection SwiGLU those
-        // two weights land on opposite sides of a BF16 midpoint in the down output.
+        // Rounding 26/21 to 79/64 crosses a BF16 midpoint in the down output.
         out[0] = .{ .at = 0, .code = if (gate_up) 7 else 2, .scale = if (gate_up) 0x7e else 0x7d };
         return out[0..1];
     }
@@ -176,8 +174,7 @@ pub fn rows(f: Format, shape: u.c.Shape, fill: u.g.Fill, seed: u64, x: []u16, id
         .random => {
             x[0] = u.word(1);
             for (0..topk) |i| inactive(ids, weights, i);
-            // Column zero: expert 0 and 1 cancel exactly before adding 2's small result.
-            // Route-slot order instead loses the small result to FP32 rounding.
+            // Expert order cancels the large terms first; slot order loses expert 2's result.
             ids[0..3].* = .{ 2, 0, 1 };
             weights[0..3].* = .{ 1, 0x1p27, 0x1p27 };
             if (shape.rows > 1) {

@@ -1,5 +1,4 @@
-//! Output-only Metal contracts for the original Mini packed experts, through the model's Store.
-//! The independent scalar reference models the BF16 nodes; split dispatches check the same bytes at offset views.
+//! Packed expert output contracts: independent BF16 rounding and exact split-dispatch bytes.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -137,8 +136,7 @@ const Probe = struct {
             return mid[t.at].mul(math.weight(p.format, t.code, t.scale, outer)).bf16();
         }
 
-        // Stress uses four exact products, in distinct K blocks. A sparse sequential FP64
-        // dot is independent of the launch schedule; the reduced-precision replays are not.
+        // Four exact products test the reduced-precision replays without tying FP64 to the launch schedule.
         var terms: [4]f64 = undefined;
         for (taps, &terms) |t, *v| v.* = mid[t.at].lo * math.weight(p.format, t.code, t.scale, outer);
         const dot = if (acc == .none)

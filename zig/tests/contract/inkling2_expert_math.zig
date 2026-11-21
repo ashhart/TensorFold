@@ -86,8 +86,7 @@ pub fn swiglu(gate: f64, up: f64, gate_cap: f64, up_cap: f64) f64 {
 pub fn activation(gate: f64, up: f64, gate_cap: f64, up_cap: f64) Range {
     const v = swiglu(gate, up, gate_cap, up_cap);
     if (!std.math.isFinite(v)) return .point(v);
-    // The sparse fixture bounds the FP32 inputs; allow transcendental and elementary op rounding
-    // before the BF16 store, not a BF16 ULP after propagation through a potentially cancelling sum.
+    // Bound FP32 elementary and transcendental rounding before the BF16 store.
     const err = @abs(v) * (64 * 0x1p-24);
     return (Range{ .lo = v - err, .hi = v + err }).bf16();
 }

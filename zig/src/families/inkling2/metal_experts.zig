@@ -1,5 +1,4 @@
-//! Inkling 2 Mini routed experts: original packed weights decoded to BF16 in registers.
-//! Only the NVFP4 per-expert factors and BF16 intermediates are owned by the Store.
+//! Decode borrowed packed Mini expert weights in registers; own only factors and BF16 scratch.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -232,8 +231,7 @@ pub const Store = struct {
         e.dispatchGroups(mtl.Size.of(std.math.divCeil(u32, out_width, if (gate_up) dot_rows / 2 else dot_rows) catch unreachable, pairs, 1), mtl.Size.of(threads, 1, 1));
     }
 
-    /// BF16 x/out [rows, hidden], u32 ids and FP32 weights [rows, topk]. IDs >= experts are inactive slots.
-    /// The serial caller orders producers before this operation and consumers after it; no submission or host sync.
+    /// Encode BF16 projections for active IDs, weighted by FP32 route scores, without submitting.
     pub fn encode(s: *const Store, e: mtl.ComputeEncoder, physical_layer: u32, x: View, ids: View, weights: View, out: View, rows: u32) !void {
         if (rows == 0 or rows > s.max_rows or physical_layer >= s.layers.len) return error.ExpertDispatch;
         const pairs = rows * s.topk;
