@@ -13,6 +13,7 @@ test {
     _ = rows;
     _ = State;
     _ = @import("cpu_gguf.zig");
+    _ = @import("cpu_gguf_refusal_test.zig");
     _ = @import("cpu_gguf_views.zig");
     _ = @import("cpu_gguf_values.zig");
     _ = @import("cpu_gguf_rows.zig");
