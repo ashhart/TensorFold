@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MOSS-Image and Step-5: the vision encoders take their RoPE frequencies from the shared exact helper; MOSS-Image's bf16 cos and sin tables change only from row 565, so shorter prompts read the same tables, Step-5's bf16 tables are unchanged, and `zig build test-moss-image-rotary-host` checks the MOSS-Image tables without a device (#1998, part of #1852).
+
 - Drama 3 on CUDA and Metal: the codec's weight map, decoder stage plan and decode and encode schedules live once in `codec_net.zig`, and each backend binds only its own kernels; a new `check-drama-codec-bindings` build step, run by `zig build test`, compiles both bindings on any host, and the waveform and codes are byte-identical to before on the author's CUDA and Metal runs (#2893, refs #2118). Thanks to @jschmied.
 
 - Nemotron and LFM2 MoE on CUDA: the prompt cache keeps a state at each message start by default, so an agent's next request resumes from where its last message began instead of reading the conversation again, within the existing prompt-cache budget and slots (#3696, part of #3617).
