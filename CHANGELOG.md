@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
+
 
 
 ## 1.3.3
