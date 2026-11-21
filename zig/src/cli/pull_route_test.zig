@@ -93,6 +93,16 @@ test "pull proxy: NO_PROXY matches exact hosts, suffixes, * and host:port" {
     try std.testing.expect(route.bypass("*", "huggingface.co", 443));
     try std.testing.expect(!route.bypass("", "huggingface.co", 443));
 }
+test "pull proxy: NO_PROXY ignores one DNS root dot on candidates and entries" {
+    const list = "ExAmPle.OrG., .Internal.:443,*.Corp.:8443,node.:9000";
+    try std.testing.expect(route.bypass(list, "EXAMPLE.ORG.", 80));
+    try std.testing.expect(route.bypass(list, "cdn.Example.Org.", 80));
+    try std.testing.expect(route.bypass(list, "branch.internal.", 443));
+    try std.testing.expect(route.bypass(list, "edge.corp.", 8443));
+    try std.testing.expect(route.bypass(list, "NODE.", 9000));
+    try std.testing.expect(!route.bypass(list, "node.", 9001));
+    try std.testing.expect(!route.bypass(list, "example.org..", 80));
+}
 
 test "pull proxy: the timeouts read their own variables" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
