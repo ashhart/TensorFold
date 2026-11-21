@@ -6,6 +6,17 @@ const cuda = @import("cuda");
 pub const chunk = 1024;
 /// Query rows x query heads of one key head a block attention call holds at most (dspark.cu's kMaxQ).
 pub const max_q = 48;
+/// The Markov rank the head's kernels hold (dspark.cu's 256-wide fold rows and rnn's shared rows).
+pub const rank = 256;
+/// The attention head width dspark.cu's kD fixes.
+pub const head_dim = 128;
+/// Rows a block drafts at most (dspark.cu's kMaxRows).
+pub const max_rows = 8;
+
+/// A draft head these kernels would run wrong is refused: any other Markov rank or head_dim, or a longer block.
+pub fn checkHead(markov_rank: usize, dim: usize, block: usize) !void {
+    if (markov_rank != rank or dim != head_dim or block == 0 or block > max_rows) return error.Inkling2DraftShape;
+}
 
 /// dspark.cu's QkArgs, field for field.
 pub const QkArgs = extern struct {
@@ -112,6 +123,7 @@ pub fn addNorm(k: *const Kernels, s: cuda.Stream, resid: u64, parts: u64, nparts
 }
 
 pub fn qk(k: *const Kernels, s: cuda.Stream, q: QkArgs, rows: usize) !void {
+    if (q.hq < 0 or q.hk <= 0 or q.ring <= 0 or q.ld < (q.hq + 2 * q.hk) * head_dim) return error.Inkling2DraftShape;
     var a: cuda.Args = .{};
     a.add(q);
     try go(k.qk, s, .{ .x = @intCast(rows), .y = @intCast(q.hq + q.hk) }, 64, &a);
@@ -152,6 +164,7 @@ pub fn silu(k: *const Kernels, s: cuda.Stream, gu: u64, out: u64, rows: usize, i
 
 /// The Markov head's context rows: fp32 [rows][3r] from the hidden rows and f_rnn.
 pub fn ctx(k: *const Kernels, s: cuda.Stream, hidden: u64, frnn: u64, w: u64, bias: u64, out: u64, rows: usize, c: usize, r: usize) !void {
+    if (rows > max_rows or r != rank) return error.Inkling2DraftShape;
     var a: cuda.Args = .{};
     for ([_]u64{ hidden, frnn, w, bias, out }) |v| a.add(v);
     for ([_]i32{ int(rows), int(c), int(r) }) |v| a.add(v);
@@ -160,6 +173,7 @@ pub fn ctx(k: *const Kernels, s: cuda.Stream, hidden: u64, frnn: u64, w: u64, bi
 
 /// One recurrence step from walk[j]: the state in place and the step's latent.
 pub fn rnn(k: *const Kernels, s: cuda.Stream, cx: u64, w: u64, w1: u64, walk: u64, j: usize, state: u64, latent: u64, r: usize, c: usize) !void {
+    if (r != rank) return error.Inkling2DraftShape;
     var a: cuda.Args = .{};
     for ([_]u64{ cx, w, w1, walk }) |v| a.add(v);
     a.add(int(j));
@@ -194,4 +208,20 @@ test "dspark ops: argument structs keep dspark.cu's layouts; chunks by absolute 
     try std.testing.expectEqual(@as(usize, 5 * 8 + 8 * 4), @sizeOf(AttnArgs));
     try std.testing.expectEqual(@as(usize, 1), chunks(0, 1023));
     try std.testing.expectEqual(@as(usize, 2), chunks(1000, 1030));
+}
+
+test "dspark ops: a head or a block the kernels would run wrong is refused before a launch" {
+    const no = error.Inkling2DraftShape;
+    try checkHead(256, 128, 8);
+    try std.testing.expectError(no, checkHead(8, 128, 8)); // tiny-random's rank
+    try std.testing.expectError(no, checkHead(512, 128, 8));
+    try std.testing.expectError(no, checkHead(256, 64, 8));
+    try std.testing.expectError(no, checkHead(256, 128, 9));
+    const k: Kernels = undefined;
+    const s: cuda.Stream = undefined;
+    try std.testing.expectError(no, rnn(&k, s, 0, 0, 0, 0, 0, 0, 0, 512, 4608));
+    try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 8, 4608, 128));
+    try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 9, 4608, 256));
+    const q: QkArgs = .{ .x = 0, .qw = 0, .kw = 0, .q = 0, .kc = 0, .vc = 0, .ld = 32 * 64, .hq = 24, .hk = 4, .ring = 4096, .pos0 = 0, .eps = 1e-6, .theta = 1e6 };
+    try std.testing.expectError(no, qk(&k, s, q, 8)); // 64-wide heads
 }
