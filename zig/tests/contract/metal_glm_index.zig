@@ -30,9 +30,11 @@ pub const Case = struct {
     new: mtl.Pipeline,
     old: mtl.Pipeline,
 
-    /// The loader's library as it compiles it (nax.h inlined for this GPU), and main's the same way.
+    /// The loader's library as it compiles it (pre-M5 define, nax.h inlined for this GPU), and main's the same way.
     pub fn text(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
-        return tf.frags.source(device, a, sources.glm_index_nax);
+        const raw = try std.mem.concat(a, u8, &.{ m3Def(!device.tensorUnits()), sources.glm_index_nax });
+        defer a.free(raw);
+        return tf.frags.source(device, a, raw);
     }
 
     pub fn init(s: *bits.Suite, control: bool) !Case {
@@ -107,5 +109,12 @@ pub fn collect(s: *bits.Suite, only: ?[]const u8) !void {
 /// Gate 5's registration `glm launch index <function>`: the loader's index library here, and as a pre-M5 GPU builds it.
 pub const prefix = "glm launch index ";
 pub fn limitsText(a: std.mem.Allocator, device: mtl.Device, _: []const u8) !bits.Texts {
-    return .{ .here = try Case.text(a, device), .pre_m5 = try tf.frags.precision.source(a, false, sources.glm_index_nax, sources.nax, false) };
+    const raw = try std.mem.concat(a, u8, &.{ m3Def(true), sources.glm_index_nax });
+    defer a.free(raw);
+    return .{ .here = try Case.text(a, device), .pre_m5 = try tf.frags.precision.source(a, false, raw, sources.nax, false) };
+}
+
+/// kernels.zig's pre-M5 dispatch define, put before glm_index_nax.metal on a GPU without tensor units.
+fn m3Def(m3_fast: bool) []const u8 {
+    return if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
 }
