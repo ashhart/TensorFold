@@ -1,0 +1,1175 @@
+diff --git a/tools/zig/drama3_limits_gate.sh b/tools/zig/drama3_limits_gate.sh
+deleted file mode 100755
+index 744879ec1..000000000
+--- a/tools/zig/drama3_limits_gate.sh
++++ /dev/null
+@@ -1,7 +0,0 @@
+-#!/bin/sh
+-# drama3_limits_gate.sh STATUS LOG: fails unless d3_router_compact was audited on all five SMs; stale records pass.
+-status=$1 log=$2
+-grep -Eq '^(FAIL|MISSED) limits' "$log" && exit 1
+-[ "$(grep -c '^PASS limits sm_[0-9]* drama3 d3_router_compact: ' "$log")" -eq 5 ] || exit 1
+-[ "$status" -eq 0 ] && exit 0
+-grep -qx "FAIL kernel-contract-limits: $(grep -c '^PASS limits .*(record stale)$' "$log") problems" "$log"
+diff --git a/tools/zig/drama3_limits_gate_test.py b/tools/zig/drama3_limits_gate_test.py
+deleted file mode 100644
+index 6e85e9bc9..000000000
+--- a/tools/zig/drama3_limits_gate_test.py
++++ /dev/null
+@@ -1,73 +0,0 @@
+-"""drama3_limits_gate.sh: stale records pass; a failed launch, missing image or unaudited router fails."""
+-import re
+-import subprocess
+-import tempfile
+-import unittest
+-from pathlib import Path
+-
+-ROOT = Path(__file__).resolve().parents[2]
+-GATE = ROOT / "tools/zig/drama3_limits_gate.sh"
+-# a GB10 audit of the real registry (nvcc 13.0): 877 stale records, no failed launch or missed control
+-REAL = (ROOT / "docs/receipts/glm-fp4local-80517fc3/head-797dd2e1/single/limits.log").read_text().splitlines()
+-SMS = (80, 86, 89, 120, 121)
+-STALE = "PASS limits sm_{sm} {name}: 30 registers, 0 static shared bytes, bound 128 (record stale)"
+-ROUTER = "drama3 d3_router_compact"
+-
+-
+-def pending_tile_launches() -> list[str]:
+-    """The K32 tile launches the registry holds unmeasured, stale under every nvcc."""
+-    source = (ROOT / "zig/src/core/contract/nvfp4_tile_pending.zig").read_text()
+-    return re.findall(r'\.name = "([^"]+)"', source)
+-
+-
+-def audit(*names: str, extra: tuple[str, ...] = ()) -> list[str]:
+-    """The real log plus each name's stale record on every SM, its problem count raised to match."""
+-    log = [line for line in REAL if not line.startswith("FAIL kernel-contract-limits")]
+-    log += [STALE.format(sm=sm, name=name) for name in names for sm in SMS] + list(extra)
+-    stale = sum(line.startswith("PASS limits") and line.endswith("(record stale)") for line in log)
+-    return log + [f"FAIL kernel-contract-limits: {stale} problems"]
+-
+-
+-def gate(status: int, lines: list[str]) -> int:
+-    with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
+-        log.write("\n".join(lines) + "\n")
+-        log.flush()
+-        return subprocess.run(["sh", str(GATE), str(status), log.name]).returncode
+-
+-
+-class LimitsGateTests(unittest.TestCase):
+-    def test_clean_audit_passes(self):
+-        lines = [STALE.format(sm=sm, name=ROUTER).replace("stale", "current") for sm in SMS]
+-        self.assertEqual(gate(0, lines + ["PASS kernel-contract-limits: every registered launch fits"]), 0)
+-
+-    def test_real_registry_with_pending_records_passes(self):
+-        tiles = pending_tile_launches()
+-        self.assertEqual(len(tiles), 2)
+-        self.assertEqual(gate(1, audit(ROUTER, *tiles)), 0)
+-
+-    def test_router_not_audited_fails(self):
+-        self.assertNotEqual(gate(1, audit(*pending_tile_launches())), 0)
+-
+-    def test_failed_launch_fails(self):
+-        failed = "FAIL limits sm_121 nvfp4_experts_tile tf_nvfp4_tile_swiglu: 300 registers, 0 static shared bytes, bound 128 (record stale): too many registers"
+-        self.assertNotEqual(gate(1, audit(ROUTER, extra=(failed,))), 0)
+-
+-    def test_missing_image_fails(self):
+-        missing = "FAIL limits drama3 d3_rmsnorm: zig-out/fatbin/drama3.fatbin holds no sm_89 image (build with -Dsm=80,86,89,120,121)"
+-        self.assertNotEqual(gate(1, audit(ROUTER, extra=(missing,))), 0)
+-
+-    def test_missed_control_fails(self):
+-        missed = "MISSED limits sm_121 control: past its bounds: 10 registers, 0 static shared bytes, bound 256 (record current)"
+-        self.assertNotEqual(gate(1, audit(ROUTER, extra=(missed,))), 0)
+-
+-    def test_problem_count_beyond_stale_records_fails(self):
+-        lines = audit(ROUTER)
+-        lines[-1] = lines[-1].replace(" problems", "1 problems")
+-        self.assertNotEqual(gate(1, lines), 0)
+-
+-    def test_error_without_summary_fails(self):
+-        self.assertNotEqual(gate(1, audit(ROUTER)[:-1]), 0)
+-
+-
+-if __name__ == "__main__":
+-    unittest.main()
+diff --git a/zig/kernels/cuda/drama3_moe.cuh b/zig/kernels/cuda/drama3_moe.cuh
+index 4367680fa..bcbd7e9f4 100644
+--- a/zig/kernels/cuda/drama3_moe.cuh
++++ b/zig/kernels/cuda/drama3_moe.cuh
+@@ -56,61 +56,6 @@ extern "C" __global__ void d3_router(const bf16* __restrict__ sp, int ss, int r_
+   }
+ }
+ 
+-// d3_router over held ids only (slots[e] >= 0), picks as slots; a poisoned sum gives NaN weights, never a dropped id.
+-extern "C" __global__ void d3_router_compact(const bf16* __restrict__ sp, int ss, int r_off, int* __restrict__ picks,
+-                                             float* __restrict__ weights, const int* __restrict__ slots) {
+-  const int t = blockIdx.x, e = threadIdx.x;  // 256 threads
+-  const bool kept = slots[e] >= 0;
+-  const float lg = kept ? b2f(sp[(size_t)t * ss + r_off + e]) : -INFINITY;
+-  const float m = block_max(lg);
+-  const float p = expf(lg - m);
+-  const float sum = block_sum(p);
+-  const bool poisoned = !isfinite(sum) || sum <= 0.f;
+-  __shared__ float best_v[8];
+-  __shared__ int best_i[8];
+-  __shared__ float wv[32];
+-  __shared__ int wi[32];
+-  float mine = kept ? (poisoned ? 0.f : p / sum) : -1.f;
+-  for (int k = 0; k < 8; ++k) {
+-    float v = mine;
+-    int idx = e;
+-#pragma unroll
+-    for (int o = 16; o > 0; o >>= 1) {
+-      const float ov = __shfl_xor_sync(FULL, v, o);
+-      const int oi = __shfl_xor_sync(FULL, idx, o);
+-      if (ov > v || (ov == v && oi < idx)) {
+-        v = ov;
+-        idx = oi;
+-      }
+-    }
+-    if ((e & 31) == 0) {
+-      wv[e >> 5] = v;
+-      wi[e >> 5] = idx;
+-    }
+-    __syncthreads();
+-    if (e == 0) {
+-      float bv = wv[0];
+-      int bi = wi[0];
+-      for (int j = 1; j < 8; ++j)
+-        if (wv[j] > bv || (wv[j] == bv && wi[j] < bi)) {
+-          bv = wv[j];
+-          bi = wi[j];
+-        }
+-      best_v[k] = bv;
+-      best_i[k] = bi;
+-    }
+-    __syncthreads();
+-    if (e == best_i[k]) mine = -1.f;
+-    __syncthreads();
+-  }
+-  if (e < 8) {
+-    float s = 0.f;
+-    for (int j = 0; j < 8; ++j) s += best_v[j];
+-    picks[t * 8 + e] = slots[best_i[e]];
+-    weights[t * 8 + e] = poisoned ? NAN : best_v[e] / s;
+-  }
+-}
+-
+ // y [T, N] = bf16(bf16(silu(g)) * u) with g, u at offsets of rows `stride` apart.
+ extern "C" __global__ void d3_swiglu(const bf16* __restrict__ x, int stride, int g_off, int u_off, int N,
+                                      bf16* __restrict__ y) {
+diff --git a/zig/src/core/contract/registry_joins.zig b/zig/src/core/contract/registry_joins.zig
+index 37a745f1b..03358cb10 100644
+--- a/zig/src/core/contract/registry_joins.zig
++++ b/zig/src/core/contract/registry_joins.zig
+@@ -51,12 +51,9 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
+     @import("exl3_prompt_pending.zig").records ++
+     @import("nemotron_draw_records.zig").records ++
+     @import("cuda_lane_pending.zig").records ++
+-    @import("moss_image_encoder_records.zig").records ++
+-    @import("moss_image_decoder_records.zig").records ++
+     @import("weight_only_records.zig").cuda ++
+     @import("hc_activation_records.zig").cuda ++
+-    @import("qwen4_records.zig").cuda ++
+-    @import("registry_media.zig").cuda_pending;
++    @import("qwen4_records.zig").cuda;
+ pub const metal_before = @import("fsr_records.zig").metal ++
+     @import("scale_index_records.zig").metal ++
+     @import("lfm3_records.zig").metal;
+@@ -70,7 +67,6 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
+     @import("metal_pair_records.zig").records ++
+     @import("glm_rows_records.zig").records ++
+     @import("glm_launch_records.zig").records ++
+-    @import("glm_tap_records.zig").records ++
+     @import("glm_dflash_records.zig").records ++
+     @import("row_wide_records.zig").records ++
+     @import("weight_only_records.zig").metal ++
+diff --git a/zig/src/core/contract/registry_media.zig b/zig/src/core/contract/registry_media.zig
+index 2d699f693..45a4b7db8 100644
+--- a/zig/src/core/contract/registry_media.zig
++++ b/zig/src/core/contract/registry_media.zig
+@@ -62,7 +62,3 @@ pub const cuda = [_]CudaRecord{
+     .{ .launch = .{ .name = "fp8_experts prompt down f32", .symbol = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi0ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi", .image = "fp8_experts", .threads = 128 }, .usage = .{ .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 } } },
+     .{ .launch = .{ .name = "fp8_experts prompt down bf16", .symbol = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi3ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi", .image = "fp8_experts", .threads = 128 }, .usage = .{ .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 } } },
+ };
+-/// Drama 3's compact-checkpoint router, unmeasured: the GB10 check runs its contract and prints its RECORD.
+-pub const cuda_pending = [_]CudaRecord{
+-    .{ .launch = .{ .name = "drama3 d3_router_compact", .symbol = "d3_router_compact", .image = "drama3", .threads = 256 }, .usage = @import("registry.zig").none },
+-};
+diff --git a/zig/src/families/drama3/cuda/engine.zig b/zig/src/families/drama3/cuda/engine.zig
+index eabe0006f..d67836ee1 100644
+--- a/zig/src/families/drama3/cuda/engine.zig
++++ b/zig/src/families/drama3/cuda/engine.zig
+@@ -142,7 +142,6 @@ pub const Engine = struct {
+             e.w.deinit();
+             gpa.destroy(e.w);
+         }
+-        if (e.w.nvfp4_layers > 0) try e.k.loadNvfp4();
+         errdefer e.freeState();
+         try e.allocState();
+         errdefer {
+diff --git a/zig/src/families/drama3/cuda/forward.zig b/zig/src/families/drama3/cuda/forward.zig
+index 4db9d3c12..66762c720 100644
+--- a/zig/src/families/drama3/cuda/forward.zig
++++ b/zig/src/families/drama3/cuda/forward.zig
+@@ -82,16 +82,12 @@ pub fn backboneLayer(e: *Engine, ln: Lane, li: usize, t: usize, start: usize) !v
+     try moe(e, s, L, t);
+ }
+ 
+-/// The MoE block: router (held experts only when compact), gated shared expert and routed FP8 or NVFP4 experts.
++/// The MoE block: router, gated shared expert and the routed FP8 experts, added to the residual stream.
+ fn moe(e: *Engine, s: cuda.Stream, L: *const wts.Layer, t: usize) !void {
+     const k = &e.k;
+     const mp = cfg.moe_proj;
+     try k.linear(s, L.moe_in, e.xn, H, H, mp, e.sp, mp, t);
+-    if (L.slots != 0) {
+-        try k.routerCompact(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, L.slots, t);
+-    } else {
+-        try k.router(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t);
+-    }
++    try k.router(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t);
+     try k.swiglu(s, e.sp, mp, 0, cfg.shared_width, cfg.shared_width, e.sact, t);
+     try k.linear(s, L.shared_down, e.sact, cfg.shared_width, cfg.shared_width, H, e.shout, H, t);
+     const pairs = t * cfg.top_k;
+@@ -99,15 +95,11 @@ fn moe(e: *Engine, s: cuda.Stream, L: *const wts.Layer, t: usize) !void {
+     const tile: usize = if (prompt) cuda.experts.promptTile(.fp8g) else 16;
+     try k.plan.route(s, e.picks, pairs, cfg.experts, tile, e.plan);
+     const items = cuda.grouped.maxItems(pairs, cfg.experts, tile);
+-    if (L.experts.format == .nvfp4) {
+-        try k.nvfp4Experts(s, prompt, e.xn, cfg.top_k, L.experts, e.plan, e.gu, e.down, items);
+-    } else {
+-        // activations to FP8 per row and 128 inputs before each expert projection, as the reference serves them
+-        try k.actQuant(s, e.xn, H, e.xq, H, e.xsc, t, H);
+-        try k.experts(s, true, prompt, e.xq, H, cfg.top_k, e.xsc, L.experts, e.plan, e.gu, items);
+-        try k.actQuant(s, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
+-        try k.experts(s, false, prompt, e.gq, cfg.expert_width, 0, e.gsc, L.experts, e.plan, e.down, items);
+-    }
++    // activations to FP8 per row and 128 inputs before each expert projection, as the reference serves them
++    try k.actQuant(s, e.xn, H, e.xq, H, e.xsc, t, H);
++    try k.experts(s, true, prompt, e.xq, H, cfg.top_k, e.xsc, L.experts, e.plan, e.gu, items);
++    try k.actQuant(s, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
++    try k.experts(s, false, prompt, e.gq, cfg.expert_width, 0, e.gsc, L.experts, e.plan, e.down, items);
+     try k.moeCombine(s, e.x, e.down, e.rw, e.shout, e.sp, mp, 2 * cfg.shared_width + cfg.experts, H, t);
+ }
+ 
+diff --git a/zig/src/families/drama3/cuda/kernels.zig b/zig/src/families/drama3/cuda/kernels.zig
+index 4b6699e40..3f1319057 100644
+--- a/zig/src/families/drama3/cuda/kernels.zig
++++ b/zig/src/families/drama3/cuda/kernels.zig
+@@ -1,4 +1,4 @@
+-//! Drama 3's launches: drama3.cu by symbol, the FP8 or NVFP4 experts with grouped.zig's plan, cuBLAS GEMMs.
++//! Drama 3's launches: drama3.cu by symbol, the FP8 experts (drama3_fp8.cu) with grouped.zig's plan, cuBLAS GEMMs.
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const blas = @import("blas.zig");
+@@ -17,7 +17,7 @@ const names = .{
+     "d3_causal_softmax", "d3_attn_gate",        "d3_router",           "d3_swiglu",         "d3_moe_combine",
+     "d3_tower_mix",      "d3_sample_main",      "d3_sample_code",      "d3_argmax_main",    "d3_finish_frame",
+     "d3_copy_i32",       "d3_act_quant",        "d3_bf16_f32",         "d3_next_input",     "d3_attn_partial",
+-    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast", "d3_router_compact",
++    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast",
+ };
+ 
+ pub const F = enum(u8) {
+@@ -49,7 +49,6 @@ pub const F = enum(u8) {
+     attn_merge,
+     sample_main_fast,
+     sample_code_fast,
+-    router_compact,
+ };
+ 
+ /// drama3_fp8.cu's instances: [decode, prompt][gate-up with the SwiGLU epilogue, down to fp32].
+@@ -69,7 +68,6 @@ pub const Kernels = struct {
+     fp8a_mod: cuda.Module,
+     fp8a: [2][2]cuda.Function,
+     fp8a_resident: [2][2]usize,
+-    nvfp4: ?cuda.experts.Nvfp4Experts = null, // loaded by loadNvfp4 when a layer's experts are NVFP4
+     blas: blas.Blas,
+     ws: cuda.DeviceBuffer,
+     sms: usize,
+@@ -79,7 +77,6 @@ pub const Kernels = struct {
+         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+         var k: Kernels = undefined;
+         k.d = d;
+-        k.nvfp4 = null;
+         k.sms = @intCast(try ctx.attribute(.multiprocessor_count));
+         k.mod = try cuda.Module.load(d, cuda.kernels.drama3);
+         errdefer k.mod.unload();
+@@ -103,7 +100,6 @@ pub const Kernels = struct {
+     }
+ 
+     pub fn unload(k: *Kernels) void {
+-        if (k.nvfp4) |*n| n.unload();
+         k.blas.close();
+         k.ws.free();
+         k.fp8a_mod.unload();
+@@ -111,10 +107,6 @@ pub const Kernels = struct {
+         k.mod.unload();
+     }
+ 
+-    pub fn loadNvfp4(k: *Kernels) !void {
+-        if (k.nvfp4 == null) k.nvfp4 = try cuda.experts.Nvfp4Experts.load(k.d, k.sms);
+-    }
+-
+     fn f(k: *const Kernels, which: F) cuda.Function {
+         return k.fns[@backingInt(which)];
+     }
+@@ -327,18 +319,6 @@ pub const Kernels = struct {
+         try k.go(.router, s, t, 1, 256, 0, &a);
+     }
+ 
+-    /// router over held experts only: `slots` (int32 [256], -1 where not held) masks, and turns picks into slots.
+-    pub fn routerCompact(k: *const Kernels, s: cuda.Stream, sp: u64, ss: usize, r_off: usize, picks: u64, weights: u64, slots: u64, t: usize) !void {
+-        var a: cuda.Args = .{};
+-        a.add(sp);
+-        a.add(i(ss));
+-        a.add(i(r_off));
+-        a.add(picks);
+-        a.add(weights);
+-        a.add(slots);
+-        try k.go(.router_compact, s, t, 1, 256, 0, &a);
+-    }
+-
+     pub fn swiglu(k: *const Kernels, s: cuda.Stream, x: u64, stride: usize, g_off: usize, u_off: usize, n: usize, y: u64, t: usize) !void {
+         var a: cuda.Args = .{};
+         a.add(x);
+@@ -465,20 +445,6 @@ pub const Kernels = struct {
+         try cuda.launch.launch(k.fp8a[pi][ei], .{ .grid = .{ .x = @intCast(grid) }, .block = .{ .x = 128 } }, s, &a);
+     }
+ 
+-    /// Routed NVFP4 experts on bf16 rows: SwiGLU pair rows, then fp32 down rows; prompts use runFact's decode sums.
+-    pub fn nvfp4Experts(k: *const Kernels, s: cuda.Stream, prompt: bool, x: u64, slots: usize, l: cuda.experts.Layer, p: cuda.grouped.Plan, gu: u64, down: u64, items: usize) !void {
+-        const e = if (k.nvfp4) |*n| n else return error.FormatNotLoaded;
+-        const up: cuda.experts.Rows = .{ .x = x, .stride = l.dims, .slots = slots };
+-        const pairs: cuda.experts.Rows = .{ .x = gu, .stride = l.width };
+-        if (prompt) {
+-            try e.runFact(s, .up, up, l, p, gu, items, -1);
+-            try e.runFact(s, .down_f32, pairs, l, p, down, items, -1);
+-        } else {
+-            try e.run(s, .up, up, l, p, gu, items, -1);
+-            try e.run(s, .down_f32, pairs, l, p, down, items, -1);
+-        }
+-    }
+-
+     pub fn bf16F32(k: *const Kernels, s: cuda.Stream, x: u64, y: u64, n: usize) !void {
+         var a: cuda.Args = .{};
+         a.add(x);
+diff --git a/zig/src/families/drama3/cuda/nvfp4_test.zig b/zig/src/families/drama3/cuda/nvfp4_test.zig
+deleted file mode 100644
+index 76ff1d542..000000000
+--- a/zig/src/families/drama3/cuda/nvfp4_test.zig
++++ /dev/null
+@@ -1,231 +0,0 @@
+-//! Compact NVFP4 experts on the host, no CUDA context: staged as stored in held-slot order, decoded against FP64.
+-const std = @import("std");
+-const core = @import("core");
+-const cuda = @import("cuda");
+-const cfg = @import("../config.zig");
+-const wts = @import("weights.zig");
+-const quant = @import("../metal/quant_format.zig");
+-const ref = @import("../metal/quant_reference.zig");
+-const Shards = @import("../shards.zig").Shards;
+-
+-const testing = std.testing;
+-const io = testing.io;
+-const E = cuda.experts.Nvfp4Experts;
+-const held_ids = [_]u8{ 3, 9, 250 };
+-const projections = [_][]const u8{ "gate_proj", "up_proj", "down_proj" };
+-const shape = [3][2]usize{ .{ cfg.expert_width, cfg.hidden }, .{ cfg.expert_width, cfg.hidden }, .{ cfg.hidden, cfg.expert_width } };
+-
+-/// Layer 0's held experts in NVFP4 as tf-drama-quant writes them; layer 1's expert 0 gate in FP8.
+-fn writeCheckpoint(arena: std.mem.Allocator, dir: []const u8) !void {
+-    var prng = std.Random.DefaultPrng.init(27);
+-    const rnd = prng.random();
+-    var tensors: std.ArrayList(core.shard_edit.New) = .empty;
+-    for (held_ids) |e| for (projections, shape) |p, s| {
+-        const name = try std.fmt.allocPrint(arena, "model.language_model.layers.0.mlp.experts.{d}.{s}.weight", .{ e, p });
+-        const codes = try arena.alloc(u8, s[0] * s[1] / 2);
+-        rnd.bytes(codes);
+-        const scales = try arena.alloc(u8, s[0] * s[1] / 16);
+-        for (scales) |*b| b.* = 0x30 + rnd.uintLessThan(u8, 0x30);
+-        const global = try arena.dupe(u8, std.mem.asBytes(&(0.5 + rnd.float(f32))));
+-        try tensors.append(arena, .{ .name = name, .dtype = .u8, .shape = try arena.dupe(usize, &.{ s[0], s[1] / 2 }), .bytes = codes });
+-        try tensors.append(arena, .{ .name = try std.fmt.allocPrint(arena, "{s}_scale", .{name}), .dtype = .f8_e4m3, .shape = try arena.dupe(usize, &.{ s[0], s[1] / 16 }), .bytes = scales });
+-        try tensors.append(arena, .{ .name = try std.fmt.allocPrint(arena, "{s}_scale_2", .{name}), .dtype = .f32, .shape = &.{}, .bytes = global });
+-    };
+-    const fp8 = try arena.alloc(u8, cfg.expert_width * cfg.hidden);
+-    rnd.bytes(fp8);
+-    try tensors.append(arena, .{ .name = "model.language_model.layers.1.mlp.experts.0.gate_proj.weight", .dtype = .f8_e4m3, .shape = &.{ cfg.expert_width, cfg.hidden }, .bytes = fp8 });
+-    try core.shard_edit.create(arena, try std.fs.path.join(arena, &.{ dir, "model.safetensors" }), &.{.{ "format", "pt" }}, tensors.items);
+-    var index: std.ArrayList(u8) = .empty;
+-    try index.appendSlice(arena, "{\"metadata\": {}, \"weight_map\": {");
+-    for (tensors.items, 0..) |t, i| try index.print(arena, "{s}\"{s}\": \"model.safetensors\"", .{ if (i == 0) "" else ", ", t.name });
+-    try index.appendSlice(arena, "}}");
+-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ dir, "model.safetensors.index.json" }), .data = index.items });
+-}
+-
+-/// Code and e4m3 scale of (row, input) in matrix `part` of `parts` packed blocks, as experts.zig documents the layout.
+-fn unpacked(blocks: []const u32, parts: usize, part: usize, k: usize, row: usize, input: usize) struct { u8, u8 } {
+-    const rr = row % E.cols;
+-    const ii = input % 32;
+-    const h = ii / 16;
+-    const block = blocks[(((row / E.cols) * (k / 32) + input / 32) * parts + part) * E.words ..][0..E.words];
+-    const word = block[((rr % 8) * 4 + (ii % 16) / 4) * 4 + rr / 8];
+-    const scale = std.mem.sliceAsBytes(block[128..])[((((rr % 8) / 2) * 2 + h) * 4 + rr / 8) * 2 + rr % 2];
+-    return .{ @intCast((word >> E.slot(h, ii % 4)) & 0xF), scale };
+-}
+-
+-/// nvfp4_experts.cu in f32: each 16-group's dot from zero, fmaf by its e4m3 scale into the row sum, then the global.
+-fn servedDot(codes: []const u8, scales: []const u8, x: []const f32, global: f32) f32 {
+-    var sum: f32 = 0;
+-    for (scales, 0..) |scale, b| {
+-        var dot: f32 = 0;
+-        for (codes[16 * b ..][0..16], x[16 * b ..][0..16]) |code, v| dot = @mulAdd(f32, @floatCast(ref.fp4(code)), v, dot);
+-        sum = @mulAdd(f32, dot, @floatCast(ref.fp8(scale)), sum);
+-    }
+-    return sum * global;
+-}
+-
+-/// A staged row through servedDot.
+-fn servedRow(blocks: []const u32, parts: usize, part: usize, k: usize, row: usize, x: []const f32, global: f32) f32 {
+-    var codes: [cfg.hidden]u8 = undefined;
+-    var scales: [cfg.hidden / 16]u8 = undefined;
+-    for (0..k) |i| codes[i], scales[i / 16] = unpacked(blocks, parts, part, k, row, i);
+-    return servedDot(codes[0..k], scales[0 .. k / 16], x[0..k], global);
+-}
+-
+-/// Round to nearest even bf16 by the integer trick the kernels' __float2bfloat16_rn performs.
+-fn bf(x: f32) f32 {
+-    const b: u32 = @bitCast(x);
+-    return @bitCast((b +% 0x7fff +% ((b >> 16) & 1)) & 0xffff0000);
+-}
+-
+-/// nvfp4_experts.cu's SwiGLU epilogue, stored as bf16: bf16(bf16(silu(bf16(g))) * bf16(u)).
+-fn servedSwiglu(g: f32, u: f32) f32 {
+-    const gv = bf(g);
+-    return bf(bf(gv / (1 + @exp(-gv))) * bf(u));
+-}
+-
+-/// The CUDA rounding contract in FP64, as drama3's FP8 path (d3_swiglu) and bf16 torch round: silu rounds to bf16.
+-fn contractSwiglu(gate: f64, up: f64) f64 {
+-    const g = ref.roundBf16(gate);
+-    return ref.roundBf16(ref.roundBf16(g / (1 + @exp(-g))) * ref.roundBf16(up));
+-}
+-
+-fn bits(v: f64) u16 {
+-    return @truncate(@as(u32, @bitCast(@as(f32, @floatCast(v)))) >> 16);
+-}
+-
+-/// One bf16 step at |v|: the most an f32 sum's last bit can move a bf16-rounded result.
+-fn ulp(v: f64) f64 {
+-    return if (v == 0) 0x1p-133 else std.math.ldexp(@as(f64, 1), std.math.ilogb(@abs(v)) - 7);
+-}
+-
+-test "SwiGLU rounds silu to bf16 before the up product: the served epilogue and the FP64 contract at a tie" {
+-    try testing.expectEqual(@as(f32, -0.00335693359375), servedSwiglu(-4, 0.046875));
+-    try testing.expectEqual(@as(f64, -0.00335693359375), contractSwiglu(-4, 0.046875));
+-    // unrounded silu (Metal's reference) lands one bf16 step away: this case pins the rounding point
+-    try testing.expectEqual(@as(f64, -0.0033721923828125), ref.swiglu(-4, 0.046875));
+-    try testing.expectEqual(contractSwiglu(1.0078125, -3), servedSwiglu(1.0078125, -3));
+-    try testing.expectEqual(contractSwiglu(-0.5, 0.0009765625), servedSwiglu(-0.5, 0.0009765625));
+-}
+-
+-/// servedDot and the FP64 oracle on one crafted row of 32 inputs: codes, one e4m3 scale a group, bf16 inputs.
+-fn crafted(codes: [32]u8, scales: [2]u8, x: [32]f32) struct { f32, f64 } {
+-    var packed_codes: [16]u8 = undefined;
+-    for (&packed_codes, 0..) |*p, i| p.* = codes[2 * i] | codes[2 * i + 1] << 4;
+-    var xb: [32]u16 = undefined;
+-    for (&xb, x) |*b, v| b.* = bits(v);
+-    return .{ servedDot(&codes, &scales, &x, 1), ref.projection(&packed_codes, &scales, 1, 0, 32, &xb) };
+-}
+-
+-test "served NVFP4 rows scale each 16-group's dot, not each term: overflow and cancellation the FP64 oracle lacks" {
+-    const six = 0x7; // fp4 6
+-    const one = 0x2; // fp4 1
+-    const neg_one = 0xA;
+-    var codes: [32]u8 = @splat(0);
+-    var x: [32]f32 = @splat(0);
+-    // 16 x (6 * 2^125) leaves f32 inside the group's dot, before e4m3 1/512 (0x01) would bring it back
+-    @memset(codes[0..16], six);
+-    @memset(x[0..16], 0x1p125);
+-    var got, var want = crafted(codes, .{ 0x01, 0 }, x);
+-    try testing.expect(std.math.isInf(got));
+-    try testing.expectEqual(@as(f64, 96 * 0x1p125 / 512), want);
+-    // 2^24 + 1 - 2^24 in a group: its f32 dot drops the 1 before e4m3 3 (0x44); per-term scaling gives 4, FP64 3
+-    codes = @splat(0);
+-    x = @splat(0);
+-    codes[0..3].* = .{ one, one, neg_one };
+-    x[0..3].* = .{ 0x1p24, 1, 0x1p24 };
+-    got, want = crafted(codes, .{ 0x44, 0 }, x);
+-    try testing.expectEqual(@as(f32, 0), got);
+-    try testing.expectEqual(@as(f64, 3), want);
+-}
+-
+-test "compact NVFP4 experts stage as stored in held-slot order and decode gate-up, SwiGLU, down and combine to FP64" {
+-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+-    defer arena_state.deinit();
+-    const arena = arena_state.allocator();
+-    var tmp = testing.tmpDir(.{});
+-    defer tmp.cleanup();
+-    const dir = try tmp.dir.realPathFileAlloc(io, ".", arena);
+-    try writeCheckpoint(arena, dir);
+-    var sh = try Shards.open(testing.allocator, io, dir);
+-    defer sh.close(io);
+-
+-    var held: quant.Held = .{};
+-    held.counts[0] = held_ids.len;
+-    @memcpy(held.ids[0][0..held_ids.len], &held_ids);
+-    try testing.expect(try wts.nvfp4Layer(&sh, 0, &held));
+-    var stage = try wts.stageNvfp4(testing.allocator, &sh, 0, held.ids[0][0..held.counts[0]], 2);
+-    defer stage.deinit(testing.allocator);
+-
+-    var prng = std.Random.DefaultPrng.init(5);
+-    var x: [cfg.hidden]u16 = undefined;
+-    for (&x) |*v| v.* = 0x3c00 + prng.random().uintLessThan(u16, 0x400) + (@as(u16, prng.random().int(u1)) << 15);
+-    var xf: [cfg.hidden]f32 = undefined;
+-    for (&xf, x) |*f, b| f.* = @floatCast(ref.fromBf16(b));
+-    const slots = wts.compactSlots(&held, 0).?;
+-    const per_up = stage.up.len / held_ids.len;
+-    const per_down = stage.down.len / held_ids.len;
+-    const route = [held_ids.len]f32{ 0.5, 0.3125, 0.1875 };
+-    var want_moe: [cfg.hidden]f64 = @splat(0);
+-    var got_moe: [cfg.hidden]f32 = @splat(0);
+-    for (slots, 0..) |slot, id| {
+-        // an original id the router can pick reaches the slot holding its own weights; the rest are masked
+-        const k_id = std.mem.indexOfScalar(u8, &held_ids, @intCast(id)) orelse {
+-            try testing.expectEqual(@as(i32, -1), slot);
+-            continue;
+-        };
+-        try testing.expectEqual(@as(i32, @intCast(k_id)), slot);
+-        const s: usize = @intCast(slot);
+-        var stored: [3]struct { w: []const u8, sc: []const u8, global: f32 } = undefined;
+-        for (projections, &stored, 0..) |p, *t, j| {
+-            var nb: [3][128]u8 = undefined;
+-            const base = "model.language_model.layers.0.mlp.experts.{d}.{s}.weight";
+-            const g = try sh.get(try std.fmt.bufPrint(&nb[2], base ++ "_scale_2", .{ id, p }));
+-            t.* = .{ .w = (try sh.get(try std.fmt.bufPrint(&nb[0], base, .{ id, p }))).bytes, .sc = (try sh.get(try std.fmt.bufPrint(&nb[1], base ++ "_scale", .{ id, p }))).bytes, .global = @bitCast(std.mem.readInt(u32, g.bytes[0..4], .little)) };
+-            try testing.expectEqual(t.global, if (j < 2) stage.up_scale[2 * s + j] else stage.down_scale[s]);
+-        }
+-        const up = stage.up[s * per_up ..][0..per_up];
+-        const down = stage.down[s * per_down ..][0..per_down];
+-        var want_act: [cfg.expert_width]u16 = undefined;
+-        var got_act: [cfg.expert_width]f32 = undefined;
+-        for (0..cfg.expert_width) |row| {
+-            const want = contractSwiglu(ref.projection(stored[0].w, stored[0].sc, stored[0].global, row, cfg.hidden, &x), ref.projection(stored[1].w, stored[1].sc, stored[1].global, row, cfg.hidden, &x));
+-            got_act[row] = servedSwiglu(servedRow(up, 2, 0, cfg.hidden, row, &xf, stored[0].global), servedRow(up, 2, 1, cfg.hidden, row, &xf, stored[1].global));
+-            // past gate -88 the served expf(-g) overflows and silu is 0 where FP64 keeps ~1e-37
+-            try testing.expect(@abs(got_act[row] - want) <= ulp(want) + 0x1p-100);
+-            want_act[row] = bits(want);
+-        }
+-        for (0..cfg.hidden) |row| {
+-            want_moe[row] += route[k_id] * ref.projection(stored[2].w, stored[2].sc, stored[2].global, row, cfg.expert_width, &want_act);
+-            got_moe[row] = @mulAdd(f32, route[k_id], servedRow(down, 1, 0, cfg.expert_width, row, &got_act, stored[2].global), got_moe[row]);
+-        }
+-    }
+-    // d3_moe_combine rounds the weighted sum of the fp32 down rows once; an activation's last-bit flip stays below 1%
+-    for (want_moe, got_moe) |want, got| try testing.expect(@abs(bf(got) - ref.roundBf16(want)) <= ulp(want) + @abs(want) / 128);
+-}
+-
+-test "a compact map over FP8 experts is refused; a full FP8 layer keeps the FP8 path" {
+-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+-    defer arena_state.deinit();
+-    const arena = arena_state.allocator();
+-    var tmp = testing.tmpDir(.{});
+-    defer tmp.cleanup();
+-    const dir = try tmp.dir.realPathFileAlloc(io, ".", arena);
+-    try writeCheckpoint(arena, dir);
+-    var sh = try Shards.open(testing.allocator, io, dir);
+-    defer sh.close(io);
+-
+-    var held: quant.Held = .{};
+-    try testing.expect(!try wts.nvfp4Layer(&sh, 1, &held));
+-    held.counts[1] = cfg.top_k;
+-    try testing.expectError(error.CompactFp8Experts, wts.nvfp4Layer(&sh, 1, &held));
+-}
+-
+-test "an unpruned NVFP4 checkpoint keeps the original router in every layer, so it cannot pass as compact" {
+-    const full = try quant.heldMetadata(null);
+-    for (0..cfg.layers) |li| try testing.expectEqual(@as(?[cfg.experts]i32, null), wts.compactSlots(&full, li));
+-    var pruned = full;
+-    pruned.counts[7] = cfg.experts - 1;
+-    try testing.expectEqual(@as(i32, -1), wts.compactSlots(&pruned, 7).?[cfg.experts - 1]);
+-    try testing.expectEqual(@as(?[cfg.experts]i32, null), wts.compactSlots(&pruned, 6));
+-}
+diff --git a/zig/src/families/drama3/cuda/weights.zig b/zig/src/families/drama3/cuda/weights.zig
+index 4701f4133..0f7182bb9 100644
+--- a/zig/src/families/drama3/cuda/weights.zig
++++ b/zig/src/families/drama3/cuda/weights.zig
+@@ -1,11 +1,10 @@
+-//! Drama 3's checkpoint on the device: bf16 projections, FP8 experts repacked or NVFP4 as stored, a cut lm_head.
++//! Drama 3's checkpoint on the device: stacked bf16 projections, FP8 experts repacked for drama3_fp8.cu, a cut lm_head.
+ const std = @import("std");
+ const staging = @import("stager.zig");
+ const cuda = @import("cuda");
+ const core = @import("core");
+ const cfg = @import("../config.zig");
+ const shards = @import("../shards.zig");
+-const quant = @import("../metal/quant_format.zig");
+ 
+ const Shards = shards.Shards;
+ const fp8 = core.quant.fp8;
+@@ -22,7 +21,6 @@ pub const Layer = struct {
+     moe_in: u64, // [1288, 2048]
+     shared_down: u64, // [2048, 512]
+     experts: cuda.experts.Layer,
+-    slots: u64, // int32 [256]: an original expert id's held slot, -1 if not held; 0 when every expert is held
+ };
+ 
+ pub const TowerLayer = struct {
+@@ -53,8 +51,6 @@ pub const Weights = struct {
+     layers: [cfg.layers]Layer,
+     tower: [cfg.tower_layers]TowerLayer,
+     heads: [cfg.codebooks - 1]u64, // [4096, 2048]
+-    nvfp4_layers: usize, // layers whose routed experts are NVFP4 (the engine loads their kernels)
+-    compact_layers: usize, // layers whose router masks to held experts (a pruned checkpoint)
+     bytes: usize,
+ 
+     pub fn deinit(w: *Weights) void {
+@@ -109,137 +105,6 @@ const Loader = struct {
+         }
+         return b.ptr;
+     }
+-
+-    fn upload(l: *Loader, comptime T: type, data: []const T) !u64 {
+-        const b = try l.alloc(data.len * @sizeOf(T));
+-        try b.upload(0, std.mem.sliceAsBytes(data));
+-        return b.ptr;
+-    }
+-
+-    /// A layer's held NVFP4 experts on the device as stored (packed, never widened), with its slot table if compact.
+-    fn nvfp4Experts(l: *Loader, li: usize, held: *const quant.Held, threads: usize) !void {
+-        const ids = held.ids[li][0..held.counts[li]];
+-        var stage = try stageNvfp4(l.gpa, l.sh, li, ids, threads);
+-        defer stage.deinit(l.gpa);
+-        const L = &l.w.layers[li];
+-        L.experts = .{ .format = .nvfp4, .up = try l.upload(u32, stage.up), .down = try l.upload(u32, stage.down), .up_scale = try l.upload(f32, stage.up_scale), .down_scale = try l.upload(f32, stage.down_scale), .width = cfg.expert_width, .dims = cfg.hidden, .experts = ids.len };
+-        L.slots = if (compactSlots(held, li)) |slots| try l.upload(i32, &slots) else 0;
+-        if (L.slots != 0) l.w.compact_layers += 1;
+-    }
+-};
+-
+-/// A pruned layer's router slot table; null when every expert is held and the original router serves it.
+-pub fn compactSlots(held: *const quant.Held, li: usize) ?[cfg.experts]i32 {
+-    return if (held.counts[li] == cfg.experts) null else held.slots(li);
+-}
+-
+-/// NVFP4 when a layer's first held gate is packed bytes; a compact map over FP8 experts is refused.
+-pub fn nvfp4Layer(sh: *const Shards, li: usize, held: *const quant.Held) !bool {
+-    var nb: [160]u8 = undefined;
+-    const t = try sh.get(fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.gate_proj.weight", .{ li, held.ids[li][0] }));
+-    if (t.dtype == .u8) return true;
+-    return if (held.counts[li] == cfg.experts) false else error.CompactFp8Experts;
+-}
+-
+-/// One layer's held NVFP4 experts in slot order as nvfp4_experts.cu reads them; slot i is the map's i-th id.
+-pub const Nvfp4Stage = struct {
+-    up: []u32, // [held][512/32][2048/32][gate, up][144]
+-    down: []u32, // [held][2048/32][512/32][1][144]
+-    up_scale: []f32, // [held][gate, up] global scales
+-    down_scale: []f32, // [held]
+-
+-    fn init(gpa: std.mem.Allocator, held: usize) !Nvfp4Stage {
+-        const E = cuda.experts.Nvfp4Experts;
+-        const up = try gpa.alloc(u32, E.bytes(held, cfg.expert_width, cfg.hidden, 2) / 4);
+-        errdefer gpa.free(up);
+-        const down = try gpa.alloc(u32, E.bytes(held, cfg.hidden, cfg.expert_width, 1) / 4);
+-        errdefer gpa.free(down);
+-        const up_scale = try gpa.alloc(f32, held * 2);
+-        errdefer gpa.free(up_scale);
+-        return .{ .up = up, .down = down, .up_scale = up_scale, .down_scale = try gpa.alloc(f32, held) };
+-    }
+-
+-    pub fn deinit(s: *Nvfp4Stage, gpa: std.mem.Allocator) void {
+-        gpa.free(s.up);
+-        gpa.free(s.down);
+-        gpa.free(s.up_scale);
+-        gpa.free(s.down_scale);
+-    }
+-};
+-
+-/// Packs a layer's held NVFP4 experts (`ids`: the map's ascending original ids) on `threads` workers.
+-pub fn stageNvfp4(gpa: std.mem.Allocator, sh: *const Shards, li: usize, ids: []const u8, threads: usize) !Nvfp4Stage {
+-    var out = try Nvfp4Stage.init(gpa, ids.len);
+-    errdefer out.deinit(gpa);
+-    const n = @max(1, @min(threads, 64, ids.len));
+-    const jobs = try gpa.alloc(Nvfp4Job, n);
+-    defer gpa.free(jobs);
+-    const workers = try gpa.alloc(std.Thread, n);
+-    defer gpa.free(workers);
+-    var spawned: usize = 0;
+-    defer for (workers[0..spawned]) |t| t.join();
+-    for (jobs, workers, 0..) |*j, *t, i| {
+-        j.* = .{ .sh = sh, .layer = li, .ids = ids, .first = i, .stride = n, .out = &out };
+-        t.* = try std.Thread.spawn(.{}, Nvfp4Job.run, .{j});
+-        spawned += 1;
+-    }
+-    for (workers[0..spawned]) |t| t.join();
+-    spawned = 0;
+-    for (jobs) |j| if (j.err) |e| return e;
+-    return out;
+-}
+-
+-const Nvfp4Job = struct {
+-    sh: *const Shards,
+-    layer: usize,
+-    ids: []const u8,
+-    first: usize,
+-    stride: usize,
+-    out: *const Nvfp4Stage,
+-    err: ?anyerror = null,
+-
+-    const projections = [_][]const u8{ "gate_proj", "up_proj", "down_proj" };
+-    const Part = struct { codes: []const u8, scales: []const u8, global: f32 };
+-
+-    fn run(j: *Nvfp4Job) void {
+-        j.work() catch |e| {
+-            j.err = e;
+-        };
+-    }
+-
+-    fn work(j: *Nvfp4Job) !void {
+-        const E = cuda.experts.Nvfp4Experts;
+-        const n = cfg.expert_width;
+-        const k = cfg.hidden;
+-        const per_up = E.bytes(1, n, k, 2) / 4;
+-        const per_down = E.bytes(1, k, n, 1) / 4;
+-        var slot = j.first;
+-        while (slot < j.ids.len) : (slot += j.stride) {
+-            const e = j.ids[slot];
+-            const g = try j.part(e, 0, n, k);
+-            const u = try j.part(e, 1, n, k);
+-            const d = try j.part(e, 2, k, n);
+-            E.packGateUp(j.out.up[slot * per_up ..][0..per_up], .{ g.codes, g.scales }, .{ u.codes, u.scales }, n, k);
+-            E.packOne(j.out.down[slot * per_down ..][0..per_down], d.codes, d.scales, k, n);
+-            j.out.up_scale[2 * slot] = g.global;
+-            j.out.up_scale[2 * slot + 1] = u.global;
+-            j.out.down_scale[slot] = d.global;
+-            var nb: [160]u8 = undefined;
+-            for (projections) |p| for ([_][]const u8{ "", "_scale", "_scale_2" }) |suffix|
+-                j.sh.release(fmt(&nb, "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight{s}", .{ j.layer, e, p, suffix }));
+-        }
+-    }
+-
+-    /// Projection `p` of expert `e` ([rows, cols] as stored), checked by the Metal loader's quant_format.nvfp4.
+-    fn part(j: *const Nvfp4Job, e: u8, p: usize, rows: usize, cols: usize) !Part {
+-        var nb: [3][160]u8 = undefined;
+-        const base = "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight";
+-        const w = try j.sh.get(fmt(&nb[0], base, .{ j.layer, e, projections[p] }));
+-        const s = try j.sh.get(fmt(&nb[1], base ++ "_scale", .{ j.layer, e, projections[p] }));
+-        const g = try j.sh.get(fmt(&nb[2], base ++ "_scale_2", .{ j.layer, e, projections[p] }));
+-        try quant.nvfp4(w, s, g, rows, cols);
+-        return .{ .codes = w.bytes, .scales = s.bytes, .global = @bitCast(std.mem.readInt(u32, g.bytes[0..4], .little)) };
+-    }
+ };
+ 
+ fn tn(buf: []u8, prefix: []const u8, idx: usize, suffix: []const u8) []const u8 {
+@@ -315,9 +180,6 @@ pub const LoadOptions = struct { threads: usize = 16, log: bool = true };
+ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, c: cfg.Config, opt: LoadOptions) !*Weights {
+     var sh = try Shards.open(gpa, io, dir);
+     defer sh.close(io);
+-    // a malformed, unordered or mismatched expert map fails here, before any device memory
+-    const held = try quant.heldMetadata(sh.metadata);
+-    try quant.checkStored(&held, sh.map);
+     var stream = try cuda.Stream.init(d, false);
+     defer stream.deinit();
+     var stager = staging.Stager.init(gpa, d, stream);
+@@ -329,8 +191,6 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
+     w.gpa = gpa;
+     w.bufs = .empty;
+     w.bytes = 0;
+-    w.nvfp4_layers = 0;
+-    w.compact_layers = 0;
+     errdefer w.deinit();
+     errdefer stream.synchronize() catch {};
+     var l: Loader = .{ .gpa = gpa, .d = d, .sh = &sh, .w = w, .stager = &stager };
+@@ -404,12 +264,6 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
+         }
+         L.moe_in = try l.stack(&.{ fmt(&nb[0], pre ++ "mlp.shared_expert.gate_proj.weight", .{li}), fmt(&nb[1], pre ++ "mlp.shared_expert.up_proj.weight", .{li}), fmt(&nb[2], pre ++ "mlp.gate.weight", .{li}), fmt(&nb[3], pre ++ "mlp.shared_expert_gate.weight", .{li}) }, &.{ cfg.shared_width, cfg.shared_width, cfg.experts, 1 }, H, cfg.moe_proj);
+         L.shared_down = try l.one(fmt(&nb[0], pre ++ "mlp.shared_expert.down_proj.weight", .{li}), &.{ H, cfg.shared_width });
+-        L.slots = 0;
+-        if (try nvfp4Layer(&sh, li, &held)) {
+-            try l.nvfp4Experts(li, &held, opt.threads);
+-            w.nvfp4_layers += 1;
+-            continue;
+-        }
+         // experts
+         for (jobs, 0..) |*j, ti| j.* = .{ .sh = &sh, .layer = li, .first = ti, .stride = nthreads, .up = up_h, .down = down_h, .up_scale = us_h, .down_scale = ds_h };
+         var spawned: usize = 0;
+@@ -455,10 +309,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
+     }
+     for (0..cfg.codebooks - 1) |hi| w.heads[hi] = try l.one(fmt(&nb[0], "audio_decoder_mtp.heads.{d}.weight", .{hi}), &.{ cfg.codebook_size, H });
+     try stager.finish();
+-    if (opt.log) {
+-        std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+-        std.log.info("drama3: routed experts held {d} of {d}; routed experts NVFP4 in {d} of {d} layers; compact routers in {d} of {d} layers", .{ held.total(), cfg.layers * cfg.experts, w.nvfp4_layers, cfg.layers, w.compact_layers, cfg.layers });
+-    }
++    if (opt.log) std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
+     return w;
+ }
+ 
+diff --git a/zig/src/families/drama3/drama3.zig b/zig/src/families/drama3/drama3.zig
+index f198a2a71..91f22076e 100644
+--- a/zig/src/families/drama3/drama3.zig
++++ b/zig/src/families/drama3/drama3.zig
+@@ -34,7 +34,6 @@ test {
+     _ = kv_state;
+     _ = @import("codec_map.zig");
+     _ = @import("codec_schema.zig");
+-    _ = @import("codec_net.zig");
+     _ = @import("cuda/stager.zig");
+     _ = @import("cuda/reference_rows.zig");
+     _ = prompt;
+@@ -43,6 +42,5 @@ test {
+ 
+ test {
+     _ = @import("cuda/owner_test.zig");
+-    _ = @import("cuda/nvfp4_test.zig");
+     _ = @import("cuda/weights.zig");
+ }
+diff --git a/zig/src/families/drama3/metal/quant_format.zig b/zig/src/families/drama3/metal/quant_format.zig
+index 72e1d0c0c..a3e4959b3 100644
+--- a/zig/src/families/drama3/metal/quant_format.zig
++++ b/zig/src/families/drama3/metal/quant_format.zig
+@@ -17,11 +17,6 @@ pub const Held = struct {
+         for (h.ids[layer][0..h.counts[layer]], 0..) |id, slot| out[id] = @intCast(slot);
+         return out;
+     }
+-    pub fn total(h: *const Held) usize {
+-        var n: usize = 0;
+-        for (h.counts) |c| n += c;
+-        return n;
+-    }
+ };
+ 
+ pub fn parseHeld(value: std.json.Value) !Held {
+@@ -48,9 +43,8 @@ pub fn heldMetadata(metadata: ?std.json.Value) !Held {
+     return if (meta.object.get("drama_experts")) |v| try parseHeld(v) else .{};
+ }
+ 
+-/// The stored experts are exactly the map's: none unlisted, and every listed one's three projections present.
+-pub fn checkStored(h: *const Held, names: anytype) !void {
+-    var it = names.keyIterator();
++pub fn checkNames(h: *const Held, names: anytype) !void {
++    var it = names;
+     const pre = "model.language_model.layers.";
+     while (it.next()) |key| {
+         const name = key.*;
+@@ -63,11 +57,6 @@ pub fn checkStored(h: *const Held, names: anytype) !void {
+         const e = std.fmt.parseInt(u8, parts.next() orelse return error.BadExpertMap, 10) catch return error.BadExpertMap;
+         if (l >= cfg.layers or std.mem.indexOfScalar(u8, h.ids[l][0..h.counts[l]], e) == null) return error.UnlistedExpert;
+     }
+-    var buf: [96]u8 = undefined;
+-    for (0..cfg.layers) |l| for (h.ids[l][0..h.counts[l]]) |e| for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |p| {
+-        const name = std.fmt.bufPrint(&buf, pre ++ "{d}.mlp.experts.{d}.{s}.weight", .{ l, e, p }) catch unreachable;
+-        if (!names.contains(name)) return error.MissingExpert;
+-    };
+ }
+ 
+ pub fn nvfp4(w: Tensor, s: Tensor, g: Tensor, n: usize, k: usize) !void {
+diff --git a/zig/src/families/drama3/metal/quant_format_test.zig b/zig/src/families/drama3/metal/quant_format_test.zig
+index cfba80317..747124a51 100644
+--- a/zig/src/families/drama3/metal/quant_format_test.zig
++++ b/zig/src/families/drama3/metal/quant_format_test.zig
+@@ -47,7 +47,7 @@ fn mapText(a: std.mem.Allocator, ids: []const u8, omit: bool) ![]u8 {
+     return text.toOwnedSlice(a);
+ }
+ 
+-test "expert metadata is complete ascending unique keeps at least eight original IDs and matches the stored experts" {
++test "expert metadata is complete ascending unique and keeps at least eight original IDs" {
+     const a = std.testing.allocator;
+     const good = "[1,3,5,7,9,11,13,255]";
+     for ([_][]const u8{ good, "[1,3,5,7,9,11,13,13]", "[3,1,5,7,9,11,13,15]", "[1,3,5,7,9,11,13,256]", "[1,3]", "[1,3,5,7,9,11,13,1.5]" }, 0..) |ids, i| {
+@@ -60,19 +60,10 @@ test "expert metadata is complete ascending unique keeps at least eight original
+             const slots = h.slots(0);
+             try std.testing.expectEqual(@as(i32, -1), slots[0]);
+             try std.testing.expectEqual(@as(i32, 7), slots[255]);
+-            try std.testing.expectEqual(@as(usize, cfg.layers * 8), h.total());
+-            var arena: std.heap.ArenaAllocator = .init(a);
+-            defer arena.deinit();
+             var names = std.StringHashMapUnmanaged(void).empty;
+-            for (0..cfg.layers) |l| for ([_]u8{ 1, 3, 5, 7, 9, 11, 13, 255 }) |e| for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |p|
+-                try names.put(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "model.language_model.layers.{d}.mlp.experts.{d}.{s}.weight", .{ l, e, p }), {});
+-            try q.checkStored(&h, names);
+-            const extra = "model.language_model.layers.0.mlp.experts.0.gate_proj.weight";
+-            try names.put(arena.allocator(), extra, {});
+-            try std.testing.expectError(error.UnlistedExpert, q.checkStored(&h, names));
+-            _ = names.remove(extra);
+-            _ = names.remove("model.language_model.layers.39.mlp.experts.255.down_proj.weight");
+-            try std.testing.expectError(error.MissingExpert, q.checkStored(&h, names));
++            defer names.deinit(a);
++            try names.put(a, "model.language_model.layers.0.mlp.experts.0.gate_proj.weight", {});
++            try std.testing.expectError(error.UnlistedExpert, q.checkNames(&h, names.keyIterator()));
+         } else try std.testing.expectError(error.BadExpertMap, q.parseHeld(tree.value));
+     }
+     const text = try mapText(a, good, true);
+diff --git a/zig/src/families/drama3/metal/weights.zig b/zig/src/families/drama3/metal/weights.zig
+index 2dfb995c1..36f543a1b 100644
+--- a/zig/src/families/drama3/metal/weights.zig
++++ b/zig/src/families/drama3/metal/weights.zig
+@@ -184,7 +184,7 @@ pub fn load(g: *Gpu, io: std.Io, dir: []const u8, c: cfg.Config) !*Weights {
+     w.sh = try Shards.open(g.gpa, io, dir);
+     errdefer w.sh.close(io);
+     const held = try quant.heldMetadata(w.sh.metadata);
+-    try quant.checkStored(&held, w.sh.map);
++    try quant.checkNames(&held, w.sh.map.keyIterator());
+     const first = g.bufs.items.len;
+     const indirect_first = g.indirect.items.len;
+     errdefer {
+diff --git a/zig/tests/cuda/contract_drama3.zig b/zig/tests/cuda/contract_drama3.zig
+index ba124d3a7..641524d31 100644
+--- a/zig/tests/cuda/contract_drama3.zig
++++ b/zig/tests/cuda/contract_drama3.zig
+@@ -1,10 +1,9 @@
+-//! Drama 3's kernels under the contract on CUDA: RMS norm rows (d3_rmsnorm, plain gamma) and the compact router.
++//! Drama 3's RMS norm rows (d3_rmsnorm with its plain gamma, the gated-norm form) under the contract on CUDA.
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const core = @import("core");
+ const check = @import("check.zig");
+ const rig_ = @import("contract_rig.zig");
+-const router_k = @import("contract_drama3_router.zig");
+ 
+ const contract = core.contract;
+ const c = contract.spec;
+@@ -87,31 +86,3 @@ pub const Norm = struct {
+         return self.r.?.simulate(acc, order, out);
+     }
+ };
+-
+-/// The drama3 image, its norm and its compact router with the unmasked control, appended to `kernels`.
+-pub const Group = struct {
+-    a: std.mem.Allocator,
+-    mod: cuda.Module,
+-    norm: Norm,
+-    routers: [2]router_k.Router,
+-
+-    pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel)) !*Group {
+-        const self = try a.create(Group);
+-        errdefer a.destroy(self);
+-        self.a = a;
+-        self.mod = try cuda.Module.load(gpu.d, cuda.kernels.drama3);
+-        errdefer self.mod.unload();
+-        self.norm = try Norm.init(gpu, s, self.mod);
+-        self.routers = .{ try .init(gpu, s, self.mod, false), try .init(gpu, s, self.mod, true) };
+-        try kernels.append(a, self.norm.kernel());
+-        for (&self.routers) |*r| try kernels.append(a, r.kernel());
+-        return self;
+-    }
+-
+-    pub fn destroy(self: *Group) void {
+-        self.norm.deinit();
+-        for (&self.routers) |*r| r.deinit();
+-        self.mod.unload();
+-        self.a.destroy(self);
+-    }
+-};
+diff --git a/zig/tests/cuda/contract_drama3_router.zig b/zig/tests/cuda/contract_drama3_router.zig
+deleted file mode 100644
+index aca318fad..000000000
+--- a/zig/tests/cuda/contract_drama3_router.zig
++++ /dev/null
+@@ -1,188 +0,0 @@
+-//! Drama 3's compact router (d3_router_compact) under the contract on CUDA: picks and weights against FP64.
+-const std = @import("std");
+-const cuda = @import("cuda");
+-const core = @import("core");
+-const Gpu = @import("check.zig").Gpu;
+-const rig_ = @import("contract_rig.zig");
+-
+-const contract = core.contract;
+-const c = contract.spec;
+-const g = contract.gates;
+-
+-const experts = 256;
+-const top = 8;
+-// drama3/config.zig's moe_proj rows: [shared gate 512 | up 512 | router 256 | shared gate 1 | pad 7]
+-const stride: usize = 1288;
+-const r_off: usize = 1024;
+-
+-fn noSums(_: c.Shape) usize {
+-    return 0;
+-}
+-
+-const rule = "only held logits count; a NaN or +inf held logit, or none finite, gives NaN weights over the lowest held ids";
+-
+-/// Rows: tokens; n: experts held of 256 (8 up); k: the router's 256 logits. Prefill, decode, a whole map.
+-pub fn spec() c.Spec {
+-    return .{
+-        .name = "cuda drama3 compact router d3_router_compact",
+-        .accum = .none,
+-        .depth = noSums,
+-        .out = .raw,
+-        .nan = .{ .stated = rule },
+-        .tiles = .{ .{}, .{ .size = 9, .step = 1, .min = 8 }, .{} },
+-        .served = &.{ .{ .rows = 64, .n = 64, .k = experts }, .{ .rows = 1, .n = 64, .k = experts }, .{ .rows = 64, .n = 256, .k = experts }, .{ .rows = 64, .n = 8, .k = experts } },
+-    };
+-}
+-
+-pub const Router = struct {
+-    rig: rig_.Rig,
+-    f: cuda.Function,
+-    control: bool = false, // f is d3_router: no mask, original ids, must fail gate 3
+-    shape: c.Shape = undefined,
+-    logits: []u16 = &.{},
+-    slots: [experts]i32 = undefined,
+-    held: [experts]u8 = undefined,
+-    sp: u64 = 0,
+-    sl: u64 = 0,
+-    picks: u64 = 0,
+-    weights: u64 = 0,
+-    msg: [200]u8 = undefined,
+-
+-    pub fn init(gpu: Gpu, s: cuda.Stream, mod: cuda.Module, control: bool) !Router {
+-        return .{ .rig = .{ .gpu = gpu, .s = s }, .f = try mod.function(if (control) "d3_router" else "d3_router_compact"), .control = control };
+-    }
+-
+-    pub fn deinit(self: *Router) void {
+-        self.rig.gpu.gpa.free(self.logits);
+-        self.rig.deinit();
+-    }
+-
+-    pub fn kernel(self: *Router) g.Kernel {
+-        var k: g.Kernel = .{ .spec = spec(), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
+-        if (self.control) k.spec.name = "cuda drama3 compact router control: d3_router, unmasked";
+-        return k;
+-    }
+-
+-    const vt = g.hooks(Router);
+-
+-    fn logit(self: *const Router, t: usize, id: usize) f64 {
+-        return c.fromBf16(self.logits[t * stride + r_off + id]);
+-    }
+-
+-    /// Held: a random n of 256 in shuffled slots; excluded logits above every held one; held on a 1/4 grid (ties).
+-    pub fn prepare(self: *Router, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+-        if (shape.k != experts or shape.n < top or shape.n > experts) return false;
+-        self.rig.reset();
+-        self.shape = shape;
+-        var prng = std.Random.DefaultPrng.init(seed);
+-        const rng = prng.random();
+-        var ids: [experts]u8 = undefined;
+-        for (&ids, 0..) |*id, i| id.* = @intCast(i);
+-        rng.shuffle(u8, &ids);
+-        @memcpy(self.held[0..shape.n], ids[0..shape.n]);
+-        self.slots = @splat(-1);
+-        for (self.held[0..shape.n], 0..) |id, slot| self.slots[id] = @intCast(slot);
+-        const a = self.rig.gpu.gpa;
+-        a.free(self.logits);
+-        self.logits = &.{};
+-        self.logits = try a.alloc(u16, shape.rows * stride);
+-        @memset(self.logits, c.toBf16(std.math.nan(f32))); // outside the router window: a misread offset poisons
+-        for (0..shape.rows) |t| for (0..experts) |id| {
+-            const v: f32 = if (self.slots[id] >= 0) @as(f32, @floatFromInt(rng.uintLessThan(u32, 24))) / 4 - 3 else 8 + @as(f32, @floatFromInt(rng.uintLessThan(u32, 8)));
+-            self.logits[t * stride + r_off + id] = c.toBf16(v);
+-        };
+-        if (fill == .nonfinite) {
+-            const h = self.held[0..shape.n];
+-            const ex = for (0..experts) |id| {
+-                if (self.slots[id] < 0) break id;
+-            } else null;
+-            if (ex) |id| self.logits[r_off + id] = c.toBf16(std.math.nan(f32)); // row 0: masked away
+-            self.logits[stride + r_off + h[1]] = c.toBf16(std.math.nan(f32));
+-            self.logits[2 * stride + r_off + h[2]] = c.toBf16(std.math.inf(f32));
+-            for (h) |id| self.logits[3 * stride + r_off + id] = c.toBf16(-std.math.inf(f32));
+-            self.logits[4 * stride + r_off + h[0]] = c.toBf16(-std.math.inf(f32)); // one -inf held: finite row
+-        }
+-        self.sp = try self.rig.input(std.mem.sliceAsBytes(self.logits));
+-        self.sl = try self.rig.input(std.mem.sliceAsBytes(&self.slots));
+-        self.picks = try self.rig.output(shape.rows * top * 4);
+-        self.weights = try self.rig.output(shape.rows * top * 4);
+-        return true;
+-    }
+-
+-    pub fn run(self: *Router) !void {
+-        var a: cuda.Args = .{};
+-        a.add(self.sp);
+-        a.add(@as(c_int, stride));
+-        a.add(@as(c_int, r_off));
+-        a.add(self.picks);
+-        a.add(self.weights);
+-        a.add(self.sl);
+-        try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows) }, .block = .{ .x = experts } }, self.rig.s, &a);
+-        try self.rig.s.synchronize();
+-    }
+-
+-    pub fn count(self: *Router) usize {
+-        return 2 * self.shape.rows * top;
+-    }
+-
+-    pub fn reference(_: *Router, want: []f64, mag: []f64) !void {
+-        @memset(want, 0);
+-        @memset(mag, 0);
+-    }
+-
+-    /// Row t's eight picks in FP64: held ids by logit, ties to the lower original id; the weights, NaN if poisoned.
+-    fn fp64(self: *const Router, t: usize, ids: *[top]usize, weights: *[top]f64) bool {
+-        var order: [experts]usize = undefined;
+-        const h = order[0..self.shape.n];
+-        for (h, self.held[0..self.shape.n]) |*o, id| o.* = id;
+-        var max = -std.math.inf(f64);
+-        var poisoned = false;
+-        for (h) |id| {
+-            const v = self.logit(t, id);
+-            poisoned = poisoned or std.math.isNan(v) or v == std.math.inf(f64);
+-            max = @max(max, v);
+-        }
+-        poisoned = poisoned or max == -std.math.inf(f64);
+-        const Cmp = struct {
+-            fn lt(_: *const Router, a: usize, b: usize) bool {
+-                return a < b; // poisoned: every held prob reads 0, so the lowest ids win
+-            }
+-            fn before(r: struct { *const Router, usize }, a: usize, b: usize) bool {
+-                const la = r[0].logit(r[1], a);
+-                const lb = r[0].logit(r[1], b);
+-                return la > lb or (la == lb and a < b);
+-            }
+-        };
+-        if (poisoned) std.sort.pdq(usize, h, self, Cmp.lt) else std.sort.pdq(usize, h, .{ self, t }, Cmp.before);
+-        var sum: f64 = 0;
+-        for (h[0..top]) |id| sum += @exp(self.logit(t, id) - max);
+-        for (h[0..top], ids, weights) |id, *i, *w| {
+-            i.* = id;
+-            w.* = if (poisoned) std.math.nan(f64) else @exp(self.logit(t, id) - max) / sum;
+-        }
+-        return poisoned;
+-    }
+-
+-    pub fn check(self: *Router, at: g.Gate) !?[]const u8 {
+-        const n = self.shape.rows * top;
+-        const got_p = try self.rig.gpu.gpa.alloc(i32, n);
+-        defer self.rig.gpu.gpa.free(got_p);
+-        @memcpy(std.mem.sliceAsBytes(got_p), try self.rig.bytes(self.picks, n * 4));
+-        const got_w: []align(1) const f32 = std.mem.bytesAsSlice(f32, try self.rig.bytes(self.weights, n * 4));
+-        var poisoned: usize = 0;
+-        for (0..self.shape.rows) |t| {
+-            var ids: [top]usize = undefined;
+-            var weights: [top]f64 = undefined;
+-            poisoned += @intFromBool(self.fp64(t, &ids, &weights));
+-            for (0..top) |k| {
+-                const p = got_p[t * top + k];
+-                const w: f64 = got_w[t * top + k];
+-                const slot = self.slots[ids[k]];
+-                const same = if (std.math.isNan(weights[k])) std.math.isNan(w) else @abs(w - weights[k]) <= 1e-6;
+-                if (p != slot or !same) return try std.fmt.bufPrint(&self.msg, "row {d} pick {d}: slot {d} weight {e}, FP64 slot {d} (id {d}) weight {e}", .{ t, k, p, w, slot, ids[k], weights[k] });
+-            }
+-        }
+-        if (at == .nonfinite and poisoned != 3) return try std.fmt.bufPrint(&self.msg, "{d} poisoned rows, not the 3 planted: no proof", .{poisoned});
+-        return null;
+-    }
+-};
+diff --git a/zig/tests/cuda/contract_tests.zig b/zig/tests/cuda/contract_tests.zig
+index 8948e76b7..15137feea 100644
+--- a/zig/tests/cuda/contract_tests.zig
++++ b/zig/tests/cuda/contract_tests.zig
+@@ -315,8 +315,11 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
+     var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
+     defer h3_topk.deinit();
+     try kernels.append(a, h3_topk.kernel());
+-    const d3 = try drama3_k.Group.create(a, gpu, s, &kernels);
+-    defer d3.destroy();
++    var d3_mod = try cuda.Module.load(gpu.d, kk.drama3);
++    defer d3_mod.unload();
++    var d3_norm = try drama3_k.Norm.init(gpu, s, d3_mod);
++    defer d3_norm.deinit();
++    try kernels.append(a, d3_norm.kernel());
+     var ck: ?cuda.ck.Ck = null;
+     var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
+     if (cap >= 120) {
