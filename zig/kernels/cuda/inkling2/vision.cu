@@ -53,3 +53,4 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2v_rope(__nv_bfloat
         p[1] = tobf(__fadd_rn(__fmul_rn(b, c), __fmul_rn(a, s)));
     }
 }
+
