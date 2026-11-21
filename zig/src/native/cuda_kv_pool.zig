@@ -510,7 +510,6 @@ test "CUDA cache default scales pool copies after full stream windows without cu
     explicit.prompt_cache_gib = 0;
     try std.testing.expectEqual(@as(u64, 0), budgetOf(F, l, 88 * GiB, explicit, 6144, false, true, 0, null).cache);
 }
-
 test "CUDA cache default leaves seven full windows beside an unpaged engine" {
     const GiB: u64 = 1 << 30;
     const l: kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
