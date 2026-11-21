@@ -167,7 +167,7 @@ fn compileInkling2Contracts() !void {
     var modelopt: @import("contract_inkling2_modelopt.zig").ModelOpt = undefined;
     _ = try modelopt.prepare(shape, .random, 0);
     try modelopt.run();
-    _ = try modelopt.check(.shapes);
+    _ = modelopt.kernel();
     _ = modelopt.count();
     const want: []f64 = undefined;
     const mag: []f64 = undefined;

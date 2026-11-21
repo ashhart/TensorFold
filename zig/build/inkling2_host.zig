@@ -12,7 +12,6 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     core.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("core", core);
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
-    m.addImport("bf16_round", b.createModule(.{ .root_source_file = b.path(dir ++ "bf16_round.zig"), .target = target, .optimize = optimize }));
     m.addImport("inkling2_metal", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig"), .target = target, .optimize = optimize }));
     m.addImport("metal", b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .optimize = optimize }));
     m.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = target, .optimize = optimize }));
