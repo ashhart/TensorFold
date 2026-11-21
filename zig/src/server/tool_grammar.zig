@@ -47,9 +47,9 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const markup = lfm2.isStyle(rendered, probe, key);
     // measured for one call: parallel calls repeat that call's rule, and the limit counts each tool once
-    const once = if (markup) try lfm2.build(cx.a, tools, false) else try build(cx.a, s, tools, false);
+    const once = if (markup) try lfmBuild(cx, tools, false) else try build(cx.a, s, tools, false);
     try fits(cx, once);
-    const text = if (!parallel) once else if (markup) try lfm2.build(cx.a, tools, true) else try build(cx.a, s, tools, true);
+    const text = if (!parallel) once else if (markup) try lfmBuild(cx, tools, true) else try build(cx.a, s, tools, true);
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
@@ -79,6 +79,13 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
     return if (prompt.renderIds(srv, &scratch, probe_turn, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => "",
+    };
+}
+
+fn lfmBuild(cx: *Cx, tools: []const Value, parallel: bool) errors.Refused![]const u8 {
+    return lfm2.build(cx.a, tools, parallel) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSchema => cx.fail(.request, "tools: LFM2 cannot enforce a required non-keyword property or an unsupported schema constraint", .{}),
     };
 }
 
@@ -142,6 +149,10 @@ pub fn optional(a: Allocator, s: Style, tools: []const Value, all: bool, paralle
         try parts.append(a, ws);
         const content = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
         break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = dsml_open } }, .{ "content", content }, .{ "end", .{ .string = dsml_close } } });
+    } else if (s == .minimax) blk: {
+        const one = try anyCall(a, s, tools, all);
+        const content = if (!parallel) one else try node(a, "sequence", &.{.{ "elements", try list(a, &.{ one, try node(a, "star", &.{.{ "content", one }}) }) }});
+        break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = mm ++ "<tool_call>\n" } }, .{ "content", content }, .{ "end", .{ .string = mm ++ "</tool_call>" } } });
     } else try callTag(a, s, tools, all);
     const triggers = try list(a, &.{tag.get("begin").?});
     const format = try node(a, "triggered_tags", &.{ .{ "triggers", triggers }, .{ "tags", try list(a, &.{tag}) }, .{ "stop_after_first", .{ .bool = !parallel } } });

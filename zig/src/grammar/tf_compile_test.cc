@@ -22,10 +22,12 @@ struct Gate {
     bool released = false;
     std::atomic<int> entered{0};
     std::atomic<int> exited{0};
-    void Wait() {
+    void Wait(const Cache::Cancel* cancel = nullptr) {
         entered++;
         std::unique_lock<std::mutex> hold(mutex);
-        changed.wait(hold, [&] { return released; });
+        while (!released && !(cancel && cancel->load(std::memory_order_acquire))) {
+            changed.wait_for(hold, std::chrono::milliseconds(1));
+        }
         exited++;
     }
     void Release() {
@@ -88,6 +90,23 @@ void deadline() {
     gate->Release();
     until([&] { return cache.Active() == 0; });
     require(cache.Compile(1, "slow", Bytes) == "grammar of slow", "a late result entered the cache");
+}
+
+void abandoned() {
+    Cache cache;
+    auto gate = std::make_shared<Gate>();
+    Release release{gate};
+    for (size_t i = 0; i < tfc::active_limit; i++) {
+        auto cancel = std::make_shared<Cache::Cancel>(false);
+        auto blocked = [gate, cancel](const std::string&) {
+            gate->Wait(cancel.get());
+            return std::string("cancelled");
+        };
+        refuses([&] { cache.Compile(1, std::to_string(i), blocked, 20, cancel); }, "time limit");
+    }
+    until([&] { return gate->exited.load() == tfc::active_limit && cache.Active() == 0; });
+    require(cache.Compile(1, "fifth", Bytes) == "grammar of fifth", "cancelled workers retained every slot");
+    until([&] { return cache.Active() == 0; });
 }
 
 void independent() {
@@ -238,6 +257,7 @@ extern "C" int tf_compile_host_test(int which) {
             case 5: ownership(); break;
             case 6: errors(); break;
             case 7: stack(); break;
+            case 8: abandoned(); break;
             default: return 1;
         }
         return 0;
