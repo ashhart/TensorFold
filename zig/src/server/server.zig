@@ -192,7 +192,6 @@ pub const Server = struct {
     /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
     recall: ?*api.recall_store.Store = null,
     witness: ?*@import("witness.zig").State = null, // serve owns GET /v1/execution/witness state; null: off
-
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         return @import("input_types.zig").media(srv);
