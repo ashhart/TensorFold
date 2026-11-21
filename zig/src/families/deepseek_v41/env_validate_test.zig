@@ -46,7 +46,7 @@ test "DeepSeek strict env: the shared table holds every runtime setting in its f
         try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_") or std.mem.eql(u8, r.name, "TF_TP_KERNEL_IMAGE"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 78, 46, 32, 47 }, counts);
+    try t.expectEqual([4]usize{ 79, 46, 32, 47 }, counts);
 }
 
 test "DeepSeek strict env: unset and blank settings both read as the caller's default" {
