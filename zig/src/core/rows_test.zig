@@ -247,16 +247,18 @@ fn gridRequest(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u3
     return .{ .from = plan.from, .sum = f.sum };
 }
 
-test "a grid family's requests name no chunk starts: its states go to disk on the grid and resume after a restart" {
+/// A grid family's states through one writer (`sync`: the test's thread, else the I/O worker), read after a restart.
+fn gridRoundTrip(sync: bool, tag: []const u8) !void {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var buf: [128]u8 = undefined;
-    const dir = root(&buf, "grid");
+    const dir = root(&buf, tag);
     defer rmTree(dir);
     const grid: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1, .planned = true, .grid = 512 };
     var o = options(dir);
+    o.sync_writes = sync;
     o.planned = true;
     o.grid = 512;
     const p = try prompt(a, 0, 5, 1300); // the engine cuts its chunks on the grid: 512 and 1024
@@ -268,7 +270,7 @@ test "a grid family's requests name no chunk starts: its states go to disk on th
         defer s.deinit();
         s.disk = r;
         _ = try gridRequest(a, &s, &f, p, 1200);
-        drain(r);
+        _ = rows.write.drain(r, rows.write.nowNs() + 3 * std.time.ns_per_s); // the worker publishes the states
         try std.testing.expect(r.states.items.len > 0);
         for (r.states.items) |st| {
             try std.testing.expectEqual(@as(u32, 0), st.at % 512);
@@ -287,6 +289,14 @@ test "a grid family's requests name no chunk starts: its states go to disk on th
     try std.testing.expect(f.restored_ok);
     try std.testing.expectEqual(fresh(turn2), got.sum);
     try std.testing.expectEqual(@as(u64, 1), r.counts.reads);
+}
+
+test "a grid family's requests name no chunk starts: its states go to disk on the grid and resume after a restart" {
+    try gridRoundTrip(true, "grid");
+}
+
+test "a grid family's chunk starts reach the I/O worker's writes as well, the writer GLM's store uses" {
+    try gridRoundTrip(false, "grid-worker");
 }
 
 test "an entry evicted before its write leaves the queue; once written, an eviction costs nothing" {

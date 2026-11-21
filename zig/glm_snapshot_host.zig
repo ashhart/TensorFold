@@ -61,6 +61,7 @@ const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
 
 test {
     _ = @import("glm_snapshot_host_ram.zig");
+    _ = @import("glm_snapshot_regions_host.zig");
 }
 const pc = @import("engine_api").prompt_cache;
 const adapter = @import("copies");

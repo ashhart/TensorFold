@@ -112,7 +112,7 @@ pub const LaneHost = struct {
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
-    pub fn countPool(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+    pub fn countPool(h: *LaneHost, pool: anytype) error{ PoolHasHost, NoClassHook }!void {
         return ledger.count(h, pool);
     }
 
@@ -354,21 +354,21 @@ pub const LaneHost = struct {
         const began = h.setup(job) orelse return true;
         return h.launch(job, began);
     }
-
     pub const Taken = union(enum) { none, failed, job: *Job };
 
     /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
     pub fn takeJob(h: *LaneHost) Taken {
         h.lock();
-        const at = admit.pick(h) orelse { // no lane free, or none may go: a shared cache pool's head waits for room
+        // a request past a whole class is refused first: no lane need free; else none free, or a pool's head waits
+        const at = admit.refused(h) orelse admit.pick(h) orelse {
             h.unlock();
-            return .none;
+            return .none; // no lane free, or none may go: a shared cache pool's head waits for room
         };
-        if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
+        if (ledger.never(h, h.queued.items[at])) |why| { // past the budget alone or a class: no release makes it fit
             const job = h.queued.orderedRemove(at);
             h.load.failures[@backingInt(load.Failure.prompt_too_large)] += 1;
             h.unlock();
-            h.finish(job, .failed, ledger.too_big);
+            h.finish(job, .failed, why);
             return .failed;
         }
         if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
