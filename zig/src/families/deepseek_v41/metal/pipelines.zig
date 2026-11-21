@@ -79,7 +79,7 @@ pub const Pipelines = struct {
         errdefer p.index.deinit();
         p.experts = try experts.Pipelines.load(a, device);
         errdefer p.experts.deinit();
-        p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);
+        p.glue = try glue.Pipelines.load(device, sources.dsv41.glue_rows);
         errdefer p.glue.deinit();
         p.mv_mma = try mv_mma.Pipelines.load(device);
         errdefer p.mv_mma.deinit();

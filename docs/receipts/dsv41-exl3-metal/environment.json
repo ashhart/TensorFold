@@ -1,0 +1,75 @@
+{
+  "recorded_at_utc": "2026-11-14T01:35:55.046425+00:00",
+  "base_commit": "bec140d545aa50b765f26cf295b43179c6b2834f",
+  "native_and_serving_commit": "e070123319b69e73c969b91409dd7195fbbef93e",
+  "source_note": "Family GPU checks were run before the final core mixed-width fallback fix. The native binary was rebuilt at e070123319b69e73c969b91409dd7195fbbef93e; 128cfe743a76f59b350d0c750a12669708029ff3 changes only the shared-down test fixture after that.",
+  "machine": {
+    "soc": "Apple M5 Ultra",
+    "gpu_cores": 64,
+    "memory_bytes": 274877906944,
+    "macos": "27.0",
+    "macos_build": "26A428",
+    "metal_support": "Metal 4"
+  },
+  "toolchain": {
+    "zig": "0.17.0",
+    "metal_toolchain_asset": "27.1.266.1",
+    "cpu_target": "apple_m1",
+    "optimize": "ReleaseSafe",
+    "benchmark_python": "3.12.14"
+  },
+  "checkpoint": {
+    "pack": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw",
+    "pack_revision": "45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b",
+    "source": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "source_revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "format": "EXL3 EAQ v1, average 2.9 bpw, mul1, out_scales=always; MTP 4 bit",
+    "pack_license": "MIT",
+    "metadata_sha256": {
+      "config.json": "4eac47f0da99a65f2bcfb97ca357f7d5388a79c9b377d6dd65b1ed18548d846d",
+      "model.safetensors.index.json": "6c4679e6407806ab4e63f9a2a46a825c5cab4990cd916723721e7ba0c6bb7d77",
+      "engram-token-map.bin": "b9a7cf9d341f5daf8fc435dbc36153bf4b28c1b8075be20de30d0556fb910511"
+    },
+    "fingerprint_scope": "All 39 EXL3 weight shards and five pack metadata/tokenizer/template files match the pinned public snapshot. Both streamed original shards and three original metadata/tokenizer files match the pinned source revision. The generated token map is bound separately by SHA256.",
+    "fingerprint_receipt": "model-fingerprints.json"
+  },
+  "matched_serve": {
+    "environment": {
+      "GLM_LOAD_LIMIT_GB": "240",
+      "TF_DSV41_PREFILL_STEP": "4096"
+    },
+    "arguments": [
+      "serve",
+      "<pack>",
+      "--engram-stream-dir",
+      "<orig>",
+      "--chat-template",
+      "<pack>/chat_template.jinja",
+      "--context",
+      "32768",
+      "--parallel",
+      "4",
+      "--prompt-cache-gib",
+      "0",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8941",
+      "--name",
+      "exl3-qualification",
+      "--keep-warm",
+      "0"
+    ],
+    "candidate_startup_diagnostic": {
+      "TF_DSV41_CONE_CHECK": "4096,16384"
+    },
+    "notes": [
+      "Identical explicit 4096-row workspace in both arms; this comparison does not measure the automatic 8192-row policy.",
+      "The default copy-draft policy is checked against draft:false; this does not qualify explicit MTP/DSpark settings.",
+      "Prompt cache disabled, but benchmark warm-up and OS/Engram page warmth mean this is not a cold-TTFT gate."
+    ]
+  },
+  "family_operator_check_commit": "59535dad914819ea4d281f87c81a138c4f2c4e1b",
+  "exl3_projection_check_commit": "128cfe743a76f59b350d0c750a12669708029ff3",
+  "qualification_tree_commit": "128cfe743a76f59b350d0c750a12669708029ff3"
+}

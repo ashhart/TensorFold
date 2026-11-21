@@ -216,6 +216,29 @@ test "the engine's default shares a long prompt's steps beside a decoder and lea
     try std.testing.expect(host2.filling.items[0].stream.fill_at.load(.monotonic) > 0); // the step ran uncapped
 }
 
+test "a family's decoding_rows cuts chunks beside a live decoder, with no flag" {
+    clearShareEnv();
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    core.backend.decoding_rows = 4096;
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host, 0)); // nothing decoding: the whole round
+    var s = try lanes.Stream.init(gpa, .{ .id = "w", .prompt = &.{ 3, 1, 4, 1 }, .max_new = 8, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try core.addStream(&s);
+    defer core.backend.release(&s);
+    const n = s.prompt_len -| s.cached;
+    try std.testing.expectEqual(@as(u32, 4096), fill.capRows(&host, n));
+    s.paused = true;
+    try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host, n));
+}
+
 test "an env share keeps its time-only meaning: it never caps chunks" {
     const gpa = std.testing.allocator;
     _ = env.setenv(share_env, "0.1", 1);

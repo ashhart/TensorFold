@@ -1,0 +1,35 @@
+//! The DeepSeek-V4.1 attention pass: the resident pipeline set, the encode entries and the five stages.
+const common = @import("attention_common.zig");
+const encode_mod = @import("attention_encode.zig");
+const stages = @import("attention_stages.zig");
+
+pub const View = common.View;
+pub const State = common.State;
+pub const Seg = common.Seg;
+pub const Prof = common.Prof;
+pub const profLayerOn = common.profLayerOn;
+pub const DiagnosticStage = common.DiagnosticStage;
+pub const DiagnosticObserver = common.DiagnosticObserver;
+pub const Pipelines = common.Pipelines;
+pub const regions = common.regions;
+pub const Region = common.Region;
+pub const Workspace = common.Workspace;
+pub const tensor = common.tensor;
+pub const core = common.core;
+pub const projection = common.projection;
+pub const norm = common.norm;
+pub const normRepeat = common.normRepeat;
+pub const rotate = common.rotate;
+pub const rotateRepeat = common.rotateRepeat;
+pub const attnCountOn = common.attnCountOn;
+pub const attnBegin = common.attnBegin;
+pub const attnMark = common.attnMark;
+pub const precedingIndex = common.precedingIndex;
+pub const partialBytes = common.partialBytes;
+pub const denseKvBytes = common.denseKvBytes;
+pub const splitScan = common.splitScan;
+pub const encode = encode_mod.encode;
+pub const encodeProfiled = encode_mod.encodeProfiled;
+pub const encodeMulti = encode_mod.encodeMulti;
+pub const encodeDiagnostic = encode_mod.encodeDiagnostic;
+pub const Stage = stages.Stage;

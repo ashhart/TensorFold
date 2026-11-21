@@ -21,9 +21,10 @@ const dsv41_mv = @import("metal_dsv41_mv.zig");
 const dsv41_mv_mma = @import("metal_dsv41_mv_mma.zig");
 const dsv41_vision = @import("metal_dsv41_vision.zig");
 const dsv41_hc = @import("metal_dsv41_hc.zig");
+const dsv41_boundary = @import("metal_dsv41_boundary.zig");
 const dsv41_fold = @import("metal_dsv41_fold.zig");
-const dsv41_glue_tmp = @import("metal_dsv41_glue_tmp.zig");
-const dsv41_glue_tmp2 = @import("metal_dsv41_glue_tmp2.zig");
+const dsv41_glue_rows = @import("metal_dsv41_glue_rows.zig");
+const dsv41_glue_rows2 = @import("metal_dsv41_glue_rows2.zig");
 const dsv41_fused = @import("metal_dsv41_fused.zig");
 const dsv41_fused2 = @import("metal_dsv41_fused2.zig");
 const dsv41_fused3 = @import("metal_dsv41_fused3.zig");
@@ -94,9 +95,10 @@ pub const Suites = struct {
     mv_mma: *dsv41_mv_mma.Suite,
     vision: *dsv41_vision.Suite,
     hc: *dsv41_hc.Suite,
+    boundary: *dsv41_boundary.Suite,
     fold: *dsv41_fold.Suite,
-    glue_tmp: *dsv41_glue_tmp.Suite,
-    glue_tmp2: *dsv41_glue_tmp2.Suite,
+    glue_rows: *dsv41_glue_rows.Suite,
+    glue_rows2: *dsv41_glue_rows2.Suite,
     fused: *dsv41_fused.Suite,
     fused2: *dsv41_fused2.Suite,
     fused3: *dsv41_fused3.Suite,
@@ -138,10 +140,12 @@ pub const Suites = struct {
         errdefer vision.destroy();
         const hc = try dsv41_hc.Suite.create(a, device, queue, kernels, only);
         errdefer hc.destroy();
+        const boundary = try dsv41_boundary.Suite.create(a, device, queue, kernels, only);
+        errdefer boundary.destroy();
         const fold = try dsv41_fold.Suite.create(a, device, queue, kernels, only);
         errdefer fold.destroy();
-        const glue_tmp = try dsv41_glue_tmp.Suite.create(a, device, queue, kernels, only);
-        errdefer glue_tmp.destroy();
+        const glue_rows = try dsv41_glue_rows.Suite.create(a, device, queue, kernels, only);
+        errdefer glue_rows.destroy();
         const fused = try dsv41_fused.Suite.create(a, device, queue, kernels, only);
         errdefer fused.destroy();
         const fused2 = try dsv41_fused2.Suite.create(a, device, queue, kernels, only);
@@ -152,26 +156,27 @@ pub const Suites = struct {
         errdefer fused4.destroy();
         const fused5 = try dsv41_fused5.Suite.create(a, device, queue, kernels, only);
         errdefer fused5.destroy();
-        const glue_tmp2 = try dsv41_glue_tmp2.Suite.create(a, device, queue, kernels, only);
-        errdefer glue_tmp2.destroy();
+        const glue_rows2 = try dsv41_glue_rows2.Suite.create(a, device, queue, kernels, only);
+        errdefer glue_rows2.destroy();
         const segs = try dsv41_segs.Suite.create(a, device, queue, kernels, only);
         errdefer segs.destroy();
         const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
         errdefer segs_ix.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .boundary = boundary, .fold = fold, .glue_rows = glue_rows, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_rows2 = glue_rows2, .segs = segs, .segs_ix = segs_ix };
     }
 
     pub fn destroy(s: *Suites) void {
         s.segs_ix.destroy();
         s.segs.destroy();
-        s.glue_tmp2.destroy();
+        s.glue_rows2.destroy();
         s.fused5.destroy();
         s.fused4.destroy();
         s.fused3.destroy();
         s.fused2.destroy();
         s.fused.destroy();
-        s.glue_tmp.destroy();
+        s.glue_rows.destroy();
         s.fold.destroy();
+        s.boundary.destroy();
         s.hc.destroy();
         s.mv_mma.destroy();
         s.mv.destroy();
@@ -227,10 +232,11 @@ pub const Suites = struct {
         t.failed += try s.compress.invariance(seed);
         t.failed += try s.compress.equality(seed);
         t.failed += try s.hc.invariance(seed);
+        t.failed += try s.boundary.invariance(seed);
         t.failed += try s.fold.invariance(seed);
-        t.failed += try s.glue_tmp.invariance(seed);
-        t.failed += try s.glue_tmp.bounds(seed);
-        t.failed += try s.glue_tmp2.invariance(seed);
+        t.failed += try s.glue_rows.invariance(seed);
+        t.failed += try s.glue_rows.bounds(seed);
+        t.failed += try s.glue_rows2.invariance(seed);
         t.failed += try s.fused.invariance(seed);
         t.failed += try s.fused3.invariance(seed);
         t.failed += try s.fused4.invariance(seed);

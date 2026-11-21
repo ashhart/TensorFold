@@ -275,7 +275,7 @@ pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !u
     return n;
 }
 /// Metal pipelines as the engine launches them; tg_memory is the most any chip reflects, m1 and m2 the compiled limits.
-pub const metal = joins.metal_before ++ [_]M{
+pub const metal = joins.metal_before ++ @import("dsv41_records.zig").metal ++ @import("exl3_metal_projection_records.zig").records ++ @import("exl3_metal_chain_records.zig").records ++ @import("dsv41_native_rows_records.zig").records ++ [_]M{
     .{ .name = "qwen3 heads q3_head_norm", .threads = 128, .tg_memory = 16, .offline = false },
     .{ .name = "contract masked values tf_masked_control", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "softmax tf_softmax_bf16", .threads = 1024, .tg_memory = 256, .m1 = 1024, .m2 = 1024 },

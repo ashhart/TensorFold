@@ -11,7 +11,6 @@ const Penalties = @import("sampling.zig").Penalties;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
-
 pub const Reason = enum {
     none,
     stop,
@@ -83,6 +82,7 @@ pub const CancelCheck = struct {
 pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,
+    snap_at: u32 = 0, // a tail mark the pass may capture INSIDE its chunk instead of cutting at (0: none)
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
 };

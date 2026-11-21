@@ -9,3 +9,4 @@ struct TfDsv41Seg {
   device uchar* ikeys;
   uint base, rows, nkeys, start;
 };
+static_assert(sizeof(TfDsv41Seg) == 72, "TfDsv41Seg must mirror segs.zig's Seg");
