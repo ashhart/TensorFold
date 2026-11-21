@@ -100,6 +100,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("ling_mla_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++
     @import("qwen27_prompt_records.zig").records ++
+    @import("q27_ane_records.zig").records ++
     @import("affine_gather_records.zig").records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++

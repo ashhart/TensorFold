@@ -199,14 +199,18 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
+        const awq_mod = @import("ane_awq.zig");
+        const affine_mod = @import("ane_affine.zig");
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
-        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
+        const chip_ok = if (c.looped) ane_policy.requestedOnGeneration(columns, m.device.generation()) else ane_policy.requestedOnChip(columns, m.device.tensorUnits());
+        const weights_ok = (if (c.looped) false else m.weights.uniformMlp()) or awq_mod.supports(&m.weights, c, columns) or affine_mod.supports(&m.weights, c, columns);
+        const share = m.shard.ranks == 1 and chip_ok and !c.moe() and mtl.ane.available() and weights_ok;
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
         // the share and its overhead bound are qualified on the dense 27B's MLP alone: routed prompts stay on the GPU
         if (columns > 0 and c.moe()) std.log.info("qwen27: the Neural Engine share is not qualified for routed checkpoints; prompts run on the GPU alone", .{});
         const bytes = ane_mlp.Share.bytes(c, columns);
         const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;
-        const required: ?u64 = if (share) ane_mlp.Share.totalBytes(c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {
+        const required: ?u64 = if (share) ane_mlp.Share.totalBytesFor(&m.weights, c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {
             error.MissingAneOverhead => null,
             else => return err,
         } else 0;
@@ -221,7 +225,7 @@ pub const Model = struct {
                 std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{bytes >> 20});
             }
         }
-        if (share and fits) m.ane = ane_mlp.Share.init(m.allocator, m.device, m.queue, &m.checkpoint, c, columns, slices) catch |err| blk: {
+        if (share and fits) m.ane = ane_mlp.Share.initFor(m.allocator, m.device, m.queue, &m.checkpoint, &m.weights, c, columns, slices) catch |err| blk: {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
@@ -296,6 +300,7 @@ test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 wei
     var c: cfg.Config = undefined;
     c.hidden = 5120;
     c.layers = 64;
+    c.physical_layers = 0;
     try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, 3072));
 }
 

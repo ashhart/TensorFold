@@ -198,64 +198,85 @@ pub const Stages = struct {
         const width: u32 = @intCast(m.config.intermediate);
         // No ANE share on a pair (a rank's MLP columns are the GPU's); the assert keeps the branches from disagreeing.
         std.debug.assert(s.reduce == null or m.ane == null);
-        const shared = if (m.ane) |sh| m.kernels.prompt and s.rows <= sh.capacity() else false;
+        const shared = if (m.ane) |sh| m.kernels.prompt and t.t0 == 0 and s.rows <= sh.capacity() else false;
         if (if (shared) m.ane else null) |share| {
             // ANE slices run the shared columns; the GPU adds its remaining columns.
             const used: u32 = (s.rows + ane_mlp.width - 1) / ane_mlp.width;
-            const v = share.next(index, used);
+            const phys = if (m.config.physical_layers != 0) m.config.exec_phys[index] else index;
+            const v = share.next(phys, used);
             const planes = Ref{ .buffer = share.outputs[0].buffer };
-            const own = share.columns / 64;
-            const all = width / 64;
-            for (0..used) |slice| try m.kernels.aneInput(e, f.get(.input), f.get(.dims), .{ .buffer = share.inputs[slice].buffer }, h, width, share.columns, @intCast(slice * ane_mlp.width));
+            for (0..used) |slice| try m.kernels.aneInput(lane.enc, f.get(.input), f.get(.dims), .{ .buffer = share.inputs[slice].buffer }, h, width, share.columns, @intCast(slice * ane_mlp.width));
             try share.signal(lane, v[0]);
-            try m.kernels.quantSkip(lane.enc, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
-            lane.enc.barrier();
-            try m.kernels.mlpAne(lane.enc, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), planes, h, width, share.columns, s.rows, own, all - own);
-            lane.enc.barrier();
-            try m.kernels.quantCut(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
-            share.wait(lane, v[1]);
-            for (0..used) |slice| {
-                const base: u32 = @intCast(slice * ane_mlp.width);
-                try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
-            }
-            lane.enc.barrier();
-            if (layer.moe) |*mo| {
-                try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
+            if (share.awq) |tail| {
+                if (tail.rem > 0) {
+                    const up_rem = Ref{ .buffer = f.get(.mixed).buffer, .offset = f.get(.mixed).offset + @as(usize, tail.rem) * 2 };
+                    if (tail.gu[phys].sn != null) {
+                        try @import("loop.zig").quantSplit(&m.kernels, lane.enc, tail.gu[phys], f.get(.input), f.get(.mixed), s.rows, 2 * tail.rem, .{});
+                        lane.enc.barrier();
+                        try m.kernels.mlp(lane.enc, f.get(.mixed), up_rem, f.get(.dims), f.get(.activated), f.get(.act_sums), tail.rem, s.rows);
+                        lane.enc.barrier();
+                        try @import("loop.zig").quantSplit(&m.kernels, lane.enc, tail.down[phys], f.get(.activated), f.get(.output), s.rows, h, .{});
+                        lane.enc.barrier();
+                    } else {
+                        try m.kernels.quant(lane.enc, tail.gu[phys], f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
+                        lane.enc.barrier();
+                        try m.kernels.mlp(lane.enc, f.get(.mixed), up_rem, f.get(.dims), f.get(.activated), f.get(.act_sums), tail.rem, s.rows);
+                        lane.enc.barrier();
+                        try m.kernels.quant(lane.enc, tail.down[phys], f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
+                        lane.enc.barrier();
+                    }
+                } else m.kernels.sn_xs128 = null;
+                share.wait(lane, v[1]);
+                for (0..used) |slice| {
+                    const base: u32 = @intCast(slice * ane_mlp.width);
+                    tail.addAneBf16(lane.enc, f.get(.output), .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, @min(ane_mlp.width, s.rows - base), base, tail.rem > 0);
+                }
+            } else {
+                const own = share.columns / 64;
+                const all = width / 64;
+                try m.kernels.quantSkip(lane.enc, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
                 lane.enc.barrier();
+                try m.kernels.mlpAne(lane.enc, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), planes, h, width, share.columns, s.rows, own, all - own);
+                lane.enc.barrier();
+                try m.kernels.quantCut(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
+                share.wait(lane, v[1]);
+                for (0..used) |slice| {
+                    const base: u32 = @intCast(slice * ane_mlp.width);
+                    try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
+                }
             }
-            s.pending = f.get(.output);
-            return;
+            lane.enc.barrier();
         } else {
             const in_sums: @import("quant_gpu.zig").Sums = .{ .ref = t.sums(f.get(.sums)), .stride = sums(f, .sums, s.rows).stride };
             try m.kernels.quant(e, layer.gu, t.at(f.get(.input), h), in_sums, t.dims, t.at(f.get(.mixed), layer.gu.n), t.n);
             e.barrier();
             const act = t.at(f.get(.activated), width);
             try m.kernels.mlp(e, t.at(f.get(.mixed), layer.gu.n), t.at(up, layer.gu.n), t.dims, act, t.sums(f.get(.act_sums)), width, t.n);
-        }
-        lane.enc.barrier();
-        // Seam B: gate|up gives each rank its columns, so down_proj's full K needs the peer's; `.mlp` keeps it whole.
-        var down_in = t.at(f.get(.activated), width);
-        const acts = if (s.reduce) |r| r.next() else null;
-        if (acts) |sm| {
-            s.reduce.?.rowsIn(&e, sm, down_in, s.rows, width, width, f.get(.mixed), layer.down.k);
-            lane.enc = e;
-            if (s.reduce.?.broken()) return error.PairFailed;
-            e.barrier();
-            down_in = f.get(.mixed);
-        }
-        // The MLP is column-split on every pair (`.mlp` mode splits it too), so its seam is unconditional there.
-        const split_down = layer.down.n != h;
-        const seam_b = if (s.reduce != null and split_down) s.reduce.?.next() else null;
-        // A gathered frame's group sums are the peer's to write, so the kernel derives them where there is no peer.
-        const act_sums: @import("quant_gpu.zig").Sums = .{ .ref = t.sums(f.get(.act_sums)), .stride = sums(f, .act_sums, s.rows).stride };
-        const down_sums: ?@import("quant_gpu.zig").Sums = if (s.reduce == null) act_sums else null;
-        if (seam_b) |sm| try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, t.dims, t.at(f.get(.output), h), t.n);
-        lane.enc.barrier();
-        if (seam_b) |sm| {
-            s.reduce.?.rowsOut(&e, sm, f.get(.output), s.rows, layer.down.n, h);
-            lane.enc = e;
-            if (s.reduce.?.broken()) return error.PairFailed;
-            e.barrier();
+            lane.enc.barrier();
+            // Seam B: gather peer columns before down_proj (`.mlp` keeps them whole).
+            var down_in = t.at(f.get(.activated), width);
+            const acts = if (s.reduce) |r| r.next() else null;
+            if (acts) |sm| {
+                s.reduce.?.rowsIn(&e, sm, down_in, s.rows, width, width, f.get(.mixed), layer.down.k);
+                lane.enc = e;
+                if (s.reduce.?.broken()) return error.PairFailed;
+                e.barrier();
+                down_in = f.get(.mixed);
+            }
+            // The MLP is column-split on every pair (`.mlp` mode splits it too), so its seam is unconditional there.
+            const split_down = layer.down.n != h;
+            const seam_b = if (s.reduce != null and split_down) s.reduce.?.next() else null;
+            // A gathered frame's group sums are the peer's to write, so the kernel derives them where there is no peer.
+            const act_sums: @import("quant_gpu.zig").Sums = .{ .ref = t.sums(f.get(.act_sums)), .stride = sums(f, .act_sums, s.rows).stride };
+            const down_sums: ?@import("quant_gpu.zig").Sums = if (s.reduce == null) act_sums else null;
+            if (seam_b) |sm| try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, f.get(.dims), sm.ref, s.rows) else try m.kernels.quant(lane.enc, layer.down, down_in, down_sums, t.dims, t.at(f.get(.output), h), t.n);
+            lane.enc.barrier();
+            if (seam_b) |sm| {
+                s.reduce.?.rowsOut(&e, sm, f.get(.output), s.rows, layer.down.n, h);
+                lane.enc = e;
+                if (s.reduce.?.broken()) return error.PairFailed;
+                e.barrier();
+            }
         }
         if (layer.moe) |*mo| {
             // the shared expert's rows in f.output take the routed experts' weighted rows and the shared gate

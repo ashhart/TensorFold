@@ -33,19 +33,33 @@ pub const Share = struct {
     failed: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     footprint_growth: ?u64 = null,
+    awq: ?*@import("ane_awq.zig").SnTail = null,
+    int8_weights: bool = false,
+    known_bytes: u64 = 0,
 
-    /// The fp16 weights a share of `columns` holds: every layer's gate, up and down over those columns.
+    /// The weight bytes a share of `columns` holds across every physical layer.
     pub fn bytes(c: Config, columns: u32) u64 {
-        return 3 * @as(u64, columns) * c.hidden * 2 * c.layers;
+        return 3 * @as(u64, columns) * c.hidden * 2 * c.physicalLayers();
     }
 
-    /// Known persistent payload: program weights, fp32 partials and both fp16 surfaces for every slice.
-    pub fn admissionBytes(c: Config, columns: u32, slices: u32) !u64 {
+    fn admissionWithTail(c: Config, columns: u32, slices: u32, tail: u64) !u64 {
         if (columns == 0 or slices == 0 or slices > max_slices) return error.BadAneShare;
         const mul = std.math.mul;
-        const weights = try mul(u64, try mul(u64, try mul(u64, 6, columns), c.hidden), c.layers);
+        const weights = try mul(u64, try mul(u64, try mul(u64, 6, columns), c.hidden), c.physicalLayers());
         const buffers = try mul(u64, try mul(u64, try mul(u64, slices, width), c.hidden), 8);
-        return std.math.add(u64, weights, buffers);
+        return std.math.add(u64, try std.math.add(u64, weights, buffers), tail);
+    }
+
+    /// Known persistent payload: program weights, partials, surfaces, and AWQ remainder weights if any.
+    pub fn admissionBytes(c: Config, columns: u32, slices: u32) !u64 {
+        return admissionWithTail(c, columns, slices, @import("ane_awq.zig").tailBytes(c, columns, true));
+    }
+
+    /// Known persistent payload including affine or AWQ remainder weights for `w`.
+    pub fn admissionBytesFor(w: *const @import("gpu_weights.zig").Weights, c: Config, columns: u32, slices: u32) !u64 {
+        const is_affine = c.looped and w.physical_layers.len > 0 and w.physical_layers[0].gu.sn == null;
+        const tail = if (is_affine) @import("ane_affine.zig").tailBytes(w, c, columns) else @import("ane_awq.zig").tailBytes(c, columns, true);
+        return admissionWithTail(c, columns, slices, tail);
     }
 
     /// An absent private build/runtime peak price refuses admission rather than silently pricing it at zero.
@@ -54,26 +68,41 @@ pub const Share = struct {
         return std.math.add(u64, known, overhead orelse return error.MissingAneOverhead);
     }
 
+    /// Total admission budget including build/runtime overhead for `w`.
+    pub fn totalBytesFor(w: *const @import("gpu_weights.zig").Weights, c: Config, columns: u32, slices: u32, overhead: ?u64) !u64 {
+        const known = try admissionBytesFor(w, c, columns, slices);
+        return std.math.add(u64, known, overhead orelse return error.MissingAneOverhead);
+    }
+
     /// Reserve the full priced share less only the footprint growth observed across its successful construction.
     pub fn cacheBytes(s: *const Share, c: Config) !u64 {
-        const total = try totalBytes(c, s.columns, s.slices, @import("ane_policy.zig").build_runtime_overhead);
+        const known = if (s.known_bytes > 0) s.known_bytes else try admissionBytes(c, s.columns, s.slices);
+        const total = try std.math.add(u64, known, @import("ane_policy.zig").build_runtime_overhead orelse return error.MissingAneOverhead);
         return total -| (s.footprint_growth orelse 0);
     }
 
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32, slices: u32) !*Share {
-        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > max_slices) return error.BadAneShare;
+        return initFor(a, device, queue, checkpoint, null, c, columns, slices);
+    }
+
+    /// Build the ANE prompt share, dispatching looped checkpoints to MLX-affine or AWQ remainder builders.
+    pub fn initFor(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, w: ?*const @import("gpu_weights.zig").Weights, c: Config, columns: u32, slices: u32) !*Share {
+        const align_cols: u32 = if (c.looped) 128 else 64;
+        if (columns == 0 or columns % align_cols != 0 or columns > c.intermediate or slices == 0 or slices > max_slices) return error.BadAneShare;
+        const want_int8 = try @import("ane_policy.zig").int8For((@import("sys").environment.Process{}).get("TF_ANE_INT8"), c.looped);
         const memory_policy = @import("sys").memory_policy;
         const before = memory_policy.footprint();
         var loaded: ?*Share = null;
         defer if (loaded) |share| {
             share.footprint_growth = memory_policy.growth(before, memory_policy.footprint());
         };
+        const phys_n = c.physicalLayers();
         const s = try a.create(Share);
         errdefer a.destroy(s);
-        const programs = try a.alloc(ane.Program, c.layers);
+        const programs = try a.alloc(ane.Program, phys_n);
         errdefer a.free(programs);
-        const requests = try a.alloc(ane.Request, c.layers * slices);
+        const requests = try a.alloc(ane.Request, phys_n * slices);
         errdefer a.free(requests);
         const partial = try device.buffer(slices * width * c.hidden * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer partial.deinit();
@@ -96,8 +125,26 @@ pub const Share = struct {
             };
         }
         s.* = .{ .allocator = a, .columns = columns, .programs = programs, .requests = requests, .slices = slices, .inputs = inputs, .outputs = outputs, .partial = partial, .event = event, .queue = queue };
+        if (c.looped) {
+            const is_affine = w != null and w.?.physical_layers.len > 0 and w.?.physical_layers[0].gu.sn == null;
+            const tail = if (is_affine)
+                try @import("ane_affine.zig").build(a, device, checkpoint, w.?, c, columns, slices, want_int8, inputs, outputs, programs, requests)
+            else
+                try @import("ane_awq.zig").SnTail.build(a, device, checkpoint, c, columns, slices, want_int8, inputs, outputs, programs, requests);
+            if (w) |wt| s.known_bytes = try admissionBytesFor(wt, c, columns, slices);
+            s.awq = tail;
+            s.int8_weights = tail.int8_active;
+            errdefer {
+                for (requests) |r| r.deinit();
+                for (programs) |p| p.deinit();
+                tail.deinit();
+            }
+            s.thread = try std.Thread.spawn(.{}, work, .{s});
+            loaded = s;
+            return s;
+        }
         // layers build on 8 threads: dequantizing dominates once the compiler's cache holds the programs
-        var b = Build{ .a = a, .s = s, .checkpoint = checkpoint, .c = c, .ready = try a.alloc(bool, c.layers) };
+        var b = Build{ .a = a, .s = s, .checkpoint = checkpoint, .c = c, .ready = try a.alloc(bool, phys_n) };
         defer a.free(b.ready);
         @memset(b.ready, false);
         errdefer for (b.ready, 0..) |ok, layer| if (ok) {
@@ -124,6 +171,7 @@ pub const Share = struct {
     pub fn deinit(s: *Share) void {
         s.stop.store(true, .release);
         if (s.thread) |t| t.join();
+        if (s.awq) |t| t.deinit();
         for (s.requests) |r| r.deinit();
         for (s.programs) |p| p.deinit();
         s.allocator.free(s.requests);
@@ -195,7 +243,7 @@ pub const Share = struct {
             // spin on the counter while prompt chunks run: a sleeping wait wakes too late for a per-layer handoff
             var spins: u64 = 0;
             while (s.event.value() < 2 * t + 1) : (spins += 1) {
-                if (spins < 2_000_000) std.atomic.spinLoopHint() else if (s.event.wait(2 * t + 1, 100)) break else if (s.stop.load(.acquire)) return;
+                if (spins < 64_000) std.atomic.spinLoopHint() else if (s.event.wait(2 * t + 1, 5)) break else if (s.stop.load(.acquire)) return;
             }
             const entry = s.ring[t % s.ring.len].load(.acquire);
             const layer = entry & 0xFFFF;

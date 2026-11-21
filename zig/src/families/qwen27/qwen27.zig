@@ -40,6 +40,9 @@ pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
+pub const ane_awq = @import("ane_awq.zig");
+pub const ane_affine = @import("ane_affine.zig");
+pub const ane_policy = @import("ane_policy.zig");
 pub const round_plan = @import("round_plan.zig");
 pub const state = @import("state.zig");
 pub const session = @import("session.zig");
@@ -85,6 +88,9 @@ test {
     _ = @import("geometry_test.zig");
     _ = @import("slot_pages_test.zig");
     _ = sn_mtp;
+    _ = ane_policy;
+    _ = ane_awq;
+    _ = ane_affine;
 }
 
 pub const residency = @import("residency.zig");
