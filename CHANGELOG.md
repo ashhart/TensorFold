@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: DFlash2's Q4 draft decode fuses its K/V, Q/K/V and gate/up projections where tensor units and the split allow, and batched heads read packed rows, without changing verified tokens; other geometries keep their current paths (#4258). Thanks to @gilby.
+
 - GLM on Metal: DFlash2 decoding skips inactive draft rows and their tap capture, and the tap mean writes into its ring in place, cutting sampling overhead without changing verified tokens (#4257). Thanks to @gilby.
 
 - MOSS-Image on CUDA: the checkpoint's Qwen3.5 prompt encoder and VAE decoder run beside the transformer, so the native server serves pictures through `POST /v1/images/generations`, the same request twice giving the same bytes (#2281, part of #1573). Thanks to @devopsfortunato.
