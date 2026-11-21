@@ -8,6 +8,7 @@ pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const loop = @import("loop.zig");
 pub const loop_model = @import("loop_model.zig");
+pub const loop_math_cuda = @import("loop_math_cuda.zig");
 
 /// config.json's name in the release.
 pub const model_type = "inkling2";
@@ -21,4 +22,5 @@ test {
     _ = modelopt;
     _ = loop;
     _ = loop_model;
+    _ = loop_math_cuda;
 }
