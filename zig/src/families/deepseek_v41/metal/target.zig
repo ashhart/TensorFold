@@ -433,10 +433,7 @@ pub const Target = struct {
         }
     }
 
-    fn dup(done: []const iface.Segment, slot: u32) bool {
-        for (done) |o| if (o.slot == slot) return true;
-        return false;
-    }
+    const dup = launch_.duplicateSlot;
 
     /// One launch over the rows of these segments (distinct slots, at most R rows in all).
     fn windowGroup(t: *Target, group: []const iface.Segment, choices: [][]u32) !void {
