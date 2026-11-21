@@ -45,8 +45,8 @@ pub fn site(s: *Seg, L: u32, which: []const u8, mode: moe.Mode) !void {
     const e = s.e;
     const pend = s.pend;
     s.pend = 0;
-    // the decoder replay's boundaries write the streams in place (replay.finish's Streams has no `alt`)
-    if (s.short) return moe.mhcInto(e, L, which, mode, s.part == .decoder);
+    // Short CUDA boundaries read all four old streams while separate CTAs write each new stream.
+    if (s.short) return moe.mhc(e, L, which, mode);
     const n = e.n;
     if (pend > 1 and mode == .boundary and n >= pend * pf_rows and n > split_rows) return s.sitePieces(L, which, pend, true);
     // TF_DSV41_MHC_SITE_ROWS: the boundary in row pieces, each piece's inputs still in L2 for its `_finish_k`
