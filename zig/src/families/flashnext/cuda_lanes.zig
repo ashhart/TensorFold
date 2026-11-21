@@ -95,7 +95,6 @@ pub fn Namespace(comptime Tri: type) type {
             /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
             layout: ?@import("core").kv_pool.Layout = null,
         };
-
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
         pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
             return bytes.deviceWeightBytes(gpa, io, dir);
@@ -571,6 +570,7 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snaps.restore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
+            _ = @import("cuda_lanes_vision_test.zig").Cases(@This());
         }
 
         test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {

@@ -84,8 +84,8 @@ pub const Weights = struct {
     bytes: u64,
     memory: cuda.DeviceBuffer,
 
-    /// `dir`'s model.safetensors on the device as `plan` lays it out; a refusal is logged with its reason.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, cfg: *const Config) !Weights {
+    /// `dir`'s model.safetensors on the device as `plan` lays it out (the tower only with `tower`); refusals logged.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, cfg: *const Config, tower: bool) !Weights {
         const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
         defer gpa.free(path);
         var file = try core.safetensors.File.open(gpa, io, path);
@@ -94,7 +94,7 @@ pub const Weights = struct {
             file.close(io);
         }
         var problem: []const u8 = "";
-        var p = try plan(gpa, cfg, &file.names, &problem) orelse {
+        var p = try plan(gpa, cfg, &file.names, tower, &problem) orelse {
             defer gpa.free(problem);
             std.log.err("{s}", .{problem});
             return error.UnreadableLfm2Checkpoint;
@@ -158,9 +158,9 @@ fn shift(s: anytype, base: u64) void {
 const language = [_][]const u8{ "model.language_model.", "model.layers.", "model.embed" };
 const projector = [_][]const u8{"model.multi_modal_projector."};
 
-/// Where every tensor `cfg` reads goes (host only), or null with `problem` (from `a`) saying why the header is refused.
-pub fn plan(a: std.mem.Allocator, cfg: *const Config, header: *const Header, problem: *[]const u8) !?Plan {
-    var p: Planner = .{ .a = a, .header = header, .problem = problem };
+/// Where every tensor `cfg` reads goes (host only; its tower only with `tower`), or null with `problem` saying why not.
+pub fn plan(a: std.mem.Allocator, cfg: *const Config, header: *const Header, tower: bool, problem: *[]const u8) !?Plan {
+    var p: Planner = .{ .a = a, .header = header, .problem = problem, .tower = tower };
     p.build(cfg) catch |e| {
         p.out.deinit(a);
         return if (e == error.Refused) null else e;
@@ -172,6 +172,7 @@ const Planner = struct {
     a: std.mem.Allocator,
     header: *const Header,
     problem: *[]const u8,
+    tower: bool,
     out: Plan = .{},
     part: enum { language, vision } = .language,
     prefix_buf: [128]u8 = undefined,
@@ -208,7 +209,9 @@ const Planner = struct {
             }
         }
         try p.unread(&language, p.out.pieces.items.len, "language tensor(s) the LFM2 kernels do not read");
-        if (cfg.vision) |v| p.out.vision = try p.vision(cfg, v);
+        if (cfg.vision) |v| if (p.tower) {
+            p.out.vision = try p.vision(cfg, v);
+        };
     }
 
     fn vision(p: *Planner, cfg: *const Config, v: config.Vision) !VisionWeights {
@@ -413,7 +416,7 @@ test "plan stacks w1;w3 and q;k;v rows back to back on 256-byte boundaries, what
     const a = arena.allocator();
     const header = try fakeHeader(a, &tiny_tensors, null);
     var problem: []const u8 = "";
-    const p = (try plan(a, &tiny, &header, &problem)).?;
+    const p = (try plan(a, &tiny, &header, true, &problem)).?;
     try std.testing.expectEqual(tiny_tensors.len, p.pieces.items.len);
     try std.testing.expectEqualSlices(u64, &.{ 0, 256 }, &.{ p.embed, p.norm });
     const conv, const attention = .{ p.layers[0], p.layers[1] };
@@ -456,9 +459,24 @@ test "a text-only checkpoint's model. names plan without a vision tower" {
     var cfg = tiny;
     cfg.vision = null;
     var problem: []const u8 = "";
-    const p = (try plan(a, &cfg, &try fakeHeader(a, text.items, null), &problem)).?;
+    const p = (try plan(a, &cfg, &try fakeHeader(a, text.items, null), true, &problem)).?;
     try std.testing.expect(p.pieces.items.len == 21 and p.vision == null);
     try std.testing.expectEqualStrings("model.embed_tokens.weight", p.pieces.items[0].name);
+}
+
+test "without --vision a VL checkpoint plans its language model alone: no tower byte is read or placed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const header = try fakeHeader(a, &tiny_tensors, null);
+    var problem: []const u8 = "";
+    const full = (try plan(a, &tiny, &header, true, &problem)).?;
+    const text = (try plan(a, &tiny, &header, false, &problem)).?;
+    try std.testing.expect(text.vision == null and text.pieces.items.len == 21);
+    for (text.pieces.items, full.pieces.items[0..21]) |t, f| try std.testing.expectEqualDeep(f, t);
+    try std.testing.expectEqual(full.pieces.items[20].dst + full.pieces.items[20].len, text.bytes);
+    // a tower the header lacks is no refusal without --vision: the planner never looks
+    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tiny_tensors[0..21], null), false, &problem) != null);
 }
 
 /// The refusal `plan` gives for the tiny tensors less `drop`, plus `add`, with `f32_name` stored as f32.
@@ -467,7 +485,7 @@ fn refusal(a: std.mem.Allocator, drop: ?[]const u8, add: ?Fake, f32_name: ?[]con
     for (tiny_tensors) |t| if (drop == null or !std.mem.eql(u8, t[0], drop.?)) try tensors.append(a, t);
     if (add) |t| try tensors.append(a, t);
     var problem: []const u8 = "";
-    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tensors.items, f32_name), &problem) == null);
+    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tensors.items, f32_name), true, &problem) == null);
     return problem;
 }
 
@@ -492,8 +510,8 @@ test "plan refuses a missing, mistyped, misshapen or unread tensor by name" {
     try std.testing.expectEqualStrings("1 projector tensor(s) the LFM2-VL tower does not read: " ++ projector_norm, try refusal(a, null, .{ projector_norm, &.{16} }, null));
     try std.testing.expectEqualStrings("layer_norm.weight is stored as f32, and the LFM2-VL tower reads bf16 weights", try refusal(a, null, .{ projector_norm, &.{16} }, projector_norm));
     var problem: []const u8 = "";
-    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tiny_tensors[21..], null), &problem) == null);
+    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tiny_tensors[21..], null), true, &problem) == null);
     try std.testing.expectEqualStrings("no language-model tensors in this checkpoint (a complete d1 checkpoint is needed)", problem);
-    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tiny_tensors[0..21], null), &problem) == null);
+    try std.testing.expect(try plan(a, &tiny, &try fakeHeader(a, tiny_tensors[0..21], null), true, &problem) == null);
     try std.testing.expectEqualStrings("no vision tower tensors in this checkpoint, which its config's vision_config needs", problem);
 }
