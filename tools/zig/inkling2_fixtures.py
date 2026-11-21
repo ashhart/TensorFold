@@ -11,15 +11,16 @@ FIXTURES = ROOT / "zig/src/families/inkling2/fixtures"
 RELEASE = "thinkingmachines/Inkling-2-Small@2ad1157016e1aac77b6ff1b770e7c05229403134"
 TINY = "tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7"
 MINI_RELEASE = "thinkingmachines/Inkling-2-Mini"
+MINI_REVISION = "ed40e7da625f594fc9c4990f5f66be24873c22d7"
 MINI_PROVENANCE = {
     "release": MINI_RELEASE,
-    "revision": None,
-    "revision_status": "full commit SHA absent from the supplied published metadata",
+    "revision": MINI_REVISION,
+    "revision_status": "full revision supplied separately; every checkpoint config field matches",
     "published": "2026-11-20",
     "license": "apache-2.0",
 }
 MINI_HEADER_PROVENANCE = (
-    f"release={MINI_RELEASE} revision=unavailable-full-commit-SHA-absent-from-supplied-inputs "
+    f"release={MINI_RELEASE} revision={MINI_REVISION} "
     "published=2026-11-20 license=apache-2.0"
 )
 PINS = {"transformers": "5.20.0", "tokenizers": "0.23.3", "jinja2": "3.1.6"}
@@ -216,8 +217,7 @@ def main():
     parser.add_argument("--tiny", type=Path, required=True, help=f"{TINY}: config.json, model.safetensors, mtp.safetensors")
     parser.add_argument(
         "--mini", type=Path, required=True,
-        help=f"{MINI_RELEASE}: config.json and model/MTP safetensors or extracted .header.json files; "
-             "the supplied snapshot has no full commit SHA",
+        help=f"{MINI_RELEASE}: config.json and model/MTP safetensors or extracted .header.json files; full revision supplied separately after config-field match",
     )
     parser.add_argument("--out", type=Path, default=FIXTURES, help="the fixtures directory to write or compare")
     parser.add_argument("--check", action="store_true", help="write nothing; exit 1 if a file differs from the one in --out")
