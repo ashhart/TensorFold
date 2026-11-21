@@ -126,7 +126,7 @@ test "experts: run refuses a call or layer its kernels do not take, before any l
     try std.testing.expectError(error.BadExperts, run(undefined, undefined, l, caps, four, 0, 0, .f16, 0, 0, 4, 0, sc));
 }
 
-test "experts: run refuses expert widths outside the kernels' 1 to 4 bits on the host" {
+test "experts: run refuses expert widths outside core's 1 to 8 bits on the host" {
     var l = std.mem.zeroes(ex.Layer);
     l.experts = 384;
     l.dims = 4608;
@@ -134,8 +134,8 @@ test "experts: run refuses expert widths outside the kernels' 1 to 4 bits on the
     l.codebook = .mul1;
     const sc = try ex.scratch(0, l, 4, 8);
     const caps: Caps = .{ .gate = 0, .up = 0 };
-    for ([_]Bits{ .{ .lo = 1, .hi = 8 }, .{ .lo = 2, .hi = 9 }, .{ .lo = 6, .hi = 4 } }) |b| {
-        try std.testing.expectError(error.BadExpertBits, run(undefined, undefined, undefined, l, caps, b, 0, 0, .f16, 0, 0, 4, 0, sc));
+    for ([_]Bits{ .{ .lo = 1, .hi = 8 }, .{ .lo = 2, .hi = 17 }, .{ .lo = 6, .hi = 4 } }) |b| {
+        try std.testing.expectError(error.BadExpertBits, run(undefined, undefined, l, caps, b, 0, 0, .f16, 0, 0, 4, 0, sc));
     }
 }
 
@@ -148,7 +148,7 @@ test "experts: run refuses a call or layer its kernels do not take, before any l
     const sc = try ex.scratch(0, l, 4, 8);
     const caps: Caps = .{ .gate = 0, .up = 0 };
     const four: Bits = .{ .lo = 8, .hi = 8 };
-    try std.testing.expectError(error.BadExperts, run(undefined, undefined, undefined, l, caps, four, 0, 0, .f16, 0, 0, 5, 0, sc));
+    try std.testing.expectError(error.BadExperts, run(undefined, undefined, l, caps, four, 0, 0, .f16, 0, 0, 5, 0, sc));
     l.codebook = .mcg;
-    try std.testing.expectError(error.BadExperts, run(undefined, undefined, undefined, l, caps, four, 0, 0, .f16, 0, 0, 4, 0, sc));
+    try std.testing.expectError(error.BadExperts, run(undefined, undefined, l, caps, four, 0, 0, .f16, 0, 0, 4, 0, sc));
 }
