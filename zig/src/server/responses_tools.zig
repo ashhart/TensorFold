@@ -43,6 +43,10 @@ fn customFormat(cx: *Cx, tool: Value, out: *json.Object) errors.Refused!void {
 }
 
 pub fn tools(cx: *Cx, raw: ?Value) errors.Refused!?[]Value {
+    return toolsMode(cx, raw, true);
+}
+
+pub fn toolsMode(cx: *Cx, raw: ?Value, strict: bool) errors.Refused!?[]Value {
     const value = raw orelse return null;
     if (value == .null) return null;
     if (value != .array) return cx.refuse("tools must be a list");
@@ -51,21 +55,21 @@ pub fn tools(cx: *Cx, raw: ?Value) errors.Refused!?[]Value {
         if (tool != .object) return cx.fail(.request, "tools[{d}] must be an object", .{i});
         const tool_name = tool.strField("name") orelse "";
         if (tool_name.len == 0) return cx.refuse("a function or custom tool needs a name");
-        if (tool.get("defer_loading")) |d| if (d != .bool) return cx.refuse("defer_loading must be a boolean");
+        if (strict) if (tool.get("defer_loading")) |d| if (d != .bool) return cx.refuse("defer_loading must be a boolean");
         if (std.mem.eql(u8, kind(tool), "function")) {
             const function = try json.newObject(cx.a);
             for ([_][]const u8{ "name", "description", "parameters", "strict" }) |k| if (tool.field(k)) |v| try function.put(cx.a, k, v);
             const t = try json.newObject(cx.a);
             try t.put(cx.a, "type", .{ .string = "function" });
             try t.put(cx.a, "function", .{ .object = function });
-            if (json.truthyField(tool, "defer_loading")) try t.put(cx.a, "defer_loading", .{ .bool = true });
+            if (strict and json.truthyField(tool, "defer_loading")) try t.put(cx.a, "defer_loading", .{ .bool = true });
             try out.append(cx.a, .{ .object = t });
         } else if (std.mem.eql(u8, kind(tool), "custom")) {
             const t = try json.newObject(cx.a);
             try t.put(cx.a, "type", .{ .string = "custom" });
             for ([_][]const u8{ "name", "description" }) |k| if (tool.field(k)) |v| try t.put(cx.a, k, v);
             try customFormat(cx, tool, t);
-            if (json.truthyField(tool, "defer_loading")) try t.put(cx.a, "defer_loading", .{ .bool = true });
+            if (strict and json.truthyField(tool, "defer_loading")) try t.put(cx.a, "defer_loading", .{ .bool = true });
             try out.append(cx.a, .{ .object = t });
         } else return cx.fail(.request, "tools of type {s} are not supported: this server runs function and custom tools", .{pyrepr.repr(cx.a, kindOf(tool)) catch return error.OutOfMemory});
     }
@@ -95,12 +99,24 @@ fn unknown(cx: *Cx, reference: Value) errors.Refused!void {
 }
 
 pub fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value) errors.Refused!Choice {
-    if (raw == null or raw.? == .null) return .{ .choice = null, .offered = try withoutDeferred(cx, offered) };
+    return toolChoiceMode(cx, raw, offered, true);
+}
+
+pub fn toolChoiceMode(cx: *Cx, raw: ?Value, offered: ?[]Value, strict: bool) errors.Refused!Choice {
+    if (raw == null or raw.? == .null) return .{ .choice = null, .offered = if (strict) try withoutDeferred(cx, offered) else offered };
     const choice = raw.?;
-    if (choice == .string) for ([_][]const u8{ "none", "auto", "required" }) |s| if (std.mem.eql(u8, s, choice.string)) return .{ .choice = choice, .offered = try withoutDeferred(cx, offered) };
+    if (choice == .string) for ([_][]const u8{ "none", "auto", "required" }) |s| if (std.mem.eql(u8, s, choice.string)) return .{ .choice = choice, .offered = if (strict) try withoutDeferred(cx, offered) else offered };
     const k = kind(choice);
     if ((std.mem.eql(u8, k, "function") or std.mem.eql(u8, k, "custom")) and choice.strField("name") != null) {
         const choice_name = choice.strField("name").?;
+        if (!strict and std.mem.eql(u8, k, "function")) {
+            const function = try json.newObject(cx.a);
+            try function.put(cx.a, "name", .{ .string = choice_name });
+            const selected_choice = try json.newObject(cx.a);
+            try selected_choice.put(cx.a, "type", .{ .string = "function" });
+            try selected_choice.put(cx.a, "function", .{ .object = function });
+            return .{ .choice = .{ .object = selected_choice }, .offered = offered };
+        }
         const selected = referenced(offered orelse &.{}, choice);
         if (selected == null) {
             try unknown(cx, choice);
@@ -119,6 +135,7 @@ pub fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value) errors.Refused!Choice
     const mode: Value = choice.get("mode") orelse .{ .string = "auto" };
     const mode_ok = mode == .string and (std.mem.eql(u8, mode.string, "auto") or std.mem.eql(u8, mode.string, "required"));
     if (std.mem.eql(u8, k, "allowed_tools") and mode_ok) {
+        if (!strict) return allowedLegacy(cx, choice, mode, offered);
         const allowed = choice.get("tools") orelse return cx.refuse("allowed_tools needs a list of function or custom tool references");
         if (allowed != .array) return cx.refuse("allowed_tools may name function or custom tools only");
         var kept: std.ArrayList(Value) = .empty;
@@ -134,4 +151,28 @@ pub fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value) errors.Refused!Choice
         return .{ .choice = mode, .offered = kept.items };
     }
     return cx.refuse("tool_choice must be none, auto, required, a named tool or allowed_tools");
+}
+
+// The legacy flat allowed set ignores missing references and follows the declared tool order.
+fn allowedLegacy(cx: *Cx, choice: Value, mode: Value, offered: ?[]Value) errors.Refused!Choice {
+    const allowed = choice.get("tools");
+    const list: []const Value = if (allowed != null and allowed.? == .array) allowed.?.array else &.{};
+    if (allowed != null and allowed.?.truthy() and allowed.? != .array)
+        return cx.refuse("allowed_tools may name function or custom tools only");
+    for (list) |reference| {
+        const k = kind(reference);
+        if (reference != .object or (!std.mem.eql(u8, k, "function") and !std.mem.eql(u8, k, "custom")))
+            return cx.refuse("allowed_tools may name function or custom tools only");
+    }
+    var kept: std.ArrayList(Value) = .empty;
+    for (offered orelse &.{}) |tool| {
+        for (list) |reference| {
+            const pick = reference.strField("name") orelse continue;
+            if (std.mem.eql(u8, kind(reference), kind(tool)) and std.mem.eql(u8, pick, name(tool))) {
+                try kept.append(cx.a, tool);
+                break;
+            }
+        }
+    }
+    return .{ .choice = mode, .offered = kept.items };
 }

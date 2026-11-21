@@ -134,7 +134,7 @@ fn respond(s: *Session, a: Allocator, body: Value, lane: []const u8, history: *S
     if (generate != .bool) return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .message = "generate must be a boolean", .param = "generate" });
     for ([_][]const u8{ "type", "stream_id", "generate" }) |k| _ = body.object.orderedRemove(k);
     var cx: Cx = .{ .a = a };
-    var t = translate_mod.translate(&cx, body, history) catch |e| {
+    var t = translate_mod.translateMode(&cx, body, history, s.srv.config.responses_strict) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .code = cx.code, .message = cx.message, .param = cx.param });
     };

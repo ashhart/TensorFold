@@ -219,6 +219,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .default_sampling = s.sampling,
         .instruct_sampling = s.instruct,
         .use_drafts = !args.no_drafts,
+        .responses_strict = args.responses_strict,
         .vision_urls = args.vision_urls,
         .vision_pdf = args.vision_pdf,
         .seed_salt = salt,

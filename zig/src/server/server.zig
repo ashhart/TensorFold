@@ -35,7 +35,6 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 pub const Identity = @import("identity.zig").Identity;
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
-
 pub const Config = struct {
     browser: request_guard.Policy = .{},
     allowed_controls: ?@import("drama_allow.zig").Policy = null,
@@ -68,6 +67,7 @@ pub const Config = struct {
     /// --instruct-sampling's set, for a sampled chat request with thinking off (family_sampling.resolveInstruct).
     instruct_sampling: ?Value = null,
     use_drafts: bool = true,
+    responses_strict: bool = false,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
     /// --vision-pdf: file/input_file and data:application/pdf parts are rendered via PDFium (pdf.zig).

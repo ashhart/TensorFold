@@ -13,7 +13,7 @@ const NoHistory = struct {
 };
 
 fn turn(a: std.mem.Allocator, cx: *errors.Cx, source: []const u8) !translate.Request {
-    return translate.translate(cx, (try json.parse(a, source)).ok, NoHistory{});
+    return translate.translateMode(cx, (try json.parse(a, source)).ok, NoHistory{}, true);
 }
 
 test "Responses custom tool replay preserves call ID, exact input, result and namespaces" {
@@ -109,7 +109,7 @@ test "Responses continuation flushes trailing reasoning without adding an empty 
     const a = arena.allocator();
     var cx: errors.Cx = .{ .a = a };
     const items = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"next\"},{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"trailing thought\"}]}]")).ok.array;
-    const messages = try translate.messages(&cx, items);
+    const messages = try translate.messagesMode(&cx, items, true);
     try t.expectEqual(@as(usize, 2), messages.len);
     try t.expectEqualStrings("assistant", messages[1].strField("role").?);
     try t.expectEqualStrings("", messages[1].strField("content").?);

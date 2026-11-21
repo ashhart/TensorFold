@@ -95,7 +95,7 @@ pub fn postGated(srv: *Server, conn: *Conn, a: Allocator, held: ?*request_gate.H
     if (body.get("previous_response_id")) |p| if (p == .string and srv.background_jobs.running(srv.io, p.string, conn.key_digest))
         return refuse(conn, a, "previous_response_id names a background response still in progress: poll it until it ends", 400, "previous_response_id");
     const history: store_mod.History = .{ .store = &srv.store, .io = srv.io, .owner = conn.key_digest };
-    const t = translate_mod.translate(&cx, body, history) catch return refuse(conn, a, cx.message, 400, null);
+    const t = translate_mod.translateMode(&cx, body, history, srv.config.responses_strict) catch return refuse(conn, a, cx.message, 400, null);
     if (t.background) return background.create(srv, conn, a, body, t, held);
     switch (turn(srv, a, conn, &cx, body, t, @import("responses_sink.zig").sse(conn), .{})) {
         .streamed => {},
@@ -135,7 +135,7 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     }
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
-    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .owner = conn.key_digest, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .strict = srv.config.responses_strict, .keep = t.store, .added = t.added, .cx = cx, .owner = conn.key_digest, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
     var out: Wire = .{ .reply = &reply };
     cancel_ids.alias = base.get("id").?.string; // the cancel route takes the response's id too
     defer cancel_ids.alias = null;
@@ -149,7 +149,7 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
 /// A ``generate: false`` turn: created, in progress, then completed with no output and ``prompt_tokens`` of input.
 pub fn warmup(srv: *Server, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, prompt_tokens: usize, opts: TurnOptions, owner: ?[32]u8) ?Value {
     const base = newBase(srv, a, body, t) catch return null;
-    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .keep = t.store, .added = t.added, .cx = cx, .owner = owner, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .strict = srv.config.responses_strict, .keep = t.store, .added = t.added, .cx = cx, .owner = owner, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
     const usage = json.newObject(a) catch return null;
     usage.put(a, "prompt_tokens", json.intValue(a, prompt_tokens) catch return null) catch return null;
     usage.put(a, "completion_tokens", .{ .int = "0" }) catch return null;
@@ -218,6 +218,7 @@ pub const Reply = struct {
     sink: Sink,
     base: *json.Object,
     streaming: bool,
+    strict: bool = false,
     keep: bool,
     added: []Value,
     cx: *Cx,
@@ -274,7 +275,7 @@ pub const Reply = struct {
 
     fn open(r: *Reply, kind: []const u8, call_id: []const u8, name: []const u8) E!*json.Object {
         const current_call = if (r.current) |c| std.mem.eql(u8, c.get("type").?.string, "function_call") or std.mem.eql(u8, c.get("type").?.string, "custom_tool_call") else false;
-        if (!current_call) try r.close("completed");
+        if (!r.strict or !current_call) try r.close("completed");
         const item = try r.obj();
         var part: ?*json.Object = null;
         if (std.mem.eql(u8, kind, "message")) {
@@ -348,13 +349,14 @@ pub const Reply = struct {
 
     /// Every unfinished item closes once at finish; calls retain input order even when their deltas interleave.
     fn closeAll(r: *Reply, status: []const u8) E!void {
+        if (!r.strict and !r.late_rows) return r.close(status);
         r.finishing = true;
         const current = r.current;
         for (r.items.items) |item| {
             const at = r.index(item);
             if (r.done.items[at]) continue;
             const old = item.get("status").?.string;
-            const next = if (item == current) status else if (std.mem.eql(u8, old, "in_progress")) "completed" else old;
+            const next = if (item == current) status else if (r.strict and std.mem.eql(u8, old, "in_progress")) "completed" else old;
             r.current = item;
             try r.close(next);
         }
@@ -534,7 +536,7 @@ pub const Reply = struct {
         try r.put(final, "output", try r.itemsValue());
         try r.put(final, "error", .{ .object = e });
         r.final = .{ .object = final };
-        if (r.keep) r.store(.{ .object = final });
+        if (r.strict and r.keep) r.store(.{ .object = final });
         try r.event("response.failed", &.{.{ "response", .{ .object = final } }});
     }
 

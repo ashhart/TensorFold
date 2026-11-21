@@ -13,7 +13,7 @@ const blank_key: ids.Key = key: {
 };
 
 fn blankReply(a: std.mem.Allocator, cx: *errors.Cx, srv: *Server, streaming: bool, sink: @import("responses_sink.zig").Sink, chat: json.Value) !responses.Reply {
-    return .{ .srv = srv, .a = a, .sink = sink, .base = try json.newObject(a), .streaming = streaming, .keep = false, .added = &.{}, .cx = cx, .owner = null, .call_ids = .{ .key = &blank_key, .body = chat } };
+    return .{ .srv = srv, .a = a, .sink = sink, .base = try json.newObject(a), .streaming = streaming, .strict = true, .keep = false, .added = &.{}, .cx = cx, .owner = null, .call_ids = .{ .key = &blank_key, .body = chat } };
 }
 
 test "a call delta that names no id takes the chat run's id at its index, and one that names its id keeps it" {
@@ -211,7 +211,7 @@ test "Responses foreground streamed failures persist exactly when store is true"
     const a = arena.allocator();
     var fixture: Engine = .{};
     var text: @import("stream_preflight_test.zig").TestText = .{};
-    const srv = try Server.init(t.allocator, t.io, fixture.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    const srv = try Server.init(t.allocator, t.io, fixture.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .responses_strict = true }, null);
     defer srv.deinit();
     var cx: errors.Cx = .{ .a = a };
     var conn: @import("http_conn.zig").Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };

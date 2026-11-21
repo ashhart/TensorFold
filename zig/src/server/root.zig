@@ -380,3 +380,8 @@ test {
     _ = @import("witness_race_test.zig");
     _ = @import("witness_reply_test.zig");
 }
+
+test {
+    _ = @import("responses_strict_compat_test.zig");
+    _ = @import("responses_strict_test.zig");
+}

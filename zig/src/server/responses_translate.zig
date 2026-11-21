@@ -178,6 +178,10 @@ fn flushThought(a: Allocator, out: *std.ArrayList(*json.Object), thought: *?[]co
 
 /// Input items (output items too) as chat messages: a turn's reasoning, text and calls are one assistant message.
 pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
+    return messagesMode(cx, items, false);
+}
+
+pub fn messagesMode(cx: *Cx, items: []const Value, strict: bool) errors.Refused![]Value {
     const a = cx.a;
     var out: std.ArrayList(*json.Object) = .empty;
     var thought: ?[]const u8 = null;
@@ -192,7 +196,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
                 if (std.mem.eql(u8, r, role)) break true;
             } else false;
             if (!ok or item.get("role").? != .string) return cx.refuse("a message's role must be user, assistant, system or developer");
-            if (!std.mem.eql(u8, role, "assistant")) try flushThought(a, &out, &thought);
+            if (strict and !std.mem.eql(u8, role, "assistant")) try flushThought(a, &out, &thought);
             const m = try json.newObject(a);
             try m.put(a, "role", .{ .string = role });
             try m.put(a, "content", try content(cx, item.get("content")));
@@ -208,7 +212,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             const supplied = if (custom) item.get("input") else item.get("arguments");
             if (custom and (supplied == null or supplied.? != .string)) return cx.refuse("a custom_tool_call item needs string input, including an explicitly empty input");
             const arguments = if (custom) supplied.? else if (supplied != null and supplied.?.truthy()) supplied.? else Value{ .string = "{}" };
-            if (!custom and arguments != .string) return cx.refuse("a function_call item's arguments must be a string; incomplete arguments remain incomplete");
+            if (strict and !custom and arguments != .string) return cx.refuse("a function_call item's arguments must be a string; incomplete arguments remain incomplete");
             const function = try json.newObject(a);
             try function.put(a, "name", .{ .string = if (custom) call_name else try flatName(cx, item.get("namespace"), call_name) });
             try function.put(a, "arguments", arguments);
@@ -243,7 +247,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             try m.put(a, "role", .{ .string = "tool" });
             try m.put(a, "tool_call_id", .{ .string = call_id });
             try m.put(a, "content", try output(cx, item.get("output")));
-            try flushThought(a, &out, &thought);
+            if (strict) try flushThought(a, &out, &thought);
             try out.append(a, m);
         } else if (std.mem.eql(u8, k, "reasoning")) {
             var texts: std.ArrayList(u8) = .empty;
@@ -260,7 +264,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             return cx.refuse("an item_reference requires its original response history; missing history cannot be reconstructed");
         } else return cx.fail(.request, "input items of type {s} are not supported: send messages, function_call, custom_tool_call, tool outputs and reasoning items", .{try pyrepr.repr(a, kind)});
     }
-    try flushThought(a, &out, &thought);
+    if (strict) try flushThought(a, &out, &thought);
     const result = try a.alloc(Value, out.items.len);
     for (out.items, result) |m, *slot| slot.* = .{ .object = m };
     return result;
@@ -311,6 +315,10 @@ pub fn include(cx: *Cx, given: Value) errors.Refused!void {
 
 /// A Responses request as the chat completion that runs it; ``history`` reads a stored conversation.
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
+    return translateMode(cx, body, history, false);
+}
+
+pub fn translateMode(cx: *Cx, body: Value, history: anytype, strict: bool) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
@@ -335,12 +343,12 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     }
     if (given != .array or given.array.len == 0) return cx.refuse("input must be a string or a non-empty list of items");
     try namespace_tools.inputNamespaces(cx, given.array, body.get("tools"));
-    const added = try messages(cx, given.array);
+    const added = try messagesMode(cx, given.array, strict);
     const parent = body.field("previous_response_id");
     const earlier: []Value = if (parent) |p| try history.conversation(cx, p) else &.{};
     const namespaced = namespace_tools.hasNamespace(body.get("tools"));
-    const offered = if (namespaced) try namespace_tools.tools(cx, body.get("tools")) else try response_tools.tools(cx, body.get("tools"));
-    const choice = if (namespaced) try namespace_tools.toolChoice(cx, body.get("tool_choice"), offered, body.get("tools")) else try response_tools.toolChoice(cx, body.get("tool_choice"), offered);
+    const offered = if (namespaced) try namespace_tools.tools(cx, body.get("tools")) else try response_tools.toolsMode(cx, body.get("tools"), strict);
+    const choice = if (namespaced) try namespace_tools.toolChoice(cx, body.get("tool_choice"), offered, body.get("tools")) else try response_tools.toolChoiceMode(cx, body.get("tool_choice"), offered, strict);
     const chat = try json.newObject(a);
     // rows come with top_logprobs or logprobs; the include name alone asks for them only where the engine has them
     const listed = if (body.get("include")) |inc| inc == .array and for (inc.array) |v| {

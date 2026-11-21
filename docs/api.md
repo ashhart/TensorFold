@@ -1723,6 +1723,22 @@ carries none of the proxy headers listed there; anyone else gets 403 `loopback_o
 
 ## The Responses API
 
+`tensorfold serve MODEL --responses-strict` enables the stricter Responses policy. It is off by default and applies to
+HTTP and WebSocket turns. With it off, flat `allowed_tools` keeps declared tool order, ignores unknown or nameless
+references, and treats a missing or falsy list as empty. Flat `defer_loading` is ignored, including non-boolean values;
+truthy non-string function-call arguments keep their historical pass-through behavior. Existing function calls keep
+`fc_` item IDs and `arguments` fields. Starting another streamed call immediately completes the preceding call, and
+failed foreground streams are not saved by `store`.
+
+With `--responses-strict`, allowed references set prompt order, deferred tools stay hidden until selected, invalid
+references/lists, non-boolean defer values and non-string function arguments are refused. Streamed calls complete at
+turn finish, failed foreground streams can be stored, and reasoning before a non-assistant item or at history end is
+preserved as an assistant reasoning message. Keep the same flag when replaying a history for exact prompt comparisons.
+Custom tools are selected per request with `type: "custom"`; their `ctc_` items, `input` fields and dedicated events
+are available in either mode. Opaque compaction input and background event replay also work in either mode. Namespace
+tool validation keeps its existing rules. Workspace identity v3 additionally hashes tokenizer configuration; it applies
+only with the opt-in workspace flags and rejects old identity-bound state. It needs no additional Responses flag.
+
 `POST /v1/responses` takes OpenAI's Responses request and runs it as the equivalent chat completion, through the
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
@@ -1737,7 +1753,7 @@ same handler and engine path. A response has that chat completion's prompt and t
   remaining history. `instructions` becomes the system message and is not carried to a later turn.
 - `tools` takes function and client-executed custom tools; `tool_choice` takes `none`, `auto`, `required`, a named
   function/custom tool or `allowed_tools`, with distinct function/custom namespaces. `parallel_tool_calls` works as
-  in chat. `defer_loading: true` keeps a tool out of the prompt until a named or allowed reference selects it; an
+  in chat. With `--responses-strict`, `defer_loading: true` keeps a tool out of the prompt until a named or allowed reference selects it; an
   unknown reference gets HTTP 400. Custom `format` accepts `text` or a Lark `grammar` definition and validates its
   shape; it is model-visible metadata, not the token-grammar enforcement described above.
   `namespace` groups are accepted too, one level deep: their function children reach the engine flattened as
