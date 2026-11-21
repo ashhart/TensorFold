@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: `tf-h3-image` runs its transformer (MiniMax H3's, without the audio layers, on M5 tensor units) from a picture case through its six distilled steps, each with its own output head, beside the engine; the VAE's rules (config, tiles and blend, latent statistics, pixels) run on the host, and core/picture gains Pillow's Lanczos-3 resampling. Clip cases run as before (#2775).
+
 - Kernel contract: the GLM record for `df_sumn` under nvcc 13.3 (40 registers) is the one checked; a stale generic 33-register entry no longer overrides it (#4291). Thanks to @Bizuayeu.
 
 - Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
