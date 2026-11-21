@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3-ASR on CUDA (tools only, not served yet): `tf-qwen3-asr` runs a WAV clip through the 0.6B or 1.7B checkpoint (the audio tower, then greedy decode through the Qwen3 CUDA pass the embedding engine runs), `tf-qwen3-asr-forced` teacher-forces a clip on a reference case, and `test-qwen3-asr-host` and `tf-qwen3-asr-check` cover config admission, tensor names, log-mel rows and a float64 tower without a GPU (#2239, refs #2105). Thanks to @jschmied.
+
 - CUDA: a resumed prompt encodes only the images its kept state does not hold (Gemma 4, Qwen3.5 and Flash Next on one rank), so a follow-up turn skips the vision tower for images the restored prefix already holds; a resume never cuts an image, and at `--tp 2` Flash Next keeps encoding every image as before (#3164).
 
 - Tokenizer: a request gap with no normalized added spelling reuses the tokenizer's memo instead of re-encoding cold, so long multi-message requests on tokenizers with normalized added tokens (DeepSeek-style ones) cost less per call; gaps carrying a spelling keep the mask and every id is unchanged (#2844).
