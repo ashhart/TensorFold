@@ -46,7 +46,6 @@ pub const prompt_rows: u32 = E.grid_rows;
 pub const takes_drafter = true;
 /// A request's pages hold one more forward past its prompt and reply (TF_QWEN_KV_PAGES).
 pub const window_rows: u32 = pages_mod.window_rows;
-
 /// Kept prompt states for the shared cache (cuda_reuse.zig) on the host budget, on the zero-anchored chunk grid.
 pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
@@ -64,14 +63,12 @@ pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
 pub const warm_usable = true;
 /// --learn-conversations: the kept states' disk image, the probe their identity hashes, the facts they depend on.
 pub const kept_disk = @import("cuda_disk.zig");
-
 /// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
 pub const request_starts = true;
 const starts = @import("cuda_request_starts.zig");
 pub const request_starts_default_on = starts.default_on;
 pub const request_starts_switch = starts.switch_name;
 pub const requestStartsOn = starts.on;
-
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
 
