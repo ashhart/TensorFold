@@ -25,7 +25,9 @@ pub const Format = struct {
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     const group_ok = f.group == 32 or f.group == 64 or f.group == 128;
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
-    const body = try frags.source(device, a, ks.core_affine_mm);
+    const with_nonfinite = try std.mem.replaceOwned(u8, a, ks.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", ks.core_affine_nonfinite);
+    defer a.free(with_nonfinite);
+    const body = try frags.source(device, a, with_nonfinite);
     defer a.free(body);
     const glu = switch (f.glu) {
         .plain => "#define TF_GLU_PLAIN 1\n",
