@@ -1,6 +1,7 @@
 // Grammar compiles on their own threads: a deadline on each request's wait, a cap on compiles at once, one per input.
 #pragma once
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -37,10 +38,11 @@ inline std::runtime_error SlotError(int milliseconds) {
 // Compiles keyed by format and exact text: hits under the lock, misses on a detached thread, published under it.
 template <class Result> class Cache {
 public:
+    using Cancel = std::atomic<bool>;
     using Work = std::function<Result(const std::string&)>;
 
-    // `work` runs once per pending input, outside every lock; a caller past `milliseconds` stops waiting for it.
-    Result Compile(int kind, std::string text, Work work, int milliseconds = time_limit_ms) {
+    // Work runs once per pending input outside every lock. Cooperative callers share a cancellation token with the job.
+    Result Compile(int kind, std::string text, Work work, int milliseconds = time_limit_ms, std::shared_ptr<Cancel> cancel = {}) {
         const int budget = std::clamp(milliseconds, 1, time_limit_ms);
         const auto deadline = Clock::now() + std::chrono::milliseconds(budget);
         const auto state = state_;
@@ -57,7 +59,7 @@ public:
             }
             if (job) break;
             if (state->jobs.size() < active_limit) {
-                job = Start(state, kind, std::move(text), deadline, budget, work);
+                job = Start(state, kind, std::move(text), deadline, budget, work, std::move(cancel));
                 break;
             }
             const bool late = state->freed.wait_until(lock, deadline) == std::cv_status::timeout;
@@ -65,6 +67,7 @@ public:
         }
         if (!job->changed.wait_until(lock, std::min(deadline, job->deadline), [&] { return job->done; })) {
             job->abandoned = true;
+            job->cancel->store(true, std::memory_order_release);
             throw TimeError(std::min(budget, job->milliseconds));
         }
         if (job->abandoned) throw TimeError(std::min(budget, job->milliseconds));
@@ -73,7 +76,7 @@ public:
         return *job->result;
     }
 
-    // Compiles holding a slot, abandoned ones included (tests wait for them to return).
+    // Compiles holding a slot until their work returns or observes cancellation.
     size_t Active() const {
         std::lock_guard<std::mutex> hold(state_->mutex);
         return state_->jobs.size();
@@ -81,6 +84,7 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
+
     struct Job {
         int kind;
         std::string text;
@@ -88,10 +92,12 @@ private:
         int milliseconds;
         std::condition_variable changed;
         bool done = false;
+        std::shared_ptr<Cancel> cancel;
         bool abandoned = false;
         std::optional<Result> result;
         std::exception_ptr failure;
-        Job(int k, std::string t, Clock::time_point d, int ms) : kind(k), text(std::move(t)), deadline(d), milliseconds(ms) {}
+        Job(int k, std::string t, Clock::time_point d, int ms, std::shared_ptr<Cancel> c)
+            : kind(k), text(std::move(t)), deadline(d), milliseconds(ms), cancel(c ? std::move(c) : std::make_shared<Cancel>(false)) {}
     };
     struct Entry {
         int kind;
@@ -113,8 +119,8 @@ private:
 
     // Called holding the lock: the job's slot, its thread started; nothing is left behind when either fails.
     static std::shared_ptr<Job> Start(const std::shared_ptr<State>& state, int kind, std::string text,
-                                      Clock::time_point deadline, int budget, Work& work) {
-        auto job = std::make_shared<Job>(kind, std::move(text), deadline, budget);
+                                      Clock::time_point deadline, int budget, Work& work, std::shared_ptr<Cancel> cancel) {
+        auto job = std::make_shared<Job>(kind, std::move(text), deadline, budget, std::move(cancel));
         auto run = std::make_unique<Run>(Run{state, job, nullptr});
         run->work.swap(work);  // swapped, never moved: the caller's copy must not keep the compiler alive
         state->jobs.push_back(job);
