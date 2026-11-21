@@ -1,0 +1,7 @@
+MILESTONE device-found elapsed_ms=8 name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 api=1.4.362 storage16=true int16=true shared=32768 fence-timeout=10000ms
+MILESTONE rope elapsed_ms=191 case="queries rows4 base0" rows=4 base=0 worst=4.964008589780876e-1 of bound, repeats byte-identical, passthrough tail bit-exact, input unchanged, planted outputs refused
+MILESTONE rope elapsed_ms=192 case="queries rows2 base5" rows=2 base=5 worst=4.8822881879460084e-1 of bound, repeats byte-identical, passthrough tail bit-exact, input unchanged, planted outputs refused
+MILESTONE cache elapsed_ms=194 case="cache prefix2 base2 rows3 cap8" base=2 rows=3 capacity=8 keys worst=4.954321215226423e-1 of bound, V transport bit-exact, poison rows untouched, inputs unchanged
+MILESTONE sdpa elapsed_ms=200 case="sdpa prefix2 rows3 cap8" prefix=2 rows=3 visible-counts={ 3, 4, 5 } worst=5.687629560222356e-2 of bound, repeats byte-identical, nan/large-finite/zero future keys bit-identical, q unchanged, planted outputs refused
+MILESTONE gate elapsed_ms=202 case="gate rows4" rows=4 worst=4.8945424413889344e-1 of bound, repeats byte-identical, inputs unchanged, planted outputs refused
+RESULT stage3 elapsed_ms=202 on "Apple M1 (G13G B1)": passed=4 total=4

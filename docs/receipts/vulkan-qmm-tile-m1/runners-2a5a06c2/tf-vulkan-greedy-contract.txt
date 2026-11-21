@@ -1,0 +1,13 @@
+MILESTONE greedy-contract device-found name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 api=1.4.362 storage16=true int16=true fence-timeout=10000ms
+error: greedy: non-finite bf16 logit at index 0 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 0 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 0 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 0 of 248320; row refused
+error: greedy: non-finite bf16 logit at index 0 of 248320; row refused
+PASS nonfinite vulkan greedy draw: finite_logits, argreduce_chunk, argreduce_combine (bf16): the stated rule holds: any non-finite anywhere in the row refuses it, winner or not; the largest value wins; exact ties (including +0/-0) go to the lowest index
+PASS repeat vulkan greedy draw: finite_logits, argreduce_chunk, argreduce_combine (bf16): five runs byte-identical (4 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan greedy draw: finite_logits, argreduce_chunk, argreduce_combine (bf16): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums vulkan greedy draw: finite_logits, argreduce_chunk, argreduce_combine (bf16): declares none sums
+FAIL nonfinite control: fmax row max (drops a NaN): row 0 did not refuse: it reported 2139095040 where the first non-finite sits at 0
+CONTROL control: fmax row max (drops a NaN): red at nonfinite, as planted
+SUMMARY vulkan greedy contract on "Apple M1 (G13G B1)": 1 kernel, 1 pass gates 1-4, 0 fail; 1 control: 1 red as planted, 0 missed

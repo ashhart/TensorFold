@@ -1,0 +1,56 @@
+// Set a flag for any nonfinite BF16 input and record the first bad index.
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+  uint16_t values[];
+} input_data;
+layout(set = 0, binding = 1, std430) buffer Results {
+  uint finite_flag;
+  uint first_bad;
+} results;
+
+layout(push_constant) uniform Params {
+  uint count;
+} params;
+
+shared uint block_bad[256];
+shared uint block_flags[256];
+
+void main() {
+  uint thread = gl_LocalInvocationID.x;
+  uint begin = gl_WorkGroupID.x * 4096u;
+  uint end = min(begin + 4096u, params.count);
+  // Bindings: 0 input BF16[count], 1 results 8B; push=count; grid=ceil(count/4096); local=256; shared=2x256 uints.
+  uint local_bad = 0xffffffffu;
+  uint local_flag = 0u;
+  for (uint k = 0u; k < 16u; ++k) {
+    uint index = begin + thread + k * 256u;
+    if (index < end) {
+      uint bits = uint(input_data.values[index]);
+      if ((bits & 0x7fffu) >= 0x7f80u) {
+        local_flag = 1u;
+        local_bad = min(local_bad, index);
+      }
+    }
+  }
+  block_bad[thread] = local_bad;
+  block_flags[thread] = local_flag;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (thread < stride) {
+      block_bad[thread] = min(block_bad[thread], block_bad[thread + stride]);
+      block_flags[thread] = block_flags[thread] | block_flags[thread + stride];
+    }
+    barrier();
+  }
+  if (thread == 0u) {
+    // Clean workgroups contribute (0, 0xffffffff): no-ops on both words.
+    atomicOr(results.finite_flag, block_flags[0]);
+    atomicMin(results.first_bad, block_bad[0]);
+  }
+}

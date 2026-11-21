@@ -1,0 +1,443 @@
+{
+ "change": {
+  "old_build_commit": "618ed699d0c62a7114afb758c2037974079a4559",
+  "old_build_elf_built_from_tree_of": "6a158edcf2a02050181b85c3b2eb6a69d9f1cf31",
+  "old_build_is": "the qmm_q4_tile build",
+  "new_build_commit": "5f8d4c3bcdd4d84b4977d1ea6c17d5ccf24cb707",
+  "new_build_elf_built_from_commit": "0d73b0fbdf06ced6643b89476342629703d5697f (the same change on the tile build before main was merged in; the two files of the change are identical)",
+  "new_build_adds": "Pipeline.run records into the open command buffer; Commands submits at 128 waiting dispatches or at the next upload, download or fill; each pipeline has a ring of 256 descriptor sets"
+ },
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "gpu_driver": "Honeykrisp, Mesa 26.3.0-devel (git-9323171c12)",
+  "os": "Linux",
+  "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+  "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
+  "quantization": "4-bit, group 64, bf16 activations",
+  "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
+  "metric": "run 2 duration: prefill of the prompt plus 63 decode steps plus the per-step logits readback; from the probe's own stderr milestones, 1 ms resolution",
+  "order": "old,new,new,old,old,new (three pairs, both orders)",
+  "decision_rule": "median run-2 gain of at least 3 percent and every pair positive"
+ },
+ "identity_probe": {
+  "exit_code": 0,
+  "result": [
+   "RESULT stage1 elapsed_ms=7652 on \"Apple M1 (G13G B1)\": passed=21 total=21"
+  ],
+  "tiled_image_vs_default_image": [
+   "m1 n8 k64: identical",
+   "m2 n257 k128: identical",
+   "m2 n256 k128 offsets: identical",
+   "m3 n8 k64 cancel: identical",
+   "m1 n16 k2048: identical",
+   "m2 n16 k6144 offsets: identical",
+   "m32 n2048 k6144: identical",
+   "m1 n4096 k2048: identical",
+   "m1 n6144 k2048: identical",
+   "m1 n2048 k6144 offsets: identical",
+   "m32 n6144 k2048: identical",
+   "m1 n140000 k2048 chunked on a 128 MiB range: identical"
+  ]
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T09:02:25+00:00",
+   "end_utc": "2026-11-03T09:03:29+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "d4949bef20e3b175365d26fab943cafe6f28befdd060185366ff2713368530a3",
+     "bytes": 5809824
+    },
+    "new": {
+     "sha256": "d8ee787b9aefd5f7461ebe3ed40d0dbbacd06f2891822cde476c1b054abfe85c",
+     "bytes": 5789144
+    }
+   },
+   "logits_sha256_all_six_processes": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 706,
+     "run1_ms": 7277,
+     "run2_ms": 6977,
+     "peak_rss_bytes": 325550080,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 711,
+     "run1_ms": 2263,
+     "run2_ms": 2277,
+     "peak_rss_bytes": 325533696,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 759,
+     "run1_ms": 2236,
+     "run2_ms": 2237,
+     "peak_rss_bytes": 295583744,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 694,
+     "run1_ms": 6758,
+     "run2_ms": 7038,
+     "peak_rss_bytes": 326549504,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 700,
+     "run1_ms": 7297,
+     "run2_ms": 7450,
+     "peak_rss_bytes": 327860224,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 724,
+     "run1_ms": 2256,
+     "run2_ms": 2262,
+     "peak_rss_bytes": 327073792,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 6977,
+     "run2_new_ms": 2277,
+     "run2_gain": 0.673642,
+     "run1_old_ms": 7277,
+     "run1_new_ms": 2263,
+     "run1_gain": 0.68902
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 7038,
+     "run2_new_ms": 2237,
+     "run2_gain": 0.682154,
+     "run1_old_ms": 6758,
+     "run1_new_ms": 2236,
+     "run1_gain": 0.669133
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 7450,
+     "run2_new_ms": 2262,
+     "run2_gain": 0.696376,
+     "run1_old_ms": 7297,
+     "run1_new_ms": 2256,
+     "run1_gain": 0.690832
+    }
+   ],
+   "run2_gain_median": 0.682154,
+   "run2_gain_min": 0.673642,
+   "run2_gain_max": 0.696376,
+   "run1_gain_median": 0.68902,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "52f61b395aa76d16ca0aa5041c62cbf41161cb23c2cee8c60deb04b7c42e0add"
+  },
+  {
+   "case": "document-256",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T09:07:47+00:00",
+   "end_utc": "2026-11-03T09:09:28+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "d4949bef20e3b175365d26fab943cafe6f28befdd060185366ff2713368530a3",
+     "bytes": 5809824
+    },
+    "new": {
+     "sha256": "d8ee787b9aefd5f7461ebe3ed40d0dbbacd06f2891822cde476c1b054abfe85c",
+     "bytes": 5789144
+    }
+   },
+   "logits_sha256_all_six_processes": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 697,
+     "run1_ms": 9751,
+     "run2_ms": 10155,
+     "peak_rss_bytes": 311312384,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 707,
+     "run1_ms": 5201,
+     "run2_ms": 5201,
+     "peak_rss_bytes": 324845568,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 710,
+     "run1_ms": 5232,
+     "run2_ms": 5202,
+     "peak_rss_bytes": 327745536,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 706,
+     "run1_ms": 10797,
+     "run2_ms": 10961,
+     "peak_rss_bytes": 327614464,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 711,
+     "run1_ms": 10134,
+     "run2_ms": 9921,
+     "peak_rss_bytes": 327630848,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 697,
+     "run1_ms": 5205,
+     "run2_ms": 5206,
+     "peak_rss_bytes": 327925760,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 10155,
+     "run2_new_ms": 5201,
+     "run2_gain": 0.487839,
+     "run1_old_ms": 9751,
+     "run1_new_ms": 5201,
+     "run1_gain": 0.466619
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 10961,
+     "run2_new_ms": 5202,
+     "run2_gain": 0.525408,
+     "run1_old_ms": 10797,
+     "run1_new_ms": 5232,
+     "run1_gain": 0.515421
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 9921,
+     "run2_new_ms": 5206,
+     "run2_gain": 0.475255,
+     "run1_old_ms": 10134,
+     "run1_new_ms": 5205,
+     "run1_gain": 0.486382
+    }
+   ],
+   "run2_gain_median": 0.487839,
+   "run2_gain_min": 0.475255,
+   "run2_gain_max": 0.525408,
+   "run1_gain_median": 0.486382,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "538d859027c43f300cc56393b0005a361a7e468d01b9f2a4c1ceecc8da5b8527"
+  },
+  {
+   "case": "document-1024",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T09:15:13+00:00",
+   "end_utc": "2026-11-03T09:19:10+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "d4949bef20e3b175365d26fab943cafe6f28befdd060185366ff2713368530a3",
+     "bytes": 5809824
+    },
+    "new": {
+     "sha256": "d8ee787b9aefd5f7461ebe3ed40d0dbbacd06f2891822cde476c1b054abfe85c",
+     "bytes": 5789144
+    }
+   },
+   "logits_sha256_all_six_processes": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 701,
+     "run1_ms": 22647,
+     "run2_ms": 22320,
+     "peak_rss_bytes": 311967744,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 722,
+     "run1_ms": 15790,
+     "run2_ms": 15730,
+     "peak_rss_bytes": 327598080,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 734,
+     "run1_ms": 15738,
+     "run2_ms": 15749,
+     "peak_rss_bytes": 308314112,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 720,
+     "run1_ms": 22652,
+     "run2_ms": 22651,
+     "peak_rss_bytes": 326664192,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 730,
+     "run1_ms": 21861,
+     "run2_ms": 22934,
+     "peak_rss_bytes": 309542912,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 700,
+     "run1_ms": 15800,
+     "run2_ms": 15797,
+     "peak_rss_bytes": 327483392,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 22320,
+     "run2_new_ms": 15730,
+     "run2_gain": 0.295251,
+     "run1_old_ms": 22647,
+     "run1_new_ms": 15790,
+     "run1_gain": 0.302777
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 22651,
+     "run2_new_ms": 15749,
+     "run2_gain": 0.304711,
+     "run1_old_ms": 22652,
+     "run1_new_ms": 15738,
+     "run1_gain": 0.305227
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 22934,
+     "run2_new_ms": 15797,
+     "run2_gain": 0.311197,
+     "run1_old_ms": 21861,
+     "run1_new_ms": 15800,
+     "run1_gain": 0.277252
+    }
+   ],
+   "run2_gain_median": 0.304711,
+   "run2_gain_min": 0.295251,
+   "run2_gain_max": 0.311197,
+   "run1_gain_median": 0.302777,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "c750d2b47ce643bf4c63cf2d7e67c3e64367e734f5548075f792a03b215ce1aa"
+  }
+ ]
+}

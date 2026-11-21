@@ -1,0 +1,22 @@
+tenrun 2026-11-12T14:32:45Z kernel 7.3.0-2-20261110.1-lab-ARCH load 1.33 gpu-timeouts=0
+tenrun tf-attention-contract rc 0
+RESULT attention-contract elapsed_ms=6730 on "Apple M1 (G13G B1)": passed=15 total=15
+tenrun tf-contract-pointwise rc 0
+RESULT contract-pointwise elapsed_ms=78 on "Apple M1 (G13G B1)": passed=16 known=1 total=17
+tenrun tf-stage1-datamove rc 0
+RESULT datamove on "Apple M1 (G13G B1)": kernels=7 passed=7 failed=0 controls=0 known=0
+tenrun tf-stage1-gpu rc 0
+RESULT stage1 elapsed_ms=7305 on "Apple M1 (G13G B1)": passed=25 total=25
+tenrun tf-stage2-gpu rc 0
+RESULT stage2 elapsed_ms=53 on "Apple M1 (G13G B1)": passed=9 total=9
+tenrun tf-stage3-gpu rc 0
+RESULT stage3 elapsed_ms=202 on "Apple M1 (G13G B1)": passed=4 total=4
+tenrun tf-stage4-gpu rc 0
+RESULT stage4 elapsed_ms=200 on "Apple M1 (G13G B1)": passed=6 total=6
+tenrun tf-stage5-gpu rc 0
+RESULT stage5 elapsed_ms=119 on "Apple M1 (G13G B1)": passed=7 total=7
+tenrun tf-vulkan-greedy-contract rc 0
+SUMMARY vulkan greedy contract on "Apple M1 (G13G B1)": 1 kernel, 1 pass gates 1-4, 0 fail; 1 control: 1 red as planted, 0 missed
+tenrun tf-vulkan-kernel-contract rc 0
+SUMMARY Apple M1 (G13G B1) 5 kernels: 5 pass gates 1-4, 0 fail, 0 known findings; 9 controls: 9 caught, 0 missed; 0 limit failures; gates 64491 ms
+tenrun-complete gpu-timeouts=0

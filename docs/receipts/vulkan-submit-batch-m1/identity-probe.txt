@@ -1,0 +1,14 @@
+RESULT stage1 elapsed_ms=7652 on "Apple M1 (G13G B1)": passed=21 total=21
+m1 n8 k64: identical
+m2 n257 k128: identical
+m2 n256 k128 offsets: identical
+m3 n8 k64 cancel: identical
+m1 n16 k2048: identical
+m2 n16 k6144 offsets: identical
+m32 n2048 k6144: identical
+m1 n4096 k2048: identical
+m1 n6144 k2048: identical
+m1 n2048 k6144 offsets: identical
+m32 n6144 k2048: identical
+m1 n140000 k2048 chunked on a 128 MiB range: identical
+exit code 0
