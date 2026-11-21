@@ -27,6 +27,7 @@ fn stride(s: c.Shape) usize {
 
 pub const Case = struct {
     control: bool,
+    m3: bool, // no tensor units: the loader's pre-M5 build and launch
     new: mtl.Pipeline,
     old: mtl.Pipeline,
 
@@ -42,13 +43,15 @@ pub const Case = struct {
         const own = try text(s.a, s.device);
         defer s.a.free(own);
         _ = try loader.require(own);
-        const body = if (control) try bits.edited(s.a, own, "void glm_index_scores_nax(", "const int tm = 16 * int(sg);", "const int tm = 16 * int(sg / 2);") else try s.a.dupe(u8, own);
+        const m3 = !s.device.tensorUnits();
+        const plant: [2][]const u8 = if (m3) .{ "tn = 32 * int(sg % 2);", "tn = 0;" } else .{ "const int tm = 16 * int(sg);", "const int tm = 16 * int(sg / 2);" };
+        const body = if (control) try bits.edited(s.a, own, "void glm_index_scores_nax(", plant[0], plant[1]) else try s.a.dupe(u8, own);
         defer s.a.free(body);
         const main_text = try tf.frags.source(s.device, s.a, main_index);
         defer s.a.free(main_text);
         const new = try bits.pipeline(s.device, body, "glm_index_scores_nax");
         errdefer new.deinit();
-        return .{ .control = control, .new = new, .old = try bits.pipeline(s.device, main_text, "glm_index_scores_nax") };
+        return .{ .control = control, .m3 = m3, .new = new, .old = try bits.pipeline(s.device, main_text, "glm_index_scores_nax") };
     }
     pub fn deinit(x: *Case) void {
         x.new.deinit();
@@ -95,8 +98,10 @@ pub const Case = struct {
         e.setBuffer(r[2].buf, r[2].off, 2);
         e.setBuffer(r[3].buf, r[3].off, 3);
         e.setValue(ScoreArgs{ .p0 = @intCast(s.k), .q_stride = QR, .w_stride = HI, .s_stride = @intCast(stride(s)), .rows = @intCast(s.rows) }, 4);
-        const tile: usize = if (new) tf.glm.prompt.scoreRows(@intCast(most), @intCast(s.rows)) else 64; // selectKeys', main's
-        e.dispatchGroups(mtl.Size.of((most + 63) / 64, (s.rows + tile - 1) / tile, 1), mtl.Size.of(2 * tile, 1, 1));
+        // selectKeys' launch (glm/prompt.zig): 32 rows and 128 threads before M5, else scoreRows' tile; main's 64 rows
+        const tile: usize = if (!new) 64 else if (x.m3) 32 else tf.glm.prompt.scoreRows(@intCast(most), @intCast(s.rows));
+        const threads: usize = if (new and x.m3) 128 else 2 * tile;
+        e.dispatchGroups(mtl.Size.of((most + 63) / 64, (s.rows + tile - 1) / tile, 1), mtl.Size.of(threads, 1, 1));
     }
 };
 
