@@ -188,7 +188,7 @@ pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api
     return kv_pool.plan(l, budgetOf(F, l, room, o, window, host_mode, engine_paged, kept_ppm, slots)) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
-            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state pages and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.statePages()) * l.pageBytes())), toGib(room) }),
+            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state {s} and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.statePages()) * l.pageBytes())), if (l.pieces == null) "runs" else "pages", toGib(room) }),
         };
         return null;
     };
@@ -490,7 +490,7 @@ test "KV admission: a refusal prices the running states beside the fixed part an
     const o: api.Open = .{ .dir = "", .model_type = "n", .lanes = 2, .lanes_fixed = true, .prompt_cache_gib = 0 };
     try std.testing.expectEqual(@as(?Plan, null), try plan(struct {}, arena.allocator(), l, 2 << 30, o, 8, &problem, false, false, 0, null));
     try std.testing.expect(std.mem.indexOf(u8, problem, "needs 3.00 GiB") != null);
-    try std.testing.expect(std.mem.indexOf(u8, problem, "state pages") != null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "state runs") != null);
 }
 
 test "CUDA cache default scales pool copies after full stream windows without cutting lanes" {
