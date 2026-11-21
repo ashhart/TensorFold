@@ -9,7 +9,7 @@ const Error = net.IpAddress.ConnectError;
 /// A socket to the proxy that now carries bytes to `t`'s host and port; refusals are recorded for pull's message.
 pub fn open(io: Io, t: route.Tunnel) Error!net.Socket {
     const p = t.proxy;
-    const socket = try reach(io, p);
+    const socket = try reach(io, p, t.deadline);
     const stream: net.Stream = .{ .socket = socket };
     errdefer stream.close(io);
     const status = handshake(io, stream, t) catch |err| {
@@ -21,19 +21,32 @@ pub fn open(io: Io, t: route.Tunnel) Error!net.Socket {
     return if (status == 407) error.AccessDenied else error.ConnectionRefused;
 }
 
-/// The first of the proxy's addresses that accepts within the connect timeout.
-fn reach(io: Io, p: route.Proxy) Error!net.Socket {
+/// The first of the proxy's addresses that accepts within the original connect deadline.
+fn reach(io: Io, p: route.Proxy, deadline: Io.Clock.Timestamp) Error!net.Socket {
+    return reachWith(http.nativeLookup, io.userdata, io, p, deadline);
+}
+
+pub fn reachWith(resolve: http.Resolver, userdata: ?*anyopaque, io: Io, p: route.Proxy, deadline: Io.Clock.Timestamp) Error!net.Socket {
     const name = net.HostName.init(p.host) catch |err| return unreachableProxy(io, p, err);
     var buf: [16]net.HostName.LookupResult = undefined;
     var results: Io.Queue(net.HostName.LookupResult) = .init(&buf);
-    name.lookup(io, &results, .{ .port = p.port }) catch |err| return unreachableProxy(io, p, err);
+    http.lookupTimed(resolve, userdata, io, name, &results, .{ .port = p.port }, deadline) catch |err| switch (err) {
+        error.Timeout => {
+            route.fail(io, .{ .connect_timeout = p });
+            return error.Timeout;
+        },
+        else => return unreachableProxy(io, p, err),
+    };
     var last: Error = error.HostUnreachable;
-    while (results.getOneUncancelable(io)) |r| switch (r) {
-        .address => |address| if (http.timed(io, &address, p)) |socket| return socket else |err| {
+    while (results.getOne(io)) |r| switch (r) {
+        .address => |address| if (http.timed(io, &address, p, deadline)) |socket| return socket else |err| {
             last = err;
         },
         .canonical_name => {},
-    } else |_| {}
+    } else |err| switch (err) {
+        error.Closed => {},
+        error.Canceled => return error.Canceled,
+    }
     if (last != error.Timeout) route.fail(io, .{ .proxy_unreachable = .{ .proxy = p, .err = last } });
     return last;
 }
