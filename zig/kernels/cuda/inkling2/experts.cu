@@ -334,44 +334,6 @@ namespace ink2m {
 
 __device__ __forceinline__ float bf(uint16_t u) { return __uint_as_float(static_cast<uint32_t>(u) << 16); }
 __device__ __forceinline__ uint16_t tobf(float f) { return __bfloat16_as_ushort(__float2bfloat16_rn(f)); }
-__device__ __forceinline__ float bfr(float f) { return bf(tobf(f)); }
-__device__ __forceinline__ float warpSum(float v) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-
-template <int N>
-__device__ __forceinline__ void blockSums(float (&v)[N], float* sh) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    for (int i = 0; i < N; ++i) v[i] = warpSum(v[i]);
-    __syncthreads();
-    if (lane == 0)
-        for (int i = 0; i < N; ++i) sh[i * 32 + w] = v[i];
-    __syncthreads();
-    for (int i = 0; i < N; ++i) {
-        float t = lane < nw ? sh[i * 32 + lane] : 0.0f;
-        v[i] = __shfl_sync(0xffffffffu, warpSum(t), 0);
-    }
-}
-
-struct GateUpArgs {
-    const uint16_t* x;  // bf16 [rows, x_stride], pair p reads row p / slots
-    const uint8_t *codes, *scales;
-    const float *amax, *denominator;
-    const int* pick;  // int32 [P]
-    uint16_t* out;  // bf16 [P, N], the rounded softcapped SwiGLU
-    int x_stride, p, slots, n, k, experts, format;
-    float gate_cap, up_cap;
-};
-
-struct DownArgs {
-    const uint16_t* x;  // bf16 [P, K], gateup's output
-    const uint8_t *codes, *scales;
-    const float *amax, *denominator;
-    const int* pick;
-    uint16_t* out;  // bf16 [P, N], each selected expert's rounded output
-    int p, n, k, experts, format;
-};
 
 struct CombineArgs {
     const uint16_t* experts;  // bf16 [rows * slots, H]
@@ -387,65 +349,11 @@ struct TensorActArgs {
     int n;
 };
 
-__device__ __forceinline__ float e2m1(unsigned code) {
-    const float values[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-    const float v = values[code & 7u];
-    return code & 8u ? -v : v;
-}
-
-// The checkpoint's stored codes and scales become one bf16 weight, with no activation quantization.
-__device__ __forceinline__ float weight(const uint8_t* codes, const uint8_t* scales, const float* amax,
-                                        const float* denominator, int e, int r, int c, int n, int k, int format) {
-    const int er = e * n + r;
-    if (format == 0) {
-        const uint8_t packed = codes[(size_t)er * (k / 2) + c / 2];
-        const unsigned code = c & 1 ? packed >> 4 : packed & 15u;
-        const float scale = tf_common::e4m3f(scales[(size_t)er * (k / 16) + c / 16]);
-        const float phi = __fdiv_rn(bfr(amax[e]), bfr(denominator[0]));
-        return bfr(__fmul_rn(__fmul_rn(e2m1(code), scale), phi));
-    }
-    const float value = tf_common::e4m3f(codes[(size_t)er * k + c]);
-    const float scale = ldexpf(1.0f, static_cast<int>(scales[(size_t)er * (k / 32) + c / 32]) - 127);
-    return bfr(__fmul_rn(value, scale));
-}
 
 __device__ __forceinline__ float cap(float x, float c) { return c * tanhf(x / c); }
 
 }  // namespace ink2m
 
-// One (routed pair, intermediate unit): two stored NVFP4/MXFP8 rows and the rounded SwiGLU epilogue.
-extern "C" __global__ void __launch_bounds__(128) tf_ink2moe_gateup(const ink2m::GateUpArgs a) {
-    __shared__ float sh[64];
-    const int p = blockIdx.y, unit = blockIdx.x, e = a.pick[p];
-    const uint16_t* x = a.x + static_cast<size_t>(p / a.slots) * a.x_stride;
-    float v[2] = {0.0f, 0.0f};
-    for (int c = threadIdx.x; c < a.k; c += blockDim.x) {
-        const float xv = ink2m::bf(x[c]);
-        const float g = ink2m::weight(a.codes, a.scales, a.amax, a.denominator, e, 2 * unit, c, 2 * a.n, a.k, a.format);
-        const float u = ink2m::weight(a.codes, a.scales, a.amax, a.denominator, e, 2 * unit + 1, c, 2 * a.n, a.k, a.format);
-        v[0] = __fmaf_rn(xv, g, v[0]);
-        v[1] = __fmaf_rn(xv, u, v[1]);
-    }
-    ink2m::blockSums<2>(v, sh);
-    if (threadIdx.x == 0) {
-        const float g = ink2m::cap(ink2m::bfr(v[0]), a.gate_cap);
-        const float u = ink2m::cap(ink2m::bfr(v[1]), a.up_cap);
-        a.out[(size_t)p * a.n + unit] = ink2m::tobf(g * (1.0f / (1.0f + expf(-ink2m::bfr(v[0])))) * u);
-    }
-}
-
-// One (routed pair, hidden output): the down projection, rounded to bf16 before routing weights are applied.
-extern "C" __global__ void __launch_bounds__(128) tf_ink2moe_down(const ink2m::DownArgs a) {
-    __shared__ float sh[32];
-    const int p = blockIdx.y, row = blockIdx.x, e = a.pick[p];
-    float v[1] = {0.0f};
-    for (int c = threadIdx.x; c < a.k; c += blockDim.x) {
-        const float w = ink2m::weight(a.codes, a.scales, a.amax, a.denominator, e, row, c, a.n, a.k, a.format);
-        v[0] = __fmaf_rn(ink2m::bf(a.x[(size_t)p * a.k + c]), w, v[0]);
-    }
-    ink2m::blockSums<1>(v, sh);
-    if (threadIdx.x == 0) a.out[(size_t)p * a.n + row] = ink2m::tobf(v[0]);
-}
 
 // Tensor-core gate/up rows are interleaved; keep the scalar baseline's softcapped SwiGLU arithmetic.
 extern "C" __global__ void __launch_bounds__(256) tf_ink2moe_tensor_act(const ink2m::TensorActArgs a) {
