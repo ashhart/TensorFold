@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: 5-bit (`4+1`) and 6-bit (`4+2`) split-plane register-direct lane projections (`tf_lane_reg`, `tf_lane_order_q5`, `tf_lane_order_q6`) accelerate M5 tensor-unit inference for group-64 Qwen3.5/Qwen3.8 and Gemma 4 checkpoints with exact tile-code parity (#4419). Thanks to @gilby.
 - CUDA on unified-memory Linux (GB10): the start-up memory budget is at most the free memory CUDA reports, less the same reserve, instead of `/proc/meminfo` alone, and the server first drops the checkpoint's own shards from the page cache, so a checkpoint that was just read is not refused for its own cached pages; discrete cards, Windows, Metal and HIP are unchanged (#3192, part of #1857).
 - Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
 
