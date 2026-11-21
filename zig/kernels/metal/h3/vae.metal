@@ -59,23 +59,63 @@
 [[kernel]] void h3_vae_attention_il(
   const device float* QKV [[buffer(0)]],
   device float* Y [[buffer(1)]],
-  constant uint* P [[buffer(2)]],
+  const device float* ROPE [[buffer(2)]],
+  constant uint* P [[buffer(3)]],
   uint2 at [[thread_position_in_grid]]) {
   const uint rows = P[0];
   const uint hd = 64, heads = 32, dim = heads * hd;
   const uint r = at.x;
   const uint head = at.y;
   if (r >= rows || head >= heads) return;
-  const device float* q = QKV + r * 3 * dim + head * 3 * hd;
+  const device float* q_raw = QKV + r * 3 * dim + head * 3 * hd;
+  // apply RoPE: cos/sin tables are [rows, 48] cos then [rows, 48] sin
+  // rotary_dim = 48 (75% of 64), half_dim = 24
+  const device float* COS = ROPE + r * 48;
+  const device float* SIN = ROPE + rows * 48 + r * 48;
+  float q_rot[64];
+  float k_rot_base[64];  // only used if we need per-key rotation — skip for now
+  for (uint i = 0; i < hd; i++) {
+    if (i < 48) {
+      const uint half_dim = 24;
+      const uint fi = i % half_dim;
+      const float c = COS[fi];
+      const float sn = SIN[fi];
+      if (i < half_dim) {
+        q_rot[i] = q_raw[i] * c - q_raw[i + half_dim] * sn;
+      } else {
+        q_rot[i] = q_raw[i] * c + q_raw[i - half_dim] * sn;
+      }
+    } else {
+      q_rot[i] = q_raw[i];
+    }
+  }
   float run_max = -1e30f;
   float run_sum = 0.0f;
   float acc[64];
   for (uint i = 0; i < hd; i++) acc[i] = 0.0f;
-  // online softmax over all keys
+  // online softmax over all keys, with RoPE applied to each key
   for (uint k = 0; k < rows; k++) {
     float dot = 0.0f;
-    const device float* kk = QKV + k * 3 * dim + head * 3 * hd + hd;
-    for (uint i = 0; i < hd; i++) dot += q[i] * kk[i];
+    const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
+    const device float* KCOS = ROPE + k * 48;
+    const device float* KSIN = ROPE + rows * 48 + k * 48;
+    for (uint i = 0; i < hd; i++) {
+      float kv;
+      if (i < 48) {
+        const uint half_dim = 24;
+        const uint fi = i % half_dim;
+        const float c = KCOS[fi];
+        const float sn = KSIN[fi];
+        if (i < half_dim) {
+          kv = kk_raw[i] * c - kk_raw[i + half_dim] * sn;
+        } else {
+          kv = kk_raw[i] * c + kk_raw[i - half_dim] * sn;
+        }
+      } else {
+        kv = kk_raw[i];
+      }
+      dot += q_rot[i] * kv;
+    }
     dot *= rsqrt(float(hd));
     const float bm = max(dot, run_max);
     const float rescale = exp(run_max - bm);

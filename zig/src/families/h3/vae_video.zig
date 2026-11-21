@@ -509,10 +509,45 @@ pub const Decoder = struct {
         // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
         // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
         // real attention kernel replaces this in the next stage)
+        // build RoPE tables: cos and sin for each row, 48 rotary dims each
+        const rope_buf = try self.device.buffer(rows * 48 * 2 * 4, mtl.ResourceOptions.shared);
+        const rope_cos = rope_buf.slice(f32, rows * 48);
+        const rope_sin = rope_buf.slice(f32, rows * 48)[rows * 48 ..];
+        var rpos: usize = 0;
+        for (0..depth) |t| {
+            for (0..height) |h| {
+                for (0..width) |w| {
+                    const pt = 2.0 * (@as(f32, @floatFromInt(t)) + 0.5) / @as(f32, @floatFromInt(depth)) - 1.0;
+                    const ph = 2.0 * (@as(f32, @floatFromInt(h)) + 0.5) / @as(f32, @floatFromInt(height)) - 1.0;
+                    const pw = 2.0 * (@as(f32, @floatFromInt(w)) + 0.5) / @as(f32, @floatFromInt(width)) - 1.0;
+                    const pvals = [3]f32{ pt, ph, pw };
+                    var k2: usize = 0;
+                    for (0..3) |axis| {
+                        for (0..8) |f| {
+                            const inv = std.math.pow(f32, 100.0, -@as(f32, @floatFromInt(f)) * 0.125);
+                            const a = pvals[axis] * inv;
+                            rope_cos[rpos * 48 + k2] = @cos(a);
+                            rope_sin[rpos * 48 + k2] = @sin(a);
+                            rope_cos[rpos * 48 + 24 + k2] = @cos(a);
+                            rope_sin[rpos * 48 + 24 + k2] = @sin(a);
+                            k2 += 1;
+                        }
+                    }
+                    rpos += 1;
+                }
+            }
+        }
+        for (rpos..rows) |rr| {
+            for (0..48) |k2| {
+                rope_cos[rr * 48 + k2] = 1.0;
+                rope_sin[rr * 48 + k2] = 0.0;
+            }
+        }
         e.setPipeline(self.p[7]);
         e.setBuffer(qkv, 0, 0);
         e.setBuffer(attended, 0, 1);
-        e.setValue([1]u32{ @intCast(rows) }, 2);
+        e.setBuffer(rope_buf, 0, 2);
+        e.setValue([1]u32{ @intCast(rows) }, 3);
         e.dispatchGroups(mtl.Size.of(voxels, 32, 1), mtl.Size.of(1, 1, 1));
         e.barrier();
 
