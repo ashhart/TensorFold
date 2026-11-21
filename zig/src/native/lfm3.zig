@@ -85,10 +85,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const chunk: u32 = if (warm_turns) 1 else prompt_chunk;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
-    if (model.config.kind == .vision_language) {
-        h.vision = try images.open(gpa, io, model, o.dir, o.vision orelse .{});
+    if (model.config.kind == .vision_language) if (o.vision) |requested| {
+        h.vision = try images.open(gpa, io, model, o.dir, requested);
         h.metal.images = .{ .ctx = h.vision.?, .prepare = images.Vision.encode };
-    }
+    };
     errdefer if (h.vision) |v| v.deinit();
     const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
     const served = try metal_admit.streams(a, "lfm3", per_stream, metal_admit.room(model.device), o, window, problem) orelse {

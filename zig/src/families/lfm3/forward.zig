@@ -8,21 +8,12 @@ const c = @import("config.zig");
 const row = @import("../../core/row_projection.zig");
 const dual = @import("dual_projection.zig");
 const binned = @import("../../core/binned_projection.zig");
-const splits = @import("attention_split.zig");
 const pairs = @import("row_projection.zig");
 const Buffer = mtl.Buffer;
 pub const counters = @import("../../core/gpu_counters.zig");
 
 pub const Segment = struct { cache: *st.Cache, rows: usize };
-/// `none` commits prompt state without publishing logits; callers must retain every observed head.
-pub const Head = enum { last, all, none };
-pub const PromptTiles = enum(u1) {
-    baseline,
-    nax,
-    fn attentionTail(self: PromptTiles) bool {
-        return self == .nax;
-    }
-};
+pub const Head = enum { last, all };
 pub var gpu_seconds: f64 = 0;
 pub const Trace = struct {
     ctx: *anyopaque,
@@ -40,8 +31,6 @@ const Encoder = struct {
     scratch: *st.Scratch,
     record: bool,
     binned_prepared: ?Prepared = null,
-    allow_nax: bool = false,
-    prompt_tiles: PromptTiles = .baseline,
 
     fn begin(self: *Encoder, kind: counters.Class) !void {
         if (self.m.profile) |profile| try profile.beginSpan(&self.e, kind);
@@ -70,9 +59,7 @@ const Encoder = struct {
 
     fn projection(self: *Encoder, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) !void {
         try self.begin(.dense);
-        if (self.allow_nax and self.prompt_tiles == .nax and self.m.prompt_nax != null and self.m.prompt_nax.?.supports(w, rows)) {
-            self.m.prompt_nax.?.encode(self.e, w, x, x_off, y, y_off, rows);
-        } else if (self.m.binned_candidate) |*candidate| {
+        if (self.m.binned_candidate) |*candidate| {
             if (binned.supports(w)) {
                 const sums = binned.Ref{ .buf = self.scratch.binned_sums orelse return error.MissingBinnedScratch };
                 const meta = binned.Ref{ .buf = self.scratch.binned_meta orelse return error.MissingBinnedScratch };
@@ -92,7 +79,6 @@ const Encoder = struct {
     }
 
     fn pairedProjection(self: *Encoder, a: row.Weights, b: row.Weights, input: Buffer, first: Buffer, second: Buffer, rows: usize) !bool {
-        if (self.allow_nax and self.prompt_tiles == .nax and self.m.prompt_nax != null) return false;
         if (self.m.projection_candidate != null or self.m.binned_candidate != null or !dual.compatible(a, b)) return false;
         try self.begin(.dense);
         try dual.encode(self.e, &self.m.kernels.dual, a, b, input, 0, first, 0, second, 0, rows);
@@ -160,23 +146,18 @@ pub fn project(m: *Model, s: *st.Scratch, w: row.Weights, input: Buffer, output:
 }
 
 pub fn runWithImages(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head, images: ?@import("image_rows.zig").Images) !void {
-    return execute(m, s, segments, tokens, record, head, images, null, .baseline);
+    return execute(m, s, segments, tokens, record, head, images, null);
 }
 
 pub fn runTrace(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, head: Head, trace: Trace) !void {
-    return execute(m, s, segments, tokens, false, head, null, trace, .baseline);
+    return execute(m, s, segments, tokens, false, head, null, trace);
 }
 
 pub fn runTraceWithImages(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, head: Head, images: ?@import("image_rows.zig").Images, trace: Trace) !void {
-    return execute(m, s, segments, tokens, false, head, images, trace, .baseline);
+    return execute(m, s, segments, tokens, false, head, images, trace);
 }
 
-pub fn runPromptWithImages(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, head: Head, images: ?@import("image_rows.zig").Images, tiles: PromptTiles) !void {
-    return execute(m, s, segments, tokens, false, head, images, null, tiles);
-}
-
-fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head, images: ?@import("image_rows.zig").Images, trace: ?Trace, tiles: PromptTiles) !void {
-    if (head == .none and (record or trace != null)) return error.InvalidDeferredLfmHead;
+fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head, images: ?@import("image_rows.zig").Images, trace: ?Trace) !void {
     if (trace != null and m.profile != null) return error.ConflictingLfmDiagnostics;
     if (images != null and (record or segments.len != 1)) return error.InvalidLfmImageSegments;
     if (tokens.len == 0 or tokens.len > s.rows or (record and tokens.len > st.batch_rows)) return error.LfmRowsExceeded;
@@ -198,7 +179,7 @@ fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         try prepareSharedConv(m, s, segments);
     }
     var cb = m.queue.commandBuffer();
-    var enc = Encoder{ .e = cb.compute(.serial), .m = m, .scratch = s, .record = record, .prompt_tiles = tiles };
+    var enc = Encoder{ .e = cb.compute(.serial), .m = m, .scratch = s, .record = record };
     var ended = false;
     if (m.profile) |profile| profile.beginCommand(cb) catch |err| {
         enc.e.end();
@@ -220,7 +201,6 @@ fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     if (images) |input| try input.encode(enc.e, s.h, segments[0].cache.len, total);
     try enc.end();
     try stage(&enc, trace, "embedding", s.h, total, c.hidden, &cb, &ended);
-    enc.allow_nax = true;
     for (m.weights.blocks, 0..) |block, i| {
         var name: [64]u8 = undefined;
         if (i == 0) try enc.norm(s.h, block.operator_norm, s.x, total);
@@ -268,9 +248,8 @@ fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         try layerStage(&enc, trace, &name, i, "output", s.h, total, c.hidden, &cb, &ended);
     }
 
-    enc.allow_nax = false;
     try stage(&enc, trace, "final_norm", s.x, total, c.hidden, &cb, &ended);
-    if (head == .all) try enc.projection(embedding, s.x, 0, s.logits, 0, total) else if (head == .last) {
+    if (head == .all) try enc.projection(embedding, s.x, 0, s.logits, 0, total) else {
         try enc.projection(embedding, s.x, (total - 1) * c.hidden * 2, s.logits, 0, 1);
     }
     if (m.profile) |profile| try profile.finishEncoding(&enc.e) else enc.e.end();
@@ -286,7 +265,7 @@ fn execute(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     var base: usize = 0;
     for (segments) |seg| {
         const logit_row = if (head == .all) base + seg.rows - 1 else 0;
-        if (head != .none) @memcpy(seg.cache.logits.contents()[0 .. c.vocab * 2], (s.logits.contents() + logit_row * c.vocab * 2)[0 .. c.vocab * 2]);
+        @memcpy(seg.cache.logits.contents()[0 .. c.vocab * 2], (s.logits.contents() + logit_row * c.vocab * 2)[0 .. c.vocab * 2]);
         seg.cache.commit(s, base, seg.rows, record);
         base += seg.rows;
     }
@@ -487,55 +466,13 @@ fn attention(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const 
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
         try enc.end();
         var at: usize = 0;
-        const window: usize = if (sliding) c.sliding_window else 0;
-        const whole = enc.m.tiled_attention != null and !enc.record and @import("attention_tiled.zig").eligiblePrompt(seg.rows, window, enc.prompt_tiles.attentionTail());
-        const step = if (whole) seg.rows else st.attn_slice;
-        while (at < seg.rows) : (at += step) {
-            const rows = @min(seg.rows - at, step);
+        while (at < seg.rows) : (at += st.attn_slice) {
+            const rows = @min(seg.rows - at, st.attn_slice);
             const first = seg.cache.len + at;
             const chunk_base = if (sliding) (first + 1 -| c.sliding_window) / st.chunk_keys else 0;
             const last_chunk = (first + rows + st.chunk_keys - 1) / st.chunk_keys;
             const args = AttnArgs{ .len = @intCast(first), .cap = cap, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .window = if (sliding) c.sliding_window else 0, .chunk_base = @intCast(chunk_base) };
             try enc.begin(.attention);
-            if (enc.m.tiled_attention) |pipeline| {
-                if (!enc.record and @import("attention_tiled.zig").eligiblePrompt(rows, args.window, enc.prompt_tiles.attentionTail())) {
-                    enc.e.setPipeline(pipeline);
-                    enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
-                    enc.e.setBuffer(cache.keys, 0, 1);
-                    enc.e.setBuffer(cache.values, 0, 2);
-                    enc.e.setBytes(std.mem.asBytes(&args), 3);
-                    enc.e.setBuffer(s.y, (base + at) * c.hidden * 2, 8);
-                    enc.e.setValue(@as(u32, @intCast(rows)), 9);
-                    enc.groups(.{ (rows + 63) / 64, c.query_heads, 1 }, .{ 128, 1, 1 });
-                    try enc.end();
-                    continue;
-                }
-            }
-            if (enc.m.split_attention) |split| {
-                enc.e.setPipeline(split.partial);
-                enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
-                enc.e.setBuffer(cache.keys, 0, 1);
-                enc.e.setBuffer(cache.values, 0, 2);
-                enc.e.setBytes(std.mem.asBytes(&args), 3);
-                enc.e.setBuffer(s.pm, 0, 4);
-                enc.e.setBuffer(s.pl, 0, 5);
-                enc.e.setBuffer(s.po, 0, 6);
-                enc.groups(.{ c.query_heads, rows, splits.parts(first + rows, args.window) }, .{ 128, 1, 1 });
-                try enc.end();
-                try enc.begin(.attention);
-                enc.e.setPipeline(split.merge);
-                enc.e.setBuffer(s.pm, 0, 0);
-                enc.e.setBuffer(s.pl, 0, 1);
-                enc.e.setBuffer(s.po, 0, 2);
-                enc.e.setBytes(std.mem.asBytes(&args), 3);
-                enc.e.setBuffer(s.y, (base + at) * c.hidden * 2, 4);
-                enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 5);
-                enc.e.setBuffer(cache.keys, 0, 6);
-                enc.e.setBuffer(cache.values, 0, 7);
-                enc.groups(.{ c.query_heads, rows, 1 }, .{ 32, 1, 1 });
-                try enc.end();
-                continue;
-            }
             enc.pipe("lfm3_attn_partial");
             enc.e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
             enc.e.setBuffer(cache.keys, 0, 1);

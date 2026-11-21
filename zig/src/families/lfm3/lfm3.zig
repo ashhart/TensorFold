@@ -18,5 +18,3 @@ pub const vision = @import("vision.zig");
 pub const vision_residency = @import("vision_residency.zig");
 
 pub const binned_projection = @import("../../core/binned_projection.zig");
-pub const prompt_nax = @import("prompt_nax.zig");
-pub const attention_split = @import("attention_split.zig");
