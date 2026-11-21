@@ -50,6 +50,13 @@ fn sigmoid(x: f64) f64 {
     return 1.0 / (1.0 + @exp(-x));
 }
 
+/// x rounded to bf16 (via f32, nearest-even), back in f64.
+fn bf16Round(x: f64) f64 {
+    const u: u32 = @bitCast(@as(f32, @floatCast(x)));
+    const r = (u + 0x7fff + ((u >> 16) & 1)) & 0xffff0000;
+    return @as(f32, @bitCast(r));
+}
+
 fn mat2(a: std.mem.Allocator, n: usize, w: usize) ![][]f64 {
     const x = try a.alloc([]f64, n);
     for (x) |*row| row.* = try a.alloc(f64, w);
@@ -124,6 +131,7 @@ pub const Ref = struct {
     c: config.Config,
     p: plan_.Plan,
     ck: *Checkpoint,
+    round_caps: bool = false, // gate and up rounded to bf16 before the soft caps (the experts' round_caps A/B)
     plant: bool = false, // a planted control: the cross-pass messages dropped (the check must then go red)
 
     fn get(r: *Ref, comptime fmt: []const u8, args: anytype) !Tensor {
@@ -376,7 +384,11 @@ pub const Ref = struct {
             const sc13 = s13.bytes[e * (s13.bytes.len / t.experts) ..][0 .. s13.bytes.len / t.experts];
             for (0..m) |j| {
                 var gu: [2]f64 = .{ 0, 0 };
-                for (0..2) |half| gu[half] = expertDot(nv, c13, sc13, h, 2 * j + half, x) * f13; // rows interleave gate, up
+                // w13's rows interleave gate and up
+                for (0..2) |half| gu[half] = expertDot(nv, c13, sc13, h, 2 * j + half, x) * f13;
+                if (r.round_caps) for (&gu) |*g| {
+                    g.* = bf16Round(g.*);
+                };
                 act[j] = sigmoid(gu[0]) * t.gate_cap * std.math.tanh(gu[0] / t.gate_cap) * t.up_cap * std.math.tanh(gu[1] / t.up_cap);
             }
             const c2 = w2.bytes[e * (w2.bytes.len / t.experts) ..][0 .. w2.bytes.len / t.experts];

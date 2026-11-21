@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const mm = @import("mini_model.zig");
+const snap = @import("mini_snap.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -205,9 +206,44 @@ pub const Mini = struct {
             l.sampled = true;
         }
         s.cached = 0;
-        l.fill = 0;
-        s.fill_at.store(0, .monotonic);
+        l.fill = x.resumeAt(s, l, p.len);
+        s.fill_at.store(@intCast(l.fill.?), .monotonic);
         return l;
+    }
+
+    /// The kept state's position, restored into the slot (0: none, not this prompt's, or another plan's).
+    fn resumeAt(x: *Mini, s: *Stream, l: *const Lane, len: usize) usize {
+        const saved = s.reuse.saved orelse return 0;
+        const k: *const snap.Saved = @ptrCast(@alignCast(saved));
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len) {
+            s.reuse_failed = true;
+            return 0;
+        }
+        snap.restore(x.m, x.s, l.slot, k) catch {
+            s.reuse_failed = true;
+            return 0;
+        };
+        s.cached = k.at;
+        return k.at;
+    }
+
+    /// The prompt pass stands at `at` (a chunk start or a mark): copy the stream's state there.
+    pub fn saveState(x: *Mini, owner: ?*anyopaque, at: u32) !*snap.Saved {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
+        return snap.save(x.gpa, x.m, x.s, l.slot, at);
+    }
+
+    pub fn restoreState(x: *Mini, owner: ?*anyopaque, k: *const snap.Saved) !void {
+        const s: *const Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        try snap.restore(x.m, x.s, l.slot, k);
+        l.len = k.at;
+    }
+
+    pub fn dropState(x: *Mini, k: *snap.Saved) void {
+        snap.drop(x.gpa, x.s, k);
     }
 
     /// One chunk from `l.fill`; true once the prompt's last row is in.
@@ -215,13 +251,17 @@ pub const Mini = struct {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        const end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
+        var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
+        for (s.reuse.marks) |mk| if (mk > at and mk < end) {
+            end = mk;
+        };
         const done = end == p.len;
         try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, x.vocab() * 4, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
         if (done) l.len = p.len;
+        if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(end)) != null) hk.at(hk.ptr, s, @intCast(end));
         return done;
     }
 

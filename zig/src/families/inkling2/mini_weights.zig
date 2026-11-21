@@ -15,6 +15,11 @@ const Tensor = core.checkpoint.Tensor;
 /// NVFP4's outer scale denominator as Mini ships it (scales/RESULTS.md); another value is refused.
 pub const nvfp4_denominator = 2688;
 
+/// The experts' round_caps A/B switch on every layer: gate and up rounded to bf16 before the soft caps.
+pub fn roundCaps(w: *Weights, on: bool) void {
+    for (w.layers) |*l| l.experts.round_caps = on;
+}
+
 /// One packed buffer a layer [q|gate|rel|sink|k|v], views at one shared K slice: fused rows keep the separate bits.
 pub const Fused = struct {
     /// Row offsets of the parts in the fused output.

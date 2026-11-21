@@ -67,7 +67,7 @@ pub fn run(gpu: Gpu, model: []const u8, count_text: []const u8) !void {
     defer rig.deinit();
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, gpu.io, model);
     defer ck.close();
-    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck };
+    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck, .round_caps = tests.roundCaps() };
     const v = rig.w.config.text.unpadded_vocab;
     var disagree: usize = 0;
     for (prompts) |pr| {
@@ -103,7 +103,7 @@ pub fn run(gpu: Gpu, model: []const u8, count_text: []const u8) !void {
         defer buf.deinit(gpa);
         var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, &buf);
         const w = &aw.writer;
-        try w.print("{{\"prompt\":\"{s}\",\"forced\":{},\"ids\":", .{ pr.name, forced != null });
+        try w.print("{{\"prompt\":\"{s}\",\"forced\":{},\"round_caps\":{},\"ids\":", .{ pr.name, forced != null, tests.roundCaps() });
         try ids(w, pr.ids);
         try w.writeAll(",\"tokens\":");
         try ids(w, all[n0..]);

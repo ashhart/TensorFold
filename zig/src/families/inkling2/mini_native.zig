@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const wts = @import("mini_weights.zig");
 const mm = @import("mini_model.zig");
 const be = @import("mini_backend.zig");
+const snap = @import("mini_snap.zig");
 
 pub const model_type = "inkling2_loop";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -14,6 +15,8 @@ pub const prompt_rows: u32 = be.prompt_rows;
 pub const takes_drafter = false;
 pub const drafter_refusal = "--drafter: Inkling 2 Mini on CUDA serves plain decode so far; its DSpark drafter is the next slice (C5)";
 pub const explains_open = true;
+/// A kept state is the caches and conv states through its position, nothing past it (no draft head reads on).
+pub const snap_lookahead: u32 = 0;
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
@@ -102,6 +105,28 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .target = &own.b,
     };
+}
+
+fn mini(ptr: *anyopaque) *be.Mini {
+    return @ptrCast(@alignCast(ptr));
+}
+
+/// Bytes a state at `at` prompt tokens takes.
+pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
+    return snap.bytes(mini(ptr).m, at);
+}
+
+/// The prompt pass stands at `at` (a chunk start or a mark): copy the stream's state there.
+pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+    return @ptrCast(try mini(ptr).saveState(owner, at));
+}
+
+pub fn snap_restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
+    return mini(ptr).restoreState(owner, @ptrCast(@alignCast(saved)));
+}
+
+pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
+    mini(ptr).dropState(@ptrCast(@alignCast(saved)));
 }
 
 /// Whether a request's caches could start now (the lane host's admission, on its engine thread).

@@ -87,8 +87,13 @@ __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int 
           o0 = swiglu(a0, acc[M - 1][r][j][2 * h], limit);
           o1 = swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit);
         } else if constexpr (EPI == 4) {  // limit and limit2: the gate's and the up's caps
-          o0 = softcap_swiglu(a0, acc[M - 1][r][j][2 * h], limit, limit2);
-          o1 = softcap_swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit, limit2);
+          if (limit2 < 0.f) {  // an A/B switch (round_caps): gate and up rounded to bf16 before the caps
+            o0 = softcap_swiglu(bf(a0), bf(acc[M - 1][r][j][2 * h]), limit, -limit2);
+            o1 = softcap_swiglu(bf(a1), bf(acc[M - 1][r][j][2 * h + 1]), limit, -limit2);
+          } else {
+            o0 = softcap_swiglu(a0, acc[M - 1][r][j][2 * h], limit, limit2);
+            o1 = softcap_swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit, limit2);
+          }
         } else {
           o0 = a0;
           o1 = a1;

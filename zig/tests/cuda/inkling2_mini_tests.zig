@@ -19,6 +19,7 @@ pub const Rig = struct {
         r.gpu = gpu;
         r.w = try ink.mini_weights.load(gpu.gpa, gpu.io, gpu.d, model);
         errdefer r.w.deinit();
+        ink.mini_weights.roundCaps(&r.w, roundCaps());
         r.k = try mm.Kernels.load(gpu.ctx);
         errdefer r.k.deinit();
         r.s = try cuda.Stream.init(gpu.d, false);
@@ -63,6 +64,12 @@ pub const Rig = struct {
         return r.logits(chains.len);
     }
 };
+
+/// INKLING2_ROUND_CAPS=1: the experts' gate and up rounded to bf16 before the soft caps (engine and reference).
+pub fn roundCaps() bool {
+    const v = std.c.getenv("INKLING2_ROUND_CAPS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
 
 pub fn argmax(x: []const f32) u32 {
     var best: usize = 0;
@@ -130,7 +137,35 @@ pub fn run(gpu: Gpu, model: []const u8, count_text: []const u8, text: []const u8
     }
     try check.expect(bad == 0, "inkling2 mini resumed == fresh: {d} chunkings differ", .{bad});
     try graphs(&rig, ids, first, plain);
+    try snapshots(&rig, ids, first);
     try concurrent(&rig, ids, plain);
+}
+
+/// A state saved mid-prompt in slot 0, restored in slot 1, prefilled on: logits bit-equal to fresh; planted differs.
+fn snapshots(rig: *Rig, ids: []const u32, first: []const f32) !void {
+    const gpa = rig.gpu.gpa;
+    const snap = ink.mini_snap;
+    const mid: u32 = @intCast(ids.len / 2);
+    gpa.free(try rig.prompt(0, ids[0..mid], 0, mm.prompt_rows));
+    const k = try snap.save(gpa, &rig.m, rig.s, 0, mid);
+    defer snap.drop(gpa, rig.s, k);
+    // the planted control: slot 0 refilled with another prefix (the ids reversed) and its state restored
+    const other = try gpa.alloc(u32, mid);
+    defer gpa.free(other);
+    for (other, 0..) |*o, i| o.* = ids[mid - 1 - i];
+    gpa.free(try rig.prompt(0, other, 0, mm.prompt_rows));
+    const wrong = try snap.save(gpa, &rig.m, rig.s, 0, mid);
+    defer snap.drop(gpa, rig.s, wrong);
+    var same: [2]bool = undefined;
+    for ([_]*const snap.Saved{ wrong, k }, 0..) |state, i| {
+        try snap.restore(&rig.m, rig.s, 1, state);
+        const got = try rig.prompt(1, ids[mid..], mid, mm.prompt_rows);
+        defer gpa.free(got);
+        same[i] = std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(first));
+    }
+    try check.expect(!same[0], "inkling2 mini planted control: another prompt's state restored gives the fresh logits", .{});
+    try check.expect(same[1], "inkling2 mini snapshot: restored at {d} != fresh", .{mid});
+    check.pass("inkling2 mini prompt-cache state at {d} of {d} ({d} bytes): restored == fresh bit-equal; planted (another prompt's state) red", .{ mid, ids.len, snap.bytes(&rig.m, mid) });
 }
 
 /// The decode graphs against direct launches: the first step's logits bit-equal, then 32 greedy tokens equal.
@@ -217,7 +252,7 @@ pub fn reference(gpu: Gpu, model: []const u8, count_text: []const u8, text: []co
     defer ck.close();
     // INKLING2_REF_PLANT=1: the reference drops the cross-pass messages; the check must go red
     const plant = if (std.c.getenv("INKLING2_REF_PLANT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
-    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck, .plant = plant };
+    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck, .plant = plant, .round_caps = roundCaps() };
     const picks = try gpa.alloc(ink.mini_ref.Pick, all.len);
     defer gpa.free(picks);
     const t0 = check.now(gpu.io);

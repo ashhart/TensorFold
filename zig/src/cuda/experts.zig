@@ -36,6 +36,7 @@ pub const Layer = struct {
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
     caps: [2]f32 = .{ 0, 0 }, // nvfp4, mxfp8: Inkling's soft-capped SwiGLU (gate cap, up cap); 0, 0 for none
+    round_caps: bool = false, // with caps: gate and up sums rounded to bf16 before the soft cap (an A/B switch)
     shared: i32 = -1, // affine3: the expert whose tables are 4-bit (a SwiGLU pair at shared_up, down at shared_down)
     shared_up: u64 = 0,
     shared_down: u64 = 0,

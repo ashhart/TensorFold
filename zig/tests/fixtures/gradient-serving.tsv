@@ -6,7 +6,7 @@ zig/kernels/cuda/embed_rows.cu	c3cad38db6576728a15e048a45f2c1a571233fc3fedc83d04
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
 zig/kernels/cuda/exlr8_dense.cu	7616e7a3bb35a2bb64b53a1ca84ce8be98442a36394dad945b844219f72ec671	raw
 zig/kernels/cuda/experts.cu	2a9b3989f3baaef5eadb56abfb8520700449bd910f2b00345703c22dbf758b8c	raw
-zig/kernels/cuda/experts.cuh	8c24ce93b6bd53c6f18230633837f02bc9f55f65f81d6dabf8d35d8a25008f43	raw	Inkling 2 Mini C3: additive soft-capped and MXFP8 entries, SASS of every existing function unchanged
+zig/kernels/cuda/experts.cuh	68fee9825b7f201cfc2d6719e54ad661848772d1cdac90e3015302a801958e50	raw	Inkling 2 Mini C3: additive soft-capped and MXFP8 entries, SASS of every existing function unchanged; Inkling 2 Mini C4: round_caps A/B switch in epilogue 4 (negative up cap), default path unchanged
 zig/kernels/cuda/experts_pack.cu	578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac	raw
 zig/kernels/cuda/experts_prefill.cu	5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc	raw
 zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f07168a016412df13a7	raw
@@ -90,7 +90,7 @@ zig/src/cuda/cublaslt.zig	d87f865fc03cf94bdcbe83504f74a6e569d70c10ca792b675122e9
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/embed_rows.zig	3fa5e28ab46b4daef2c820b3ad3f7d331bc77f55ea340a7a3cac64b21584c5f4	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
-zig/src/cuda/experts.zig	0976785ad15e648819f7bf86f805209e094509c505235f726ae9adb4e7763025	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change), #1630 (a bf16 format: its Grouped member, decode and prompt arms and prompt tile; other formats unchanged); #4493 (opt-in paired prompt experts, 128-row items); Inkling 2 Mini C3: additive MXFP8 format and soft-capped dispatch (experts_mx.zig); existing calls unchanged
+zig/src/cuda/experts.zig	8a9ff4f263d69f85253849c3544e1446cbfa4baa381ede14290870dfa9b6f9a4	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change), #1630 (a bf16 format: its Grouped member, decode and prompt arms and prompt tile; other formats unchanged); #4493 (opt-in paired prompt experts, 128-row items); Inkling 2 Mini C3: additive MXFP8 format and soft-capped dispatch (experts_mx.zig); existing calls unchanged; Inkling 2 Mini C4: Layer.round_caps (A/B switch, off by default)
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate

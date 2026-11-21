@@ -48,6 +48,11 @@ pub fn splitGateUp(rows: []const u8, row_bytes: usize, gate: []u8, up: []u8) voi
     }
 }
 
+/// The caps as the kernels take them: a negative up cap asks for gate and up rounded to bf16 first (round_caps).
+pub fn kernelCaps(l: Layer) [2]f32 {
+    return .{ l.caps[0], if (l.round_caps) -l.caps[1] else l.caps[1] };
+}
+
 /// An expert call's arguments as the soft-capped and MXFP8 entries take them; `scale` null for MXFP8 (in its blocks).
 pub fn argsOf(in: Rows, gate: bool, w: u64, scale: ?u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, caps: [2]f32, skip: i32) launch_.Args {
     var a: launch_.Args = .{};
@@ -85,7 +90,7 @@ pub const Softcap = struct {
     /// Gate-up on a plan of at most `items` items (16 pairs decode, 64 prompt); capsBuilt checked the layer.
     pub fn run(c: Softcap, s: Stream, prompt: bool, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
         const nb = l.width / 32;
-        var a = argsOf(in, true, l.up, l.up_scale, l.dims / 32, nb, p, out, l.width, l.caps, skip);
+        var a = argsOf(in, true, l.up, l.up_scale, l.dims / 32, nb, p, out, l.width, kernelCaps(l), skip);
         const grid = if (prompt) items * ((nb + prompt_wn - 1) / prompt_wn) else @min((items * nb + 3) / 4, c.resident);
         if (grid < 1) return;
         const smem: u32 = if (prompt) experts.Nvfp4Experts.promptSmem(2, prompt_wn) else 0;
@@ -139,7 +144,7 @@ pub const Mxfp8Experts = struct {
         if (prompt and nb % cw != 0) return error.UnexpectedShape;
         const grid = if (prompt) items * (nb / cw) else @min((items * nb + 3) / 4, e.resident[fi]);
         if (grid < 1) return;
-        var a = argsOf(in, gate, if (gate) l.up else l.down, null, k / 32, nb, p, out, n, l.caps, skip);
+        var a = argsOf(in, gate, if (gate) l.up else l.down, null, k / 32, nb, p, out, n, kernelCaps(l), skip);
         try launch_.launch(e.fns[fi], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 } }, s, &a);
     }
 
