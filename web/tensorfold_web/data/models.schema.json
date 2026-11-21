@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashhart/TensorFold/blob/main/web/tensorfold_web/data/models.schema.json",
+  "title": "TensorFold models catalog",
+  "description": "Model support and measured runs, kept apart. Unknown values are null. Every number in a run is copied from the receipt at receipt_url, which is the source of truth.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "updated", "hardware_classes", "models", "runs"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "updated": {"$ref": "#/$defs/date"},
+    "hardware_classes": {
+      "description": "The page's hardware filters, in display order.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "properties": {
+          "id": {"$ref": "#/$defs/slug"},
+          "label": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "models": {"type": "array", "items": {"$ref": "#/$defs/model"}},
+    "runs": {"type": "array", "items": {"$ref": "#/$defs/run"}}
+  },
+  "$defs": {
+    "slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$"},
+    "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "url": {"type": "string", "pattern": "^https://"},
+    "text": {"type": ["string", "null"], "minLength": 1},
+    "count": {"type": ["integer", "null"], "minimum": 1},
+    "measure": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "family", "name", "checkpoint", "support"],
+      "properties": {
+        "id": {"$ref": "#/$defs/slug"},
+        "family": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "checkpoint": {"type": "string", "minLength": 1},
+        "support": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["backend", "status", "recipe_url", "hardware"],
+            "properties": {
+              "backend": {"enum": ["metal", "cuda", "hip"]},
+              "status": {"enum": ["supported", "experimental", "planned"]},
+              "recipe_url": {"anyOf": [{"$ref": "#/$defs/url"}, {"type": "null"}]},
+              "hardware": {
+                "description": "Hardware classes this backend's recipe covers; places a model with no run under a filter.",
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/slug"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "model_id", "note", "checkpoint", "revision", "quant", "tf_version", "hardware", "hardware_class",
+        "backend", "prompt_tokens", "context_capacity", "slots", "concurrency", "drafting", "sampling", "ttft_ms",
+        "ttft_p95_ms", "prefill_tps", "decode_tps", "rate_source", "rate_scope", "rate_window", "measured_at",
+        "receipt_url", "suite_id", "suite_digest"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/slug"},
+        "model_id": {"$ref": "#/$defs/slug"},
+        "note": {"$ref": "#/$defs/text", "description": "One line under the model name: prompt, profile, load."},
+        "checkpoint": {"$ref": "#/$defs/text", "description": "The repository measured when it is not the model's own."},
+        "revision": {"$ref": "#/$defs/text"},
+        "quant": {"$ref": "#/$defs/text"},
+        "tf_version": {"$ref": "#/$defs/text"},
+        "hardware": {"type": "string", "minLength": 1},
+        "hardware_class": {"$ref": "#/$defs/slug"},
+        "backend": {"enum": ["metal", "cuda", "hip"]},
+        "prompt_tokens": {"$ref": "#/$defs/count"},
+        "context_capacity": {"$ref": "#/$defs/count"},
+        "slots": {"$ref": "#/$defs/count", "description": "Requests the server admits at once (--parallel)."},
+        "concurrency": {"type": "integer", "minimum": 1, "description": "Requests the client kept in flight."},
+        "drafting": {"$ref": "#/$defs/text"},
+        "sampling": {"$ref": "#/$defs/text"},
+        "ttft_ms": {"$ref": "#/$defs/measure", "description": "Time to first token, median."},
+        "ttft_p95_ms": {"$ref": "#/$defs/measure"},
+        "prefill_tps": {"$ref": "#/$defs/measure"},
+        "decode_tps": {"$ref": "#/$defs/measure"},
+        "rate_source": {"enum": ["client", "server", null]},
+        "rate_scope": {"enum": ["per-stream", "aggregate", null]},
+        "rate_window": {
+          "description": "decode: one stream's first to last token; steady-state: only while every stream generates; end-to-end: request sent to last token.",
+          "enum": ["decode", "steady-state", "end-to-end", null]
+        },
+        "measured_at": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
+        "receipt_url": {"$ref": "#/$defs/url"},
+        "suite_id": {"$ref": "#/$defs/text"},
+        "suite_digest": {"$ref": "#/$defs/text"}
+      },
+      "allOf": [
+        {
+          "if": {"anyOf": [
+            {"properties": {"decode_tps": {"type": "number"}}, "required": ["decode_tps"]},
+            {"properties": {"prefill_tps": {"type": "number"}}, "required": ["prefill_tps"]}
+          ]},
+          "then": {"properties": {"rate_scope": {"enum": ["per-stream", "aggregate"]}}},
+          "else": {"properties": {"rate_scope": {"const": null}, "rate_window": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"rate_scope": {"const": "aggregate"}}, "required": ["rate_scope"]},
+          "then": {"properties": {"rate_window": {"const": "steady-state"}, "concurrency": {"minimum": 2}}}
+        }
+      ]
+    }
+  }
+}

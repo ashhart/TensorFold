@@ -1,0 +1,83 @@
+package ui
+
+import (
+	"cmp"
+
+	"github.com/ashhart/TensorFold/web/models-preview/internal/apiclient"
+	"github.com/ashhart/TensorFold/web/models-preview/internal/config"
+)
+
+// BoardRoot is what filters and sorting change; Datastar replaces it by id.
+templ BoardRoot(board apiclient.Board, repoURL string) {
+	<div id="board" data-signals={ signals(board.Query) }>
+		@fastest(board)
+		@chips(board)
+		@table(board)
+		@sourceLine(board, repoURL)
+	</div>
+}
+
+templ fastest(board apiclient.Board) {
+	<section class="fastest" aria-labelledby="fastest-title">
+		<div class="fastest-body">
+			<p class="small">{ fastestOn(board) }</p>
+			if board.Fastest != nil {
+				<h2 id="fastest-title">{ board.Fastest.Model.Name }</h2>
+				<p class="small">
+					{ board.Fastest.Run.Hardware } · decode tok/s, per stream ·
+					<a href={ templ.SafeURL(board.Fastest.Run.ReceiptURL) } rel="noopener">receipt ↗</a>
+				</p>
+			} else {
+				<h2 id="fastest-title">No single-stream rate yet</h2>
+				<p class="small">Runs here report a total of several streams or no rate, and a total is never shown as one stream's.</p>
+			}
+		</div>
+		if board.Fastest != nil {
+			<p class="fastest-rate"><span class="big">{ rate(board.Fastest.Run.DecodeTPS) }</span> <span class="small">tok/s</span></p>
+		}
+		<form class="picker" method="get" action={ templ.SafeURL(config.AppRoutes.Home) }>
+			<label for="mine" class="small">Your hardware</label>
+			{{ field := pickedField(board.Query) }}
+			for key, value := range board.Query.Values() {
+				if key != "mine" && key != "hw" && key != "run" {
+					<input type="hidden" name={ key } value={ value[0] }/>
+				}
+			}
+			<select id="mine" name={ field } data-on:change={ pick(board.Query) }>
+				for _, class := range board.Classes {
+					<option value={ class.ID } selected?={ class.ID == board.Query.Mine }>{ class.Label }</option>
+				}
+			</select>
+			<noscript><button type="submit">Show</button></noscript>
+		</form>
+	</section>
+}
+
+templ chips(board apiclient.Board) {
+	<div class="filters">
+		<nav class="chips" aria-label="Hardware">
+			@chip(board.Query, "", "All hardware")
+			for _, class := range board.Classes {
+				@chip(board.Query, class.ID, class.Label)
+			}
+		</nav>
+		<ul class="legend" aria-label="Status">
+			<li><span class="dot dot-supported"></span>Supported</li>
+			<li><span class="dot dot-experimental"></span>Experimental</li>
+			<li><span class="dot dot-planned"></span>Planned</li>
+		</ul>
+	</div>
+	<p class="small hint">Select a model to inspect the run.</p>
+}
+
+templ chip(query apiclient.BoardQuery, class, label string) {
+	{{ next := with(query, func(q *apiclient.BoardQuery) { q.Hardware, q.Mine = class, cmp.Or(class, q.Mine) }) }}
+	<a
+		class={ "chip", templ.KV("chip-on", query.Hardware == class) }
+		href={ templ.SafeURL(href(next)) }
+		if query.Hardware == class {
+			aria-current="true"
+		}
+		data-on:click__prevent={ fetch(next) }
+	>{ label }</a>
+}

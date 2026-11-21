@@ -1,0 +1,55 @@
+package ui
+
+import (
+	"strconv"
+	"strings"
+
+	"github.com/ashhart/TensorFold/web/models-preview/internal/apiclient"
+)
+
+templ details(row apiclient.Row) {
+	<dl class="inspect">
+		<div><dt>Rate</dt><dd>{ rate(row.Run.DecodeTPS) } tok/s decode, { scope(row.Run) }</dd></div>
+		{{ each := perStream(row.Run) }}
+		if each != "" {
+			<div><dt>Each stream</dt><dd>{ each } tok/s ({ rate(row.Run.DecodeTPS) } ÷ { strconv.Itoa(row.Run.Concurrency) })</dd></div>
+		}
+		<div><dt>Counted by</dt><dd>{ source(row.Run) }</dd></div>
+		<div><dt>Window</dt><dd>{ window(row.Run) }</dd></div>
+		<div><dt>Checkpoint</dt><dd class="mono">{ checkpoint(row) }</dd></div>
+		<div><dt>Revision</dt><dd class="mono">{ text(row.Run.Revision) }</dd></div>
+		<div><dt>Weights</dt><dd>{ text(row.Run.Quant) }</dd></div>
+		<div><dt>Release</dt><dd>{ text(row.Run.TFVersion) }</dd></div>
+		<div><dt>Drafting</dt><dd>{ text(row.Run.Drafting) }</dd></div>
+		<div><dt>Sampling</dt><dd>{ text(row.Run.Sampling) }</dd></div>
+		<div><dt>Prompt tokens</dt><dd>{ count(row.Run.PromptTokens) }</dd></div>
+		<div><dt>Prefill</dt><dd>{ rate(row.Run.PrefillTPS) } tok/s</dd></div>
+		<div><dt>Suite</dt><dd class="mono">{ suite(row.Run) }</dd></div>
+		<div><dt>Receipt</dt><dd><a href={ templ.SafeURL(row.Run.ReceiptURL) } rel="noopener" title={ row.Run.ReceiptURL }>{ receiptPlace(row.Run.ReceiptURL) } ↗</a></dd></div>
+	</dl>
+}
+
+templ unmeasuredRow(item apiclient.Unmeasured) {
+	<tr class="run unmeasured-row">
+		<td>
+			<span class="model">{ item.Model.Name }</span>
+			<span class="sub mono">{ item.Model.Checkpoint }</span>
+		</td>
+		<td data-label="Hardware">
+			{ strings.Join(item.Hardware, ", ") }
+			<span class="sub">{ item.Support.Backend }</span>
+		</td>
+		<td data-label="tok/s"><span class="num muted">{ dash }</span><span class="sub">not measured</span></td>
+		<td class="mono no-phone">{ dash }</td>
+		<td class="mono no-phone">{ dash }</td>
+		<td class="mono no-phone">{ dash }</td>
+		<td class="nowrap" data-label="Status"><span class={ "dot", "dot-" + item.Support.Status }></span>{ statusLabel(item.Support.Status) }</td>
+		<td class="small" data-label="Recipe">
+			if item.Support.RecipeURL != nil {
+				<a href={ templ.SafeURL(*item.Support.RecipeURL) } rel="noopener">Recipe ↗</a>
+			} else {
+				{ dash }
+			}
+		</td>
+	</tr>
+}
