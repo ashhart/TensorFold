@@ -1,6 +1,8 @@
 //! Inkling 2's reply blocks split into reasoning, visible text and tool calls, as vLLM's Inkling parser reads them.
 const std = @import("std");
+const json = @import("json");
 const json_cut = @import("tool_json_cut.zig");
+const tool_parse = @import("tool_parse.zig");
 
 /// The release's block markers (special tokens in tokenizer_config.json).
 pub const markers = struct {
@@ -52,8 +54,8 @@ fn next(s: State, m: Marker) ?State {
 }
 
 /// Split one reply (specials spelled out) into `a`; unfinished, it holds back an open header that may name a tool.
-pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool) !Reply {
-    var s: Stream = .{ .a = a };
+pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool, offered: []const json.Value) !Reply {
+    var s: Stream = .{ .a = a, .offered = offered };
     try s.feed(reply, false);
     return s.result(reply, finished);
 }
@@ -61,6 +63,7 @@ pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool) !Reply {
 /// The split kept across a stream's steps: each step reads only the text past `fed`.
 pub const Stream = struct {
     a: std.mem.Allocator,
+    offered: []const json.Value = &.{}, // the request's tools: a block that calls none of them is content
     state: State = .header,
     reasoning: std.ArrayList(u8) = .empty,
     content: std.ArrayList(u8) = .empty,
@@ -95,9 +98,9 @@ pub const Stream = struct {
         s.fed = i;
     }
 
-    /// A finished tool block: its call, else its payload as written, kept as content.
+    /// A finished tool block: a call to an offered tool, else its payload as written, kept as content.
     fn close(s: *Stream) !void {
-        if (try call(s.a, s.payload.items)) |c| return s.calls.append(s.a, c);
+        if (try call(s.a, s.payload.items, s.offered)) |c| return s.calls.append(s.a, c);
         try s.content.appendSlice(s.a, s.payload.items);
     }
 
@@ -167,14 +170,15 @@ pub fn thinkingTokens(text: anytype, ids: []const u32) usize {
     return n;
 }
 
-/// A tool block's `{"name": ..., "args": {...}}` with a string name; null for anything else.
-fn call(a: std.mem.Allocator, payload: []const u8) !?Call {
+/// A tool block's `{"name": ..., "args": {...}}` naming an offered tool, under its spelling; null for anything else.
+fn call(a: std.mem.Allocator, payload: []const u8, offered: []const json.Value) !?Call {
     var doc = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return null;
     defer doc.deinit();
     if (doc.value != .object) return null;
     const n = doc.value.object.get("name") orelse return null;
     if (n != .string) return null;
-    const own = try a.dupe(u8, n.string);
+    var known = try tool_parse.knownNames(a, offered);
+    const own = try tool_parse.callName(a, n.string, &known) orelse return null;
     const args = json_cut.find(try json_cut.members(a, std.mem.trimStart(u8, payload, " \t\r\n")), "args");
     return .{ .name = own, .arguments = try a.dupe(u8, if (args) |m| m.value else "{}") };
 }
@@ -190,8 +194,17 @@ fn name(a: std.mem.Allocator, payload: []const u8) !?[]const u8 {
 
 const t = std.testing;
 
+/// The tools a request offers, from their JSON list.
+fn toolsT(a: std.mem.Allocator, list: []const u8) ![]const json.Value {
+    return (try json.parse(a, list)).ok.items().?;
+}
+
+const offered_t = "[{\"name\":\"get_weather\"},{\"name\":\"a\"},{\"name\":\"b\"},{\"name\":\"f\"},{\"name\":\"g\"}," ++
+    "{\"type\":\"function\",\"function\":{\"name\":\"run_shell_command\"}}]";
+
 fn splitT(arena: *std.heap.ArenaAllocator, text: []const u8) !Reply {
-    return split(arena.allocator(), text, true);
+    const a = arena.allocator();
+    return split(a, text, true, try toolsT(a, offered_t));
 }
 
 test "inkling2 reply: a chat turn gives its reasoning and its answer" {
@@ -258,12 +271,13 @@ test "inkling2 reply: a stream holds back a header until its block says what it 
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const tools = try toolsT(a, offered_t);
     const so_far = "<|message_model|><|content_thinking|>List /tmp.<|end_message|><|message_model|>run_shell";
-    try t.expectEqualStrings("", (try split(a, so_far, false)).content);
-    const named = try split(a, so_far ++ "_command<|content_invoke_tool_json|>{\"name\":\"run_shell_command\"}<|end_message|>", false);
+    try t.expectEqualStrings("", (try split(a, so_far, false, tools)).content);
+    const named = try split(a, so_far ++ "_command<|content_invoke_tool_json|>{\"name\":\"run_shell_command\"}<|end_message|>", false, tools);
     try t.expectEqualStrings("", named.content);
     try t.expectEqualStrings("run_shell_command", named.calls[0].name);
-    try t.expectEqualStrings("Hi", (try split(a, "<|message_model|>Hi", true)).content);
+    try t.expectEqualStrings("Hi", (try split(a, "<|message_model|>Hi", true, tools)).content);
 }
 
 test "inkling2 reply: thinking tokens are the ids inside thinking blocks" {
@@ -281,19 +295,36 @@ test "inkling2 reply: a stream fed a byte at a time splits each prefix as the wh
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const tools = try toolsT(a, offered_t);
     const reply = "<|message_model|><|content_thinking|>a <|content_text|>b<|end_message|><|message_model|><|content_text|>" ++
         "x <|content_te y<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"k\":1}}" ++
-        "<|end_message|><|message_model|>f" ++
+        "<|end_message|><|message_model|>h<|content_invoke_tool_json|>{\"name\":\"h\"}<|end_message|><|message_model|>f" ++
         "<|content_invoke_tool_json|>{\"name\":<|end_message|><|message_model|>g<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{\"q\":\"<|\"";
-    var s: Stream = .{ .a = a };
+    var s: Stream = .{ .a = a, .offered = tools };
     for (1..reply.len + 1) |n| {
         try s.feed(reply[0..n], true);
         const got = try s.result(reply[0..n], false);
-        const want = try split(a, reply[0..n], false);
+        const want = try split(a, reply[0..n], false, tools);
         try t.expectEqualStrings(want.reasoning, got.reasoning);
         try t.expectEqualStrings(want.content, got.content);
         try t.expectEqual(want.calls.len, got.calls.len);
         try t.expectEqualStrings(want.cut orelse "-", got.cut orelse "-");
+    }
+}
+
+test "inkling2 reply: a call takes the offered spelling, and a call to a tool not offered stays content" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const block = "<|message_model|>get_weather<|content_invoke_tool_json|>{\"name\":\" get_weather\",\"args\":{}}<|end_message|>";
+    const spelled = try split(a, block, true, try toolsT(a, "[{\"name\":\"Get_Weather\"}]"));
+    try t.expectEqual(@as(usize, 1), spelled.calls.len);
+    try t.expectEqualStrings("Get_Weather", spelled.calls[0].name);
+    // a named tool_choice leaves only that tool offered (tool_specs.active), so a call to another one is content
+    for ([_][]const u8{ "[{\"name\":\"send_mail\"}]", "[]" }) |list| {
+        const r = try split(a, block, true, try toolsT(a, list));
+        try t.expectEqual(@as(usize, 0), r.calls.len);
+        try t.expectEqualStrings("{\"name\":\" get_weather\",\"args\":{}}", r.content);
     }
 }
 

@@ -103,11 +103,7 @@ pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
 /// ``parse_tool_calls_from_content``: the reply's content and its calls (null when it makes none).
 pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?usize) Allocator.Error!Parsed {
     if (tools.len == 0) return .{ .content = text, .calls = null };
-    var known: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
-    for (tools) |tool| {
-        const name = try tool_specs.toolName(a, tool);
-        try known.put(a, try std.ascii.allocLowerString(a, name), name);
-    }
+    var known = try knownNames(a, tools);
     if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
     const schemas = try tool_params.schemas(a, tools);
     const envs = try envelopes(a, text);
@@ -149,7 +145,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             const list = parsed orelse break :blk .malformed;
             if (list.len == 0) break :blk .malformed;
             var unoffered = false;
-            for (list) |c| if ((try callName(a, c, &known)) == null) {
+            for (list) |c| if ((try callName(a, c.name, &known)) == null) {
                 unoffered = true;
                 try keepName(a, &kept_names, strip(c.name));
             };
@@ -162,7 +158,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             continue;
         }
         for (parsed.?) |c| {
-            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, &known)).?, c.arguments));
+            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c.name, &known)).?, c.arguments));
         }
     }
     try residue.appendSlice(a, text[cursor..]);
@@ -235,9 +231,19 @@ fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     return closed[body.len..];
 }
 
-/// The offered tool's spelling, or null when the request did not declare that name.
-fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged([]const u8)) Allocator.Error!?[]const u8 {
-    const name = strip(c.name);
+/// The offered tools' names, each under its lowercase spelling, for ``callName``.
+pub fn knownNames(a: Allocator, tools: []const Value) Allocator.Error!std.StringArrayHashMapUnmanaged([]const u8) {
+    var known: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    for (tools) |tool| {
+        const name = try tool_specs.toolName(a, tool);
+        try known.put(a, try std.ascii.allocLowerString(a, name), name);
+    }
+    return known;
+}
+
+/// The offered tool's spelling of a written name, or null when the request did not declare that name.
+pub fn callName(a: Allocator, written: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8)) Allocator.Error!?[]const u8 {
+    const name = strip(written);
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 

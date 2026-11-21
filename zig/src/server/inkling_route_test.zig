@@ -232,6 +232,34 @@ test "an Inkling 2 reply a stop string ended keeps no tool calls, whole and stre
     }
 }
 
+/// A chat request offering `list` (the JSON after `"tools":`) with `extra` members after it.
+fn offering(a: A, list: []const u8, extra: []const u8, stream: bool) ![]const u8 {
+    const head = "{\"model\":\"test-model\",\"max_tokens\":400,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"tools\":";
+    return std.mem.concat(a, u8, &.{ head, list, extra, ",\"stream\":", if (stream) "true" else "false", "}" });
+}
+
+/// A tools list offering the one function `name`.
+fn offer(comptime name: []const u8) []const u8 {
+    return "[{\"type\":\"function\",\"function\":{\"name\":\"" ++ name ++ "\",\"parameters\":{\"type\":\"object\"}}}]";
+}
+
+test "an Inkling 2 call takes the offered tool's spelling, and one to a tool not offered is content, whole and streamed" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |stream| {
+        const spelled = try post(a, try offering(a, comptime offer("Run_Shell_Command"), "", stream), stream);
+        try t.expectEqualStrings("Run_Shell_Command", spelled.names.items);
+        const none = ",\"tool_choice\":\"none\"";
+        for ([_][]const u8{ try offering(a, comptime offer("read_file"), "", stream), try offering(a, comptime offer("run_shell_command"), none, stream) }) |body| {
+            const got = try post(a, body, stream);
+            try t.expectEqual(@as(usize, 0), got.ids.items.len);
+            try t.expectEqualStrings(payload, got.content.items);
+            try t.expectEqualStrings("stop", got.finish);
+        }
+    }
+}
+
 test "an Inkling 2 tool block that is not JSON is content, not a call, whole and streamed" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
