@@ -230,13 +230,25 @@ kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], c
   lambda[i] = bfloat(tanh(values[2]));
 }
 
+// A simdgroup an id: eight columns a lane a step, every row sharing the read of unembed[id]; rounded once to BF16.
 [[max_total_threads_per_threadgroup(256)]]
-kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], const device bfloat* y [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkBaseArgs& a [[buffer(3)]], uint i [[thread_position_in_grid]]) {
-  if (i >= a.rows * a.vocab) return;
-  const uint row = i / a.vocab, id = i % a.vocab;
-  float dot = 0.0f;
-  for (uint d = 0; d < DSP_H; ++d) dot += float(unembed[id * DSP_H + d]) * float(y[row * DSP_H + d]);
-  out[i] = bfloat(dot);
+kernel void tf_ink2_dspark_base(const device bfloat* unembed [[buffer(0)]], const device bfloat* y [[buffer(1)]], device bfloat* out [[buffer(2)]], constant DsparkBaseArgs& a [[buffer(3)]],
+    uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint id = tg * 8 + sg;
+  if (id >= a.vocab) return;
+  const device bfloat* w = unembed + size_t(id) * DSP_H;
+  float acc[7] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint i = 8 * lane; i < DSP_H; i += 256) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
+    for (uint row = 0; row < a.rows; ++row) {
+      const device bfloat* x = y + size_t(row) * DSP_H + i;
+      acc[row] += dot(w0, float4(*(const device bfloat4*)x)) + dot(w1, float4(*(const device bfloat4*)(x + 4)));
+    }
+  }
+  for (uint row = 0; row < a.rows; ++row) {
+    const float sum = simd_sum(acc[row]);
+    if (lane == 0) out[size_t(row) * a.vocab + id] = bfloat(sum);
+  }
 }
 
 [[max_total_threads_per_threadgroup(256)]]
