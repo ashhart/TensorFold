@@ -135,6 +135,8 @@ fn startStream(c: *Conn, sample_rate: u32, metadata: Metadata) error{Closed}!voi
     c.addHeader("X-Sample-Rate", std.fmt.bufPrint(&rate, "{d}", .{sample_rate}) catch unreachable) catch return error.Closed;
     c.addHeader("X-Channels", "1") catch return error.Closed;
     c.addHeader("X-Bit-Depth", "16") catch return error.Closed;
+    // the rate again under the name OpenAI-style clients look for
+    c.addHeader("X-Audio-Sample-Rate", std.fmt.bufPrint(&rate, "{d}", .{sample_rate}) catch unreachable) catch return error.Closed;
     c.addHeader("Trailer", "X-Finish-Reason") catch return error.Closed;
     metadata.add(c) catch return error.Closed;
     if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
