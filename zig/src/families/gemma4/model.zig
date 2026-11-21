@@ -97,23 +97,23 @@ pub const Model = struct {
         m.mm = @splat(null);
         m.config = try cfg.Config.read(gpa, io, dir);
         try admit(m.config);
-        m.projections = .{ .geo = m.config.geo };
+        m.projections = .{ .gpa = gpa, .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         try admitChip(m.config.geo, m.device.tensorUnits());
         // the fused one-row path is the reg lane kernel: M5 only, not the E-series; before the M5 the row path serves.
-        m.fuse = m.device.tensorUnits() and m.config.widths.allFast(m.config.geo.layers) and m.config.geo.layer_input == 0;
+        m.fuse = @import("fused_lane.zig").available(m.device) and m.config.widths.allFast(m.config.geo.layers) and m.config.geo.layer_input == 0;
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = ckpt.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        // the E-series on a chip without tensor units keeps one copy of its projections and tied table: the packed one
+        // the E-series on a chip without tensor units also leaves its tied table in its files until the head pack
         const lean = m.config.geo.layer_input != 0 and !m.device.tensorUnits();
-        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weights.later else null);
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", if (lean) weights.laterLean else weights.later);
         m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config, lean);
-        if (lean) m.checkpoint.closeFiles();
+        m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
         errdefer m.kernels.deinit();
@@ -227,6 +227,36 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
+
+test "a tower that fails to load leaves the model without one, so deinit frees nothing that was never made" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // the name vision_unified.present() looks for, so loadVision reaches Embedder.load
+    const header =
+        \\{"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}
+    ;
+    var data: [8 + header.len + 4]u8 = @splat(0);
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = &data });
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    var m: Model = undefined;
+    m.gpa = gpa;
+    m.device = device;
+    m.checkpoint = ckpt.Checkpoint.init(gpa);
+    defer m.checkpoint.deinit();
+    m.vision = null;
+    m.config = .{ .geo = cfg.unified12b, .context = 1 };
+    m.config.geo.hidden = vision_unified.width + 1; // a width the embedder cannot project to: Embedder.load refuses it
+    for (&m.mm) |*p| p.* = @as(affine_mm.Pipes, undefined); // never read: the refusal comes first
+    try std.testing.expectError(error.UnexpectedGemmaVisionTensor, m.loadVision(std.testing.io, dir));
+    try std.testing.expect(m.vision == null);
+}
 
 test "the E-series is admitted whole and every other layout keeps its refusal" {
     for ([_]cfg.Geometry{ cfg.dense31b, cfg.unified12b, cfg.e4b }) |g| try admit(.{ .geo = g, .context = 1 });

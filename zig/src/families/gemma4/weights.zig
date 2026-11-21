@@ -307,27 +307,9 @@ fn storedK(r: Src, prefix: []const u8, member: []const u8, width: cfg.widths.Wid
     return k;
 }
 
-/// A tensor's dtype and shape, kept in the checkpoint or still in its file (a lean load, see `later`).
-const Meta = struct {
-    dtype: ckpt.DType,
-    shape: @FieldType(ckpt.Tensor, "shape"),
-    rank: usize,
-    bytes: usize,
-
-    fn count(m: Meta) usize {
-        return m.bytes / m.dtype.size();
-    }
-};
-
-fn meta(c: *const ckpt.Checkpoint, name: []const u8) !Meta {
-    if (c.deferred.get(name)) |d| return .{ .dtype = d.dtype, .shape = d.shape, .rank = d.rank, .bytes = d.bytes };
-    const t = try c.get(name);
-    return .{ .dtype = t.dtype, .shape = t.shape, .rank = t.rank, .bytes = t.bytes };
-}
-
-/// Lean loads (the E-series without tensor units): projections and the tied table stay in their files until `pack`.
-pub fn later(name: []const u8, _: usize) bool {
-    if (std.mem.indexOf(u8, name, "_proj.") != null and (std.mem.indexOf(u8, name, ".self_attn.") != null or std.mem.indexOf(u8, name, ".mlp.") != null)) return true;
+/// Lean E-series loads also leave the tied table in its file until `pack` reads it once.
+pub fn laterLean(name: []const u8, rank: usize) bool {
+    if (later(name, rank)) return true;
     for ([_][]const u8{ "embed_tokens.weight", "embed_tokens.scales", "embed_tokens.biases" }) |t| {
         if (std.mem.endsWith(u8, name, t) and std.mem.indexOf(u8, name, plan.prefix) != null) return true;
     }
@@ -460,10 +442,10 @@ fn dense(c: *const ckpt.Checkpoint, name: []const u8, n: usize, k: usize) !Dense
 
 /// plan.check's view of a loaded checkpoint: each tensor asked for at its dtype and shape; skipped ones are not read.
 const Checker = struct {
-    c: *const ckpt.Checkpoint,
+    r: Src,
 
     pub fn expect(k: Checker, name: []const u8, dtype: ckpt.DType, shape: []const usize) !void {
-        const t = try meta(k.c, name);
+        const t = try k.r.meta(name);
         if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) {
             std.log.warn("gemma4: {s} is not the {s} tensor of shape {any} the plan stores", .{ name, @tagName(dtype), shape });
             return error.UnexpectedTensor;
@@ -473,19 +455,20 @@ const Checker = struct {
     pub fn skip(_: Checker, _: []const u8) !void {}
 };
 
-/// `lean`: the checkpoint was read with `later`, so no copy of the projections or the tied table stays in it.
+/// `lean`: the checkpoint was read with `laterLean`, so its tied table does not stay resident beside the head pack.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, config: cfg.Config, lean: bool) !Weights {
     const geo = config.geo;
     const ws = &config.widths;
-    try plan.check(config, Checker{ .c = c });
-    const pm = plan.model(config);
-    var w: Weights = undefined;
-    w.owned = .empty;
-    w.ple = null;
-    errdefer w.deinit(gpa);
     var stage = Stage{ .gpa = gpa };
     defer stage.deinit();
     const r: Src = .{ .c = c, .stage = &stage };
+    try plan.check(config, Checker{ .r = r });
+    const pm = plan.model(config);
+    var w: Weights = undefined;
+    w.owned = .empty;
+    w.aliased = 0;
+    w.ple = null;
+    errdefer w.deinit(gpa);
     const rows = !device.tensorUnits();
     var p: [96]u8 = undefined;
     var name: [160]u8 = undefined;
@@ -503,12 +486,21 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
             widths3[count] = lw[2];
             count += 1;
         }
-        l.qkv = try stack(gpa, device, c, &w.owned, geo, pre, members[0..count], widths3[0..count], false);
-        l.o = try pack(gpa, device, c, &w.owned, geo, pre, &.{"self_attn.o_proj"}, lw[3], false);
-        l.gate_up = try stack(gpa, device, c, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, lw[4..6], true);
-        l.down = try pack(gpa, device, c, &w.owned, geo, pre, &.{"mlp.down_proj"}, lw[6], false);
+        l.qkv = try stack(gpa, device, r, &w.owned, geo, pre, members[0..count], widths3[0..count], false);
+        l.o = try pack(gpa, device, r, &w.owned, geo, pre, &.{"self_attn.o_proj"}, lw[3], false);
+        l.gate_up = try stack(gpa, device, r, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, lw[4..6], true);
+        l.down = try pack(gpa, device, r, &w.owned, geo, pre, &.{"mlp.down_proj"}, lw[6], false);
         if (geo.layer_input != 0) {
             l.mlx = undefined; // prompt chunks (prompt.zig) read these; the E-series' prompts run in decode windows
+        } else if (rows) { // the dense models keep main's row-pack aliases for their prompt chunks
+            try mlxStack(r, &l.qkv, pre, members[0..count], widths3[0..count], l.mlx[0..count]);
+            l.mlx[3] = mlxAlias(l.o, 0, l.o.n);
+            try mlxStack(r, &l.gate_up, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, lw[4..6], l.mlx[4..6]);
+            l.mlx[6] = mlxAlias(l.down, 0, l.down.n);
+            if (cfg.global(i)) l.mlx[2] = l.mlx[1]; // global layers have no v_proj: k stands in, never read
+            for (cfg.widths.module_names) |member| if (!(cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj"))) {
+                w.aliased += try copyBytes(r, pre, member);
+            };
         } else for (&l.mlx, cfg.widths.module_names, lw) |*x, member, width| {
             // global layers have no v_proj: k stands in, never read
             x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, r, &w.owned, pre, member, width);
@@ -526,7 +518,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
             l.ple_norm = try ref(c, try std.fmt.bufPrint(&name, "{s}post_per_layer_input_norm.weight", .{pre}));
         }
     }
-    w.head = try pack(gpa, device, c, &w.owned, geo, plan.prefix, &.{"embed_tokens"}, ws.embed, false);
+    w.head = try pack(gpa, device, r, &w.owned, geo, plan.prefix, &.{"embed_tokens"}, ws.embed, false);
     w.embed_bits = ws.embed.bits;
     // lean: the embedding gather reads the head's words, scales and biases as the checkpoint stores them
     if (lean) {
@@ -572,18 +564,22 @@ pub fn projectRow(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, r
 pub fn projectRowAt(ps: *Projections, device: mtl.Device, e: mtl.ComputeEncoder, raw: rowp.Weights, l: Linear, x: lane.Ref, y: mtl.Buffer, y_off: usize, rows: usize) !void {
     const p = try ps.simd(device);
     const mtx = rowp.simd_bits.Matrix{ .w = raw.w, .scales = raw.scales, .biases = raw.biases };
-    const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, rows <= 2, 0);
+    const scalar = rows <= 2 and try ps.bitTwin(device, p, mtx, raw);
+    const call = try rowp.simd_bits.call(p, raw.bits, raw.n, raw.k, rows, l.y_stride orelse l.n, scalar, 0);
     rowp.simd_bits.encode(e, call, mtx, x.buf, x.off, y, y_off + l.col * 2);
 }
 
 /// The lane pipelines, one per distinct (n, k, width, stride, prologue).
 pub const Projections = struct {
+    gpa: std.mem.Allocator,
     geo: cfg.Geometry,
     follow: ?mtl.ResidencySet.Follow = null,
     list: std.ArrayList(struct { x: Linear, p: lane.Projection }) = .empty,
     fused_list: std.ArrayList(struct { x: Linear, fuse: u8, p: fused.Projection }) = .empty,
     /// The row path's tiles (a chip without tensor units): the simdgroup matrices at any width.
     row_simd: ?rowp.simd_bits.Pipelines = null,
+    /// Per [bits, n, k, whole]: whether the scalar twin is bit-equal to the tiles on this chip.
+    bit_twins: std.AutoHashMapUnmanaged([4]usize, bool) = .empty,
     fn same(a: Linear, b: Linear) bool {
         return a.n == b.n and a.k == b.k and std.meta.eql(a.format, b.format) and a.y_stride == b.y_stride;
     }
@@ -608,6 +604,16 @@ pub const Projections = struct {
         return &ps.row_simd.?;
     }
 
+    /// Checks the scalar twin against the tiles once per width, shape and K split key on this chip.
+    fn bitTwin(ps: *Projections, device: mtl.Device, p: *rowp.simd_bits.Pipelines, m: rowp.simd_bits.Matrix, raw: rowp.Weights) !bool {
+        const key = [4]usize{ raw.bits, raw.n, raw.k, 0 };
+        if (ps.bit_twins.get(key)) |ok| return ok;
+        const ok = try rowp.simd_bits.twinExact(p, device, raw.bits, m, raw.n, raw.k, 0);
+        if (!ok) std.log.info("gemma4: {d}-bit {d}x{d} rows take simdgroup tiles at every width (the scalar twin's bits differ on this chip)", .{ raw.bits, raw.n, raw.k });
+        try ps.bit_twins.put(ps.gpa, key, ok);
+        return ok;
+    }
+
     pub fn deinit(ps: *Projections, gpa: std.mem.Allocator) void {
         ps.setResident(null);
         if (ps.row_simd) |*p| p.deinit();
@@ -615,6 +621,7 @@ pub const Projections = struct {
         ps.list.deinit(gpa);
         for (ps.fused_list.items) |v| v.p.deinit();
         ps.fused_list.deinit(gpa);
+        ps.bit_twins.deinit(ps.gpa);
     }
 
     pub fn appendBuffers(ps: *const Projections, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
@@ -636,6 +643,16 @@ test "later: the layers' linears stay in their files; the embed, norms and scala
         try std.testing.expect(later(t, 2));
     for ([_][]const u8{ "language_model.model.embed_tokens.weight", "language_model.model.embed_tokens.scales", "language_model.model.norm.weight", pre ++ "input_layernorm.weight", pre ++ "self_attn.q_norm.weight", pre ++ "layer_scalar" }) |t|
         try std.testing.expect(!later(t, 1));
+}
+
+test "laterLean defers the tied table too, without changing the dense loader's pick" {
+    const pre = "language_model.model.";
+    for ([_][]const u8{ "embed_tokens.weight", "embed_tokens.scales", "embed_tokens.biases" }) |t| {
+        try std.testing.expect(!later(pre ++ t, 2));
+        try std.testing.expect(laterLean(pre ++ t, 2));
+    }
+    try std.testing.expect(!laterLean(pre ++ "norm.weight", 1));
+    try std.testing.expect(laterLean(pre ++ "layers.3.self_attn.q_proj.weight", 2));
 }
 
 test "gate|up interleaves on tensor units alone: the row path keeps gate rows, then up's, as prompt chunks read them" {

@@ -188,7 +188,7 @@ pub fn main(_: std.process.Init) !void {
     const y = try device.buffer(rows * n * 2, mtl.ResourceOptions.shared);
     defer y.deinit();
 
-    var projections = g4.weights.Projections{ .geo = g4.config.dense31b };
+    var projections = g4.weights.Projections{ .gpa = a, .geo = g4.config.dense31b };
     defer projections.deinit(a);
 
     // the family's projection on this chip: the simdgroup tiles.

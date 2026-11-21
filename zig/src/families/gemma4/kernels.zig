@@ -86,9 +86,7 @@ pub const Kind = struct {
         inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "assist_input" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write", "gemma_draft_store", "gemma_draft_add", "gemma_draft_swiglu", "gemma_assist_input" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
         {
-            const body = try frags.source(device, a, prompt_attention);
-            defer a.free(body);
-            const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, geo.query_heads, geo.query_heads / nk, dh / 128, @as(usize, if (global) 0 else geo.sliding_window), @as(usize, if (global) 0 else @import("state.zig").ringOf(geo)), body });
+            const src = try promptSource(device, a, geo, global);
             defer a.free(src);
             const plib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
             defer plib.deinit();
@@ -213,6 +211,6 @@ pub fn promptSource(device: mtl.Device, a: std.mem.Allocator, geo: cfg.Geometry,
     const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
     const body = try frags.source(device, a, prompt_attention);
     defer a.free(body);
-    const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, geo.query_heads, geo.query_heads / nk, dh / 128, @as(usize, if (global) 0 else cfg.window), @as(usize, if (global) 0 else @import("state.zig").ring), body });
+    const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, geo.query_heads, geo.query_heads / nk, dh / 128, @as(usize, if (global) 0 else geo.sliding_window), @as(usize, if (global) 0 else @import("state.zig").ringOf(geo)), body });
     return src;
 }

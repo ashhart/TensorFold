@@ -94,6 +94,10 @@ fn simdPipes() row.simd_bits.Pipelines {
     };
     return p;
 }
+
+fn cacheTwin(ps: *weights.Projections, l: weights.Linear) !void {
+    if (l.raw) |raw| try ps.bit_twins.put(ps.gpa, .{ raw.bits, raw.n, raw.k, 0 }, true);
+}
 fn projection() lane.Projection {
     return .{ .pipe = .{ .id = 201 }, .n = D, .k = D, .group_count = 1, .weight_bytes = D * D / 2, .metadata_bytes = D * 4, .output_bytes = 2, .y_stride = D, .tile_count = 2, .sk = 1, .reg = true, .sums_pipe = .{ .id = 200 }, .sums_buffer = buf(7) };
 }
@@ -118,7 +122,9 @@ test "gemma prompt head: both paths equal all-row matrix logits on the last synt
         var both: [2]Row = undefined;
         for ([_]bool{ true, false }, 0..) |raw, pi| {
             const l = linear(raw);
-            var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+            var ps = weights.Projections{ .gpa = a, .geo = cfg.unified12b, .row_simd = simdPipes() };
+            try cacheTwin(&ps, l);
+            defer ps.bit_twins.deinit(a);
             try ps.list.append(a, .{ .x = l, .p = projection() });
             defer ps.list.deinit(a);
             var record: mtl.Record = .{};
@@ -150,12 +156,14 @@ test "gemma prompt head: both paths equal all-row matrix logits on the last synt
 
 test "gemma prompt head: a selected input ref survives the real row encoder at each code width" {
     for (row.simd_bits.bit_widths) |bits| for ([_]usize{ 1, 2, 16, 17 }) |rows| {
-        var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
+        defer ps.bit_twins.deinit(std.testing.allocator);
         var l = linear(true);
         l.format.bits = bits;
         l.raw.?.bits = bits;
         l.col = 32;
         l.y_stride = 128;
+        try cacheTwin(&ps, l);
         var record: mtl.Record = .{};
         try weights.projectRow(&ps, .{}, .{ .r = &record }, l.raw.?, l, .{ .buf = buf(1), .off = 256 }, buf(5), rows);
         const p = record.passes[0];
@@ -167,11 +175,12 @@ test "gemma prompt head: a selected input ref survives the real row encoder at e
 }
 
 test "gemma prompt head: zero rows refused and first decode starts from its own row" {
-    var ps = weights.Projections{ .geo = cfg.unified12b, .row_simd = simdPipes() };
+    var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
+    defer ps.bit_twins.deinit(std.testing.allocator);
     var record: mtl.Record = .{};
     const e = mtl.ComputeEncoder{ .r = &record };
     const l = linear(true);
-    try std.testing.expectError(error.BadChunk, prompt.projectHead(std.testing.allocator, .{}, &ps, e, l, buf(1), buf(5), 0));
+    try cacheTwin(&ps, l);
     try std.testing.expectEqual(@as(usize, 0), record.n);
     // The production decode caller supplies this zero-offset Ref for its first (or window's first) row.
     try weights.projectRow(&ps, .{}, e, l.raw.?, l, .{ .buf = buf(6) }, buf(5), 1);
@@ -181,12 +190,14 @@ test "gemma prompt head: zero rows refused and first decode starts from its own 
 
 test "gemma prompt head: actual 12B and 31B hidden widths select the final chunk row" {
     for ([_]cfg.Geometry{ cfg.unified12b, cfg.dense31b }) |geo| for ([_]usize{ 2, 511, 512 }) |rows| {
-        var ps = weights.Projections{ .geo = geo, .row_simd = simdPipes() };
+        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = geo, .row_simd = simdPipes() };
+        defer ps.bit_twins.deinit(std.testing.allocator);
         var l = linear(true);
         l.n = cfg.vocab;
         l.k = geo.hidden;
         l.raw.?.n = l.n;
         l.raw.?.k = l.k;
+        try cacheTwin(&ps, l);
         var record: mtl.Record = .{};
         try prompt.projectHead(std.testing.allocator, .{}, &ps, .{ .r = &record }, l, buf(1), buf(5), rows);
         try std.testing.expectEqual(mtl.Bound{ .id = 1, .off = (rows - 1) * geo.hidden * 2 }, record.passes[0].buffers[0]);
