@@ -1,4 +1,4 @@
-//! Drama 3's kernels under the contract on CUDA: RMS norm rows (d3_rmsnorm, plain gamma), the compact router and the CFG mix.
+//! Drama 3 under the CUDA contract: RMS norm rows (plain gamma and gated form), compact router and CFG mix.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -186,7 +186,7 @@ pub const Mix = struct {
     }
 };
 
-/// The drama3 image, its norm, its compact router with the unmasked control and its CFG mix, appended to `kernels`.
+/// The drama3 image's registrations onto `kernels`: norm rows, compact router with unmasked control, CFG mix.
 pub const Group = struct {
     a: std.mem.Allocator,
     mod: cuda.Module,
