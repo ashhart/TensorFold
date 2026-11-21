@@ -14,7 +14,7 @@ pub fn context(ctx: *anyopaque) bool {
 }
 pub fn failed(ctx: *anyopaque, err: anyerror) void {
     const m: *Model = @ptrCast(@alignCast(ctx));
-    if (m.session.fate) |*f| f.fatal(if (err == error.CudaContextLost) "CUDA context" else if (err == error.StalledRound) "round progress" else "execution", err);
+    if (m.session.fate) |*f| f.fatal(if (err == error.CudaContextLost) "CUDA context" else if (err == error.StalledRound) "round progress" else if (err == error.StopRequested) "a stop signal (SIGTERM or SIGINT)" else "execution", err);
     std.c._exit(70);
 }
 
