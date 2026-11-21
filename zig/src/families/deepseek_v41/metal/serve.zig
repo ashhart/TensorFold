@@ -224,8 +224,8 @@ pub const Metal = struct {
         }
         m.t.behind = null;
         if (m.warm) |w| w.queue.deinit();
-        if (m.rp) |p| p.log();
         if (m.dp) |p| p.deinit();
+        if (m.rp) |p| p.log();
         m.t.deinit();
         if (m.rp) |p| p.deinit();
         if (m.parts.owner) |o| o.close(o.ctx);
