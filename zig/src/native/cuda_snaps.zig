@@ -6,7 +6,7 @@ const api = @import("engine_api");
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
-    if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
+    if (warmQuiet(F) > 0) rules.warm = .waits;
     if (@hasDecl(F, "warm_usable")) rules.warm_usable = F.warm_usable;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
     if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
@@ -21,8 +21,9 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     return rules;
 }
 
-/// The family's own wait before a warm pass's first chunk (0: it declares none).
+/// The family's own wait before a warm pass's first chunk (0: none); `request_starts_warm_quiet` only when opted in.
 pub fn warmQuiet(comptime F: type) u64 {
+    if (@hasDecl(F, "request_starts_warm_quiet")) return if (requestStep(F) > 0) F.request_starts_warm_quiet else 0;
     return if (@hasDecl(F, "warm_quiet")) F.warm_quiet else 0;
 }
 

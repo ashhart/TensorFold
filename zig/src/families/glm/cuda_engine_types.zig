@@ -23,7 +23,7 @@ pub const Seq = struct {
 };
 
 /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
-pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
+pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0, drafter_from: ?i64 = null };
 
 /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a cold pass's cut (cuda_prompt_cuts).
 pub const Resume = struct { id: u64, at: usize };
