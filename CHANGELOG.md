@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `TF_GLM_KV_SPLIT=1`, admission counts each KV owner class on its own and chooses a stream's owner once inside the reservation, and a request larger than one whole class is refused by name even while other streams run (#3676, part of #2444). Thanks to @jschmied.
+
 - Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
 
 
