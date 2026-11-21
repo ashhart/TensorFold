@@ -101,15 +101,7 @@ pub const SchedHost = struct {
                 };
                 return .admit;
             },
-            .wait => return .wait,
-            .skip => return .skip,
-            .refuse => |r| {
-                words.* = switch (r) {
-                    .too_large => "the request needs more KV pool pages than the pool has",
-                    .memory => "the prompt's prefill cannot fit in this server's memory now (TF_DSV41_FLOOR_HARD_GIB)",
-                };
-                return .refuse;
-            },
+            .wait, .skip, .refuse => return @import("sched_verdict.zig").held(v, before, h.p.counts, words),
         }
     }
 

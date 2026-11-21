@@ -18,8 +18,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     }), .filters = &.{"release paths:"} }));
     b.step("test-release-paths-host", "Planted path leaks in raw, wide and compressed release payloads").dependOn(&run.step);
     all.dependOn(&run.step);
+    // its own compile to install: a run of an installed artifact executes the installed copy, maybe mid-write
+    b.step("compile-release-paths-host", "Build the host release checker without shader compilers").dependOn(&b.addInstallArtifact(checker(b), .{}).step);
     const tool = checker(b);
-    b.step("compile-release-paths-host", "Build the host release checker without shader compilers").dependOn(&b.addInstallArtifact(tool, .{}).step);
     const clean = b.addWriteFiles();
     const clean_file = clean.add("noise.bin", "\x01./.\x02");
     const bad = b.addWriteFiles();
@@ -59,11 +60,11 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         command_test.dependOn(&check.step);
     }
 }
+/// Run the checker tree mode over a release directory; the walk runs inside the tool, shared with package.sh.
 pub fn directory(b: *std.Build, tool: *std.Build.Step.Compile, dir: std.Build.LazyPath) *std.Build.Step {
-    const run = b.addSystemCommand(&.{"sh"});
-    run.addFileArg(b.path("tools/release/check_paths.sh"));
-    run.addArtifactArg(tool);
+    const run = b.addRunArtifact(tool);
     run.addArg(absoluteRoot(b));
+    run.addArg("--tree");
     run.addDirectoryArg(dir);
     return &run.step;
 }

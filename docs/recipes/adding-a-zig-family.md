@@ -24,72 +24,59 @@ The Python engine's guides, [adding an MLX family](adding-a-family.md) and
 
 ## Build each step once, in the core
 
-A new model should get every step below by default, not a hand-built engine. So far each family was built as its own
-engine, to be exact quickly, and the GPU-side wins stayed inside one family:
+A family composes the core blocks below and writes only what is its own: its config, weight map and layer graph, and
+kernels for its own mixer (KDA, GDN, MLA) or a sparse-attention indexer. Kernels stay per backend. On day one it's
+exact against the reference (stage 0); after the lane kernels go in, check against the engine's own plain output
+(step 4).
 
-- Flash Next replays the Python engine's recorded lane kernels and has its own GPU-side rounds
-  (`zig/src/families/flashnext/replay.zig`).
-- Kimi K3 and Nemotron have their own rounds.
-- Our GLM-5.3 port (not pushed yet) started with MLX-identical row kernels and a host-synchronous round loop.
+**The host blocks on main.** Block paths are under `zig/src/core`, other paths under `zig/src`. "Families" names the
+ones that call the block now.
 
-Some of the host side already lives in core, but so far each piece serves one family, or two:
-- the lane round loop, the depth rule and copy proposals (`zig/src/core/lanes`) are Nemotron's;
-- prompt reuse (`zig/src/core/prompt_cache.zig`) serves Flash Next, GLM, Nemotron and the Qwen3.8-27B, each with its own `snapshot.zig`;
-- staggered segments (`zig/src/core/segments.zig`, and `zig/src/cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
-  on CUDA;
-- every host returns the HTTP contract in `zig/src/core/engine_api.zig`, and `zig/src/core/lane_host.zig` serves Nemotron on Metal
-  and CUDA, and Flash Next on CUDA. Flash Next on Metal has its own host, one reply at a time, unless an explicit
-  `--parallel` above one asks for shared sessions on one Mac: then `zig/src/native/flashnext_batch_host.zig` serves it
-  through `lane_host` too (the rule is `shared` in `zig/src/families/flashnext/batch_meta.zig`).
-
-The GPU side is barely shared yet, and that costs time. In the GLM-5.3 port each extra row in a window cost about
-4.4 ms of GPU time, against about 2.3 ms for the row's own experts. Row kernels read every replicated weight again for
-every row.
-
-**What the core owns.** A family gets all of this by plugging in:
-
-1. Lane kernels by format.
-   - Formats: affine 4-, 6- and 8-bit at the checkpoint's group size, and bf16. They run on M5 tensor units and in the
-     M1-M4 layout (`zig/src/core/frags.zig`).
-   - Ops: dense projections; the expert gather (gate and up fused, then down); the router with its top-k and this Mac's
-     expert lists; the head with its argmax; norms.
-   - Each kernel reads a weight once per window and keeps every row's own sums, so a row's bits are the same at any
-     width.
-2. GPU-side rounds (steps 6-9).
-   - The accept kernel, the ring, and two rounds in flight.
-   - The MTP chain driver and copy drafts.
-   - A depth rule set from measured tokens per ms for each model.
-3. The prompt path (steps 10-15).
-4. Several Macs.
-   - Tensor and expert parallel over [MCDMA](https://github.com/ashhart/MCDMA), with exchanges inside the command buffer.
-   - Experts split by rows, so both Macs do equal work for every pick.
-5. Serving (steps 16-17), and the exactness suite.
-
-**What a family supplies.** Its config, weight map and layer graph, plus kernels only for what is its own: a mixer such
-as KDA, GDN or MLA, or a sparse-attention indexer. On day one it's exact against the reference (stage 0). After the
-lane kernels go in, check against the engine's own plain output (step 4).
-
-**Where each piece lives today:**
-
-| Piece | Shared now | Family copies or gaps |
+| Block | The call a family makes | Families |
 | --- | --- | --- |
-| Lane kernels | `zig/kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `zig/src/core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `zig/kernels/metal/decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels. On CUDA, `zig/kernels/cuda/experts_rows.cu` runs affine 4-bit group-32 experts over a window's rows with the decode kernel's sums, and `route_rows.cu` the router logits and softmax top-k (Flash Next) |
-| GPU-side rounds | the host loop, depth rule and copy proposer in `zig/src/core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`zig/src/families/flashnext/replay.zig`). Nemotron on Metal: `zig/src/families/nemotron/gpu_round.zig` for a lone stream. Kimi K3: none |
-| Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `zig/src/families/flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `zig/src/families/kimi_k3/parallel.zig` is a split plan with no link yet |
-| Prompt path | segments; the prompt cache, used by Flash Next, GLM, Nemotron and the Qwen3.8-27B | per-family prompt kernels and snapshots |
-| Serving | `engine_api` for every host; `lane_host` for Nemotron, Flash Next on CUDA, and Flash Next on Metal under an explicit `--parallel` above one | Flash Next on Metal by default: its own host, one reply at a time |
+| `lanes/engine.zig`, `lanes/backend.zig` | implements `lanes.backend.Backend` (forwards and draws); the host steps `lanes.Engine.init(gpa, cfg, backend, clock)` | deepseek_v41, dory, dots_mocr, flashnext, gemma4, glm, glm_dsa, glm_ocr, kimi_k3, kolibri1, lfm2_moe, lfm3, lighton_ocr, llama, minimax_m3, nemotron, nemotron_parse, qwen27 (`native/qwen27_lanes.zig`), qwen3, qwen3_5, qwen4, spark25, step5 |
+| `lanes/drafter.zig`, `lanes/drafted.zig` | returns a `lanes.drafter.Drafter` (taps, open, absorb, hold, held, release); the host wraps it with `lanes.drafted.Drafted.init(gpa, target, drafter)` (`native/cuda_drafted.zig` on CUDA) | qwen3_5 on CUDA (DFlash2, MTP), gemma4 on CUDA and Metal (DFlash, assistant), minimax_m3 (DSpark). qwen27's DFlash on Metal has its own glue |
+| `lanes/solo_chunk.zig` | `lanes.solo_chunk.rows(env_name, limits)` for its solo chunk setting, then `passRows(lanes, own, fill, solo, busy)` when a stream's prompt pass starts: wider chunks while no other stream decodes (`othersDecode` alone for a family that only needs the test) | gemma4 on CUDA (`families/gemma4/cuda_solo.zig`, `TF_GEMMA4_CHUNK_SOLO`), flashnext on CUDA (`families/flashnext/cuda_chunk.zig`), glm on CUDA (`othersDecode` in `families/glm/cuda_prompt_solo.zig`) |
+| `lane_host.zig` | its host calls `LaneHost.init(gpa, io, &engine, info)`, then `start` | every CUDA family through `native/cuda.zig`; on Metal, HIP and XPU through their hosts (`native/metal.zig`, `hip.zig`, `xpu.zig`, `qwen35.zig`, `qwen27_served.zig`, `glm_host.zig`, `llama.zig`, `lfm3.zig`, ...). Flash Next on Metal has its own host, one reply at a time, unless `--parallel` above one selects `native/flashnext_batch_host.zig` (`shared` in `families/flashnext/batch_meta.zig`) |
+| `engine_api.zig` | its host opens it from `Open` and returns an `Engine` with its `Info`; the HTTP server drives only this | every host |
+| `kv_pool.zig` | declares a `kv_pool.Layout`, sizes it with `kv_pool.plan`, holds pages in a `kv_pool.Pool` | on CUDA: dory, flashnext, gemma4, glm, kolibri1, nemotron, qwen3_5, spark25; on Metal: qwen3_5, nemotron (`TF_NEMOTRON_METAL_KV_PAGES=1`), and every Metal family's stream admission (`kv_pool.plan` in `native/metal_admit.zig`) |
+| `kv_ledger.zig` | none of its own: a family that exposes `kvPool` or `ledgerPool` gets its pool's pages counted by the lane host's ledger (`native/cuda_kv_pool.zig`); `per_request` declares per-request costs (`native/cuda_ledger.zig`) | the CUDA families on `kv_pool`; no family declares `per_request` yet |
+| `prompt_cache.zig` | gives a `prompt_cache.Snapshots` (`bytes`, `save`, `restore`, `drop`; optional spare, disk and rows hooks) to `prompt_cache.Store.init(gpa, snapshots, rules, budget)`, and sets the lane host's `cache` to that store; the lane host (`lane_host.zig:5`) then does the exact prompt reuse | on CUDA, every family that declares `snap_save` (`native/cuda.zig`, hooks from `native/cuda_snaps.zig`): dory, flashnext, gemma4, glm, kolibri1, minimax_m3, nemotron, qwen3_5, spark25; qwen4 through `families/qwen4/lane_snapshots.zig` (`native_host.zig:26`); on Metal, XPU and HIP the hosts' own snapshot hooks (`native/metal.zig`, `qwen35.zig`, `qwen27_served.zig`, `glm_host.zig`, `flashnext_host.zig`, `xpu.zig`, `families/dots_mocr`, `glm_ocr`, `lighton_ocr`, `nemotron_parse`, ...) |
+| `prompt_radix.zig` | gives a `Store` its snapshots and pages (`Store.init(gpa, snapshots, pages, rules)`), then `begin`, `resumed`, `keep` | qwen3_5 on CUDA (`TF_QWEN_KV_SHARE`, `families/qwen3_5/cuda_prefix.zig`) and HIP; nemotron on HIP; spark25, kolibri1 and glm on CUDA under `TF_KV_SHARE` (`native/cuda_prompt_pages.zig`) |
+| `prompt_tail.zig` | passes its `Facts` to `prompt_tail.start` to keep one row's logits past the last layer's keys and values | qwen3_5 on CUDA |
+| `recurrent_workspace.zig` | `Workspace(DeviceBuffer)` for recurrent scratch leases, disposed after their completion watermark | qwen3_5 on CUDA |
+| `checkpoint_direct.zig` | `checkpoint.direct.Layers.init(gpa, ck, readers)`, then `enter(prefix, next)` per layer: tensors read past the page cache, the next layer ahead | qwen3_5 and gemma4 on CUDA |
+| `direct_gather.zig` | `direct_gather.Pair` and `Source` directly, for a loader that is not layer by layer | flashnext on CUDA |
+| `rope_yarn.zig` | `rope_yarn.yarn(theta, factor, trained)`: transformers' static YaRN frequencies and attention factor | qwen3_5 on CUDA (`--rope-yarn`); the CUDA host refuses `--rope-yarn` for other families, as Metal, HIP and XPU do. flashnext keeps its own `yarn` in `families/flashnext/rotary_config.zig` |
+| `affine4_host.zig` | `dequantize`, `quantize`, `f32of`, `bf16of` for MLX affine 4-bit at group 64 on the host | nemotron, qwen3_5 (`cuda_mtp_bf16.zig`) |
+| `modelopt.zig` | `modelopt.admitRecipes` and `Recipe` to check an NVFP4 or MIXED_PRECISION config before loading; `zig/src/cuda/modelopt.zig` repacks its tensors on the GPU | config checks: qwen3_5 and glm on CUDA. GPU repack: dory, flashnext, minimax_m3, nemotron, qwen3_5 |
+| `gguf.zig` | `gguf.Document` over a checked GGUF v3 file | qwen27 on Metal |
 
-**The order.**
-1. GLM-5.3 builds the core pieces first:
-   - the route (router logits, then the pick) and the hyper-connection boundary, each in as few launches as its
-     arithmetic allows;
-   - 4-bit lane kernels with groups of 64, generalized from `fn_lane.metal`;
-   - GPU-side rounds lifted from Flash Next;
-   - experts split by rows across two Macs.
-2. Flash Next moves onto the core kernels once they give its own bits, and drops its copies.
-3. Qwen3.6-35B-A3B, Kimi K3 and Nemotron follow.
+**What a family PR must justify.** For each block above it does not use, the pull request names the block and says why
+its own code is needed, or refuses that feature by name until the block covers it.
 
-A model is done when the exactness checks pass and the served side-by-side beats the release on the same Mac.
+**The rules a family PR follows.**
+- Settings are read through `zig/src/platform/environment.zig`; policy switches live in `zig/src/core/profile.zig`.
+- Source files stay at or below 600 lines ([CONTRIBUTING.md](../../CONTRIBUTING.md#lean-code-and-review)).
+- Each new or changed kernel registers with the [kernel contract](../kernel-contract.md#adding-a-kernel) and its
+  records ([the PR skill, section 4](../pr/SKILL.md#4-kernels-arithmetic-and-platforms)).
+- The served gate is the family's conformance kit profile (`tools/conformance.py`, #2467) once that lands.
+
+**The GPU side.** Shared kernels so far:
+- `zig/kernels/metal/ops/qmv.metal`: affine 4-, 6- and 8-bit row matmuls with MLX's arithmetic, and
+  `zig/src/core/frags.zig`, the prompt kernels' fragment layout on M1-M4.
+- On CUDA, `zig/kernels/cuda/experts_rows.cu` runs the decode expert kernel over a window's rows, and
+  `route_rows.cu` the router logits and softmax top-k (flashnext, glm). A row's bits never depend on its window.
+- Staggered prompt segments: `zig/src/core/segments.zig` (Flash Next on Metal) and `zig/src/cuda/segments.zig`
+  (Nemotron on CUDA).
+- Several Macs: the MCDMA fabric (`zig/src/fabric`). Flash Next splits rows over it in
+  `zig/src/families/flashnext/tp.zig`; `zig/src/families/kimi_k3/parallel.zig` is a split plan.
+
+Family-owned GPU rounds remain: Flash Next on Metal replays its recorded kernels
+(`zig/src/families/flashnext/replay.zig`), and Nemotron on Metal runs a lone greedy stream's rounds with no host wait
+(`zig/src/families/nemotron/gpu_round.zig`).
+
+A model is done when the exactness checks pass and the served side-by-side beats the release on the same machine.
 
 ## Tokenizer byte API
 
@@ -112,7 +99,8 @@ This API does not enable constrained generation or add a server capability.
 - **Prompt path.** The first token is the same, last-row logits are within bf16 rounding, and the next 48 decoded
   tokens are equal, at 8k and 32k. Run it from a fresh process: an A/B inside one process can hide uninitialized
   state.
-- **Precision.** No int8 or fp8 activations, and no lossy cache. A new summation order at equal precision is allowed.
+- **Precision.** No int8 or fp8 activations. No lossy weight or cache formats, even opt-in, and no mode that changes
+  output tokens, even opt-in. A new summation order at equal precision is allowed.
 
 ## Stage 0: exact on day one
 

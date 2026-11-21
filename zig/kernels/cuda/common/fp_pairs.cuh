@@ -25,6 +25,12 @@ __device__ __forceinline__ uint32_t fp4pair(uint32_t w, int s) {
     return r;
 }
 
+// fp4pair with code 0b1000 read as +5 (NVFP4_NZ5): the one code fp4pair widens to 0x8000, -0, becomes 0x40A0.
+__device__ __forceinline__ uint32_t fp4pair_nz5(uint32_t w, int s) {
+    const uint32_t r = fp4pair(w, s);
+    return r ^ (__vcmpeq2(r, 0x80008000u) & 0xC0A0C0A0u);
+}
+
 // Two E4M3 codes, the low two bytes of v, as a bf16x2 pair.
 __device__ __forceinline__ uint32_t fp8pair(uint32_t v) {
     const uint32_t t = ((v & 0x7Fu) << 4) | ((v & 0x80u) << 8) | ((v & 0x7F00u) << 12) | ((v & 0x8000u) << 16);
@@ -64,6 +70,14 @@ __device__ __forceinline__ uint32_t e4m3x2(uint32_t h) {
     uint32_t r;
     asm("{ .reg .b16 a; cvt.u16.u32 a, %1; cvt.rn.bf16x2.e4m3x2 %0, a; }" : "=r"(r) : "r"(h));
     return r;
+}
+
+// fp4pair(w, 8q), fp4pair(w, 8q + 4) bit for bit: byte q of x holds nibbles (2q, 2q + 4), of y (2q + 1, 2q + 5)
+__device__ __forceinline__ void e2m1_pairs(uint32_t w, int q, uint32_t& b0, uint32_t& b1) {
+    const uint32_t lo = w & 0x0F0F0F0Fu, hi = (w >> 4) & 0x0F0F0F0Fu;
+    const uint32_t x = lo | (lo >> 12), y = hi | (hi >> 12);
+    b0 = e2m1x2(q ? x >> 8 : x);
+    b1 = e2m1x2(q ? y >> 8 : y);
 }
 #endif
 

@@ -1,6 +1,7 @@
 //! A lane host's status counts: running and waiting requests, the 2 s decode and prompt rates, each stream's tokens.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const snap = @import("prompt_cache_status.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// Tokens a round landed, and when.
@@ -28,6 +29,8 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         .streams = n,
         .generation_tokens = h.live_generated,
         .prompt_cache = h.cache_status,
+        .disk = h.disk_status,
+        .fsr = if (h.fsr) |source| source.read(source.ctx) else null,
     };
     fillTotals(h, out);
 }
@@ -82,7 +85,20 @@ pub fn noteLive(h: *LaneHost) void {
     defer h.unlock();
     h.live_tokens.clearRetainingCapacity();
     h.live_generated = 0;
-    h.cache_status = if (h.cache) |s| .{ .states = s.entries.items.len, .bytes = s.held + s.spare() } else null;
+    const now_ms = @import("rows_io.zig").wallMs();
+    if (h.cache) |s| {
+        if (h.cache_status == null or now_ms - h.cache_at >= 1000) { // the full copies at 1 Hz at most
+            h.cache_status = snap.PromptCache(s);
+            h.disk_status = snap.Disk(s);
+            h.cache_at = now_ms;
+        } else {
+            h.cache_status.?.states = s.entries.items.len; // /metrics reads these every round, as before
+            h.cache_status.?.bytes = s.held + s.spare();
+        }
+    } else {
+        h.cache_status = null;
+        h.disk_status = null;
+    }
     for (h.admitted.items) |job| if (job.started) {
         h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
         h.live_generated += @intCast(job.stream.emitted().len);

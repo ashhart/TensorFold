@@ -98,3 +98,27 @@ test "pick: linear_wc, then the mid-M kernels from min_rows; the linear below th
     fixed.wk = 8;
     try std.testing.expect(exl3.pick(fixed, 64, true, true, 17).? == .linear); // (unregistered forms otherwise)
 }
+
+test "pinnedColumns launches the parent's plan where columns plans its own shape" {
+    const whole = weight(5120, 12288, 8); // q_proj of the 27B: 1 split, 8 warps; its half plans 4 splits, 4 warps
+    const p = exl3.planOf(whole);
+    const own = try whole.columns(6144, 6144);
+    try expectEqual(@as(u32, 0), own.sk);
+    try std.testing.expect(exl3.planOf(own).sk != p.sk and exl3.planOf(own).wk != p.wk);
+    const pinned = try whole.pinnedColumns(6144, 6144);
+    try expectEqual(p.sk, exl3.planOf(pinned).sk);
+    try expectEqual(p.wk, exl3.planOf(pinned).wk);
+    var same = pinned; // the same view of the same columns, only the plan fixed
+    same.sk = 0;
+    same.wk = 0;
+    try expectEqual(own, same);
+    try std.testing.expect(exl3.pick(pinned, 64, true, true, 17).? == .linear); // a fixed plan keeps the linear
+    var fixed = whole; // a parent that is itself pinned hands its own plan on
+    fixed.sk = 2;
+    fixed.wk = 4;
+    const view = try fixed.pinnedColumns(128, 256);
+    try expectEqual(@as(u32, 2), exl3.planOf(view).sk);
+    try expectEqual(@as(u32, 4), exl3.planOf(view).wk);
+    try std.testing.expectError(error.Exl3Shape, whole.pinnedColumns(64, 128));
+    try std.testing.expectError(error.Exl3Shape, whole.pinnedColumns(12160, 256));
+}

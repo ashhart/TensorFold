@@ -18,11 +18,14 @@ pub const reuse = @import("cuda_reuse.zig");
 pub const joint = @import("cuda_joint_readout.zig");
 /// The joint schema head on the device (cuda/joint_schema), for the runners.
 pub const joint_schema = @import("cuda_joint_schema");
+pub const stage = @import("cuda_stage.zig");
 
 test {
+    _ = @import("cuda_projection_many.zig");
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");
+    _ = @import("cuda_solo.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
@@ -52,6 +55,8 @@ test {
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
     _ = @import("cuda_reuse_pages_test.zig");
+    _ = @import("cuda_warm_turns_test.zig");
+    _ = @import("cuda_spares.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");
@@ -63,6 +68,10 @@ test {
 
 test {
     _ = @import("cuda_wide.zig");
+    _ = @import("cuda_weights.zig");
+    _ = @import("cuda_mt2.zig");
+    _ = @import("cuda_stage_forward.zig");
+    _ = @import("cuda_shapes.zig");
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");
@@ -74,12 +83,29 @@ test {
 }
 
 test {
+    _ = @import("cuda_sm110_modes.zig");
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
 }
 
 test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
     try @import("cuda_admit_test.zig").refusals();
+}
+
+pub const shard = @import("cuda_shard.zig");
+pub const shard_plan = @import("cuda_shard_plan.zig");
+/// The EXL3 tensor checks the loader and the cut-plan runner share.
+pub const exl3_admit = @import("cuda_exl3_admit.zig");
+
+test {
+    _ = shard;
+    _ = shard_plan;
+}
+
+test "the shard plan's head widths are the kernels'" {
+    const plan = @import("cuda_shard.zig");
+    try @import("std").testing.expectEqual(geometry.head_dim, plan.head_dim);
+    try @import("std").testing.expectEqual(geometry.dk, plan.dk);
 }
 
 test {

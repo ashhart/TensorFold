@@ -15,4 +15,7 @@ test "dashboard page polls the public stats snapshot without private details" {
     // the label names the queue's wait, not a first token
     try std.testing.expect(std.mem.indexOf(u8, page, "queue drains in") != null);
     try std.testing.expect(std.mem.indexOf(u8, page, "memory.limit!=null") != null); // the limit is labelled as one
+    // the cache section reads the prompt, disk and SSD-expert caches, each hidden when the server lacks it
+    for ([_][]const u8{ "prompt_cache", "cached_tokens_total", "prefill_reuse", "disk", "SSD expert cache", "allocator cache", "id=\"model\"", "el(\"model\")" }) |s|
+        try std.testing.expect(std.mem.indexOf(u8, page, s) != null);
 }

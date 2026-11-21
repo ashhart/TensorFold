@@ -120,6 +120,69 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
     if (!jpeg) return error.SkipZigTest;
 }
 
+/// Small JPEGs built by hand: 8-bit, one quantization table of ones, one-code Huffman tables (DC 0, then end of block).
+const crafted = struct {
+    const soi = "\xff\xd8";
+    const eoi = "\xff\xd9";
+    const junk = "\x00"; // a stray byte before a marker: libjpeg's "extraneous bytes" warning
+    const dqt = "\xff\xdb\x00\x43\x00" ++ @as([64]u8, @splat(1));
+    const dht = "\xff\xc4\x00\x14\x00\x01" ++ @as([15]u8, @splat(0)) ++ "\x00" ++ "\xff\xc4\x00\x14\x10\x01" ++ @as([15]u8, @splat(0)) ++ "\x00";
+    const gray8 = "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x11\x00";
+    const gray16 = "\xff\xc0\x00\x0b\x08\x00\x10\x00\x10\x01\x01\x11\x00";
+    const progressive16 = "\xff\xc2\x00\x0b\x08\x00\x10\x00\x10\x01\x01\x11\x00";
+    const rgb8 = "\xff\xc0\x00\x11\x08\x00\x08\x00\x08\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00";
+    const scan_gray = "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00";
+    const scan_dc = "\xff\xda\x00\x08\x01\x01\x00\x00\x00\x00"; // a progressive first scan: DC only
+    const scan_rgb = "\xff\xda\x00\x0c\x03\x01\x00\x02\x00\x03\x00\x00\x3f\x00";
+
+    /// libjpeg stops on a fatal error after a warning, and TurboJPEG reports it as a warning: no pixel is written.
+    const unfinished = [_][]const u8{
+        soi ++ gray8 ++ junk ++ scan_gray ++ eoi, // no quantization table, refused only as the pixels start
+        soi ++ rgb8 ++ junk ++ scan_rgb ++ eoi,
+        soi ++ dqt ++ progressive16 ++ dht ++ scan_dc ++ gray16 ++ eoi, // the scan ends at once at a second frame
+        soi ++ dqt ++ junk ++ progressive16 ++ dht ++ scan_dc ++ "\x0f" ++ gray16 ++ eoi,
+    };
+
+    /// Warned, but libjpeg finishes every row: these still decode, all mid-gray (each block's DC is 0).
+    const finished = [_][]const u8{
+        soi ++ dqt ++ junk ++ gray16 ++ dht ++ scan_gray ++ "\x00" ++ eoi,
+        soi ++ dqt ++ gray16 ++ dht ++ scan_gray ++ eoi, // the scan is empty: its blocks read as zeros
+        soi ++ dqt ++ gray16 ++ dht ++ scan_gray ++ gray16 ++ eoi, // a second frame only after the last row
+        soi ++ dqt ++ gray16 ++ dht ++ "\xff\xdd\x00\x04\x00\x01" ++ scan_gray ++ "\x00\xff\xd3\x00" ++ eoi, // a wrong restart
+    };
+};
+
+test "a JPEG libjpeg gives up on after a warning is refused, never returned with pixels it did not write" {
+    const a = std.testing.allocator;
+    if (!try jpegReady(a)) return error.SkipZigTest;
+    var decoded: usize = 0;
+    for (crafted.unfinished, 0..) |bytes, i| {
+        var rgb = picture.decode(std.testing.io, a, bytes) catch |err| {
+            try std.testing.expectEqual(error.Invalid, err);
+            continue;
+        };
+        defer rgb.deinit(a);
+        // a safe build paints new memory 0xaa: the bytes the decoder left as it found them
+        const painted = std.mem.count(u8, rgb.pixels, "\xaa");
+        std.debug.print("case {d}: {d}x{d} decoded, {d} of {d} bytes unwritten\n", .{ i, rgb.width, rgb.height, painted, rgb.pixels.len });
+        decoded += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), decoded);
+}
+
+test "warned JPEGs libjpeg finishes still decode, every pixel written" {
+    const a = std.testing.allocator;
+    if (!try jpegReady(a)) return error.SkipZigTest;
+    for (crafted.finished, 0..) |bytes, i| {
+        errdefer std.debug.print("case {d}\n", .{i});
+        var rgb = try picture.decode(std.testing.io, a, bytes);
+        defer rgb.deinit(a);
+        try std.testing.expectEqual(@as(usize, 16), rgb.width);
+        try std.testing.expectEqual(@as(usize, 16), rgb.height);
+        for (rgb.pixels) |v| try std.testing.expectEqual(@as(u8, 128), v);
+    }
+}
+
 test "PNG tRNS keys compare their low bytes, except mode 1 keeps the whole key" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

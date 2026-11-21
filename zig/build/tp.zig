@@ -3,7 +3,7 @@
 const std = @import("std");
 
 /// The CUDA runtime without the engine's kernels (tp only needs the driver, memory, streams and NCCL).
-fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const options = @import("cuda_runtime.zig").kernelOptions(b, false, null);
     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
@@ -17,16 +17,24 @@ pub fn verbsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
 }
 
-/// The `tp` module over `cuda` (an engine passes its own runtime module); verbs (zig/src/fabric/verbs.zig) for RoCE.
+var tp_verbs: std.AutoHashMapUnmanaged(*std.Build.Module, *std.Build.Module) = .empty;
+var tp_modules: std.AutoHashMapUnmanaged(struct { cuda: *std.Build.Module, verbs: *std.Build.Module }, *std.Build.Module) = .empty;
+
+/// The `tp` module over `cuda` (an engine passes its own runtime module), one per cuda module; verbs for RoCE.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
-    return moduleWith(b, target, optimize, cuda, verbsModule(b, target, optimize));
+    const verbs = tp_verbs.getOrPut(b.allocator, cuda) catch @panic("OOM");
+    if (!verbs.found_existing) verbs.value_ptr.* = verbsModule(b, target, optimize);
+    return moduleWith(b, target, optimize, cuda, verbs.value_ptr.*);
 }
 
-/// Same as `module`, using a verbs module the caller already owns.
+/// Same as `module`, using a verbs module the caller already owns; one per (cuda, verbs), so families share it.
 pub fn moduleWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
+    const slot = tp_modules.getOrPut(b.allocator, .{ .cuda = cuda, .verbs = verbs }) catch @panic("OOM");
+    if (slot.found_existing) return slot.value_ptr.*;
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("verbs", verbs);
+    slot.value_ptr.* = m;
     return m;
 }
 
@@ -50,8 +58,32 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
     return b.createModule(.{ .root_source_file = wf.add("tp_kernel.zig", "pub const mailbox: []const u8 = \"\";\n") });
 }
 
+var mailbox_image: ?std.Build.LazyPath = null;
+var mailbox_module: ?*std.Build.Module = null;
+
+/// The mailbox fatbin (-Dtp-nvcc / -Dtp-fatbin), built once for every runner that embeds it; null without either.
+fn mailboxImage(b: *std.Build, opts: @import("options.zig").Tp) ?std.Build.LazyPath {
+    if (mailbox_image == null) mailbox_image = if (opts.fatbin) |p| b.graph.cwdRelativePath(p) else if (opts.nvcc) |tool| mailboxFatbin(b, tool) else null;
+    return mailbox_image;
+}
+
+/// `tp_kernel`: the mailbox fatbin's bytes (or empty), one module for every runner on RoCE.
+pub fn mailboxModule(b: *std.Build) *std.Build.Module {
+    if (mailbox_module) |m| return m;
+    mailbox_module = kernelModule(b, mailboxImage(b, @import("options.zig").tp(b)));
+    return mailbox_module.?;
+}
+
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step, opts: @import("options.zig").Tp) void {
     const host = b.graph.host;
+    const suite_cuda = runtime(b, host, .debug);
+    const suite_host = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/fabric/tp/suite_host.zig"),
+        .target = host,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = suite_cuda }, .{ .name = "tp", .module = module(b, host, .debug, suite_cuda) } },
+    }) }));
+    b.step("test-tp-suite-host", "Ring omissions reach the actual GPU suite without device work").dependOn(&suite_host.step);
     if (host.result.os.tag != .windows) {
         const fate_host = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/fate_lifetime_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = runtime(b, host, .debug) }} });
         b.step("test-tp-fate-host", "Failure hooks and their owners survive concurrent shutdown without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fate_host })).step);
@@ -68,12 +100,20 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const tp_step = b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests");
     tp_step.dependOn(&tests.step);
     tp_step.dependOn(cli_step);
+    tp_step.dependOn(&suite_host.step);
     const multi_root = module(b, host, .debug, runtime(b, host, .debug));
     multi_root.root_source_file = b.path("zig/src/fabric/tp/roce_multi_host.zig");
     const multi = b.addRunArtifact(b.addTest(.{ .root_module = multi_root }));
     multi.has_side_effects = true;
     b.step("test-roce-multi-host", "Frozen two-rank posts and multirank fake-verbs byte and completion contracts").dependOn(&multi.step);
     tp_step.dependOn(&multi.step);
+    const integration = b.addRunArtifact(b.addTest(.{ .root_module = multi_root, .filters = &.{ "relay family world:", "relay ceiling:", "relay suite:" } }));
+    b.step("test-roce-integration-host", "Family world, ring-only references and exact ceiling routes without devices").dependOn(&integration.step);
+    const focused = b.addRunArtifact(b.addTest(.{ .root_module = multi_root, .filters = &.{
+        "relay: a held", "relay sums:", "relay: dropped", "relay: real", "relay topology:", "relay custody:", "relay probe vote:",
+    } }));
+    focused.has_side_effects = true;
+    b.step("test-roce-relay-controls-host", "Relay custody, fault and round-once controls without devices").dependOn(&focused.step);
     if (host.result.os.tag != .windows) test_step.dependOn(&multi.step);
     // the bootstrap and failure tests run over POSIX sockets: Windows checks only the Linux compile below
     if (host.result.os.tag != .windows) test_step.dependOn(&tests.step);
@@ -88,14 +128,12 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     tests.step.dependOn(&object.step);
     if (host.result.os.tag == .windows) test_step.dependOn(&object.step);
     if (target.result.os.tag != .linux) return;
-    const nvcc = opts.nvcc;
-    const prebuilt = opts.fatbin;
-    const image: ?std.Build.LazyPath = if (prebuilt) |p| b.graph.cwdRelativePath(p) else if (nvcc) |tool| mailboxFatbin(b, tool) else null;
+    const image = mailboxImage(b, opts);
     const cuda = runtime(b, target, optimize);
     const runner = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     runner.addImport("cuda", cuda);
     runner.addImport("tp", module(b, target, optimize, cuda));
-    runner.addImport("tp_kernel", kernelModule(b, image));
+    runner.addImport("tp_kernel", mailboxModule(b));
     const exe = b.addExecutable(.{ .name = "tf-tp-test", .root_module = runner });
     if (host.result.os.tag == .linux and target.query.isNative()) {
         const cli = @import("../src/fabric/tp/gpu_cli.zig");

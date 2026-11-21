@@ -333,3 +333,7 @@ pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
         m.mtp.draft,
     }) |l| if (l.rows) |d| try warm(r, d);
 }
+
+test {
+    _ = rows_w;
+}

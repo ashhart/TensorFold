@@ -95,5 +95,3 @@ template <int QK_DIM, int TOPK, int HEADS>
   }
 
 }
-
-template [[host_name("custom_kernel_tf_glm5_indexed_sparse_attention_ad9e57bce4__512_2051_64_bfloat16_t_bfloat16_t_int32_t_floatc_int32_tc_bfloat16_t")]] [[kernel]] decltype(custom_kernel_tf_glm5_indexed_sparse_attention_ad9e57bce4__512_2051_64_bfloat16_t_bfloat16_t_int32_t_floatc_int32_tc_bfloat16_t<512, 2051, 64>) custom_kernel_tf_glm5_indexed_sparse_attention_ad9e57bce4__512_2051_64_bfloat16_t_bfloat16_t_int32_t_floatc_int32_tc_bfloat16_t<512, 2051, 64>;

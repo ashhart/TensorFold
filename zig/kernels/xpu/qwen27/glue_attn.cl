@@ -147,33 +147,43 @@ KERNEL(256) void swiglu(global const half *GU, global half *H, global half *AHI,
                         int rot) {
   local half hl[1024];
   const int t = get_group_id(0), blk = get_group_id(1), lid = get_local_id(0);
+  const int valid_cols = min(1024, max(0, (int)Q27_FF - blk * 1024));
   {                                                   // 4 consecutive columns per work-item, vector reads and write
     const int e = lid * 4, c = blk * 1024 + e;
-    const long gc = ilv ? (c / 16) * 32 + c % 16 : c, uc = ilv ? gc + 16 : Q27_FF + c;
-    const half4 gv = vload4(0, GU + (long)t * (2 * Q27_FF) + gc), uv = vload4(0, GU + (long)t * (2 * Q27_FF) + uc);
-    half4 o;
-    for (int i = 0; i < 4; i++) o[i] = convert_half_rte(rbf(silu((float)gv[i]) * (float)uv[i]));
-    if (!rot) vstore4(o, 0, H + (long)t * Q27_FF + c);
+    half4 o = (half4)(0.0h);
+    if (c < Q27_FF) {
+      const long gc = ilv ? (c / 16) * 32 + c % 16 : c, uc = ilv ? gc + 16 : Q27_FF + c;
+      const half4 gv = vload4(0, GU + (long)t * (2 * Q27_FF) + gc), uv = vload4(0, GU + (long)t * (2 * Q27_FF) + uc);
+      for (int i = 0; i < 4; i++) o[i] = convert_half_rte(rbf(silu((float)gv[i]) * (float)uv[i]));
+      if (!rot) vstore4(o, 0, H + (long)t * Q27_FF + c);
+    }
     vstore4(o, 0, hl + e);
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-  if (rot) {                                          // the 8 blocks of 128 of these 1 024 columns
-    if (get_sub_group_id() < 8) {
+  if (rot) {                                          // the blocks of 128 of these columns
+    if (get_sub_group_id() < valid_cols / 128) {
       const int o = get_sub_group_id() * 128 + get_sub_group_local_id() * 8;
       vstore8(rot128_reg(vload8(0, hl + o)), 0, hl + o);
     }
     barrier(CLK_LOCAL_MEM_FENCE);
-    vstore4(vload4(0, hl + lid * 4), 0, H + (long)t * Q27_FF + blk * 1024 + lid * 4);
+    if (lid * 4 < valid_cols) vstore4(vload4(0, hl + lid * 4), 0, H + (long)t * Q27_FF + blk * 1024 + lid * 4);
   }
-  const int lane = get_sub_group_local_id(), per = gs / 16, ng = 1024 / gs;
-  for (int g = get_sub_group_id(); g < ng; g += 16) {
+  const int lane = get_sub_group_local_id(), per = gs / 16, ng = 1024 / gs, rem_ng = valid_cols / gs;
+  const int nff = Q27_FF / gs, gp = Q27_GSTRIDE(nff);
+  for (int g = get_sub_group_id(); g < rem_ng; g += 16) {
     float s = 0.0f;
     for (int k = 0; k < per; k++) s += (float)hl[g * gs + lane * per + k];
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
       const half hi = convert_half_rte(s * ASC);
-      AHI[(long)t * (Q27_FF / gs) + blk * ng + g] = hi;
-      ALO[(long)t * (Q27_FF / gs) + blk * ng + g] = convert_half_rte(s * ASC - (float)hi);
+      AHI[(long)t * gp + blk * ng + g] = hi;
+      ALO[(long)t * gp + blk * ng + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+  if (blk + 1 == get_num_groups(1) && lane == 0) {
+    for (int g = nff + get_sub_group_id(); g < gp; g += 16) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
     }
   }
 }
@@ -181,10 +191,11 @@ KERNEL(256) void swiglu(global const half *GU, global half *H, global half *AHI,
 // Row sums of the activation written by the SwiGLU epilogue (H fp16 [T, 17 408]): grid T, groups of 256.
 KERNEL(128) void rowsums_ff(global half *H, global half *AHI, global half *ALO, int gs, int rot) {
   // the sums of rowsums read directly from global memory (same additions, same order: same bits)
-  const int t = get_group_id(0), lane = get_sub_group_local_id(), per = gs / 16;
+  const int t = get_group_id(0), lane = get_sub_group_local_id(), per = gs / 16, nsg = get_num_sub_groups();
   global half *h = H + (long)t * Q27_FF;
   if (rot) {                                          // rotated weights: rotate each block in place, then sum
-    for (int b = get_sub_group_id(); b < Q27_FF / 128; b += get_num_sub_groups()) {
+    const int nff = Q27_FF / 128, gp = Q27_GSTRIDE(nff);
+    for (int b = get_sub_group_id(); b < nff; b += nsg) {
       float v[8];
       for (int i = 0; i < 8; i++) v[i] = (float)h[b * 128 + i * 16 + lane];
       for (int m = 1; m < 16; m <<= 1)
@@ -208,13 +219,20 @@ KERNEL(128) void rowsums_ff(global half *H, global half *AHI, global half *ALO, 
       s = sub_group_reduce_add(s) * (1.0f / 128);
       if (lane == 0) {
         const half hi = convert_half_rte(s * ASC);
-        AHI[(long)t * (Q27_FF / 128) + b] = hi;
-        ALO[(long)t * (Q27_FF / 128) + b] = convert_half_rte(s * ASC - (float)hi);
+        AHI[(long)t * gp + b] = hi;
+        ALO[(long)t * gp + b] = convert_half_rte(s * ASC - (float)hi);
+      }
+    }
+    if (lane == 0) {
+      for (int b = nff + get_sub_group_id(); b < gp; b += nsg) {
+        AHI[(long)t * gp + b] = 0.0h;
+        ALO[(long)t * gp + b] = 0.0h;
       }
     }
     return;
   }
-  for (int g = get_sub_group_id(); g < Q27_FF / gs; g += get_num_sub_groups()) {
+  const int nff = Q27_FF / gs, gp = Q27_GSTRIDE(nff);
+  for (int g = get_sub_group_id(); g < nff; g += nsg) {
     float s = 0.0f;
     if (per == 8) {
       const half8 x = vload8(0, h + g * gs + lane * 8);
@@ -226,8 +244,14 @@ KERNEL(128) void rowsums_ff(global half *H, global half *AHI, global half *ALO, 
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
       const half hi = convert_half_rte(s * ASC);
-      AHI[(long)t * (Q27_FF / gs) + g] = hi;
-      ALO[(long)t * (Q27_FF / gs) + g] = convert_half_rte(s * ASC - (float)hi);
+      AHI[(long)t * gp + g] = hi;
+      ALO[(long)t * gp + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+  if (lane == 0) {
+    for (int g = nff + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
     }
   }
 }

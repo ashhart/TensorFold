@@ -1,5 +1,6 @@
 //! `tf-qwen35-cuda <model> <step|window|tree|prompt|state|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const core = @import("core");
 const q = @import("qwen35");
@@ -20,6 +21,13 @@ const usage =
     \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
     \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
     \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
+    \\       tf-qwen35-cuda <model dir> stage <out> [fp8]: a scenario's logits, one engine or a ring of stages (RFC #2005)
+    \\stage and pipe require POSIX.
+    \\stage: without TF_STAGE_RANK one engine; with TF_STAGE_RANK, _WORLD, _PEERS, _SECRET_FILE and TF_STAGE_LAYOUT
+    \\(first:end a rank, e.g. 0:32,32:64) each process loads its layers only and rank 0 writes <out>. The scenario: a
+    \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
+    \\       tf-qwen35-cuda <model dir> pipe <out> [fp8]: greedy streams in TF_PIPE_K groups in flight, tokens to <out>
+    \\pipe: TF_PIPE_STREAMS, _K (0: no pipelining), _PROMPT, _TOKENS, _DRAFT (prompt-lookup drafts); TF_STAGE_* as stage.
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -51,6 +59,24 @@ pub fn main(init: std.process.Init) !u8 {
         if (code == 2) std.debug.print("{s}", .{usage});
         return code;
     }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "stage")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_stage.zig").run(init, a, args[1], args[3], fp8);
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "pipe")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_pipe.zig").run(init, a, args[1], args[3], fp8);
+    }
     if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
         if (args.len != 7 and args.len != 8) {
             std.debug.print("{s}", .{usage});
@@ -72,7 +98,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null, E.max_rows);
     defer e.deinit();
     if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
@@ -129,7 +155,7 @@ pub fn main(init: std.process.Init) !u8 {
         var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
             if (resume_tree > 0 and windows == resume_tree) {
-                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
                 from = .{ .at = at, .w = w, .out = out.items.len };
             }
             at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
@@ -224,7 +250,7 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
                 try cache.settle(e);
             }
-            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
             defer q.reuse.dropCopy(e, copy);
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
@@ -269,7 +295,7 @@ fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a
 
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false, null);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);
@@ -406,10 +432,10 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8, null);
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8, null, E.max_rows);
     defer eb.deinit();
     // int8: one engine (two would not fit), fp8 caches, the second cache's prompt chunks through int8 activations
-    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control, null);
+    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control, null, E.max_rows);
     defer if (!int8) e8.deinit();
     var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
     defer cb.deinit(init.gpa);
@@ -418,6 +444,7 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     if (int8) try eb.int8.enable(eb);
     eb.int8.on = false;
     try fill(eb, &cb, ids.items[0..skip], skip);
+    if (int8) try e8.int8.ensureRows(e8, E.max_rows);
     e8.int8.on = int8;
     try fill(e8, &c8, ids.items[0..skip], skip);
     e8.int8.on = false;

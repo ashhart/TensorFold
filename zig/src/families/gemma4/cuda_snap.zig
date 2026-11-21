@@ -12,6 +12,7 @@ pub const Saved = struct {
     blob: []u32 = &.{}, // the copied rows in pages the store holds (TF_KV_SHARE), else in `buf`
     buf: cuda.DeviceBuffer,
     draft: ?cuda.DeviceBuffer = null,
+    images: bool = false, // its prompt held an image before `at`: RAM alone tells which one
 
     fn copyTo(k: *const Saved, m: *const fwd.Model, s: cuda.Stream, out: bool) Copy {
         if (k.blob.len > 0) return .{ .m = m, .s = s, .blob = .{ .ids = k.blob, .chunk = chunk(m), .regions = regions(m) }, .out = out };
@@ -20,11 +21,11 @@ pub const Saved = struct {
 };
 
 /// Positions a sliding layer keeps at `at`: the keys the next row's window reaches back to.
-fn tail(at: usize) usize {
+pub fn tail(at: usize) usize {
     return @min(at, cfg.window - 1);
 }
 
-fn rowBytes(m: *const fwd.Model, i: usize) usize {
+pub fn rowBytes(m: *const fwd.Model, i: usize) usize {
     return m.geo.kvHeads(i) * cfg.headDim(i) * 2;
 }
 
@@ -36,7 +37,7 @@ pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
 }
 
 /// Each layer's cache, K then V, positions [first, at) of `slot` (full: from `from`), one copy a run, in order.
-fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+pub fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     if (from > 0 and (!m.paged or from % fwd.pages.tokens != 0 or from > at)) return error.KeptPagesUnpaged;
     var off: usize = 0;
     for (0..fwd.pages.ownLayers(m)) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
@@ -111,6 +112,16 @@ fn fullLayer(m: *const fwd.Model, j: usize) usize {
 /// Pages a state at `at` (full layers from `from`) takes when its copied rows are kept in pool pages.
 pub fn blobPages(m: *const fwd.Model, at: usize, from: usize) usize {
     return Blob.pagesFor(copyBytes(m, at, from), chunk(m), regions(m));
+}
+
+/// A state of `at` positions in buffers of its own, `draft` bytes of drafter context: the disk store fills them.
+pub fn blank(gpa: std.mem.Allocator, m: *const fwd.Model, at: u32, draft: u64) !*Saved {
+    const k = try gpa.create(Saved);
+    errdefer gpa.destroy(k);
+    k.* = .{ .at = at, .buf = try cuda.DeviceBuffer.alloc(m.d, copyBytes(m, at, 0)) };
+    errdefer k.buf.free();
+    if (draft > 0) k.draft = try cuda.DeviceBuffer.alloc(m.d, draft);
+    return k;
 }
 
 /// Copy `slot`'s state at `at` (full layers from `from`) to new storage or `blob`'s pages, queued after its chunk.

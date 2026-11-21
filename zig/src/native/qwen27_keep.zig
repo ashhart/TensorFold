@@ -37,13 +37,26 @@ const Commit = struct {
         const logits = r.model.frame.get(.logits);
         const vocab: u32 = @intCast(r.model.config.vocab);
         const rows: u32 = @intCast(b.rows);
+        // the taps and head the drafter reads next; the target's keep follows in its own buffer
         const cb = r.model.queue.commandBuffer();
         const e = cb.compute(.concurrent);
         var ended = false;
         errdefer if (!ended) e.end();
-        try r.keepDevice(&b.round.?, e, g.commit, ref);
-        if (!ready) try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = @intCast(r.taps.count) });
-        if (!ready) try g.commit.head(e, ref, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = rows, .width = vocab, .stride = vocab });
+        try g.commit.taps(e, ref, .{ .buf = r.taps.buffer }, .{ .buf = g.taps }, .{ .rows = rows, .width = r.taps.width, .capacity = r.taps.capacity, .planes = @intCast(r.taps.count) });
+        try g.commit.head(e, ref, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = rows, .width = vocab, .stride = vocab });
+        e.end();
+        ended = true;
+        return cb;
+    }
+    /// The target's keep, committed behind the taps and head without a wait, as the prefetched path's.
+    pub fn keep(c: *Commit) !mtl.CommandBuffer {
+        const g = &c.d.generation;
+        const r = c.b.runner;
+        const cb = r.model.queue.commandBuffer();
+        const e = cb.compute(.concurrent);
+        var ended = false;
+        errdefer if (!ended) e.end();
+        try r.keepDevice(&c.b.round.?, e, g.commit, .{ .buf = g.matcher.buffers[4] });
         e.end();
         ended = true;
         return cb;

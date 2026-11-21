@@ -6,6 +6,7 @@ test {
     _ = @import("engram_rows_safetensors_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_rows_test.zig");
     if (@import("builtin").os.tag == .macos) _ = @import("engram_rows_darwin_test.zig");
+    if (@import("builtin").os.tag == .linux) _ = @import("engram_dio_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_pack_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_manifest_test.zig");
     std.testing.refAllDecls(@import("engram_rows.zig").Rows);

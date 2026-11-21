@@ -1,0 +1,235 @@
+//! Qwen3 dense checkpoints on the native CUDA server: the head the folder declares, sized to the memory budget.
+const std = @import("std");
+const cuda = @import("cuda");
+const lanes = @import("lanes");
+const api = @import("engine_api");
+const engine = @import("engine.zig");
+const lane = @import("../lane.zig");
+const score = @import("../score.zig");
+const folder = @import("../head.zig");
+
+const Engine = engine.Engine;
+const Prompt = lane.Prompt(Engine, engine.max_inputs);
+const Allocator = std.mem.Allocator;
+
+/// The registry entry: `native/cuda.zig` opens `qwen3` checkpoints through it.
+pub const model_type = "qwen3";
+pub const formats: []const []const u8 = &.{"bf16"};
+/// The window when neither --context nor the checkpoint's config names one (the Qwen3 8B serving default).
+pub const default_context: i64 = 32768;
+/// A prompt-only engine writes no reply text, so no reasoning block (Info.reasoning).
+pub const reasoning = false;
+pub const drafter_refusal = "--drafter: Qwen3 dense checkpoints have no drafts to train; serve without --drafter";
+pub const record_refusal = "--record: qwen3 checkpoints give no rows to record on CUDA yet";
+
+/// A refusal: the client's words in `problem`, and an error, so every errdefer of the open runs.
+fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) error{Refused} {
+    problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
+    return error.Refused;
+}
+
+/// Opens `o.dir` on CUDA; null with the reason in `problem` when it is refused.
+pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type, comptime libs: type) anyerror!?api.Opened {
+    return openEngine(a, gpa, io, o, device, problem, budget, windows, libs) catch |err| switch (err) {
+        error.Refused => null,
+        else => return err,
+    };
+}
+
+/// Whatever the server holds: the device handles, the engine, its prompt lane and the host that serves it.
+const Owned = struct {
+    gpa: Allocator,
+    e: *Engine,
+    p: Prompt,
+    cfg: lanes.Config,
+    clock: lanes.backend.WallClock,
+    core: lanes.Engine,
+    host: api.LaneHost,
+    startup: []const u8,
+    /// The checkpoint folder, kept for the reranker's head rows.
+    dir: []const u8,
+};
+
+/// The context this thread's CUDA calls go to: open's thread at startup, the lane host's thread at rounds.
+threadlocal var bound: ?*const cuda.Context = null;
+
+/// Makes the engine's context current on this thread once.
+fn bind(o: *Owned) void {
+    if (bound != &o.e.ctx) {
+        o.e.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on this thread: {s}", .{@errorName(e)});
+        bound = &o.e.ctx;
+    }
+}
+
+/// The lane thread binds the device context before its first round (on_thread).
+fn bindThread(ptr: *anyopaque) anyerror!void {
+    bind(@as(*Owned, @ptrCast(@alignCast(ptr))));
+}
+
+fn halt(ptr: *anyopaque, reason: []const u8) void {
+    const o: *Owned = @ptrCast(@alignCast(ptr));
+    o.host.halt(reason);
+}
+
+/// The ownership order of `close`: the host joined first, then the lane's, the engine's (which closes the device) last.
+fn release(ptr: *anyopaque) void {
+    const o: *Owned = @ptrCast(@alignCast(ptr));
+    o.host.stop(); // the round in flight has ended: the device is this thread's alone
+    bind(o);
+    o.core.deinit();
+    o.cfg.deinit(o.gpa);
+    o.p.deinit();
+    o.e.deinit();
+    o.gpa.free(o.startup);
+    o.gpa.free(o.dir);
+    o.gpa.destroy(o);
+}
+
+/// The lane host's readiness: false once the engine's context has a sticky fault.
+fn healthy(ptr: *anyopaque) bool {
+    const o: *Owned = @ptrCast(@alignCast(ptr));
+    return o.e.ctx.healthy();
+}
+
+/// The device and pinned bytes this process holds, for the status route.
+fn memory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const u = cuda.usage(reset_peak);
+    return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
+}
+
+fn gibs(bytes: usize) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
+
+fn scratchOf(e: *Engine, window: usize) anyerror!usize {
+    return e.scratchBytes(window);
+}
+
+/// Whether a reranker's yes or no token is past the vocabulary's rows: its head row would not exist.
+fn labelOutside(l: api.Rerank, vocab: usize) bool {
+    return l.yes >= vocab or l.no >= vocab;
+}
+
+test "a reranker's labels must both be rows of the vocabulary" {
+    try std.testing.expect(!labelOutside(.{ .yes = 9693, .no = 2152 }, 151669));
+    try std.testing.expect(!labelOutside(.{ .yes = 0, .no = 2 }, 3));
+    try std.testing.expect(labelOutside(.{ .yes = 3, .no = 0 }, 3));
+    try std.testing.expect(labelOutside(.{ .yes = 0, .no = 3 }, 3));
+}
+
+/// The engine for `o.dir` on `device`, its head from the folder and its window from the memory budget.
+fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32, problem: *[]const u8, comptime budget: type, comptime windows: type, comptime libs: type) anyerror!api.Opened {
+    // `budget` and `windows` are the native module's own file imports; the family cannot open them again.
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return error.Refused;
+    }
+    if (o.record != null) {
+        problem.* = record_refusal;
+        return error.Refused;
+    }
+    const native = windows.modelContext(a, io, o.dir);
+    const asked = windows.contextWindow(o.context, native, default_context) catch |e| {
+        problem.* = switch (e) {
+            error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
+            error.NoNative => "--context 0 asks for the model's window, and its config.json names none: give a token count",
+            error.PastNative => try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
+        };
+        return error.Refused;
+    };
+    // the device and the folder's head are checked before the engine takes a driver, a context or any weights
+    var probe = cuda.Driver.open() catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(err)});
+        return error.Refused;
+    };
+    defer probe.close();
+    const count: u32 = @intCast(probe.deviceCount() catch |err|
+        return refuse(a, problem, "the CUDA driver cannot count its devices ({s})", .{@errorName(err)}));
+    if (device >= count) {
+        const named = if (o.device != null) "--device " else "TF_CUDA_DEVICE=";
+        return refuse(a, problem, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", count - 1 });
+    }
+    const head = try folder.headOf(a, io, o.dir, "CUDA", problem);
+    const own = try gpa.create(Owned);
+    errdefer gpa.destroy(own);
+    own.* = .{ .gpa = gpa, .e = undefined, .p = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .startup = undefined, .dir = undefined };
+    own.e = Engine.load(gpa, io, o.dir, @intCast(device)) catch |err| {
+        problem.* = libs.explain(err) orelse try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+        return error.Refused;
+    };
+    errdefer own.e.deinit();
+    const cap = try own.e.ctx.capability();
+    const e = own.e;
+    var why: []const u8 = "";
+    const got = budget.readPool(gpa, io, &e.ctx, &why) catch |err|
+        return refuse(a, problem, "the native CUDA engine cannot read the GPU's memory ({s})", .{@errorName(err)});
+    const pool = got orelse {
+        problem.* = why;
+        return error.Refused;
+    };
+    const room = pool.room(e.weights);
+    const window = (folder.fitWindow(@intCast(asked), room, engine.least_window, e, scratchOf) catch |err|
+        return refuse(a, problem, "the native CUDA engine cannot count its scratch ({s})", .{@errorName(err)})) orelse {
+        const least = e.scratchBytes(@min(@as(usize, @intCast(asked)), engine.least_window)) catch 0;
+        return refuse(
+            a,
+            problem,
+            "the CUDA memory budget fits no {d}-token pass: it takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; free device memory or lower --context",
+            .{ @min(@as(usize, @intCast(asked)), engine.least_window), gibs(least), gibs(room), gibs(e.weights), gibs(pool.reserve) },
+        );
+    };
+    e.size(window) catch |err|
+        return refuse(a, problem, "the native CUDA engine cannot allocate its scratch ({s})", .{@errorName(err)});
+    const normalize = switch (head) {
+        .embedding => |h| h.normalize,
+        .rerank => false,
+    };
+    const labels: ?api.Rerank = switch (head) {
+        .embedding => null,
+        .rerank => |l| l,
+    };
+    if (labels) |l| if (labelOutside(l, e.m.spec.vocab))
+        return refuse(a, problem, "1_LogitScore/config.json: tokens {d} and {d} are not both in this {d}-token vocabulary", .{ l.yes, l.no, e.m.spec.vocab });
+    own.dir = try gpa.dupe(u8, o.dir);
+    errdefer gpa.free(own.dir);
+    own.p = Prompt.init(gpa, e, normalize);
+    errdefer own.p.deinit();
+    if (labels) |l| {
+        own.p.heads = score.Heads.of(&e.m, io, own.dir);
+        own.p.table.score = Prompt.scoreLabels;
+        own.p.table.decide = Prompt.decideLabels;
+        // both label rows read at load: a bad head fails startup, and the first request reads nothing
+        for ([_]u32{ l.yes, l.no }) |id| _ = own.p.heads.?.row(gpa, id) catch |err|
+            return refuse(a, problem, "the native CUDA engine cannot read lm_head row {d} ({s})", .{ id, @errorName(err) });
+    }
+    own.cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    errdefer own.cfg.deinit(gpa);
+    own.clock = .{ .io = io };
+    own.core = lanes.Engine.init(gpa, &own.cfg, own.p.backend(), own.clock.clock());
+    errdefer own.core.deinit();
+    const shrunk: []const u8 = if (window < asked) " (shrunk from the asked window to fit the budget)" else "";
+    own.startup = try std.fmt.allocPrint(gpa, "CUDA sm{d} device {d}: qwen3 {s}, model {d:.2} GiB; {d}-token passes{s}, {d:.2} GiB scratch, of {d:.1} GiB left after a {d:.1} GiB reserve; {s}", .{
+        cap, device, if (head == .rerank) "reranker" else "embedding", gibs(e.weights), window, shrunk, gibs(e.scratchBytes(window) catch 0), gibs(room), gibs(pool.reserve),
+        switch (head) {
+            .embedding => |h| if (h.normalize) "vectors unit-normed" else "vectors as pooled",
+            .rerank => "label scores from lm_head rows read at load, on the host",
+        },
+    });
+    errdefer gpa.free(own.startup);
+    const spec = e.m.spec;
+    own.host = api.LaneHost.init(gpa, io, &own.core, .{
+        .lanes = 1,
+        .context_window = @intCast(window),
+        .text_generation = false,
+        .embeddings = if (head == .rerank) null else .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
+        .decides = head == .rerank,
+        .rerank = labels,
+        .reasoning = reasoning,
+        .startup = own.startup,
+    });
+    own.host.on_thread = .{ .ctx = own, .run = bindThread };
+    own.host.health = .{ .ctx = own, .read = healthy };
+    own.host.memory = .{ .read = memory };
+    try own.host.start();
+    return .{ .engine = own.host.engine(), .close = release, .ctx = own, .halt = halt };
+}

@@ -148,6 +148,7 @@ pub const Hybrid = struct {
     /// RoCE with its device side, in one op or in slot-sized ops (the route is the size's alone: every rank alike).
     pub fn varFits(ptr: *anyopaque, n: usize) bool {
         const h = self_(ptr);
+        if (h.small == .roce_multi and h.small.roce_multi.relay and n > h.small.roce_multi.relay_max_bytes) return false;
         const single = singleFits(h, n);
         return single or switch (h.small) {
             inline .roce, .roce_multi => |p| chunkRoute(h.chunked_bytes, n, single, p.d != null and p.chunk_abi),

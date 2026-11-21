@@ -125,6 +125,7 @@ pub const Trainer = struct {
     dv: u64 = 0,
     probs: u64 = 0,
     dscores: u64 = 0,
+    locate: @import("living").pocket_locate.Probe = .{},
     nudge: train_mode.Nudge = .{}, // where a one-sequence target step adds `delta`
     delta: Shared = undefined, // f32 [max_seqs, 3, layers, D]: each sequence's nudges after each layer it names
     push: Shared = undefined, // f32 [max_seqs, 3, layers, D]: the loss's gradient at each nudged row after each of them
@@ -449,6 +450,11 @@ pub const Trainer = struct {
         return out[0];
     }
 
+    /// A forward-only raw-logit read, optionally replacing one subject row's layer contribution with zero.
+    pub fn causalLogit(t: *Trainer, ex: @import("living").lesson_examples.Example, layer: ?usize, row: usize) !f32 {
+        return @import("living").pocket_locate.logit(t, ex, layer, row);
+    }
+
     /// `seqs` side by side in one pass (several: keys, prefixes, losses or targets), each's mean loss into `out`.
     pub fn pass(t: *Trainer, seqs: []const Seq, mode: Mode, turn: lesson_route.Turn, out: []Result) !void {
         if (seqs.len == 0 or seqs.len > max_seqs or out.len < seqs.len) return error.BadPass;
@@ -505,6 +511,7 @@ pub const Trainer = struct {
         try f.chunkBegin(&w);
         for (0..c.layers) |l| {
             try f.chunkPre(&w, l);
+            if (t.locate.active) try @import("cuda_train_locate.zig").patch(t, &f, &w, l);
             try o.copy(t.savedAt(l), w.x, rows * D * 2);
             if (c.kinds[l] != .mamba) try o.copy(t.kept[l].x, b.y, rows * D * 2);
             try tfw.mixer(&f, &w, l, spans, .{ .store = &t.prefixes, .prime = mode == .prime });
@@ -517,7 +524,7 @@ pub const Trainer = struct {
             const one = seqs[0];
             switch (mode) {
                 .loss, .prime => {},
-                .grad, .learn => try t.keep(l, rows),
+                .grad, .learn => try @import("cuda_train_keep.zig").keep(t, l, rows),
                 .avoid, .seek => {
                     const y = if (mode == .avoid) s.avoid.dev else s.seek.dev;
                     const n: usize = if (mode == .avoid) sites_mod.avoid_dims else sites_mod.candidates;
@@ -536,13 +543,13 @@ pub const Trainer = struct {
                 .keys, .target => if (c.kinds[l] == .moe) {
                     try o.copy(t.inputs.dev() + l * pack_rows * D * 2, t.kept[l].x, rows * D * 2);
                     if (mode == .target) {
-                        if (l >= low) try t.keep(l, rows);
+                        if (l >= low) try @import("cuda_train_keep.zig").keep(t, l, rows);
                         // its nudges go into the shared expert's slot, which the next norm sums in
                         for (seqs, spans, 0..) |sq, sp, si| for (sq.nudge.layers, sq.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
                             try o.addRow(b.ymoe + (sp.row(row) * c.slots() + c.top_k) * D * 2, false, t.delta.dev() + t.vec(si, i, l) * 4, D);
                         };
                     }
-                } else if (mode == .target and l >= low) try t.keep(l, rows),
+                } else if (mode == .target and l >= low) try @import("cuda_train_keep.zig").keep(t, l, rows),
             }
         }
         if (reads(mode)) {
@@ -556,6 +563,7 @@ pub const Trainer = struct {
         // only the rows that predict an answer reach the head: any other row's loss and gradient there is zero
         for (answers) |a| try o.copy(t.dhn + a.at * D * 2, b.y + a.first * D * 2, a.rows * D * 2);
         try o.prefillDense(t.dhn, e.w.head, t.logits, t.answered);
+        if (t.locate.active) return @import("cuda_train_locate.zig").finish(t, seqs[0], out);
         const tg = t.host.dev;
         try k.softmax(t.logits, tg, tg + pack_rows * 4, tg + pack_rows * 8, t.answered, c.vocab);
         // a target pass's residuals for the host, the scale of what its pocket adds
@@ -568,30 +576,6 @@ pub const Trainer = struct {
                 r.loss += st_[0] * wgt;
                 r.recalled = r.recalled and st_[1] > 0.5;
             }
-        }
-    }
-
-    /// Layer l's activations into its slot from the forward's scratch, for its backward.
-    fn keep(t: *Trainer, l: usize, rows: usize) !void {
-        const c = t.c;
-        const o = t.e.ops();
-        const b = &t.buf;
-        const kp = t.kept[l];
-        switch (c.kinds[l]) {
-            .mamba => {
-                try o.copy(kp.proj, b.proj, rows * c.projDim() * 2);
-                try o.copy(kp.ya, b.g, rows * c.inner() * 2);
-            },
-            .attention => try o.copy(kp.ya, b.att, rows * c.heads * c.head_dim * 2),
-            .moe => {
-                const S = c.slots();
-                const W = c.expert_width;
-                try o.copy(kp.act, b.act, rows * S * W * 2);
-                try t.ops_().copyRows(b.act + @as(u64, c.top_k) * W * 2, S * W, 0, kp.upr, c.shared_width, c.shared_width, rows);
-                try o.copy(kp.ys, b.ymoe, rows * S * c.hidden * 2);
-                try o.copy(kp.ids, b.pick, rows * S * 4);
-                try o.copy(kp.wts, b.wts, rows * S * 4);
-            },
         }
     }
 };

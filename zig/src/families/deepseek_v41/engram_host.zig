@@ -81,7 +81,7 @@ pub const Host = struct {
                 blocked = blocked or before or v == dead_id;
                 tokens[shift] = @intCast(if (blocked) h.pad_id else v);
             }
-            @import("engram_hash.zig").hashValues(tokens[0..h.max_ngram], h.mult[li][0..h.max_ngram], h.primes[li][0..C], h.offsets[li][0..C], h.heads, out[(t * L + li) * C ..][0..C]);
+            @import("engram_hash_core").hashValues(tokens[0..h.max_ngram], h.mult[li][0..h.max_ngram], h.primes[li][0..C], h.offsets[li][0..C], h.heads, out[(t * L + li) * C ..][0..C]);
         };
     }
 
@@ -135,8 +135,8 @@ pub const Host = struct {
         }
     }
 
-    pub fn fromTokenMap(map: @import("engram_hash.zig").TokenMap, layer_buf: []u32) !Host {
-        const hash_api = @import("engram_hash.zig");
+    pub fn fromTokenMap(map: @import("engram_hash_core").TokenMap, layer_buf: []u32) !Host {
+        const hash_api = @import("engram_hash_core");
         if (layer_buf.len < hash_api.layers.len) return error.BadEngramHost;
         var h: Host = .{ .layer_ids = layer_buf[0..hash_api.layers.len], .max_ngram = hash_api.order, .heads = hash_api.heads, .token_map = &.{}, .map_bytes = map.bytes, .pad_id = hash_api.pad_id };
         for (hash_api.layers, 0..) |meta, i| {
@@ -151,7 +151,7 @@ pub const Host = struct {
     /// Loads recipe/dsv41_engram_host.py's file (the map borrowed from `bytes`, which must outlive the host).
     pub fn load(bytes: []const u8, heads: u32, pad_token: u32, vocab_size: u64, layer_buf: []u32) !Host {
         if (heads != 8 or pad_token != 2 or vocab_size != 16000000) return error.BadEngramHost;
-        return fromTokenMap(try @import("engram_hash.zig").TokenMap.parse(bytes), layer_buf);
+        return fromTokenMap(try @import("engram_hash_core").TokenMap.parse(bytes), layer_buf);
     }
 
     // Legacy fixture adapter only. Production load requires the pinned canonical map above.
@@ -333,4 +333,5 @@ test "the n-gram hashes: the reference NgramHasher on the release config and tok
     }
     try testing.expectEqual(fx.len, at);
     try testing.expectEqual([2]u32{ 12, 12 }, h.headShard(1, 2));
+    try testing.expectEqual([2]u32{ 16, 8 }, h.headShard(2, 3));
 }

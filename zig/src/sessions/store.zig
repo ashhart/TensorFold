@@ -214,6 +214,7 @@ pub const Store = struct {
         j.lists = try s.familyLists(slot.mapped()[0..np], 0, false);
         j.sink = .{ .store = s.pages, .families = s.pool.layout.families, .page = s.pool.page, .world = s.pool.world, .rank = s.pool.rank, .pages = j.lists };
         try s.pending.append(s.gpa, j);
+        errdefer _ = s.pending.pop(); // a job the tier never queued must not stay where settle and deinit wait on it
         try s.runner.?.submit(j);
         return j;
     }
@@ -282,9 +283,14 @@ pub const Store = struct {
         j.lists = try s.familyLists(e.extra.pages, first, true);
         j.blobs = try e.extra.bounded.?.vtable.blobs(e.extra.bounded.?.ptr, s.gpa);
         j.src = .{ .key = e.key, .base = base, .tag = e.tag, .kind = e.extra.kind, .page = page, .pos = e.pos, .first_page = first, .npages = npages, .ids = j.ids[first * page ..], .store = s.pages, .fence = try s.pages.fence(), .families = s.pool.layout.families, .pages = j.lists, .blobs = j.blobs, .measure = e.extra.bounded.?.logical_bytes orelse e.extra.bounded.?.vtable.nbytes(e.extra.bounded.?.ptr) };
-        if (base) |b| d.get(b).?.refs += 1; // held while the job runs: a trim cannot take the base
-        e.extra.job = j;
         try s.pending.append(s.gpa, j);
+        errdefer _ = s.pending.pop(); // a job the tier never queued must not stay where settle and deinit wait on it
+        if (base) |b| d.get(b).?.refs += 1; // held while the job runs: a trim cannot take the base
+        errdefer if (base) |b| {
+            d.get(b).?.refs -= 1;
+        };
+        e.extra.job = j;
+        errdefer e.extra.job = null;
         try s.runner.?.submit(j);
         return j;
     }

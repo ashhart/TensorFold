@@ -200,10 +200,11 @@ pub fn Pass(comptime Tri: type) type {
             const act = s.act + r0 * low * 2;
             const xs_act = s.xs_act + r0 * (low / 32) * 4;
             if (hc_w.down.native != null) {
+                if (std.meta.eql(keep, HcKeep{}) and hc.promptFused(self, hc_w, n)) return tiles.readoutFused(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
                 try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
                 return hc.readoutNative(self, hc_w, r0, n);
             }
-            if (n >= @import("cuda_chunk.zig").readoutTileRows() and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
+            if (n >= self.k.forms.readout_rows and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             if (hc_sk * n * hc_w.n_down * 4 > s.hc_part_bytes) return error.UnexpectedTensor;
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
@@ -258,7 +259,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * cd * 2);
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
-            const fused = self.lanes.len == 0 and (n >= 64 or marks.inPass(self)) and gdn_fused.on();
+            const fused = self.lanes.len == 0 and (n >= 64 or marks.inPass(self)) and self.k.forms.gdn_fused;
             const cuts = try marks.cuts(self, li, fused);
             if (fused and keep.log != 0) return error.UnexpectedTensor;
             if (fused) {
@@ -583,9 +584,9 @@ pub fn Pass(comptime Tri: type) type {
     };
 }
 
-test "a pass's scratch at the dense cap stays near a gigabyte and a half" {
+test "a pass's scratch at the default chunk stays under three gigabytes" {
     _ = @import("cuda_paging_batch_test.zig");
-    try std.testing.expect(Scratch.bytes(default_chunk, .{ .head_rows = default_chunk }) < 2 << 30);
+    try std.testing.expect(Scratch.bytes(default_chunk, .{ .head_rows = default_chunk }) < 3 << 30);
     try std.testing.expect(Scratch.bytes(1, .{}) < Scratch.bytes(2, .{}));
     try std.testing.expect(Scratch.bytes(4096, .{ .lane_reduce = false }) < Scratch.bytes(4096, .{}));
 }

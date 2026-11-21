@@ -67,11 +67,11 @@ fn batch(r: *Rig, comptime label: []const u8, g: experts.Grouped, router: groupe
     const up_in: experts.Rows = .{ .x = try r.dev(std.mem.sliceAsBytes(x[0 .. rows * D])), .stride = D, .slots = slots };
     const down_in: experts.Rows = .{ .x = act, .stride = NI };
     if (prompt) {
-        try g.prompt(r.s, .up, up_in, l, pl.p, act, pl.items, -1);
-        try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y, pl.items, -1);
+        try g.prompt(r.s, .up, up_in, l, pl.p, act, pl.items, pairs, tile, -1);
+        try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y, pl.items, pairs, tile, -1);
     } else {
-        try g.decode(r.s, .up, up_in, l, pl.p, act, pl.items, -1);
-        try g.decode(r.s, .down_f32, down_in, l, pl.p, y, pl.items, -1);
+        try g.decode(r.s, .up, up_in, l, pl.p, act, pl.items, pairs, tile, -1);
+        try g.decode(r.s, .down_f32, down_in, l, pl.p, y, pl.items, pairs, tile, -1);
     }
     // gate-up: each pair's row of x through its expert, SwiGLU with the kernels' roundings
     const want = try r.a.alloc(f64, pairs * NI);
@@ -140,15 +140,15 @@ fn skipped(
     const up_in: experts.Rows = .{ .x = xd, .stride = D, .slots = slots };
     const a0 = try r.zeros(pairs * NI * 2);
     const a1 = try r.dev(fill[0 .. pairs * NI * 2]);
-    try g.prompt(r.s, .up, up_in, l, pl.p, a0, pl.items, -1);
-    try g.prompt(r.s, .up, up_in, l, pl.p, a1, pl.items, skip);
+    try g.prompt(r.s, .up, up_in, l, pl.p, a0, pl.items, pairs, experts.promptTile(l.format), -1);
+    try g.prompt(r.s, .up, up_in, l, pl.p, a1, pl.items, pairs, experts.promptTile(l.format), skip);
     const up_plain = try r.back(a0, pairs * NI * 2);
     try leftAlone(label ++ " prompt gate-up", pk, skip, up_plain, try r.back(a1, pairs * NI * 2), NI * 2, fill);
     const down_in: experts.Rows = .{ .x = a0, .stride = NI };
     const y0 = try r.zeros(pairs * D * 2);
     const y1 = try r.dev(fill[0 .. pairs * D * 2]);
-    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y0, pl.items, -1);
-    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y1, pl.items, skip);
+    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y0, pl.items, pairs, experts.promptTile(l.format), -1);
+    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y1, pl.items, pairs, experts.promptTile(l.format), skip);
     const down_plain = try r.back(y0, pairs * D * 2);
     try leftAlone(label ++ " prompt down", pk, skip, down_plain, try r.back(y1, pairs * D * 2), D * 2, fill);
 }

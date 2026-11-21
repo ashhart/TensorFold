@@ -1,12 +1,8 @@
 //! Validate every advertised axis and byte extent before fixed-layout readers use checkpoint storage.
 const std = @import("std");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
+
+/// `t` is `dtype` with exactly `dims`, its bytes those dims' extent: the core reader's check, under Step-5's error.
 pub fn require(t: anytype, dtype: @TypeOf(t.dtype), dims: []const usize) error{UnexpectedStep5Tensor}!void {
-    if (t.dtype != dtype or t.rank != dims.len or t.rank > t.shape.len) return error.UnexpectedStep5Tensor;
-    if (!std.mem.eql(usize, t.shape[0..t.rank], dims)) return error.UnexpectedStep5Tensor;
-    var bytes: usize = dtype.size();
-    for (dims) |n| {
-        if (n == 0) return error.UnexpectedStep5Tensor;
-        bytes = std.math.mul(usize, bytes, n) catch return error.UnexpectedStep5Tensor;
-    }
-    if (t.bytes != bytes) return error.UnexpectedStep5Tensor;
+    mlx_affine.require(t, dtype, dims) catch return error.UnexpectedStep5Tensor;
 }

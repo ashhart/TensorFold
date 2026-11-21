@@ -35,10 +35,19 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 
 - Both ranks run the same executable (they compare it) and need NCCL 2.30 or later; set `NCCL_SOCKET_IFNAME` and
   `NCCL_IB_HCA` for the link between the hosts. `--master-port` (default 29551) names rank 0's control port.
+- A GB10's ConnectX-7 reaches the chip over two PCIe links, so each cabled port is two RDMA devices (`rocep1s0f0` and
+  `roceP2p1s0f0` for the first port), and one device alone carries about 112 of the port's 200 Gb/s. Give both
+  devices' interfaces an address, list both (`NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1`) and, when the interfaces
+  hold other addresses too, set `NCCL_IB_ADDR_RANGE` to a range that covers both; NCCL then puts half its channels on
+  each. On two GB10s joined by one cable this made cold 2,048 to 32,768-token prompts 26.5% to 28.1% faster (1,147
+  to 1,469 tokens/s at 8,192, NCCL 2.32.3), with decode speed and token hashes unchanged.
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
 - `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
+- A prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's
+  rows and gathers the sums: rank 0 sends 3.43 MiB a prompt token over two GB10s' RoCE link instead of 5.81, with the
+  same bytes in every written row. Decode rounds and verify windows keep the all-reduce.
 - At `--tp 2` each stream's window verifies alone, so concurrent streams do not yet share a verify pass.
 
 ## Experimental K32 prompt experts
@@ -72,8 +81,12 @@ Other families keep their existing cache policy. Full token keys and frame ident
 ## Run
 
 ```bash
-tensorfold-native serve /path/to/checkpoint --temperature 0
+tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --temperature 0
 ```
+
+The download is 105.5 GiB; the engine uploads 73.3 GiB of it to the GPU (below). A local checkpoint folder serves by
+its path.
 
 - `--context N` takes up to the model's 262,144 tokens; the default is the whole window. Past 2,048 keys each attention
   layer reads 512 blocks of 4 keys a row, chosen by the model's block indexer, as the Python engine does.
@@ -82,13 +95,18 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.
-- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
+- `TF_FLASHNEXT_READOUT_FUSED=1` (default off) runs a prompt pass's BF16 hyper-connection read-out, from 768 rows, on
+  two fused tiles that form the normed rows on chip. Same bits; cold prompts of 8k to 64k tokens 2.8% to 3.5% quicker
+  on a GB10 with the NVFP4 checkpoint. Metal, HIP and an MLX affine read-out refuse it by name.
+- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 3,072) caps the rows of one prompt pass. Every pass reads the weights
   of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
   stream decoding during a pass waits up to the whole pass for its next token. See
   [Prompt chunk size](#prompt-chunk-size).
 - `TF_FLASHNEXT_CHUNK_SOLO` (`TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
   is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, it's 8,192 at `--parallel 1`
   on one GPU, and every other server's passes take `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
+  Both settings are checked by name when the engine loads, with a blank value read as unset
+  ([environment](../environment.md#flash-next)).
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default -0.4) set the head's chain. A
   negative value keeps drafting while the drafts' probabilities multiply to at least its size (0.4 by default), a
   positive value keeps a later draft only at or above it, and 0 keeps every draft.
@@ -129,6 +147,10 @@ The family plugs into the core's pieces and adds no scheduler:
   `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; a successful resume counts toward
   `tensorfold:prompt_tokens_cached_total`. The chunk and budget host fixtures exercise this policy; real-model
   resumed/fresh parity and TTFT for this interior state still need the GPU gate.
+- `TF_PROMPT_INTERMEDIATE=1` keeps up to four intermediate states at power-of-two positions under a long prompt's
+  history, so a later request that keeps a compacted prefix resumes inside it. On one GB10 (NVFP4, `--no-drafts`,
+  an 8 GiB cache), a 104K-token request keeping its first 100K resumed 65,536 tokens instead of 2 (TTFT 19.9 s
+  against 50.7 s, same tokens); a cold 165K prompt paid 0.9 s more and the cache held two more states. Off by default.
 - Shared row kernels: the token rows (`embed_rows.cu`, groups of 32 and a copy a hyper-connection stream), the MTP
   head's RMS rows with their group sums (`norms.cu`), the router logits and softmax top-k (`route_rows.cu`), and the
   routed experts over a window's or a chunk's rows on the core's plan (`cuda/grouped.zig`, `experts_rows.cu`).
@@ -193,8 +215,8 @@ aggregate tok/s), on our kernels and, for comparison, on the 76-kernel captured 
 | Cold first token at 3,001 / 12,001 tokens (s) | 2.67 / 10.40 | 2.67 / 10.30 |
 | 45,030-token prompt, no cache (s) | 36.5 | 35.8 |
 
-Every concurrent reply equalled its solo run, and every drafted one its `"draft": false` run. Drafted streams verify
-their windows a pass each, so drafted throughput does not grow with streams yet. While a 12,001-token prompt runs,
+Every concurrent reply equalled its solo run, and every drafted one its `"draft": false` run. Drafted streams now verify
+their windows in shared passes; the table above predates that path. While a 12,001-token prompt runs,
 another stream's decode waits at most 1.3 s between tokens (one prompt chunk). Each stream at a 16,384-token window
 takes 0.74 GiB with drafts, 0.54 GiB without.
 
@@ -229,7 +251,7 @@ in one start of four on this machine. After the 131,072-token prompt the process
 ### Prompt chunk size
 
 `TF_FLASHNEXT_CHUNK` sets how many prompt rows one pass takes. A prompt of N rows runs in ceil(N / chunk) passes: a
-1,922-row prompt is two passes at the default 1,536 and one at 8,192.
+1,922-row prompt is two passes at 1,536 and one at the default 3,072 or at 8,192.
 
 - **For:** every pass reads the gate, up and down weights of each routed expert its rows route to (1.84 MB of gate and
   up weights an expert, 512 experts a layer). Fewer passes read each expert fewer times, so a prompt longer than one
@@ -250,7 +272,7 @@ change the sums. Two costs remain:
 On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
 `--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0` (two fresh servers for each setting, medians):
 
-| | unset (1,536) | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
+| | `TF_FLASHNEXT_CHUNK_SOLO` unset, chunk 1,536 | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
 | --- | --- | --- | --- |
 | First token, one stream, at 1,927 / 8,320 / 31,736 tokens | 0.99 / 4.07 / 16.05 s | 0.91 / 3.88 / 14.94 s | 0.89 / 3.86 / 14.78 s |
 | Longest wait between a decoding stream's tokens while an 8k prompt runs | 0.81 s | 0.81 s | 0.85 s |
@@ -285,9 +307,9 @@ per-stream launches. The bytes equal the per-stream launches': `tf-cuda-test fla
 
 - The dense projections run a copy of the Python engine's group-32 lane matmul (`qmm.cu`); the core's `qmm_group` and
   `lane_gemv` are built for groups of 64.
-- No CUDA graphs or GPU-side rounds; drafted streams verify their windows one pass each, and the MTP head drafts one
-  stream at a time.
+- Shared windows and the MTP head use CUDA graphs and batched passes; sampling remains on the host.
 - Prompts run slower than the Python engine's: a cold 12,001-token prompt takes about 10 s against its 6.7 s.
-- Draws are made on the host from each row's scores.
+- Draws use the host f64 sampler over GPU top-k candidates when eligible, with whole-row fallbacks.
+  `TF_FLASHNEXT_BATCH_DRAWS=0` restores per-stream reductions for an A/B.
 - Our glue's sums are not the captured kernels' bit for bit, so replies part from the Python engine's teacher path
   after a while, as that engine's own served path does (10 to 36 tokens, from its routed-experts kernel's rounding).

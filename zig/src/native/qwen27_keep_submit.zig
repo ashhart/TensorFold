@@ -13,11 +13,21 @@ pub fn run(c: anytype, ready: bool) !void {
     const cb = try c.encode(ready);
     cb.commit();
     if (ready) c.hold(cb) else {
+        // the drafter waits only for the taps and head; the keep runs behind it until the next settle
+        const keep = c.keep() catch |err| {
+            cb.wait();
+            return err;
+        };
+        keep.commit();
+        c.hold(keep);
         cb.wait();
-        try c.check(cb);
+        c.check(cb) catch |err| {
+            c.drain() catch {};
+            return err;
+        };
     }
     c.publish() catch |err| {
-        if (ready) c.drain() catch {};
+        c.drain() catch {};
         return err;
     };
 }
@@ -29,6 +39,7 @@ const Recording = struct {
     drained: usize = 0,
     fail_check: bool = false,
     fail_publish: bool = false,
+    fail_keep: bool = false,
     const Buffer = struct {
         r: *Recording,
         pub fn commit(b: Buffer) void {
@@ -39,6 +50,10 @@ const Recording = struct {
         }
     };
     pub fn encode(r: *Recording, _: bool) !Buffer {
+        return .{ .r = r };
+    }
+    pub fn keep(r: *Recording) !Buffer {
+        if (r.fail_keep) return error.KeepEncode;
         return .{ .r = r };
     }
     pub fn check(r: *Recording, _: Buffer) !void {
@@ -70,6 +85,22 @@ test "qwen27 pass: a non-prefetched keep waits and refuses publication on failur
     try std.testing.expectError(error.GpuFailed, run(&r, false));
     try std.testing.expectEqual(@as(usize, 1), r.waits);
     try std.testing.expect(!r.published and !r.retained);
+}
+test "qwen27 pass: a non-prefetched keep waits for its taps alone and runs behind the next drafter" {
+    var r: Recording = .{};
+    try run(&r, false);
+    try std.testing.expectEqual(@as(usize, 2), r.commits);
+    try std.testing.expectEqual(@as(usize, 1), r.waits);
+    try std.testing.expect(r.retained and r.published);
+    try r.drain();
+    try std.testing.expect(!r.retained);
+}
+test "qwen27 pass: a keep that cannot encode waits out its taps and holds nothing" {
+    var r: Recording = .{ .fail_keep = true };
+    try std.testing.expectError(error.KeepEncode, run(&r, false));
+    try std.testing.expectEqual(@as(usize, 1), r.commits);
+    try std.testing.expectEqual(@as(usize, 1), r.waits);
+    try std.testing.expect(!r.retained and !r.published);
 }
 test "qwen27 pass: publication failure drains the submitted asynchronous keep" {
     var r: Recording = .{ .fail_publish = true };

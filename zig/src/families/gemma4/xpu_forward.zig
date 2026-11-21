@@ -310,7 +310,7 @@ pub const Runner = struct {
             const end = @min(ids.len, at + r.window);
             if (r.pos + (end - at) > r.context) return error.ContextFull;
             var win: [MAXT]i32 = undefined;
-            for (ids[at..end], 0..) |t, j| win[j] = @intCast(t);
+            for (ids[at..end], 0..) |t, j| win[j] = @bitCast(t);
             // the prompt's last row runs alone: the rows before it only fill the cache (16 rows or fewer stay whole)
             const split = want and end == ids.len and end - at > ROWS;
             const body = end - at - @intFromBool(split);
@@ -350,7 +350,7 @@ pub const Runner = struct {
         if (ids.len == 0 or ids.len > ROWS) return error.BadWindow;
         if (r.pos + ids.len > r.context) return error.ContextFull;
         var win: [ROWS]i32 = undefined;
-        for (ids, 0..) |t, j| win[j] = @intCast(t);
+        for (ids, 0..) |t, j| win[j] = @bitCast(t);
         _ = try r.forward(win[0..ids.len], r.pos, .rows);
         r.rows_last = @intCast(ids.len);
     }
@@ -479,7 +479,7 @@ pub const Runner = struct {
             for (windows[0..i]) |o| if (o.slot == w.slot) return error.BadWindow;
             const p0 = r.posOf(w.slot);
             if (p0 + w.ids.len > r.context) return error.ContextFull;
-            for (w.ids, 0..) |t, j| ids[n + j] = @intCast(t);
+            for (w.ids, 0..) |t, j| ids[n + j] = @bitCast(t);
             parts[i] = .{ .slot = w.slot, .ro = n, .t = @intCast(w.ids.len), .p0 = p0 };
             n += @intCast(w.ids.len);
         }
@@ -495,6 +495,7 @@ pub const Runner = struct {
         const T: u32 = @intCast(ids.len);
         const k = if (T > ROWS) r.kp else r.k;
         if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
+        for (ids) |id| if (id < 0 or id >= cfg.vocab) return error.InvalidGemmaToken; // past i32 arrives negative; the embeds read both tables at id unchecked
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle(); // the queued copy reads the caller's ids
         const t_start = dev.now();

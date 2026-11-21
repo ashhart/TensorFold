@@ -1,4 +1,4 @@
-// Four-bit BF16 row projection, FP32 sums, explicit BF16 RNE output; built with -ffp-contract=off so every row reduces the same way for any M.
+// Four-bit BF16 row projection, FP32 sums, BF16 RNE output; -ffp-contract=off keeps rows reducing the same for any M.
 #include <hip/hip_runtime.h>
 #include <stdint.h>
 

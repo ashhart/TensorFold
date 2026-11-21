@@ -155,11 +155,26 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
-    e.affine.mlp128 = false;
-    e.affine.prefill_fn = function(&driver, 11);
-    e.affine.group_fn = function(&driver, 10);
-    e.affine.pdl = false;
-    e.affine.wide_verify = false;
+    e.affine = .{
+        .group_fn = function(&driver, 10),
+        .mlp128_fn = function(&driver, 10),
+        .gemv_fn = function(&driver, 7),
+        .verify_fn = function(&driver, 10),
+        .verify64_fn = function(&driver, 10),
+        .verify128_fn = function(&driver, 10),
+        .split_fn = function(&driver, 10),
+        .seg_fn = function(&driver, 10),
+        .many_fn = function(&driver, 10),
+        .prefill_fn = function(&driver, 11),
+        .prefill22_fn = function(&driver, 10),
+        .prefill_many_fn = function(&driver, 10),
+        .words_fn = function(&driver, 10),
+        .scales_fn = function(&driver, 10),
+        .gemv_blocks = 0,
+        .split = null,
+        .pdl = false,
+        .wide_verify = false,
+    };
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
@@ -207,7 +222,7 @@ fn actualFrame(block: usize) !void {
     d.scratch = .{ .d = &driver, .ptr = 0x100000, .len = measured };
     try std.testing.expectEqual(measured, try d.layout(true));
     try std.testing.expect(d.hp + F.max_streams * d.c.block * d.c.rank * 2 <= d.scratch.ptr + measured);
-    try std.testing.expect(d.po + F.max_streams * d.c.block * d.c.heads * F.chunks * 128 * 4 <= d.scratch.ptr + measured);
+    try std.testing.expect(d.po + F.max_streams * d.c.block * d.c.heads * d.c.chunks() * 128 * 4 <= d.scratch.ptr + measured);
     var contexts: [128]q.draft.Ctx = undefined;
     var holds: [128]lanes.drafter.Hold = undefined;
     const shape: lanes.shape.Shape = .{ .parents = @constCast(&[_]i32{ -1, -1, 0, 1, 2, 2, 3 }), .depths = @constCast(&[_]u8{ 0, 0, 1, 1, 2, 2, 2 }), .ranks = @constCast(&[_]u8{ 0, 1, 0, 1, 0, 1, 0 }), .expected = 0 };

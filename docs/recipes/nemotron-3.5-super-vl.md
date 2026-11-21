@@ -18,7 +18,8 @@ converted ahead of time.
 ## Run on one GB10
 
 ```bash
-tensorfold serve /models/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --name super --vision
+tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@82d93699acd3be9e4617c53360fe5b3f5dbeb1b3
+tensorfold serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 --name super --vision
 ```
 
 The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower and its rows). At the default

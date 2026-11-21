@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const View = @import("view.zig").View;
 const Dtype = @import("ops.zig").Dtype;
-pub const hash = @import("engram_hash.zig");
+pub const hash = @import("engram_hash_core");
 
 pub const head_dim = 256;
 pub const gather_dim = hash.columns * head_dim;

@@ -97,32 +97,9 @@ fn hexDigest(a: Allocator, bytes: []const u8) ![]const u8 {
     return a.dupe(u8, &std.fmt.bytesToHex(d, .lower));
 }
 
-/// ``model_type``, else ``text_config.model_type``, when it is a non-empty string.
-pub fn modelType(config: Value) ?[]const u8 {
-    if (config.get("model_type")) |t| if (t.truthy()) return t.str();
-    const text = config.get("text_config") orelse return null;
-    const t = text.get("model_type") orelse return null;
-    return t.str();
-}
-
-/// A drafter made for one family and shape: the target's hidden size and layer count.
-const Known = struct { model_type: []const u8, hidden: i64, layers: i64, repo: []const u8 };
-const known_drafters = [_]Known{.{ .model_type = "qwen3_5", .hidden = 5120, .layers = 64, .repo = "z-lab/Qwen3.8-27B-DFlash2" }};
-
-/// The repo ID of the drafter made for this checkpoint's family and shape (Qwen3.8-27B's DFlash2), else null.
-pub fn knownDrafter(config: Value) ?[]const u8 {
-    const kind = modelType(config) orelse return null;
-    for (known_drafters) |d| {
-        if (!std.mem.eql(u8, kind, d.model_type)) continue;
-        for ([_]?Value{ config, config.get("text_config") }) |source| {
-            const src = source orelse continue;
-            const hidden = (src.get("hidden_size") orelse continue).int64() orelse continue;
-            const layers = (src.get("num_hidden_layers") orelse continue).int64() orelse continue;
-            if (hidden == d.hidden and layers == d.layers) return d.repo;
-        }
-    }
-    return null;
-}
+// the drafter table serve pairs from as well (drafter.zig)
+pub const modelType = @import("drafter.zig").modelType;
+pub const knownDrafter = @import("drafter.zig").knownDrafter;
 
 const methods = [_][]const u8{ "mlx", "exl3", "modelopt", "compressed-tensors", "awq", "gptq", "bitsandbytes" };
 const details = [_][]const u8{ "nvfp4", "mxfp4", "mxfp8", "fp8", "fp4", "mixed_precision", "affine", "float-quantized", "pack-quantized", "int-quantized", "w4a16_nvfp4" };

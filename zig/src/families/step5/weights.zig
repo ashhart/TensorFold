@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
 const rows = @import("../../core/row_projection.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 const route = @import("../../core/moe_route.zig");
 const cfg = @import("config.zig");
 const shape = @import("tensor_shape.zig");
@@ -51,30 +52,7 @@ fn tensor(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, dtype
 /// An affine [.., n, k] matrix: bits and group read from the stored shapes, which must agree with each other.
 fn affine(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, stack: usize, n: usize, k: usize) !Linear {
     var buf: [256]u8 = undefined;
-    const base = try name(&buf, prefix, suffix);
-    var b2: [256]u8 = undefined;
-    const w = try c.get(try name(&b2, base, ".weight"));
-    const s = try c.get(try name(&b2, base, ".scales"));
-    const z = try c.get(try name(&b2, base, ".biases"));
-    return checkedAffine(w, s, z, stack, n, k);
-}
-
-pub fn checkedAffine(w: Tensor, s: Tensor, z: Tensor, stack: usize, n: usize, k: usize) !Linear {
-    if (stack == 0 or n == 0 or k == 0 or n > std.math.maxInt(i32) or k > std.math.maxInt(i32)) return error.UnexpectedStep5Tensor;
-    const rank: usize = if (stack == 1) 2 else 3;
-    if (w.rank != rank or s.rank != rank or z.rank != rank) return error.UnexpectedStep5Tensor;
-    const words = w.shape[rank - 1];
-    const groups = s.shape[rank - 1];
-    const wd = [3]usize{ stack, n, words };
-    const sd = [3]usize{ stack, n, groups };
-    try shape.require(w, .u32, wd[3 - rank ..]);
-    try shape.require(s, .bf16, sd[3 - rank ..]);
-    try shape.require(z, .bf16, sd[3 - rank ..]);
-    const packed_bits = std.math.mul(usize, words, 32) catch return error.UnexpectedStep5Tensor;
-    if (groups == 0 or k % groups != 0 or packed_bits % k != 0 or packed_bits / k > std.math.maxInt(u8)) return error.UnexpectedStep5Tensor;
-    const out = Linear{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = k / groups, .bits = @intCast(packed_bits / k) };
-    try out.validate();
-    return out;
+    return rows.affine(try mlx_affine.read(c, try name(&buf, prefix, suffix), .{ .stack = stack, .n = n, .k = k }));
 }
 
 fn mlp(c: *const ck.Checkpoint, p: []const u8, hidden: usize, inter: usize) !Mlp {
@@ -175,8 +153,4 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         };
     }
     return w;
-}
-
-test {
-    _ = @import("weights_test.zig");
 }

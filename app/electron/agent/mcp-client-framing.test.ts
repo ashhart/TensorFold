@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { PassThrough } from 'node:stream'
 import { McpHost, createMcpServer } from './mcp-client'
+import { SECRET_MASK } from './security'
 
 const host = new McpHost()
 const config = createMcpServer({ id: 'framing-fixture', name: 'Framing fixture', command: '/bin/echo' })
@@ -30,6 +32,44 @@ try {
     state.pending.set(72, { resolve: () => { resolved = true }, reject: () => {}, timer: setTimeout(() => {}, 1000) })
     runtime.handleStdout(state, Buffer.from('{"jsonrpc":"1.0","id":72,"result":{"trusted":true}}\n'))
     assert.equal(resolved, false)
+  })
+  check('MCP startup stderr keeps a split UTF-8 diagnostic together', () => {
+    const stderr = new PassThrough()
+    const finish = runtime.captureStartupStderr(state, stderr)
+    const message = 'Could not open 🔐.sqlite: testing database unavailable'
+    const bytes = Buffer.from(message)
+    const split = bytes.indexOf(Buffer.from('🔐')) + 1
+    state.runtime.logs = []
+    stderr.write(bytes.subarray(0, split))
+    stderr.write(bytes.subarray(split, split + 7))
+    stderr.write(bytes.subarray(split + 7))
+    assert.deepEqual(state.runtime.logs, [])
+    finish()
+    finish()
+    assert.deepEqual(state.runtime.logs, [message])
+    stderr.write('Connected diagnostic\n')
+    assert.deepEqual(state.runtime.logs, [message, 'Connected diagnostic'])
+  })
+  check('MCP startup stderr is redacted before its logical lines enter the preview', () => {
+    const stderr = new PassThrough()
+    const finish = runtime.captureStartupStderr(state, stderr)
+    state.runtime.logs = []
+    const fence = '-----'
+    const keyType = ['PRIVATE', 'KEY'].join(' ')
+    stderr.write(`${fence}BEGIN ${keyType}${fence}\r\n`)
+    stderr.write('synthetic fixture only\r\n')
+    stderr.write(`${fence}END ${keyType}${fence}\r\n`)
+    finish()
+    assert.deepEqual(state.runtime.logs, [SECRET_MASK])
+  })
+  check('An oversized MCP startup diagnostic is omitted without retaining its fragments', () => {
+    const stderr = new PassThrough()
+    const finish = runtime.captureStartupStderr(state, stderr)
+    state.runtime.logs = []
+    stderr.write(Buffer.alloc(64 * 1024, 0x61))
+    stderr.write('oversized diagnostic\n')
+    finish()
+    assert.deepEqual(state.runtime.logs, ['MCP startup diagnostics exceeded the log limit.'])
   })
   check('The MCP frame byte limit applies before parsing newline-terminated input', () => {
     const frame = JSON.stringify({ jsonrpc: '2.0', id: 73, result: 'x'.repeat(8 * 1024 * 1024) }) + '\n'

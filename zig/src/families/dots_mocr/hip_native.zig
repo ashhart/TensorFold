@@ -8,6 +8,7 @@ const cfg = @import("config.zig");
 const engine = @import("hip_engine.zig");
 const backend_ = @import("hip_backend.zig");
 const text = @import("hip_text.zig");
+const ocr = @import("ocr.zig");
 
 pub const model_type = "dots_ocr";
 pub const formats: []const []const u8 = &.{"bf16"};
@@ -97,6 +98,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     } else null;
     return .{ .backend = back.backend(), .facts = .{ .exact_width = @intCast(rows), .drafts = 0, .mtp = false, .copy_drafts = true, .streams_exact = true }, .rows = @intCast(e.p.rows), .streams = e.p.streams, .ctx = own, .deinit = Owner.close, .startup = startup, .offer = .{
         .vision = vision,
+        .ocr = ocr.reader,
         .cache = if (cached) &back.store else null,
         .cache_capacity = .{ .budget_bytes = e.p.cache_bytes, .minimum_state_bytes = (text.Cache.bytes(e.c, @min(e.p.window, engine.plan.prompt_rows)) catch 0) + @as(u64, e.c.vocab) * 2 },
         .warm_turns = cached,
@@ -116,8 +118,8 @@ fn frameKey(images: []const api.Image) u32 {
 }
 fn prepare(ptr: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const own: *Owner = @ptrCast(@alignCast(ptr));
-    const p = try own.e.processor.?.prepare(own.e.io, a, bytes, max_tokens);
-    return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+    const processor = own.e.processor.?;
+    return ocr.prepared(try processor.prepare(own.e.io, a, bytes, max_tokens), processor.patches.patch);
 }
 pub fn follow(a: std.mem.Allocator, _: std.mem.Allocator, _: std.Io, _: hip.Device, _: []const u8, _: anytype, problem: *[]const u8) !void {
     return refuse(a, problem, "dots.mocr currently serves one HIP GPU", .{});

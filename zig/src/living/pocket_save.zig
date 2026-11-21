@@ -3,6 +3,7 @@ const std = @import("std");
 const neuron = @import("neuron.zig");
 pub fn save(p: anytype, t: anytype, host: anytype) !usize {
     _ = t;
+    if (p.shrink.pending) return error.ShrinkPending;
     const P = @TypeOf(p.*);
     const n = p.up.items.len;
     p.save_pending = true;

@@ -74,12 +74,10 @@ pub const Model = struct {
         m.rows = try rows.Pipelines.load(m.device);
         errdefer m.rows.deinit();
         {
-            const body = try frags.source(m.device, gpa, ks.spark25_attention_nax);
-            defer gpa.free(body);
             var made: usize = 0;
             errdefer for (m.prompt_attn[0..made]) |p| p.deinit();
             for ([_]bool{ true, false }, 0..) |sliding, k| {
-                const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define WINDOW {d}\n#define RING {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, geo.query_heads, geo.query_heads / geo.kv_heads, geo.kv_heads, if (sliding) @as(usize, cfg.window) else 0, if (sliding) st.sliding_ring else 0, cfg.scale, body });
+                const src = try attentionSource(m.device, gpa, sliding);
                 defer gpa.free(src);
                 const lib = try mtl.Library.fromSource(m.device, src, mtl.CompileOptions.mlx());
                 defer lib.deinit();
@@ -165,3 +163,10 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
+
+/// The loader's sliding or full prompt attention source.
+pub fn attentionSource(device: mtl.Device, a: std.mem.Allocator, sliding: bool) ![]u8 {
+    const body = try frags.source(device, a, ks.spark25_attention_nax);
+    defer a.free(body);
+    return try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define WINDOW {d}\n#define RING {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, geo.query_heads, geo.query_heads / geo.kv_heads, geo.kv_heads, if (sliding) @as(usize, cfg.window) else 0, if (sliding) st.sliding_ring else 0, cfg.scale, body });
+}

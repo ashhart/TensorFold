@@ -34,6 +34,13 @@ pub const layout_batch_count: c_int = 5;
 pub const layout_batch_stride: c_int = 6;
 pub const pref_max_workspace_bytes: c_int = 1;
 
+/// cublasLtMatrixLayoutAttribute_t's CUBLASLT_MATRIX_LAYOUT_COLS (cublasLt.h), a uint64_t.
+pub const layout_cols: c_int = 3;
+
+/// cublasLtMatmulAlgoConfigAttributes_t's split-K factor and reduction scheme, as ints.
+pub const algo_config_splitk: c_int = 2;
+pub const algo_config_reduction: c_int = 3;
+
 /// What D gets after the product: nothing, or a bias over its columns added in f32 before D's one rounding.
 pub const Epilogue = enum(u32) { none = 1, bias = 4 };
 
@@ -59,6 +66,7 @@ pub const Api = struct {
     cublasLtMatmulPreferenceSetAttribute: *const fn (Preference, c_int, CPtr, usize) callconv(.c) S,
     cublasLtMatmulAlgoGetHeuristic: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, Preference, c_int, [*]Heuristic, *c_int) callconv(.c) S,
     cublasLtMatmulAlgoCheck: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, *const Algo, *Heuristic) callconv(.c) S,
+    cublasLtMatmulAlgoConfigGetAttribute: *const fn (*const Algo, c_int, ?*anyopaque, usize, ?*usize) callconv(.c) S,
     cublasLtMatmul: *const fn (Handle, MatmulDesc, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, ?*const Algo, abi.DevicePtr, usize, abi.Stream) callconv(.c) S,
 };
 
@@ -112,7 +120,7 @@ pub const Library = struct {
     }
 };
 
-/// One row-major bf16 product D[m,n] = X[m,k] . W[n,k]^T (a torch Linear), fp32 accumulate, bf16 or fp32 out.
+/// One row-major product D[m,n] = X[m,k] . W[n,k]^T (a torch Linear), fp32 accumulate; bf16 inputs unless typed.
 pub const Linear = struct {
     lt: *const Library,
     handle: Handle,
@@ -132,6 +140,11 @@ pub const Linear = struct {
 
     /// `init`'s plan, its algorithm also running `epilogue` when it supports it (`epilogue` says if); see `runBias`.
     pub fn initEpilogue(lt: *const Library, m: u64, n: u64, k: u64, out: DataType, workspace_limit: usize, epilogue: Epilogue) Error!Linear {
+        return initTyped(lt, m, n, k, .bf16, out, workspace_limit, epilogue);
+    }
+
+    /// `initEpilogue` with X and W of type `in` (bf16, fp16, or fp32 for true fp32 products), fp32 compute.
+    pub fn initTyped(lt: *const Library, m: u64, n: u64, k: u64, in: DataType, out: DataType, workspace_limit: usize, epilogue: Epilogue) Error!Linear {
         var self: Linear = undefined;
         self.lt = lt;
         try lt.check(lt.api.cublasLtCreate(&self.handle), "cublasLtCreate");
@@ -143,9 +156,9 @@ pub const Linear = struct {
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transa, &ta, @sizeOf(c_int)), "set transa");
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transb, &tb, @sizeOf(c_int)), "set transb");
         // column-major view: D^T[n,m] = W[n,k] (stored k x n, transposed) . X^T[k,m]
-        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.a, .bf16, k, n, @intCast(k)), "layout W");
+        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.a, in, k, n, @intCast(k)), "layout W");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.a);
-        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.b, .bf16, k, m, @intCast(k)), "layout X");
+        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.b, in, k, m, @intCast(k)), "layout X");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.b);
         try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.c, out, n, m, @intCast(n)), "layout D");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.c);

@@ -13,16 +13,29 @@ const Kind = @typeInfo(@TypeOf(Kernels.blockGo)).@"fn".param_types[5].?;
 const Entry = @typeInfo(@FieldType(@FieldType(Kernels, "reg"), "entries")).pointer.child;
 const Call = @typeInfo(@typeInfo(@FieldType(Entry, "launch")).pointer.child).@"fn".param_types[1].?;
 
-const Case = struct { tile: []const u8, rows: usize, group: usize, name: []const u8 };
+const Case = struct { tile: []const u8, rows: usize, group: usize, few: c_int, name: []const u8 };
 const tiles = [_]struct { []const u8, usize }{.{ "item64", 64 }};
+/// The few-row cut a case's launches pass: none (the matrix path at every row count), then the tile's most.
+const cuts = [_]c_int{ 0, hip.launches.item.few_rows };
 
 pub const cases = blk: {
-    var out: [2 * tiles.len]Case = undefined;
-    for (tiles, 0..) |t, i| for ([_]usize{ 32, 64 }, 0..) |group, j| {
-        const name = std.fmt.comptimePrint("hip affine_wmma_item ({d} rows, 4-bit, group {d}, fp32 out)", .{ t[1], group });
-        out[2 * i + j] = .{ .tile = t[0], .rows = t[1], .group = group, .name = name };
+    var out: [2 * cuts.len * tiles.len]Case = undefined;
+    for (tiles, 0..) |t, i| for (cuts, 0..) |few, f| for ([_]usize{ 32, 64 }, 0..) |group, j| {
+        const name: []const u8 = if (few == 0)
+            std.fmt.comptimePrint("hip affine_wmma_item ({d} rows, 4-bit, group {d}, fp32 out)", .{ t[1], group })
+        else
+            std.fmt.comptimePrint("hip affine_wmma_item ({d} rows, 4-bit, group {d}, fp32 out, K-parallel passes to {d} rows)", .{ t[1], group, few });
+        out[2 * (cuts.len * i + f) + j] = .{ .tile = t[0], .rows = t[1], .group = group, .few = few, .name = name };
     };
     break :blk out;
+};
+
+/// The planted control on the last case's geometry: the few-row passes stop after a wave's first. Red at gate 3.
+pub const control = struct {
+    pub const index = cases.len - 1;
+    pub const symbol = "tf_ctl_item_few_one_pass";
+    const name = "control: routed item tile whose few-row passes stop after a wave's first";
+    const gate: g.Gate = .shapes;
 };
 
 /// The 128-row tile's chain: a group's products by k, its scale and bias, then the groups' sum.
@@ -39,6 +52,8 @@ pub const Item = struct {
     f: ?contract.affine.Affine = null,
     arg: Arg = undefined,
     base: u64 = 0,
+    /// The planted control (its kernel from the controls' object, on the tile's geometry) in place of the served one.
+    planted: ?hip.Function = null,
 
     pub fn init(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, i: usize) Item {
         return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .arena = .init(a), .index = i };
@@ -54,7 +69,7 @@ pub const Item = struct {
         const flash: c.Shape = .{ .rows = 22, .n = 1280, .k = 2560 };
         return .{
             .spec = .{
-                .name = cfg.name,
+                .name = if (self.planted != null) control.name else cfg.name,
                 .accum = .f32,
                 .depth = depth,
                 .out = .f32,
@@ -62,10 +77,12 @@ pub const Item = struct {
                 .nan = .{ .stated = "the 128-row tile's bytes" },
                 // a prompt's routed items: about 22 rows at 1,024 tokens a step, 88 at 4,096
                 .served = &.{ flash, .{ .rows = 88, .n = 1280, .k = 2560 }, .{ .rows = 5, .n = 1024, .k = 2048 } },
-                .tiles = .{ .{ .size = cfg.rows }, .{ .size = 128 }, .{ .size = 256, .step = cfg.group, .min = cfg.group } },
+                // rows: the block's edge, or the cut's when the launch passes one
+                .tiles = .{ .{ .size = if (cfg.few > 0) @intCast(cfg.few) else cfg.rows }, .{ .size = 128 }, .{ .size = 256, .step = cfg.group, .min = cfg.group } },
             },
             .ctx = self,
             .vt = &vt,
+            .control = if (self.planted != null) control.gate else null,
         };
     }
 
@@ -96,13 +113,18 @@ pub const Item = struct {
             .group = @intCast(cfg.group),
             .fp16 = 0,
         };
+        self.arg.route.few = cfg.few;
         return true;
     }
 
     pub fn run(self: *Item) !void {
         const tile = cases[self.index].tile;
+        const call: Call = .{ .r = self.l.r, .s = self.rig.s.handle, .arg = self.arg, .items = 1 };
+        if (self.planted) |f| {
+            try hip.launches.item.goWith(f, call, 0);
+            return self.rig.s.synchronize();
+        }
         for (self.l.affine.reg.entries) |*e| if (std.mem.startsWith(u8, e.id, "mlx.routed.prefill.") and std.mem.endsWith(u8, e.id, tile)) {
-            const call: Call = .{ .r = self.l.r, .s = self.rig.s.handle, .arg = self.arg, .items = 1 };
             try e.launch(&self.l.affine, call);
             try self.rig.s.synchronize();
             return;

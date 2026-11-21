@@ -2,20 +2,45 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Defines: TF_D (stream width, multiple of 1024), TF_ITERS (Sinkhorn iterations), TF_HC_EPS_INT (split's eps in 1e-9).
+// Defines: TF_D (stream width, 1024s), TF_ITERS, TF_HC_EPS_INT (split's eps in 1e-9), TF_HC_TOPK (a MoE's picks).
 constant constexpr int S = 4, F = S * TF_D, MIX = (2 + S) * S, SLICES = F / 1024, PARTS = MIX + 1;
 
 #pragma clang fp contract(off)
 inline float hc_sq_acc(float acc, float v) { return v * v + acc; }
 inline float hc_add_nc(float a, float b) { return a + b; }
+inline float hc_mul_add(float acc, float a, float b) { return a * b + acc; }
 #pragma clang fp contract(on)
 
+// A thread's 4 branch columns: BRANCH's, or (MOE) glm's combine of a MoE's rows BRANCH [rows, topk + 1, D] by W.
+template <bool MOE>
+inline void hc_branch4(const device bfloat* BRANCH, const device float* W, int r, int d, thread float* b) {
+  if (!MOE) {
+    for (int i = 0; i < 4; i++) b[i] = float(BRANCH[size_t(r) * TF_D + d + i]);
+    return;
+  }
+  const device bfloat4* y = (const device bfloat4*)(BRANCH + size_t(r) * (TF_HC_TOPK + 1) * TF_D + d);
+  const bfloat4 y0 = y[0];
+  float acc[4];
+  for (int i = 0; i < 4; i++) acc[i] = W[r * TF_HC_TOPK] * float(y0[i]);
+  for (int k = 1; k < TF_HC_TOPK; k++) {
+    const bfloat4 yk = y[k * (TF_D / 4)];
+    const float w = W[r * TF_HC_TOPK + k];
+    for (int i = 0; i < 4; i++) acc[i] = hc_mul_add(acc[i], w, float(yk[i]));
+  }
+  const bfloat4 ys = y[TF_HC_TOPK * (TF_D / 4)];
+  for (int i = 0; i < 4; i++) {
+    const bfloat v = bfloat(acc[i]) + ys[i];
+    b[i] = float(v);
+  }
+}
+
 // (SLICES, rows) of 256: slice j's thread t expands 1024 j + 4 t..; squares + 24 mixes into PART [rows, SLICES, 25].
-template <bool EXPAND>
+template <bool EXPAND, bool MOE = false>
 [[kernel]] void tf_hc_expand_mix(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                              const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                              const device uint4* FNP [[buffer(4)]], device bfloat* XNEW [[buffer(5)]],
-                             device float* PART [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
+                             device float* PART [[buffer(6)]], const device float* W [[buffer(7)]],
+                             uint2 tg [[threadgroup_position_in_grid]],
                              uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                              uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float red[8][PARTS];
@@ -24,12 +49,17 @@ template <bool EXPAND>
   const device bfloat* xo = XOLD + size_t(r) * F;
   float vals[4];
   float ss = 0.0f;
+  float br[4];
+  if (EXPAND) {
+    const int f0 = 1024 * j + 4 * int(t), s0 = f0 / TF_D; // a thread's 4 columns: one stream's
+    hc_branch4<MOE>(BRANCH, W, r, f0 - s0 * TF_D, br);
+  }
   for (int tn = 0; tn < 4; tn++) {
     const int f = 1024 * j + 4 * int(t) + tn;
     float v;
     if (EXPAND) {
       const int s = f / TF_D, d = f - s * TF_D;
-      const float y = POST[r * S + s] * float(BRANCH[size_t(r) * TF_D + d]);
+      const float y = POST[r * S + s] * br[tn];
       const device float* c = COMB + r * S * S;
       float mm = c[0 * S + s] * float(xo[0 * TF_D + d]);
       mm = fma(c[1 * S + s], float(xo[1 * TF_D + d]), mm);
@@ -78,6 +108,84 @@ template <bool EXPAND>
 
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
+template [[host_name("tf_hc_expand_mix_moe")]] [[kernel]] decltype(tf_hc_expand_mix<true, true>) tf_hc_expand_mix<true, true>;
+
+// tf_hc_expand_mix's parts on MIX / 4 groups a slice (z: 4 mixes; z 0 also squares, streams): the same sums, order.
+template <bool EXPAND, bool MOE = false>
+[[kernel]] void tf_hc_expand_mix_parts(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
+                                   const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
+                                   const device uint4* FNP [[buffer(4)]], device bfloat* XNEW [[buffer(5)]],
+                                   device float* PART [[buffer(6)]], const device float* W [[buffer(7)]],
+                                   uint3 tg [[threadgroup_position_in_grid]],
+                                   uint3 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                                   uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float red[8][5];
+  const int j = int(tg.x), r = int(tg.y), og = int(tg.z);
+  const uint t = tpos.x;
+  const device bfloat* xo = XOLD + size_t(r) * F;
+  float vals[4];
+  float ss = 0.0f;
+  float br[4];
+  if (EXPAND) {
+    const int f0 = 1024 * j + 4 * int(t), s0 = f0 / TF_D; // a thread's 4 columns: one stream's
+    hc_branch4<MOE>(BRANCH, W, r, f0 - s0 * TF_D, br);
+  }
+  for (int tn = 0; tn < 4; tn++) {
+    const int f = 1024 * j + 4 * int(t) + tn;
+    float v;
+    if (EXPAND) {
+      const int s = f / TF_D, d = f - s * TF_D;
+      const float y = POST[r * S + s] * br[tn];
+      const device float* c = COMB + r * S * S;
+      float mm = c[0 * S + s] * float(xo[0 * TF_D + d]);
+      mm = fma(c[1 * S + s], float(xo[1 * TF_D + d]), mm);
+      mm = fma(c[2 * S + s], float(xo[2 * TF_D + d]), mm);
+      mm = fma(c[3 * S + s], float(xo[3 * TF_D + d]), mm);
+      const bfloat nb = bfloat(hc_add_nc(y, mm));
+      if (og == 0) XNEW[size_t(r) * F + f] = nb;
+      v = float(nb);
+    } else {
+      v = float(xo[f]);
+    }
+    vals[tn] = v;
+    ss = hc_sq_acc(ss, v);
+  }
+  float acc[5];
+  {
+    const device uint4* w = FNP + (size_t(og * 8 + int(sg)) * 32 + lane) * SLICES * 2 + j * 2;
+    float inter[4][4];
+    for (int h = 0; h < 2; h++) {
+      const uint4 v = w[h];
+      const uint words[4] = {v.x, v.y, v.z, v.w};
+      for (int k = 0; k < 4; k++) {
+        const int e = h * 8 + k * 2;
+        inter[e / 4][e % 4] = as_type<float>(words[k] << 16);
+        inter[(e + 1) / 4][(e + 1) % 4] = as_type<float>(words[k] & 0xffff0000u);
+      }
+    }
+    for (int tm = 0; tm < 4; tm++) {
+      float a = 0.0f;
+      for (int tn = 0; tn < 4; tn++) a += inter[tm][tn] * vals[tn];
+      acc[tm] = a;
+    }
+  }
+  acc[4] = ss;
+  const int parts = og == 0 ? 5 : 4;
+  for (int i = 0; i < parts; i++) {
+    const float v = simd_sum(acc[i]);
+    if (lane == 0) red[sg][i] = v;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(t) < parts) {
+    float a = red[0][t];
+    for (int k = 1; k < 8; k++) a += red[k][t];
+    PART[(size_t(r) * SLICES + j) * PARTS + (t < 4 ? og * 4 + int(t) : MIX)] = a;
+  }
+}
+
+template [[host_name("tf_hc_expand_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<true>) tf_hc_expand_mix_parts<true>;
+template [[host_name("tf_hc_first_mix_parts")]] [[kernel]] decltype(tf_hc_expand_mix_parts<false>) tf_hc_expand_mix_parts<false>;
+template [[host_name("tf_hc_expand_mix_parts_moe")]] [[kernel]] decltype(tf_hc_expand_mix_parts<true, true>) tf_hc_expand_mix_parts<true, true>;
 
 // In-place pending branch to the streams (one prompt buffer): TF_D / 4 a row, 4 stream columns each, read before write.
 [[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
@@ -106,50 +214,41 @@ inline float4 hc_col4(float4 v) {
   return v + simd_shuffle_xor(v, ushort(2));
 }
 
-// 1024 a row: slice sums in order, mixes by 1/norm, then the split (pre, post, Sinkhorn), streams collapsed, normed.
+// A row's slice sums for parts 0..24 in order (lane l: part l), the mixes by 1/norm on lanes 0..23: the split's values.
+inline float hc_mix_lane(const device float* PART, int r, uint lane, float eps) {
+  float a = 0.0f;
+  if (lane < (uint)PARTS) {
+    const device float* p = PART + size_t(r) * SLICES * PARTS + lane;
+    a = p[0];
+    for (int j = 1; j < SLICES; j++) a += p[j * PARTS];
+  }
+  const float sq = simd_shuffle(a, ushort(MIX));
+  return a * metal::precise::rsqrt(sq / float(F) + eps);
+}
+
+// (rows, 2) of 1024: group 0 collapses by pre and norms (one barrier), group 1 post and the comb; one group's bits.
 [[kernel]] void tf_hc_split(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                         const constant float* SCALE [[buffer(2)]], const device float* BASEV [[buffer(3)]],
                         const device bfloat* NORMW [[buffer(4)]], const constant float* EPS [[buffer(5)]],
                         device bfloat* NORMED [[buffer(6)]], device float* POST_OUT [[buffer(7)]],
-                        device float* COMB_OUT [[buffer(8)]], uint tg [[threadgroup_position_in_grid]],
-                        uint t [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                        device float* COMB_OUT [[buffer(8)]], uint2 tg [[threadgroup_position_in_grid]],
+                        uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                         uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr float HC_EPS = TF_HC_EPS_INT * 1e-9;
-  const int r = int(tg);
-  threadgroup float tot[PARTS];
-  threadgroup float mixes[MIX];
-  threadgroup float red[32];
-  threadgroup float pre_s[S];
-  threadgroup float inv_s[1];
-  device const bfloat* xs = X + size_t(r) * F;
-  float xv[4][S]; // this thread's 4 columns of the streams, loaded while the mixes and the Sinkhorn run
-  for (int i = 0; i < 4; ++i) {
-    for (int s = 0; s < S; ++s) xv[i][s] = float(xs[s * TF_D + int(t) * 4 + i]);
-  }
-  if (int(t) < PARTS) {
-    const device float* p = PART + size_t(r) * SLICES * PARTS + t;
-    float a = p[0];
-    for (int j = 1; j < SLICES; j++) a += p[j * PARTS];
-    tot[t] = a;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (int(t) < MIX) mixes[t] = tot[t] * metal::precise::rsqrt(tot[MIX] / float(F) + EPS[0]);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
+  const uint t = tpos.x;
+  const int r = int(tg.x);
+  const uint llane = metal::min(lane, (uint)(S - 1));
+  if (tg.y == 1) { // post and the Sinkhorn comb
+    if (sg != 0) return;
     constexpr int BASE_OFF = 2 * S;
-    const float pre_scale = SCALE[0], post_scale = SCALE[1], comb_scale = SCALE[2];
+    const float mix = hc_mix_lane(PART, r, lane, EPS[0]);
+    const float post_scale = SCALE[1], comb_scale = SCALE[2];
     const float active = (lane < (uint)S) ? 1.0f : 0.0f;
-    const uint llane = metal::min(lane, (uint)(S - 1));
-    const float pre_z = mixes[llane] * pre_scale + BASEV[llane];
-    const float post_z = mixes[S + llane] * post_scale + BASEV[S + llane];
-    const float pre_v = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + HC_EPS;
+    const float post_z = simd_shuffle(mix, ushort(S + llane)) * post_scale + BASEV[S + llane];
     const float post_v = 2.0f / (1.0f + metal::fast::exp(-post_z));
-    if (lane < (uint)S) {
-      pre_s[lane] = pre_v;
-      POST_OUT[r * S + lane] = post_v;
-    }
-    const float4 m4 = float4(mixes[BASE_OFF + llane * S], mixes[BASE_OFF + llane * S + 1], mixes[BASE_OFF + llane * S + 2],
-                             mixes[BASE_OFF + llane * S + 3]);
+    if (lane < (uint)S) POST_OUT[r * S + lane] = post_v;
+    const float4 m4 = float4(simd_shuffle(mix, ushort(BASE_OFF + llane * S)), simd_shuffle(mix, ushort(BASE_OFF + llane * S + 1)),
+                             simd_shuffle(mix, ushort(BASE_OFF + llane * S + 2)), simd_shuffle(mix, ushort(BASE_OFF + llane * S + 3)));
     float4 v = (m4 * comb_scale + *(const device float4*)(BASEV + BASE_OFF + llane * S)) * active;
     const float row_max = metal::max(metal::max(v.x, v.y), metal::max(v.z, v.w));
     const float4 e = metal::fast::exp(v - row_max) * active;
@@ -162,9 +261,24 @@ inline float4 hc_col4(float4 v) {
       rr *= col_inv;
     }
     if (lane < (uint)S) *(device float4*)(COMB_OUT + r * S * S + lane * S) = rr;
+    return;
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float p0 = pre_s[0], p1 = pre_s[1], p2 = pre_s[2], p3 = pre_s[3];
+  threadgroup float red[32];
+  device const bfloat* xs = X + size_t(r) * F;
+  float xv[4][S]; // this thread's 4 columns of the streams, loaded while the mixes run
+  for (int i = 0; i < 4; ++i) {
+    for (int s = 0; s < S; ++s) xv[i][s] = float(xs[s * TF_D + int(t) * 4 + i]);
+  }
+  float p0, p1, p2, p3;
+  { // every simdgroup its own pre (lanes 0..3), the one-group split's sums
+    const float mix = hc_mix_lane(PART, r, lane, EPS[0]);
+    const float pre_z = mix * SCALE[0] + BASEV[llane];
+    const float pre_v = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + HC_EPS;
+    p0 = simd_shuffle(pre_v, ushort(0));
+    p1 = simd_shuffle(pre_v, ushort(1));
+    p2 = simd_shuffle(pre_v, ushort(2));
+    p3 = simd_shuffle(pre_v, ushort(3));
+  }
   float xc[4];
   float acc = 0.0f;
   for (int i = 0; i < 4; ++i) {
@@ -173,17 +287,11 @@ inline float4 hc_col4(float4 v) {
     acc = hc_sq_acc(acc, xc[i]);
   }
   acc = simd_sum(acc);
-  if (sg == 0) red[lane] = 0.0f;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
   if (lane == 0) red[sg] = acc;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    const float a = simd_sum(red[lane]);
-    if (lane == 0) inv_s[0] = metal::precise::rsqrt(a / float(TF_D) + EPS[0]);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float inv = metal::precise::rsqrt(simd_sum(red[lane]) / float(TF_D) + EPS[0]); // every simdgroup the same
   for (int i = 0; i < 4; ++i) {
     const int d = int(t) * 4 + i;
-    NORMED[size_t(r) * TF_D + d] = NORMW[d] * bfloat(xc[i] * inv_s[0]);
+    NORMED[size_t(r) * TF_D + d] = NORMW[d] * bfloat(xc[i] * inv);
   }
 }

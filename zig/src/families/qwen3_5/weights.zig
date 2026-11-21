@@ -2,6 +2,7 @@
 const std = @import("std");
 const ck = @import("../../core/checkpoint_metal.zig");
 const c = @import("config.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 
 pub const Tensor = ck.Tensor;
 pub const Linear = struct { weight: Tensor, scales: Tensor, biases: Tensor, inputs: usize, outputs: usize };
@@ -46,13 +47,8 @@ fn tensor(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, dt
 fn projection(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, outputs: usize, inputs: usize) !Linear {
     var buf: [256]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
-    return .{
-        .weight = try tensor(ckpt, name, ".weight", .u32, &.{ outputs, inputs / 8 }),
-        .scales = try tensor(ckpt, name, ".scales", .bf16, &.{ outputs, inputs / c.group }),
-        .biases = try tensor(ckpt, name, ".biases", .bf16, &.{ outputs, inputs / c.group }),
-        .inputs = inputs,
-        .outputs = outputs,
-    };
+    const t = try mlx_affine.read(ckpt, name, .{ .n = outputs, .k = inputs, .bits = 4, .group = c.group });
+    return .{ .weight = t.weight, .scales = t.scales, .biases = t.biases, .inputs = inputs, .outputs = outputs };
 }
 
 pub fn load(ckpt: *const ck.Checkpoint, tied: bool) !Weights {

@@ -1,4 +1,4 @@
-//! `logprobs`: rows cover the answer as `content` does, the 0.6.6 refusals hold; `prompt_logprobs` on /v1/completions.
+//! Target logprob rows on chat and completions, including streamed projection and prompt rows.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -18,8 +18,8 @@ const all_bytes = blk: {
 };
 
 /// Bytes as tokens, `</think>` as token 300 and an end token 301; every prompt renders as "prompt".
-const Text = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const Text = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .token_bytes = tokenBytes } };
     }
 
@@ -71,14 +71,14 @@ const Text = struct {
 };
 
 /// Answers `reply` in two rounds; token i at -(i + 1) / 4, best itself then 'z'; even prompt rows rank their token 1.
-const Script = struct {
+pub const Script = struct {
     reply: []const u32,
     asked: ?u8 = null,
     prompt_rows: bool = true,
     logprobs: bool = true,
     submits: usize = 0,
 
-    fn engine(e: *@This()) api.Engine {
+    pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
@@ -91,7 +91,7 @@ const Script = struct {
         const e: *Script = @ptrCast(@alignCast(ctx));
         e.submits += 1;
         e.asked = r.logprobs;
-        var rows: [32]api.LogprobRow = undefined;
+        var rows: [1024]api.LogprobRow = undefined;
         for (e.reply, rows[0..e.reply.len], 0..) |t, *row, i| {
             const lp = -@as(f32, @floatFromInt(i + 1)) / 4;
             row.* = .{ .token = t, .logprob = lp, .count = r.logprobs orelse 0 };
@@ -134,16 +134,16 @@ const Script = struct {
 };
 
 /// The reply the route wrote: its status and body, or a stream's events, as JSON text (testing-allocator owned).
-const Got = struct {
+pub const Got = struct {
     status: u16 = 0,
     body: []u8 = &.{},
     events: std.ArrayList([]u8) = .empty,
 
-    fn out(g: *Got) openai.Out {
+    pub fn out(g: *Got) openai.Out {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn deinit(g: *Got) void {
+    pub fn deinit(g: *Got) void {
         std.testing.allocator.free(g.body);
         for (g.events.items) |e| std.testing.allocator.free(e);
         g.events.deinit(std.testing.allocator);
@@ -169,9 +169,9 @@ const Got = struct {
     }
 };
 
-const Route = enum { chat, responses, completions };
+pub const Route = enum { chat, responses, completions };
 
-fn send(reply: []const u32, thinking: bool, route: Route, body: []const u8) !Got {
+pub fn send(reply: []const u32, thinking: bool, route: Route, body: []const u8) !Got {
     return sendWith(reply, thinking, route, body, true);
 }
 
@@ -202,7 +202,7 @@ fn sendCapabilities(reply: []const u32, thinking: bool, route: Route, body: []co
     return got;
 }
 
-const NoHistory = struct {
+pub const NoHistory = struct {
     pub fn conversation(_: NoHistory, cx: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
         return cx.refuse("no stored responses in this test");
     }
@@ -330,14 +330,17 @@ test "a streamed reply's rows, joined over its chunks, are the whole reply's and
         defer spelled.deinit(std.testing.allocator);
         var text: std.ArrayList(u8) = .empty;
         defer text.deinit(std.testing.allocator);
+        var carried: usize = 0; // chunks whose own text came with its entries
         for (streamed.events.items) |e| {
             const chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, e, .{});
             defer chunk.deinit();
             const choices = chunk.value.object.get("choices") orelse continue;
             if (choices.array.items.len == 0) continue;
             const choice = choices.array.items[0].object;
-            if (choice.get("delta").?.object.get("content")) |c| try text.appendSlice(std.testing.allocator, c.string);
+            const said = choice.get("delta").?.object.get("content");
+            if (said) |c| try text.appendSlice(std.testing.allocator, c.string);
             const lp = choice.get("logprobs") orelse continue;
+            if (said != null and lp.object.get("content").?.array.items.len > 0) carried += 1;
             for (lp.object.get("content").?.array.items) |r| {
                 try rows.print(std.testing.allocator, "{s}:{d};", .{ r.object.get("token").?.string, r.object.get("logprob").?.float });
                 for (r.object.get("bytes").?.array.items) |b| try spelled.append(std.testing.allocator, @intCast(b.integer));
@@ -349,24 +352,30 @@ test "a streamed reply's rows, joined over its chunks, are the whole reply's and
         try std.testing.expectEqualStrings(expected.items, rows.items);
         try std.testing.expectEqualStrings("Hello", text.items);
         try std.testing.expectEqualStrings("Hello", spelled.items);
+        // the answer's text streams with its own entries, each round's (two for the plain reply), not all at the end
+        try std.testing.expect(carried >= @as(usize, if (case[1]) 1 else 2));
     }
 }
 
-test "logprobs refuse tools, stop strings, structured output, a thinking budget and other routes" {
+test "logprobs combinations reach planning while unsupported legacy boolean probabilities still refuse" {
     const reply = tokensOf("Hi");
-    const refused = [_][]const u8{
+    const bodies = [_][]const u8{
         ask ++ ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}}]}",
         ask ++ ",\"stop\":[\"x\"]}",
         ask ++ ",\"response_format\":{\"type\":\"json_object\"}}",
         ask ++ ",\"thinking_budget\":5}",
     };
-    for (refused) |body| {
-        const got = try send(&reply, false, .chat, body);
-        defer std.testing.allocator.free(got.body);
-        try std.testing.expectEqual(@as(u16, 400), got.status);
+    var text: Text = .{};
+    var backend: Script = .{ .reply = &reply };
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{ .served_name = "test-model", .model_ids = &.{"test-model"} }, null);
+    defer srv.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    for (bodies) |body| {
+        const p = try openai.plan(srv, &cx, true, (try json.parse(cx.a, body)).ok, null, true);
+        try std.testing.expectEqual(@as(?u8, 2), p.input.logprobs);
     }
-    const responses = send(&reply, false, .responses, "{\"model\":\"test-model\",\"input\":\"x\",\"logprobs\":true}");
-    try std.testing.expectError(error.Refused, responses);
     var boolean = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"x\",\"logprobs\":true}");
     defer boolean.deinit();
     try std.testing.expectEqual(@as(u16, 400), boolean.status);

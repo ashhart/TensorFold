@@ -47,6 +47,7 @@ fn one(m: *q.model.Model, io: std.Io, job: Job) !void {
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     try m.kernels.quant(e, p, .{ .buffer = input }, null, m.frame.get(.dims), .{ .buffer = output }, job.rows); // raw rows carry no producer sums: the kernel takes its own
+    e.barrier();
     e.end();
     cb.commit();
     cb.wait();

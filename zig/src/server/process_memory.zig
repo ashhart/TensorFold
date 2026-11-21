@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const Snapshot = struct { physical_footprint_bytes: u64, lifetime_peak_physical_footprint_bytes: u64 };
+pub const Snapshot = struct { physical_footprint_bytes: u64, lifetime_peak_physical_footprint_bytes: u64, disk_io_bytes_read: u64 = 0 };
 
 // Darwin's rusage_info_v4 ABI, including the UUID and trailing fields the kernel writes but we never publish.
 const RUsage = extern struct {
@@ -54,6 +54,7 @@ pub fn read() ?Snapshot {
     if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
     return .{
         .physical_footprint_bytes = info.phys_footprint,
+        .disk_io_bytes_read = info.diskio_bytesread,
         .lifetime_peak_physical_footprint_bytes = info.lifetime_max_phys_footprint,
     };
 }
@@ -62,6 +63,7 @@ test "Darwin v4 footprint fields use the documented ABI layout" {
     try std.testing.expectEqual(@as(usize, 296), @sizeOf(RUsage));
     try std.testing.expectEqual(@as(usize, 72), @offsetOf(RUsage, "phys_footprint"));
     try std.testing.expectEqual(@as(usize, 240), @offsetOf(RUsage, "lifetime_max_phys_footprint"));
+    try std.testing.expectEqual(@as(usize, 144), @offsetOf(RUsage, "diskio_bytesread"));
 }
 
 test "kernel lifetime footprint peak includes the current sample and cannot reset" {

@@ -76,7 +76,7 @@ fn up(r: *Rig, k: *Kit, l: cuda.experts.Layer, x: u64, pick: u64, m: usize, tile
     };
     try k.router.route(r.s, pick, pairs, E, tile, plan);
     const out = try r.zeros(pairs * I * 2);
-    try k.g.run(r.s, .up, .{ .x = x, .stride = D, .slots = SLOTS }, l, plan, out, items, -1, false);
+    try k.g.run(r.s, .up, .{ .x = x, .stride = D, .slots = SLOTS }, l, plan, out, items, pairs, tile, -1);
     return r.back(out, pairs * I * 2);
 }
 

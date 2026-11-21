@@ -47,6 +47,7 @@ pub const Checkpoint = struct {
     shards: std.ArrayList(Shard) = .empty,
     tensors: std.StringHashMapUnmanaged(Tensor) = .empty,
     deferred: std.StringHashMapUnmanaged(Deferred) = .empty,
+    selected_bytes: usize = 0, // what addFileSelected would hold: each file's span from its first selected tensor to its last
     files: std.ArrayList(File) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Checkpoint {
@@ -91,7 +92,6 @@ pub const Checkpoint = struct {
         defer arena.deinit();
         const entries = try st.parseHeaderPrefix(arena.allocator(), header, data_len, selected);
         if (entries.count() == 0) return;
-        if (later) |pick| return self.split(device, fd, &held, data_start, entries, prefix, pick);
         var begin: usize = if (selected == null) 0 else data_len;
         var limit: usize = if (selected == null) data_len else 0;
         for (entries.values()) |e| {
@@ -99,6 +99,8 @@ pub const Checkpoint = struct {
             limit = @max(limit, e.end);
         }
         const bytes = limit - begin;
+        self.selected_bytes += bytes;
+        if (later) |pick| return self.split(device, fd, &held, data_start, entries, prefix, pick);
         const buffer = try device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         var transferred = false;
         errdefer if (!transferred) buffer.deinit();
@@ -376,6 +378,7 @@ test "full and selected checkpoint views retain data, ownership and relative off
     try selected.addFileSelected(device, path, "", "text.");
     try std.testing.expectEqual(@as(usize, 30), full.residentBytes());
     try std.testing.expectEqual(@as(usize, 26), selected.residentBytes());
+    try std.testing.expectEqual(selected.residentBytes(), selected.selected_bytes);
     const a = try full.get("text.weight");
     const b = try selected.get("text.weight");
     try std.testing.expectEqual(@as(usize, 4), a.offset);
@@ -410,6 +413,7 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     defer split.deinit();
     try split.addFileSplit(device, path, "", "text.", Weights.later);
     try std.testing.expectEqual(@as(usize, 2), split.residentBytes());
+    try std.testing.expectEqual(@as(usize, 26), split.selected_bytes); // the span addFileSelected holds for "text."
     try std.testing.expect(split.has("text.weight"));
     try std.testing.expectError(error.DeferredTensor, split.get("text.weight"));
     try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));

@@ -1,0 +1,2 @@
+PASS tcp-host rank 1/2: 400 all-gathers (1 B to 4 MiB), 796 fp32 and bf16 sums, 100 exchanges, send/recv and variable all-gathers bit-exact over USB4 networking (thunderbolt_net), cable 2 of 2, MTU 1500, Ryzen AI Max+ 395 to Ryzen AI Max+ 395
+exit 0

@@ -83,7 +83,7 @@ def command(args):
         bounded=len(data)>=MAX
         if timedout or bounded:
             try: os.killpg(p.pid,signal.SIGKILL)
-            except ProcessLookupError: pass
+            except (ProcessLookupError, PermissionError): pass
         try: code=p.wait(timeout=2)
         except subprocess.TimeoutExpired:
             os.killpg(p.pid,signal.SIGKILL); code=p.wait(timeout=2)
@@ -94,7 +94,7 @@ def command(args):
     finally:
         sel.close(); p.stdout.close()
         try: os.killpg(p.pid,signal.SIGKILL)
-        except ProcessLookupError: pass
+        except (ProcessLookupError, PermissionError): pass
         if p.poll() is None: p.wait()
 def main(req):
     tool=req.get('tool'); args=req.get('args')

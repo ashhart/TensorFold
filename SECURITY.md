@@ -44,7 +44,9 @@ are refused. Both checks run before authentication, body processing and routing,
 Their HTTP 403 replies name Host/Origin and the relevant exception flag.
 
 Clients without Origin keep working with a valid Host, and no Content-Type restriction is introduced.
-The server sends no CORS headers; an origin exception does not grant cross-origin browser reads.
+An `--allowed-origin` exception sends no CORS headers and does not grant cross-origin browser reads. Only origins
+named with `--cors-origin ORIGIN` (exact, no wildcard, no credentials mode) get CORS preflights and
+`Access-Control-Allow-Origin`; their requests still need a valid key when keys are on.
 These browser checks do not replace `--api-key` for network access. See [API headers](docs/api.md#browser-request-headers).
 
 ## Release files
@@ -55,3 +57,10 @@ SHA-256. The Mac app is signed and notarized.
 Malformed or folded headers and unsupported request targets are refused before routing. Each request on a pooled
 connection is checked afresh. Rejections close before `100 Continue` and unread bodies are not dispatched. Key files
 must be regular files without group or other read/write permission; use `chmod 600`.
+
+## Cluster nodes
+
+A cluster node on a real host takes only the nodes its cluster file names, each on the link the file gives it, and it
+believes a node only about itself. Another node's word cannot add a member, choose the leader or end a member's run.
+The links carry no key: the node at the far end of a link is whichever host MCDMA connected there, and a node of the
+file is trusted about itself.
