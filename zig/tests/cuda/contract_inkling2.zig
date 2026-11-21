@@ -10,6 +10,7 @@ pub const Set = struct {
     attn: @import("contract_inkling2_attn.zig").Set = .{},
     ops: @import("contract_inkling2_ops.zig").Set = .{},
     experts: @import("contract_inkling2_experts.zig").Set = .{},
+    loop_math: @import("contract_inkling2_loop_math_extra.zig").Set = .{},
 
     /// The set, its kernels appended to `list`.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -22,10 +23,12 @@ pub const Set = struct {
         errdefer set.ops.deinit();
         try set.experts.init(gpu, s, a, list);
         errdefer set.experts.deinit();
+        try set.loop_math.init(gpu, s, a, list);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.loop_math.deinit();
         set.experts.deinit();
         set.ops.deinit();
         set.attn.deinit();
