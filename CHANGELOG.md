@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
+
 - Spark 2.5 on CUDA: gate and up load as one stacked weight and decode in one launch on every CUDA chip instead of two launches, with the bits unchanged; only 4-bit checkpoints take this path (#3130).
 
 - LFM2-MoE on Metal: prefill runs one chunk a call with decode rounds between chunks, so a new prompt no longer stalls other streams' replies; the backend declares `prefill_step` and `cancel_prefill` beside `reports_fill` (#3058).
