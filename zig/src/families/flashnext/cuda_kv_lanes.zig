@@ -462,7 +462,7 @@ pub const Pool = struct {
         }
         var ids: [1024]u32 = undefined; // two pieces' worth: a request's pages and a keep's held ones
         const n: usize = @intCast(@min(ids.len, @max(1, 2 * @import("cuda_kv_arena.zig").piece_bytes / pb)));
-        for (nextPages(&p.pool, p.layout.runPages(), ids[0..n])) |id| {
+        for (nextPages(p.pool, p.layout.runPages(), ids[0..n])) |id| {
             if (!runs) p.arena.post(@as(u64, id) * pb, pb) else p.arena.ensure(@as(u64, id) * pb, pb, s) catch return;
         }
     }

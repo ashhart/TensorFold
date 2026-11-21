@@ -150,7 +150,6 @@ test "KV lanes: every pass over a lane's MTP head reads its cache through the la
 
 test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pages; every valid size unchanged" {
     if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
-    const t = std.testing;
     const env = @import("sys").env;
     const name = "TF_FLASHNEXT_KV_PAGES";
     const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
