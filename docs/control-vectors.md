@@ -308,13 +308,42 @@ acceptance. In the seeded active functional cell, drafting is slower:
 22.465 versus 30.415 tokens/s, with 17 of 112 proposals accepted. The
 no-slowdown gate is therefore not qualified for that control.
 
+### Recorded four-slot TP2 served check
+
 The first four-slot baseline request failed with `MissingTritonVariant`
 (`_scores`): rank zero had 189 AOT variants, the follower 194. The consumed
 RoPE table prefix was bit-identical despite different file capacities.
 Private qualification assets now align the 194-variant bundle and the
 133120-row RoPE file on both ranks; original serving assets are unchanged.
-The wider-stream comparison is not yet qualified by that preparation.
+After alignment, baseline, no-file, loaded-zero and active-strength-4 policies
+each passed 13 long requests on four physical slots, including four concurrent
+plain clients and four concurrent drafted clients. No-file/zero match baseline;
+active outputs match the single-slot active run, including seeded output.
+RAM and forced-eviction NVMe restores reproduce the exact 8176-row prefix.
+Both ranks retain distinct no-file, loaded-zero and active-policy namespaces.
+The metadata-only file comparison above was run at one slot, not four.
 
+These measurements use the same pinned model source and baseline as the
+single-slot check. They are not a fresh binary run of the later main refresh.
+Four-stream warm-cache aggregate client decode-window medians follow, with
+64 output tokens per stream and three plain/draft/draft/plain repetitions
+(six samples per mode). Binary arms were not alternated; small differences
+are observations, not a strict no-regression or kernel-only qualification.
+
+| Policy | Plain tokens/s | Drafted tokens/s | Rank 0 VmHWM MiB | Rank 1 VmHWM MiB |
+|---|---:|---:|---:|---:|
+| Baseline | 110.707 | 136.784 | 5818.754 | 5723.016 |
+| Candidate, no file | 111.094 | 138.188 | 5818.938 | 5722.879 |
+| Candidate, loaded zero | 110.912 | 137.268 | 5820.980 | 5724.922 |
+| Candidate, synthetic strength 4 | 111.577 | 138.935 | 5822.289 | 5726.652 |
+
+`VmHWM` is per-process resident high-water from `/proc`, not a complete
+device/pinned-allocation peak. All runs retain normal memory floors. The
+single-slot seeded-draft slowdown above remains a failed performance cell;
+these four-stream greedy observations do not override it.
+
+
+### Future trained-vector publication
 
 Derive later style/topic vectors for the exact DeepSeek checkpoint, quantization
 and paired site. Publish their authors/licence, checkpoint and conversion pins,
