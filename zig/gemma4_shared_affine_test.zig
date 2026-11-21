@@ -104,7 +104,7 @@ test "landed Metal source bytes are pinned without shader compilation" {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
         // Hy4-flash's mapped experts and rounded SiLU, both behind defines that are off for every other caller
-        try std.testing.expectEqualStrings("2cf4deb55455fda30efb4fce3043ef5d90052d71f48ce7660960e8b588478aca", &std.fmt.bytesToHex(hash, .lower));
+        try std.testing.expectEqualStrings("9a01998f26f80c9faa511dce14d1f545264c9ab343d189d8f0f005d83cc632b7", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
