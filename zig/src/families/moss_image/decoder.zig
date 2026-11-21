@@ -113,7 +113,7 @@ pub const Decoder = struct {
         const config = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(arena, &.{ dir, "config.json" }), arena, .limited(1 << 20));
         try check(gpa, config);
         // qualified on the M5 alone, as the transformer is
-        if (!device.tensorUnits()) {
+        if (!@import("kernels.zig").available(device)) {
             std.log.err("moss image decoder: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
             return error.TensorUnitsRequired;
         }

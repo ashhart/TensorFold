@@ -146,10 +146,54 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
 // The warp form ranking sigmoid(logit) + bias, logit the `slices` partials [slices, rows, ne] summed in order.
 constexpr int MAXSK = 8; // slices the score form sums
 
+// Group-limited selection: experts outside the `keep` groups of best top-2 sums go to -inf (ties: lower group).
+template <int P, bool HIGH = false>
+__device__ __forceinline__ void keep_groups(float (&v)[P], int lane, int ne, int groups, int keep) {
+    const int gs = ne / groups;
+    float gscore = -INFINITY; // lane g: group g's two best values summed
+    for (int gi = 0; gi < groups; ++gi) {
+        float a = -INFINITY, b = -INFINITY; // this lane's best two in group gi, a >= b
+#pragma unroll
+        for (int j = 0; j < P; ++j) {
+            const int e = lane + 32 * j;
+            if (e < ne && e / gs == gi) {
+                if (v[j] > a) b = a, a = v[j];
+                else if (v[j] > b) b = v[j];
+            }
+        }
+        for (int m = 16; m > 0; m >>= 1) {
+            const float oa = __shfl_xor_sync(0xFFFFFFFFu, a, m), ob = __shfl_xor_sync(0xFFFFFFFFu, b, m);
+            b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+            a = fmaxf(a, oa);
+        }
+        if (lane == gi) gscore = __fadd_rn(a, b);
+    }
+    unsigned kept = 0u;
+    bool live = lane < groups;
+    for (int k = 0; k < keep; ++k) { // the best live group: the largest sum, then the lowest group among equals
+        const unsigned key = live ? ordered(gscore) : 0u;
+        const unsigned top = __reduce_max_sync(0xFFFFFFFFu, key);
+        unsigned id = __reduce_min_sync(0xFFFFFFFFu, live && key == top ? static_cast<unsigned>(lane) : 32u);
+        if constexpr (HIGH) { // the contract's control: the highest group among equals
+            const unsigned hi = __reduce_max_sync(0xFFFFFFFFu, live && key == top ? lane + 1u : 0u);
+            id = hi == 0u ? 32u : hi - 1u;
+        }
+        if (id >= 32u) break;
+        kept |= 1u << id;
+        if (lane == static_cast<int>(id)) live = false;
+    }
+#pragma unroll
+    for (int j = 0; j < P; ++j) {
+        const int e = lane + 32 * j;
+        if (e < ne && !((kept >> (e / gs)) & 1u)) v[j] = -INFINITY;
+    }
+}
+
 // A lane holds experts lane + 32 j, j < P; every slice's and the bias's load issued before the sums.
-template <int P>
+template <int P, bool GROUPS = false, bool HIGH = false>
 __device__ __forceinline__ void score_warp(const float* logits, const float* bias, int* pick, float* wts, int rows, int ne,
-                                           int topk, int shared, int normalize, float scale, int slices) {
+                                           int topk, int shared, int normalize, float scale, int slices, int groups = 1,
+                                           int keep = 1) {
     const int lane = threadIdx.x & 31;
     const int64_t r = static_cast<int64_t>(blockIdx.x) * 8 + (threadIdx.x >> 5);
     if (r >= rows) return;
@@ -173,6 +217,7 @@ __device__ __forceinline__ void score_warp(const float* logits, const float* bia
         const float vj = __fadd_rn(x[j], b[j]);
         v[j] = e < ne && vj == vj ? vj : -INFINITY; // a NaN logit is never picked ahead of a number
     }
+    if constexpr (GROUPS) keep_groups<P, HIGH>(v, lane, ne, groups, keep);
     const int slots = topk + shared;
     float xk = 0.f; // lane k's pick's score
     int pk = 0;     // lane k's pick
@@ -220,6 +265,24 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp
                                                                                     int topk, int shared, int normalize,
                                                                                     float scale, int slices) {
     score_warp<4>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices);
+}
+
+// The score form up to 512 experts with group-limited selection: `groups` equal groups, the best `keep` kept (Ling).
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_groups(const float* logits, const float* bias,
+                                                                                  int* pick, float* wts, int rows, int ne,
+                                                                                  int topk, int shared, int normalize,
+                                                                                  float scale, int slices, int groups,
+                                                                                  int keep) {
+    score_warp<PER, true>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices, groups, keep);
+}
+
+// The contract's planted control for the tie rule: tf_moe_topk_sigmoid_score_groups keeping the highest equal group.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_moe_topk_score_groups_high(const float* logits, const float* bias,
+                                                                                    int* pick, float* wts, int rows, int ne,
+                                                                                    int topk, int shared, int normalize,
+                                                                                    float scale, int slices, int groups,
+                                                                                    int keep) {
+    score_warp<PER, true, true>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices, groups, keep);
 }
 
 // out[r, d] = sum over the row's slots, in slot order, of w[r, k] * y[r, k, d] (fp32 fma), rounded once to out's kind.

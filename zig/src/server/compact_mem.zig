@@ -1,5 +1,6 @@
 //! The compaction note file and the hash of the messages a note already covers.
 const std = @import("std");
+const platform = @import("sys");
 const json = @import("json");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
@@ -41,13 +42,16 @@ pub fn loadMem(srv: *Server, a: Allocator, msgs: []const Value) ?Mem {
 
 pub fn storeMem(srv: *Server, a: Allocator, msgs: []const Value, covered: usize, note: []const u8) void {
     const dir = srv.config.compact_memory orelse return;
-    std.Io.Dir.cwd().createDirPath(srv.io, dir) catch return;
+    // a folder made here is the owner's alone; one that already exists keeps the mode its owner gave it
+    const Permissions = std.Io.File.Permissions;
+    const private: Permissions = if (@hasDecl(Permissions, "fromMode")) .fromMode(0o700) else .default_dir;
+    _ = std.Io.Dir.cwd().createDirPathStatus(srv.io, dir, private) catch return;
     const key = conversationKey(a, msgs) catch return;
     const n = @min(covered, msgs.len);
     const hash = prefixHash(a, msgs[0..n]) catch return;
     const body = std.fmt.allocPrint(a, "{{\"covered\":{d},\"hash\":\"{s}\"}}", .{ n, hash }) catch return;
-    writeNamed(srv, a, dir, &key, ".md", note);
-    writeNamed(srv, a, dir, &key, ".json", body);
+    writeNamed(a, dir, &key, ".md", note);
+    writeNamed(a, dir, &key, ".json", body);
 }
 
 fn readNamed(srv: *Server, a: Allocator, dir: []const u8, key: []const u8, ext: []const u8) ?[]u8 {
@@ -56,13 +60,11 @@ fn readNamed(srv: *Server, a: Allocator, dir: []const u8, key: []const u8, ext: 
     return std.Io.Dir.cwd().readFileAlloc(srv.io, path, a, .limited(1 << 20)) catch null;
 }
 
-fn writeNamed(srv: *Server, a: Allocator, dir: []const u8, key: []const u8, ext: []const u8, data: []const u8) void {
+/// A note holds a conversation's summary: owner-only, through a unique temporary that follows no link.
+fn writeNamed(a: Allocator, dir: []const u8, key: []const u8, ext: []const u8, data: []const u8) void {
     const name = std.fmt.allocPrint(a, "{s}{s}", .{ key, ext }) catch return;
-    const tmp = std.fmt.allocPrint(a, "{s}{s}.tmp", .{ key, ext }) catch return;
     const path = std.fs.path.join(a, &.{ dir, name }) catch return;
-    const tmp_path = std.fs.path.join(a, &.{ dir, tmp }) catch return;
-    std.Io.Dir.cwd().writeFile(srv.io, .{ .sub_path = tmp_path, .data = data }) catch return;
-    std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), path, srv.io) catch return;
+    platform.atomic_file.replacePrivate(a, path, &.{data}) catch return;
 }
 
 fn prefixHash(a: Allocator, msgs: []const Value) ![]u8 {

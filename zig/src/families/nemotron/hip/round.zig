@@ -10,8 +10,25 @@ const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 const pops = hip.plan_ops;
 
-/// Rows a stream's window holds at most: the pending token and the drafts (every width reproduces one-token steps).
-pub const max_window = 4;
+/// Rows a stream's window holds by default: the pending token and three drafts.
+pub const default_window = 4;
+
+/// Rows a lone stream's window holds at most when `--mtp-drafts` opts in past three.
+pub const max_window = 16;
+
+/// Shared round row ceiling up to eight streams (above eight, `planRows` keeps `streams * default_window`).
+pub const shared_cap_rows = 32;
+
+/// Window rows for a policy's `--mtp-drafts`: four up to three drafts (exact baseline), else `asked + 1` up to sixteen.
+pub fn windowFor(asked: u8) usize {
+    return if (asked <= 3) default_window else @min(max_window, @as(usize, asked) + 1);
+}
+
+/// Plan rows for `streams` and `window`: at least `streams * default_window`, and up to `shared_cap_rows` past four.
+pub fn planRows(streams: usize, window: usize) usize {
+    if (window <= default_window) return streams * window;
+    return @max(streams * default_window, @min(streams * window, shared_cap_rows));
+}
 
 /// Shortest span the attention walk covers; spans double from here (a row's bits do not depend on the span).
 pub const min_span = 128;
@@ -57,13 +74,15 @@ pub const Plan = struct {
     /// Pages a head of a pool slot holds, and the words of a descriptor before its page table.
     pool: u32,
     pages: u32,
+    /// Rows of the embedding table: `send` refuses a token at or past it.
+    vocab: usize,
 
     /// Device bytes a plan of `rows` rows over `slots` streams holds.
     pub fn deviceBytes(rows: usize, slots: usize) usize {
         return 4 * Layout.of(rows, slots).words;
     }
 
-    pub fn init(d: *const hip.Runtime, pool: *const pages.Pool, rows: usize, slots: usize) !Plan {
+    pub fn init(d: *const hip.Runtime, pool: *const pages.Pool, rows: usize, slots: usize, vocab: usize) !Plan {
         const bytes = deviceBytes(rows, slots);
         var host = try hip.HostBuffer.alloc(d, bytes);
         errdefer host.free();
@@ -74,6 +93,7 @@ pub const Plan = struct {
             .slots = slots,
             .pool = @intCast(pool.count),
             .pages = @intCast(pages.header_words + 2 * pool.keys.len),
+            .vocab = vocab,
         };
     }
 
@@ -89,6 +109,7 @@ pub const Plan = struct {
         for (windows) |w| {
             total += w.tokens.len;
             visible = @max(visible, w.pos + w.tokens.len);
+            for (w.tokens) |t| if (t >= p.vocab) return error.TokenOutsideVocabulary; // no kernel bounds an id
         }
         if (windows.len == 0 or windows.len > p.slots or total == 0 or total > p.rows) return error.WindowTooWide;
         const l = Layout.of(total, windows.len);
@@ -256,4 +277,24 @@ test "the layout keeps the descriptors on even words" {
     try std.testing.expect(l.desc % 2 == 0);
     try std.testing.expectEqual(@as(usize, 3 * 5 + 3 + 3), l.count + 3);
     try std.testing.expectEqual(l.desc + 6, l.words);
+}
+
+test "security: a round refuses a token at or past the vocabulary before its plan is written" {
+    var p: Plan = .{ .host = undefined, .dev = undefined, .rows = 4, .slots = 1, .pool = 0, .pages = 0, .vocab = 8 };
+    const win: Window = .{ .s = undefined, .pos = 0, .tokens = &.{ 7, 8 } };
+    try std.testing.expectError(error.TokenOutsideVocabulary, p.send(&.{win}, 4096, undefined));
+}
+
+test "windowFor holds four up to three drafts and tracks --mtp-drafts up to 16; planRows keeps shared floor" {
+    for (0..4) |n| try std.testing.expectEqual(@as(usize, 4), windowFor(@intCast(n)));
+    for (4..16) |n| try std.testing.expectEqual(n + 1, windowFor(@intCast(n)));
+    try std.testing.expectEqual(@as(usize, 16), windowFor(16));
+    try std.testing.expectEqual(@as(usize, 16), windowFor(255));
+    for ([_]usize{ 1, 2, 4, 8, 16 }) |s| try std.testing.expectEqual(4 * s, planRows(s, 4));
+    try std.testing.expectEqual(@as(usize, 16), planRows(1, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(2, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(4, 16));
+    try std.testing.expectEqual(@as(usize, 32), planRows(8, 8));
+    try std.testing.expectEqual(@as(usize, 64), planRows(16, 8));
+    try std.testing.expectEqual(@as(usize, 64), planRows(16, 16));
 }

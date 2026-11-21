@@ -96,7 +96,9 @@ pub const Checkpoint = struct {
     /// The output head, or null when it is the embedding (`tie_word_embeddings`).
     pub fn head(c: *const Checkpoint, a: std.mem.Allocator) !?host.Projection {
         if (c.config.tied) return null;
-        return try projection.projection(a, &c.main, c.names.head);
+        const p = try projection.projection(a, &c.main, c.names.head);
+        if (p.rows() != c.spec().vocab) return error.UnexpectedTensor;
+        return p;
     }
 
     /// Drops the mapped pages of layer `index` once it is uploaded (null: the embedding, norm and head).
@@ -110,6 +112,8 @@ pub const Checkpoint = struct {
             c.main.release(c.text(&buf, "norm."));
             c.main.release(c.names.head);
         }
+        // Windows has no per-range advice: one trim of the process's set after the step, not one per tensor
+        @import("sys").working_set.release();
     }
 
     /// Layer `index`, read and converted; free it with `deinit`.

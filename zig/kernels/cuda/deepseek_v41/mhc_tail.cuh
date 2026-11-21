@@ -11,7 +11,7 @@ __device__ __forceinline__ int ld_acquire(const int* p) {
     return v;
 }
 __device__ __forceinline__ float rn_of(float ssc, float eps) {
-    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ssc, 1.0f * D), eps)));
+    return tf_common::rms_scale(ssc, D, eps);
 }
 
 // row r's 25 sums over its 160 entries and the square sum over stream 0's 40 (finish()'s chains), then coefs()
@@ -43,10 +43,7 @@ __device__ void norm_item(const Args& a, int r, int q, float* buf, int t) {
     if (t < NB) buf[t] = __ldcg(a.part + (static_cast<long long>(r) * NE + t) * PW + 25);
     __syncthreads();
     if (t == 0) {
-        float ssc = 0.0f;
-#pragma unroll 8
-        for (int e = 0; e < NB; ++e) ssc = __fadd_rn(ssc, buf[e]);
-        buf[NB] = rn_of(ssc, a.eps);
+        buf[NB] = rn_of(tf_common::sum_rn<8>(NB, [&](int e) { return buf[e]; }), a.eps);
     }
     __syncthreads();
     const float rn = buf[NB];

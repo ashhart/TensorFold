@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "Usunięcie folderu zatrzymuje wykrywanie w nim; nie usuwa modeli, a działający pozostaje wczytany do zatrzymania serwera.",
   "Rename": "Zmień nazwę",
   "Render the plan panel with block progress bars and status glyphs.": "Wyświetl panel planu z paskami postępu i symbolami stanu.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "Powtarzalne pomiary community-v1 dla modeli z pamięci podręcznej na Macu.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "Powtarzalne pomiary community-v2 dla modeli z pamięci podręcznej na Macu.",
   "repeated checks": "powtórzone kontrole",
   "Replace matching records from the backup": "Zastąp pasujące rekordy z kopii",
   "replaces the current instructions": "zastępuje bieżące instrukcje",

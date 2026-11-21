@@ -281,6 +281,14 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
     var b2: Box = .{};
     defer b2.tokens.deinit(gpa);
     const r2: Request = .{ .prompt = t2.items, .max_tokens = 12, .history_len = @intCast(t2.items.len - 2) };
+    // Force an opportunistic mark so reservation trimming does not remove this restore-lifetime regression.
+    const ExtraMark = struct {
+        fn keep(_: *anyopaque, stream: *lanes.Stream, _: usize) void {
+            stream.reuse.marks = &.{16};
+        }
+    };
+    target.prefill_hook = ExtraMark.keep;
+    target.prefill_hook_ctx = &snaps;
     try e.submit(2, &r2, .{ .ctx = &b2, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b2.wait());
     try std.testing.expectEqual(@as(?u32, 8), b2.cached);

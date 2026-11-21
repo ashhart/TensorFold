@@ -9,9 +9,9 @@ const Error = collective.Error;
 
 pub const max_ranks = 8;
 
-const Call = enum(u8) { none, all_reduce, all_gather, all_gather_v, exchange, barrier };
+pub const Call = enum(u8) { none, all_reduce, all_gather, all_gather_v, exchange, barrier };
 
-const Post = struct { call: Call = .none, send: DevicePtr = 0, recv: DevicePtr = 0, count: usize = 0, t: DType = .u8, op: Op = .sum, peer: u32 = 0, lens: DevicePtr = 0 };
+pub const Post = struct { call: Call = .none, send: DevicePtr = 0, recv: DevicePtr = 0, count: usize = 0, t: DType = .u8, op: Op = .sum, peer: u32 = 0, lens: DevicePtr = 0 };
 
 /// One-way message slot from rank `src` to rank `dst` (send / recv).
 const Slot = struct { buf: std.atomic.Value(DevicePtr) = .init(0), bytes: usize = 0, taken: std.atomic.Value(bool) = .init(false) };
@@ -38,8 +38,20 @@ pub const Group = struct {
         return .{ .group = g, .me = r };
     }
 
+    /// Posts rank `me`'s call, waits for all, and refuses calls that do not match rank 0's.
+    pub fn enter(g: *Group, me: u32, p: Post) Error!void {
+        if (g.aborted.load(.acquire)) return error.Aborted;
+        g.posts[me] = p;
+        try g.meet();
+        const r0 = g.posts[0];
+        if (r0.call != p.call or r0.count != p.count or r0.t != p.t or r0.op != p.op) {
+            g.aborted.store(true, .release);
+            return error.Invalid;
+        }
+    }
+
     /// Sense-reversing barrier over every rank; `error.Aborted` once any rank aborts.
-    fn meet(g: *Group) Error!void {
+    pub fn meet(g: *Group) Error!void {
         const gen = g.generation.load(.acquire);
         if (g.arrived.fetchAdd(1, .acq_rel) + 1 == g.world) {
             g.arrived.store(0, .release);
@@ -56,7 +68,7 @@ pub const Group = struct {
     }
 };
 
-fn now() u64 {
+pub fn now() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
@@ -106,17 +118,8 @@ pub const Rank = struct {
         return self_(ptr).group.world;
     }
 
-    /// Posts this rank's call, waits for all, and refuses calls that do not match rank 0's.
     fn enter(self: *Rank, p: Post) Error!void {
-        const g = self.group;
-        if (g.aborted.load(.acquire)) return error.Aborted;
-        g.posts[self.me] = p;
-        try g.meet();
-        const r0 = g.posts[0];
-        if (r0.call != p.call or r0.count != p.count or r0.t != p.t or r0.op != p.op) {
-            abort(self);
-            return error.Invalid;
-        }
+        return self.group.enter(self.me, p);
     }
 
     fn allReduce(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, count: usize, t: DType, op: Op, _: collective.Stream) Error!void {
@@ -271,6 +274,17 @@ pub const Options = struct {
 };
 
 pub fn runWith(world: u32, opts: Options, ctx: anytype, comptime body: fn (collective.Collective, u32, @TypeOf(ctx)) anyerror!void) !void {
+    return runSpawning(world, opts, ctx, body, Spawn{});
+}
+
+const Spawn = struct {
+    fn start(_: Spawn, comptime f: anytype, args: anytype) !std.Thread {
+        return std.Thread.spawn(.{}, f, args);
+    }
+};
+
+/// `runWith` with each rank's thread from `spawner.start(function, args)`: tests plant a failed spawn with it.
+pub fn runSpawning(world: u32, opts: Options, ctx: anytype, comptime body: fn (collective.Collective, u32, @TypeOf(ctx)) anyerror!void, spawner: anytype) !void {
     var group = Group.init(world);
     group.var_refuse = opts.var_refuse;
     var ranks: [max_ranks]Rank = undefined;
@@ -286,7 +300,12 @@ pub fn runWith(world: u32, opts: Options, ctx: anytype, comptime body: fn (colle
     };
     for (0..world) |i| {
         ranks[i] = group.rank(@intCast(i));
-        threads[i] = try std.Thread.spawn(.{}, Wrap.go, .{ &ranks[i], ctx, &errs[i] });
+        threads[i] = spawner.start(Wrap.go, .{ &ranks[i], ctx, &errs[i] }) catch |err| {
+            // the ranks already running hold this frame's group: stop them and wait before returning
+            group.aborted.store(true, .release);
+            for (threads[0..i]) |t| t.join();
+            return err;
+        };
     }
     for (threads[0..world]) |t| t.join();
     for (errs[0..world]) |e| if (e) |err| return err;

@@ -111,11 +111,14 @@ const Rig = struct {
     fn startWith(r: *Rig, pages: *Pages, check: bool, counted: bool) !void {
         const gpa = std.testing.allocator;
         r.cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        errdefer r.cfg.deinit(gpa);
         r.target = .{ .gpa = gpa, .reserve = pages.reserve() };
+        errdefer r.target.deinit();
         r.clock = .{};
         r.core = lanes.Engine.init(gpa, &r.cfg, r.target.backend(), r.clock.clock());
+        errdefer r.core.deinit();
         r.host = LaneHost.init(gpa, std.testing.io, &r.core, .{ .lanes = 3, .admit = if (check) .{ .ctx = pages, .fits = Pages.fits } else null });
-        if (counted) r.host.countPool(&pages.pool);
+        if (counted) try r.host.countPool(&pages.pool);
         try r.host.start();
     }
 
@@ -238,4 +241,19 @@ test "a counted pool: a request past it with nothing else running fails in words
     try expectEqual(@as(?Reason, .length), b.waitFor(2000));
     rig.stop();
     try expect(pages.pool.idle() and pages.pool.ledger == null);
+}
+
+test "one host counts a pool: a second is refused while the first holds it, and counts it once the first stops" {
+    var pages: Pages = .{ .pool = try kv.Pool.init(std.testing.allocator, 3, 4) };
+    defer pages.deinit();
+    var first: Rig = undefined;
+    try first.startWith(&pages, true, true);
+    var second: Rig = undefined;
+    try std.testing.expectError(error.PoolHasHost, second.startWith(&pages, true, true));
+    try expect(pages.pool.host == @as(*const anyopaque, &first.host));
+    first.stop();
+    try expect(pages.pool.host == null and pages.pool.ledger == null);
+    try second.startWith(&pages, true, true);
+    try expect(pages.pool.host == @as(*const anyopaque, &second.host));
+    second.stop();
 }

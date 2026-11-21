@@ -17,15 +17,19 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("drafter_test.zig");
+    _ = @import("startup_receipt.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");
+    _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
     _ = @import("admission_cli.zig");
+    _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");
     _ = @import("request_admission_http_test.zig");
     _ = @import("vision_markers_test.zig");
@@ -33,18 +37,34 @@ test {
     _ = @import("embedding_service_test.zig");
     _ = @import("readout_service_test.zig");
     _ = @import("http_limits_test.zig");
+    _ = @import("env_defaults_test.zig");
     _ = @import("done_times_test.zig");
+    _ = @import("unread_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
+    _ = @import("request_deadline_test.zig");
+    _ = @import("request_deadline_http_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
+    _ = @import("wait_reason_ledger_test.zig");
     _ = @import("name_priority_http_test.zig");
+    _ = @import("ws_frame.zig");
+    _ = @import("ws_upgrade.zig");
+    _ = @import("ws_cache.zig");
+    _ = @import("responses_ws_read.zig");
+    _ = @import("responses_ws_events.zig");
+    _ = @import("responses_ws_turn.zig");
+    _ = @import("responses_ws_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
     _ = @import("fields.zig");
+    _ = @import("reply_code.zig");
     _ = @import("reply_text.zig");
+    _ = @import("reply_incremental_test.zig");
+    _ = @import("recipient_reply_test.zig");
+    _ = @import("recipient_cut_test.zig");
     _ = @import("tool_parse.zig");
     _ = @import("tool_lfm2.zig");
     _ = @import("tool_lfm2_stream_test.zig");
@@ -55,8 +75,11 @@ test {
     _ = @import("tool_grammar_lfm2.zig");
     _ = @import("tool_grammar_lfm2_test.zig");
     _ = @import("tool_required_test.zig");
+    _ = @import("tool_think_test.zig");
     _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
+    _ = @import("grammar_compile_test.zig");
+    _ = @import("structural_tag.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
     _ = @import("load_metrics.zig");
@@ -64,16 +87,28 @@ test {
     _ = @import("auth.zig");
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
+    _ = @import("cli_profile_test.zig");
+    _ = @import("compact_at_cli_test.zig");
+    _ = @import("toml_flat_test.zig");
+    _ = @import("cli_config_test.zig");
+    _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("models_input_types_test.zig");
+    _ = @import("models_id_test.zig");
     _ = @import("speech.zig");
+    _ = @import("images_generations.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_batch_test.zig"); // uses a socketpair test
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_progress_test.zig"); // the same
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_sequence_progress_test.zig"); // the same
     _ = @import("drama_cfg.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_generations_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_speakers_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_sampling_test.zig");
@@ -92,21 +127,34 @@ test {
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
     _ = @import("log.zig");
+    _ = @import("log_test.zig");
     _ = @import("request_log.zig");
+    _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
+    _ = @import("deferred_tools.zig");
+    _ = @import("deferred_tools_test.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("pdf_measure_test.zig");
+    _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
+    _ = @import("chat_ocr_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("ids.zig");
+    _ = @import("tool_call_ids_test.zig");
+    _ = @import("tool_id_key.zig");
     _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("tool_cut_test.zig");
+    _ = @import("tool_args_close.zig");
+    _ = @import("tool_json_cut.zig");
+    _ = @import("tool_json_cut_routes_test.zig");
     _ = @import("tool_glm_stream_test.zig");
     _ = @import("tool_glm_messages_test.zig");
     _ = @import("tool_dsml_stream_test.zig");
@@ -114,18 +162,33 @@ test {
     _ = @import("tool_dsml_messages_test.zig");
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("logprob_parts_test.zig");
+    _ = @import("limit_pins_test.zig");
+    _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("reasoning_recovered_test.zig");
+    _ = @import("stream_scan_text.zig");
+    _ = @import("stream_scan_bench.zig");
+    _ = @import("stream_memory_wire_test.zig");
+    _ = @import("warm_reasoning_test.zig");
+    _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
+    _ = @import("tool_prose_code_http_test.zig");
     _ = @import("compact.zig");
     _ = @import("compact_test.zig");
+    _ = @import("private_files_test.zig");
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
+    _ = @import("cancel_ids.zig");
+    _ = @import("cancel_route_test.zig");
+    _ = @import("prompt_list_test.zig");
     _ = @import("hf_eos_http_test.zig");
+    _ = @import("token_stream_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
     _ = @import("spark_wire.zig");
     _ = @import("spark_wire_test.zig");
@@ -136,6 +199,7 @@ test {
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
     _ = @import("rerank_test.zig");
+    _ = @import("score_routes_test.zig");
     _ = @import("rerank_ids_test.zig");
     _ = @import("rerank_cut_test.zig");
     _ = @import("rerank_decide_test.zig");
@@ -168,6 +232,7 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
+    _ = @import("slide_write_cause_test.zig");
     _ = @import("slide_forget_many_test.zig");
     _ = @import("slide_supplied.zig");
     _ = @import("slide_questions_test.zig");
@@ -188,6 +253,16 @@ test {
     _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
+    _ = @import("responses_background.zig");
+    _ = @import("responses_background_test.zig");
+    _ = @import("message_starts_test.zig");
+    _ = @import("message_starts_proof_test.zig");
+    _ = @import("message_marks_test.zig");
+    _ = @import("responses_namespace_translate_test.zig");
+    _ = @import("responses_namespace_output_test.zig");
+    _ = @import("responses_store.zig");
+    _ = @import("responses_owner_test.zig");
+    _ = @import("responses_owner_socket_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("cortheon/research.zig");
@@ -220,7 +295,22 @@ test {
 }
 
 test {
+    _ = @import("chat_cli_args.zig");
+    _ = @import("chat_cli_history.zig");
+    _ = @import("chat_cli_reply.zig");
+    _ = @import("chat_cli_turn.zig");
+    // the chat's own serve child and its runs against fakes use POSIX signals and processes, as the benchmark's do
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("chat_cli_child.zig");
+        _ = @import("chat_cli_test.zig");
+    }
+}
+
+test {
     _ = @import("slide_retention_test.zig");
+    _ = @import("slide_shrink_test.zig");
+    _ = @import("slide_correction_test.zig");
+    _ = @import("benchmark_form_factor_test.zig");
 }
 
 test {
@@ -248,10 +338,28 @@ test {
 test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
+    _ = @import("cors_test.zig");
     _ = @import("deepseek_fixture_test.zig");
+    _ = @import("uocr_chat_test.zig");
 }
 
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("voice_cli.zig");
+    _ = @import("drama_voice_store.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
+    _ = @import("grafana_dashboard_test.zig");
+    _ = @import("ocr/types_test.zig");
+    _ = @import("ocr/geometry_test.zig");
+    _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/mistral_test.zig");
+    _ = @import("ocr/mistral_sdk_test.zig");
+    _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/run_pdf_test.zig");
+    _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/prompt_ids_test.zig");
+    _ = @import("ollama_e2e_test.zig");
+    _ = @import("open_connections_route_test.zig");
 }

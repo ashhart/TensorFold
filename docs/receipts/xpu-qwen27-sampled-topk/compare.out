@@ -1,0 +1,20 @@
+streams checked: 54 (mode, streams, depth, kind, stream); requests: 840
+MISMATCH main/branch/passes/waves (distinct token_sha256 != 1): 0
+streams not at 256 tokens: 0 []
+sampled: 52 streams, 32 distinct hashes
+greedy: 2 streams, 2 distinct hashes
+MISMATCH across 1, 4 and 8 streams (same prompt and seed, distinct token_sha256 != 1): 0 of 34 (prompt, seed) pairs
+
+cell (streams, prompt tokens, kind) | per-stream tok/s main / branch = ratio (pairs) | aggregate tok/s main / branch = ratio (pairs)
+1 streams, short code: 153.00 / 158.61 = 1.037 (1.037, 1.037; gap 0.000) | 146.76 / 151.90 = 1.035 (1.035, 1.035; gap 0.000)
+1 streams, short text: 80.20 / 80.56 = 1.005 (1.004, 1.005; gap 0.001) | 78.54 / 78.88 = 1.004 (1.004, 1.005; gap 0.001)
+1 streams, 8192 code: 65.00 / 65.40 = 1.006 (1.005, 1.007; gap 0.001) | 31.94 / 32.01 = 1.002 (1.001, 1.003; gap 0.002)
+1 streams, 8192 text: 60.66 / 60.93 = 1.004 (1.004, 1.005; gap 0.001) | 30.23 / 30.27 = 1.001 (1.000, 1.002; gap 0.002)
+4 streams, short code: 67.64 / 74.88 = 1.107 (1.109, 1.105; gap 0.003) | 219.78 / 245.27 = 1.116 (1.114, 1.118; gap 0.005)
+4 streams, short text: 46.37 / 51.27 = 1.106 (1.103, 1.109; gap 0.006) | 175.25 / 192.56 = 1.099 (1.102, 1.096; gap 0.006)
+4 streams, 8192 code: 22.32 / 23.19 = 1.039 (1.026, 1.053; gap 0.027) | 42.38 / 43.29 = 1.021 (1.020, 1.023; gap 0.003)
+4 streams, 8192 text: 21.73 / 22.77 = 1.048 (1.043, 1.053; gap 0.010) | 41.87 / 42.67 = 1.019 (1.017, 1.021; gap 0.003)
+8 streams, short code: 37.51 / 41.39 = 1.103 (1.126, 1.081; gap 0.045) | 257.12 / 284.62 = 1.107 (1.102, 1.112; gap 0.010)
+8 streams, short text: 31.19 / 34.49 = 1.106 (1.101, 1.110; gap 0.009) | 213.63 / 238.90 = 1.118 (1.134, 1.103; gap 0.031)
+8 streams, 8192 code: 12.11 / 12.62 = 1.042 (1.038, 1.047; gap 0.010) | 45.14 / 45.98 = 1.019 (1.018, 1.019; gap 0.001)
+8 streams, 8192 text: 11.97 / 12.50 = 1.044 (1.079, 1.010; gap 0.068) | 44.05 / 44.85 = 1.018 (1.018, 1.018; gap 0.001)

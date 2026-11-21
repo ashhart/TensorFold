@@ -103,14 +103,14 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        // dda89ef49's bytes: 47afc1620..dda89ef49 reworded comments only, after cf10a6b7d's pinned edit
-        try std.testing.expectEqualStrings("c959eb1f5ac8a57049c09b3aad5d20f26b64f2e47d8b082c47ebbfae90d97a8b", &std.fmt.bytesToHex(hash, .lower));
+        // Hy4-flash's mapped experts and rounded SiLU, both behind defines that are off for every other caller
+        try std.testing.expectEqualStrings("2cf4deb55455fda30efb4fce3043ef5d90052d71f48ce7660960e8b588478aca", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_lane_projection, &hash, .{});
-        // 66155d5ee's bytes (8-bit lane codes and producer sums, Refs #2502, under the metal_lane_q8 contract)
-        try std.testing.expectEqualStrings("159f39224b5bb60fd2ced301496d91662d2958056bd291d13d8a5db5186dd41a", &std.fmt.bytesToHex(hash, .lower));
+        // Packed affine lanes with producer sums, prompt row blocks, inline sums and the 8-bit reg layout.
+        try std.testing.expectEqualStrings("d921d9a938d3c4f1fe5a1c89ddfd135d96845055bee1721080ba82fef7a9f8e3", &std.fmt.bytesToHex(hash, .lower));
     }
 }
 test "released lane parameters and conservative scratch size" {

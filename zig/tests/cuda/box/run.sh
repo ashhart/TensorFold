@@ -1,5 +1,5 @@
 #!/bin/bash
-# One run of the Zig CUDA runtime checks on a CUDA machine: oracle in the PyTorch image, zig build with the image's nvcc, GPU tests. Usage: TF_ZIG_ROOT=<work dir holding src/, toolchain/, cache/, runs/> [TF_ZIG_JOURNAL=<file>] flock <GPU lock> bash -u run.sh RUN_ID
+# Zig CUDA checks (PyTorch oracle, nvcc build, GPU tests). Usage: TF_ZIG_ROOT=<dir> flock <lock> bash -u run.sh RUN_ID
 set -u
 RUN="${1:?run id}"
 TF="${TF_ZIG_ROOT:?set TF_ZIG_ROOT}"

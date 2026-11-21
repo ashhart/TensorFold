@@ -79,17 +79,24 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
-        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+        if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
             if (n < 16 or n > 2048 or n % 16 != 0) {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
             }
         }
+        const timing = core.startup_receipt;
+        timing.target();
+        const validation = timing.span(.model_config);
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
-        const c = try cfg.parse(a, text, null);
+        var problem: cfg.Problem = .{};
+        const c = cfg.parseWhy(a, text, null, &problem) catch |e| {
+            if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
+            return e;
+        };
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
@@ -111,25 +118,35 @@ pub const Model = struct {
             std.log.err("qwen27: {s} (layer {?d}) is {d}-bit group {d}; this chip's projection kernels do not run it ({s})", .{ why.module, why.layer, why.width.bits, why.width.group, @errorName(why.reason) });
             return err;
         };
+        validation.end();
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer m.checkpoint.deinit();
+        const headers = timing.span(.checkpoint_headers);
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+        headers.end();
+        const packing = timing.span(.read_pack);
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
+        packing.end();
+        const pipelines = timing.span(.weight_pipelines);
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
+        pipelines.end();
+        const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
+        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation(), geometry)));
         errdefer m.frame.deinit();
+        allocation.end();
         m.ane = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
@@ -146,7 +163,7 @@ pub const Model = struct {
         m.share_pending = false;
         defer m.checkpoint.closeFiles();
         const c = m.config;
-        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
         const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
@@ -196,10 +213,10 @@ pub const Model = struct {
     }
 };
 
-/// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(c: cfg.Config, generation: u32) u32 {
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
+/// Default frame rows follow attention geometry; a validated environment override keeps its width.
+pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {
+    const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
+    return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
 /// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).

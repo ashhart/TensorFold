@@ -228,7 +228,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.",
   "Rename",
   "Render the plan panel with block progress bars and status glyphs.",
-  "Repeatable community-v1 measurements for cached models on this Mac.",
+  "Repeatable community-v2 measurements for cached models on this Mac.",
   "repeated checks",
   "Replace matching records from the backup",
   "replaces the current instructions",

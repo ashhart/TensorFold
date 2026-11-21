@@ -14,6 +14,9 @@ const tail_bytes = wt.ple_tail_n * wt.wide * 2;
 /// The MTP head's cache: its own layer, whole on every rank.
 const head_heads: Heads = .full;
 
+/// The prompt cache's ladder: tokens between rungs, and the most it keeps under one history mark.
+pub const ladder = .{ .tokens = 8192, .most = 4 };
+
 /// A state's shape for its disk image (cuda_disk.zig, one rank, the whole layer): layer counts and bytes a row.
 pub const shape = .{ .linear = wt.linear_n, .attn = wt.attn_n, .conv = sizes.convBytes(.full), .state = sizes.stateBytes(.full), .kv_row = Heads.full.kvRow(), .index_row = index_row, .ratio = wt.index_ratio, .tail = tail_bytes };
 

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
@@ -120,7 +121,7 @@ pub const Funcs = struct {
 };
 
 fn launch(r: *const Run, f: cuda.Function, grid: cuda.Dim3, threads: u32, a: *cuda.Args) !void {
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
 }
 
 pub const Tower = struct {
@@ -170,7 +171,7 @@ pub const Tower = struct {
                 total += std.mem.alignForward(u64, p.codes, 256) + std.mem.alignForward(u64, p.scales, 256);
             } else total += std.mem.alignForward(u64, (try ck.get(name)).bytes.len, 256);
         };
-        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, try weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
         errdefer t.deinit();
         t.bytes = t.mem.deviceBytes();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
@@ -574,8 +575,7 @@ test "vision quantized projections reject either mismatched axis before a launch
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Fake.launch;
     const f: cuda.Function = .{ .d = &d, .handle = null };
-    var lane: cuda.qmmf.Lane = undefined;
-    lane.clusters = true;
+    var lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = undefined, .f32_fns = undefined, .reduce = undefined, .half = undefined, .clusters = true };
     for (&lane.f32_fns) |*set| for (set) |*function| {
         function.* = f;
     };
@@ -588,8 +588,7 @@ test "vision quantized projections reject either mismatched axis before a launch
 }
 
 test "vision MXFP8 refuses a lane requiring unowned slice partials before upload" {
-    var lane: cuda.qmmf.Lane = undefined;
-    lane.clusters = false;
+    var lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = undefined, .f32_fns = undefined, .reduce = undefined, .half = undefined, .clusters = false };
     const p: Plan = .{ .module = "model.visual.blocks.0.attn.qkv", .format = .mxfp8, .n = 3072, .k = 1024, .codes = 0, .scales = 0 };
     try std.testing.expectError(error.SlicePartialsNotHeld, fits(.{ .lane = &lane }, p));
     lane.clusters = true;

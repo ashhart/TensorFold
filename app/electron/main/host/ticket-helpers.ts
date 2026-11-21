@@ -62,6 +62,7 @@ export function mkTicket(projectId: string, p: Partial<Ticket>): Ticket {
   return {
     id: randomUUID(), projectId, title: p.title || 'Untitled', body: p.body || '',
     roomId: p.roomId ?? null,
+    botId: p.botId ?? null,
     type: p.type || 'task', status: p.status || 'todo', priority: p.priority || 'medium', effort: p.effort || 'medium',
     tags: normalizeStringList(p.tags, []), ...execution,
     dependsOn: normalizeTicketDependencyIds(p.dependsOn),

@@ -120,7 +120,7 @@ struct CombineArgs { int hidden, topk, shared_in_out, pad; };
   Y[size_t(g.y) * wk.x + g.x] = X[size_t(ORDER[g.y] / wk.y) * wk.x + g.x];
 }
 
-// act = silu(gate) * up in fp32, rounded once, as the dense block's q27_mlp.
+// act = silu(gate) * up in fp32, rounded once.
 [[kernel]] void q27_expert_glu(const device bfloat* G [[buffer(0)]], const device bfloat* U [[buffer(1)]],
                                device bfloat* OUT [[buffer(2)]], constant GluArgs& a [[buffer(3)]],
                                uint2 g [[thread_position_in_grid]]) {

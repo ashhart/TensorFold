@@ -6,6 +6,37 @@ const hip = @import("hip");
 /// A message's first word: rank 0 decides every match, eviction, page and slot, and a rank only applies it.
 pub const Op = enum(u32) { stop, prefill, fill, verify, keep, release, pages, snap, copy };
 
+/// A message's step once it holds the words that step reads; the family checks its own prefill, verify and keep.
+pub fn step(m: []const u32) error{LinkFailed}!Op {
+    if (m.len == 0) return error.LinkFailed;
+    const op = std.enums.fromInt(Op, m[0]) orelse return error.LinkFailed;
+    const need: usize = switch (op) {
+        .stop, .prefill, .verify, .keep => 1,
+        .release => 2,
+        .fill, .snap, .copy => 3,
+        .pages => 4,
+    };
+    if (m.len < need or (op == .pages and m[3] > m.len - 4)) return error.LinkFailed;
+    return op;
+}
+
+/// Rank 0's table from page `first` on: no gap past this rank's `held` pages, inside its `room`, ids in its pool.
+pub fn pagesFit(first: usize, ids: []const u32, held: usize, room: usize, pool: usize) bool {
+    if (first > held or ids.len > room or first > room - ids.len) return false;
+    for (ids) |id| if (id >= pool) return false;
+    return true;
+}
+
+/// A page rank 0 names, against this rank's pool of `pool` pages (every rank's pool is sized from the same options).
+pub fn pageFits(page: u32, pool: usize) bool {
+    return page < pool;
+}
+
+/// A snapshot slot rank 0 names: one this rank holds, or the next one (rank 0 claims the lowest free slot).
+pub fn slotFits(slot: u32, slots: usize) bool {
+    return slot <= slots;
+}
+
 /// The prefill message's snapshot slot when the pass starts from nothing.
 pub const no_snapshot: u32 = std.math.maxInt(u32);
 
@@ -150,8 +181,7 @@ pub fn Follower(comptime F: type) type {
             while (true) {
                 try link.recv(w.gpa, &msg);
                 const m = msg.items;
-                if (m.len == 0) return error.LinkFailed;
-                switch (@as(Op, @fromBackingInt(m[0]))) {
+                switch (try step(m)) {
                     .stop => return,
                     // prefill, verify and keep are the family's own words: it reads the message whole
                     .prefill => try F.prefill(w.f, w, m),
@@ -235,4 +265,45 @@ test "a sender sends nothing once its family stopped the group" {
     try std.testing.expectError(error.GroupStopped, s.fill(1, 16));
     try std.testing.expectError(error.GroupStopped, s.stop());
     try std.testing.expectEqual(@as(usize, 1), r.sent.items.len);
+}
+
+test "security: a step from the link is refused unless its message holds the words it reads" {
+    const t = std.testing;
+    try t.expectError(error.LinkFailed, step(&.{}));
+    try t.expectError(error.LinkFailed, step(&.{9}));
+    try t.expectError(error.LinkFailed, step(&.{0xffff_ffff}));
+    try t.expectEqual(Op.stop, try step(&.{0}));
+    for ([_]Op{ .fill, .snap, .copy }) |op| {
+        try t.expectError(error.LinkFailed, step(&.{ @backingInt(op), 1 }));
+        try t.expectEqual(op, try step(&.{ @backingInt(op), 1, 2 }));
+    }
+    try t.expectError(error.LinkFailed, step(&.{@backingInt(Op.release)}));
+    try t.expectEqual(Op.release, try step(&.{ @backingInt(Op.release), 1 }));
+    // pages: id, first, count, then that many ids
+    const pages = @backingInt(Op.pages);
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0 }));
+    try t.expectEqual(Op.pages, try step(&.{ pages, 1, 0, 0 }));
+    try t.expectEqual(Op.pages, try step(&.{ pages, 1, 0, 2, 7, 8 }));
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 3, 7, 8 }));
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 0xffff_ffff, 7 }));
+}
+
+test "security: rank 0's page and slot indices are refused past this rank's own pool, table and slots" {
+    const t = std.testing;
+    // a table of 4 pages held, room for 6, a pool of 100: the largest legal sends pass
+    try t.expect(pagesFit(4, &.{ 98, 99 }, 4, 6, 100));
+    try t.expect(pagesFit(0, &.{}, 0, 0, 100));
+    try t.expect(pagesFit(3, &.{0}, 4, 6, 100));
+    try t.expect(!pagesFit(5, &.{0}, 4, 6, 100)); // a gap after the held pages
+    try t.expect(!pagesFit(4, &.{ 1, 2, 3 }, 4, 6, 100)); // past the stream's room
+    try t.expect(!pagesFit(0xffff_ffff, &.{1}, 4, 6, 100));
+    try t.expect(!pagesFit(0, &.{ 1, 100 }, 4, 6, 100)); // a page past the pool
+    try t.expect(!pagesFit(0, &.{0xffff_ffff}, 4, 6, 100));
+    try t.expect(pageFits(99, 100));
+    try t.expect(!pageFits(100, 100));
+    try t.expect(!pageFits(0xffff_ffff, 100));
+    try t.expect(slotFits(3, 3));
+    try t.expect(slotFits(0, 0));
+    try t.expect(!slotFits(4, 3));
+    try t.expect(!slotFits(0xffff_ffff, 3));
 }

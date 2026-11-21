@@ -40,6 +40,26 @@ async function main() {
     assert.equal(failed.state, 'failed')
     assert.match(failed.message ?? '', /file tree is unreachable/)
 
+    const diagnostic = 'error: checkpoint café is incomplete'
+    const script = `
+      const fs = require('node:fs')
+      const bytes = Buffer.from(${JSON.stringify(diagnostic)})
+      const split = bytes.indexOf(Buffer.from('é')) + 1
+      fs.writeSync(2, bytes.subarray(0, split))
+      setTimeout(() => fs.writeSync(1, 'checking checkpoint\\r\\n'), 100)
+      setTimeout(() => { fs.writeSync(2, bytes.subarray(split)); process.exitCode = 1 }, 200)
+    `
+    const visible = new Set<string>()
+    const fragmented = startPull({
+      binary: { command: process.execPath, args: ['-e', script, '--'] }, env: h.env, hub: h.hub,
+      steps: [{ repo: 'Org/Fragmented', revision: null }], totalBytes: null,
+      onUpdate: ({ lastLine }) => { if (lastLine) visible.add(lastLine) },
+    })
+    const fragmentFailure = await fragmented.done
+    assert.equal(fragmentFailure.state, 'failed')
+    assert.equal(fragmentFailure.message, diagnostic)
+    assert.deepEqual(visible, new Set(['checking checkpoint', diagnostic]))
+
     // Cancel kills the whole process group, not just the direct child.
     const slow = startPull({ binary: h.binary, env: { ...h.env, FAKE_PULL_DELAY_MS: '200' }, hub: h.hub, steps: [{ repo: 'Org/Slow', revision: null }], totalBytes: total, pollMs: 40, onUpdate: () => {} })
     await waitFor(async () => (await fs.readdir(path.join(h.hub, 'models--Org--Slow', 'blobs')).catch(() => [])).length > 0, 10_000, 'slow pull to start')

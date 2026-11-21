@@ -107,6 +107,8 @@ pub const Config = struct {
         for (taps.array.items, 0..) |t, i| {
             if (t != .integer or t.integer < 0 or t.integer >= target.layers) return error.BadDraftConfig;
             c.taps[i] = @intCast(t.integer);
+            // one layer twice would tap one residual into two ring slots
+            if (std.mem.indexOfScalar(u32, c.taps[0..i], c.taps[i]) != null) return error.BadDraftConfig;
         }
         c.n_taps = taps.array.items.len;
         // what the kernels fix: the head width, two-tap convolutions, a block of 8, the selector's top-k within a row

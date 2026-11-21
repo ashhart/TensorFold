@@ -7,14 +7,13 @@ const be = lanes.backend;
 
 /// TF_FLASHNEXT_BATCH_HEADS=0 drafts a shared round's streams one at a time (the batched head gives the same drafts).
 pub fn batchHeads() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_BATCH_HEADS") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_BATCH_HEADS", true) catch true;
 }
 
 /// TF_FLASHNEXT_SAMPLED_HEADS=0 keeps sampled streams (temperature above zero) out of a shared round's batched head.
 pub fn sampledHeads() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_SAMPLED_HEADS") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SAMPLED_HEADS", true) catch true;
 }
 
 /// TF_FLASHNEXT_DEPTH_LOG=1: every 200 draft calls, the drafts a stream got by round width (streams drafting together).
@@ -40,14 +39,12 @@ pub fn stopFor(self: anytype, r: Rule, sm: ?mtp.Sampling) f64 {
 /// TF_FLASHNEXT_GREEDY_WIDE: the round width (streams drafting together) up to which greedy chains keep their depth.
 pub const default_wide: usize = 4;
 fn wideStreams() usize {
-    const v = std.c.getenv("TF_FLASHNEXT_GREEDY_WIDE") orelse return default_wide;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default_wide;
+    return @import("sys").environment.read(usize, "TF_FLASHNEXT_GREEDY_WIDE", default_wide) catch default_wide;
 }
 
 /// TF_FLASHNEXT_SHARED_DRAFTS=0: greedy chains keep the engine's stop rule beside other streams too.
 fn sharedRule() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_SHARED_DRAFTS") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARED_DRAFTS", true) catch true;
 }
 
 /// More than one stream in `lanes` (keyed by stream) is neither finished nor paused: decoding, filling or resuming.

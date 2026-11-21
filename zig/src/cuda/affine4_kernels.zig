@@ -368,7 +368,7 @@ pub const Affine4Kernels = struct {
         try launch_.launch(f, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = threads }, .shared = smem }, s, &g);
     }
 
-    /// One GB10 launch over 2-4 affine-4 prompt projections, each retaining prompt()'s exact tile body.
+    /// One GB10 launch over 2-4 affine-4 prompt projections, with the same copies and math as prefill_kernel.
     pub fn promptMany(a: *const Affine4Kernels, s: Stream, x: u64, outs: []const Out, rows: usize) !void {
         if (!a.pdl or a.half_prompt) return error.UnsupportedPromptMany;
         if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;

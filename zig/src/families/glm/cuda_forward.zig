@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
-const kda = @import("cuda_kda.zig");
+const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
@@ -26,6 +26,7 @@ const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
+const pieces_mod = @import("cuda_forward_pieces.zig");
 
 pub const prefill_rows = state.prefill_rows;
 pub const solo_rows = state.solo_rows;
@@ -44,6 +45,8 @@ pub const Modules = struct {
     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
+    dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
+    dscore: ?index_mod.Kernels, // TF_GLM_DSCORES (default on): a decode window's index scores on glm_index_scores
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
@@ -52,8 +55,8 @@ pub const Modules = struct {
     quant: quant.Kernels,
     q4: q4.Kernels,
 
-    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
+    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;
@@ -63,10 +66,12 @@ pub const Modules = struct {
             n += 1;
         }
         m.lane = try cuda.qmmf.Lane.load(d, @intCast(try ctx.attribute(.compute_capability_major)));
+        m.lane.pdl = @import("cuda_pdl.zig").on();
         errdefer m.lane.unload();
         m.prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer m.prompt.unload();
         m.kda = try kda.Kernels.load(m.mods[0]);
+        m.kda.pdl = @import("cuda_pdl.zig").on();
         m.experts = try experts.Kernels.load(d, m.mods[2], @intCast(try ctx.attribute(.multiprocessor_count)), block32);
         errdefer m.experts.unload();
         m.copy_rows = try m.mods[1].function("tf_glm_copy_rows");
@@ -82,9 +87,19 @@ pub const Modules = struct {
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
         if (mode != .off) m.index = index_mod.Kernels.load(d, k.glm_index, mode) catch |err| blk: {
-            std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
+            std.log.warn("glm: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores, as with TF_GLM_INDEX_CUDA=0", .{err});
             break :blk null;
         };
+        m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
+        if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
+        m.dscore = null;
+        errdefer if (m.dscore) |*x| x.unload();
+        if (try @import("sys").environment.read(bool, "TF_GLM_DSCORES", true)) {
+            m.dscore = index_mod.Kernels.load(d, k.glm_index, .scores) catch |err| blk: {
+                std.log.warn("TF_GLM_DSCORES: glm_index is not loaded ({t}); decode windows keep tf_glm_scores", .{err});
+                break :blk null;
+            };
+        } else std.log.warn("TF_GLM_DSCORES=0: a decode window's index scores keep tf_glm_scores", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
@@ -101,6 +116,7 @@ pub const Modules = struct {
 
     pub fn deinit(m: *Modules) void {
         if (m.index) |*x| x.unload();
+        if (m.dscore) |*x| x.unload();
         m.exl3.unload();
         for (&m.mods) |*x| x.unload();
         m.lane.unload();
@@ -110,72 +126,16 @@ pub const Modules = struct {
     }
 };
 
-/// overlap.ROW_STEP and PIECES_MAX: piece boundaries on the BF16 prompt matmul's 128-row blocks, at most 16 pieces.
-pub const row_step = 128;
-pub const max_pieces = 16;
-
-/// overlap.ranges: [lo, hi) row pieces of a chunk of `rows`, about equal on row_step boundaries (fewer when short).
-pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
-    const per = (rows + pieces - 1) / pieces;
-    const size = (per + row_step - 1) / row_step * row_step;
-    var n: usize = 0;
-    var lo: usize = 0;
-    while (lo < rows) : (lo += size) {
-        out[n] = .{ lo, @min(rows, lo + size) };
-        n += 1;
-    }
-    return n;
-}
-
-/// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
-pub const Pieces = struct {
-    count: usize = 4,
-    side: cuda.Stream,
-    filled: [max_pieces]cuda.Event,
-    gathered: [max_pieces]cuda.Event,
-    glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
-    shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
-    owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
-
-    /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
-    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
-        if (count == 0 or count > max_pieces) return error.BadPieces;
-        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
-    }
-
-    /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
-    pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
-        return make(d, of.count, of.side, false);
-    }
-
-    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
-        var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.* = try cuda.Event.init(d, false);
-            b.* = try cuda.Event.init(d, false);
-            g.* = try cuda.Event.init(d, false);
-            s.* = try cuda.Event.init(d, false);
-        }
-        return p;
-    }
-
-    pub fn deinit(p: *Pieces) void {
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.deinit();
-            b.deinit();
-            g.deinit();
-            s.deinit();
-        }
-        if (p.owns_side) p.side.deinit();
-        p.* = undefined;
-    }
-};
+pub const row_step = pieces_mod.row_step;
+pub const max_pieces = pieces_mod.max_pieces;
+pub const ranges = pieces_mod.ranges;
+pub const Pieces = pieces_mod.Pieces;
 
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    // group: the main stream's all-gathers through it (RoCE writes for small ones on two ranks); side streams stay raw
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
+    // collective: the boundary's gathers through it (the group's RoCE route once installed); side streams stay raw
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -215,28 +175,12 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null };
     }
 
-    /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
-    fn gather(f: *const Forward, rows: usize) !void {
-        const stamp = prof_mod.span(f.prof, f.stream, .all_gather);
-        defer stamp.end();
-        const c = &f.ranks[0].w.config;
-        const bytes = rows * c.hidden * 4;
-        switch (f.exchange) {
-            .local => for (f.ranks) |to| for (f.ranks) |from| {
-                if (to.w.share.rank == from.w.share.rank) continue;
-                const off = from.w.share.rank * bytes;
-                try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(to.b.gathered + off, from.b.gathered + off, bytes, f.stream.handle), "cuMemcpyDtoDAsync");
-            },
-            .nccl => |n| {
-                const r = f.ranks[0];
-                if (n.group) |g| return g.allGather(f.stream, r.b.gathered + r.w.share.rank * bytes, r.b.gathered, bytes);
-                const count = rows * c.hidden;
-                try n.lib.check(n.lib.api.ncclAllGather(r.b.gathered + r.w.share.rank * bytes, r.b.gathered, count, .f32, n.comm, f.stream.handle), "ncclAllGather");
-            },
-        }
+    /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
+    pub fn resolve(f: *const Forward, rows: usize) !void {
+        return @import("cuda_boundary.zig").resolve(f, rows);
     }
 
     fn slot(r: Rank, rows: usize) u64 {
@@ -467,7 +411,7 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
             if (pf) |p| try p.fork(f.stream, j, .f);
-            try f.gather(R);
+            try f.resolve(R);
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
             for (f.ranks) |r| {
@@ -478,7 +422,7 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             if (pf) |p| try p.fork(f.stream, j, .n);
-            try f.gather(R);
+            try f.resolve(R);
             for (f.ranks) |r| try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
@@ -550,7 +494,7 @@ pub const Forward = struct {
             }
         }
         if (!propose) return;
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
@@ -558,7 +502,7 @@ pub const Forward = struct {
             try glue.rmsnormBy(f.set(), f.stream, b.mx + tail, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, rows, D);
             try f.ffn(r, m.layer, rows, slot(r, rows));
         }
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
@@ -578,16 +522,17 @@ pub const Forward = struct {
                 for (st.cur) |x| if (x != cur) return error.KdaLayersOutOfStep;
                 if (keep < st.pending) {
                     const h = st.heads;
-                    var a: cuda.Args = .{};
-                    a.add(@as(c_int, @intCast(h)));
-                    a.add(st.recAt(cur, 0));
-                    a.add(@as(usize, st.rec_layer / 4));
-                    for ([_]u64{ st.save_k, st.save_v, st.save_g, st.save_b }) |x| a.add(x);
-                    a.add(@as(usize, window_rows * h * kda.dk));
-                    a.add(@as(usize, window_rows * h));
-                    a.add(@as(c_int, @intCast(keep)));
-                    a.add(st.recAt(1 - cur, 0));
-                    try cuda.launch.launch(f.m.kda.replay_layers, .{ .grid = .{ .x = @intCast(st.kda_layers * h) }, .block = .{ .x = 1024 } }, f.stream, &a);
+                    try kda.replayLayers(&f.m.kda, f.stream, .{
+                        .state_in = st.recAt(cur, 0),
+                        .state_stride = st.rec_layer / 4,
+                        .k = st.save_k,
+                        .v = st.save_v,
+                        .g = st.save_g,
+                        .b = st.save_b,
+                        .kv_stride = window_rows * h * kda.dk,
+                        .b_stride = window_rows * h,
+                        .state_out = st.recAt(1 - cur, 0),
+                    }, keep, h, st.kda_layers);
                 }
                 for (st.cur) |*x| x.* = 1 - x.*;
                 if (st.kda_layers > 0) try glue.convShift(f.set(), f.stream, st.conv, st.proj, keep, st.proj_layer, st.proj_row, st.kda_layers, st.conv_c);

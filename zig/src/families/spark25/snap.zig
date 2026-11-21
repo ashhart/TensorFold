@@ -19,11 +19,11 @@ pub const Saved = struct {
 };
 
 /// Positions a sliding layer keeps at `at`: the keys the next row's window reaches back to.
-fn tail(at: usize) usize {
+pub fn tail(at: usize) usize {
     return @min(at, cfg.window - 1);
 }
 
-fn rowBytes(m: *const fwd.Model) usize {
+pub fn rowBytes(m: *const fwd.Model) usize {
     return m.geo.kvWidth() * 2;
 }
 
@@ -35,7 +35,7 @@ pub fn bytes(m: *const fwd.Model, at: usize, from: usize) u64 {
 }
 
 /// Each layer's cache, K then V, positions [first, at) of `slot` (full: from `from`), one copy a run, in order.
-fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+pub fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     if (from > 0 and (!m.paged or from % fwd.page_tokens != 0 or from > at)) return error.KeptPagesUnpaged;
     var off: usize = 0;
     const rb = rowBytes(m);
@@ -110,6 +110,14 @@ fn fullLayer(m: *const fwd.Model, j: usize) usize {
 /// Pages a state at `at` (full layers from `from`) takes when its copied rows are kept in pool pages.
 pub fn blobPages(m: *const fwd.Model, at: usize, from: usize) usize {
     return Blob.pagesFor(bytes(m, at, from), chunk(m), regions(m));
+}
+
+/// A state of `at` positions in a buffer of its own: the disk store fills it (cuda_disk.zig).
+pub fn blank(gpa: std.mem.Allocator, m: *const fwd.Model, at: u32) !*Saved {
+    const k = try gpa.create(Saved);
+    errdefer gpa.destroy(k);
+    k.* = .{ .at = at, .buf = try cuda.DeviceBuffer.alloc(m.d, @max(1, bytes(m, at, 0))) };
+    return k;
 }
 
 /// Copy `slot`'s state at `at` (full layers from `from`) to new storage or `blob`'s pages, queued after its chunk.

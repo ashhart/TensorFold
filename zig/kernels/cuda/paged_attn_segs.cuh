@@ -2,7 +2,7 @@
 
 #define SEG_E (SEG_WIDE ? 8 : 4)
 #ifndef SEG_VLANE
-#define SEG_VLANE 0  // 1 in contract_controls.cu only: the narrow form reads its values from the neighbouring lane's dims
+#define SEG_VLANE 0  // 1 in the planted controls only: values from the neighbouring lane's dims
 #endif
 
 extern "C" __global__ void __launch_bounds__(256) SEG_CHUNK(const AttnSegs sg, const __nv_bfloat16* __restrict__ QKV,
@@ -79,7 +79,7 @@ extern "C" __global__ void __launch_bounds__(256) SEG_CHUNK(const AttnSegs sg, c
             for (int j = 0; j < TILE; ++j) {
                 const float p = ps[g][j];
 #if SEG_WIDE
-                const uint4 v = *reinterpret_cast<const uint4*>(&vw[j][4 * jj]);
+                const uint4 v = *reinterpret_cast<const uint4*>(&vw[j][4 * (jj ^ SEG_VLANE)]);
                 const uint32_t vv[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
                 for (int e = 0; e < 4; ++e) {

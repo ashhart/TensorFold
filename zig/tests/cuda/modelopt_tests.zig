@@ -354,11 +354,11 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
         const up_in: cuda.experts.Rows = .{ .x = dx.ptr, .stride = dims, .slots = slots };
         const down_in: cuda.experts.Rows = .{ .x = act.ptr, .stride = width };
         if (arm == 0) {
-            try g.decode(s, .up, up_in, l, plan, act.ptr, items, -1);
-            try g.decode(s, .down_f32, down_in, l, plan, y.ptr, items, -1);
+            try g.decode(s, .up, up_in, l, plan, act.ptr, items, np, tile, -1);
+            try g.decode(s, .down_f32, down_in, l, plan, y.ptr, items, np, tile, -1);
         } else {
-            try g.prompt(s, .up, up_in, l, plan, act.ptr, items, -1);
-            try g.prompt(s, .down_bf16, down_in, l, plan, y.ptr, items, -1);
+            try g.prompt(s, .up, up_in, l, plan, act.ptr, items, np, tile, -1);
+            try g.prompt(s, .down_bf16, down_in, l, plan, y.ptr, items, np, tile, -1);
         }
         try s.synchronize();
         outs[arm] = .{ try check.download(gpu, act), try check.download(gpu, y) };

@@ -336,6 +336,35 @@ test "lanes write, read back and check chunks through bounded staging" {
     try std.testing.expectError(error.ChecksumMismatch, rop.wait());
 }
 
+// O_DIRECT: the retry after a short read is off a 4 KiB boundary (:284); a kernel refusing it would say ReadFailed
+test "a span read past a restore file shortened under it stops with ShortRead, off or on a 4 KiB boundary" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try gpa.alloc(u8, 3 * block);
+    defer gpa.free(data);
+    for (data, 0..) |*b, i| b.* = @truncate(i *% 13);
+    const buf = try gpa.alignedAlloc(u8, .fromByteUnits(block), 2 * block);
+    defer gpa.free(buf);
+    for ([_]u64{ block + 1000, 2 * block }) |cut| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "cut.tfs", .data = data });
+        // opened as Disk.openFile opens a restore file: O_DIRECT where the file system takes it
+        var rc = linux.openat(tmp.dir.handle, "cut.tfs", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECT = true }, 0);
+        if (linux.errno(rc) != .SUCCESS) rc = linux.openat(tmp.dir.handle, "cut.tfs", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        const fd: linux.fd_t = @intCast(rc);
+        defer _ = linux.close(fd);
+        try preadAll(fd, buf[0..block], 0);
+        try std.testing.expectEqualSlices(u8, data[0..block], buf[0..block]);
+        const f = try tmp.dir.openFile(io, "cut.tfs", .{ .mode = .read_write });
+        try f.setLength(io, cut);
+        f.close(io);
+        try std.testing.expectError(error.ShortRead, preadAll(fd, buf[0 .. 2 * block], block));
+    }
+}
+
 test "Ownership rollback: staging lazy allocation failure leaves the sole slot available" {
     var f = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var s = try Staging.init(f.allocator(), std.testing.io, 1, block);

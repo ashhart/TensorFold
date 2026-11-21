@@ -67,14 +67,13 @@ const Stub = struct {
 };
 
 // The compiler boundary records the kind it is asked for; no xgrammar library or GPU is loaded.
-const Compile = struct {
+pub const Compile = struct {
     kind: c_int = -1,
 
-    fn compiler(c: *Compile) api.grammar.Compiler {
+    pub fn compiler(c: *Compile) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;
-        out.mutex = .init;
         out.f.compile = compile;
         out.f.free = free;
         out.f.close = free;
@@ -336,7 +335,7 @@ test "structure field: the Responses translation hands the engine text.format" {
     const r = try responses_translate.translate(&cx, body, History{});
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = g };
     var wire: Wire = .{};
-    openai.runNamed(srv, g, wire.out(), .{ .conn = &conn }, true, r.chat, r.format, true);
+    openai.runNamed(srv, g, wire.out(), .{ .conn = &conn }, true, r.chat, r.format, true, false);
     try std.testing.expectEqual(@as(u16, 200), wire.status);
     try std.testing.expectEqualStrings("text.format", rec.field());
     try std.testing.expectEqualStrings("json", rec.kind);

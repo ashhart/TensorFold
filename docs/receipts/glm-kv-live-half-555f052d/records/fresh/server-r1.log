@@ -1,0 +1,20 @@
+rank 1 launch-pr.sh start 18:46:48 binary=$WORK/bin-pr2/tensorfold-native live_half=unset
+rank 1 memlock soft=unlimited hard=unlimited
+info: rank 1: liveness line to rank 0 connected after 21 tries
+info: glm kv selection: pool pages; TF_KV_PAGES=auto (default); rank 1 of 2; cache bf16
+info: rank 1 startup: entering NCCL init
+info: rank 1: NCCL id 6aad89ef taken
+info: rank 1 startup: entering NCCL init (2 ranks, id 6aad89ef, NCCL 2.30.7, CUDA device 0 000F:01:00.0)
+info: rank 1 startup: NCCL init done in 3008 ms
+info: p2p: rank 1 of 2: GPU 0 NVIDIA GB10 (0000000F:01:00.0); driver 580.159.03, CUDA driver API 13.0, NCCL 2.30.7
+info: p2p: peer access: TensorFold enables none itself (no cuCtxEnablePeerAccess); NCCL sets up its own peers
+info: p2p: NCCL transport not captured: NCCL_DEBUG, NCCL_DEBUG_SUBSYS or NCCL_DEBUG_FILE is set, so NCCL logs as the user asked
+info: rank 1 startup: entering peer warm-up
+info: rank 1 startup: entering weights
+info: checkpoint digest: 0.0 GiB read in 0.1 s, 120/120 cached files
+info: weights: 16 readers read 156.4 GiB ahead of the loader
+info: TF_GLM_L2PF: 123 rows, 1066 MiB a decode window, 2 CTAs a site, the gathers' sites at 150 GB/s (0: unpaced)
+info: RoCE all-gather: 2 HCA(s), shards up to 512 KiB by RDMA writes
+info: rank 1 startup: ready to follow rank 0
+info: rank 1: rank 0 ended; leaving
+Terminated

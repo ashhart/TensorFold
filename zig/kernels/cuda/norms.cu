@@ -48,7 +48,7 @@ __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     if (threadIdx.x < 32) {
         float s = warps[threadIdx.x];
         for (int m = 16; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-        if (threadIdx.x == 0) inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+        if (threadIdx.x == 0) inv = tf_common::rms_scale(s, width, eps);
     }
     __syncthreads();
     const float r = inv;
@@ -435,7 +435,7 @@ __device__ __forceinline__ void gated_rms(const __nv_bfloat16* __restrict__ y, l
     for (int i = 0; i < 8; ++i) part = __fmaf_rn(yv[i], yv[i], part);
 #pragma unroll
     for (int m = L / 2; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps)));
+    const float inv = tf_common::rms_scale(part, DV, eps);
     float o[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {

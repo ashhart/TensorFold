@@ -1,6 +1,9 @@
 //! Source and lane regressions with a recording Metal boundary, no shader compiler or GPU work.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const rope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/rope_refusal_test.zig"), .target = b.graph.host }) }));
+    b.step("test-flashnext-rope-host", "The Metal/HIP config reader refuses scaled RoPE and keeps plain configs' rotary").dependOn(&rope.step);
+    all.dependOn(&rope.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/load_memory.zig"), .target = b.graph.host });
     b.step("test-flashnext-memory-host", "Flash Next allocation floor and working-set refusal without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });
@@ -18,6 +21,11 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const schedule_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const schedule = b.createModule(.{ .root_source_file = b.path("zig/flashnext_schedule_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = schedule_metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
     if (b.graph.host.result.os.tag == .macos) schedule.linkSystemLibrary("objc", .{});
+    const cancel_tf = b.createModule(.{ .root_source_file = b.addWriteFiles().add("flashnext-cancel-tf.zig", "pub const lanes = @import(\"lanes\");\n"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const cancelled = b.createModule(.{ .root_source_file = b.path("zig/src/native/flashnext_cancel.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = cancel_tf }} });
+    const cancel_run = b.addRunArtifact(b.addTest(.{ .root_module = cancelled }));
+    b.step("test-flashnext-cancel-host", "Single-reply cancellation retains only an actual landed prompt state").dependOn(&cancel_run.step);
+    all.dependOn(&cancel_run.step);
     const schedule_run = b.addRunArtifact(b.addTest(.{ .root_module = schedule, .filters = &.{ "flashnext prefill:", "fill aging:" } }));
     b.step("test-flashnext-prefill-pairs-host", "Prompt head lookahead and segment coverage without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = schedule, .filters = &.{"flashnext prefill: prompt head pairs"} })).step);
     const schedule_step = b.step("test-flashnext-scheduling-host", "Actual Flash Next prompt steps and shared-host fairness without devices");

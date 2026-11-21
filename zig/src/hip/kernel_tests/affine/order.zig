@@ -1,4 +1,4 @@
-//! The matrix tile's banded block order keeps each tile's bits: its bytes equal the dot2 GEMM tile's on served shapes.
+//! The matrix tiles' block order and staging rows keep each tile's bits: their bytes equal the dot2 GEMM tile's.
 
 const std = @import("std");
 const base = @import("../rig.zig");
@@ -57,7 +57,7 @@ fn digest(p: *const Product, e: *const Entry, out: Buffer) !u64 {
     return prod.digestOf(out, p.outBytes(false));
 }
 
-test "the matrix tile's banded order writes the dot2 GEMM tile's bytes on the 27B's prompt shapes and their edges" {
+test "the matrix tiles' banded order, padded or skewed, writes the dot2 GEMM tile's bytes on the 27B's prompt shapes and their edges" {
     const b = try base.Rig.open(1 << 20);
     defer b.close();
     var rig = Rig.open(b);
@@ -73,5 +73,11 @@ test "the matrix tile's banded order writes the dot2 GEMM tile's bytes on the 27
         const got = try digest(&p, matrix, out);
         std.debug.print("ORDER {s} m{d} n{d} k{d}: {x:0>16} {x:0>16}\n", .{ c.name, c.rows, c.n, c.k, got, want });
         try base.expect(got == want, "order {s}: the matrix tile writes other bytes than the dot2 tile", .{c.name});
+        // the skewed-row tile, where the table lists it and it takes the shape
+        if (find(&p, "skew")) |skew| {
+            const s = try digest(&p, skew, out);
+            std.debug.print("ORDER {s} skew m{d} n{d} k{d}: {x:0>16} {x:0>16}\n", .{ c.name, c.rows, c.n, c.k, s, want });
+            try base.expect(s == want, "order {s}: the skewed matrix tile writes other bytes than the dot2 tile", .{c.name});
+        }
     }
 }

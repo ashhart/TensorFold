@@ -68,12 +68,17 @@ fn coordinates(comptime T: type, gated: bool, rounded: bool) !void {
     var errors: ref.Error = .{};
     const values = [_][]f64{ p.q, p.k, p.v, p.gate };
     const grads = [_][]T{ gradient.dq, gradient.dk, gradient.dv, dg };
+    const names = [_][]const u8{ "q", "k", "v", "gate" };
     const count: usize = if (gated) 4 else 3;
-    for (values[0..count], grads[0..count]) |input, derivative| for (input, derivative, 0..) |_, actual, i| {
-        for ([_]f64{ 0x1p-12, 0x1p-15, 0x1p-18 }) |step|
-            try errors.check(T, try p.coordinate(input, i, step, gated), actual);
+    for (values[0..count], grads[0..count], 0..) |input, derivative, which| for (input, derivative, 0..) |_, actual, i| {
+        for ([_]f64{ 0x1p-12, 0x1p-15, 0x1p-18 }) |step| {
+            const exact = try p.coordinate(input, i, step, gated);
+            errors.check(T, exact, actual) catch |e| {
+                std.debug.print("QSA_BACKWARD_COORD {s} gated={} rounded={} {s}[{d}] step={e:.1}: expected {e:.8}, got {e:.8}\n", .{ @typeName(T), gated, rounded, names[which], i, step, exact, @as(f64, actual) });
+                return e;
+            };
+        }
     };
-    std.debug.print("QSA_BACKWARD_COORD {s} gated={} rounded={} probes={d} absolute={e:.8} relative={e:.8}\n", .{ @typeName(T), gated, rounded, errors.coordinates, errors.max_absolute, errors.max_relative });
 }
 
 test "Qwen4 QSA backward: every tiny Q K V coordinate matches independent float64 central slopes" {
@@ -129,9 +134,11 @@ fn directional(comptime T: type, p: ref.Point) !void {
             x.* = base - step * delta;
         };
         const central = (plus - try p.loss(false)) / (2 * step);
-        try errors.check(T, central, @as(T, @floatCast(analytic)));
+        errors.check(T, central, @as(T, @floatCast(analytic))) catch |e| {
+            std.debug.print("QSA_BACKWARD_DIRECTION {s} rows={d} heads={d} kv={d} width={d} selected={d} step={e:.1}: central {e:.8}, analytic {e:.8}\n", .{ @typeName(T), p.shape.rows, p.shape.heads, p.shape.kv, p.shape.width, if (p.rows[0].ids) |ids| ids.len else p.rows[0].end, step, central, analytic });
+            return e;
+        };
     }
-    std.debug.print("QSA_BACKWARD_DIRECTION {s} rows={d} heads={d} kv={d} width={d} selected={d} absolute={e:.8}\n", .{ @typeName(T), p.shape.rows, p.shape.heads, p.shape.kv, p.shape.width, if (p.rows[0].ids) |ids| ids.len else p.rows[0].end, errors.max_absolute });
 }
 
 test "Qwen4 QSA backward: served 24 by 4 heads width 256 crosses dense 128 and sparse 2048 plus tail" {

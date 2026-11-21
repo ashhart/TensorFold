@@ -1,6 +1,9 @@
 //! Qwen3 dense checkpoints on the native HIP engine: config, BF16 weights on the device and the batched prompt pass.
 
 pub const config = @import("config.zig");
+pub const names = @import("names.zig");
+pub const head = @import("head.zig");
+pub const lane = @import("lane.zig");
 pub const model = @import("model.zig");
 pub const forward = @import("forward.zig");
 pub const score = @import("score.zig");
@@ -20,6 +23,9 @@ pub const Taps = forward.Taps;
 
 test {
     _ = config;
+    _ = names;
+    _ = head;
+    _ = lane;
     _ = model;
     _ = forward;
     _ = score;

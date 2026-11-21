@@ -295,6 +295,7 @@ test "a rocm receipt on linux saves but never publishes; rocm on macos fails bot
 }
 
 test "a receipt path is checked before a run: a directory name is refused, its directory is made, a file fits, nothing is left" {
+    try @import("test_permissions.zig").skipIfRoot();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -323,7 +324,6 @@ test "a receipt path is checked before a run: a directory name is refused, its d
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "Could not save the benchmark receipt to {s}", .{named}), problem);
     }
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, try std.fs.path.join(a, &.{ root, "unmade" }), .{}));
-    if (std.c.geteuid() == 0) return;
     const locked = try std.fs.path.join(a, &.{ root, "locked" });
     try cwd.createDirPath(io, locked);
     try cwd.setFilePermissions(io, locked, .fromMode(0o500), .{});

@@ -57,11 +57,11 @@ pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u
         try launch(k, e.stream, .up, rows_in, layer, plan, s.act, items, -1);
         try launch(k, e.stream, .down_f32, act_in, layer, plan, s.y, items, -1);
     } else if (wide) {
-        try grouped.prompt(e.stream, .up, rows_in, layer, plan, s.act, items, -1);
-        try grouped.prompt(e.stream, .down_bf16, act_in, layer, plan, s.y, items, -1);
+        try grouped.prompt(e.stream, .up, rows_in, layer, plan, s.act, items, pairs, tile, -1);
+        try grouped.prompt(e.stream, .down_bf16, act_in, layer, plan, s.y, items, pairs, tile, -1);
     } else {
-        try grouped.decode(e.stream, .up, rows_in, layer, plan, s.act, items, -1);
-        try grouped.decode(e.stream, .down_f32, act_in, layer, plan, s.y, items, -1);
+        try grouped.decode(e.stream, .up, rows_in, layer, plan, s.act, items, pairs, tile, -1);
+        try grouped.decode(e.stream, .down_f32, act_in, layer, plan, s.y, items, pairs, tile, -1);
     }
     try e.moe.combine(e.stream, s.y, !wide or nvfp4, s.wts, out, total, slots, g.hidden, params);
 }

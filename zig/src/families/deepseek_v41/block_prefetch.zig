@@ -6,13 +6,15 @@ const Emitter = block.Emitter;
 const L2Src = block.Emitter.L2Src;
 const L2Site = block.Emitter.L2Site;
 
-/// l2pf._lin_tensors: every projection's suh and svh, then their trellis words.
+/// l2pf._lin_tensors: every projection's suh and svh, then their trellis words; a float projection's matrix whole.
 pub fn linSrcs(e: *Emitter, out: *std.ArrayList(L2Src), ws: []const []const u8, ks: []const i64, ns: []const i64) !void {
-    for (ws, ks, ns) |w, k, n| try out.appendSlice(e.a, &.{
+    for (ws, ks, ns) |w, k, n| if (e.w.plain(w)) {
+        try out.append(e.a, .{ .kind = .weight, .name = try e.fmt("{s}.plain", .{w}), .bytes = @intCast(4 * k * n) });
+    } else try out.appendSlice(e.a, &.{
         .{ .kind = .weight, .name = try e.fmt("{s}.suh", .{w}), .bytes = @intCast(2 * k) },
         .{ .kind = .weight, .name = try e.fmt("{s}.svh", .{w}), .bytes = @intCast(2 * n) },
     });
-    for (ws, ks, ns) |w, k, n| try out.append(e.a, .{ .kind = .words, .name = w, .bytes = try e.trellisBytes(w, k, n) });
+    for (ws, ks, ns) |w, k, n| if (!e.w.plain(w)) try out.append(e.a, .{ .kind = .words, .name = w, .bytes = try e.trellisBytes(w, k, n) });
 }
 
 /// Site `site`'s sources: "o" and "f" of block `L`, "x" of the block before `L` (its table is "s.L<L>.pf.x").
@@ -21,7 +23,7 @@ pub fn l2pfSources(e: *Emitter, L: u32, site: L2Site) ![]const L2Src {
     switch (site) {
         .o => {
             const D: i64 = e.cfg.hidden;
-            const g = e.cfg.o_groups / e.o.world;
+            const g = try e.rankGroups();
             const ki: i64 = @divExact(@as(i64, e.cfg.heads) * e.cfg.head_dim, @as(i64, e.cfg.o_groups));
             const ws = try e.a.alloc([]const u8, g);
             const ks = try e.a.alloc(i64, g);

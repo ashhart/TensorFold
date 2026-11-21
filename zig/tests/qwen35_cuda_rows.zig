@@ -18,7 +18,7 @@ pub fn run(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], false, null);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], false, null, E.max_rows);
     defer e.deinit();
     if (std.mem.eql(u8, mode, "rows-last")) return last(init.gpa, e, ids.items);
     if (std.mem.eql(u8, mode, "rows-cuts")) {

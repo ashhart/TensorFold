@@ -22,14 +22,20 @@ pub fn hash(io: std.Io, path: []const u8, maximum: u64) ![32]u8 {
     return h.finalResult();
 }
 
-pub fn bind(h: *std.hash.Wyhash, digest: [32]u8) void {
+/// `h`: any hasher with `update(bytes)`, a kept key's Wyhash or a SHA-256.
+pub fn bind(h: anytype, digest: [32]u8) void {
     h.update("serving-binary-v1");
     h.update(&digest);
 }
 
 /// The running binary includes compiled host code, embedded GPU images, compiler options and snapshot layouts.
-pub fn current(h: *std.hash.Wyhash, a: std.mem.Allocator, io: std.Io) !void {
+pub fn current(h: anytype, a: std.mem.Allocator, io: std.Io) !void {
+    bind(h, try running(a, io));
+}
+
+/// The running binary's SHA-256, read by its path.
+pub fn running(a: std.mem.Allocator, io: std.Io) ![32]u8 {
     const path = try std.process.executablePathAlloc(io, a);
     defer a.free(path);
-    bind(h, try hash(io, path, 1 << 31));
+    return hash(io, path, 1 << 31);
 }

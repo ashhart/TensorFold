@@ -1,7 +1,7 @@
 //! The next prompt chunk's Engram rows, read on a worker while the GPU runs the current chunk; taken only on equal ids.
 const std = @import("std");
 const engram = @import("engram.zig");
-const hash = @import("engram_hash.zig");
+const hash = @import("engram_hash_core");
 const model = @import("model.zig");
 const Model = model.Model;
 const nowNs = model.nowNs;

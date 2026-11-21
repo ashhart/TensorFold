@@ -53,6 +53,7 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     }) }));
     loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
     test_step.dependOn(&loader.step);
+    loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
@@ -124,7 +125,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     kernel_module.addIncludePath(.{ .cwd_relative = hip_include });
     kernel_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
     kernel_module.addImport("hip_kernels", objects);
-    kernel_module.addImport("core", coreModule(b, target));
+    @import("flashnext_reach.zig").wire(b, target, kernel_module, coreModule(b, target));
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
     b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
@@ -167,6 +168,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native.import_table.get("glm_ocr").?, .filters = &.{"GLM-OCR native admission:"} })).step);
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
+    @import("hip_followers.zig").steps(b, &.{ host.serve, host.flashnext, host.nemotron });
     @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
     @import("lighton_hip.zig").host(b, host.lighton, test_step);
@@ -221,6 +223,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     qwen3_run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
     b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
     b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
+    @import("flashnext_gpu.zig").draftBatch(b, target, optimize, gpu);
     const parse_object = compile(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib }, hip_arch, b.path("zig/kernels/hip/ops/vision.hip"), "parse-vision.hsaco");
     @import("nemotron_parse_gpu.zig").gpuTests(b, target, host.hip, parse_object);
     @import("nemotron_parse_gpu.zig").modelTests(b, target, optimize, gpu.hip);
@@ -241,6 +244,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "tf-flashnext-hip-test",
         "Flash Next model checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
+    const fx_gpu = b.addTest(.{ .name = "tf-flashnext-hip-gpu-test", .root_module = gpu.flashnext, .filters = &.{"Flash Next fused prompt prep:"} });
+    b.step("flashnext-hip-gpu-build", "Compile the Flash Next GPU checks without running them").dependOn(&fx_gpu.step);
+    b.step("flashnext-hip-gpu-test", "Flash Next's DeltaNet through linear() on the GPU: the fused prompt prep against the unfused chain").dependOn(&b.addRunArtifact(fx_gpu).step);
     const nem_test = b.addExecutable(.{ .name = "tf-nemotron-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/nemotron_hip/main.zig"),
         .target = target,
@@ -272,14 +278,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "core", .module = gpu.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = gpu.lighton } },
     }) });
     b.step("tf-lighton-hip-capture", "Capture native HIP LightOnOCR stages against a local reference fixture").dependOn(&b.addInstallArtifact(lighton_capture, .{}).step);
-    const qwen_capture_host = captureQwen(b, b.graph.host, host);
+    const qwen_capture_host = @import("lighton_hip.zig").captureQwen(b, b.graph.host, host);
     b.step("check-qwen-hip-capture-host", "Compile the Qwen HIP fixture capture without device execution").dependOn(&qwen_capture_host.step);
-    const qwen_capture_gpu = captureQwen(b, target, gpu);
+    const qwen_capture_gpu = @import("lighton_hip.zig").captureQwen(b, target, gpu);
     b.step("tf-qwen-hip-capture", "Capture native Qwen HIP stages against local reference fixtures").dependOn(&b.addInstallArtifact(qwen_capture_gpu, .{}).step);
     for ([_][]const u8{ "lighton", "qwen" }) |family_name| {
-        const exact_host = exactTool(b, b.graph.host, host, family_name);
+        const exact_host = @import("lighton_hip.zig").exactTool(b, b.graph.host, host, family_name);
         b.step(b.fmt("check-{s}-hip-exact-host", .{family_name}), "Compile native HIP image consistency checks without execution").dependOn(&exact_host.step);
-        const exact_gpu = exactTool(b, target, gpu, family_name);
+        const exact_gpu = @import("lighton_hip.zig").exactTool(b, target, gpu, family_name);
         b.step(b.fmt("tf-{s}-hip-exact", .{family_name}), "Build native HIP image consistency checks").dependOn(&b.addInstallArtifact(exact_gpu, .{}).step);
     }
     const native = server(b, target, gpu, build_options);
@@ -472,25 +478,6 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
     _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
     return exe;
 }
-fn captureQwen(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine) *std.Build.Step.Compile {
-    return b.addExecutable(.{ .name = "tf-qwen-hip-capture", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/lighton_hip/qwen_capture.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
-}
-fn exactTool(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, family_name: []const u8) *std.Build.Step.Compile {
-    const file = if (std.mem.eql(u8, family_name, "lighton")) "exact.zig" else "qwen_exact.zig";
-    return b.addExecutable(.{ .name = b.fmt("tf-{s}-hip-exact", .{family_name}), .root_module = b.createModule(.{
-        .root_source_file = b.path(b.fmt("zig/tests/lighton_hip/{s}", .{file})),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = e.lighton }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
-    }) });
-}
 /// A group's source and whether it compiles with IEEE arithmetic (`strict`: -O2 -fno-fast-math, IEEE denormals).
 const Source = struct { path: []const u8, strict: bool = false };
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
@@ -510,18 +497,20 @@ const groups = [_]Source{
     .{ .path = "joint_schema/joint_schema.hip" },
     .{ .path = "lighton_ocr.hip", .strict = true },
     .{ .path = "qwen_vision.hip", .strict = true },
+    .{ .path = "draft/draft.hip" },
+    .{ .path = "exl3/exl3.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",              "decode/plan.hpp",      "ops/attention.hpp",
-    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",                    "ops/elementwise.hpp",  "ops/linear.hpp",
-    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",                  "common/arch.hpp",      "common/dot2.hpp",
-    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",                 "quant/mlx.hpp",        "quant/mlx_decoder.hpp",
-    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",                "tiles/epilogue.hpp",   "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",                "tiles/stream.hpp",     "flashnext/streams.hpp",
-    "flashnext/ngram.hpp",        "flashnext/indexer.hpp", "flashnext/sparse.hpp",          "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
-    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",      "columns_controls.hpp",
-    "ops/vision.hpp",             "ops/dense_text.hpp",    "ops/vl_position.hpp",
+    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",      "decode/plan.hpp",               "ops/attention.hpp",
+    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",            "ops/elementwise.hpp",           "ops/linear.hpp",
+    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",          "common/arch.hpp",               "common/dot2.hpp",
+    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",         "quant/mlx.hpp",                 "quant/mlx_decoder.hpp",
+    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",        "tiles/epilogue.hpp",            "tiles/gemm.hpp",
+    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/matrix_item.hpp", "tiles/plan.hpp",                "tiles/stream.hpp",
+    "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp", "flashnext/sparse.hpp",          "ops/nemotron_moe.hpp",
+    "quant/bf16_decoder.hpp",     "quant/dense_tiles.hpp", "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",
+    "columns_controls.hpp",       "ops/vision.hpp",        "ops/dense_text.hpp",    "ops/vl_position.hpp",           "flashnext/sparse_lanes.hpp",
 };
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
@@ -537,7 +526,6 @@ pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u
     }
     return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
 }
-
 /// The HIP compiler as the build found it, the device bitcode it links, and whether gfx1100 relaxes branches earlier.
 pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool = false };
 

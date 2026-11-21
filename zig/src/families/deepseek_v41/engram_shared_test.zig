@@ -1,7 +1,7 @@
 //! Independent hash/layout and FP64-ideal row equations adapted from @akol1's #826 reference.
 const std = @import("std");
 const t = std.testing;
-const hash = @import("engram_hash.zig");
+const hash = @import("engram_hash_core");
 const eh = @import("engram_host.zig");
 const er = @import("engram_rows.zig");
 const portable = @import("engram_rows_portable.zig");

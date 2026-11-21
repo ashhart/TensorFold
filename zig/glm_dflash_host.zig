@@ -17,19 +17,40 @@ test "glm dflash: gather and read fit for every supported rank count" {
 test "glm dflash: the raw scratch holds every 4-bit linear's words, scales and biases at every rank count" {
     const df = glm.dflash;
     var short: usize = 0;
-    for (1..17) |world| {
-        const ff = if (world == 2) df.FF / 2 else df.FF; // two ranks split gate and up by rows; any other world loads them whole
+    for (1..17) |world| for ([_]bool{ false, true }) |wide| {
+        const ff = df.mlpSplit(world, wide).ff;
         // dflash_load's 4-bit linears, rows by columns: qkv, kv, o, gate and up, the kernel projections, fc
         const linears = [_][2]usize{ .{ df.QKV, df.D }, .{ 2 * df.KVW, df.D }, .{ df.D, df.D }, .{ 2 * ff, df.D }, .{ df.KVW, df.D }, .{ df.D, 5 * df.D } };
         for (linears) |shape| {
             const nk = shape[0] * shape[1];
             const need = std.mem.alignForward(usize, nk / 2, 256) + std.mem.alignForward(usize, nk / 32, 256) + nk / 32;
-            if (need <= df.rawBytes(4, world)) continue;
-            std.debug.print("world {d}: a {d}x{d} linear needs {d} raw bytes, the scratch has {d}\n", .{ world, shape[0], shape[1], need, df.rawBytes(4, world) });
+            if (need <= df.rawBytes(4, world, wide)) continue;
+            std.debug.print("world {d}: a {d}x{d} linear needs {d} raw bytes, the scratch has {d}\n", .{ world, shape[0], shape[1], need, df.rawBytes(4, world, wide) });
             short += 1;
         }
-    }
+    };
     try t.expectEqual(@as(usize, 0), short);
+}
+
+test "glm dflash: the MLP splits at two ranks as on main; three or more only with TF_ROCE=1" {
+    const df = glm.dflash;
+    const whole: df.MlpSplit = .{ .split = false, .ff = df.FF };
+    try t.expectEqual(whole, df.mlpSplit(1, true));
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = df.FF / 2 }, df.mlpSplit(2, false)); // 6144: main's split, no opt-in
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = df.FF / 2 }, df.mlpSplit(2, true));
+    for ([_]usize{ 3, 4, 6, 8 }) |world| try t.expectEqual(whole, df.mlpSplit(world, false)); // main's whole MLP on every rank
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = df.FF / 4 }, df.mlpSplit(4, true)); // 3072 on four Sparks
+    try t.expectEqual(df.MlpSplit{ .split = true, .ff = 4096 }, df.mlpSplit(3, true));
+    try t.expectEqual(whole, df.mlpSplit(5, true)); // 12288 / 5 is no share
+    try t.expectEqual(whole, df.mlpSplit(7, true));
+    for (1..17) |world| for ([_]bool{ false, true }) |wide| {
+        const m = df.mlpSplit(world, wide);
+        try t.expect(m.ff % 256 == 0); // the q4 pack's rows, glm_mm's K tiles and df_swiglu's columns all fit
+        if (m.split) {
+            try t.expectEqual(df.FF, m.ff * world); // the shares are the whole width
+            for (0..world) |rank| try t.expect(rank * m.ff + m.ff <= df.FF); // every rank's slice lies inside
+        } else try t.expectEqual(df.FF, m.ff);
+    };
 }
 
 const Resources = struct {

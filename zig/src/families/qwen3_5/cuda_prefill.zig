@@ -2,12 +2,14 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
+const prompt_tail = @import("cuda_prompt_tail.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
-const reuse = @import("cuda_reuse.zig");
+const readout = @import("cuda_readout.zig");
+const cuda_solo = @import("cuda_solo.zig");
 
-/// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
+/// Where a prompt pass from `at` cuts its chunk: grid_rows rows on, or the request's next chunk start before that.
 fn nextCut(len: usize, chunks: []const u32, at: usize, max_rows: u32) usize {
-    const bound = if (max_rows > 0) @min(E.max_rows, max_rows) else E.max_rows;
+    const bound = if (max_rows > 0) @min(E.grid_rows, max_rows) else E.grid_rows;
     var end: usize = @min(len, at + bound);
     for (chunks) |boundary| if (boundary > at) {
         end = @min(end, boundary);
@@ -23,16 +25,160 @@ fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
     return at == pos;
 }
 
-test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or from the request's chunk starts" {
-    const m = E.max_rows;
+test "a pass resumes only where a cold pass cuts: every grid_rows rows from 0 or from the request's chunk starts" {
+    const m = E.grid_rows;
     const len = 10 * m;
     const start = m + m / 2; // a request chunk start between the first two cuts
     try std.testing.expect(coldCut(len, &.{}, m * 3));
     try std.testing.expect(!coldCut(len, &.{}, m * 3 + 1));
     try std.testing.expect(coldCut(len, &.{start}, start));
     try std.testing.expect(coldCut(len, &.{start}, start + m));
-    try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then max_rows on
+    try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then grid_rows on
     try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m, 0));
+}
+
+/// The rows a capped step's cuts keep: the prompt tile's rows, a multiple of the delta rule's 64-row chunks.
+pub const cap_grid = 128;
+
+/// The end of `f`'s next step under `max_rows` (0: the cold cut), its cold cut renewed once the last one landed.
+fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
+    if (f.cold <= f.at) f.cold = nextCut(len, chunks, f.at, 0);
+    return lanes.step_cap.end(f.at, f.cold, max_rows, cap_grid);
+}
+
+test "a yielded pass keeps its completed prefix and stops before the next chunk, on the grid chunk though solo" {
+    const t = std.testing;
+    const len: usize = 2 * @as(usize, E.grid_rows) + 1; // a solo pass would take both chunks at once
+    const ids = try t.allocator.alloc(u32, len);
+    defer t.allocator.free(ids);
+    @memset(ids, 3);
+    const Probe = struct {
+        stream: ?*lanes.Stream = null,
+        saves: usize = 0,
+        saved_at: u32 = 0,
+        fn cast(ctx: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn yielded(ctx: *anyopaque) bool {
+            const p = cast(ctx);
+            return p.stream.?.fill_at.load(.monotonic) >= E.grid_rows;
+        }
+        fn kept(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const p = cast(ctx);
+            p.saves += 1;
+            p.saved_at = at;
+        }
+    };
+    const FakeEngine = struct {
+        scratch_rows: usize = 2 * E.grid_rows, // TF_QWEN35_CHUNK_SOLO=8192
+        forwards: usize = 0,
+        layers: [2]void = .{ {}, {} },
+        taps: [1]u32 = undefined,
+        n_taps: usize = 0,
+        learning: ?*const anyopaque = null,
+        mlp: ?*const anyopaque = null,
+        pockets: struct {
+            pub fn any(_: *const @This()) bool {
+                return false;
+            }
+        } = .{},
+        int8: struct { on: bool = false } = .{},
+        fn forward(self: *@This(), parts: []const E.Part, ids_: []const u32, _: E.Keep) !void {
+            self.forwards += 1;
+            parts[0].cache.len += ids_.len;
+            parts[0].cache.written += ids_.len;
+        }
+    };
+    const FakePrefix = struct {
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) !void {}
+    };
+    const FakePages = struct {
+        fn log(_: *@This(), _: usize, _: usize) void {}
+    };
+    const FakeLanes = struct {
+        gpa: std.mem.Allocator,
+        e: FakeEngine = .{},
+        cache: *E.Cache,
+        prefix: ?*FakePrefix = null,
+        pages: ?*FakePages = null,
+        caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty, // no stream beside it decodes
+        fills: std.AutoHashMapUnmanaged(*lanes.Stream, void) = .empty,
+        fn cacheOf(self: *@This(), _: *lanes.Stream) !*E.Cache {
+            return self.cache;
+        }
+    };
+
+    var probe: Probe = .{};
+    var cache: E.Cache = undefined;
+    cache.len = 0;
+    cache.written = 0;
+    var fake: FakeLanes = .{ .gpa = t.allocator, .cache = &cache };
+    var stream = try lanes.Stream.init(t.allocator, .{
+        .id = "yielded-prefix",
+        .prompt = ids,
+        .max_new = 1,
+        .yield_check = .{ .ptr = &probe, .check = Probe.yielded },
+        .reuse = .{
+            .marks = &.{},
+            .hook = .{ .ptr = &probe, .at = Probe.kept },
+        },
+    });
+    defer stream.deinit(t.allocator);
+    probe.stream = &stream;
+    var fill: Fill = .{ .at = 0, .media = null };
+
+    try t.expect(!try chunk(&fake, &stream, &fill, 0));
+    try t.expectEqual(@as(usize, 1), fake.e.forwards);
+    try t.expectEqual(E.grid_rows, fill.at); // one grid chunk: the yield check keeps the pass off the solo rows
+    try t.expectEqual(@as(usize, 0), probe.saves);
+    try t.expectError(error.Yielded, chunk(&fake, &stream, &fill, 0));
+    try t.expectEqual(@as(usize, 1), fake.e.forwards);
+    try t.expectEqual(@as(usize, 1), probe.saves);
+    try t.expectEqual(E.grid_rows, probe.saved_at);
+    // the same prompt in the foreground (no yield check): both grid chunks in one solo pass
+    var fore = try lanes.Stream.init(t.allocator, .{ .id = "foreground", .prompt = ids, .max_new = 1 });
+    defer fore.deinit(t.allocator);
+    var whole_fill: Fill = .{ .at = 0, .media = null };
+    try t.expect(!try chunk(&fake, &fore, &whole_fill, 0));
+    try t.expectEqual(2 * E.grid_rows, whole_fill.at);
+}
+
+/// The fewest rows a cold chunk needs to join a solo pass: fewer take the projections' small-row tiles.
+pub const solo_min_rows = 2048;
+
+/// A solo pass's end (TF_QWEN35_CHUNK_SOLO): cold chunks of solo_min_rows or more, up to `rows`, a kept mark ends it.
+fn soloEnd(len: usize, chunks: []const u32, f: *Fill, rows: usize, marks: []const u32) usize {
+    var end = capped(len, chunks, f, 0);
+    if (end - f.at < solo_min_rows) return end; // a short chunk runs alone, as in a cold pass
+    while (end < len and std.mem.indexOfScalar(u32, marks, @intCast(end)) == null) {
+        const next = nextCut(len, chunks, end, 0);
+        if (next - end < solo_min_rows or next - f.at > rows) break;
+        end = next;
+    }
+    f.cold = end; // the merged cuts' last: the pass lands on it, as on any cold cut
+    return end;
+}
+
+test "a solo pass merges cold chunks of 2048 rows or more up to its rows; marks and short chunks keep their cuts" {
+    const t = std.testing;
+    const m = E.grid_rows;
+    var f: Fill = .{ .at = 0, .media = null };
+    try t.expectEqual(2 * m, soloEnd(10 * m, &.{}, &f, 2 * m, &.{}));
+    try t.expectEqual(2 * m, f.cold);
+    f.at = 2 * m;
+    try t.expectEqual(3 * m, soloEnd(10 * m, &.{}, &f, 2 * m, &.{3 * m})); // the mark keeps its cut
+    f = .{ .at = 0, .media = null };
+    try t.expectEqual(m, soloEnd(m + 12, &.{}, &f, 2 * m, &.{})); // a 12-row tail runs alone
+    f = .{ .at = 0, .media = null };
+    try t.expectEqual(m + 2048, soloEnd(m + 2048, &.{}, &f, 2 * m, &.{})); // a 2048-row tail joins
+    f = .{ .at = 0, .media = null };
+    try t.expectEqual(m, soloEnd(10 * m, &.{m + 1000}, &f, 2 * m, &.{})); // a request start's 1000-row chunk alone
+    f = .{ .at = m, .media = null };
+    try t.expectEqual(m + 1000, soloEnd(10 * m, &.{m + 1000}, &f, 2 * m, &.{}));
+    f = .{ .at = 512, .cold = m, .media = null }; // a capped step's 3584-row rest, then the next chunk
+    try t.expectEqual(2 * m, soloEnd(10 * m, &.{}, &f, 2 * m, &.{}));
+    f = .{ .at = 0, .media = null };
+    try t.expectEqual(2 * m, soloEnd(10 * m, &.{}, &f, 3 * m - 1, &.{})); // whole chunks only, never past the rows
 }
 
 pub fn run(self: anytype, stream: *lanes.Stream) !void {
@@ -41,8 +187,17 @@ pub fn run(self: anytype, stream: *lanes.Stream) !void {
     while (!try chunk(self, stream, &f, 0)) {}
 }
 
+/// One whole prompt fill: a readout's pieces to the end, else the text pass, each exactly once.
+pub fn whole(self: anytype, stream: *lanes.Stream) !void {
+    if (stream.readout != null) {
+        while (!try readout.step(self, stream, 0)) {}
+        return;
+    }
+    return run(self, stream);
+}
+
 /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
-pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
+pub fn step(self: anytype, stream: *lanes.Stream, max_rows: u32) !bool {
     const got = try self.fills.getOrPut(self.gpa, stream);
     if (!got.found_existing) {
         got.value_ptr.* = opening(self, stream) catch |err| {
@@ -51,7 +206,7 @@ pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
         };
     }
     const f = self.fills.getPtr(stream).?;
-    const done = chunk(self, stream, f, 0) catch |err| {
+    const done = chunk(self, stream, f, max_rows) catch |err| {
         endFill(self, stream);
         return err;
     };
@@ -74,6 +229,7 @@ pub fn endFill(self: anytype, stream: *lanes.Stream) void {
 /// A prompt pass under way: where its next cut starts, an image prompt's encoded images, TF_QWEN_KV_SHARE's marks.
 pub const Fill = struct {
     at: usize,
+    cold: usize = 0, // the cold pass's cut that ends the chunk in flight; a capped step cuts inside it (lanes.step_cap)
     media: ?vision_prompt.Media,
     kept: ?struct { gpa: std.mem.Allocator, marks: []const u32 } = null,
 
@@ -119,7 +275,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         cache.written = at;
     } else if (stream.reuse.saved) |saved| {
         if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
-            if (reuse.restoreCache(self.e, cache, saved, seen)) {
+            if (self.restoreKept(cache, saved, seen)) {
                 at = stream.reuse.at;
                 stream.cached = stream.reuse.at;
             } else |_| {
@@ -133,29 +289,41 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
 }
 
-/// The pass's next cut; true once the prompt is in. The hint keeps the cold grid, where a cap would cut differently.
-pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
+/// The pass's next cut; true once the prompt is in. A cap cuts inside the cold chunk (on cap_grid): cold cuts all land.
+pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !bool {
     const ids = stream.prompt();
     // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
     if (stream.isCancelled()) {
         stream.keepInterruptedPrefill(@intCast(f.at));
         return error.Cancelled;
     }
+    if (stream.yields()) {
+        stream.keepInterruptedPrefill(@intCast(f.at));
+        return error.Yielded;
+    }
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-    const end = nextCut(ids.len, stream.chunks, f.at, 0);
-    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    // TF_QWEN35_CHUNK_SOLO: a lone uncapped text pass merges cold chunks; a yield-checked (warm) pass keeps the grid
+    const rows = self.e.scratch_rows;
+    const solo = max_rows == 0 and rows > E.grid_rows and stream.yield_check == null and f.media == null and
+        !cuda_solo.othersDecode(self, stream);
+    const marks = if (f.kept) |k| k.marks else stream.reuse.marks;
+    const end = if (solo) soloEnd(ids.len, stream.chunks, f, rows, marks) else capped(ids.len, stream.chunks, f, max_rows);
+    // a non-final chunk's rows feed only a head nobody reads: its last layer stops at its keys and values
+    const unread = end < ids.len and prompt_tail.unread(self.e, images != null);
+    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], if (unread) .none else .last);
     lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
-    // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
+    // a mark the store asked for, where the cold pass cuts (a resume's only place): the lane host copies the state here
+    const cold = end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
     if (f.kept) |k| {
-        if (end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
+        if (cold and end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
             self.prefix.?.keep(cache, ids, end) catch |err| {
                 if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
                 std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
             };
-    } else if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
+    } else if (cold and end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
         if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
     }
     if (end < ids.len) return false;

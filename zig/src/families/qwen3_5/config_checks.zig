@@ -2,11 +2,17 @@
 
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
+const eos_ids = @import("checkpoint_eos");
 
-pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || layer_pattern.Error;
+pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary, ZeroHeadCount } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
+comptime {
+    std.debug.assert(eos_ids.qwen35_hip.max.? == max_eos);
+}
 
 /// The most decoder layers a config may declare.
 pub const max_layers = 128;
@@ -40,8 +46,7 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
 
 /// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
 pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
-    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
+    if (rope_config.scaled(tower, rope) != null) return error.InvalidRotary;
 }
 
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
@@ -53,14 +58,7 @@ pub fn maxPosition(tower: std.json.ObjectMap) Error!usize {
 
 /// Refuses a tower whose activation, attention gate, attention bias or recurrent state type the kernels do not compute.
 pub fn computes(tower: std.json.ObjectMap) Error!void {
-    if (tower.get("hidden_act")) |v| if (!isString(v, "silu")) return error.UnsupportedActivation;
-    // "swish" is the gate the kernels apply, att * sigmoid(gate), as the qwen27 family reads it
-    if (tower.get("output_gate_type")) |v| if (!isString(v, "swish")) return error.UnsupportedAttentionGate;
-    if (tower.get("attn_output_gate")) |v| if (!isFlag(v, true)) return error.UnsupportedAttentionGate;
-    if (tower.get("attention_bias")) |v| if (!isFlag(v, false)) return error.UnsupportedAttentionGate;
-    inline for (.{ "linear_attn_state_dtype", "mamba_ssm_dtype" }) |key| {
-        if (tower.get(key)) |v| if (!isString(v, "float32")) return error.UnsupportedStateType;
-    }
+    return rules.check(tower, .hip);
 }
 
 /// The sizes the kernels index with 32-bit counts and the host multiplies: every product must fit.
@@ -81,7 +79,13 @@ pub const Sizes = struct {
     shared_width: usize,
 };
 
+/// Every head count the host divides by or groups with: 0 is refused by name before any division.
+pub fn heads(counts: []const usize) Error!void {
+    for (counts) |n| if (n == 0) return error.ZeroHeadCount;
+}
+
 pub fn products(s: Sizes) Error!void {
+    try heads(&.{ s.heads, s.kv_heads, s.key_heads, s.value_heads });
     if (s.heads % s.kv_heads != 0 or s.value_heads % s.key_heads != 0) return error.InvalidConfig;
     const limit: usize = std.math.maxInt(u32);
     const q = try mul(try mul(s.heads, s.head_dim), 2);
@@ -94,29 +98,13 @@ pub fn products(s: Sizes) Error!void {
     for (widths) |w| if (w > limit) return error.InvalidConfig;
 }
 
-/// The end ids, config.json's (root, then text tower) and generation_config.json's, each once and below `vocab`.
+/// The HIP loader's end ids by core's qwen35_hip policy: root, text tower and generation_config.json, below `vocab`.
 pub fn eos(out: *[max_eos]u32, root: std.json.ObjectMap, tower: std.json.ObjectMap, generation: ?std.json.ObjectMap, vocab: usize) Error![]const u32 {
-    var n: usize = 0;
-    const holders = [_]?std.json.Value{ root.get("eos_token_id"), tower.get("eos_token_id"), if (generation) |g| g.get("eos_token_id") else null };
-    for (holders) |h| if (h) |v| try collect(out, &n, v, vocab);
-    if (n == 0) return error.MissingEos;
-    return out[0..n];
-}
-
-fn collect(out: *[max_eos]u32, n: *usize, v: std.json.Value, vocab: usize) Error!void {
-    switch (v) {
-        .null => {},
-        .array => |list| for (list.items) |item| try collect(out, n, item, vocab),
-        .integer => |i| {
-            if (i < 0 or i >= vocab) return error.BadEos;
-            const id: u32 = @intCast(i);
-            if (std.mem.indexOfScalar(u32, out[0..n.*], id) != null) return;
-            if (n.* == max_eos) return error.TooManyEos;
-            out[n.*] = id;
-            n.* += 1;
-        },
-        else => return error.BadEos,
-    }
+    const gen: std.json.Value = if (generation) |g| .{ .object = g } else .null;
+    return eos_ids.collect(out, eos_ids.qwen35_hip, .{ .object = root }, .{ .object = tower }, gen, vocab) catch |e| return switch (e) {
+        error.BadEosValue => error.BadEos,
+        else => |x| x,
+    };
 }
 
 fn mul(a: usize, b: usize) Error!usize {
@@ -125,10 +113,6 @@ fn mul(a: usize, b: usize) Error!usize {
 
 fn add(a: usize, b: usize) Error!usize {
     return std.math.add(usize, a, b) catch error.InvalidConfig;
-}
-
-fn isString(v: std.json.Value, want: []const u8) bool {
-    return v == .string and std.mem.eql(u8, v.string, want);
 }
 
 /// A JSON boolean, or the 0 / 1 some conversions write in its place.
@@ -172,7 +156,7 @@ test "end ids from config.json and generation_config.json, once each, refused pa
     try std.testing.expectError(error.TooManyEos, eos(&out, try parsed(a, "{\"eos_token_id\":[0,1,2,3,4,5,6,7,8]}"), try parsed(a, "{}"), null, 10));
 }
 
-test "sizes: products past 32 bits and uneven head groups are refused" {
+test "sizes: products past 32 bits, uneven head groups and zero head counts are refused" {
     const ok: Sizes = .{ .hidden = 5120, .intermediate = 17408, .vocab = 248320, .heads = 24, .kv_heads = 4, .head_dim = 256, .key_heads = 16, .value_heads = 48, .key_dim = 128, .value_dim = 128, .conv = 4, .experts = 0, .moe_width = 0, .shared_width = 0 };
     try products(ok);
     var moe = ok;
@@ -182,6 +166,11 @@ test "sizes: products past 32 bits and uneven head groups are refused" {
     var wide = ok;
     wide.vocab = 1 << 20;
     try std.testing.expectError(error.InvalidConfig, products(wide));
+    inline for (.{ "heads", "kv_heads", "key_heads", "value_heads" }) |name| {
+        var zero = ok;
+        @field(zero, name) = 0;
+        try std.testing.expectError(error.ZeroHeadCount, products(zero));
+    }
     var uneven = ok;
     uneven.kv_heads = 5;
     try std.testing.expectError(error.InvalidConfig, products(uneven));

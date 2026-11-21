@@ -55,6 +55,7 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     if (gathered) { // the rows' queries and indexer weights, as the absorb computed them where the rows were
         fwd.qmv(x, e, x.k.qmv_x, normed, L.attn.mla.x_proj, sc.xp, rows);
         fwd.indexWeights(x, e, sc.xp, c.xProj(), sc.iw, rows);
+        x.q_normed = false; // the queries from this x_proj: mlaAttend norms them
     }
     fwd.mlaAttend(x, e, mi, &L.attn.mla, rows, pos);
     add(x, e, res, sc.branch, sc.m_out, rows * D);
@@ -65,12 +66,12 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
 }
 
-/// Drafts for `rows` pre-norm head outputs at `out`: the head's norm, then the LM head over the draft vocabulary.
+/// Drafts for `rows` head outputs at `out`: the norm, then shared_head.head when stored, else lm_head (drafts only).
 pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, picks: Ref) void {
     const c = x.c;
     const D = c.hidden;
     fwd.rms(x, e, out, x.w.mtp.?.norm, x.sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headOver(x, e, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
+    fwd.headWith(x, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).

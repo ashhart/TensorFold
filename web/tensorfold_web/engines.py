@@ -7,7 +7,7 @@ from typing import Protocol
 import httpx
 
 from . import native
-from .settings import Settings
+from .settings import Settings, engine_root
 
 
 @dataclass
@@ -108,7 +108,7 @@ def _json(client: httpx.Client, url: str, headers: dict) -> dict | None:
 
 def identify(url: str, *, key: str | None = None, client: httpx.Client | None = None) -> Endpoint:
 
-    base = url.rstrip("/").removesuffix("/v1")
+    base = engine_root(url)
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     own = client or httpx.Client(trust_env=False, timeout=3.0)
     try:

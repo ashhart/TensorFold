@@ -12,6 +12,11 @@ const grouped = cuda.grouped;
 const experts = cuda.experts;
 const TreeAttention = cuda.tree_attention.TreeAttention;
 
+/// bf16 elements from `origin` to `at`, signed: a cache made after `origin` (attach's rings) may sit below it.
+pub fn elementsFrom(origin: u64, at: u64) i64 {
+    return @divExact(@as(i64, @bitCast(at -% origin)), 2);
+}
+
 /// Prompt rows a forward takes: the chunk grid, from position 0.
 pub const prompt_rows = 8192;
 /// Decode rows a forward takes over every stream's window.
@@ -405,8 +410,8 @@ pub const Model = struct {
         defer m.gpa.free(offs);
         for (0..c.layers) |i| for (chains, 0..) |ch, j| {
             const at = if (m.paged and c.full[i]) 0 else ch.slot * per; // paged: the layer's region, the table's rows
-            offs[(i * chains.len + j) * 2] = @intCast((m.k[i] + at - m.origin) / 2);
-            offs[(i * chains.len + j) * 2 + 1] = @intCast((m.v[i] + at - m.origin) / 2);
+            offs[(i * chains.len + j) * 2] = elementsFrom(m.origin, m.k[i] + at);
+            offs[(i * chains.len + j) * 2 + 1] = elementsFrom(m.origin, m.v[i] + at);
         };
         try m.upload(s, dst, std.mem.sliceAsBytes(offs));
     }
@@ -464,11 +469,11 @@ pub const Model = struct {
             const up_in: experts.Rows = .{ .x = m.s.x, .stride = c.hidden, .slots = slots_e };
             const down_in: experts.Rows = .{ .x = m.s.act, .stride = c.moe_width };
             if (prompt) {
-                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             } else {
-                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             }
             try o.combine(m.s.y, prompt, m.s.wts, m.s.mo, n, slots_e, c.hidden);
             const after = if (i + 1 < w.layers.len) w.layers[i + 1].input_norm else w.norm;
@@ -589,4 +594,7 @@ test "a page's bytes: the pool's layout and the kernels' stride agree" {
     m.ring = ringSize(prompt_rows, m.c.window);
     try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
     try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
+}
+test {
+    _ = @import("forward_offsets_test.zig");
 }

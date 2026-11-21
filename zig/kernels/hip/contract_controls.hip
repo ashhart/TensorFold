@@ -7,6 +7,7 @@
 
 #include "attention/prefill.hpp"
 #include "quant/dense_tiles.hpp"
+#include "quant/mlx_tiles.hpp"
 #include "tiles/wmma12_gemm_k32_ref.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
@@ -196,6 +197,18 @@ tf_ctl_fa_paged_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_b
                                                     0, 0, 0, 0, table, count);
 }
 
+// Gate 3: the routed item tile's few-row passes stop after a wave's first, leaving the block's other columns unwritten.
+struct TfCtlItemFewOnePass {
+    using Dot = tf::rocm::DotBF16;
+    using Epi = tf::rocm::GemmOut<tf::rocm::DotBF16>;
+    static constexpr bool every_pass = false;
+};
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_item_few_one_pass(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma_item_tile<MlxDecoder<4>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, 4, TfCtlItemFewOnePass>(a);
+}
+
 // Gate 3: the big block loading its operands without the stores' swizzle, and without its K loop's barriers.
 struct TfCtlUnswizzled {
     static constexpr bool swizzled_loads = false, ordered = true;
@@ -237,3 +250,32 @@ extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Af
     using namespace tf::rocm;
     wmma12_k32_ref_tile<IdentityAct<DotBF16>, GemmOut<DotBF16>>(a);
 }
+
+// Gate 3: the plain item-rows stream tile over items one row short, so each item's last row is never summed or stored.
+struct TfCtlShortItems : tf::rocm::MlxDecoder<4> {
+    __device__ static bool take_item(tf::rocm::Affine& a, int z) {
+        if (!tf::rocm::take_item(a, z)) return false;
+        a.m -= a.m > 1 ? 1 : 0;
+        return true;
+    }
+};
+
+#if TF_DOT2_BF16
+using TfCtlDot = tf::rocm::DotBF16;
+#else
+using TfCtlDot = tf::rocm::DotF16;
+#endif
+
+template <int CB>
+__device__ void tf_ctl_items(tf::rocm::Affine& a, const tf::rocm::StreamSides& s, int lpc_log2, int gshift) {
+    using namespace tf::rocm;
+    stream_tile<TfCtlShortItems, IdentityAct<TfCtlDot>, TfCtlDot, StreamRound<TfCtlDot>, 4, CB>(a, s, lpc_log2, gshift);
+}
+
+#define TF_CTL_ITEMS_PLAIN(CB)                                                                                        \
+    extern "C" __global__ void __launch_bounds__(128)                                                                 \
+        tf_ctl_items_short_plain_##CB(tf::rocm::Affine a, tf::rocm::StreamSides s, int lpc_log2, int gshift) {        \
+        tf_ctl_items<CB>(a, s, lpc_log2, gshift);                                                                     \
+    }
+TF_CTL_ITEMS_PLAIN(2)
+TF_CTL_ITEMS_PLAIN(4)

@@ -10,6 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from typing import ClassVar
+from urllib.parse import unquote
 
 
 def native_version() -> str:
@@ -101,10 +102,21 @@ def _handler(rate_tps: float, api_key: str | None = None):
                 if not self._authorized():
                     return self._json(401, {"error": {"message": "invalid API key"}})
                 self._json(200, {"version": native_version(), "mock": True})
-            elif p.endswith("/models"):
+            elif p.endswith("/models") or p.startswith(("/v1/models/", "/models/")):
                 if not self._authorized():
                     return self._json(401, {"error": {"message": "invalid API key"}})
-                self._json(200, {"object": "list", "data": [{"id": MODEL, "object": "model", "owned_by": "library" if State.plain else "tensorfold"}]})
+                entry = {"id": MODEL, "object": "model", "owned_by": "library" if State.plain else "tensorfold"}
+                if p.endswith("/models"):
+                    return self._json(200, {"object": "list", "data": [entry]})
+                model_id = unquote(p.partition("/models/")[2])
+                if model_id == MODEL:
+                    return self._json(200, entry)
+                self._json(404, {"error": {
+                    "message": f"model {model_id!r} is not served here",
+                    "type": "invalid_request_error",
+                    "param": "model",
+                    "code": "model_not_found",
+                }})
             elif p == "/slide":                         # TensorFold 1.0.7's page: absolute paths, a key it may ask
                 body = (b'<html><script type="module">import * as data from "/slide/data.js"; data.start();</script>'
                         b'</html>')

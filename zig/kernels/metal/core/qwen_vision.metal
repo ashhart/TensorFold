@@ -1,62 +1,20 @@
 // Qwen-VL image towers (the Qwen3.5 tower, any width): bf16 weights, fp32 sums and residual; gemm_nax.metal first.
 
-// ---- the projections and attention products: tfp::gemm_nax (bm64 bn128 bk256 wm2 wn4) by operand layout ----
-#define QWV_GEMM(NAME, T, TB, AM, AN)                                                                               \
-  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
-      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
-      device T* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                      \
-      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
-    tfp::gemm_nax<T, false, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                      \
-  }
 // x [M, K] w^T: every linear layer (bf16 in and out, fp32 sums)
-QWV_GEMM(qwv_gemm_bf16_nt_00, bfloat16_t, true, false, false)
-QWV_GEMM(qwv_gemm_bf16_nt_01, bfloat16_t, true, false, true)
-QWV_GEMM(qwv_gemm_bf16_nt_10, bfloat16_t, true, true, false)
-QWV_GEMM(qwv_gemm_bf16_nt_11, bfloat16_t, true, true, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
 // q k^T per head in fp32
-QWV_GEMM(qwv_gemm_f32_nt_00, float, true, false, false)
-QWV_GEMM(qwv_gemm_f32_nt_01, float, true, false, true)
-QWV_GEMM(qwv_gemm_f32_nt_10, float, true, true, false)
-QWV_GEMM(qwv_gemm_f32_nt_11, float, true, true, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_00, float, false, true, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_01, float, false, true, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_10, float, false, true, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_11, float, false, true, true, true)
 // p v per head in fp32
-QWV_GEMM(qwv_gemm_f32_nn_00, float, false, false, false)
-QWV_GEMM(qwv_gemm_f32_nn_01, float, false, false, true)
-QWV_GEMM(qwv_gemm_f32_nn_10, float, false, true, false)
-QWV_GEMM(qwv_gemm_f32_nn_11, float, false, true, true)
-
-inline float qwv_bf(float x) { return float(bfloat(x)); }
-
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float qwv_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
-// One threadgroup's largest `v`, returned to all of them.
-inline float qwv_max(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_max(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : -INFINITY;
-    s = simd_max(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_00, float, false, false, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_01, float, false, false, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_10, float, false, false, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_11, float, false, false, true, true)
 
 // The fp32 residual stream's start: the patch projection p plus its bias and the patch's four learned-grid taps.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void qwv_embed(
@@ -81,19 +39,10 @@ struct QwvRows {
     device bfloat* y [[buffer(3)]], constant QwvRows& p [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
     uint t [[thread_position_in_threadgroup]], uint n [[threads_per_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
   const device float* xr = x + ulong(row) * p.width;
   device bfloat* yr = y + ulong(row) * p.width;
-  float s = 0.0f;
-  for (uint i = t; i < p.width; i += n) s += float(xr[i]);
-  const float mean = qwv_sum(s, part, n, lane, sg) / float(p.width);
-  float v = 0.0f;
-  for (uint i = t; i < p.width; i += n) {
-    const float d = float(xr[i]) - mean;
-    v += d * d;
-  }
-  const float inv = metal::precise::rsqrt(qwv_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
-  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
+  TF_VIS_LAYER_NORM_STATS(TF_VIS_ROW)
+  TF_VIS_LAYER_NORM_OUT(TF_VIS_ROW)
 }
 
 struct QwvQkv {
@@ -113,14 +62,14 @@ struct QwvQkv {
   const float v = float(qkv[row + col + d]) + float(bias[col + d]);
   const ulong out = (ulong(h) * p.rows + r) * p.dim + d;
   if (which == 2) {
-    V[out] = qwv_bf(v);
+    V[out] = tf_vis_bf(v);
     return;
   }
   const uint e = d < mid ? d + mid : d - mid;
   const float partner = float(qkv[row + col + e]) + float(bias[col + e]);
   const float c = cs[ulong(r) * p.dim + d], s = sn[ulong(r) * p.dim + d];
   const float turned = d < mid ? v * c - partner * s : v * c + partner * s;
-  (which == 0 ? Q : K)[out] = qwv_bf(turned);
+  (which == 0 ? Q : K)[out] = tf_vis_bf(turned);
 }
 
 // Each row of S [rows, n] (fp32 scores) as softmax(scale * s) in place, one threadgroup a row.
@@ -133,14 +82,14 @@ struct QwvQkv {
   device float* s = S + ulong(row) * n;
   float m = -INFINITY;
   for (uint i = t; i < n; i += tn) m = max(m, s[i] * scale);
-  m = qwv_max(m, part, tn, lane, sg);
+  m = tf_vis_max(m, part, tn, lane, sg);
   float z = 0.0f;
   for (uint i = t; i < n; i += tn) {
     const float e = metal::precise::exp(s[i] * scale - m);
     s[i] = e;
     z += e;
   }
-  const float inv = 1.0f / qwv_sum(z, part, tn, lane, sg);
+  const float inv = 1.0f / tf_vis_sum(z, part, tn, lane, sg);
   for (uint i = t; i < n; i += tn) s[i] *= inv;
 }
 

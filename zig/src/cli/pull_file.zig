@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const Allocator = std.mem.Allocator;
+const Auth = @import("pull_auth.zig").Auth;
 
 /// One file the hub's tree lists for the revision: LFS files carry their sha256, small files their git blob sha1.
 pub const Entry = struct { path: []const u8, size: u64, sha256: ?[32]u8 = null, git_sha1: ?[20]u8 = null };
@@ -25,13 +26,13 @@ fn partialPath(a: Allocator, blobs_dir: []const u8, e: Entry) ![]const u8 {
 }
 
 /// `download` again after a reset or a short body, waiting longer each time; a sha256 mismatch starts over once.
-pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
+pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
     var wait_ms: i64 = 250;
     var restarted = false;
     var attempt: u32 = 1;
     while (true) : (attempt += 1) {
-        if (download(a, io, client, out, url, blobs_dir, e)) |name| return name else |err| {
-            if (attempt == attempts or (err == error.ShaMismatch and restarted)) return err;
+        if (download(a, io, client, auth, out, url, blobs_dir, e)) |name| return name else |err| {
+            if (attempt == attempts or err == error.HubDenied or (err == error.ShaMismatch and restarted)) return err;
             if (err == error.ShaMismatch) {
                 restarted = true;
                 std.Io.Dir.cwd().deleteFile(io, try partialPath(a, blobs_dir, e)) catch {};
@@ -43,7 +44,7 @@ pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, out:
 }
 
 /// Downloads one file into ``blobs`` with HTTP range resume, verifies size and sha256, and returns the blob name.
-fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
+fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out: *std.Io.Writer, url: []const u8, blobs_dir: []const u8, e: Entry) ![]const u8 {
     const final_name = try blobName(a, e);
     const final_path = try std.fs.path.join(a, &.{ blobs_dir, final_name });
     const partial_path = try partialPath(a, blobs_dir, e);
@@ -63,11 +64,10 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
         extra = &headers;
     }
     const uri = std.Uri.parse(url) catch return error.BadUrl;
-    var req = try client.request(.GET, uri, .{ .extra_headers = extra, .headers = .{ .accept_encoding = .{ .override = "identity" } } }); // the file's own bytes: sizes, digests and ranges count them
-    defer req.deinit();
-    try req.sendBodiless();
+    var req: std.http.Client.Request = undefined;
     var redirect_buf: [8 << 10]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
+    var response = try auth.send(client, &req, .GET, uri, .{ .extra_headers = extra, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &redirect_buf); // the file's own bytes: sizes, digests and ranges count them
+    defer req.deinit();
     const status = response.head.status;
     if (status != .ok and status != .partial_content) return error.HubStatus;
     var restart = false;
@@ -137,6 +137,8 @@ fn snapshotPathOk(path: []const u8) bool {
     while (it.next()) |c| {
         if (c.len == 0 or c[c.len - 1] == '.' or c[c.len - 1] == ' ') return false;
         if (std.mem.eql(u8, c, ".") or std.mem.eql(u8, c, "..")) return false;
+        // TensorFold's own names in a model folder (snapshot, save marker, put-back copies) never come from a hub
+        if (std.ascii.startsWithIgnoreCase(c, ".tensorfold") or std.ascii.endsWithIgnoreCase(c, ".tensorfold-rollback")) return false;
     }
     return true;
 }
@@ -181,6 +183,18 @@ test "security: remote snapshot paths are portable and cannot escape on Windows"
         "deep/weights/",
     }) |path| {
         try std.testing.expect(!snapshotPathOk(path));
+    }
+}
+
+test "security: a hub repository cannot plant TensorFold's own snapshot, marker or put-back files" {
+    const planted = [_][]const u8{
+        ".tensorfold-original/SHA256SUMS", ".tensorfold-original/graphs",     ".tensorfold-original.partial/config.json",
+        ".tensorfold-save-pending",        "config.json.tensorfold-rollback", "nested/.TensorFold-Original/graphs",
+        ".tensorfold-benchmark/run.json",  ".TENSORFOLD-SAVE-PENDING",
+    };
+    for (planted) |path| try std.testing.expect(!snapshotPathOk(path));
+    for ([_][]const u8{ ".gitattributes", "tensorfold/config.json", "model.tensorfold.safetensors", "a.tensorfold-rollback.txt" }) |path| {
+        try std.testing.expect(snapshotPathOk(path));
     }
 }
 

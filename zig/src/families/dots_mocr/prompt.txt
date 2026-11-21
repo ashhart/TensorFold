@@ -1,0 +1,15 @@
+Give the layout of this document image: every layout element's bbox, its category and the text inside the bbox.
+
+1. Bbox: [x1, y1, x2, y2]
+
+2. Category: one of ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
+
+3. Text:
+    - Picture: leave the text field out.
+    - Formula: write it as LaTeX.
+    - Table: write it as HTML.
+    - Every other category: write it as Markdown.
+
+4. Copy the text exactly as printed, with no translation, and list the elements in reading order.
+
+5. Answer with a single JSON object and nothing else.

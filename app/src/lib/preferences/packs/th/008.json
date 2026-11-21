@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "นำโฟลเดอร์ออกจะหยุดค้นโมเดลที่นั่น ไม่ลบโมเดล และโมเดลที่ทำงานยังโหลดอยู่จนหยุดเซิร์ฟเวอร์",
   "Rename": "เปลี่ยนชื่อ",
   "Render the plan panel with block progress bars and status glyphs.": "แสดงแผนด้วยแถบความคืบหน้าแบบบล็อกและสัญลักษณ์สถานะ",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "การวัด community-v1 ทำซ้ำได้สำหรับโมเดลแคชบน Mac นี้",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "การวัด community-v2 ทำซ้ำได้สำหรับโมเดลแคชบน Mac นี้",
   "repeated checks": "การตรวจซ้ำ",
   "Replace matching records from the backup": "แทนข้อมูลที่ตรงจากสำรอง",
   "replaces the current instructions": "แทนคำแนะนำปัจจุบัน",

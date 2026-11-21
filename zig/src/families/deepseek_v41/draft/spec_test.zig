@@ -121,7 +121,7 @@ const Run = struct {
 
 const Mode = enum { off, sync, device };
 
-fn run(cases: []const Case, mode: Mode, settings: spec.Settings, siblings: u32) !Run {
+fn run(cases: []const Case, mode: Mode, settings: spec.Settings, siblings: u32, history: bool) !Run {
     const dims: twin.Dims = .{};
     const slots: u32 = 4;
     const t = try twin.Twin.init(gpa, dims, slots + 1);
@@ -133,7 +133,7 @@ fn run(cases: []const Case, mode: Mode, settings: spec.Settings, siblings: u32) 
     const pass = if (mode == .device) d.passAsync() else d.pass();
     var set = settings;
     set.on = mode != .off;
-    const x = try ln.Lanes.init(gpa, t.target(), pass, c, .{ .shape = d.shape, .slots = slots, .siblings = siblings, .spec = set });
+    const x = try ln.Lanes.init(gpa, if (history) t.target() else t.targetNoHistory(), pass, c, .{ .shape = d.shape, .slots = slots, .siblings = siblings, .spec = set });
     defer x.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -155,7 +155,14 @@ fn run(cases: []const Case, mode: Mode, settings: spec.Settings, siblings: u32) 
 }
 
 fn expectSame(cases: []const Case, settings: spec.Settings, siblings: u32) ![3]spec.Stats {
-    const off = try run(cases, .off, settings, siblings);
+    var stats: [3]spec.Stats = undefined;
+    // with history an absorb without an ask waits for the next ingest, so ingest calls are counted without it
+    for ([_]bool{ true, false }) |history| stats = try expectSameAs(cases, settings, siblings, history);
+    return stats;
+}
+
+fn expectSameAs(cases: []const Case, settings: spec.Settings, siblings: u32, history: bool) ![3]spec.Stats {
+    const off = try run(cases, .off, settings, siblings, history);
     defer off.deinit();
     for (cases, off.out) |cs, got| { // the reference itself is the serial decode
         const t = try twin.Twin.init(gpa, .{}, 1);
@@ -166,7 +173,7 @@ fn expectSame(cases: []const Case, settings: spec.Settings, siblings: u32) ![3]s
     }
     var stats: [3]spec.Stats = undefined;
     for ([_]Mode{ .sync, .device }, 1..) |m, i| {
-        const r = try run(cases, m, settings, siblings);
+        const r = try run(cases, m, settings, siblings, history);
         defer r.deinit();
         for (off.out, r.out) |a, b| try std.testing.expectEqualSlices(u32, a, b);
         // the same drafts: the same windows, acceptance and kept counts as the run without speculation
@@ -175,7 +182,7 @@ fn expectSame(cases: []const Case, settings: spec.Settings, siblings: u32) ![3]s
         try std.testing.expectEqualSlices(u64, &off.kept, &r.kept);
         // every used speculation replaced a pass, every launch ran one; skipped commits saved their ingests
         try std.testing.expectEqual(off.passes + r.stats.launched - r.stats.hit, r.passes);
-        try std.testing.expectEqual(off.ingests + r.stats.launched_slots, r.ingests + r.stats.ingests_skipped);
+        if (!history) try std.testing.expectEqual(off.ingests + r.stats.launched_slots, r.ingests + r.stats.ingests_skipped);
         stats[i] = r.stats;
     }
     stats[0] = .{};

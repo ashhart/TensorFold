@@ -5,6 +5,7 @@
 //   rows        the most rows of a plain product (0: any), and rows_matrix the most when the matrix cores take the rows above it
 //   min_rows    the fewest rows
 //   items       the most items of a routed plan (0: any)
+//   max_bits    the most bits a weight code holds (0: any)
 //   plain, routed   whether it takes plain products, routed plans (both by default)
 // The numbers are the thresholds the launches kept before the registry; a measured table replaces them.
 .{

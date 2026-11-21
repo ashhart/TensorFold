@@ -44,7 +44,7 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
+pub const Error = platform.optional_libraries.Failure || platform.environment.Error || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
 
 pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
@@ -76,8 +76,17 @@ pub const Library = struct {
     lib: platform.DynLib,
     api: Api,
 
+    /// TF_NCCL_LIB's value as the library to open: a path is kept as written; unset, empty and blank keep libnccl.so.2.
+    pub fn pathFrom(raw: ?[]const u8) platform.environment.Error![]const u8 {
+        return try platform.environment.path("TF_NCCL_LIB", raw) orelse "libnccl.so.2";
+    }
+
+    fn configuredPath() platform.environment.Error![]const u8 {
+        return pathFrom(platform.environment.Process.get(.{}, "TF_NCCL_LIB"));
+    }
+
     pub fn open() Error!Library {
-        return openPath("libnccl.so.2");
+        return openPath(try configuredPath());
     }
 
     pub fn openPath(path: []const u8) Error!Library {
@@ -144,6 +153,29 @@ pub const Library = struct {
         return v;
     }
 };
+
+test "NCCL library: TF_NCCL_LIB overrides the default; unset and empty keep it" {
+    const name = "TF_NCCL_LIB";
+    const saved = if (platform.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, v, 0) else null;
+    defer if (saved) |v| {
+        _ = platform.env.setenv(name, v, 1);
+        std.testing.allocator.free(v);
+    } else {
+        _ = platform.env.unsetenv(name);
+    };
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.unsetenv(name));
+    try std.testing.expectEqualStrings("libnccl.so.2", try Library.configuredPath());
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.setenv(name, "/fixture/nccl/libnccl.so.2", 1));
+    try std.testing.expectEqualStrings("/fixture/nccl/libnccl.so.2", try Library.configuredPath());
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.setenv(name, " ./nccl/libnccl.so.2 ", 1));
+    try std.testing.expectEqualStrings(" ./nccl/libnccl.so.2 ", try Library.configuredPath());
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.setenv(name, "", 1));
+    try std.testing.expectEqualStrings("libnccl.so.2", try Library.configuredPath());
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.setenv(name, "libnccl.so.2\n", 1));
+    try std.testing.expectError(error.InvalidEnvironment, Library.open());
+    try std.testing.expectEqual(@as(c_int, 0), platform.env.setenv(name, " \t", 1));
+    try std.testing.expectEqualStrings("libnccl.so.2", try Library.configuredPath());
+}
 
 test "nonblocking communicator config preserves the public ABI defaults" {
     const c: Config = .{};

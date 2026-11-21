@@ -32,19 +32,15 @@ fn visit(io: Io, dir: []const u8, names: []const []const u8, comptime advise: an
 }
 
 /// Flash Next also closes shards while loading; its live PLE mappings must be excluded from the final sweep.
-pub fn directory(io: Io, dir: []const u8, keep: anytype) void {
+pub fn shards(io: Io, paths: []const [:0]u8, keep: anytype) void {
     if (@import("builtin").os.tag != .linux) return;
-    walk(io, dir, keep, drop);
+    walk(io, paths, keep, drop);
 }
 
-fn walk(io: Io, dir: []const u8, keep: anytype, comptime advise: anytype) void {
-    var d = Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return;
-    defer d.close(io);
-    var it = d.iterate();
-    entries: while (it.next(io) catch null) |e| {
-        if (e.kind != .file and e.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
-        const f = d.openFile(io, e.name, .{}) catch continue;
+/// `paths` from the index (checkpoint.shardFiles), so shards nested under tensors/ are reached; held inodes skipped.
+fn walk(io: Io, paths: []const [:0]u8, keep: anytype, comptime advise: anytype) void {
+    entries: for (paths) |path| {
+        const f = Io.Dir.cwd().openFile(io, path, .{}) catch continue;
         defer f.close(io);
         const stat = f.stat(io) catch continue;
         for (keep) |k| {
@@ -89,30 +85,33 @@ test "checkpoint cache: last read precedes release and close on success and refu
     }
 }
 
-test "checkpoint cache: final sweep excludes live PLE, subdirectories and unrelated files" {
+test "checkpoint cache: final sweep reaches the index's nested shards and excludes live PLE and aliases" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    for ([_][]const u8{ "model.safetensors", "mtp.safetensors", "ple.safetensors", "config.json" }) |name|
+    try tmp.dir.createDirPath(t.io, "tensors");
+    for ([_][]const u8{ "tensors/model-1.safetensors", "tensors/model-2.safetensors", "tensors/ple.safetensors" }) |name|
         try tmp.dir.writeFile(t.io, .{ .sub_path = name, .data = name });
-    try tmp.dir.createDirPath(t.io, "ssd.safetensors");
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "ssd.safetensors/expert.safetensors", .data = "runtime" });
-    if (@import("builtin").os.tag != .windows) try tmp.dir.symLink(t.io, "ple.safetensors", "alias.safetensors", .{});
-    const ple = try tmp.dir.openFile(t.io, "ple.safetensors", .{});
+    if (@import("builtin").os.tag != .windows) try tmp.dir.symLink(t.io, "ple.safetensors", "tensors/alias.safetensors", .{});
+    const ple = try tmp.dir.openFile(t.io, "tensors/ple.safetensors", .{});
     defer ple.close(t.io);
     const keep = [_]struct { file: struct { file: Io.File } }{.{ .file = .{ .file = ple } }};
-    const path = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
-    defer t.allocator.free(path);
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    var paths: [5][:0]u8 = undefined;
+    for (&paths, [_][]const u8{ "model-1", "model-2", "ple", "alias", "missing" }) |*p, name|
+        p.* = try std.fmt.allocPrintSentinel(t.allocator, "{s}/tensors/{s}.safetensors", .{ root, name }, 0);
+    defer for (paths) |p| t.allocator.free(p);
     const Spy = struct {
         var count: usize = 0;
         fn advise(f: Io.File) void {
             var buf: [64]u8 = undefined;
             const n = f.readPositionalAll(t.io, &buf, 0) catch unreachable;
-            std.debug.assert(std.mem.eql(u8, buf[0..n], "model.safetensors") or std.mem.eql(u8, buf[0..n], "mtp.safetensors"));
+            std.debug.assert(std.mem.startsWith(u8, buf[0..n], "tensors/model-"));
             count += 1;
         }
     };
     Spy.count = 0;
-    walk(t.io, path, &keep, Spy.advise);
+    walk(t.io, &paths, &keep, Spy.advise);
     try t.expectEqual(@as(usize, 2), Spy.count);
 }
 

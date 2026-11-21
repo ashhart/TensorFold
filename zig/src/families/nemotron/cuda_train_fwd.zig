@@ -92,8 +92,8 @@ pub fn experts(f: *const fwd.Forward, m: weights.MoE, rows: usize, scale: Scale,
     const items = kern.maxItems(pairs, ex.experts, tile);
     const g = o.grouped();
     const in = f.rowsIn(ex);
-    try g.prompt(o.s, .up, in[0], ex, b.plan, b.act, items, -1);
-    try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, -1);
+    try g.prompt(o.s, .up, in[0], ex, b.plan, b.act, items, pairs, tile, -1);
+    try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, pairs, tile, -1);
     for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(b.act, ex.width, r, b.ymoe, ex.dims, false, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
     const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
     if (m.pocket) |p| try t.pocketRows(b.y, ex.dims, p.up, p.down, p.n, b.ymoe, false, rows, c.slots(), c.top_k, scale.rows, scale.from[layer]);

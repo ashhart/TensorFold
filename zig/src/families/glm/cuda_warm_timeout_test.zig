@@ -107,6 +107,11 @@ const Fake = struct {
         posts += 1;
         return 0;
     }
+    fn gathered(_: u64, _: u64, n: usize, _: cuda.nccl.DataType, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        std.debug.assert(n == 4 << 20);
+        posts += 1;
+        return 0;
+    }
     fn abort(_: cuda.nccl.Comm) callconv(.c) cuda.nccl.Result {
         std.debug.assert(order == 1);
         order = 2;
@@ -134,9 +139,9 @@ const Fake = struct {
     }
     const Action = struct {
         g: *cuda.tp_group.Group,
-        ring: bool,
+        peers: warm.Peers,
         pub fn expired(a: @This()) void {
-            if (@hasDecl(warm, "timeoutWith")) warm.timeoutWith(a.g, a.ring, &.{}, Watch, log);
+            if (@hasDecl(warm, "timeoutWith")) warm.timeoutWith(a.g, a.peers, &.{}, Watch, log);
         }
     };
     fn driver() cuda.Driver {
@@ -154,10 +159,11 @@ const Fake = struct {
         g.lib.api.ncclGroupEnd = end;
         g.lib.api.ncclSend = transfer;
         g.lib.api.ncclRecv = transfer;
+        g.lib.api.ncclAllGather = gathered;
         g.lib.api.ncclCommAbort = abort;
         return g;
     }
-    fn run(rank: usize, count: usize, ring: bool, where: Stage, answer: ?u64) !void {
+    fn run(rank: usize, count: usize, peers: warm.Peers, where: Stage, answer: ?u64) !void {
         reset(rank, count, where, answer);
         var g = group();
         const d = driver();
@@ -167,16 +173,16 @@ const Fake = struct {
             guard.join();
         }
         if (@hasDecl(warm, "warmWith")) {
-            try warm.warmWith(&d, &g, ring, Clock{}, 100, Action{ .g = &g, .ring = ring });
+            try warm.warmWith(&d, &g, peers, Clock{}, 100, Action{ .g = &g, .peers = peers });
         } else {
-            try warm.warm(&d, &g, ring);
+            try warm.warm(&d, &g, peers);
         }
     }
 };
 
 test "GLM warm peers: a missing peer in posting or stream wait aborts once and stops every rank by name" {
     for ([_]Fake.Stage{ .posting, .stream, .cleanup }) |stage| for (0..2) |rank| {
-        try t.expectError(error.PeerWarmupTimedOut, Fake.run(rank, 2, false, stage, null));
+        try t.expectError(error.PeerWarmupTimedOut, Fake.run(rank, 2, .every, stage, null));
         try t.expect(!Fake.escaped.load(.acquire));
         try t.expectEqual(@as(u64, 100), Fake.ms.load(.acquire));
         try t.expectEqual(@as(usize, 1), Fake.abort_count);
@@ -193,7 +199,7 @@ test "GLM warm peers: a missing peer in posting or stream wait aborts once and s
 
 test "GLM warm peers: a peer answering just inside the bound passes without abort or stopping another rank" {
     for ([_]Fake.Stage{ .posting, .stream }) |stage| for (0..2) |rank| {
-        try Fake.run(rank, 2, false, stage, 99);
+        try Fake.run(rank, 2, .every, stage, 99);
         try t.expect(!Fake.escaped.load(.acquire));
         if (@hasDecl(warm, "warmWith")) try t.expectEqual(@as(u64, 99), Fake.ms.load(.acquire));
         try t.expectEqual(@as(usize, 0), Fake.abort_count);
@@ -207,9 +213,23 @@ test "GLM warm peers: timeout names only selected ring peers and observed NCCL t
     if (!@hasDecl(warm, "timeoutLine")) return error.SkipZigTest;
     var buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try warm.timeoutLine(&w, 1, 4, true, 5);
+    try warm.timeoutLine(&w, 1, 4, .neighbours, 5);
     try t.expectEqualStrings("rank 1: peer warm-up: 4 MiB send/recv with rank(s) 0,2 not finished after 300 s (NCCL transport P2P+NET); PeerWarmupTimedOut; stopping every rank", w.buffered());
     w = std.Io.Writer.fixed(&buf);
-    try warm.timeoutLine(&w, 1, 4, false, 0);
+    try warm.timeoutLine(&w, 1, 4, .every, 0);
     try t.expect(std.mem.indexOf(u8, w.buffered(), "rank(s) 0,2,3") != null);
+}
+
+test "GLM warm peers: gather's all-gather that never completes stops every rank, named as the all-gather" {
+    for (0..2) |rank| {
+        try t.expectError(error.PeerWarmupTimedOut, Fake.run(rank, 2, .gather, .stream, null));
+        try t.expect(!Fake.escaped.load(.acquire));
+        try t.expectEqual(@as(u64, 100), Fake.ms.load(.acquire));
+        try t.expectEqual(@as(usize, 1), Fake.abort_count);
+        for (Fake.stops[0..2]) |cause| try t.expectEqualStrings("PeerWarmupTimedOut", cause orelse "still waiting");
+        var expected: [512]u8 = undefined;
+        const line = try std.fmt.bufPrint(&expected, "rank {d}: peer warm-up: 4 MiB all-gather not finished after 300 s (NCCL transport unknown); PeerWarmupTimedOut; stopping every rank", .{rank});
+        try t.expectEqualStrings(line, Fake.message[0..Fake.message_len]);
+        try t.expectEqual(@as(usize, 1), Fake.posts);
+    }
 }

@@ -1,0 +1,5 @@
+bin-pr: 555f052d9 (upstream main ca854daf3 plus the change) built with Zig 0.17.0 and nvcc 13.0 for sm_121 on a GB10
+(ReleaseFast); the same file on both ranks (sha256 equal on R0 and R1); arms on, off and fresh
+5230f587107d1f74854bfb532f246649aef3e6f90f4ab73bcae58360937d66d9  tensorfold-native (bin-pr)
+bin-main: ca854daf3 (upstream main) built the same way; the same file on both ranks; arm main
+11f369d97237f4b7747963c7e31497d1e1fe041ba908f6d9338df181a473a907  tensorfold-native (bin-main)

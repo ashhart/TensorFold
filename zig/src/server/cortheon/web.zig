@@ -272,9 +272,16 @@ fn hasScheme(url: []const u8) bool {
     return false;
 }
 
+/// `location` with tab and newline removed, then other whitespace trimmed off the ends.
+fn cleanLocation(a: Allocator, location: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (location) |ch| if (!(ch == '\t' or ch == '\n' or ch == '\r')) try out.append(a, ch);
+    return std.mem.trim(u8, out.items, &std.ascii.whitespace);
+}
+
 /// `location` resolved against `base` (absolute, scheme-relative, root-relative or path-relative).
 pub fn resolveUrl(a: Allocator, base: []const u8, location: []const u8) Allocator.Error![]const u8 {
-    const loc = std.mem.trim(u8, location, " \t");
+    const loc = try cleanLocation(a, location);
     if (std.ascii.startsWithIgnoreCase(loc, "http://") or std.ascii.startsWithIgnoreCase(loc, "https://")) return withoutDots(a, try a.dupe(u8, loc));
     if (hasScheme(loc)) return a.dupe(u8, loc); // an absolute URL of another scheme stays itself
     const scheme_end = std.mem.indexOf(u8, base, "://") orelse return a.dupe(u8, loc);
@@ -321,6 +328,24 @@ test "redirect locations resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/sib", try resolveUrl(a, "https://a.org", "sib"));
     try std.testing.expectEqualStrings("ftp://files.example/a", try resolveUrl(a, "https://a.org/docs/intro", "ftp://files.example/a"));
     try std.testing.expectEqualStrings("https://a.org/login?next=https://a.org/x", try resolveUrl(a, "https://a.org/docs/intro", "/login?next=https://a.org/x"));
+}
+
+test "a link whose ends are a newline still resolves" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("https://b.org/x", try resolveUrl(a, "https://a.org/p/q", "\nhttps://b.org/x"));
+    try std.testing.expectEqualStrings("https://b.org/y", try resolveUrl(a, "https://a.org/p/q", "https://b.org/y\r"));
+    try std.testing.expectEqualStrings("https://a.org/root", try resolveUrl(a, "https://a.org/p/q", "\n/root"));
+}
+
+test "a tab or newline wrapped inside a link is not part of it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("https://b.org/path", try resolveUrl(a, "https://a.org/p/q", "https://b.org/pa\nth"));
+    try std.testing.expectEqualStrings("https://b.org/path", try resolveUrl(a, "https://a.org/p/q", "https://b.org/pa\tth"));
+    try std.testing.expectEqualStrings("https://b.org/a b", try resolveUrl(a, "https://a.org/p/q", "https://b.org/a b"));
 }
 
 test "a link that only replaces the query or the fragment stays on its page" {

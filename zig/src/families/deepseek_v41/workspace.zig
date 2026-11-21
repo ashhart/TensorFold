@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const exl3 = @import("core").exl3_projection;
 const View = @import("view.zig").View;
-const hash = @import("engram_hash.zig");
+const hash = @import("engram_hash_core");
 const groups = @import("core").expert_groups;
 
 pub const Field = enum {

@@ -100,6 +100,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         };
     }
     if (wording.looped(steady_prompt, replies[at].content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
+    try @import("slide_correction.zig").verify(srv, cx, plan, recalled, gone);
     return .{ .recalled = recalled };
 }
 
