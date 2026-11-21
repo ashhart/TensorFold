@@ -22,6 +22,7 @@ fn noSums(_: c.Shape) usize {
     return 0;
 }
 
+const nan_relu = "relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN";
 /// A key's 128 products, then the 32 heads' weighted sum.
 fn scoreDepth(_: c.Shape) usize {
     return dk + heads;
