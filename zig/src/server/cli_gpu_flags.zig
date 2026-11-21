@@ -12,6 +12,8 @@ const int = cli.int;
 const float = cli.float;
 const gib = cli.gib;
 
+pub const flags = [_]cli.Flag{.{ .name = "--rank-secret", .native = cli.served("--tp") }};
+
 /// The CUDA build's --device, --segments and --precision; false for any other flag.
 pub fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
     if (std.mem.eql(u8, name, "--precision")) {
