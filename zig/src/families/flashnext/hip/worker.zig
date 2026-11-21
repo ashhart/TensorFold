@@ -110,7 +110,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .snap => {
                 const lane = lanes.get(w[1]) orelse return error.UnknownStream;
                 // a copy this rank cannot keep is a restore it refuses later, which every rank then hears
-                const x = snapshot.save(gpa, &e.driver, e.stream, &lane.caches, null, w[3], ratio) catch continue;
+                const x = snapshot.save(gpa, .{ .d = &e.driver }, e.stream, &lane.caches, null, w[3], ratio) catch continue;
                 saved.put(gpa, w[2], x) catch snapshot.drop(gpa, x);
             },
             .restore => {
@@ -118,7 +118,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
                 // every rank resumes from the state, or every rank starts the prompt over
                 snapshot.restoreAgreed(
                     gpa,
-                    &e.driver,
+                    .{ .d = &e.driver },
                     e.stream,
                     saved.get(w[2]),
                     &lane.caches,
