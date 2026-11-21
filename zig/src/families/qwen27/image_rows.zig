@@ -1,12 +1,12 @@
 //! A round's rows under M-RoPE: each window's rope positions from its slot's images, and the rows image rows replace.
 const std = @import("std");
-const mrope = @import("core").qwen_vl.rope;
+const core = @import("core");
+const mrope = core.qwen_vl.rope;
 const Ref = @import("projection.zig").Ref;
 const Round = @import("round_plan.zig").Round;
 const Frame = @import("gpu_frame.zig").Frame;
 
-/// One image's rows in a prompt pass: prompt rows [at, at + n) take rows [row, row + n) of the pass's image rows.
-pub const Span = struct { at: u32, n: u32, row: u32 };
+pub const Span = core.image_rows.Span;
 
 /// A prompt pass's images: the stream in `slot` takes `rows` (bf16, the model's width) at its spans.
 pub const Images = struct { slot: u32, rows: Ref, spans: []const Span };
@@ -38,8 +38,8 @@ fn placeRows(pos: []i32, takes: []i32, cap: usize, rope: []const mrope.Layout, i
             pos[2 * cap + row] = x[2];
             grid = grid or x[1] != x[0] or x[2] != x[0];
             takes[row] = -1;
-            if (images) |im| if (im.slot == slot) for (im.spans) |s| if (p >= s.at and p < s.at + s.n) {
-                takes[row] = @intCast(s.row + (p - s.at));
+            if (images) |im| if (im.slot == slot) for (im.spans) |s| if (core.image_rows.cut(s, p, @as(usize, p) + 1)) |c| {
+                takes[row] = @intCast(c.row);
                 took = true;
             };
         }

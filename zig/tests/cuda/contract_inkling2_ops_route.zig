@@ -1,4 +1,4 @@
-//! Inkling 2's router and expert epilogues under the contract: tf_ink2_topk, tf_ink2_gateup, tf_ink2_prompt_tail.
+//! Inkling 2's router and expert epilogues: tf_ink2_topk, core's tf_exl3_gateup_capped, tf_ink2_prompt_tail.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -143,19 +143,38 @@ fn gateDepth(s: c.Shape) usize {
 /// (row, slot) pairs x a rank's width x the gate/up's K splits: 1 row, 16, a 128-row window, a 2,048-row window.
 pub fn gateupSpec(swapped: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 8, .n = width, .k = 4 }, .{ .rows = 128, .n = width, .k = 4 }, .{ .rows = 1024, .n = width, .k = 4 }, .{ .rows = 16384, .n = width, .k = 4 } };
-    const name = if (swapped) "control: inkling2 ops tf_ink2_gateup with the caps swapped" else "inkling2 ops tf_ink2_gateup (softcapped SwiGLU, gate cap 4, up cap 25)";
+    const name = if (swapped) "control: inkling2 exl3 tf_exl3_gateup_capped with the caps swapped" else "inkling2 exl3 tf_exl3_gateup_capped (softcapped SwiGLU, gate cap 4, up cap 25)";
     return .{ .name = name, .accum = .f32, .depth = gateDepth, .out = .f16, .tiles = .{ .{}, .{ .size = 128, .step = 128, .min = 128 }, .{} }, .served = if (swapped) served[0..2] else served };
 }
+
+/// exl3_experts.cu's CappedArgs, field for field: act_mode 3, no clamp.
+pub const CappedArgs = extern struct {
+    z: u64,
+    pick: u64,
+    svh_g: u64,
+    svh_u: u64,
+    suh_d: u64,
+    xd: u64,
+    p: i32,
+    n: i32,
+    sk: i32,
+    experts: i32,
+    limit: f32 = 0,
+    act_mode: i32 = 3,
+    gate_cap: f32,
+    up_cap: f32,
+};
 
 /// xd = H(gcap tanh(g / gcap) sigmoid(g) ucap tanh(u / ucap) suh_d) 2^-3.5, g and u the split sums' H times svh.
 pub const Gateup = struct {
     kern: *const ops.Kernels,
+    capped: cuda.Function, // exl3_experts.Experts.capped
     swapped: bool = false,
     shape: c.Shape = undefined,
     z: []f32 = &.{}, // [(mat * sk + split) * P + pair] * n + column
     sv: [3][]u16 = .{ &.{}, &.{}, &.{} }, // fp16 [experts][n]: svh_g, svh_u, suh_d
     pick: []i32 = &.{},
-    args: ops.GateUpArgs = undefined,
+    args: CappedArgs = undefined,
 
     pub const sums = {};
 
@@ -207,7 +226,10 @@ pub const Gateup = struct {
     }
 
     pub fn run(self: *Gateup, rig: *rig_.Rig) !void {
-        try ops.gateup(self.kern, rig.s, self.args);
+        var a: cuda.Args = .{};
+        a.add(self.args);
+        const grid: cuda.Dim3 = .{ .x = @intCast(self.args.p), .y = @intCast(@divExact(self.args.n, 128)) };
+        try cuda.launch.launch(self.capped, .{ .grid = grid, .block = .{ .x = 32 } }, rig.s, &a);
     }
 
     pub fn count(self: *const Gateup) usize {

@@ -29,6 +29,7 @@ pub const Kernels = struct {
     g4_gelu_fn: module.Function,
     g4_pool_fn: module.Function,
     pointwise_fn: module.Function,
+    pointwise_gamma_fn: module.Function,
     bias_fn: module.Function,
     bias_act_fn: module.Function,
     unshuffle_fn: module.Function,
@@ -47,6 +48,7 @@ pub const Kernels = struct {
             .g4_gelu_fn = try mod.function("tf_vit_g4_gelu_mul"),
             .g4_pool_fn = try mod.function("tf_vit_g4_pool"),
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
+            .pointwise_gamma_fn = try mod.function("tf_vit_pointwise_gamma"),
             .bias_fn = try mod.function("tf_vit_bias"),
             .bias_act_fn = try mod.function("tf_vit_bias_act"),
             .unshuffle_fn = try mod.function("tf_vit_unshuffle"),
@@ -116,6 +118,18 @@ pub const Kernels = struct {
         a.add(@as(i64, @intCast(count)));
         a.add(@backingInt(act));
         try go(k.pointwise_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// pointwise with a layer scale: o = bf16(r + bf16(gamma[i % width] act(x))), gamma bf16 [width].
+    pub fn pointwiseGamma(k: *const Kernels, s: Stream, x: u64, r: ?u64, o: u64, count: usize, act: Act, gamma: u64, width: usize) !void {
+        if (width == 0) return error.RowShape;
+        var a: Args = .{};
+        for ([_]u64{ x, r orelse 0, o }) |p| a.add(p);
+        a.add(@as(i64, @intCast(count)));
+        a.add(@backingInt(act));
+        a.add(gamma);
+        a.add(int(width));
+        try go(k.pointwise_gamma_fn, s, blocks(count, threads), 1, &a);
     }
 
     /// o [rows, n] = bf16(acc + b), acc f32.
@@ -272,11 +286,12 @@ const Full = struct {
     }
 };
 
-/// Full attention by head dim: SigLIP2's 72, RADIO's 80 (full_kernel's bits in one barrier a tile), MOSS-Image's 128.
+/// Full attention by head dim: SigLIP2's 72, RADIO's 80 (full_kernel's bits), MOSS-Image's 128 and Inkling 2's 64.
 const fulls = [_]Full{
     .{ .dim = 72, .warps = 8, .slots = 8 },
     .{ .dim = 80, .warps = 8 },
     .{ .dim = 128, .warps = 8 },
+    .{ .dim = 64, .warps = 8 },
 };
 
 /// Every row of a picture over every key (no mask), a block a head and 128 rows.
