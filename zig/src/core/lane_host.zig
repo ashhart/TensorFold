@@ -464,14 +464,14 @@ pub const LaneHost = struct {
         job.reported();
         if (h.cache) |store| {
             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
-            if (job.request.promptOnly()) {
-                // never kept, so a repeat of it is not worth noting
+            if (job.request.promptOnly()) { // never kept, so a repeat of it is not worth noting
             } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }
         }
+        @import("lane_host_progress.zig").filled(job); // a progress stream's last count, before its prefilled event
         emit(job, .{ .prefilled = job.stream.cached });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);
