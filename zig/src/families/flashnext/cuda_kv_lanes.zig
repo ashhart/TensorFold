@@ -370,7 +370,7 @@ pub const Pool = struct {
             var at: [4 * wt.linear_n + 6]u64 = undefined;
             const n = m.at.len - seq_pieces;
             if (n > at.len) return error.FlashNextRunTooShort;
-            for (at[0..n], seq_pieces..) |*a, i| a.* = m.addr(i, p.arena.ptr, x.lease.state.items);
+            for (at[0..n], seq_pieces..) |*a, i| a.* = m.addr(i, p.arena.buf.ptr, x.lease.state.items);
             return mtp.Draft.initPieces(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, at[0..n], (x.wide orelse return error.FlashNextRunTooShort).ptr);
         }
         const run_len = p.layout.runPages() * p.layout.pageBytes();
