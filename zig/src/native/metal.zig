@@ -41,7 +41,6 @@ const affine_widths = blk: {
 };
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
-
 pub const families: []const api.Family = &.{
     .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
     .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
