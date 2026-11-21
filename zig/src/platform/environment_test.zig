@@ -492,6 +492,9 @@ test "environment: TENSORFOLD_PARALLEL takes the flag over the setting, blank ke
         defer a.free(why);
         try t.expect(std.mem.indexOf(u8, why, "TENSORFOLD_PARALLEL") != null);
         try t.expect(std.mem.indexOf(u8, why, "or auto") != null);
+    }
+}
+
 test "environment: a malformed calibration setting stops a Metal start naming the setting, its text and the accepted forms" {
     const metal: e.Flags = .{ .metal = true };
     const bad = [_]struct { name: []const u8, raw: []const u8 }{
