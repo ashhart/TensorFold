@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream that opens a slot is promised the KV pages of its prompt and one widest pass instead of every slot being promised its whole window at load; a pass past that promises the rest before it takes a page and fails with `LaneMemory` before any page is taken when the pool cannot meet it, and a stream that leaves, a failed or requeued prompt pass, a reset and a move to slot 0 give back the slot's pages and promise. Without the flag nothing changes (#3377, refs #1293). Thanks to @CodingEmil.
+
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
 
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
@@ -647,7 +649,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the Qwen3.8-27B reply-end keep test names its history, as the keep pin added on 10 Nov requires, and `test-qwen27-reply-cache-host` now runs it (#3012).
 
 - Lanes: shared rounds price a plain (undrafted) round apart from drafted rows, from trial rounds whose first is a dropped warm-up, and fit row costs from plain and drafted widths, so only how many drafts a round asks for changes; on gfx1151 with Qwen3.6-35B-A3B and MTP it is level with main with tokens unchanged, and opt-in `TF_SHARED_PRICE_LOG=1` prints each shared round's prices (#2687, refs #2605).
-- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream is promised its prompt's KV pages when it opens a slot and its reply's as it writes them, and gives every page and its promise back when it leaves, is reset or moves to slot 0, instead of each slot holding a promise of its whole window from startup (#3377, part of #1293).
 
 - Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
 
