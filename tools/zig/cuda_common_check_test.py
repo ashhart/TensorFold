@@ -80,6 +80,13 @@ class GuardTest(unittest.TestCase):
             self.unit.write_text(DEFINITION + DEFINITION.replace("warp_sum", name))
             self.assertIn("definition:" + name, " ".join(self.errors()))
 
+    def test_camel_case_reductions(self):
+        for name in ("warpSum", "WarpSum", "blockSum", "blockSums", "BlockSumTree"):
+            self.unit.write_text(DEFINITION + DEFINITION.replace("warp_sum", name))
+            self.assertIn("definition:" + name, " ".join(self.errors()))
+        self.unit.write_text(DEFINITION + DEFINITION.replace("warp_sum", "warpSumOf"))
+        self.assertEqual(self.errors(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

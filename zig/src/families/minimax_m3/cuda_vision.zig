@@ -31,8 +31,7 @@ pub const image_config: vl.Config = .{ .depth = depth, .hidden = width, .heads =
 /// A request's image limits (--vision): image tokens in all and images.
 pub const Limits = struct { image_tokens: u32, max_images: u32 };
 
-/// Prompt rows [at, at + n) take image rows [row, row + n).
-pub const Span = struct { at: u32, n: u32, row: u32 };
+pub const Span = core.image_rows.Span;
 
 /// An image's bytes to patches in merge order: torchvision's antialiased bicubic, then CLIP's mean and std.
 pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, budget: u32) !vl.geometry.Prepared {
@@ -279,10 +278,8 @@ pub const Images = struct {
 /// A sequence's image rows over prompt rows [lo, hi) of its pass, into the residual rows at `resid` (row lo first).
 pub fn splice(mk: *const kern.Kernels, s: cuda.Stream, rows: u64, spans: []const Span, lo: usize, hi: usize, resid: u64) !void {
     for (spans) |sp| {
-        const a = @max(lo, sp.at);
-        const b = @min(hi, sp.at + sp.n);
-        if (a >= b) continue;
-        try kern.splice(mk, s, rows + (sp.row + (a - sp.at)) * hidden * 2, resid + (a - lo) * hidden * 4, b - a, hidden);
+        const c = core.image_rows.cut(sp, lo, hi) orelse continue;
+        try kern.splice(mk, s, rows + c.row * hidden * 2, resid + (c.at - lo) * hidden * 4, c.n, hidden);
     }
 }
 

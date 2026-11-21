@@ -1,6 +1,7 @@
 // MiniMax-M3.1-Flash's glue on CUDA: the Metal family's glue.metal step for step (bf16 activations, fp32 sums).
 
 #include "minimax_m3.cuh"
+#include "common/dspark_pick.cuh"
 
 namespace tf_mm3 {
 // The token ids' bf16 embeddings as the fp32 residual rows (bf16 values).
@@ -358,18 +359,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_mm3_top1f(const float* __r
 // The ranks' gathered (value, id) picks to one, the best (the low id on a tie), into walk[j + 1]
 extern "C" __global__ void tf_mm3_pick_merge(const unsigned char* __restrict__ picks, int world, int stride,
                                              int* __restrict__ walk, int j) {
-  if (threadIdx.x != 0) return;
-  float best = -CUDART_INF_F;
-  int id = 0;
-  for (int q = 0; q < world; ++q) {
-    const float v = *reinterpret_cast<const float*>(picks + (size_t)q * stride);
-    const int k = *reinterpret_cast<const int*>(picks + (size_t)q * stride + 4);
-    if (v > best || (v == best && k < id)) {
-      best = v;
-      id = k;
-    }
-  }
-  walk[j + 1] = id;
+  tf_common::dspark_pick<0>(picks, world, stride, walk, j);
 }
 
 // fp32 pixels [P][K] . the fp32 conv weight [N][K]^T, each output one fma chain in k order, rounded to bf16 once
