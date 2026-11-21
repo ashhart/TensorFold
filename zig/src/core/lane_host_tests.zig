@@ -33,6 +33,7 @@ test {
     _ = @import("lane_remote_provenance_test.zig");
     _ = @import("lane_remote_cut_test.zig");
     _ = @import("lane_export_cancel_test.zig");
+    _ = @import("lane_host_flush_test.zig");
 }
 
 test {

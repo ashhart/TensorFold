@@ -11,6 +11,7 @@ const Wait = @import("wait_reason.zig").Wait;
 /// The queued job to admit (its index), or null to hold, each job held stores why; the caller holds the lock.
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return hold(h, .memory_pressure); // under memory pressure nothing starts or is read ahead
+    if (h.disk.holding()) return null; // a flush waits for the requests in flight: nothing starts or is read ahead
     if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
     if (!h.stale) @import("lane_remote.zig").queue(h); // remote prefixes beyond the cache's, filled on their own threads
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead

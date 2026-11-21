@@ -15,11 +15,6 @@ concurrency:
 permissions:
   contents: read
 
-# A newer push to main or to a pull request cancels the older format run, as No GPU does.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 # 19 Nov: a landing train's PR (lead/train-*) skips these jobs. Our local CI runs the same checks on the train's
 # tip, and the hosted queue (58 runs behind ~13 jobs) held main's and contributors' checks for hours. A train
 # whose local run is red starts this workflow on its branch by hand (workflow_dispatch) for GitHub's verdict.
