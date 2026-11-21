@@ -73,7 +73,7 @@ const Piece = struct { bytes: u64, row: u32 = 0 };
 
 const Offsets = struct {
     ends: *std.ArrayList(u64),
-    fn add(c: Offsets, _: u64, off: usize, len: usize) anyerror!void {
+    fn add(c: Offsets, _: u64, off: u64, len: usize) anyerror!void {
         try c.ends.append(testing.allocator, off + len);
     }
 };
