@@ -62,7 +62,11 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "fp8_experts prompt down f32", .symbol = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi0ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi", .image = "fp8_experts", .threads = 128 }, .usage = .{ .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 } } },
     .{ .launch = .{ .name = "fp8_experts prompt down bf16", .symbol = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi3ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi", .image = "fp8_experts", .threads = 128 }, .usage = .{ .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 197, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 }, .{ .regs = 221, .static = 32768, .bound = 128 } } },
 };
-/// Drama 3's compact-checkpoint router, unmeasured: the GB10 check runs its contract and prints its RECORD.
+
+/// Launches still owed nvcc receipts; qualification refuses each SM until its receipt lands.
 pub const cuda_pending = [_]CudaRecord{
+    // Drama 3's compact-checkpoint router, unmeasured: the GB10 check runs its contract and prints its RECORD.
     .{ .launch = .{ .name = "drama3 d3_router_compact", .symbol = "d3_router_compact", .image = "drama3", .threads = 256 }, .usage = @import("registry.zig").none },
+    // GB10 (sm_121, nvcc 13.0) by docs/recipes/drama3-cuda/cfg-mix-gb10.sh; no __launch_bounds__, so 1024 fit.
+    .{ .launch = .{ .name = "drama3 d3_cfg_mix", .symbol = "d3_cfg_mix", .image = "drama3", .threads = 256 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } }, .later_pending = true },
 };

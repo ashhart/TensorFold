@@ -15,10 +15,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (o.cfg_enabled or o.cfg_batched) {
-        problem.* = "this engine revision implements Drama CFG on Metal only; use the pinned CUDA quant engine on Linux";
-        return null;
-    }
     if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and (o.lanes == 0 or o.lanes > 8))) {
         problem.* = "Drama 3 serves 1 through 8 frame lanes on one CUDA device; tensor parallelism is unsupported";
         return null;
@@ -69,8 +65,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .max_frames = o.max_frames,
         .prefill_rows = prefill_rows,
         .reference_entries = entries,
+        .cfg_enabled = o.cfg_enabled,
+        .cfg_batched = o.cfg_batched,
     }) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
+        problem.* = if (e == error.DramaLanesOverMemory)
+            try std.fmt.allocPrint(a, "Drama 3 lanes and their CFG guidance states do not fit this CUDA device's memory; serve fewer --parallel lanes", .{})
+        else
+            try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
         return null;
     };
 }

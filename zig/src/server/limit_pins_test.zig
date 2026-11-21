@@ -148,15 +148,13 @@ test "limit pins: serve flags at their documented bounds" {
     defer arena.deinit();
     const a = arena.allocator();
     var u: cli.Usage = .{};
-    if (@import("builtin").os.tag == .macos) { // CFG flags: macOS only (drama_cfg.zig)
-        const off = try cli.parse(a, &.{ "m", "--cfg-gamma", "0" }, &u);
-        try std.testing.expectEqual(@as(f32, 0), off.cfg.gamma);
-        const top = try cli.parse(a, &.{ "m", "--cfg-gamma", "5" }, &u);
-        try std.testing.expectEqual(@as(f32, 5), top.cfg.gamma);
-        for ([_][]const u8{ "5.5", "-0.5" }) |v| {
-            try std.testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--cfg-gamma", v }, &u));
-            try std.testing.expectEqualStrings("--cfg-gamma must be 0 (off) or 1 (unguided) through 5", u.message);
-        }
+    const off = try cli.parse(a, &.{ "m", "--cfg-gamma", "0" }, &u);
+    try std.testing.expectEqual(@as(f32, 0), off.cfg.gamma);
+    const top = try cli.parse(a, &.{ "m", "--cfg-gamma", "5" }, &u);
+    try std.testing.expectEqual(@as(f32, 5), top.cfg.gamma);
+    for ([_][]const u8{ "5.5", "-0.5" }) |v| {
+        try std.testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--cfg-gamma", v }, &u));
+        try std.testing.expectEqualStrings("--cfg-gamma must be 0 (off) or 1 (unguided) through 5", u.message);
     }
     const share = try cli.parse(a, &.{ "m", "--decode-share", "0" }, &u);
     try std.testing.expectEqual(@as(?f64, 0), share.decode_share);
