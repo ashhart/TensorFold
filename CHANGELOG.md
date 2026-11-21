@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Web: Qwen3.6-35B-A3B is listed for CUDA only, and starting it on a machine without CUDA is refused before anything launches, so a Mac is no longer pointed at the Python engine for it (#3738, refs #3710). Thanks to @AIFlowML.
+
 - Server: `TENSORFOLD_PARALLEL` sets the default lanes when `serve` has no `--parallel`: a whole number 1 to 4096 or `auto`; the flag wins when both are given, a blank value keeps the default, and any other value is refused by name at startup (#3685, for #3684). Thanks to @bikepresentball.
 
 - Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
@@ -548,8 +550,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Prompt cache: with `--learn-conversations`, an image conversation's kept states stay in RAM as before, and the log now says so once per conversation ("kept RAM-only (ImageConversation)") instead of leaving disk silently unused; no prompt text or image content is logged, and replies are unchanged (#3008).
 
 - App: creating a Kanban ticket shows it once, even when its update event arrives before the create reply (#3363, fixes #3338). Thanks to @sx4im.
-
-- Web: Qwen3.6-35B-A3B is available on CUDA only while native Metal support is being qualified (#3738)
 
 - CLI: `tensorfold rm REPO[@REVISION]` removes a checkpoint `pull` cached, or one of its snapshots with the refs that name it and the blobs no other snapshot links to. It lists what goes and the bytes freed, then asks; `--yes` skips the question and `--dry-run` only lists. It refuses paths and repos the cache does not hold, and never deletes outside the repo's cache folder or through a link. It coordinates with TensorFold pulls, rechecks the plan after confirmation, and refuses snapshots a running server holds (#3525).
 
