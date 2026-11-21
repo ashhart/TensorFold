@@ -85,6 +85,7 @@ const Seen = struct {
 test "with vit's attention a block is one q and k launch and one attention launch a frame group, for any segment" {
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Seen.launch;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Seen.launch);
     const f: cuda.Function = .{ .d = &d, .handle = null };
     var ru: vision.Run = .{ .stream = .{ .d = &d, .handle = null }, .f = undefined };
     ru.f.qk = f;
