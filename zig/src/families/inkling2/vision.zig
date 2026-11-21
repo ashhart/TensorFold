@@ -435,3 +435,20 @@ test "the splice copies rows as wide as the config's decoder, Small's 4608 and M
     v.proj_hidden = 2048;
     try std.testing.expectEqual(@as(u64, 16 * 2048 * 2), wide - scratchBytes(v, 16));
 }
+
+test "encode refuses a picture whose pixels do not fill its grid" {
+    var px: [2 * image.side * image.side * 3]f32 = undefined;
+    try admit(.{ .pixels = &px, .rows = 1, .cols = 2 }, 2);
+    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = &px, .rows = 1, .cols = 3 }, 4));
+    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = px[0..0], .rows = 0, .cols = 2 }, 4));
+}
+
+test "encode refuses a picture with more tokens than the tower's scratch covers" {
+    var px: [2 * image.side * image.side * 3]f32 = undefined;
+    try std.testing.expectError(error.ImageTooLarge, admit(.{ .pixels = &px, .rows = 2, .cols = 1 }, 1));
+}
+
+test "a tower with scratch for no image tokens is refused before any device work" {
+    const got = Tower.load(std.testing.allocator, std.testing.io, undefined, "", testVision(4608), 0);
+    try std.testing.expectError(error.ImageTokens, got);
+}
