@@ -233,6 +233,15 @@ pub const Suite = struct {
         return bad;
     }
 
+    /// The signed witness runs once with the ordinary prompt registration, including when selected by name.
+    pub fn blockOrder(s: *Suite) !usize {
+        for (s.probes.items) |p| {
+            if (p.v.ctl == 0 and p.v.out == .f32 and !p.v.fixture)
+                return @import("metal_dsv41_fp8_order.zig").run(&p.rig, &p.pipes);
+        }
+        return 0;
+    }
+
     /// Per projection class: the worst error against float64 must not exceed the fp8_rows order's.
     pub fn accuracy(s: *Suite, seed: u64) !usize {
         const p = if (s.probes.items.len > 0) s.probes.items[0] else return 0;
