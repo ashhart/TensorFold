@@ -49,7 +49,7 @@ const World = struct {
     fn init(w: *World, gpa: std.mem.Allocator) !void {
         w.d = D.driver();
         w.e = engine(&w.d);
-        const l = pages.layout(&w.e, capacity, page, 0, 0);
+        const l = pages.layout(&w.e, capacity, page, 0, 0, try pages.statePieces(std.testing.allocator, &w.e, page));
         w.p = try pages.Pages.init(gpa, &w.e, l, capacity, 0, 2, 3 * l.need(capacity, 0, pages.window_rows));
         errdefer w.p.deinit();
         w.x = try Prefix.init(gpa, &w.e, w.p, 4);

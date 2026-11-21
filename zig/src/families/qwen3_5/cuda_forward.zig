@@ -24,6 +24,23 @@ pub fn promptMoe(prompt: bool, rows: usize) bool {
     return prompt and rows > prompt_moe_cutoff;
 }
 
+/// A forward's delta-rule scan of `segments` windows (Engine.deltaScan): slot scans when recorded, else the chain.
+pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int, table: bool) !void {
+    const f = &e.fns;
+    const scan = if (!record) (if (table) f.gdn_chain_table else f.gdn_chain) else switch (slot_count) {
+        1 => if (table) f.gdn_slots_1_table else f.gdn_slots_1,
+        2 => if (table) f.gdn_slots_2_table else f.gdn_slots_2,
+        4 => if (table) f.gdn_slots_4_table else f.gdn_slots_4,
+        8 => if (table) f.gdn_slots_8_table else f.gdn_slots_8,
+        16 => if (table) f.gdn_slots_16_table else f.gdn_slots_16,
+        else => return error.InvalidGdnSlots,
+    };
+    const input = e.tables.ptr + @as(usize, if (record) @import("cuda_round.zig").steps_at else rowpar_at);
+    // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
+    const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
+    try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
+}
+
 pub fn body(e: *E.Engine, shape: anytype) !void {
     const g = e.g;
     const total: usize = shape.total;
@@ -64,10 +81,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const layer: c_int = @intCast(di);
                 try e.projManyPrompt(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
-                try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                try e.run(if (shape.table) e.fns.gdn_pre_table else e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
-                if (!(record and nseg == 1 and total > 1)) try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
-                if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
+                if (!(record and nseg == 1 and total > 1)) try e.run(if (shape.table) e.fns.conv_commit_table else e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
+                if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer, shape.table);
                 try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
                 di += 1;

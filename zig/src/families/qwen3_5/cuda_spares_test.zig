@@ -135,6 +135,7 @@ const Fixture = struct {
         c.pend = 0;
         c.delta = 0;
         c.paged = null;
+        c.pieces = null;
         f.state = try t.allocator.alloc(u8, f.e.g.stateBytes());
         f.kv = try t.allocator.alloc(u8, if (paged) f.ids.len * f.e.g.kvBytes(page_tokens, kv8) else f.e.g.kvBytes(c.cap, kv8));
         c.state = .{ .d = &f.d, .ptr = @intFromPtr(f.state.ptr), .len = f.state.len };

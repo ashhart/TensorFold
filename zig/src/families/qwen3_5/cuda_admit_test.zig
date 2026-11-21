@@ -29,10 +29,11 @@ fn admitted(comptime Lanes: type, parallel: u32, share: usize) !usize {
     var e = engine(&d);
     const all = share == 0; // TF_QWEN_KV_PAGES_ALL: the engine's own stream takes pages too, as open sets it
     var l: Lanes = .{ .gpa = t.allocator, .io = undefined, .e = &e, .capacity = capacity, .page_tokens = page, .engine_paged = all, .share_snaps = share, .target = undefined };
-    const lay = pages.layout(&e, capacity, page, 0, 0);
-    // the plan's pages: a window and a run for each stream beside the engine's own (all: for it too)
+    l.state_pieces = try pages.statePieces(t.allocator, &e, page);
+    const lay = pages.layout(&e, capacity, page, 0, 0, l.state_pieces);
+    // the plan's pages: a window and the state's pages for each stream beside the engine's own (all: for it too)
     const paged = parallel - 1 + @intFromBool(all);
-    try native.attach(&l, parallel - 1, paged * (lay.pages(capacity + pages.window_rows) + lay.runPages()));
+    try native.attach(&l, parallel - 1, paged * (lay.pages(capacity + pages.window_rows) + lay.statePages()));
     try t.expect(l.paged_only);
     var open: std.ArrayList(*engine_mod.Cache) = .empty;
     defer {
@@ -70,8 +71,9 @@ fn capped(comptime Lanes: type, parallel: u32, paged: u32) !usize {
         .engine_paged = true,
         .target = undefined,
     };
-    const lay = pages.layout(&e, capacity, page, 0, 0);
-    try native.attach(&l, parallel - 1, paged * (lay.pages(capacity + pages.window_rows) + lay.runPages()));
+    l.state_pieces = try pages.statePieces(t.allocator, &e, page);
+    const lay = pages.layout(&e, capacity, page, 0, 0, l.state_pieces);
+    try native.attach(&l, parallel - 1, paged * (lay.pages(capacity + pages.window_rows) + lay.statePages()));
     var open: std.ArrayList(*engine_mod.Cache) = .empty;
     defer {
         for (open.items) |x| _ = l.pages.?.close(x);

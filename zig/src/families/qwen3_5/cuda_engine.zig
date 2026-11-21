@@ -170,6 +170,10 @@ pub const Engine = struct {
     hop: ?stage_fwd.Hop = null,
     boundary: ?cuda.HostBuffer = null,
     held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
+    /// During a prompt chunk's forward: its stream's state table on the host (cuda_prompt.zig's delta reads it).
+    prompt_states: []const u64 = &.{},
+    /// The state table version (States.version) each forward segment's copy in `tables` holds (0: none yet).
+    forward_from: [Round.max_segs]u64 = @splat(0),
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -230,6 +234,8 @@ pub const Engine = struct {
         e.hop = null;
         e.boundary = null;
         e.held = null;
+        e.prompt_states = &.{};
+        e.forward_from = @splat(0);
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, grid_rows));
@@ -348,10 +354,10 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
+    /// A stream's device bytes at a `cap`-token window: state, keys and values, taps, log and its state table.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
+        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g) + c.States.bytes(e.g);
     }
 
     /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
@@ -449,8 +455,8 @@ pub const Engine = struct {
     }
 
     /// A window's staged segment: one-row windows that skip their rollback copy read no `before`.
-    pub fn stagedSeg(c: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize, undo: bool) Seg {
-        var sg = c.fold(c.seg(e, len, row0, rows));
+    pub fn stagedSeg(c: *Cache, e: *const Engine, t: ?[4]u64, len: usize, row0: usize, rows: usize, undo: bool) !Seg {
+        var sg = c.fold(if (t) |x| c.segIn(e, x, len, row0, rows) else try c.seg(e, len, row0, rows));
         if (rows == 1 and !undo) sg.before = 0;
         return sg;
     }
@@ -475,11 +481,15 @@ pub const Engine = struct {
             if (!(record and keep != .hidden)) try p.cache.flush(e);
             try recurrent.prepare(e, p.cache, p.rows, record, p.undo);
         }
+        const table = Round.onTable(parts); // a pool lane among the parts: every scan reads state tables, else main's
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = stagedSeg(p.cache, e, p.cache.len, row0, p.rows, p.undo);
+            segs[i] = try stagedSeg(p.cache, e, if (table) try Round.forwardStates(e, i, p.cache) else null, p.cache.len, row0, p.rows, p.undo);
             row0 += p.rows;
         }
+        // a pool lane's prompt chunk is one stream's: its delta rule takes the recurrences' addresses on the host
+        e.prompt_states = if (!record and table) parts[0].cache.states.?.host else &.{};
+        defer e.prompt_states = &.{};
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
             const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);
@@ -514,6 +524,7 @@ pub const Engine = struct {
         shape.rows = keep == .rows;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         shape.join = shape.paged and caches.anyShares(parts);
+        shape.table = table;
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             shape.total = @intCast(total);
@@ -568,24 +579,13 @@ pub const Engine = struct {
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
 
-    /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
-            else => return error.InvalidGdnSlots,
-        };
-        const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
-        // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
-        const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
-        try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
-    }
+    /// A state table's entries (cuda_cache.zig States): `tables` holds one for each forward segment.
+    pub const stateEntries = Round.stateEntries;
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
     pub const body = @import("cuda_forward.zig").body;
+    /// The same scan selected by body, exposed for host launch-contract fixtures (cuda_forward.zig).
+    pub const deltaScan = @import("cuda_forward.zig").deltaScan;
 
     pub const routedRows = routed.rows;
 
