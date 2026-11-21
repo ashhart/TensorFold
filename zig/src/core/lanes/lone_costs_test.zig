@@ -75,6 +75,23 @@ test "lone price: unseen widths retain measured tile jumps and full rounds are n
     }
 }
 
+test "lone price: with enough widths sampled one noisy timing does not move its neighbours' prices" {
+    var startup: Table = .{};
+    defer startup.deinit(a);
+    var samples: Table = .{};
+    defer samples.deinit(a);
+    for (1..9) |rows| try startup.put(a, @intCast(rows), 36 + 0.5 * @as(f64, @floatFromInt(rows)));
+    // times 2 ms over the startup model at 1, 5 and 8 drafts; the 5-draft one is 5 ms slow
+    try samples.put(a, 1, 38.5);
+    try samples.put(a, 5, 43.5);
+    try samples.put(a, 8, 38.5);
+    try std.testing.expect(own.estimate(startup, samples, 5, 0).? < 43);
+    try std.testing.expect(own.estimate(startup, samples, 6, 0).? < 43);
+    // two samples keep each width's own time
+    samples.slots[8 - 1] = null;
+    try std.testing.expectEqual(@as(?f64, 43.5), own.estimate(startup, samples, 6, 0));
+}
+
 test "lone price: tile probes are bounded, respect available rows, and stop after calibration" {
     var cfg = try setup();
     defer cfg.deinit(a);
