@@ -438,7 +438,6 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
 }
-
 /// A comma-separated list's nonblank entries, from one to the row's `max`, without control characters: their count.
 fn nameCount(r: Rule, text: []const u8) Error!u64 {
     for (text) |ch| if (ch < 0x20 or ch == 0x7f) return error.InvalidEnvironment;
