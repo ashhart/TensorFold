@@ -4,13 +4,13 @@ const cuda = @import("cuda");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_inkling2_ops_ref.zig");
+const M = @import("contract_inkling2_model.zig");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
 const Iv = ref.Iv;
 const Sums = ref.Sums;
 const ops = ref.ops;
-const C = ref.hidden;
 
 /// Rows of the fixture's table: ids are a bijection of the rows, so planted rows stay in their rows.
 const table_rows = 4096;
@@ -19,17 +19,22 @@ fn embedDepth(s: c.Shape) usize {
     return ref.blockDepth(s.k, 256);
 }
 
+fn embedServed(comptime C: usize) []const c.Shape {
+    return &.{ .{ .rows = 16, .n = C, .k = C }, .{ .rows = 1, .n = C, .k = C }, .{ .rows = 128, .n = C, .k = C }, .{ .rows = 2048, .n = C, .k = C } };
+}
+
 /// Rows x hidden x hidden: a prompt chunk, a verify window, one decode row (the drafter's anchor embeds one too).
-pub fn embedSpec(shifted: bool) c.Spec {
-    const served = &[_]c.Shape{ .{ .rows = 16, .n = C, .k = C }, .{ .rows = 1, .n = C, .k = C }, .{ .rows = 128, .n = C, .k = C }, .{ .rows = 2048, .n = C, .k = C } };
-    if (shifted) return .{ .name = "control: inkling2 ops tf_ink2_embed gathering the next row", .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served[0..2] };
-    return .{ .name = "inkling2 ops tf_ink2_embed (embed_norm, rounded once)", .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served };
+pub fn embedSpec(shifted: bool, mini: bool) c.Spec {
+    const served = if (mini) embedServed(M.mini.hidden) else embedServed(M.small.hidden);
+    if (shifted) return .{ .name = M.named("control: inkling2 ops tf_ink2_embed gathering the next row", mini), .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served[0..2] };
+    return .{ .name = M.named("inkling2 ops tf_ink2_embed (embed_norm, rounded once)", mini), .accum = .f32, .depth = embedDepth, .out = .bf16, .served = served };
 }
 
 /// out = bf16(w * (e * rsqrtf(mean(e^2) + eps))) of each id's embedding row.
 pub const Embed = struct {
     kern: *const ops.Kernels,
     shifted: bool = false,
+    mini: bool = false,
     shape: c.Shape = undefined,
     table: []u16 = &.{}, // [table_rows + 1][C]: the control reads one row on
     w: []u16 = &.{},
@@ -40,7 +45,7 @@ pub const Embed = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Embed) c.Spec {
-        return embedSpec(self.shifted);
+        return embedSpec(self.shifted, self.mini);
     }
 
     pub fn control(self: *const Embed) ?g.Gate {
@@ -111,27 +116,40 @@ fn dotDepth(s: c.Shape) usize {
     return (s.k + 31) / 32 + 5;
 }
 
-/// Rows x outputs x hidden; tiles: calls of 32 rows or more with fp32 out (router, taps), bit-equal to tf_ink2_rowdot.
-pub fn dotSpec(d: Dot, tiles: bool, short: bool) c.Spec {
+/// A model's row-dot calls, plain then tiled: router (experts), sinks (query heads), dynamic taps (4 a key head).
+fn dotServed(comptime m: M.Model, d: Dot) [2][]const c.Shape {
+    const C = m.hidden;
+    const E = m.experts;
+    const H = m.heads;
+    const T = comptime m.taps();
     const plain: []const c.Shape = switch (d) { // comptime arrays: a spec outlives this call
-        .router => &.{ .{ .rows = 16, .n = 384, .k = C }, .{ .rows = 1, .n = 384, .k = C }, .{ .rows = 31, .n = 384, .k = C }, .{ .rows = 7, .n = 384, .k = C } },
-        .sink => &.{ .{ .rows = 16, .n = 24, .k = C }, .{ .rows = 1, .n = 24, .k = C }, .{ .rows = 128, .n = 24, .k = C }, .{ .rows = 2048, .n = 24, .k = C } },
-        .taps => &.{ .{ .rows = 16, .n = 16, .k = C }, .{ .rows = 1, .n = 16, .k = C }, .{ .rows = 31, .n = 16, .k = C } },
+        .router => &.{ .{ .rows = 16, .n = E, .k = C }, .{ .rows = 1, .n = E, .k = C }, .{ .rows = 31, .n = E, .k = C }, .{ .rows = 7, .n = E, .k = C } },
+        .sink => &.{ .{ .rows = 16, .n = H, .k = C }, .{ .rows = 1, .n = H, .k = C }, .{ .rows = 128, .n = H, .k = C }, .{ .rows = 2048, .n = H, .k = C } },
+        .taps => &.{ .{ .rows = 16, .n = T, .k = C }, .{ .rows = 1, .n = T, .k = C }, .{ .rows = 31, .n = T, .k = C } },
     };
     const wide: []const c.Shape = if (d == .router)
-        &.{ .{ .rows = 64, .n = 384, .k = C }, .{ .rows = 32, .n = 384, .k = C }, .{ .rows = 100, .n = 384, .k = C }, .{ .rows = 2048, .n = 384, .k = C } }
+        &.{ .{ .rows = 64, .n = E, .k = C }, .{ .rows = 32, .n = E, .k = C }, .{ .rows = 100, .n = E, .k = C }, .{ .rows = 2048, .n = E, .k = C } }
     else
-        &.{ .{ .rows = 64, .n = 16, .k = C }, .{ .rows = 32, .n = 16, .k = C }, .{ .rows = 100, .n = 16, .k = C }, .{ .rows = 2048, .n = 16, .k = C } };
+        &.{ .{ .rows = 64, .n = T, .k = C }, .{ .rows = 32, .n = T, .k = C }, .{ .rows = 100, .n = T, .k = C }, .{ .rows = 2048, .n = T, .k = C } };
+    return .{ plain, wide };
+}
+
+/// Rows x outputs x hidden; tiles: calls of 32 rows or more with fp32 out (router, taps), bit-equal to tf_ink2_rowdot.
+pub fn dotSpec(d: Dot, tiles: bool, short: bool, mini: bool) c.Spec {
+    const both = if (mini) dotServed(M.mini, d) else dotServed(M.small, d);
+    const plain = both[0];
+    const wide = both[1];
     const names = [3][2][]const u8{
         .{ "inkling2 ops tf_ink2_rowdot router (fp32 sigmoid scores)", "inkling2 ops tf_ink2_rowdot_tiles router (fp32 sigmoid scores)" },
         .{ "inkling2 ops tf_ink2_rowdot attention sinks (bf16 sigmoid)", "" },
         .{ "inkling2 ops tf_ink2_rowdot dynamic conv taps (fp32)", "inkling2 ops tf_ink2_rowdot_tiles dynamic conv taps (fp32)" },
     };
-    var s: c.Spec = .{ .name = names[@backingInt(d)][@intFromBool(tiles)], .accum = .f32, .depth = dotDepth, .out = if (d == .sink) .bf16 else .f32, .served = if (tiles) wide else plain };
+    const flat = names[0] ++ names[1] ++ names[2];
+    var s: c.Spec = .{ .name = M.namedAt(&flat, @as(usize, @backingInt(d)) * 2 + @intFromBool(tiles), mini), .accum = .f32, .depth = dotDepth, .out = if (d == .sink) .bf16 else .f32, .served = if (tiles) wide else plain };
     s.tiles = if (tiles) .{ .{ .size = 32, .min = 32 }, .{ .size = 16 }, .{} } else .{ .{}, .{ .size = 8 }, .{} };
     if (tiles) s.replaces = "tf_ink2_rowdot";
     if (short) {
-        s.name = "control: inkling2 ops tf_ink2_rowdot router one 32-column step short";
+        s.name = M.named("control: inkling2 ops tf_ink2_rowdot router one 32-column step short", mini);
         s.tiles = .{ .{}, .{}, .{} };
         s.served = plain[0..2];
     }
@@ -144,6 +162,7 @@ pub const Rowdot = struct {
     dot: Dot,
     tiles: bool = false,
     short: bool = false,
+    mini: bool = false,
     shape: c.Shape = undefined,
     x: []u16 = &.{},
     w: []u16 = &.{},
@@ -154,7 +173,7 @@ pub const Rowdot = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Rowdot) c.Spec {
-        return dotSpec(self.dot, self.tiles, self.short);
+        return dotSpec(self.dot, self.tiles, self.short, self.mini);
     }
 
     pub fn control(self: *const Rowdot) ?g.Gate {
@@ -238,22 +257,28 @@ pub const Rowdot = struct {
     }
 };
 
-/// Rows x a rank's vocabulary share x 1: the head's fp32 logits, in place.
-pub fn capSpec(wrong: bool) c.Spec {
-    const served = &[_]c.Shape{ .{ .rows = 16, .n = ref.share, .k = 1 }, .{ .rows = 1, .n = ref.share, .k = 1 }, .{ .rows = 128, .n = ref.share, .k = 1 } };
-    return .{ .name = if (wrong) "control: inkling2 ops tf_ink2_softcap at cap 20" else "inkling2 ops tf_ink2_softcap (final logits, cap 30, in place)", .accum = .none, .depth = ref.noSums, .out = .f32, .in_place = true, .served = if (wrong) served[0..1] else served };
+fn capServed(comptime V: usize) []const c.Shape {
+    return &.{ .{ .rows = 16, .n = V, .k = 1 }, .{ .rows = 1, .n = V, .k = 1 }, .{ .rows = 128, .n = V, .k = 1 } };
+}
+
+/// Rows x a rank's vocabulary share x 1: the head's fp32 logits, in place (Mini: the whole 201,024 at one rank).
+pub fn capSpec(wrong: bool, mini: bool) c.Spec {
+    const served = if (mini) capServed(M.mini.share()) else capServed(M.small.share());
+    const name = if (wrong) M.named("control: inkling2 ops tf_ink2_softcap at cap 20", mini) else M.named("inkling2 ops tf_ink2_softcap (final logits, cap 30, in place)", mini);
+    return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .f32, .in_place = true, .served = if (wrong) served[0..1] else served };
 }
 
 /// x = tanhf(x / 30) * 30 over the logits in place.
 pub const Softcap = struct {
     kern: *const ops.Kernels,
     wrong: bool = false,
+    mini: bool = false,
     shape: c.Shape = undefined,
     x: []f32 = &.{},
     out: u64 = 0,
 
     pub fn spec(self: *const Softcap) c.Spec {
-        return capSpec(self.wrong);
+        return capSpec(self.wrong, self.mini);
     }
 
     pub fn control(self: *const Softcap) ?g.Gate {

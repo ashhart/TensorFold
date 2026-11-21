@@ -128,9 +128,24 @@ pub fn embed(k: *const Kernels, s: cuda.Stream, ids: u64, rows: usize, table: u6
     try go(k.embed, s, .{ .x = @intCast(rows) }, 256, &a);
 }
 
+/// Whether tf_ink2_mix holds a row: ops.cu's kMixCache x 512 columns, 16-byte copies (Small 4,608, Mini 2,304).
+pub fn mixFits(c: i32) error{Inkling2MixWidth}!void {
+    if (c <= 0 or c > 10 * 512 or @rem(c, 128) != 0) return error.Inkling2MixWidth;
+}
+
+/// Whether tf_ink2_topk picks: 8 scores a thread of 512, 32 picks at most (Small 384 experts, Mini 128; top 8).
+pub fn routerFits(experts: usize, top: usize) error{Inkling2RouterShape}!void {
+    if (experts == 0 or experts > 512 * 8 or top == 0 or top > 32 or top > experts) return error.Inkling2RouterShape;
+}
+
+/// Whether dynamic conv taps split the width: column c reads head c / (C / heads) (Small 4 key heads, Mini 8).
+pub fn convFits(c: ConvArgs) error{Inkling2ConvHeads}!void {
+    if (c.dyn != 0 and (c.heads <= 0 or c.c <= 0 or @rem(c.c, c.heads) != 0)) return error.Inkling2ConvHeads;
+}
+
 /// The residual mix of each row and query, normed: a block a row.
 pub fn mix(k: *const Kernels, s: cuda.Stream, m: MixArgs) !void {
-    if (m.c > 10 * 512 or @rem(m.c, 128) != 0) return error.Inkling2MixWidth; // ops.cu: kMixCache x 512 columns, 16-byte copies
+    try mixFits(m.c);
     var a: cuda.Args = .{};
     a.add(m);
     try go(if (m.rows <= 16) k.mix else k.mix_rows, s, .{ .x = @intCast(m.rows) }, 512, &a); // equal bits either way
@@ -150,7 +165,7 @@ pub fn rowdot(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, out: u64, rows:
 
 /// The router's picks and weights from fp32 sigmoid scores [rows, experts] and the selection bias.
 pub fn topk(k: *const Kernels, s: cuda.Stream, scores: u64, bias: u64, pick: u64, wts: u64, rows: usize, experts: usize, top: usize, scale: f32) !void {
-    if (experts > 512 * 8 or top > 32) return error.Inkling2RouterShape;
+    try routerFits(experts, top);
     var a: cuda.Args = .{};
     for ([_]u64{ scores, bias, pick, wts }) |v| a.add(v);
     a.add(int(experts));
@@ -168,6 +183,7 @@ pub fn gateup(k: *const Kernels, s: cuda.Stream, g: GateUpArgs) !void {
 
 /// A short convolution over each of `streams` streams' rows, their states carried (ops.cu's tf_ink2_conv).
 pub fn conv(k: *const Kernels, s: cuda.Stream, c: ConvArgs, streams: usize) !void {
+    try convFits(c);
     var a: cuda.Args = .{};
     a.add(c);
     // a stream's rows in blocks of 32 (blocks past a stream's rows return at once)
@@ -251,4 +267,8 @@ test "ops: the argument structs keep ops.cu's layouts" {
     try std.testing.expectEqual(@as(usize, 9 * 8 + 2 * 8 + 7 * 4 + 4), @sizeOf(ConvArgs));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RewindSite));
     try std.testing.expectEqual(@as(usize, 6 * 8 + 6 * 4), @sizeOf(GateUpArgs));
+}
+
+test {
+    _ = @import("ops_test.zig");
 }

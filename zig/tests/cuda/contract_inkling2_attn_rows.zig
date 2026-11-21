@@ -5,6 +5,7 @@ const core = @import("core");
 const ink = @import("inkling2");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_inkling2_attn_ref.zig");
+const M = @import("contract_inkling2_model.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -12,7 +13,6 @@ const g = contract.gates;
 const K = ink.kernels;
 const D = ref.D;
 const heads = ref.heads;
-const kv = ref.kv;
 const n_out = heads * D;
 const global_ring = 4096; // global keys to 1M wrap a 4,096-slot ring (key p in slot p % ring): no 2 GiB cache needed
 
@@ -22,7 +22,8 @@ pub const Path = enum { sliding, fold, split, prompt };
 /// A control's planted fault, through the device's inputs only: the served kernels run as they are.
 pub const Plant = enum { none, late_bias, no_sink, q_ulp };
 
-pub const fold_name = "inkling2 attn tf_ink2_attn_fold + tf_ink2_merge (global layers, 16,384-key chunks)";
+const fold_base = "inkling2 attn tf_ink2_attn_fold + tf_ink2_merge (global layers, 16,384-key chunks)";
+pub const fold_name = fold_base;
 
 /// Unused beside `bounds`: the reference derives each output's allowance from the device's own steps.
 fn depth(_: c.Shape) usize {
@@ -34,33 +35,33 @@ const fold_shapes = [_]c.Shape{ .{ .rows = 16, .n = n_out, .k = 20000 }, .{ .row
 const split_shapes = [_]c.Shape{ .{ .rows = 16, .n = n_out, .k = 20000 }, .{ .rows = 1, .n = n_out, .k = 1048576 }, .{ .rows = 8, .n = n_out, .k = 1048576 }, .{ .rows = 64, .n = n_out, .k = 70000 }, .{ .rows = 33, .n = n_out, .k = 1030 } };
 const prompt_shapes = [_]c.Shape{ .{ .rows = 130, .n = n_out, .k = 20000 }, .{ .rows = 1, .n = n_out, .k = 1048576 }, .{ .rows = 2048, .n = n_out, .k = 2048 }, .{ .rows = 2048, .n = n_out, .k = 18432 }, .{ .rows = 256, .n = n_out, .k = 1048576 } };
 
-/// rows x 24 heads x 128 outputs; k: the first stream's context (its last row's position + 1).
-pub fn spec(path: Path) c.Spec {
+/// rows x 24 heads x 128 outputs; k: the first stream's context (Mini: same shapes, 8 key heads in the inputs).
+pub fn spec(path: Path, mini: bool) c.Spec {
     const no: c.Tile = .{};
-    const rows32: c.Tile = .{ .size = 32 }; // 192 (row, head) pairs: three 64-pair tiles
+    const rows32: c.Tile = .{ .size = if (mini) 64 else 32 }; // 192 (row, head) pairs: three 64-pair tiles
     const s: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = &fold_shapes };
     var x = s;
     switch (path) {
         .sliding => {
-            x.name = "inkling2 attn tf_ink2_attn + tf_ink2_merge (sliding layers: window 1,024, 256-key chunks)";
+            x.name = M.named("inkling2 attn tf_ink2_attn + tf_ink2_merge (sliding layers: window 1,024, 256-key chunks)", mini);
             x.served = &sliding_shapes;
             x.tiles = .{ rows32, no, .{ .size = 1024 } };
         },
         .fold => {
-            x.name = fold_name;
+            x.name = M.named(fold_base, mini);
             x.tiles = .{ rows32, no, .{ .size = 16384 } };
         },
         .split => {
-            x.name = "inkling2 attn tf_ink2_attn split + tf_ink2_merge (global layers, a block a 1,024-key sub-chunk)";
+            x.name = M.named("inkling2 attn tf_ink2_attn split + tf_ink2_merge (global layers, a block a 1,024-key sub-chunk)", mini);
             x.served = &split_shapes;
             x.tiles = .{ rows32, no, .{ .size = 1024 } };
-            x.replaces = fold_name;
+            x.replaces = M.named(fold_base, mini);
         },
         .prompt => {
-            x.name = "inkling2 attn tf_ink2_attn_prompt + tf_ink2_merge (one stream's prompt rows, 128 pairs a block)";
+            x.name = M.named("inkling2 attn tf_ink2_attn_prompt + tf_ink2_merge (one stream's prompt rows, 128 pairs a block)", mini);
             x.served = &prompt_shapes;
-            x.tiles = .{ .{ .size = 64 }, no, .{ .size = 16384 } };
-            x.replaces = fold_name;
+            x.tiles = .{ .{ .size = if (mini) 128 else 64 }, no, .{ .size = 16384 } }; // 384 pairs: three blocks
+            x.replaces = M.named(fold_base, mini);
         },
     }
     return x;
@@ -79,6 +80,7 @@ pub const Attn = struct {
     k: *const K.Kernels,
     path: Path,
     plant: Plant = .none,
+    m: M.Model = M.small,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
     layer: K.Layer = undefined,
@@ -117,12 +119,12 @@ pub const Attn = struct {
     }
 
     pub fn kernel(self: *Attn) g.Kernel {
-        var s = spec(self.path);
+        var s = spec(self.path, self.m.mini);
         s.name = switch (self.plant) {
             .none => s.name,
-            .late_bias => "control: inkling2 attn sliding rows read each distance's bias one distance late",
-            .no_sink => "control: inkling2 attn global fold rows merged without their sink",
-            .q_ulp => "control: inkling2 attn prompt rows with one q value a bf16 step up (bit equality must see it)",
+            .late_bias => M.named("control: inkling2 attn sliding rows read each distance's bias one distance late", self.m.mini),
+            .no_sink => M.named("control: inkling2 attn global fold rows merged without their sink", self.m.mini),
+            .q_ulp => M.named("control: inkling2 attn prompt rows with one q value a bf16 step up (bit equality must see it)", self.m.mini),
         };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
     }
@@ -134,7 +136,7 @@ pub const Attn = struct {
     }
 
     fn call(self: *const Attn) ref.Call {
-        return .{ .q = self.q, .k = self.kc, .v = self.vc, .tab = self.tab, .sink = self.sink, .gate = self.gate, .pos = self.pos, .stream = self.stream, .ring = self.layer.ring, .window = self.layer.window, .exact = self.fill == .stress };
+        return .{ .q = self.q, .k = self.kc, .v = self.vc, .tab = self.tab, .sink = self.sink, .gate = self.gate, .pos = self.pos, .stream = self.stream, .ring = self.layer.ring, .window = self.layer.window, .exact = self.fill == .stress, .kv = self.m.kv };
     }
 
     /// Two streams for decode windows (2..128 rows; the second at half the context), else one; prompt: one.
@@ -153,7 +155,7 @@ pub const Attn = struct {
         const n1 = if (self.streams == 2) rows / 2 else 0;
         const n0 = rows - n1;
         const last1 = @max(n1, shape.k / 2);
-        const segs = [2]K.Seg{ .{ .row0 = 0, .n = @intCast(n0), .p0 = @intCast(shape.k - n0), .off = 0 }, .{ .row0 = @intCast(n0), .n = @intCast(n1), .p0 = @intCast(last1 - n1), .off = @intCast(ring * kv * D) } };
+        const segs = [2]K.Seg{ .{ .row0 = 0, .n = @intCast(n0), .p0 = @intCast(shape.k - n0), .off = 0 }, .{ .row0 = @intCast(n0), .n = @intCast(n1), .p0 = @intCast(last1 - n1), .off = @intCast(ring * self.m.kv * D) } };
         self.pos = try a.alloc(usize, rows);
         self.stream = try a.alloc(usize, rows);
         for (0..rows) |r| {
@@ -165,9 +167,9 @@ pub const Attn = struct {
         const rng = prng.random();
         try self.fillAll(rng, ring);
         if (fill == .nonfinite) self.plantNonfinite(ring);
-        const tiles = try a.alloc(K.Tile, K.tileCount(rows, ref.group) + 2);
+        const tiles = try a.alloc(K.Tile, K.tileCount(rows, @intCast(self.m.group())) + 2);
         defer a.free(tiles);
-        self.n_tiles = @intCast(try K.tiles(segs[0..self.streams], ref.group, tiles));
+        self.n_tiles = @intCast(try K.tiles(segs[0..self.streams], @intCast(self.m.group()), tiles));
         const pos32 = try a.alloc(i32, 2 * rows);
         defer a.free(pos32);
         for (0..rows) |r| {
@@ -201,6 +203,7 @@ pub const Attn = struct {
         const rows = self.shape.rows;
         const stress = self.fill == .stress;
         self.q = try a.alloc(u16, rows * n_out);
+        const kv = self.m.kv;
         self.kc = try a.alloc(u16, self.streams * kv * ring * D);
         self.vc = try a.alloc(u16, self.kc.len);
         self.tab = try a.alloc(u16, rows * heads * ref.extent);
@@ -300,7 +303,7 @@ pub const Attn = struct {
     /// kernels.attend as the forward calls it; `path` picks its branch through `streams` and the partial room.
     fn launch(self: *Attn, path: Path, q: u64, tab: u64, sink: u64, out: u64) !void {
         const d = self.dev;
-        var r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = d.pos, .seg_of = d.seg_of, .segs = d.segs, .tiles = d.tiles, .n_tiles = self.n_tiles, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.streams) };
+        var r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = @intCast(self.m.kv), .pos = d.pos, .seg_of = d.seg_of, .segs = d.segs, .tiles = d.tiles, .n_tiles = self.n_tiles, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.streams) };
         const stride = K.slotsFor(self.layer, self.shape.k);
         var slots: usize = 0; // no partial room for sub-chunks: global calls take the fold or the prompt kernel
         switch (path) {
@@ -340,7 +343,7 @@ pub const Attn = struct {
         std.debug.assert(self.fill == .stress);
         const a = self.rig.gpu.gpa;
         const cl = self.call();
-        try Pool.run(a, .{ .call = &cl, .want = out, .tol = &.{}, .sim = .{ .acc = acc, .order = order } }, self.shape.rows * kv);
+        try Pool.run(a, .{ .call = &cl, .want = out, .tol = &.{}, .sim = .{ .acc = acc, .order = order } }, self.shape.rows * self.m.kv);
     }
 };
 
@@ -365,11 +368,12 @@ const Pool = struct {
             var i = j.first;
             while (i < j.items) : (i += j.step) {
                 if (pool.sim) |s| {
+                    const kv = pool.call.kv;
                     const r = i / kv;
-                    const h0 = (i % kv) * ref.group;
+                    const h0 = (i % kv) * pool.call.perKv();
                     const o = pool.want[(r * heads + h0) * D ..][0..D];
                     ref.simulate(pool.call, r, h0, s.acc, s.order, j.p, j.col, o);
-                    for (1..ref.group) |e| @memcpy(pool.want[(r * heads + h0 + e) * D ..][0..D], o);
+                    for (1..pool.call.perKv()) |e| @memcpy(pool.want[(r * heads + h0 + e) * D ..][0..D], o);
                 } else {
                     const at = i * D;
                     ref.row(pool.call, i / heads, i % heads, j.ks, pool.want[at..][0..D], pool.tol[at..][0..D]);
