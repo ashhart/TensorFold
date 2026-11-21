@@ -95,7 +95,6 @@ pub fn Namespace(comptime Tri: type) type {
             /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
             layout: ?@import("core").kv_pool.Layout = null,
         };
-
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
         pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
             return bytes.deviceWeightBytes(gpa, io, dir);
@@ -103,7 +102,6 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
             return bytes.placementWeightBytes(gpa, io, dir, world, rank, drafts);
         }
-
         pub const worlds = bytes.worlds; // refused by name before admission and open, which take no others
         pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
             return bytes.visionBytes(a, io, dir);
