@@ -157,9 +157,9 @@ fn run(m: cfgs.Model, times: [2]f64, copier: ?Copier, streams: usize, max_new: u
     return out;
 }
 
-/// hip_lanes.zig facts in small: 16-row windows, timed forwards; plain rounds compete with a head, lone copies always.
+/// hip_lanes.zig facts in small: 16-row windows, timed forwards; plain rounds and lone copies always compete.
 fn hip(head: bool) cfgs.Model {
-    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = head, .copy_guard = true, .window_costs = &startup, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
+    return .{ .exact_width = 16, .mtp = head, .speculate = head, .speculate_early = false, .drafts = 4, .plain_guard = true, .copy_guard = true, .window_costs = &startup, .mtp_step_ms = if (head) 0.5 else 0, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
 }
 
 fn expectPlain(m: cfgs.Model, times: [2]f64, got: Run, streams: usize, max_new: u32) !void {
@@ -244,29 +244,6 @@ test "lone copy price: shared rounds' copies stay as on main (the streams' lone 
     }
 }
 
-/// A hash of the trail's lines up to the first step without a shared round, and how many lines that is.
-fn sharedPhase(log: *ev.Log) ![2]u64 {
-    var end: usize = log.events.items.len;
-    var step: ?usize = null;
-    var turns = false;
-    for (log.events.items, 0..) |fields, i| {
-        const kind = for (fields) |x| {
-            if (std.mem.eql(u8, x.k, "ev")) break x.v.str;
-        } else "";
-        if (std.mem.eql(u8, kind, "turns")) turns = true;
-        if (!std.mem.eql(u8, kind, "step")) continue;
-        if (step) |at| if (!turns) {
-            end = at;
-            break;
-        };
-        step = i;
-        turns = false;
-    } else if (step) |at| if (!turns) {
-        end = at; // the run's last step was a lone one
-    };
-    return hashed(log, end);
-}
-
 /// A hash of the trail's first `end` lines, and `end`.
 fn hashed(log: *ev.Log, end: usize) ![2]u64 {
     var h = std.hash.Wyhash.init(0);
@@ -277,25 +254,6 @@ fn hashed(log: *ev.Log, end: usize) ![2]u64 {
         h.update("\n");
     }
     return .{ h.final(), end };
-}
-
-test "lone copy price: HIP's facts without a head keep main's shared rounds, two and four streams" {
-    // main e7e24243d, its hip_lanes.zig facts without a head (no plain_guard): the shared phase's trail, hashed
-    const cases = [_]struct { streams: usize, copier: Copier, expected: [2]u64 }{
-        .{ .streams = 2, .copier = .{}, .expected = .{ 12160614949009965908, 1276 } },
-        .{ .streams = 2, .copier = .{ .land_from = 48 }, .expected = .{ 612887639395430184, 445 } },
-        .{ .streams = 4, .copier = .{}, .expected = .{ 5045447432178392522, 1790 } },
-        .{ .streams = 4, .copier = .{ .land_from = 80 }, .expected = .{ 5351245168654378449, 1104 } },
-    };
-    for (cases) |c| {
-        var log = ev.Log.init(gpa);
-        defer log.deinit();
-        trail = &log;
-        defer trail = null;
-        _ = try run(hip(false), long_context, c.copier, c.streams, 128);
-        const got = try sharedPhase(&log);
-        try std.testing.expectEqual(c.expected, got);
-    }
 }
 
 test "lone copy price: copy_guard is off unless a family opts in, whatever plain_guard says" {
@@ -406,12 +364,12 @@ test "lone copy price: a request's first copies are priced from the copy rounds 
         for (got, 0..) |r, i| try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], r.tokens[0..r.len]);
         // the second request starts from the first's timed copies: its first copy is whole, as the first's later ones
         try std.testing.expectEqual(@as(?usize, 15), got[1].first);
-        // without a head the first request timed its plain rounds before any copy: the untimed price cut its first one
+        // without a head, copy pricing starts from probes; its first copy can be partial
         if (!head) try std.testing.expect(got[0].first.? < 15);
     }
 }
 
-test "lone copy price: kept copy prices need two timed copies on a lone stream, leave a head's times, keep a stream's own" {
+test "lone copy price: kept copy prices need two timed copies on a lone stream and leave depth-rule times out" {
     for ([_]bool{ false, true }) |head| {
         var cfg = try cfgs.Config.init(gpa, hip(head), 16, 15);
         defer cfg.deinit(gpa);
@@ -438,8 +396,8 @@ test "lone copy price: kept copy prices need two timed copies on a lone stream, 
         _ = try e.rule.rates(win.who(&next));
         try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &next).*, &next);
         try std.testing.expectEqual(@as(?f64, 11.6), next.depth.?.copy_ms.?.get(15));
-        // a head's own round times are its depth rule's, never carried by copy pricing
-        try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (next.depth.?.ms) |t| t.get(0) else null);
+        // plain and head round times belong to the depth rule, never carried by copy pricing
+        try std.testing.expectEqual(@as(?f64, null), if (next.depth.?.ms) |t| t.get(0) else null);
         const long = try gpa.alloc(u32, 8192);
         defer gpa.free(long);
         @memset(long, 1);
@@ -453,7 +411,7 @@ test "lone copy price: kept copy prices need two timed copies on a lone stream, 
         try copy_price.observeCopy(&e.rule, 15, 30, false, win.who(&timed));
         try lone_costs.seedCopies(gpa, lone_costs.slot(&e.lone_kept, &timed).*, &timed);
         try std.testing.expectEqual(@as(?f64, 30), timed.depth.?.copy_ms.?.get(15)); // its own copy times stay
-        try std.testing.expectEqual(@as(?f64, if (head) null else 10.1), if (timed.depth.?.ms) |t| t.get(0) else null);
+        try std.testing.expectEqual(@as(?f64, null), if (timed.depth.?.ms) |t| t.get(0) else null);
     }
 }
 
