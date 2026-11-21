@@ -1,6 +1,7 @@
-"""A Llama checkpoint's teacher-forced logits in float64 on the CPU, rounded once to bf16: the exact reference."""
+"""A Llama or Qwen2 checkpoint's teacher-forced logits in float64 on the CPU, rounded once to bf16: the reference."""
 # usage: llama_f64_reference.py MODEL_DIR tokens.json out.bin [--bf16-points]: raw bf16 [positions, vocab]
 import json
+import math
 import sys
 import time
 
@@ -21,11 +22,18 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     torch.set_num_threads(24)
     cfg = json.load(open(f"{model_dir}/config.json"))
     index = json.load(open(f"{model_dir}/model.safetensors.index.json"))["weight_map"]
-    if cfg.get("rope_scaling") or cfg.get("attention_bias") or cfg.get("mlp_bias") or cfg.get("tie_word_embeddings"):
-        raise SystemExit("only the plain Llama layout: no scaled RoPE, biases or tied head")
+    qwen2 = cfg["model_type"] == "qwen2"  # q, k and v biases (modeling_qwen2), and usually YaRN
+    if cfg.get("mlp_bias") or cfg.get("tie_word_embeddings") or (cfg.get("attention_bias") and not qwen2):
+        raise SystemExit("only the Llama layout, or Qwen2's with its q, k and v biases: no MLP biases or tied head")
     layers, heads, kv = cfg["num_hidden_layers"], cfg["num_attention_heads"], cfg["num_key_value_heads"]
     dim = cfg.get("head_dim") or cfg["hidden_size"] // heads
-    eps, theta = cfg["rms_norm_eps"], float(cfg["rope_theta"])
+    rope = cfg.get("rope_parameters") or cfg.get("rope_scaling") or {}  # transformers 5 keeps rope_theta inside it
+    eps, theta = cfg["rms_norm_eps"], float(cfg.get("rope_theta") or rope.get("rope_theta") or 10000.0)
+    yarn = None
+    if rope.get("rope_type", rope.get("type", "default")) == "yarn":
+        yarn = (float(rope["factor"]), int(rope["original_max_position_embeddings"]))
+    elif rope.get("rope_type", rope.get("type", "default")) != "default":
+        raise SystemExit("only the default rope or static YaRN")
     f64 = torch.float64
     quant = cfg.get("quantization")
     if quant and (quant.get("mode", "affine") != "affine" or quant["bits"] not in (4, 8)):
@@ -79,24 +87,43 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     def rotate(x):
         return torch.cat((-x[..., dim // 2 :], x[..., : dim // 2]), -1)
 
+    def inv_freq(dtype):  # HF's 1 / theta^(2i / dim), or transformers' static YaRN table (_compute_yarn_parameters)
+        pos_freqs = theta ** (torch.arange(0, dim, 2, dtype=dtype) / dim)
+        if yarn is None:
+            return 1.0 / pos_freqs, 1.0
+        factor, trained = yarn
+        extra, inter = 1.0 / pos_freqs, 1.0 / (factor * pos_freqs)
+        corr = lambda rot: dim * math.log(trained / (rot * 2 * math.pi)) / (2 * math.log(theta))
+        low, high = max(math.floor(corr(32)), 0), min(math.ceil(corr(1)), dim - 1)
+        if low == high:
+            high += 0.001
+        ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(0, 1).to(dtype)
+        mask = 1 - ramp
+        return inter * (1 - mask) + extra * mask, 0.1 * math.log(factor) + 1.0
+
+    def linear(x, name):  # torch's bf16 linear: the bias joins the sum before its one rounding
+        y = x @ w(name + ".weight").T
+        return r(y + w(name + ".bias") if qwen2 and name.endswith(("q_proj", "k_proj", "v_proj")) else y)
+
     ids = json.load(open(tokens))
     n = len(ids)
     t0 = time.time()
     with torch.no_grad():
-        inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=f64) / dim))
+        inv, mscale = inv_freq(f64)
         angle = torch.outer(torch.arange(n, dtype=f64), inv)
-        cos, sin = torch.cat((angle, angle), -1).cos(), torch.cat((angle, angle), -1).sin()
-        if points:  # HF's fp32 angle, its cos and sin rounded to bf16
-            a32 = torch.outer(torch.arange(n, dtype=torch.float32), 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)))
-            cos, sin = r(torch.cat((a32, a32), -1).cos().to(f64)), r(torch.cat((a32, a32), -1).sin().to(f64))
+        cos, sin = torch.cat((angle, angle), -1).cos() * mscale, torch.cat((angle, angle), -1).sin() * mscale
+        if points:  # HF's fp32 angle and table, its cos and sin (times YaRN's attention factor) rounded to bf16
+            inv32, _ = inv_freq(torch.float32)
+            a32 = torch.outer(torch.arange(n, dtype=torch.float32), inv32)
+            cos, sin = r((torch.cat((a32, a32), -1).cos() * mscale).to(f64)), r((torch.cat((a32, a32), -1).sin() * mscale).to(f64))
         x = w("model.embed_tokens.weight", mlx=points)[torch.tensor(ids)]
         mask = torch.full((n, n), float("-inf"), dtype=f64).triu(1)
         for i in range(layers):
             p = f"model.layers.{i}."
             h = norm(x, w(p + "input_layernorm.weight"))
-            q = r(h @ w(p + "self_attn.q_proj.weight").T).view(n, heads, dim).transpose(0, 1)
-            k = r(h @ w(p + "self_attn.k_proj.weight").T).view(n, kv, dim).transpose(0, 1)
-            v = r(h @ w(p + "self_attn.v_proj.weight").T).view(n, kv, dim).transpose(0, 1)
+            q = linear(h, p + "self_attn.q_proj").view(n, heads, dim).transpose(0, 1)
+            k = linear(h, p + "self_attn.k_proj").view(n, kv, dim).transpose(0, 1)
+            v = linear(h, p + "self_attn.v_proj").view(n, kv, dim).transpose(0, 1)
             q, k = r(r(q * cos) + r(rotate(q) * sin)), r(r(k * cos) + r(rotate(k) * sin))
             k, v = k.repeat_interleave(heads // kv, 0), v.repeat_interleave(heads // kv, 0)
             a = r(torch.softmax(q @ k.transpose(1, 2) / dim**0.5 + mask, -1) @ v)

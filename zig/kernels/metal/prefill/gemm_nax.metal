@@ -104,9 +104,10 @@ inline void gemm_store(thread const frag<float> (&acc)[2][2], device O* D, int l
   }
 }
 
-// D = A * B per batch, steel_gemm_fused_nax without epilogue; P holds the GEMM_PARAMS fields of check_prefill_ops.
-template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN>
-inline void gemm_nax(const device T* A, const device T* B, device T* D, const device int* P, uint3 tg, uint sg,
+// D = A * B per batch stored as TD (T, or fp32 sums), steel_gemm_fused_nax without epilogue; P: GEMM_PARAMS fields.
+template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN,
+          typename TD = T>
+inline void gemm_nax(const device T* A, const device T* B, device TD* D, const device int* P, uint3 tg, uint sg,
                      uint lane) {
   static_assert(BM / WM == 32 && BN / WN == 32, "a simdgroup owns a 32x32 block");
   const int swz = P[8];
@@ -125,11 +126,11 @@ inline void gemm_nax(const device T* A, const device T* B, device T* D, const de
   frag<float> acc[2][2];
   if (full) {
     gemm_block<T, TA, TB, true, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
-    gemm_store<T, true>(acc, D, ldd, rows, cols, home);
+    gemm_store<TD, true>(acc, D, ldd, rows, cols, home);
   } else {
     gemm_block<T, TA, TB, false, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
     if (rows > 0 && cols > 0) {
-      gemm_store<T, false>(acc, D, ldd, rows, cols, home);
+      gemm_store<TD, false>(acc, D, ldd, rows, cols, home);
     }
   }
 }
