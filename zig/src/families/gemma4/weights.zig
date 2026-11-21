@@ -647,9 +647,9 @@ test "later: the layers' linears stay in their files; the embed, norms and scala
 
 test "laterLean defers the tied table too, without changing the dense loader's pick" {
     const pre = "language_model.model.";
-    for ([_][]const u8{ "embed_tokens.weight", "embed_tokens.scales", "embed_tokens.biases" }) |t| {
-        try std.testing.expect(!later(pre ++ t, 2));
-        try std.testing.expect(laterLean(pre ++ t, 2));
+    for ([_][]const u8{ pre ++ "embed_tokens.weight", pre ++ "embed_tokens.scales", pre ++ "embed_tokens.biases" }) |name| {
+        try std.testing.expect(!later(name, 2));
+        try std.testing.expect(laterLean(name, 2));
     }
     try std.testing.expect(!laterLean(pre ++ "norm.weight", 1));
     try std.testing.expect(laterLean(pre ++ "layers.3.self_attn.q_proj.weight", 2));
