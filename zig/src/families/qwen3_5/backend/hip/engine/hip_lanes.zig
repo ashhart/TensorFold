@@ -193,7 +193,6 @@ pub const Hip = struct {
             .max_streams = @intCast(h.e.o.batch_rows),
             .draft_streams = drafting,
             .plain_guard = plain_guard,
-            .copy_guard = h.costs.windows > 0, // a lone stream's copies too, with a head or without (lanes/lone_copy.zig)
             .window_costs = h.costs.window[0..h.costs.windows],
             .shared_costs = h.costs.shared[0..h.costs.shareds],
             .mtp_step_ms = h.costs.step_ms,
@@ -535,6 +534,5 @@ test "Qwen HIP facts price plain rounds for a copies-only engine" {
     h.costs.window[0] = .{ .width = 1, .ms = 1 };
     const facts = h.facts();
     try std.testing.expect(facts.plain_guard);
-    try std.testing.expect(facts.copy_guard);
     try std.testing.expect(!facts.mtp and !facts.speculate and !facts.draft_streams);
 }
