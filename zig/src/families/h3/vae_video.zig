@@ -8,6 +8,7 @@ extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
 extern "c" fn fclose(file: *anyopaque) c_int;
 extern "c" fn fwrite(ptr: *const anyopaque, size: usize, count: usize, file: *anyopaque) usize;
+extern "c" fn fread(ptr: *anyopaque, size: usize, count: usize, file: *anyopaque) usize;
 const mtl = @import("metal");
 const frags = @import("core").frags;
 const kernels = @import("h3_kernels");
@@ -282,7 +283,6 @@ pub const Decoder = struct {
     /// spatial tiles of tile/16 latents with tile_overlap/16 overlap, each piece
     /// running the full ViT pass, cross-fades on the CPU.
     pub fn frames(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]u8 {
-        const clip_latents = self.config.clip_length - self.config.token_drop;
         const tile_latents = self.config.tile / self.config.spatial_ratio;
         const overlap_latents = self.config.tile_overlap / self.config.spatial_ratio;
         const p_ratio = self.config.spatial_ratio;
@@ -297,9 +297,11 @@ pub const Decoder = struct {
         @memset(weight, 0);
 
         std.debug.print("canvas ready", .{});
+        const chunk = (self.config.clip_length + self.config.temporal_ratio - 1) / self.config.temporal_ratio;
+        const token_overlap = (self.config.temporal_ratio - (self.config.token_drop % chunk)) % chunk;
         var clip_start: usize = 0;
         while (clip_start < depth) {
-            const clip_depth = @min(self.config.clip_length, depth - clip_start);
+            const clip_depth = @min(chunk + token_overlap, depth - clip_start);
             var y: usize = 0;
             while (y < height) {
                 const tile_h = @min(tile_latents, height - y);
@@ -355,7 +357,7 @@ pub const Decoder = struct {
                 y += tile_latents - overlap_latents;
             }
             if (clip_start + clip_depth >= depth) break;
-            clip_start += clip_latents;
+            clip_start += chunk;
         }
 
         const pixels = try gpa.alloc(u8, canvas.len);
@@ -424,6 +426,14 @@ pub const Decoder = struct {
         @memset(tokens_full[voxels + self.config.register_tokens .. rows * dim], 0);
         gpa.free(tokens_host);
         std.debug.print("stage: pq+embedder+registers done", .{});
+        if (getenv("TOKENS_INPUT") != null) {
+            const tip = "tokens-dump.f32";
+            const tipz: [*:0]const u8 = tip;
+            const ft = fopen(tipz, "rb") orelse return error.CannotOpen;
+            _ = fread(tokens_full.ptr, 4, tokens_full.len, ft);
+            _ = fclose(ft);
+            std.debug.print("TOKENS_INPUT loaded", .{});
+        }
         if (getenv("DUMP_TOKENS") != null) {
             const pathz: [*:0]const u8 = "tokens-dump.f32";
             const fh = fopen(pathz, "wb") orelse return error.CannotWrite;
@@ -479,31 +489,60 @@ pub const Decoder = struct {
                 rope_s[rr * 48 + k2] = 0.0;
             }
         }
-        if (getenv("SKIP_BLOCKS") == null) for (self.blocks) |b| {
+        if (getenv("SKIP_BLOCKS") == null) { for (self.blocks, 0..) |b, bi| {
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
 
         const n1_w = try self.device.buffer(b.norm1_w.len * 4, mtl.ResourceOptions.shared);
         @memcpy(n1_w.slice(f32, b.norm1_w.len), b.norm1_w);
+        const normed_out = try self.device.buffer(rows * dim * 4, mtl.ResourceOptions.shared);
+        if (getenv("DUMP_PRENORM") != null and bi == 0) {
+            const pp = try std.fmt.allocPrintSentinel(gpa, "zig-prenorm.f32", .{}, 0);
+            defer gpa.free(pp);
+            const fp2 = fopen(pp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed.slice(f32, rows * dim).ptr, 4, rows * dim, fp2);
+            _ = fclose(fp2);
+        }
         e.setPipeline(self.p[1]);
         e.setBuffer(normed, 0, 0);
         e.setBuffer(n1_w, 0, 1);
-        e.setBuffer(normed, 0, 2);
+        e.setBuffer(normed_out, 0, 2);
         e.setValue([1]u32{ @intCast(dim) }, 3);
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-        e.barrier();
+        e.end();
+        cb.commit(); cb.wait();
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
 
         const qkv_w = try self.device.buffer(b.attn_qkv_w.len * 4, mtl.ResourceOptions.shared);
         @memcpy(qkv_w.slice(f32, b.attn_qkv_w.len), b.attn_qkv_w);
         const qkv_b = try self.device.buffer(b.attn_qkv_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(qkv_b.slice(f32, b.attn_qkv_b.len), b.attn_qkv_b);
         e.setPipeline(self.p[0]);
-        e.setBuffer(normed, 0, 0);
+        e.setBuffer(normed_out, 0, 0);
         e.setBuffer(qkv_w, 0, 1);
         e.setBuffer(qkv_b, 0, 2);
         e.setBuffer(qkv, 0, 3);
         e.setValue([4]u32{ @intCast(rows), @intCast(dim), @intCast(3 * dim), 0 }, 4);
                 e.dispatchThreads(mtl.Size.of(3 * dim, rows, 1), mtl.Size.of(64, 1, 1));
+        e.end();
+        cb.commit(); cb.wait();
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
+        if (getenv("DUMP_QKV") != null and bi == 0) {
+            const qzp = try std.fmt.allocPrintSentinel(gpa, "zig-qkv.f32", .{}, 0);
+            defer gpa.free(qzp);
+            const fq = fopen(qzp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(qkv.slice(f32, rows * 3 * dim).ptr, 4, rows * 3 * dim, fq);
+            _ = fclose(fq);
+        }
+        if (getenv("DUMP_NORMED") != null and bi == 0) {
+            const nnp = try std.fmt.allocPrintSentinel(gpa, "zig-normed.f32", .{}, 0);
+            defer gpa.free(nnp);
+            const fnn = fopen(nnp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed_out.slice(f32, rows * dim).ptr, 4, rows * dim, fnn);
+            _ = fclose(fnn);
+        }
         e.barrier();
 
         // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
@@ -548,7 +587,7 @@ pub const Decoder = struct {
         e.setBuffer(attended, 0, 1);
         e.setBuffer(rope_buf, 0, 2);
         e.setValue([1]u32{ @intCast(rows) }, 3);
-        e.dispatchGroups(mtl.Size.of(voxels, 32, 1), mtl.Size.of(1, 1, 1));
+        e.dispatchThreads(mtl.Size.of(rows * 32, 1, 1), mtl.Size.of(1, 1, 1));
         e.barrier();
 
         const out_w = try self.device.buffer(b.attn_out_w.len * 4, mtl.ResourceOptions.shared);
@@ -579,13 +618,23 @@ pub const Decoder = struct {
 
         const n2_w = try self.device.buffer(b.norm2_w.len * 4, mtl.ResourceOptions.shared);
         @memcpy(n2_w.slice(f32, b.norm2_w.len), b.norm2_w);
+        if (getenv("DUMP_PRENORM") != null and bi == 0) {
+            const pp = try std.fmt.allocPrintSentinel(gpa, "zig-prenorm.f32", .{}, 0);
+            defer gpa.free(pp);
+            const fp2 = fopen(pp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed.slice(f32, rows * dim).ptr, 4, rows * dim, fp2);
+            _ = fclose(fp2);
+        }
         e.setPipeline(self.p[1]);
         e.setBuffer(normed, 0, 0);
         e.setBuffer(n2_w, 0, 1);
         e.setBuffer(normed, 0, 2);
         e.setValue([1]u32{ @intCast(dim) }, 3);
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
-        e.barrier();
+        e.end();
+        cb.commit(); cb.wait();
+        cb = self.queue.commandBuffer();
+        e = cb.compute(.concurrent);
 
         const fw1_w = try self.device.buffer(b.ff_w1.len * 4, mtl.ResourceOptions.shared);
         @memcpy(fw1_w.slice(f32, b.ff_w1.len), b.ff_w1);
@@ -626,6 +675,41 @@ pub const Decoder = struct {
             for (0..dim) |i| tokens_full[r * dim + i] += qkv_host2[r * dim + i] * b.scale2[i];
         }
         n2_w.deinit(); fw1_w.deinit(); fw1_b.deinit(); fw2_w.deinit(); fw2_b.deinit();
+        if (getenv("DUMP_BLK") != null) {
+            const bp = try std.fmt.allocPrintSentinel(gpa, "blk{d}-dump.f32", .{bi}, 0);
+            defer gpa.free(bp);
+            const fb = fopen(bp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fb);
+            _ = fclose(fb);
+        }
+        if (getenv("DUMP_TOKENS0") != null and bi == 0) {
+            const tp = try std.fmt.allocPrintSentinel(gpa, "zig-tokens.f32", .{}, 0);
+            defer gpa.free(tp);
+            const ft = fopen(tp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed.slice(f32, rows * dim).ptr, 4, rows * dim, ft);
+            _ = fclose(ft);
+        }
+        if (getenv("DUMP_NORMED") != null and bi == 0) {
+            const nnp = try std.fmt.allocPrintSentinel(gpa, "zig-normed.f32", .{}, 0);
+            defer gpa.free(nnp);
+            const fnn = fopen(nnp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(normed_out.slice(f32, rows * dim).ptr, 4, rows * dim, fnn);
+            _ = fclose(fnn);
+        }
+        if (getenv("DUMP_QKV") != null and bi == 0) {
+            const qzp = try std.fmt.allocPrintSentinel(gpa, "zig-qkv.f32", .{}, 0);
+            defer gpa.free(qzp);
+            const fq = fopen(qzp, "wb") orelse return error.CannotWrite;
+            _ = fwrite(qkv.slice(f32, rows * 3 * dim).ptr, 4, rows * 3 * dim, fq);
+            _ = fclose(fq);
+        }
+        if (getenv("DUMP_ATTN") != null) {
+            const ap = try std.fmt.allocPrintSentinel(gpa, "attn{d}-dump.f32", .{bi}, 0);
+            defer gpa.free(ap);
+            const fa = fopen(ap, "wb") orelse return error.CannotWrite;
+            _ = fwrite(attended.slice(f32, rows * dim).ptr, 4, rows * dim, fa);
+            _ = fclose(fa);
+        }
         if (getenv("DUMP_B2") != null) {
             const pzb: [*:0]const u8 = "block2-dump.f32";
             const fhb = fopen(pzb, "wb") orelse return error.CannotWrite;
@@ -638,7 +722,7 @@ pub const Decoder = struct {
             _ = fwrite(tokens_full.ptr, 4, tokens_full.len, fh);
             _ = fclose(fh);
         }
-        }
+        }}
         fused.deinit();
         gated.deinit();
         std.debug.print("stage: 36 blocks done", .{});

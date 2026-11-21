@@ -61,13 +61,18 @@
   device float* Y [[buffer(1)]],
   const device float* ROPE [[buffer(2)]],
   constant uint* P [[buffer(3)]],
-  uint2 at [[thread_position_in_grid]]) {
+  uint at1 [[thread_position_in_grid]]) {
   const uint rows = P[0];
   const uint hd = 64, heads = 32, dim = heads * hd;
-  const uint r = at.x;
-  const uint head = at.y;
+  const uint r = at1 / 32;
+  const uint head = at1 % 32;
   if (r >= rows || head >= heads) return;
   const device float* q_raw = QKV + r * 3 * dim + head * 3 * hd;
+  float q_sq = 0.0f;
+  for (uint i = 0; i < hd; i++) q_sq += q_raw[i] * q_raw[i];
+  const float q_rstd = rsqrt(q_sq / float(hd) + 1e-5f);
+  float q_normed[64];
+  for (uint i = 0; i < hd; i++) q_normed[i] = q_raw[i] * q_rstd;
   // apply RoPE: cos/sin tables are [rows, 48] cos then [rows, 48] sin
   // rotary_dim = 48 (75% of 64), half_dim = 24
   const device float* COS = ROPE + r * 48;
@@ -81,12 +86,12 @@
       const float c = COS[fi];
       const float sn = SIN[fi];
       if (i < half_dim) {
-        q_rot[i] = q_raw[i] * c - q_raw[i + half_dim] * sn;
+        q_rot[i] = q_normed[i] * c - q_normed[i + half_dim] * sn;
       } else {
-        q_rot[i] = q_raw[i] * c + q_raw[i - half_dim] * sn;
+        q_rot[i] = q_normed[i] * c + q_normed[i - half_dim] * sn;
       }
     } else {
-      q_rot[i] = q_raw[i];
+      q_rot[i] = q_normed[i];
     }
   }
   float run_max = -1e30f;
@@ -97,6 +102,9 @@
   for (uint k = 0; k < rows; k++) {
     float dot = 0.0f;
     const device float* kk_raw = QKV + k * 3 * dim + head * 3 * hd + hd;
+    float k_sq = 0.0f;
+    for (uint i = 0; i < hd; i++) k_sq += kk_raw[i] * kk_raw[i];
+    const float k_rstd = rsqrt(k_sq / float(hd) + 1e-5f);
     const device float* KCOS = ROPE + k * 48;
     const device float* KSIN = ROPE + rows * 48 + k * 48;
     for (uint i = 0; i < hd; i++) {
@@ -107,9 +115,9 @@
         const float c = KCOS[fi];
         const float sn = KSIN[fi];
         if (i < half_dim) {
-          kv = kk_raw[i] * c - kk_raw[i + half_dim] * sn;
+          kv = kk_raw[i] * k_rstd * c - kk_raw[i + half_dim] * k_rstd * sn;
         } else {
-          kv = kk_raw[i] * c + kk_raw[i - half_dim] * sn;
+          kv = kk_raw[i] * k_rstd * c + kk_raw[i - half_dim] * k_rstd * sn;
         }
       } else {
         kv = kk_raw[i];
@@ -124,6 +132,11 @@
     const device float* vv = QKV + k * 3 * dim + head * 3 * hd + 2 * hd;
     for (uint i = 0; i < hd; i++) acc[i] = acc[i] * rescale + wgt * vv[i];
     run_max = bm;
+  }
+  if (P[1] == 1) {
+    // debug mode: write q_rot directly
+    for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = q_rot[i];
+    return;
   }
   for (uint i = 0; i < hd; i++) Y[r * dim + head * hd + i] = run_sum > 0.0f ? acc[i] / run_sum : 0.0f;
 }

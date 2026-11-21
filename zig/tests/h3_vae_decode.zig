@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const vae = @import("vae");
 
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn fread(ptr: *anyopaque, size: usize, count: usize, file: *anyopaque) usize;
 extern "c" fn fclose(file: *anyopaque) c_int;
 extern "c" fn fwrite(ptr: *const anyopaque, size: usize, count: usize, file: *anyopaque) usize;
 
@@ -76,6 +77,38 @@ pub fn main(init: std.process.Init) !void {
         cb2.commit(); cb2.wait();
         const yh = yb.slice(f32, R * N);
         std.debug.print("MATMUL-TEST y = {d} {d} {d} {d}", .{ yh[0], yh[1], yh[2], yh[3] });
+    {
+        // RMSNORM unit test: X = tokens from tokens-dump rows 0..3, D=2048
+        const tz: [*:0]const u8 = "tokens-dump.f32";
+        const tf = fopen(tz, "rb") orelse return error.CannotOpen;
+        {
+            const n: usize = 4357 * 2048;
+            const rows_n = n / 2048;
+            const xb2 = try device.buffer(n * 4, mtl.ResourceOptions.shared);
+            defer xb2.deinit();
+            _ = fread(xb2.slice(f32, n).ptr, 4, n, tf);
+            _ = fclose(tf);
+            const yb3 = try device.buffer(n * 4, mtl.ResourceOptions.shared);
+            defer yb3.deinit();
+            const wb3 = try device.buffer(2048 * 4, mtl.ResourceOptions.shared);
+            defer wb3.deinit();
+            @memcpy(wb.slice(f32, 2048), decoder.blocks[0].norm1_w);
+            const q3 = try device.queue();
+            const cb3 = q3.commandBuffer();
+            const e3 = cb3.compute(.concurrent);
+            e3.setPipeline(decoder.p[1]);
+            e3.setBuffer(xb2, 0, 0);
+            e3.setBuffer(wb3, 0, 1);
+            e3.setBuffer(yb3, 0, 2);
+            e3.setValue([1]u32{ 2048 }, 3);
+            e3.dispatchGroups(mtl.Size.of(rows_n, 1, 1), mtl.Size.of(256, 1, 1));
+            e3.end();
+            cb3.commit(); cb3.wait();
+            const yh3 = yb3.slice(f32, n);
+                        const xh3 = xb2.slice(f32, n);
+            std.debug.print("RMSNORM-TEST x0={d:.4} x1={d:.4} w0={d:.4} y0={d:.4} y1={d:.4}", .{ xh3[0], xh3[1], wb3.slice(f32, 2048)[0], yh3[0], yh3[1] });
+        }
+    }
     }
     const pixels = try decoder.frames(gpa, denorm, depth, height, width);
     std.debug.print("frames done", .{});
