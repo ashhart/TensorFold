@@ -129,6 +129,11 @@ pub const Dev = struct {
         return x.active != .host;
     }
 
+    /// A pass's statics region bytes (int64 [n64], int32 [n32]), padded so each region starts int64-aligned.
+    pub fn regionBytes(n64: usize, n32: usize) usize {
+        return std.mem.alignForward(usize, 8 * n64 + 4 * n32, @alignOf(i64));
+    }
+
     /// Region `g`'s statics staging (int64 [n64], int32 [n32]), no sync: uploadAsync clones it before returning.
     pub fn statics(x: *Dev, g: usize, n64: usize, n32: usize) !struct { []i64, []i32 } {
         if (g >= x.regions or 8 * n64 + 4 * n32 > x.region_bytes) return error.Statics;
