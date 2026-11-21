@@ -257,8 +257,8 @@ test "snapshot index: RAM keep unwinds every allocation failure and failed famil
             break;
         }
     }
-    try std.testing.expect(succeeded); // spans, Entry, the one prompt copy, the save, then both publication reserves
-    try std.testing.expectEqual(@as(usize, 7), failures);
+    try std.testing.expect(succeeded); // empty images allocate nothing: spans, Entry, prompt, save, then both publication reserves
+    try std.testing.expectEqual(@as(usize, 6), failures);
 }
 
 /// A conversation tree: each prompt a kept one's prefix and new tokens, so states share long prefixes and fork.

@@ -229,6 +229,13 @@ pub const Drafter = struct {
         return d;
     }
 
+    /// Draft scratch only: its weights are part of the target checkpoint's resident bytes.
+    pub fn fixedBytes(d: *const Drafter) u64 {
+        var bytes: u64 = 0;
+        for (d.s) |x| bytes += x.length();
+        return bytes;
+    }
+
     pub fn deinit(d: *Drafter) void {
         d.settle() catch {}; // an absorb in flight writes the lanes freed below
         d.setResident(null);

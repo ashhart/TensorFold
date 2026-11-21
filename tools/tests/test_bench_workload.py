@@ -19,12 +19,20 @@ def row(start=2, end=12, tokens=80, **fields):
 
 class CompleteTiming(unittest.TestCase):
     def test_overlapping_full_intervals_and_bursts(self):
-        for rows, span, total in [([row(), row(7, 22, 120)], 20, 200), ([row()], 10, 80)]:
+        for rows, span, total, overlap in [([row(), row(7, 22, 120)], 20, 200, True), ([row()], 10, 80, None)]:
             result = concurrent.aggregates(rows)
             self.assertEqual(result.get("makespan_s"), span)
             self.assertEqual(result.get("requested_requests"), len(rows))
             self.assertTrue(result.get("timing_valid"))
             self.assertAlmostEqual(result["end_to_end_tps"], total / span)
+            self.assertIs(concurrent.overlapped(rows), overlap)
+
+    def test_serialized_control_has_wall_rate_without_decode_overlap(self):
+        rows = [row(2, 12, 80), row(12, 22, 120)]
+        result = concurrent.aggregates(rows)
+        self.assertEqual(result["makespan_s"], 20)
+        self.assertEqual(result["end_to_end_tps"], 10)
+        self.assertIs(concurrent.overlapped(rows), False)
 
     def test_partial_or_malformed_workers_invalidate_the_entire_workload(self):
         invalid = [dict(complete=False), dict(complete=1), dict(error="lost"), dict(tokens=0),
@@ -72,17 +80,17 @@ class CompleteTiming(unittest.TestCase):
         class Response:
             def __enter__(self):
                 chunks = [dict(choices=[dict(text="first")]), dict(choices=[dict(text="second")]),
-                          dict(usage=dict(completion_tokens=80, prompt_tokens=10))]
+                          dict(choices=[dict(text="third")]), dict(usage=dict(completion_tokens=80, prompt_tokens=10))]
                 return iter([("data: " + json.dumps(c)).encode() for c in chunks] + [b"data: [DONE]"])
             def __exit__(self, *args):
                 pass
         with patch.object(concurrent.urllib.request, "urlopen", return_value=Response()), \
-                patch.object(concurrent.time, "perf_counter", side_effect=[10, 10.5, 11, 14, 18]):
+                patch.object(concurrent.time, "perf_counter", side_effect=[10, 10.5, 11, 12, 15, 18]):
             run = concurrent.stream("http://unused", "fixture", concurrent.PROMPTS[0], 80, 0, 1)
         self.assertTrue(run["complete"])
         self.assertEqual(run.get("elapsed_s"), 8)
-        self.assertEqual(run.get("chunk_offsets_s"), [1, 4])
-        self.assertEqual(run.get("chunk_gaps_ms"), dict(count=1, p50=3000, p95=3000, max=3000))
+        self.assertEqual(run.get("chunk_offsets_s"), [1, 2, 5])
+        self.assertEqual(run.get("chunk_gaps_ms"), dict(count=2, p50=1000, p95=3000, max=3000))
         self.assertEqual(concurrent.aggregates([run])["end_to_end_tps"], 10)
         self.assertIsNone(run["decode_tps"])
 

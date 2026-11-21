@@ -79,6 +79,24 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.draft(x.inner.ptr, r);
             }
         }.f,
+        .draft_capacity = if (v.draft_capacity != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream) u32 {
+                const x = H.bind(p);
+                return x.inner.vtable.draft_capacity.?(x.inner.ptr, s);
+            }
+        }.f else null,
+        .proposal_draft = if (v.proposal_draft != null) struct {
+            fn f(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.proposal_draft.?(x.inner.ptr, r);
+            }
+        }.f else null,
+        .clear_proposals = if (v.clear_proposals != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream) void {
+                const x = H.bind(p);
+                x.inner.vtable.clear_proposals.?(x.inner.ptr, s);
+            }
+        }.f else null,
         .unspeculate = if (v.unspeculate != null) struct {
             fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
                 const x = H.bind(p);
@@ -245,6 +263,22 @@ test "each forwarded entry calls the family's entry of the same name, once" {
                 Rec.hit(p, "draft");
             }
         }.f,
+        .draft_capacity = struct {
+            fn f(p: *anyopaque, _: *S) u32 {
+                Rec.hit(p, "draft_capacity");
+                return 5;
+            }
+        }.f,
+        .proposal_draft = struct {
+            fn f(p: *anyopaque, _: []const be.DraftRequest) anyerror!void {
+                Rec.hit(p, "proposal_draft");
+            }
+        }.f,
+        .clear_proposals = struct {
+            fn f(p: *anyopaque, _: *S) void {
+                Rec.hit(p, "clear_proposals");
+            }
+        }.f,
         .unspeculate = struct {
             fn f(p: *anyopaque, _: *S) anyerror!void {
                 Rec.hit(p, "unspeculate");
@@ -348,6 +382,12 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     try rec.once("keep");
     try w.draft(p, &.{});
     try rec.once("draft");
+    try std.testing.expectEqual(@as(u32, 5), w.draft_capacity.?(p, &s));
+    try rec.once("draft_capacity");
+    try w.proposal_draft.?(p, &.{});
+    try rec.once("proposal_draft");
+    w.clear_proposals.?(p, &s);
+    try rec.once("clear_proposals");
     try w.unspeculate.?(p, &s);
     try rec.once("unspeculate");
     _ = try w.probabilities.?(p, &s, &probs);

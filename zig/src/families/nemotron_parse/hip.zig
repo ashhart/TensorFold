@@ -114,3 +114,7 @@ test "Parse refuses missing image input, tensor parallelism and unsupported trai
     other.context = 16385;
     try std.testing.expect(refusal(other) != null);
 }
+
+test {
+    _ = @import("prefill.zig");
+}

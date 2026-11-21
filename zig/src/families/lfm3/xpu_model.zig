@@ -372,6 +372,9 @@ pub const Model = struct {
 
     /// The bound stream continues from a kept state.
     pub fn snapRestore(m: *Model, sn: *const Snap) !void {
+        m.seq.pos = sn.at;
+        m.seq.win_start = 0;
+        m.seq.win_rows = 0;
         m.pos = sn.at;
         try m.snapCopy(sn, false);
     }

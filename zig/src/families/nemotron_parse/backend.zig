@@ -69,7 +69,7 @@ pub const Backend = struct {
         return .{ .ptr = h, .vtable = &vtable, .penalties = true, .chunk_invariant = true };
     }
 
-    const vtable: be.Backend.VTable = .{ .reports_fill = true, .prefill = fillAll, .prefill_step = fillStep, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .tree = tree, .held = held, .release = release };
+    const vtable: be.Backend.VTable = .{ .reports_fill = true, .prefill = fillAll, .prefill_step = fillStep, .cancel_prefill = cancelPrefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .tree = tree, .held = held, .release = release };
 
     pub fn of(ptr: *anyopaque) *Backend {
         const h: *Backend = @ptrCast(@alignCast(ptr));
@@ -83,6 +83,9 @@ pub const Backend = struct {
 
     fn fillStep(ptr: *anyopaque, s: *lanes.Stream, max_rows: u32) anyerror!bool {
         return prefill.step(of(ptr), s, max_rows);
+    }
+    fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+        return prefill.cancel(of(ptr), s);
     }
 
     fn first(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {

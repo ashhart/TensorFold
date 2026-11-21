@@ -10,13 +10,13 @@ pub const Family = struct { model_type: []const u8, title: []const u8, formats: 
 
 const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h", .title = "Nemotron 3.5 Lightning" },
-    .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Super VL" },
+    .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Omni (Super VL or Bolt)" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "mistral3", .title = "Mistral3 wrapper (LightOnOCR-3-1B only)" },
     .{ .model_type = "lighton_ocr", .title = "LightOnOCR-3-1B" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
-    .{ .model_type = "qwen3_5_moe", .title = "Qwen3.5-MoE (Ornith-1.5-122B)" },
+    .{ .model_type = "qwen3_5_moe", .title = "Qwen3.5-MoE (Ornith-1.5-122B or Qwen3.6-35B-A3B)" },
     .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
     .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
     .{ .model_type = "step5_vl", .title = "Step-5-Preview" },
@@ -28,16 +28,16 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "unlimited-ocr", .title = "Unlimited-OCR-2" },
 };
 
+fn displayTitle(model_type: []const u8) []const u8 {
+    for (titles) |t| if (std.mem.eql(u8, t.model_type, model_type)) return t.title;
+    return model_type;
+}
+
 /// The family that serves `model_type` from the engine registry, or null when Zig cannot serve it (the 0.6 line may).
 pub fn family(model_type: []const u8) ?Family {
     for (engines.families) |f| {
         if (!std.mem.eql(u8, f.model_type, model_type)) continue;
-        var title: []const u8 = f.model_type;
-        for (titles) |t| if (std.mem.eql(u8, t.model_type, model_type)) {
-            title = t.title;
-            break;
-        };
-        return .{ .model_type = f.model_type, .title = title, .formats = f.formats };
+        return .{ .model_type = f.model_type, .title = displayTitle(model_type), .formats = f.formats };
     }
     return null;
 }
@@ -284,6 +284,8 @@ test "security: negative quantization metadata is refused without a cast trap" {
 test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Nemotron 3.5 Lightning", family("nemotron_h").?.title);
     try std.testing.expectEqualStrings("Qwen3.8 Flash Next", family("qwen4_exp").?.title);
+    try std.testing.expectEqualStrings("Nemotron 3.5 Omni (Super VL or Bolt)", displayTitle("nemotron_h_omni"));
+    try std.testing.expectEqualStrings("Qwen3.5-MoE (Ornith-1.5-122B or Qwen3.6-35B-A3B)", displayTitle("qwen3_5_moe"));
     // Every family the linked registry serves resolves; the titles are display names, so only their presence is fixed.
     for (engines.families) |f| try std.testing.expect(family(f.model_type) != null);
     try std.testing.expect(family("gemma3n") == null);

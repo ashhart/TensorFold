@@ -2,6 +2,7 @@
 test {
     _ = @import("hub.zig");
     _ = @import("models.zig");
+    _ = @import("artifact_transaction.zig");
     _ = @import("catalog.zig");
     _ = @import("info.zig");
     _ = @import("pull.zig");

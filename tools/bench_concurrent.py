@@ -9,8 +9,8 @@ their first / (last token of any stream - first token of any stream). Medians ov
 every stream is live (tokens split by the characters each stream delivered inside that window).
 ``--alone``: runs every request alone first and checks each concurrent reply's token-id hash (``token_sha256``)
 against it; ``--serial`` checks the alone runs against ``"draft": false``. Both counts are a report, not a gate:
-the cell names them ``vacuous`` when they compared nothing (``alone``: a rep in which no two streams decoded at once,
-so the server served them one at a time; ``serial``: the drafted runs accepted no draft, or the plain ones drafted,
+the cell names them ``vacuous`` when they compared nothing (``alone``: a rep with fewer than two observed decode
+spans, or without overlap between those spans; ``serial``: the drafted runs accepted no draft, or the plain ones drafted,
 or the server reports no draft counters). ``--no-seed``: sampled requests carry
 no seed (mlx_lm's server batches only those), for measuring a standard; no hash checks then. Run a standard with its
 prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive as one text piece. Tokens come from
@@ -371,8 +371,14 @@ def main() -> None:
                     cell["alone"] = {"equal": checks.count(True), "unequal": checks.count(False),
                                      "failed": checks.count(None)}
                     apart = sum(r["overlapped"] is False for r in reps)
+                    unknown = sum(r["overlapped"] is None for r in reps)
+                    reasons = []
                     if apart:
-                        cell["alone"]["vacuous"] = f"{apart} of {len(reps)} reps had no two streams decoding at once"
+                        reasons.append(f"{apart} of {len(reps)} reps had no two streams decoding at once")
+                    if unknown:
+                        reasons.append(f"{unknown} of {len(reps)} reps had fewer than two observed decode spans")
+                    if reasons:
+                        cell["alone"]["vacuous"] = "; ".join(reasons)
                 if args.serial:
                     checks = [v.get("serial_equal") for v in alone.values()]
                     cell["serial"] = {"equal": checks.count(True), "unequal": checks.count(False),

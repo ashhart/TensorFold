@@ -27,10 +27,13 @@ def whole(content, reply_id='chatcmpl-1', created=1, tokens=TOKENS, seconds=0.5)
                        'tensorfold': {'token_sha256': tokens, 'seconds': seconds}}).encode()
 
 
-def streamed(pieces, reply_id='chatcmpl-1', keepalive=False):
+def streamed(pieces, reply_id='chatcmpl-1', keepalive=False, usage=False, cached=0):
     frames = [{'id': reply_id, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]}]
     frames += [{'id': reply_id, 'choices': [{'index': 0, 'delta': {'content': p}, 'finish_reason': None}]} for p in pieces]
     frames.append({'id': reply_id, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'tensorfold': {'token_sha256': TOKENS}})
+    if usage:
+        frames.append({'choices': [], 'usage': {'prompt_tokens': 8, 'completion_tokens': 2,
+                                                'prompt_tokens_details': {'cached_tokens': cached}}})
     out = b''.join(b'data: ' + json.dumps(f).encode() + b'\n\n' for f in frames)
     return (b': keepalive\n\n' if keepalive else b'') + out + b'data: [DONE]\n\n'
 
@@ -74,6 +77,23 @@ class ReplayTests(unittest.TestCase):
         server = FakeServer(whole('ok'))
         r.replay(own, 'http://example.test', server.send)
         self.assertEqual(server.calls[0][1]['seed'], 7)  # the client's own seed is never replaced
+
+    def test_a_null_seed_replays_the_journaled_draw_and_keeps_cache_hits_out_of_stream_equality(self):
+        body = {'messages': [{'role': 'user', 'content': 'hi'}], 'temperature': 1, 'seed': None,
+                'stream': True, 'stream_options': {'include_usage': True}}
+        entry = self.journal(streamed(['o', 'k'], usage=True), stream=True, body=body)
+        sent = []
+
+        def send(url, request):
+            sent.append(request)
+            pieces = ['ok'] if request.get('seed') == 42 else ['different']
+            return 200, streamed(pieces, reply_id='chatcmpl-2', usage=True, cached=8)
+
+        result, _ = r.replay(entry, 'http://example.test', send)
+        self.assertTrue(result['equal'])
+        self.assertEqual(sent[0]['seed'], 42)
+        self.assertEqual(sent[0]['stream_options'], {'include_usage': True})
+        self.assertIsNone(entry['start']['body']['seed'])
 
     def test_different_text_or_tokens_are_a_reported_mismatch(self):
         result, _ = r.replay(self.journal(), 'http://example.test', FakeServer(whole('oK')).send)

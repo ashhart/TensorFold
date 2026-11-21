@@ -14,7 +14,7 @@ test {
     _ = kernels;
     _ = model;
     _ = forward;
-    _ = backend;
+    _ = @import("cuda_prefill_test.zig");
     _ = native;
     _ = snap;
 }

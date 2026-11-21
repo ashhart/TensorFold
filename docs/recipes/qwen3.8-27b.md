@@ -194,8 +194,9 @@ The remaining 8-bit prompt rate is 40–41% of 4-bit's, against a stored-weight 
 Dense projections still dominate its split-buffer profile, so weight size alone does not explain the prompt gap.
 Decode here is a regression check; the two changes were measured together.
 
-The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
-with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).
+The packed row readers on Apple Silicon cover MLX affine 2/3/4/5/6/8-bit projections with groups of 32/64/128,
+including mixed layers. CUDA admits those bit widths at group 64 and also reads
+[EXL3 packs](#exl3-checkpoints-experimental).
 A fused projection keeps its members separate where their bit width or group size differs. Unsupported formats
 and tied embedding heads are refused from `config.json` before weight downloads and again at load; loaded
 projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units and

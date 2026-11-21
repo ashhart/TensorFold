@@ -179,7 +179,7 @@ pub const Metal = struct {
         while (at < ids.len) {
             var end = @min(ids.len, at + st.prompt_rows);
             if (stream) |sm| {
-                if (sm.isCancelled()) return error.Cancelled;
+                try checkCancelled(sm, cache.len);
                 for (sm.chunks) |x| if (x > base + at and x < base + end) {
                     end = x - base;
                 };
@@ -438,4 +438,40 @@ fn argmax(l: []const u16) usize {
         best = i;
     };
     return best;
+}
+
+fn checkCancelled(s: *lanes.Stream, at: usize) error{Cancelled}!void {
+    if (!s.isCancelled()) return;
+    s.keepInterruptedPrefill(@intCast(at));
+    return error.Cancelled;
+}
+
+test "llama prefill: cancellation keeps a restored pass's last completed chunk" {
+    const Observer = struct {
+        cancelled: bool = false,
+        marked: usize = 0,
+        interrupted: ?u32 = null,
+        fn cancel(ptr: *anyopaque) bool {
+            return @as(*@This(), @ptrCast(@alignCast(ptr))).cancelled;
+        }
+        fn mark(ptr: *anyopaque, _: *lanes.Stream, _: u32) void {
+            @as(*@This(), @ptrCast(@alignCast(ptr))).marked += 1;
+        }
+        fn interrupt(ptr: *anyopaque, _: *lanes.Stream, at: u32) void {
+            @as(*@This(), @ptrCast(@alignCast(ptr))).interrupted = at;
+        }
+    };
+    var observer: Observer = .{};
+    const ids: [2 * st.prompt_rows + 17]u32 = @splat(3);
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "cancel", .prompt = &ids, .max_new = 4, .drafts = false, .cancel_check = .{ .ptr = &observer, .check = Observer.cancel }, .reuse = .{ .hook = .{ .ptr = &observer, .at = Observer.mark, .interrupted = Observer.interrupt } } });
+    defer stream.deinit(std.testing.allocator);
+    stream.cached = 64;
+    const at = 64 + st.prompt_rows;
+    try checkCancelled(&stream, at);
+    try std.testing.expectEqual(@as(usize, 0), observer.marked);
+    try std.testing.expectEqual(@as(?u32, null), observer.interrupted);
+    observer.cancelled = true;
+    try std.testing.expectError(error.Cancelled, checkCancelled(&stream, at));
+    try std.testing.expectEqual(@as(usize, 0), observer.marked);
+    try std.testing.expectEqual(@as(?u32, @intCast(at)), observer.interrupted);
 }

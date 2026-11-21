@@ -101,7 +101,7 @@ pub const Model = struct {
     pub const Prepared = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 
     /// Every image of the stream through the tower, laid out as its image tokens in prompt order.
-    fn encodeImages(m: *Model, a: std.mem.Allocator, images: []const lanes.stream.Image) ![]u16 {
+    fn encodeImages(m: *Model, a: std.mem.Allocator, images: []const lanes.stream.Image, cancel: ?lanes.stream.CancelCheck) ![]u16 {
         var total: usize = 0;
         for (images) |img| total += img.tokens;
         const rows = try a.alloc(u16, total * H);
@@ -111,6 +111,7 @@ pub const Model = struct {
         const tile_px = 3 * cfg.tile_size * cfg.tile_size;
         var at: usize = 0;
         for (images) |img| {
+            if (cancel) |c| if (c.check(c.ptr)) return error.Cancelled;
             const across: usize = img.gw;
             const down: usize = img.gh;
             const tiles: usize = if (across * down > 1) across * down else 0;
@@ -123,7 +124,10 @@ pub const Model = struct {
             try m.encoder.encode(cfg.base_size, px[0..global_px], global, .{});
             const tile_rows = try a.alloc(u16, tiles * t * t * H);
             defer a.free(tile_rows);
-            for (0..tiles) |i| try m.encoder.encode(cfg.tile_size, px[global_px + i * tile_px ..][0..tile_px], tile_rows[i * t * t * H ..][0 .. t * t * H], .{});
+            for (0..tiles) |i| {
+                if (cancel) |c| if (c.check(c.ptr)) return error.Cancelled;
+                try m.encoder.encode(cfg.tile_size, px[global_px + i * tile_px ..][0..tile_px], tile_rows[i * t * t * H ..][0 .. t * t * H], .{});
+            }
             const out = rows[at * H ..][0 .. @as(usize, img.tokens) * H];
             vision.layout(&m.weights, global, tile_rows, across, down, out);
             at += img.tokens;
@@ -146,16 +150,17 @@ pub const Model = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const m = cast(ptr);
+        if (stream.isCancelled()) return error.Cancelled;
         if (m.stream != null) return error.UocrBusy;
         const ids = stream.prompt();
         // the prompt's rows, then a row for every reply token fed back: all but the last, which ends the reply
         if (ids.len == 0 or ids.len + @max(stream.max_new, 1) - 1 > m.decoder.cap) return error.UocrPromptTooLong;
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
-        const rows = try m.encodeImages(arena.allocator(), stream.images);
+        const rows = try m.encodeImages(arena.allocator(), stream.images, stream.cancel_check);
         var p = try prompt_mod.positions(m.gpa, try m.gpa.dupe(u32, ids));
         errdefer p.deinit(m.gpa);
-        try m.decoder.prefill(p, rows);
+        try m.decoder.prefill(p, rows, stream.cancel_check);
         m.guard = generate.Guard.init(p);
         m.step = prompt_mod.Step.init(p);
         m.prompt = p;
@@ -222,4 +227,18 @@ pub const Model = struct {
 test "uocr: a page's token bounds" {
     try std.testing.expectEqual(@as(u32, 273), basePageTokens());
     try std.testing.expect(maxPageTokens() > basePageTokens());
+}
+
+test "uocr: cancelled prefill stops before the encoder" {
+    const Stop = struct {
+        fn yes(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    var other: lanes.Stream = undefined;
+    var s: lanes.Stream = undefined;
+    s.cancel_check = .{ .ptr = &s, .check = Stop.yes };
+    var m: Model = undefined;
+    m.stream = &other;
+    try std.testing.expectError(error.Cancelled, Model.prefillFn(&m, &s));
 }

@@ -8,12 +8,11 @@ that engine. @cshintov brought the model to Macs in [#138](https://github.com/as
 ([#270](https://github.com/ashhart/TensorFold/pull/270)) worked on its CUDA path; see [credits](../credits.md).
 The native CUDA engine serves the checkpoint with its MTP layer: see
 [NVIDIA's NVFP4 checkpoint](#nvidias-nvfp4-checkpoint-native-cuda) and its [1M-token window](#a-1m-token-window-yarn).
-The Metal native binary has no `qwen3_5_moe` family yet and cannot serve the checkpoint there; `tensorfold pull` and
-`tensorfold info` still read it, since the hub registers the model type.
+The Metal native binary's `qwen3_5_moe` family admits Ornith-1.5-122B only and refuses this checkpoint's geometry;
+`tensorfold pull` and `tensorfold info` still read it, since the hub registers the model type.
 
-The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
-(Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense
-MLP, and on both backends it drafts with the checkpoint's own MTP layer.
+The family serves Qwen3.6-35B-A3B on one NVIDIA GPU. Its layers are the 27B's (Gated DeltaNet and gated full attention,
+every fourth layer attention) with routed experts in place of the dense MLP, and it drafts with the checkpoint's own MTP layer.
 
 ## Checkpoint
 

@@ -1,6 +1,5 @@
 """Full-workload throughput and observed SSE timing without inferring token times from text chunks."""
 import math
-import statistics
 
 from bench_evidence import count
 
@@ -58,6 +57,7 @@ def request(run):
     if len(arrivals) < 2:
         return out
     gaps = sorted((right - left) * 1000 for left, right in zip(arrivals, arrivals[1:]))
-    out["chunk_gaps_ms"] = {"count": len(gaps), "p50": statistics.median(gaps),
+    out["chunk_gaps_ms"] = {"count": len(gaps),
+                            "p50": gaps[math.ceil(len(gaps) * 0.5) - 1],
                             "p95": gaps[math.ceil(len(gaps) * 0.95) - 1], "max": gaps[-1]}
     return out

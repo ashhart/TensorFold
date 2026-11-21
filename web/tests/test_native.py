@@ -220,10 +220,10 @@ def test_what_the_engine_serves_comes_from_its_capabilities(fake_binary, monkeyp
     qwen = next(e for e in cat.entries if e.id == "TensorFold/Qwen3.8-27B-MLX-4bit")
     flash = next(e for e in cat.entries if e.family == "qwen4_exp")
     assert not cat.native_here(qwen)                          # this engine lists Nemotron only
-    caps = {**CAPS, "families": {"nemotron_h": ["mlx-q4g64"], "qwen3_5": ["mlx-q4g64"], "qwen4_exp": ["mlx-q6g32"]}}
+    caps = {**CAPS, "families": {"nemotron_h": ["mlx-q4g64"], "qwen3_5": ["mlx-q4g64"], "qwen4_exp": ["mlx-q4g32"]}}
     monkeypatch.setattr(native, "capabilities", lambda _b: caps)
     assert cat.native_here(qwen)                              # 1.0.3 and later on a Mac
-    assert not cat.native_here(flash)                         # the family, but not this checkpoint's format
+    assert cat.native_here(flash)                             # CUDA's checkpoint-native MLX4/group-32 path
     monkeypatch.setenv("TENSORFOLD_BIN", "/nonexistent")
     native.forget()
     assert cat.native_here(qwen) == qwen.native               # no engine to ask: the catalog's flag
