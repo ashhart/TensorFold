@@ -46,7 +46,7 @@ fn run(gpa: std.mem.Allocator, e: *Engine, ids: hip.DeviceBuffer, len: usize, re
     }
     e.prompts.reset();
     const o = e.ops(&e.prompts);
-    const kept = try fwd.spanFor(o, m, &caches, ids.base(), len, 0, null, reads);
+    const kept = try fwd.spanFor(o, m, &caches, ids.base(), len, 0, e.stepRows(), null, reads);
     if (kept.from < len) {
         const row = kept.row(len - 1, m.spec.hidden);
         const logits = try o.project(row, m.head, 1, false);

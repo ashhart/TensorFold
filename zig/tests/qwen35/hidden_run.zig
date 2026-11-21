@@ -72,7 +72,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     defer gpa.free(ids);
     if (ids.len == 0) return error.MissingArgument;
     const piece = if (cut == 0) ids.len else @min(cut, ids.len);
-    const e = try Engine.open(gpa, io, args[0], .{ .capacity = ids.len + 64, .prompt_rows = piece, .streams = 1, .batch_rows = 32, .policy = (try @import("group.zig").resolve("", 0)).policy });
+    var policy = (try @import("group.zig").resolve("", 0)).policy;
+    // a cut stands for a server's prompt step: each piece crosses a layer whole, as that server's chunks do
+    policy.prefill_step = @intCast(@max(policy.prefill_step, cut));
+    const e = try Engine.open(gpa, io, args[0], .{ .capacity = ids.len + 64, .prompt_rows = piece, .streams = 1, .batch_rows = 32, .policy = policy });
     defer e.deinit();
     const m = e.model();
     // numpy has no bf16: its bits as uint16, which the oracle widens

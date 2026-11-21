@@ -20,7 +20,7 @@ pub fn prompts(e: *Engine, rows: usize, capacity: usize) !usize {
     var arena = hip.Arena.counting();
     const o = counting(e, &arena);
     // every take grows with the rows and the keys walked, so the last chunk of a full window is the largest
-    const hidden = try fwd.span(o, m, &caches, 0, rows, capacity - rows, null);
+    const hidden = (try fwd.spanFor(o, m, &caches, 0, rows, capacity - rows, e.stepRows(), null, .{ .logits = true, .readers = true })).rows;
     const y = try o.project(fwd.at(hidden, (rows - 1) * m.spec.hidden), m.head, 1, false);
     _ = try e.wholeRows(o, y, 1);
     return arena.peak;

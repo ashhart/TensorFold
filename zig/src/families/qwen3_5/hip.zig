@@ -52,6 +52,7 @@ test {
     _ = moe;
     _ = sample;
     _ = prefix;
+    _ = @import("backend/hip/engine/prompt_rows.zig");
     _ = hip_lanes;
     _ = radix;
     _ = native_engine;

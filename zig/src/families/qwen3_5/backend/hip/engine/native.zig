@@ -7,7 +7,7 @@ const engine = @import("engine.zig");
 const Engine = engine.Engine;
 const memory = @import("memory.zig");
 const mtp = @import("mtp.zig");
-const prefix = @import("prefix.zig");
+const prompt_rows = @import("prompt_rows.zig");
 const pages = @import("../forward/pages.zig");
 const state = @import("../forward/state.zig");
 const worker = @import("worker.zig");
@@ -127,6 +127,16 @@ fn served(e: *Engine, streams: usize, capacity: usize, readouts: ?Readouts) !usi
 
 const Readouts = struct { cfg: @import("core").joint_schema.Config, bounds: hip.joint_schema.plan.Bounds };
 
+/// `want` prompt rows when their scratch still holds `streams` and `cache` in `room`, else the `small` rows that did.
+fn settled(e: *Engine, want: usize, small: usize, streams: usize, capacity: usize, readouts: ?Readouts, room: u64, cache: u64) !prompt_rows.Opened {
+    const smaller = try e.promptBytes(capacity);
+    const beside = try served(e, streams, capacity, readouts) - smaller;
+    e.o.prompt_rows = want;
+    const opened = prompt_rows.settle(want, small, room, cache, try e.promptBytes(capacity), smaller, beside);
+    e.o.prompt_rows = opened.rows;
+    return opened;
+}
+
 /// Loads this rank's share of the model, admits the streams its memory holds (with the other ranks) and sizes them.
 fn prepare(
     a: std.mem.Allocator,
@@ -198,6 +208,10 @@ fn prepare(
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({s})", .{ dir, @errorName(err) }),
     };
     errdefer e.deinit();
+    // admission starts from the fallback's rows where a lone rank has them: the policy's must not cost a stream
+    const want = prompt_rows.opening(dev.policy, e.plain());
+    const small = prompt_rows.fallback(dev.policy, dev.fallback_step, want);
+    e.o.prompt_rows = small orelse want;
     // a Clef head's weights go up beside the model's and count with them
     var head = try loadJoint(a, gpa, io, e, dir, problem);
     errdefer if (head) |*h| h.deinit();
@@ -240,6 +254,17 @@ fn prepare(
             .{ o.streams, gibs(asked), window, gibs(room), streams },
         );
     }
+    // a prompt cache a flag asked for claims its bytes beside the streams, unless it may pass the cap
+    const flag: ?usize = if (o.cache_gib) |g| @intFromFloat(g * (1 << 30)) else null;
+    const claim = prompt_rows.claim(flag, o.cache_over_cap);
+    // the policy's rows come back when their larger scratch holds that claim and the streams the fallback admitted
+    var opened: prompt_rows.Opened = .{ .rows = want };
+    if (small) |s| opened = settled(e, want, s, streams, capacity, readouts, room, claim) catch |err| return steps.refuseAll(
+        a,
+        problem,
+        "the native HIP engine cannot count its scratch ({s})",
+        .{@errorName(err)},
+    );
     const need = served(e, streams, capacity, readouts) catch |err| return steps.refuseAll(
         a,
         problem,
@@ -250,7 +275,7 @@ fn prepare(
     const left = room - need;
     const policy = dev.policy;
     const keep: usize = policy.slots;
-    var budget: usize = if (o.cache_gib) |g| @intFromFloat(g * (1 << 30)) else left;
+    var budget: usize = flag orelse left;
     if (budget > left and !o.cache_over_cap) {
         return steps.refuseAll(
             a,
@@ -274,8 +299,11 @@ fn prepare(
             .{@errorName(err)},
         );
     const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
-    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
-        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
+    var why: [96]u8 = undefined;
+    const cost = if (opened.cache) "leave less than the prompt cache" else "admit fewer of the streams";
+    const narrowed = if (opened.narrowed) |n| std.fmt.bufPrint(&why, " ({d}-row chunks would {s} asked for)", .{ n, cost }) catch "" else "";
+    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks{s}", .{
+        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, opened.rows, narrowed,
     });
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup, .joint = head, .bounds = if (readouts) |r| r.bounds else undefined };
 }
