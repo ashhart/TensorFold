@@ -265,7 +265,6 @@ pub const Server = struct {
         if (srv.keepalive) |k| k.stop();
         srv.keepalive = null;
     }
-
     pub fn deinit(srv: *Server) void {
         srv.media_jobs.deinit();
         if (srv.workspace) |workspace| workspace.deinit();
