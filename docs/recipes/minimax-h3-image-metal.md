@@ -53,6 +53,73 @@ The picture case brings the rest, made by the reference pipeline for now:
 Rows are 96 wide: 24 latent channels times a 2 x 2 patch, channel-major, then the patch's row, then its column.
 Patches run in row-major order. The case must be written aligned (Python's `safetensors` writer does this).
 
+## Prompt
+
+`tf-h3-image-prompt` makes a picture case's `text` and `text_tags` from a prompt. It runs on any Apple GPU: no tensor
+units are needed.
+
+```sh
+zig build tf-h3-image-prompt -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-prompt TEXT_ENCODER_DIR MODEL_DIR prompt.txt out/prompt.safetensors
+```
+
+`TEXT_ENCODER_DIR` is MiniMax-H3's `text_encoder/` (Qwen3-VL). `MODEL_DIR` is the MiniMax-H3-Image folder, for its
+`tokenizer/` and `transformer/`. The prompt is used verbatim, except for one trailing line ending: no chat template and
+no system prompt.
+
+1. **Ids.** The prompt is tokenised on its own, with no special tokens added, and cut to its first 4,096 tokens.
+   Every row is tagged 1 (text).
+2. **The text encoder.** Qwen3-VL's text model runs 50 of its 64 layers:
+   - hidden 5,120, with 64 query and 8 KV heads of 128;
+   - q and k RMSNorm, and a SwiGLU of 25,600;
+   - causal attention, with rotary at theta 5,000,000.
+
+   Text positions count up, equal on M-RoPE's three axes. The rows leaving layer index 49 are kept unnormalised. The
+   final norm and layers 50 to 63 are never mapped or run.
+3. **The front end.** `condition_proj` and its bias map each row to 5,376. The two token-refiner blocks then run over
+   every row as one document, with no rotary and no AdaLN, and `token_refiner.final_norm` ends it.
+
+It writes `text` BF16 [rows, 5,376], `text_tags` I32 [rows] and `ids` I32 [rows], aligned. `tf-h3-image` reads the
+first two as a case's own.
+
+**Precision.** Weights are bf16, read in place. Products run in simdgroup matrices with fp32 sums. Norms keep fp32
+statistics, and the softmax and its sums stay in fp32. Each step rounds to bf16 where the reference's bf16 arithmetic
+does:
+
+- the text model's norms round x r before the weight;
+- its rotary turns by bf16 cos and sin;
+- its SiLU rounds once;
+- the refiner rounds as H3's blocks do: x r w at once, then the sigmoid, then the product.
+
+**Edits.** The encoder places a reference's vision rows at its image pads and adds DeepStack's features after layers
+0, 1 and 2. The labels (`Picture i: `), vision blocks, tags (0 for a vision block's tokens) and M-RoPE positions are
+made here. Qwen3-VL's vision tower is not, so an edit's prompt rows still come from the case.
+
+**Gates, fixed before the first run except the whole-run gate below.** `tf-h3-image-prompt selftest [WORK_DIR]`
+writes a tiny synthetic checkpoint and loads it as a real run does. The checkpoint is a 256-wide text model with 4
+query and 2 KV heads, three layers written and two run, and a 384-wide refiner of 2 heads. The selftest checks 70 rows
+against a float64 host reference with the same bf16 rounding points:
+
+- **Each kernel alone:** at least 99.9% of values bit-equal, none further than 1/32 of its row's RMS. Kernels: the
+  product, both norms, heads with rotary, fused heads, causal and full attention, both SiLU gates, the residual add.
+- **Whole runs:** a text prompt; a reference's vision and DeepStack rows at M-RoPE positions; the refiner on the GPU's
+  encoder rows. Each must be within twice a float32-sum host run's distance from float64, in both 1 - cosine and
+  relative error, with cosine at least 0.999. This gate replaced a fixed cosine bound of 0.99999, which the refiner
+  missed at 0.9999884 on a second seed while every kernel alone was bit-exact.
+- **A second run:** byte for byte the same.
+
+On an M3 Ultra, every kernel alone is 99.97% to 100% bit-equal. The whole runs sit 0.7 to 1.03 times as far from
+float64 as the float32-sum run.
+
+`zig build test-h3-image-prompt` runs the prompt rules without a GPU:
+
+- ids per segment, the 4,096 cut, tags, pad rows and vision token counts;
+- M-RoPE positions and the interleaved rotary table;
+- the Qwen copy's size and LANCZOS pixels;
+- the encoder's and refiner's configs, and the text model's tensor prefix.
+
+`zig build compile-h3-image-prompt` compiles the tool without running a shader.
+
 ## Run a case
 
 ```sh
@@ -89,6 +156,72 @@ Attention here is dense, so no routing floor applies. FastH3's 0.990 at step 1 c
 float32. The text encoder is MiniMax-H3's Qwen3-VL; its 50th layer's rows are the prompt's. The weights are under the
 MiniMax-H3-Image Community License, which excludes the European Union, the United Kingdom, the Republic of Korea and
 the United States of America. Read it before use.
+
+## Edit encoder
+
+An edit's reference reaches the transformer as clean latent rows made by the VAE's CNN encoder. `tf-h3-image-encoder`
+makes them on Metal in fp32, on any Apple GPU; no tensor units are needed. Its kernels are compiled from source when it
+starts, so it builds without the Metal compiler.
+
+- **The VAE copy.** The reference is read upright in RGB, with any alpha dropped. A short edge already in 1024..2048
+  keeps the original pixels. Otherwise the picture is scaled to the nearer bound, each side snapped to 32 (halves to
+  even) and resampled with Pillow's LANCZOS: 512x768 becomes 1024x1536, 3000x4000 becomes 2048x2720, and 1536x2048 is
+  kept. A side under 32 pixels, or a copy over 64 MP, is refused.
+- **The input.** Bytes / 255, then ImageNet's mean and std, in fp32, cropped top-left to multiples of 16 pixels.
+- **The network.**
+  - Each 3x3x3 causal convolution runs as the 2D convolution of its last time slice, reflect-padded by one.
+  - `conv_in` maps 3 channels to 128.
+  - Six levels of two ResNet blocks follow, at widths 128, 256, 256, 512, 512 and 1,024, with `nin_shortcut` where the
+    width changes.
+  - Levels 0 to 3 end with a stride-2 downsample that reflects the right and bottom edges by one pixel.
+  - Then GroupNorm(32, eps 1e-6) with SiLU, `conv_out` (1,024 to 48) and `quant_conv`.
+  - Every tensor name and shape is checked against the checkpoint's header before anything loads.
+- **Tiles.** 256-pixel tiles overlapping by at least 64, split as the decoder splits. Each tile's 48 moment channels
+  are blended in latent cells (overlap / 16) with the decoder's rule.
+- **The rows.**
+  - The posterior sample, mean + exp(0.5 clamp(logvar, -30, 20)) x noise, is rounded to fp16.
+  - It is normalised with the latent statistics and cropped top-left to the even grid: 1024x1024 gives 64 x 64, and
+    1050x1000 gives 62 rows by 64 columns.
+  - Then it is patchified.
+  - Anchor rows are 0.999 x clean + (1 - 0.999 in fp32) x the anchor noise.
+- **The noise.** One CPU torch generator per request (`moss_image/noise.zig`, its draws chained), drawn in order: the
+  target, each reference's anchor noise, then each reference's posterior noise on its full grid.
+
+```sh
+zig build tf-h3-image-encoder -Dcpu=apple_m1 -Doptimize=ReleaseFast
+zig-out/bin/tf-h3-image-encoder MODEL_DIR reference.png SEED out/ref [CANVAS]
+zig-out/bin/tf-h3-image-encoder selftest
+```
+
+It writes:
+
+- `out/ref.rows.f32`: the clean rows [rows, 96];
+- `out/ref.moments.f32`: the blended moments [48, h, w], before sampling;
+- `out/ref.grid.json`.
+
+With `CANVAS` (WxH), the generator first draws the target's noise and this reference's anchor noise, as a
+one-reference edit does, and `out/ref.anchors.f32` is written too. Without it, the posterior's noise is the seed's
+first draw.
+
+`selftest` runs each kernel on small synthetic weights against a float64 host reference and exits 1 on a miss. It
+covers:
+
+- a reflect-padded 3x3 convolution and the stride-2 downsample;
+- a 1x1 convolution with a residual;
+- GroupNorm with SiLU;
+- both kinds of ResNet block;
+- a small encode over uneven tiles, run twice.
+
+Its gates, measured on an M3 Ultra:
+
+| Check | Gate | Measured |
+|---|---|---|
+| Each layer, worst error over the largest value | 1e-5 | 2e-7 to 9e-7 |
+| The tiled moments | 1e-4 | 1.6e-6 |
+| The fp16 samples | one fp16 step at the largest value | within it |
+| Repeat runs | bit-identical | bit-identical |
+
+A 1024 x 1024 reference at the released widths encodes in 0.6 s.
 
 ## Not done
 
