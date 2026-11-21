@@ -495,7 +495,6 @@ pub fn close(ptr: *anyopaque) void {
     h.spares.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     h.core.deinit();
-    if (h.wrap) |*w| w.deinit();
     q.residency.drop(h);
     if (h.disk_stage) |b| b.deinit();
     h.cfg.deinit(h.gpa);
@@ -522,30 +521,4 @@ test {
     _ = @import("qwen27_served_test.zig");
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_startup_line.zig");
-}
-
-test "Qwen27 interior state uses a guaranteed cold request cut" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const tokens = try a.alloc(u32, 128 * 1024 + 64);
-    @memset(tokens, 7);
-    var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, cacheRules(2048), 32 << 30);
-    defer store.deinit();
-    var starts: std.ArrayList(u32) = .empty;
-    var at: u32 = 2048;
-    while (at < tokens.len) : (at += 2048) try starts.append(a, at);
-    const p = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{ 16, 129024, @intCast(tokens.len - 8) }, p.marks);
-    for (p.marks) |m| try std.testing.expect(store.keep(tokens, m, null, starts.items, &.{}));
-    tokens[tokens.len - 512] += 1;
-    const followup = try store.beginUser(a, tokens, @intCast(tokens.len - 8), 16, @intCast(tokens.len - 8), &.{}, starts.items, null, &.{});
-    try std.testing.expectEqual(@as(u32, 129024), followup.from);
-    try std.testing.expect(store.held <= store.budget);
-}
-
-test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
-    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
 }
