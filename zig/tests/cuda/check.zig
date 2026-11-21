@@ -64,3 +64,15 @@ pub fn median(xs: []f64) f64 {
     const n = xs.len;
     return if (n % 2 == 1) xs[n / 2] else (xs[n / 2 - 1] + xs[n / 2]) / 2;
 }
+
+pub fn info(gpu: Gpu) !void {
+    var name_buf: [256]u8 = undefined;
+    const name = try gpu.ctx.name(&name_buf);
+    const mem = try gpu.ctx.memInfo();
+    std.debug.print("RESULT driver CUDA {d}, device {s}, sm_{d}, {d} SMs, {d} MiB total, {d} MiB free, kernels embedded {}\n", .{
+        try gpu.d.version(),      name,
+        try gpu.ctx.capability(), try gpu.ctx.attribute(.multiprocessor_count),
+        mem.total >> 20,          mem.free >> 20,
+        cuda.kernels.available,
+    });
+}

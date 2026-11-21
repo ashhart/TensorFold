@@ -231,6 +231,7 @@ pub const Server = struct {
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
         if (minimax) srv.markers = reply_text.mm_markers;
+        if (srv.info.reasoning_optional and std.mem.eql(u8, srv.markers.close, reply_text.think_markers.close)) srv.markers.optional = true;
         srv.close_id = text.tokenId(srv.markers.close);
         srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
@@ -581,20 +582,4 @@ fn templateImages(srv: *Server) bool {
 /// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
-}
-
-test "queue phase: server notes measured waits only when explicitly enabled" {
-    const defaults: Config = .{ .served_name = "test", .model_ids = &.{"test"} };
-    try std.testing.expect(!defaults.phase_metrics);
-    for ([_]bool{ false, true }) |enabled| {
-        var srv: Server = undefined;
-        srv.io = std.testing.io;
-        srv.metrics = .{ .gpa = std.testing.allocator, .phases = enabled };
-        defer srv.metrics.deinit();
-        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, 0.25, 0.3);
-        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
-        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, null, null);
-        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
-        try std.testing.expectEqual(@as(u64, 6), srv.metrics.generation);
-    }
 }

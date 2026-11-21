@@ -281,6 +281,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-minimax-vision", .path = "zig/tests/minimax_m3/vision.zig", .about = "MiniMax-M3.1-Flash's image tower alone: an image's patches and text rows, for tools/vision_ref.py's check" },
         .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-flint-run", .path = "zig/tests/flint/run.zig", .about = "Flint greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-ricursive-run", .path = "zig/tests/ricursive/run.zig", .about = "Ripple on Metal: greedy tokens, every position's logits, a prompt's last logits or forced steps, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
     // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
@@ -473,19 +474,4 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     return metal_server.nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null, null);
 }
 
-pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
-    const kimi = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
-            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "core", .module = engine }},
-        }) } },
-    });
-    kimi.addImport("lanes", lanes);
-    return kimi;
-}
+pub const kimiModule = @import("metal_kimi.zig").module;

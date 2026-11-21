@@ -7,6 +7,8 @@ const registry = @import("cuda_families.zig").registry;
 pub fn familyInfo(comptime F: type, host: api.Info) api.Info {
     var info = host;
     info.reasoning = reasoning(F);
+    if (@hasDecl(F, "reasoning_optional")) info.reasoning_optional = F.reasoning_optional;
+    if (@hasDecl(F, "thinking_budget")) info.thinking_budget = F.thinking_budget;
     return info;
 }
 
@@ -32,4 +34,23 @@ test "the Info openWith serves carries each family's reasoning declaration over 
     const kept = familyInfo(Plain, .{ .lanes = 6, .context_window = 8192, .startup = "plan" });
     try std.testing.expect(kept.lanes == 6 and kept.context_window == 8192 and std.mem.eql(u8, kept.startup, "plan"));
     inline for (registry) |F| try std.testing.expectEqual(reasoning(F), familyInfo(F, .{ .reasoning = !reasoning(F) }).reasoning);
+}
+
+test "optional reasoning and its budget are family metadata; other host flags stay unchanged" {
+    const Optional = struct {
+        pub const reasoning_optional = true;
+        pub const thinking_budget = false;
+    };
+    const host: api.Info = .{ .lanes = 3, .context_window = 4096, .reasoning_optional = false, .thinking_budget = true };
+    const chosen = familyInfo(Optional, host);
+    try std.testing.expect(chosen.reasoning and chosen.reasoning_optional and !chosen.thinking_budget);
+    try std.testing.expect(chosen.lanes == host.lanes and chosen.context_window == host.context_window);
+    const untouched = familyInfo(struct {}, host);
+    try std.testing.expect(!untouched.reasoning_optional and untouched.thinking_budget);
+    inline for (registry) |F| {
+        const info = familyInfo(F, host);
+        const optional = std.mem.eql(u8, F.model_type, "ricursive");
+        try std.testing.expectEqual(optional, info.reasoning_optional);
+        try std.testing.expectEqual(!optional, info.thinking_budget);
+    }
 }
