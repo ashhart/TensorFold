@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the Web loopback startup test sets its fixture ready before probing, so its health, model-list and relay checks no longer depend on warm-up timing (#3753, fixes #3752). Thanks to @AIFlowML.
+
 - Server: `TENSORFOLD_PARALLEL` sets the default lanes when `serve` has no `--parallel`: a whole number 1 to 4096 or `auto`; the flag wins when both are given, a blank value keeps the default, and any other value is refused by name at startup (#3685, for #3684). Thanks to @bikepresentball.
 
 - Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
