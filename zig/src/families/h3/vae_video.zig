@@ -576,6 +576,7 @@ pub const Decoder = struct {
             _ = fclose(fpb);
         }
         if (getenv("SKIP_BLOCKS") == null) { for (self.blocks, 0..) |b, bi| {
+        @memcpy(normed.slice(f32, rows * dim), tokens_full);
         cb = self.queue.commandBuffer();
         e = cb.compute(.concurrent);
 
@@ -630,6 +631,13 @@ pub const Decoder = struct {
             _ = fclose(fnn);
         }
         e.barrier();
+        if (getenv("DUMP_QKV_BLK") != null and bi == 1) {
+            const qzp2 = try std.fmt.allocPrintSentinel(gpa, "zig-qkv-blk1.f32", .{}, 0);
+            defer gpa.free(qzp2);
+            const fq2 = fopen(qzp2, "wb") orelse return error.CannotWrite;
+            _ = fwrite(qkv.slice(f32, rows * 3 * dim).ptr, 4, rows * 3 * dim, fq2);
+            _ = fclose(fq2);
+        }
 
         // V extraction in the interleaved layout: attended[h][r][i] = qkv[r][h*3*hd + 2*hd + i]
         // (softmax stand-in: attention over itself is wrong but keeps shapes live; the
