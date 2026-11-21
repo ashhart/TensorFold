@@ -77,7 +77,6 @@ fn isGemma4(model_type: []const u8) bool {
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
 }
-
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
@@ -93,7 +92,6 @@ const Host = struct {
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
-
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const h: *Host = @ptrCast(@alignCast(ctx));
@@ -102,12 +100,10 @@ const Host = struct {
         const r = try nemotron.gpu_round.run(h.gpa, h.metal, s, h.round, .{ .ctx = hooks.ctx, .committed = hooks.committed, .yield = hooks.yield });
         return r.paused;
     }
-
     fn halt(ctx: *anyopaque, reason: []const u8) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.halt(reason);
     }
-
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
