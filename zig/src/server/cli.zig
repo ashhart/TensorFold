@@ -109,8 +109,7 @@ pub const flags = [_]Flag{
     .{ .name = "--slide", .kind = .store_true, .native = true },
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
     .{ .name = "--slide-graph", .path = true, .native = true },
-    .{ .name = "--drafter", .native = true },
-    .{ .name = "--drafter-bits", .choices = &.{ "0", "4", "8" }, .native = true },
+} ++ @import("cli_drafter.zig").flags ++ [_]Flag{
     .{ .name = "--rope-yarn", .native = cuda_build },
     .{ .name = "--record", .path = true, .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },

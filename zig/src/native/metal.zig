@@ -169,20 +169,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) {
-        var serving = o;
-        if (o.drafter != null) {
-            const device = try mtl.Device.init();
-            defer device.deinit();
-            const name = std.mem.span(device.name());
-            serving = metal_admit.lfm2DrafterOptions(o, name);
-            if (serving.drafter == null and o.drafts) std.log.info(
-                "lfm2: DSpark standing aside on {s}; serving without a neural drafter (requires Apple M5 or newer)",
-                .{name},
-            );
-        }
-        return @import("lfm2_moe.zig").open(a, gpa, io, serving, problem);
-    }
+    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("metal_lfm2.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h") and !std.mem.eql(u8, o.model_type, "nemotron_h_puzzle")) {
         problem.* = try @import("no_backend.zig").message(a, o.model_type);
         return null;
@@ -303,7 +290,7 @@ const recall_refusal = "--recall drafts from a record in the lane engine's round
     "serve it without --recall, --recall-dir, --recall-gib or --recall-read-only";
 
 /// Refused before any weights load: absent family learners and unsupported disk-state options.
-fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
+pub fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
@@ -425,7 +412,7 @@ test {
     _ = glm_dsa;
     _ = qwen27;
     _ = @import("cache_fit.zig");
-    _ = metal_admit;
+    _ = @import("metal_lfm2.zig");
     _ = @import("resident.zig");
     _ = @import("metal_identity.zig");
     _ = @import("qwen27_landing.zig");
@@ -548,17 +535,6 @@ test "--slide is refused by every family but Nemotron, which learns into its wei
     for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
         const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
-    }
-}
-
-test "drafter admission: LFM2 DSpark and Llama survive centralized Metal refusal" {
-    const a = std.testing.allocator;
-    for ([_][]const u8{ "lfm2_moe", "llama", "gemma4", "qwen3_5_moe" }) |model| {
-        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = model, .drafter = "draft" }, false)) == null);
-    }
-    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5", .drafter = "draft" }, true)) == null);
-    for ([_][]const u8{ "qwen3_5", "nemotron_h", "unknown" }) |model| {
-        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = model, .drafter = "draft" }, false)) != null);
     }
 }
 
