@@ -345,7 +345,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?q.
     var draft_model = drafter;
     const owns_draft = drafter == null and o.drafter != null;
     const before_draft = model.device.allocated();
-    if (owns_draft) draft_model = q.drafter.Any.loadSpan(gpa, io, model, o.drafter.?, o.drafter_bits, o.target_dir orelse return error.DrafterLoad, capacity + window) catch |err| {
+    if (owns_draft) draft_model = q.drafter.Any.loadSpan(gpa, io, model, o.drafter.?, o.drafter_bits, o.target_dir, capacity + window) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ o.drafter.?, @errorName(err) });
         return error.DrafterLoad;
     };

@@ -83,7 +83,7 @@ pub const Model = struct {
         for (shards) |file| try m.checkpoint.addFileSplit(target.device, file, "", null, later);
         m.primitives = try core.draft_ops.Ops.init(target.device);
         errdefer m.primitives.deinit();
-        m.attention = try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = @intCast(s.heads), .kv_heads = @intCast(s.kv_heads), .head_dim = @intCast(s.head_dim), .rotary_dim = @intCast(s.head_dim), .capacity = @intCast(s.window + s.block), .output = .bf16 });
+        m.attention = try core.shared_attention.Attention.init(a, target.device, .{ .query_heads = s.heads, .kv_heads = s.kv_heads, .head_dim = s.head_dim, .capacity = s.window + s.block, .output = .bf16 });
         errdefer m.attention.deinit();
         m.topk = try core.bf16_topk_gpu.Ops.init(target.device);
         errdefer m.topk.deinit();

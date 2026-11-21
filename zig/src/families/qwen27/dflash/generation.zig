@@ -11,7 +11,7 @@ pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, match
 /// What the context says follows `path` (the pending token first), at most `max` tokens; borrowed until the next call.
 pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32 };
 pub const Generation = GenerationOf(Draft);
-/// Rounds over a drafter with: binds(target), tapIds(), tapWidth(), failed(), idle(), committedEnd(), absorb, propose.
+/// Verify rounds over a drafter that provides taps, context state and proposals.
 pub fn GenerationOf(comptime D: type) type {
     return struct {
         const Self = @This();
@@ -231,7 +231,7 @@ pub fn GenerationOf(comptime D: type) type {
         pub fn runRound(g: *Self, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
             return g.roundImpl(remaining, nodes, eos, already_delivered, extend, extra, false);
         }
-        /// The lane's full candidate tree and dependent picks after the verify head's barrier, before its existing wait.
+        /// Encode the tree and dependent picks between the verify head's barrier and wait.
         pub fn runRoundTail(g: *Self, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
             return g.roundImpl(remaining, nodes, eos, already_delivered, extend, extra, true);
         }
@@ -254,7 +254,7 @@ pub fn GenerationOf(comptime D: type) type {
             defer tree.deinit();
             const drafted = try tree.verifyParents(g.allocator);
             defer g.allocator.free(drafted);
-            // a copy from the root shares the tree's nodes while they agree, and its rest hangs below the last shared one
+            // A copy shares the matching prefix and hangs below its last shared node.
             const room = @min(extra, @as(u32, @intCast(@import("core").tree_round.max_rows - drafted.len)), available - 1 - @as(u32, @intCast(tree.tokens.len)));
             const copy: []const u32 = if (extend) |x| (if (room > 0) try x.call(x.ptr, &.{pending}, room + @as(u32, @intCast(tree.tokens.len))) else &.{}) else &.{};
             var last: i32 = 0;
