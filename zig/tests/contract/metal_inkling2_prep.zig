@@ -1,19 +1,4 @@
-//! Inkling 2's attention inputs through the operators the model graph calls (qPrep, relPrep, kvPrep), against float64
-//! formulas over whole [rows][heads][dim] arrays at absolute positions (inkling2_math_prep.zig).
-//!
-//! Every buffer a call must not touch is poisoned with NaN: the rows around the call's views (a stray read goes NaN
-//! where float64 is finite) and every cache slot the call does not write. Both are held exact: the outputs end with
-//! one flag a poisoned region (0 intact, 1 written), where float64 says 0. The clip kinds run out of place and in
-//! place (the graph clips q and rel in place); the in-place and split kinds must equal the out-of-place whole call
-//! byte for byte. The kv kinds cover ring 0 (slot = position), a ring that wraps (rows past the ring: the last row of a
-//! slot wins) and head dims 64 and 256.
-//!
-//! Roundings: the clip's result is bf16(v * factor) (fp32 factor), and with tau bf16(bf16(v * factor) * tau). The
-//! reference is unrounded float64, so spec.mids = 1 with tau (the rounding before tau's product) and the output's own
-//! rounding closes the bound: relative error <= (1 + 2^-8)^2 - 1 for the two bf16 steps plus the fp32 tail (the
-//! sum of squares over a lane's 8 elements and 5 butterfly adds, sqrt, add, divide, multiply, tau's log): ops = 8 and
-//! depth 16 cover it. The sums are fp32, so gate 4 plants integer heads whose squares sum below 2^24 exactly; the
-//! nonlinear tail after the sum is the same fp32 arithmetic in the exact bound.
+//! Inkling 2's attention inputs (qPrep, relPrep, kvPrep) against float64 formulas at absolute positions.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -283,8 +268,7 @@ pub const Probe = struct {
             .replaces = if (p.kind == .kv_split) "the same rows in one call" else if (isInPlace(p.kind)) "the same rows out of place in one call" else null,
             .served = servedOf(p.kind),
             .tiles = .{ .{ .size = rows_tile }, .{}, .{} },
-            // The output rounds the factor's relative error (sqrt halves the sum's) to bf16: a bf16 sum of the
-            // squares moves the result by about one bf16 ulp, not 100 times the bound; fp16 overflows (squares >= 1e4).
+            // Rounding the factor's relative error (sqrt halves it) to bf16 costs one ulp, 100x bound.
             .sums = .{ .f16 = 100, .bf16 = 0, .why = "output rounding hides bf16 sum error" },
         } };
     }
@@ -362,7 +346,7 @@ pub const Probe = struct {
             @memset(p.sc, c.toBf16(1));
         }
         if (fill == .nonfinite) {
-            // NaN, +inf, -inf, then one head holding both infinities; an infinity clips its head to 0 and itself to NaN.
+            // NaN, +inf, -inf, one head holding both infinities; an infinity clips its head to 0 and itself to NaN.
             if (kv) {
                 p.plant(p.xs, 0, 0, 3, u.nan_bits);
                 p.plant(p.xs, 1, 1, dm / 2, u.pinf_bits);
@@ -448,9 +432,7 @@ pub const Probe = struct {
         });
     }
 
-    /// The cache regions are [pad][k slots][pad][v slots][pad], one slot each. Output: the key rows and the value rows
-    /// each as its slot ended (rows past the ring read the slot's last writer), then a flag a region that is not a
-    /// written slot: 1 where its poison changed.
+    /// Cache [pad][k slots][pad][v slots][pad]. Output: k/v rows as each slot ended, then a flag per unwritten slot.
     fn kvCompute(p: *Probe, dst: rig_.Ref, cut: bool) !void {
         const re = p.rowElems();
         const rows = p.shape.rows;

@@ -1,6 +1,4 @@
-//! Inkling 2's backbone operator probes (kernels/metal/inkling2 through families/inkling2/metal_ops.zig), registered
-//! with the contract and released together. Probes share one production `Ops`; each planted source fault gets its own
-//! `Ops` built from the edited text, so a control cannot leak into another probe's pipelines.
+//! Backbone probes (kernels/metal/inkling2), each planted source fault in its own `Ops` so a control cannot leak.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");

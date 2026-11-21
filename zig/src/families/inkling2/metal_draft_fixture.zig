@@ -1,6 +1,4 @@
-//! Inkling 2 Mini's DSpark head for tests: the checkpoint's own structure (3 layers with the first and last sliding, 4
-//! logical taps, 3 query heads to a key/value head, rnn_hidden Markov head) at test widths with random bf16 values, and
-//! an independent f64 reference of a block that reads the head's tensors from their file, whatever its widths.
+//! Mini's DSpark head for tests: 3 layers, 4 logical taps, random bf16 values, and an independent f64 reference.
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
@@ -48,8 +46,7 @@ pub const Dims = struct {
     }
 };
 
-/// The real Mini config.json (inkling2_loop, taps [5, 23, 41, 48], 24 physical layers in 48 logical visits) narrowed to
-/// test widths: same layer plan, window, block, taps and head ratio; 6 query heads over 2 (as 24 over 8), width 128.
+/// Mini config.json (inkling2_loop, taps [5, 23, 41, 48], 24 layers, 48 visits) at test widths: plan, window, block.
 pub fn tinyConfig(a: std.mem.Allocator) !config.Config {
     var why: config.Why = .{};
     var c = try config.parse(a, @embedFile("fixtures/mini_media_config.json"), &why);
@@ -273,8 +270,7 @@ pub const Reference = struct {
         }
     }
 
-    /// The Markov steps teacher-forced on the GPU's choices: per step the best corrected logit over `cand` (null: the
-    /// whole unpadded vocabulary) and the chosen token's. The folded unembedding is formed for the tokens read only.
+    /// Markov steps teacher-forced on GPU choices: each step's best logit in `cand` (null: all) and the chosen's.
     pub fn steps(r: *const Reference, a: std.mem.Allocator, x: []const f64, feats_last: []const u16, anchor: u32, chosen: []const u32, cand: ?[]const u32, best: []f64, got: []f64) !void {
         const d = r.d;
         const D = d.D;
@@ -406,8 +402,7 @@ fn random(device: mtl.Device, n: usize, scale: f32, bias: f32) !mtl.Buffer {
     return b;
 }
 
-/// The synthetic head: a tiny Mini config, its mtp.safetensors in a temporary directory, random target tensors, and the
-/// reference over both.
+/// Synthetic head: a tiny Mini config, its mtp.safetensors in a temp dir, random target tensors, the f64 reference.
 pub const Fixture = struct {
     arena: std.heap.ArenaAllocator,
     tmp: std.testing.TmpDir,

@@ -1,13 +1,4 @@
-//! Host data of Inkling 2's attention probes (metal_inkling2_attention.zig): the cases, the stream of keys and values
-//! with the "hot" keys that carry weight at the seams, the non-finite plants, and the cache each ring holds.
-//!
-//! Magnitudes: q = noise (+-3) + a per-kv-head direction u (+-1.5), keys +-3, so a random key's logit has a standard
-//! deviation near 3.4 and the largest of a few thousand sits near 12. A hot key is kappa * u (kappa in 0.8..2): its
-//! logit is 7..17, so it holds a real share of its row's softmax wherever a kernel can mishandle it: the chunk edges
-//! (2047, 2048, 4095, 4096), the row's own key, the window's edges, and the key at distance `extent` (where the bias
-//! stops). rel and proj are dyadic (multiples of 1/8, |rel| <= 1, |proj| <= 2): every product is a multiple of 1/64 and
-//! the 16-term sums are exact in fp32 and fp64, so the reference's bf16(bias) is the kernel's, bit for bit; the bias
-//! has real bf16 rounding (twelve significant bits). The sink is 0..12 (a share of the softmax like the keys').
+//! Host data of Inkling 2's attention probes: cases, seam-hot key/value streams, non-finite plants, each cache.
 const std = @import("std");
 const u = @import("inkling2_util.zig");
 const c = u.c;
@@ -72,8 +63,7 @@ fn kidx(x: usize, kvh: usize, kv: usize, j: usize) usize {
     return (x * kv + kvh) * dim + j;
 }
 
-/// The cache a ring holds after positions lo..=last were written in order (position x in slot x % ring, or x); every
-/// other slot is NaN, as are the slots past the last position of a ring-less cache.
+/// The cache a ring holds after positions lo..=last (slot x % ring, or x), other slots NaN, as are those past the last.
 pub fn cacheFor(a: std.mem.Allocator, stream: []const u16, kv: usize, ring: usize, lo: usize, last: usize) ![]u16 {
     const slots = if (ring == 0) last + 1 + 8 else ring;
     const out = try a.alloc(u16, slots * kv * dim);
@@ -163,19 +153,7 @@ pub fn build(a: std.mem.Allocator, cs: Case, rows: usize, pos0: usize, fill: u.g
     };
 }
 
-/// NaN, +inf and -inf at known places (see `plantable`); what each gives is float64's arithmetic on the formula:
-///  - q[0][0][5] NaN: (row 0, head 0) NaN.
-///  - kv head 1 keys pos0-6 (+inf in component 7), pos0-7 (-inf in 8), pos0-8 (+inf in 4 and -inf in 5: one key holding
-///    both): a +inf score gives NaN, a -inf score weighs 0; q components set to +-1 make (row 1, head 2) NaN and
-///    (row 2, head 3) finite, its three keys weighing 0.
-///  - values: kv head 0 key pos0-5 +inf in component 3, key pos0-6 -inf in 6; kv head 2 key pos0-5 +inf in 7 and -inf in 8
-///    (one value row holding both): those outputs are +-inf wherever the key weighs (always: no score is -inf there).
-///  - kv head 3: component 0 of every key is -inf, q component 0 of (row 2, heads 6 and 7) is +1, so every score of those is
-///    -inf: head 6's sink is -inf too (every logit -inf: NaN), head 7's is finite (all weight on the sink: 0).
-///  - sinks: NaN at (1, 4), +inf at (3, 1) (both NaN), -inf at (4, 0) (the sink weighs 0).
-///  - rel[3][5][2] NaN: (row 3, head 5) NaN. proj[3][2] = +inf, proj[4][3] = -inf: the bias at distances 2 and 3 is
-///    +-inf by the sign of rel[3], rel[4]; rows 2 and 4 fix both signs (-inf bias: those keys weigh 0), the others take
-///    their random signs (NaN where the bias is +inf).
+/// NaN, +inf and -inf at known places (see `plantable`): each follows float64's arithmetic on the formula.
 fn plant(cs: Case, rows: usize, pos0: usize, q: []u16, rel: []u16, sink: []u16, k: []u16, v: []u16, proj: []u16) void {
     if (!plantable(cs, rows)) return;
     const heads = cs.heads;

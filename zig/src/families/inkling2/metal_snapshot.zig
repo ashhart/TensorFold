@@ -1,7 +1,4 @@
-//! A stream's exact state at a length, device-copied: the keys and values the next rows can still read and every convolution history.
-//!
-//! Global layers keep positions 0..len; sliding layers only the last `window` positions (older keys are never read again).
-//! A restore writes them back to the same slots, so a restored stream continues bit for bit where the saved one stood.
+//! A stream's exact state at a length, device-copied: keys and values next rows can read, every convolution history.
 const std = @import("std");
 const mtl = @import("metal");
 const config = @import("config.zig");

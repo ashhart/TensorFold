@@ -43,8 +43,7 @@ test "original Mini header maps small FP32 offsets and weights beyond four GiB" 
     try t.expectEqual(@as(usize, 24 * h * 4), q.end - q.begin);
 }
 
-// A constant hidden and constant messages make both input norms round to ±1 in BF16.
-// The independent CPU calculation can then evaluate the trained controllers with exact signed sums before gate tanh.
+// Constant hidden and messages round both input norms to ±1 in BF16, so the CPU check sums exactly before gate tanh.
 test "original Mini's four trained core controllers agree with FP64 scalar math" {
     const path = try fixture.checkpoint();
     defer t.allocator.free(path);

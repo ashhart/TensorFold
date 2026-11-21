@@ -1,7 +1,4 @@
-//! A safetensors file used in place: a private file mapping handed to Metal as one no-copy buffer, so the
-//! 19.5 GB Mini checkpoint is never copied into a second allocation. Every tensor stays at its file offset
-//! (`data_start` + its data offset in the buffer). The mapping outlives the buffer: release the buffer (the checkpoint
-//! that owns it), then `deinit`.
+//! A safetensors file in place: a private mapping as one no-copy Metal buffer; the 19.5 GB checkpoint is never copied.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -51,8 +48,7 @@ pub const Mapped = struct {
         return device.bufferNoCopy(m.span.ptr, m.span.len, mtl.ResourceOptions.shared);
     }
 
-    /// Consume `buf` and register the file's tensors at their original offsets. `c` must be empty.
-    /// On an indexing error `c` still owns the buffer and any tensors already inserted.
+    /// Consume `buf`, registering the file's tensors at their offsets; `c` must be empty and on error keeps the buffer.
     pub fn adopt(m: *const Mapped, c: *ck.Checkpoint, buf: mtl.Buffer) !void {
         {
             errdefer buf.deinit();
@@ -74,8 +70,7 @@ pub const Mapped = struct {
         }
     }
 
-    /// Fault every page in now, on `threads` threads: the GPU cannot take a page fault, and the first command buffer
-    /// that reads the buffer would otherwise page the whole file in behind a single dispatch.
+    /// Fault every page in on `threads` threads: the GPU takes no page fault, so the first command buffer pages it in.
     pub fn warm(m: *const Mapped, threads: usize) void {
         const page = std.heap.pageSize();
         const pages = m.span.len / page;

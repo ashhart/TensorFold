@@ -1,5 +1,4 @@
-//! Inkling 2 Mini loop operator source (families/inkling2/metal_loop.zig). Register as
-//! `pub const inkling2_loop_ops = @import("inkling2/loop_sources.zig").ops;` in kernels/metal/sources.zig.
+//! Mini loop source (metal_loop.zig); register as `inkling2_loop_ops = @import("inkling2/loop_sources.zig").ops`.
 
 pub const common = @embedFile("common.metal");
 pub const loop = @embedFile("loop.metal");

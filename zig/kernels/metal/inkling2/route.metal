@@ -1,9 +1,4 @@
-// Inkling 2 router (Inkling2TopKRouter) after its fp32 logits (the shared bf16-weight matvec, fp32 out):
-// score = sigmoid(logit); the top-k of score + e_score_correction_bias picks the experts; the weights are the
-// unbiased scores of the picks over their sum plus 1e-20, times route_scale. One simdgroup a row.
-//
-// Order rule (stated, the contract's nan rule): picks rank by biased score, a NaN above every number, ties to the lower
-// expert index, in rank order. A NaN score keeps its NaN in the weights (the sum is NaN). -0 and +0 tie.
+// Router: score = sigmoid(logit), top-k of score+bias (NaN top, ties low index), weights score/(sum+1e-20)*route_scale.
 
 constant constexpr uint I2_ROUTE_PER_LANE = 16; // experts up to 512
 constant constexpr uint I2_ROUTE_MAX_TOPK = 16;

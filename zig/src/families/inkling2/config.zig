@@ -1,4 +1,4 @@
-//! Inkling 2's shape from config.json (inkling2 Small and inkling2_loop Mini), refusing every layout the engine does not run.
+//! Inkling 2's shape from config.json (Small and the looped Mini), refusing every layout the engine does not run.
 const std = @import("std");
 
 /// The most physical backbone layers the plan tables hold (Inkling 2 Small has 48, Mini 24).
@@ -40,8 +40,7 @@ pub const Why = struct {
 /// One attention geometry: sliding layers read the `swa_*` keys, global layers the plain ones.
 pub const Heads = struct { q: u32, kv: u32, dim: u32 };
 
-/// inkling2_loop's loop_config: layers [start, end) (whole attention-residual blocks) run `passes` times, each pass after
-/// the first restarting from the state entering the core and receiving gated messages of the previous pass.
+/// loop_config: blocks [start, end) run `passes` times; later passes restart from the entry state with prior messages.
 pub const Loop = struct { start: u32, end: u32, passes: u32, rank: u32 };
 
 /// The reference's loop_config defaults (Inkling2LoopTextConfig), used when text_config has no loop_config.
@@ -82,8 +81,7 @@ pub const Text = struct {
         return if (isGlobal(i)) c.rel_extent else c.window;
     }
 
-    /// Logical layer visits of a forward: `layers`, plus the core's extra passes of a looped model. States (keys,
-    /// convolution histories) and draft taps are indexed by visit; weights by `physicalLayer`.
+    /// Layer visits: `layers` plus core passes; states and taps index by visit, weights by `physicalLayer`.
     pub fn executionLayers(c: *const Text) u32 {
         const l = c.loop orelse return c.layers;
         return c.layers + (l.passes - 1) * (l.end - l.start);
@@ -310,8 +308,7 @@ fn parseText(o: std.json.ObjectMap, looped: bool, why: *Why) !Text {
 /// The longest message gate rank the loop kernels hold in threadgroup memory.
 pub const max_gate_rank = 128;
 
-/// text_config's loop_config (absent: the reference's defaults). The core is whole attention-residual blocks, so every pass
-/// restarts at a block boundary; varloop (a per-token pass count) is not a layout the engine runs.
+/// text_config's loop_config (absent: reference defaults); whole-block core, passes restart at a boundary; no varloop.
 fn parseLoop(o: std.json.ObjectMap, t: *const Text, why: *Why) !Loop {
     var l = default_loop;
     if (o.get("loop_config")) |v| {

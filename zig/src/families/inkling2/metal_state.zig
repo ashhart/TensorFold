@@ -1,10 +1,4 @@
-//! Inkling 2 on Metal: one stream's exact state (keys/values, short-convolution histories), laid out so a rollback is a length reset.
-//!
-//! Every per-token quantity of the model is either a KV row or one of four short-convolution inputs (key, value,
-//! attention output, MLP output). Global layers keep a KV row per position; sliding layers a ring wide enough that
-//! rows of a rejected window never overwrite a key a re-run still reads. Convolution histories are rings of the last
-//! `hist_ring` raw inputs: a forward reads positions len-3..len-1 and stores its own rows afterwards, so positions below
-//! the new length stay intact for `max_rollback` rows.
+//! Inkling 2 on Metal: a stream's state as KV rows and conv-history rings, laid out so a rollback is a length reset.
 const std = @import("std");
 const mtl = @import("metal");
 const config = @import("config.zig");
@@ -168,4 +162,27 @@ test "inkling2 state: rings, histories and a stream's bytes follow the geometry"
     for (0..48) |l| total += 2 * kvBytes(&t, @intCast(l), g) + hist(&t, @intCast(l)).bytes;
     const cfg: config.Config = .{ .text = t, .vision = undefined, .mtp = null, .eos = 0, .image_token = 0 };
     try std.testing.expectEqual(total, bytes(&cfg, g));
+    // Mini's looped geometry: 24 physical layers run as 48 visits, 8 of them global (physical 5, 11, 17 and 23).
+    var mini: config.Text = std.mem.zeroes(config.Text);
+    mini.window = 1024;
+    mini.layers = 24;
+    mini.hidden = 4608;
+    mini.local = .{ .q = 48, .kv = 8, .dim = 128 };
+    mini.global = .{ .q = 48, .kv = 8, .dim = 128 };
+    mini.loop = .{ .start = 6, .end = 18, .passes = 3, .rank = 64 };
+    const mc: config.Config = .{ .text = mini, .vision = undefined, .mtp = null, .eos = 0, .image_token = 0 };
+    try std.testing.expectEqual(@as(u32, 48), mini.executionLayers());
+    var mtotal: u64 = 0;
+    var global_visits: u32 = 0;
+    for (0..mini.executionLayers()) |l| {
+        const i = mini.physicalLayer(@intCast(l));
+        if (config.isGlobal(i)) global_visits += 1;
+        mtotal += 2 * kvBytes(&mini, i, g) + hist(&mini, i).bytes;
+    }
+    try std.testing.expectEqual(@as(u32, 8), global_visits);
+    try std.testing.expectEqual(mtotal, bytes(&mc, g));
+    // visit 41 is physical 17, global; visit 40 is physical 16, sliding
+    try std.testing.expectEqual(@as(u32, 17), mini.physicalLayer(41));
+    try std.testing.expectEqual(@as(u32, 0), ring(&mini, mini.physicalLayer(41), g));
+    try std.testing.expectEqual(@as(u32, 1216), ring(&mini, mini.physicalLayer(40), g));
 }

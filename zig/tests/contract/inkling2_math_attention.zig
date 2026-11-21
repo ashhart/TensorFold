@@ -1,19 +1,4 @@
-//! Independent float64 formulas of Inkling 2's attention, written from transformers' modeling_inkling2
-//! (eager_attention_forward, Inkling2RelativeLogits and the output gate) over a stream's whole position axis: there is
-//! no ring, no chunk and no cache here, only the keys and values of positions 0..pos0+rows and one mask rule, so a
-//! kernel that mishandles a seam differs from these.
-//!
-//! One (row, head) at position p, kv head kvh = head / (heads / kv_heads), keys x with x <= p and (window == 0 or
-//! p - window < x):
-//!   logit(x) = (q . k_x) * scale + bf16(sum_i rel[i] * proj[i][p - x])   (the bias is 0 where p - x >= extent)
-//! plus one sink logit with a zero value vector. Softmax over [logits..., sink] in float64, the sink's weight
-//! dropped, out = sum_x w_x v_x, then the gate: out * sigmoid(gate). The bf16 rounding of the bias is the one the
-//! formulas state and the probes' data (dyadic rel and proj) makes exact in fp32 and fp64; the roundings of the
-//! attention output and of the gated product are not applied: the probes' bounds account for them.
-//!
-//! Non-finite rule (float64 arithmetic on the formula, as torch's softmax does): a NaN logit or sink gives NaN, a +inf
-//! logit or sink gives NaN (exp(inf - inf)), a -inf logit weighs 0, a row whose every logit and sink is -inf gives NaN
-//! (softmax over only -inf). Values are summed as w * v in float64 (0 * inf is NaN, inf + -inf is NaN).
+//! Float64 formulas of Inkling 2's attention (eager_attention_forward, relative logits) over the whole stream, no ring.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -31,9 +16,7 @@ pub const Config = struct {
     scale: f32,
 };
 
-/// Everything as bf16 words. q, out [rows][heads][128]; rel [rows][heads][16]; sink [rows][heads]; gate [rows][heads*128];
-/// k, v [position][kv_heads][128] for positions 0..pos0+rows (positions the rows cannot see may hold anything);
-/// proj [16][extent].
+/// [rows][heads]: q/out x128, rel x16, sink x1, gate x128; k/v [position][kv_heads][128]; proj [16][extent].
 pub const Data = struct {
     q: []const u16,
     rel: []const u16,
@@ -44,8 +27,7 @@ pub const Data = struct {
     proj: []const u16,
 };
 
-/// `want`, and per output the pieces of the probes' error bound: `att` the attention output before the gate, `err` the
-/// bound on the fp32 kernel's error of it, `sig` the gate's sigmoid. All [rows][heads][128].
+/// `want`; per output `att` (before the gate), `err` (fp32 bound on it), `sig` (gate sigmoid), all [rows][heads][128].
 pub const Result = struct { want: []f64, att: []f64, err: []f64, sig: []f64 };
 
 fn val(w: u16) f64 {
@@ -67,13 +49,7 @@ fn firstVisible(p: usize, window: usize) usize {
     return x;
 }
 
-/// u: fp32's unit roundoff. The kernel's score is an fp32 chain of 128 fma, one product by scale, one add of the bias:
-/// 131 roundings of at most the terms' magnitude. A weight is exp of a difference of fp32 values: relative error
-/// 4u + u |x| (x the exponent), the sums of weights and of weight * value run in chains of at most 33 roundings a
-/// 32-key block and one rescale a block, four simdgroups and the chunks' merge.
-/// With e the largest score error, weights move by at most e^(2e) - 1 in total (the softmax's sensitivity: the sum of
-/// |dw| <= expm1(2e)), so a value of at most vmax moves the output by vmax * expm1(2e); the weights' own roundings and
-/// the sums add their share, and the division by the sum one more u.
+/// u = fp32 unit roundoff; a weight's relative error is 4u + u|x|, so output moves by vmax * expm1(2e) plus roundings.
 const eps32 = 0x1p-24;
 
 pub fn attention(a: std.mem.Allocator, cfg: Config, d: Data, out: Result) !void {

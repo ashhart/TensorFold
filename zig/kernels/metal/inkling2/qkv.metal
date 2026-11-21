@@ -1,5 +1,4 @@
-// Inkling 2 attention inputs: the scaled L2 clip of queries and relative states (with the full-attention layers' log
-// scaling) and the key clip / value norm written straight into the KV cache. One simdgroup a (row, head).
+// Inkling 2 inputs: scaled L2 clip of q and rel states (log scaling); key clip / value norm into the KV cache.
 
 constant constexpr uint I2_HEAD_LANE_ELEMS = 8; // head vectors up to 256 wide
 
@@ -9,9 +8,7 @@ struct I2ClipArgs {
   float threshold, alpha;
 };
 
-// Inkling2ScaledL2Clip: v = x * scale; v * min(threshold / (|v| + 1e-6), 1) in bf16; on a full-attention layer the
-// bf16 result times tau = 1 + alpha * log(max((pos + 1) / floor, 1)) in fp32, rounded to bf16 again. x and out may be
-// the same buffer: a head's words are read before any is written.
+// ScaledL2Clip: bf16(v * min(threshold / (|v| + 1e-6), 1)); full-attention times tau = 1 + alpha * log((pos+1)/floor).
 [[kernel, max_total_threads_per_threadgroup(32)]] void inkling2_scaled_l2_clip(
     const device bfloat* x [[buffer(0)]], const device bfloat* scale [[buffer(1)]], device bfloat* out [[buffer(2)]],
     constant I2ClipArgs& a [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]],
@@ -50,9 +47,7 @@ struct I2KvArgs {
   uint pad;
 };
 
-// Key: Inkling2L2Clip (no scale) of the conv output, bf16, into kcache; value: Inkling2UnweightedRMSNorm of the conv
-// output, bf16, into vcache. Row t lands in slot (pos0 + t) % ring, or at pos0 + t when ring is 0; a slot is
-// [kv_heads][dim] bf16.
+// Key: L2 clip of conv into kcache; value: unweighted RMS norm into vcache; slot (pos0 + t) % ring else pos0 + t.
 [[kernel, max_total_threads_per_threadgroup(32)]] void inkling2_kv_prep(
     const device bfloat* k [[buffer(0)]], const device bfloat* v [[buffer(1)]], device bfloat* kcache [[buffer(2)]],
     device bfloat* vcache [[buffer(3)]], constant I2KvArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],

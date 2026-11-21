@@ -1,4 +1,4 @@
-//! Inkling 2 Mini's bundled DSpark draft head as a `lanes.drafter.Drafter` on Metal: logical-layer taps in, up to 7 drafts out.
+//! Mini's bundled DSpark draft head as a `lanes.drafter.Drafter` on Metal: logical-layer taps in, up to 7 drafts out.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");

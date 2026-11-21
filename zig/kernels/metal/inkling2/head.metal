@@ -14,8 +14,7 @@ struct I2ElemArgs {
   out[ulong(at.y) * a.out_ld + at.x] = metal::precise::tanh(float(y[ulong(at.y) * a.in_ld + at.x]) / a.cap) * a.cap;
 }
 
-// The attention half's partial state: the post-attention conv output as fp32, plus the layer's input unless the
-// layer starts a block (has_block == 0): out = (has_block ? float(block) : 0) + float(a); a fp32 sum, never rounded.
+// Attention half partial: conv + input unless has_block, fp32: out = (has_block ? float(block) : 0) + float(a).
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_residual_attn(
     const device bfloat* conv [[buffer(0)]], const device bfloat* block [[buffer(1)]], device float* out [[buffer(2)]],
     constant I2ElemArgs& a [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {

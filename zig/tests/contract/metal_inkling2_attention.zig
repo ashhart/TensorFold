@@ -1,27 +1,4 @@
-//! Inkling 2's attention (relative-logit bias, sink, gate) through ops.attention exactly as the model graph calls it,
-//! against float64 formulas over the whole stream (inkling2_math_attention.zig: no ring, no chunks).
-//!
-//! A shape is (rows, case, pos0): `n` indexes metal_inkling2_attention_data.zig's cases (heads, kv heads, window, ring,
-//! extent) and `k` is the first row's position, so the shapes gate's edges move the rows (1, 31..33, 40) and the position
-//! (0, 2047, 2048, 2049, 6000) across the 2048-key chunk edges: rows with one chunk and rows with two or three share
-//! calls. Every cache slot no row of the call can see is NaN (positions before every window, slots past the last
-//! position, slots of other rings), so a read of a masked key turns the output NaN where float64 is finite.
-//!
-//! Gate 3 bound (spec.accum = .none: the sums' chains are nonlinear, no stress input makes them exact): the output is
-//! bf16(bf16(o) * sigmoid(gate)) with o the fp32 softmax average. Against float64's unrounded o * sigmoid(gate) the
-//! bound is, per output with E the fp32 error of o,
-//!   sigma * (E + 2^-8 (|o| + E)) + 4 u sigma |o|       (the rounding of o to bf16, the fp32 sigmoid)
-//!   plus 2^-8 (|want| + that)                          (the output's own rounding)
-//! and E = vmax * (expm1(2 e) + the weights' and sums' roundings), e = gamma(131, u) * the largest |q.k| scale term + u |s|:
-//! see inkling2_math_attention.zig. e is about 5e-4 on this data (q . k terms sum to about 60 after the scale). A bf16
-//! chain of the 128 products moves a logit by 0.07 on average (0.5 at worst) and an fp16 chain by 8e-3 (measured on this
-//! data's q and k in a throwaway script: 100x and 15x e), and the hot keys' weights carry it to the output: the shapes
-//! catch both. The bias is exact in fp32 (dyadic data), so its bf16 rounding is the reference's.
-//!
-//! The seam kinds hold the same bytes as the whole call with the plain layout: the rows split over two calls (pos0
-//! advanced), one row a call (the one-chunk rows take the direct kernel there, and the split-and-merge path in the whole
-//! call whenever another row has more than one chunk), the views at nonzero offsets between NaN pad, and another ring of
-//! the same window (the slots differ).
+//! Inkling 2 attention (bias, sink, gate) via ops.attention vs float64 stream formulas crossing 2048-key chunk edges.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

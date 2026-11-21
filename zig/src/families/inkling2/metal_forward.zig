@@ -1,5 +1,4 @@
-//! Shared Metal forward over all logical visits, with per-stream attention and convolution state.
-//! Routing and experts stay on the same serial encoder. Lengths advance only after GPU success.
+//! Shared forward over visits, with per-stream attention and convolution state; lengths advance only after GPU success.
 const std = @import("std");
 const mtl = @import("metal");
 const st = @import("metal_state.zig");

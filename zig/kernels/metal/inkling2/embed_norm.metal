@@ -1,5 +1,4 @@
-// Inkling 2: the normed embedding, the plain RMS norm and the strided row copy.
-// RMS norm is Inkling2RMSNorm: x in fp32, x * rsqrt(mean(x^2) + eps), times the weight, rounded once to bf16.
+// Inkling 2 normed embedding, RMS norm and strided row copy: x * rsqrt(mean(x^2) + eps) * weight, rounded once to bf16.
 
 struct I2NormArgs {
   uint hidden, rows, vocab, x_pitch;

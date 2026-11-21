@@ -1,7 +1,4 @@
-// Inkling 2 block attention residual (Inkling2BlockAttentionResidual) fused with the RMS norm that consumes it.
-// Per row: the sources are the finished blocks (bf16) then the running partial state (fp32 or bf16); each is
-// RMS-normed without a weight (eps_u); a learned fp32 query attends over them (scale hidden^-0.5, softmax in fp32,
-// keys and values the same normed rows); the mix is normed again with the query's weight (eps_n) and rounded to bf16.
+// Inkling 2 attention residual + RMS norm: fp32 query attends normed sources (hidden^-0.5), mix normed (eps_n)
 
 constant constexpr uint I2_MAX_SOURCES = 17;
 constant constexpr uint I2_MAX_QUERIES = 3;

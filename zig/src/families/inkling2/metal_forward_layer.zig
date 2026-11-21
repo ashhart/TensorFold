@@ -1,7 +1,4 @@
-//! One Inkling 2 layer's two halves as GPU dispatches: attention up to the router, then the post-MLP convolution and residual.
-//!
-//! Dense work (norms, attention-residual mixes, projections, residual adds) runs once over every row of the pass; what a
-//! stream's own state touches (short convolutions, keys and values, attention) runs per item at its rows' offsets.
+//! One layer's GPU dispatches: attention to the router, then post-MLP convolution and residual; stateful work per item.
 const std = @import("std");
 const mtl = @import("metal");
 const View = @import("../../core/exl3_projection.zig").View;
@@ -155,8 +152,7 @@ pub const Run = struct {
         };
     }
 
-    /// Bank the previous pass before resetting the partial. The original prefix blocks
-    /// remain in place; the first core boundary stored its entry in the first core slot.
+    /// Bank the previous pass before resetting the partial: prefix blocks stay; the first core slot holds the entry.
     pub fn enter(r: *Run, k: u32) !void {
         const m = r.m;
         const p = &m.plan;
@@ -353,7 +349,7 @@ pub const Run = struct {
         }
         try r.lin(v(s.att, 0), a.wo, v(s.o, 0), n);
 
-        // the post-attention convolution, then the residual: a block boundary keeps only the attention output as partial
+        // post-attention convolution, then residual: a block boundary keeps only the attention output as partial
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
             const rows: u32 = @intCast(it.ids.len);
@@ -416,7 +412,7 @@ pub const Run = struct {
         try m.ops.residualMlp(r.e, .{ .h = v(s.h32, 0), .conv = v(s.c, 0), .out = v(s.hid(k + 1), 0), .rows = r.n, .cols = h });
     }
 
-    /// The final attention-residual mix and norm over every row, the final-norm taps, then logits of each item's last rows.
+    /// The final attention-residual mix and norm over every row, the final-norm taps, then each item's last-row logits.
     pub fn head(r: *Run) !void {
         const m = r.m;
         const t = &m.config.text;

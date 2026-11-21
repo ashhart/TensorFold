@@ -1,14 +1,4 @@
-//! Inkling 2's normed embedding, plain RMS norm and strided row copy through the operators the model graph calls
-//! (Ops.embed, Ops.rmsNorm, Ops.copyRows), against float64 formulas written from Inkling2NormedEmbedding and
-//! Inkling2RMSNorm (inkling2_math_norm.zig).
-//!
-//! Every input tensor sits 16 bytes into its buffer (a non-zero view offset) between NaN words, so a kernel that reads
-//! outside its tensor goes NaN where float64 is finite. A row's scale varies by row (1, 4, 2^-10) so the 1e-6 in the
-//! norm matters in a third of the rows. The `split` kinds run the same rows as two calls over offset views and must
-//! equal the one call byte for byte (a row's bytes never depend on the rows around it).
-//!
-//! Stated rule (embed): an id at or past the vocabulary gives a NaN row and reads nothing past the table; the
-//! non-finite fill plants such ids (the vocabulary itself and 0xffffffff) and the reference implements the rule.
+//! Inkling 2's normed embedding, RMS norm and row copy (embed, rmsNorm, copyRows) vs float64 inkling2_math_norm.zig.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -100,8 +90,7 @@ fn padded(a: std.mem.Allocator, data: []const u16) ![]u16 {
     return out;
 }
 
-// Served shapes. A split needs two rows at least, so the one-row shapes are appended for the whole-call kinds only.
-// embed: rows tokens, vocabulary, hidden. rms: rows, hidden, hidden. copy: rows, columns, extra source pitch.
+// Served shapes (splits need two rows). embed: rows, vocab, hidden; rms: rows, hidden, hidden; copy: rows, cols, pitch.
 const embed_shared = [_]c.Shape{
     .{ .rows = 7, .n = 61, .k = 128 },   .{ .rows = 16, .n = 97, .k = 4608 }, .{ .rows = 40, .n = 61, .k = 1000 },
     .{ .rows = 33, .n = 61, .k = 128 },  .{ .rows = 31, .n = 61, .k = 4608 }, .{ .rows = 32, .n = 61, .k = 128 },

@@ -1,5 +1,4 @@
-//! Inkling 2 backbone operator sources (families/inkling2/metal_ops.zig). Register as
-//! `pub const inkling2_ops = @import("inkling2/ops_sources.zig").ops;` in kernels/metal/sources.zig.
+//! Inkling 2 backbone sources (metal_ops.zig); register as `inkling2_ops = @import("inkling2/ops_sources.zig").ops`.
 
 /// Helpers every file after it uses; keep first.
 pub const common = @embedFile("common.metal");

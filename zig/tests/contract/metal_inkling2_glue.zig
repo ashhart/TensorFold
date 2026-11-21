@@ -1,16 +1,4 @@
-//! Inkling 2's elementwise glue through the operators the model graph calls: the logit softcap (Ops.softcap, bf16 logits
-//! `ldy` apart to fp32 tanh(y / cap) * cap), the attention half's partial state (Ops.residualAttn: fp32 conv + block
-//! with a block, the bare conv without, never rounded) and the layer's output (Ops.residualMlp: bf16(h + conv), h fp32),
-//! against float64 formulas of Inkling2Softcap and the decoder layer's residual adds (inkling2_math_norm.zig).
-//!
-//! Every input sits 16 bytes or more into its buffer between NaN words; the softcap's pitch gap (ldy - n words per row)
-//! is NaN, so a kernel that reads the gap or walks rows at the wrong pitch goes NaN where float64 is finite (`pitched`
-//! kinds: ldy = n + the shape's third number, `tight`: ldy = n). The `split` kinds run the same rows as two calls over
-//! offset views and must equal the one call byte for byte. The residual kinds plant cancelling columns (h = -conv + a
-//! few 2^-18) so an h rounded to bf16 before the add shows.
-//!
-//! Non-finite rules are float64's: softcap of +-inf is exactly +-cap (held to zero error), of NaN is NaN; sums of
-//! opposite infinities are NaN.
+//! Inkling 2 elementwise glue via the graph's operators (softcap, residualAttn, residualMlp), against float64 formulas.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -262,10 +250,7 @@ pub const Probe = struct {
         };
     }
 
-    /// A softcap of an infinity is exactly +-cap: no error allowed there. Elsewhere the relative allowance (12 roundings
-    /// of the value) has an absolute floor of 8 * 2^-24 * cap: near 0 a few-ulp-of-1 error of the fp32 tanh (the value
-    /// of tanh is small there, its absolute accuracy is what an exp-based form keeps) must not read as a fault; the
-    /// faults the controls plant move outputs by orders of magnitude more.
+    /// Softcap of an infinity is exactly +-cap; elsewhere a floor of 8 * 2^-24 * cap absorbs fp32 tanh's near-0 error.
     pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
         if (!isSoftcap(p.kind)) return;
         const cols = p.shape.n;

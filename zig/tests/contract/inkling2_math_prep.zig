@@ -1,7 +1,4 @@
-//! Independent float64 formulas of Inkling 2's attention inputs, written from transformers' modeling_inkling2
-//! (Inkling2ScaledL2Clip, Inkling2L2Clip, Inkling2UnweightedRMSNorm, and the log scaling in Inkling2Attention).
-//! They read whole [rows][heads][dim] arrays at absolute positions: no ring, no slot and no chunk exists here.
-//! Nothing is rounded to bf16: the probes' bounds carry the roundings (spec.mids counts the one before tau's product).
+//! Float64 formulas of attention inputs (scaled L2 clip, log scaling, unweighted RMS norm) over [rows][heads][dim].
 const std = @import("std");
 const contract = @import("contract");
 const g = contract.gates;
@@ -34,8 +31,7 @@ fn magnitude(v: f64) f64 {
     return if (std.math.isFinite(v)) @abs(v) else 0;
 }
 
-/// Inkling2ScaledL2Clip then, with `t`, the context scaling: x [rows][heads][dim], scale [heads][dim].
-/// out = (x * scale) * min(threshold / (|x * scale| + 1e-6), 1) * tau(pos0 + row). `mag` is |out|.
+/// Scaled L2 clip, tau scaling: out = x*scale * min(threshold/(|x*scale| + 1e-6), 1) * tau(pos0+row); `mag` = |out|.
 pub fn scaledClip(x: []const f64, scale: []const f64, rows: usize, heads: usize, dim: usize, threshold: f64, t: ?Tau, out: []f64, mag: []f64) void {
     for (0..rows) |r| for (0..heads) |h| {
         const at = (r * heads + h) * dim;

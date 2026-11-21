@@ -1,7 +1,4 @@
-//! Mini's image preprocessing from encoded bytes (PNG, JPEG) against the Hugging Face processor's own formulas, written
-//! out independently (Inkling2ImageProcessor: alpha over a 204/153 checkerboard, pad with -1 to whole 40-pixel cells,
-//! rescale and normalize, one [40, 40, 3] patch a token, then the tower's merge-block reshape). The raw pixels the
-//! formulas start from were decoded by Pillow, not by this engine.
+//! Mini's image preprocessing from PNG/JPEG against the HF formulas (pad, rescale, normalize, 40-pixel patch tokens).
 const std = @import("std");
 const picture = @import("../../core/picture/picture.zig");
 const image = @import("metal_vision_image.zig");

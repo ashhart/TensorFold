@@ -1,6 +1,4 @@
-//! Mini's DSpark draft head on Metal: blocks against an f64 reference, chunking / rollback / stream isolation, refusals,
-//! the logical-tap contract. The synthetic head keeps the checkpoint's structure (3 layers, sliding 0 and 2, 4 taps, 3
-//! query heads a key/value head) at test widths.
+//! DSpark head on Metal: blocks against an f64 reference, chunking, rollback, stream isolation, refusals, tap contract.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");

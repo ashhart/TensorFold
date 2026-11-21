@@ -1,10 +1,4 @@
-//! Inkling 2 backbone operators on Metal: pipelines and encoders. The caller owns the compute encoder, the buffers and
-//! every state (conv history rings, KV caches); each op only encodes dispatches on the encoder it is given, in order,
-//! so a serial encoder gives the layer its dependencies. Formulas and rounding points follow
-//! transformers' modeling_inkling2 (see kernels/metal/inkling2/*.metal for each op's arithmetic).
-//!
-//! Row independence: a row's bits never depend on the other rows of its call (fixed-order sums per row; the dense
-//! projections are core/deepseek mv, bit-equal from 1 row to a full MMA tile; attention chunks are cut per row).
+//! Inkling 2 backbone ops on Metal (modeling_inkling2 formulas): caller owns encoder, buffers, state; rows independent.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -140,10 +134,7 @@ pub const EmbedArgs = struct { ids: View, table: View, norm: View, out: View, ro
 pub const RmsNormArgs = struct { x: View, w: View, out: View, rows: u32, hidden: u32, eps: f32 };
 /// A rows x cols block of bf16, pitches in elements; source and destination must not overlap.
 pub const CopyRowsArgs = struct { src: View, src_ld: u32, dst: View, dst_ld: u32, rows: u32, cols: u32 };
-/// Sources are `blocks` finished block states bf16 [blocks][rows][hidden] (`block_stride` elements apart), then
-/// `partial` [rows][hidden] (fp32 when `partial_f32`, else bf16; rows `partial_ld` elements apart, 0 = hidden).
-/// Output q (bf16 [rows][hidden], `out_stride` elements after query q-1's) = norm_q(attention-residual mix of query q);
-/// `norms[q]` is that query's RMS weight. queries f32 [nq][hidden].
+/// Sources: `blocks` bf16 [blocks][rows][hidden], then `partial`; out q = norm_q(mix of query q) with `norms[q]`.
 pub const AttnResArgs = struct {
     blocks: View,
     block_stride: u32,
@@ -163,7 +154,7 @@ pub const AttnResArgs = struct {
 };
 /// y [rows][n] = bf16(x [rows][k] w[n][k]^T) (or fp32 when `f32_out`), fp32 chains; a row's bits do not depend on rows.
 pub const LinearArgs = struct { x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool = false };
-/// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32 / weights f32 [rows][topk].
+/// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32, weights f32 per row.
 pub const RouteArgs = struct {
     x: View,
     w: View,
@@ -210,8 +201,7 @@ pub const KvPrepArgs = struct {
     threshold: f32,
     eps: f32,
 };
-/// proj bf16 [rel_dim][extent]; caches bf16 [slot][kv_heads][128]; q, out [rows][heads][128]; rel [rows][heads][16];
-/// sink [rows][heads]; gate [rows][heads * 128]. window 0: every earlier key, else keys p - window < k <= p.
+/// proj bf16 [rel_dim][extent]; caches [slot][kv_heads][128]; q/out [rows][heads][128]; rel, sink, gate; window 0: all.
 pub const AttentionArgs = struct {
     q: View,
     rel: View,

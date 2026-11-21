@@ -1,5 +1,4 @@
-//! The layer plan: which layers slide or see everything, where attention-residual blocks end, what layers sum over, and
-//! the logical visits (a looped model runs its core layers once a pass over one set of weights).
+//! The layer plan: sliding vs global layers, attention-residual block ends, layer sums, and the logical visits.
 const std = @import("std");
 const config = @import("config.zig");
 
@@ -37,8 +36,7 @@ pub const Plan = struct {
     loop: ?config.Loop,
     /// Finished blocks entering the core (the blocks of the layers before it).
     pre_blocks: u32,
-    /// Blocks a core pass adds that the next pass receives as messages: all but the first (the core's entry state,
-    /// which every pass rebuilds identically).
+    /// Blocks a core pass adds that the next receives as messages: all but the first (the entry state, rebuilt).
     bank_blocks: u32,
 
     pub fn at(p: *const Plan, i: u32) *const Layer {

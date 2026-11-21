@@ -1,17 +1,4 @@
-// Inkling 2 attention with a relative-logit bias and a sink, flash style in fp32, head dim 128, d_rel 16.
-//
-// Row p (position pos0 + r) sees keys lo..p, lo = max(0, p + 1 - window) (window 0: all). Its logit for key k is
-//   (q . k) * scale + bf16(rel[p] . proj[:, p - k]) when p - k < extent, else (q . k) * scale,
-// plus one extra logit, the row's sink, whose value is zero: softmax over the keys and the sink, the sink's weight
-// dropped. The output is bf16(attention) times sigmoid(gate), rounded again, ready for the output projection.
-//
-// A row's keys are cut into chunks of I2_CHUNK keys from lo: each chunk is one threadgroup (four simdgroups, 32
-// keys a step, a lane a key), the chunks meet in inkling2_attn_merge. Chunks depend only on the row, so a row's bits
-// are the same in any call. When every row of a call has one chunk the _final kernel does the merge itself, with the
-// same arithmetic (a merge of one chunk multiplies by exp(0) = 1).
-//
-// Non-finite rule: it is float64's. A NaN logit, sink, or a +inf logit/sink next to +inf gives NaN; a -inf logit
-// weighs 0; a row whose every logit and sink is -inf gives NaN (softmax over only -inf).
+// Inkling 2 flash attention fp32: logit (q.k)*scale + bf16(rel[p].proj[:,p-k]); sink dropped; merge inkling2_attn_merge
 
 constant constexpr uint I2_DIM = 128;
 constant constexpr uint I2_DREL = 16;

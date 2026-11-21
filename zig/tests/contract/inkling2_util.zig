@@ -1,6 +1,4 @@
-//! Shared pieces of the Inkling 2 operator contract probes (metal_inkling2_*.zig): values, planted controls, views.
-//! The probes drive the operators through tensorfold.inkling2_metal.ops exactly as the model graph does, and compare
-//! them with independent float64 formulas written from transformers' modeling_inkling2 (inkling2_math*.zig).
+//! Shared pieces of the Inkling 2 operator contract probes: views, values and planted controls (see inkling2_math).
 const std = @import("std");
 const tf = @import("tensorfold");
 const contract = @import("contract");
@@ -68,8 +66,7 @@ pub fn outBf(bytes: []const u8, i: usize) f64 {
     return c.read(.bf16, bytes, i);
 }
 
-/// Probes call this first in `prepare`: frees the last shape's device buffers and host data; returns the arena's
-/// allocator for the new shape's host data. Probes keep fields `a`, `arena` and `rig` (the gates' hooks need `rig`).
+/// Probes call this first in `prepare`: frees the last shape's buffers and host data; returns the arena's allocator.
 pub fn reset(arena: *std.heap.ArenaAllocator, rig: *rig_.Rig) std.mem.Allocator {
     rig.reset();
     _ = arena.reset(.retain_capacity);

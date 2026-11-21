@@ -295,6 +295,13 @@ const mutations = [_]Mutation{
         .to = "s << 23",
     },
     .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts MXFP8 down projection writes its first two columns swapped",
+        .from = "    dst[0] = bfloat(accum.x);\n    dst[1] = bfloat(accum.y);",
+        .to = "    dst[0] = bfloat(accum.y);\n    dst[1] = bfloat(accum.x);",
+    },
+    .{
         .format = .nvfp4,
         .gate = .shapes,
         .label = "control: inkling2 experts combine rounds the FP32 route product to BF16",

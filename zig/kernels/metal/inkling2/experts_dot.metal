@@ -75,6 +75,7 @@ inline void i2x_dot(const device uchar* weight, const device uchar* w_scales,
   for (uint shift = 16u; shift != 0u; shift >>= 1u) accum += simd_shuffle_xor(accum, shift);
   if (lane != 0u) return;
   if (GATE_UP) {
+    // The gate_up rows interleave gate and up: (x, y) and (z, w) are each one output row's (gate, up) for SwiGLU.
     const float4 v = i2x_bf4(accum);
     dst[0] = bfloat(i2x_swiglu(v.x, v.y, a.gate_cap, a.up_cap));
     dst[1] = bfloat(i2x_swiglu(v.z, v.w, a.gate_cap, a.up_cap));

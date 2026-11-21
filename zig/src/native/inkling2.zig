@@ -91,18 +91,25 @@ fn refusal(a: Allocator, o: api.Open) !?[]const u8 {
     return null;
 }
 
-/// Only the selected release files participate; the loader diagnoses missing files.
+/// Every released shard counts, as core/checkpoint.zig lists them (model*.safetensors), plus mtp when drafted.
 fn checkpointFileBytes(io: std.Io, dir: []const u8, drafted: bool) u64 {
-    var d = std.Io.Dir.cwd().openDir(io, dir, .{}) catch return 0;
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
     defer d.close(io);
-    const main = if (d.statFile(io, "model-00001-of-00001.safetensors", .{})) |st| st.size else |_| 0;
-    if (!drafted) return main;
-    const head = if (d.statFile(io, "mtp.safetensors", .{})) |st| st.size else |_| 0;
-    return main +| head;
+    var total: u64 = 0;
+    var it = d.iterate();
+    while (true) {
+        const e = (it.next(io) catch break) orelse break;
+        if (e.kind != .file and e.kind != .sym_link) continue;
+        const shard = std.mem.startsWith(u8, e.name, "model") and std.mem.endsWith(u8, e.name, ".safetensors");
+        const head = drafted and std.mem.eql(u8, e.name, "mtp.safetensors");
+        if (!shard and !head) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        total +|= st.size;
+    }
+    return total;
 }
 
-/// Bytes the kept prompt states may hold: --prompt-cache-gib, else half of what is left (none beside a draft head).
-/// null with `problem` set when the asked budget exceeds what is left.
+/// Kept-state bytes: --prompt-cache-gib, else half the room; none beside DSpark, so the default never resumes.
 fn cacheBudget(a: Allocator, o: api.Open, left: u64, drafted: bool, problem: *[]const u8) !?u64 {
     const gib = o.prompt_cache_gib orelse return if (drafted) 0 else left / 2;
     if (gib == 0) return 0;
@@ -282,6 +289,12 @@ test "inkling2 Mini refuses options it cannot honour before any load" {
     o.prompt_cache_gib = -1;
     try std.testing.expect((try refusal(a, o)) != null);
     o = base;
+    o.loops = 2;
+    try std.testing.expectEqualStrings("--policy and --loops are unsupported for Inkling 2 on Metal", (try refusal(a, o)).?);
+    o = base;
+    o.policy = "x=1";
+    try std.testing.expectEqualStrings("--policy and --loops are unsupported for Inkling 2 on Metal", (try refusal(a, o)).?);
+    o = base;
     o.prompt_cache_gib = 2;
     o.keep = 0;
     try std.testing.expect((try refusal(a, o)) == null);
@@ -300,6 +313,14 @@ test "inkling2 DSpark is the checkpoint's bundled head: --drafter is refused, no
     const dir = try scratchDir(tmp, a);
     try std.testing.expectEqual(@as(u64, 5), checkpointFileBytes(std.testing.io, dir, false));
     try std.testing.expectEqual(@as(u64, 8), checkpointFileBytes(std.testing.io, dir, true));
+    var shards = std.testing.tmpDir(.{});
+    defer shards.cleanup();
+    try shards.dir.writeFile(std.testing.io, .{ .sub_path = "model-00001-of-00002.safetensors", .data = "1234" });
+    try shards.dir.writeFile(std.testing.io, .{ .sub_path = "model-00002-of-00002.safetensors", .data = "567" });
+    try shards.dir.writeFile(std.testing.io, .{ .sub_path = "mtp.safetensors", .data = "89" });
+    const shard_dir = try scratchDir(shards, a);
+    try std.testing.expectEqual(@as(u64, 7), checkpointFileBytes(std.testing.io, shard_dir, false));
+    try std.testing.expectEqual(@as(u64, 9), checkpointFileBytes(std.testing.io, shard_dir, true));
 }
 
 test "inkling2 prompt cache budget: half the room, none beside a head, explicit sizes checked" {

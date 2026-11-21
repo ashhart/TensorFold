@@ -1,23 +1,4 @@
-//! Inkling 2's block attention residual fused with the norm that consumes it (Ops.attnRes), against a float64 formula
-//! written from Inkling2BlockAttentionResidual + Inkling2RMSNorm (inkling2_math_norm.zig attnResRow): the stack of
-//! finished blocks and the partial state, each RMS-normed without a weight, a learned query attending over them with
-//! scale hidden^-0.5, the mix normed again with the query's weight.
-//!
-//! The kinds cover one query and three (a full-attention layer's q, k, v inputs), a bf16 and an fp32 partial state.
-//! Blocks sit `block_stride` apart with a NaN gap after each (a stride past rows * hidden on odd row counts), the
-//! partial rows `partial_ld` apart (hidden + 24 unless the row count divides by 3, where the encoder's default 0
-//! applies), the queries' outputs `out_stride` apart with a gap; the gaps are poisoned NaN in the inputs and primed to
-//! bf16 1.0 in the output (an element the kernel must not touch), every tensor sits 16 bytes or more into its buffer
-//! between NaN words, and the weights views of queries 1 and 2 hold NaN when there is one query. Source scales vary
-//! (1, 2^-10, 4 by source; 2^-9 more on every fourth row) so the 1e-6 of the unweighted norm matters.
-//!
-//! Gate 3 allowance: no reduction here can be stressed (a softmax and two norms follow every sum), so the kind declares
-//! no fp32 sums and gives its own bound: first-order fp32 sensitivities of the whole chain, from fp32 error alone
-//! (inkling2_math_norm.zig attnResRow, `err`), then the bf16 output's own rounding. A bf16 accumulator misses it.
-//!
-//! Non-finite rule: float64 arithmetic. A non-finite value in a source makes that row's every output NaN (the source's
-//! 1 / rms is 0 or NaN, its normed value NaN, its score NaN, the softmax NaN); a NaN query element makes that query's
-//! output NaN in every row; a NaN weight makes its column NaN; other rows stay finite.
+//! Inkling 2 block attention residual fused with its consuming norm (Ops.attnRes), against float64 attnResRow formula.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

@@ -1,4 +1,4 @@
-//! The draft head's small kernels against hand-computed values: argmax ties and masks, alpha, gate cell, logits, SwiGLU.
+//! The draft head's small kernels vs hand-computed values: argmax ties and masks, alpha, gate cell, logits, SwiGLU.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");

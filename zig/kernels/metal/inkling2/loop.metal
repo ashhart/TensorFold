@@ -1,7 +1,4 @@
-// Inkling 2 Mini's looped core (inkling2_loop): the messages between passes and the gates that mix them in.
-// Every kernel runs a row (or a row and a gate) as one 256-thread group with fixed-order fp32 trees, so a row's bits
-// never depend on the rows around it. Formulas follow transformers' Inkling2LoopMessageAttentionResidual and
-// Inkling2LoopMessageGate; helpers come from common.metal, which precedes this file in the library.
+// Inkling2Mini looped core (inkling2_loop): pass messages and their mixing gates; helpers from common.metal.
 
 constant constexpr uint LP_MAX_SOURCES = 9;   // sources of one attention-residual mix (finished blocks + the partial state)
 constant constexpr uint LP_MAX_QUERIES = 4;   // queries of one mix: q, k, v, mlp of a message; 1 or 3 of an input
@@ -21,10 +18,7 @@ inline float lp_source(const device bfloat* blocks, const device uchar* partial,
   return float(((const device bfloat*)partial)[ulong(row) * a.partial_pitch + i]);
 }
 
-// Block attention residual without the norm that follows it: per row the sources (finished blocks, bf16, then the
-// partial state, fp32 or bf16) are RMS-normed without a weight, up to four fp32 queries attend over them (softmax in
-// fp32, scale hidden^-0.5, keys and values the same normed rows) and the fp32 mixes are written, one plane a query.
-// Pass-to-pass messages are this kernel with the previous pass's banked blocks and final hidden state as the sources.
+// Attention residual, no norm: normed sources, four fp32 queries attend (softmax, hidden^-0.5), mixes per query.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_mix(
     const device bfloat* blocks [[buffer(0)]], const device uchar* partial [[buffer(1)]],
     const device float* q0 [[buffer(2)]], const device float* q1 [[buffer(3)]], const device float* q2 [[buffer(4)]],
@@ -117,9 +111,7 @@ struct LpGateArgs {
 
 inline uint lp_slot(constant LpGateArgs& a, uint g) { return g == 0 ? a.slot0 : (g == 1 ? a.slot1 : a.slot2); }
 
-// First half of Inkling2LoopMessageGate: for gate g (grid y) and a row, both the fp32 state h and the fp32 message m
-// are RMS-normed without a weight, concatenated, rounded to bf16 and projected to `rank` by the bf16 down matrix
-// [rank][2 hidden] (fp32 chain, output rounded to bf16). down[g][row][rank] holds the rounded values.
+// Message gate first half: h and m normed, concatenated, bf16, projected by down [rank][2 hidden] to `rank`, rounded.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_down(
     const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
     const device float* msg [[buffer(3)]], const device bfloat* w0 [[buffer(4)]], const device bfloat* w1 [[buffer(5)]],
@@ -171,9 +163,7 @@ inline uint lp_slot(constant LpGateArgs& a, uint g) { return g == 0 ? a.slot0 : 
   }
 }
 
-// Second half, fused with the weighted RMS norm that consumes the gate: forget = tanh(Wf d), gain = tanh(Wg d) over the
-// bf16-stored fp32 gate matrices [hidden][rank] (fp32 chains), y = (1 - forget) * h + gain * m in fp32, then
-// bf16(norm_w * (y * rsqrt(mean(y^2) + eps))). One plane a gate, `out_stride` elements apart.
+// Second half + weighted RMS norm: forget = tanh(Wf d), gain = tanh(Wg d) over fp32 gates [hidden][rank]; y normed.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_loop_gate_mix(
     const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
     const device float* msg [[buffer(3)]], const device bfloat* down [[buffer(4)]],

@@ -1,6 +1,4 @@
-//! Independent float64 formulas of Inkling 2's short convolutions, written from transformers' modeling_inkling2
-//! (Inkling2ShortConvolution, Inkling2DynamicShortConvolution), over a stream's whole position axis: there is no
-//! ring, no history buffer and no chunking here, so a kernel that mishandles a seam differs from these.
+//! Float64 formulas of Inkling 2's short convolutions over the whole stream: no ring, no history buffer, no chunking.
 const std = @import("std");
 const contract = @import("contract");
 const g = contract.gates;
@@ -8,9 +6,7 @@ const c = contract.spec;
 
 pub const taps = 4;
 
-/// `stream` holds positions 0..first+rows of a [channels] row each (position p at p * channels), as decoded bf16.
-/// Static conv (Conv1d depthwise weight w[ch][j], tap j weighs the input 3 - j positions back, zero before position 0):
-/// out[t][ch] = (sum_j w[ch][j] x[t - 3 + j][ch] + x[t][ch]) / sqrt(5). `mag` is the sum of the terms' magnitudes.
+/// `stream` rows at p*channels; conv: out = (sum_j w[ch][j] x[t-3+j][ch] + x[t][ch]) / sqrt(5); `mag` = sum |terms|.
 pub fn staticConv(stream: []const f64, w: []const f64, channels: usize, first: usize, rows: usize, out: []f64, mag: []f64) void {
     const root = @sqrt(@as(f64, taps + 1));
     for (0..rows) |r| for (0..channels) |ch| {
@@ -41,8 +37,7 @@ pub fn staticConvIn(acc: c.Accum, order: g.Order, stream: []const f64, w: []cons
     };
 }
 
-/// Dynamic conv of a full-attention layer: tap weights static[lag][ch] + dyn[r][head][lag] (lag 0 the current row),
-/// head = ch / (channels / kv_heads); out = (sum_lag weight_lag x[t - lag] + x[t]) / sqrt(2 * 4 + 1) = / 3.
+/// weight = static[lag][ch] + dyn[r][head][lag], head = ch / (channels/kv_heads), out = (sum_lag w x[t-lag]+x[t]) / 3.
 pub fn dynamicConv(stream: []const f64, static_w: []const f64, dyn: []const f64, channels: usize, kv_heads: usize, first: usize, rows: usize, out: []f64, mag: []f64) void {
     for (0..rows) |r| for (0..channels) |ch| {
         const t = first + r;

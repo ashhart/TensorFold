@@ -1,6 +1,4 @@
-// Inkling 2 backbone operators: shared helpers. Every inkling2_ops kernel file after this one relies on them.
-// fp32 sums are fixed-order trees (lane partials, one simd_sum, eight simdgroup partials added in order), so a row's
-// bits never depend on the rows around it.
+// Inkling 2 helpers: fixed-order fp32 trees (lane partials, simd_sum, simdgroup partials) keep rows deterministic.
 #include <metal_stdlib>
 using namespace metal;
 #pragma clang fp contract(off)

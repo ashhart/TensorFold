@@ -1,4 +1,4 @@
-//! Inkling 2's weight map (Small and the looped Mini): each tensor the config implies, with dtype and shape, checked against headers.
+//! Inkling 2's weight map (Small and looped Mini): config-implied tensors, dtype and shape, checked against headers.
 const std = @import("std");
 const st = @import("safetensors");
 const config = @import("config.zig");
@@ -77,9 +77,7 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
     }
 }
 
-/// A looped model's extra tensors: per core layer four message gates (attention query, key, value and MLP input; each a BF16
-/// rank-r down projection of the 2H [hidden, message] row and two [H, r] gate matrices), and the cross-pass queries. The
-/// checkpoint stores the 4 queries of core layer j as rows 2j, 2j + 1 of two tables: [query, mlp] and [key, value].
+/// A looped model's extras: per core layer four message gates (rank-r down, two [H,r] matrices) and cross-pass queries.
 fn loopTensors(c: *const Text, l: config.Loop, sink: anytype) !void {
     const h: u64 = c.hidden;
     const r: u64 = l.rank;

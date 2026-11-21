@@ -7,8 +7,7 @@ pub const Tensor = ck.Tensor;
 
 pub const Error = error{UnexpectedInklingTensor};
 
-/// One layer's attention tensors. Sliding layers hold one input norm and per-channel convolution taps; global layers one
-/// norm per q, k and v input, static taps and the per-token tap projection.
+/// One layer's attention tensors: sliding layers one input norm and conv taps; global ones one norm per q, k, v.
 pub const Attention = struct {
     wq: Tensor, // [q*dim, H]
     wk: Tensor, // [kv*dim, H]

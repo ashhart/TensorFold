@@ -1,11 +1,4 @@
-//! Inkling 2's short convolutions through the operators the model graph calls (convStatic / convDynamic then
-//! convStore), against float64 formulas over the whole position axis.
-//!
-//! The history ring is poisoned with NaN everywhere the convolution must not read (positions before 0, positions more
-//! than three back), so a kernel that reads a negative position or a stale slot goes NaN where float64 is finite. The
-//! outputs end with the ring rows the store wrote, read back from the device and held exact. The `split` kinds run
-//! the same window as two calls with a store between them and must equal the one call byte for byte: the seam a
-//! drafted window, a prompt chunk and a decode step all cross.
+//! Inkling 2 short convs via convStatic/convDynamic and convStore vs float64 over positions; the ring is NaN-poisoned.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -114,10 +107,7 @@ pub const Probe = struct {
         const dyn = try a.alloc(u16, if (dynamic(p.kind)) rows * kv_heads * 4 else 0);
         u.fillUniform(rng, dyn, 0.5);
         if (fill == .stress and rows >= 4) {
-            // Every window of every row sums to integers below 2^24 (exact in fp32 in any order); row 3's cancels to
-            // zero through 65536 and 255 - 255: fp16 overflows on 65536 and bf16 loses the 255s.
-            // Static taps run oldest first; dynamic taps run newest first. Both put 65536, 255, -255, 0 in that
-            // accumulation order, then cancel the exact sum with row 3's -65536 residual.
+            // Windows sum below 2^24 (fp32-exact); row 3's cancels via 65536, 255, -255: fp16 overflows, bf16 rounds.
             const dyn_kind = dynamic(p.kind);
             @memset(stream, 0);
             @memset(dyn, 0);

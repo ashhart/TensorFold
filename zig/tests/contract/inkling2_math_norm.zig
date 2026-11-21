@@ -1,8 +1,4 @@
-//! Independent float64 formulas of Inkling 2's norms, block attention residual, router, softcap and residual joins,
-//! written from transformers' modeling_inkling2 (Inkling2RMSNorm, Inkling2NormedEmbedding,
-//! Inkling2BlockAttentionResidual, Inkling2TopKRouter, Inkling2Softcap and the decoder layer's residual adds).
-//! Nothing here follows a kernel's structure: the norms are plain sums, the attention residual is an explicit softmax
-//! over the stacked sources, and the router ranks experts with a full sort.
+//! Float64 formulas of Inkling 2's norms, attention residual, router, softcap, residual joins, from modeling_inkling2.
 const std = @import("std");
 const contract = @import("contract");
 const g = contract.gates;
@@ -10,14 +6,12 @@ const c = contract.spec;
 
 const unit: f64 = 0x1p-24;
 
-/// The longest chain of fp32 roundings a row sum of the norm kernels passes through: each of 256 threads chains its
-/// ceil(n / 256) squares, then five butterfly steps and seven adds over the eight simdgroups.
+/// Longest fp32 chain of a norm row sum: ceil(n/256) squares a thread, then five butterfly steps and seven adds.
 pub fn rowSumDepth(n: usize) usize {
     return (n + 255) / 256 + 12;
 }
 
-/// Inkling2RMSNorm of one row: weight * (x * rsqrt(mean(x^2) + eps)). `mag` is half |out|: a relative error of the sum
-/// of squares moves the output by half of it, and the squares are all positive.
+/// RMS norm: weight * x * rsqrt(mean(x^2) + eps); `mag` = half |out| (a sum-of-squares error moves it by half).
 pub fn rmsRow(x: []const f64, w: []const f64, eps: f64, out: []f64, mag: []f64) void {
     var ss: f64 = 0;
     for (x) |v| ss += v * v;
@@ -36,8 +30,7 @@ pub fn rmsRowIn(acc: c.Accum, order: g.Order, x: []const f64, w: []const f64, ep
     for (x, w, out) |v, wi, *o| o.* = wi * (v * inv);
 }
 
-/// Inkling2NormedEmbedding of one token: the RMS norm of the table row. An id outside the vocabulary has no table row:
-/// the stated rule is a NaN row.
+/// Normed embedding of a token: the RMS norm of its table row; an id past the vocabulary yields a NaN row.
 pub fn embedRow(table: []const f64, id: u32, vocab: usize, hidden: usize, w: []const f64, eps: f64, out: []f64, mag: []f64) void {
     if (id >= vocab) {
         @memset(out[0..hidden], std.math.nan(f64));
@@ -54,12 +47,7 @@ pub fn embedRowIn(acc: c.Accum, order: g.Order, table: []const f64, id: u32, voc
 
 pub const AttnRes = struct { hidden: usize, sources: usize, queries: usize, eps_u: f64, eps_n: f64 };
 
-/// Inkling2BlockAttentionResidual followed by the consumer's Inkling2RMSNorm, for one row.
-/// `src` [sources][hidden] is the stack (finished blocks, then the partial state); `q` [queries][hidden] the learned
-/// queries, `norms` [queries][hidden] the RMS weights. Per query: u_s = x_s * rsqrt(mean(x_s^2) + eps_u);
-/// p = softmax_s(hidden^-0.5 * q . u_s); mix = sum_s p_s u_s; out = w * (mix * rsqrt(mean(mix^2) + eps_n)).
-/// `err` (optional, [queries][hidden]) receives an absolute bound on what fp32 arithmetic moves each output by before the
-/// output's own rounding, from first-order sensitivities (derivation inline); it is finite only for finite inputs.
+/// Block attention residual: mix = sum_s softmax_s(hidden^-0.5 q.u_s) u_s, u_s = rms(x_s, eps); out = norm(mix).
 pub fn attnResRow(a: std.mem.Allocator, p: AttnRes, src: []const f64, q: []const f64, norms: []const f64, out: []f64, err: ?[]f64) !void {
     const H = p.hidden;
     const S = p.sources;
@@ -107,8 +95,7 @@ pub fn attnResRow(a: std.mem.Allocator, p: AttnRes, src: []const f64, q: []const
             l += e.*;
         }
         for (prob) |*e| e.* /= l;
-        // A score moved by at most dmax moves p_s by the factor exp(+-2 dmax) (numerator and normalizer), plus the
-        // exp and the sum's own roundings; a coefficient p_s * inv_s adds the inverse's error and two more roundings.
+        // A score moved by dmax moves p_s by exp(+-2 dmax) plus exp/sum roundings; p_s * inv_s adds inverse's error.
         const rp = @exp(2 * dmax) - 1 + @as(f64, @floatFromInt(S + 6)) * unit;
         const rc = rp + e_inv + rp * e_inv + 3 * unit;
         const rmix = rc + c.gamma(@as(f64, @floatFromInt(S + 1)), unit);
@@ -131,8 +118,7 @@ pub fn attnResRow(a: std.mem.Allocator, p: AttnRes, src: []const f64, q: []const
             cross += @abs(mix[i]) * del[i];
             square += del[i] * del[i];
         }
-        // The second norm's sum of squares moves by 2 sum |mix| del + sum del^2, plus its own chain (gd); the factor
-        // (n2 + H eps)^-1/2 then moves by half that, relative to n2 + H eps.
+        // The second norm's sum moves by 2 sum |mix| del + sum del^2; (n2 + H eps)^-1/2 then moves by half as much.
         const ds2 = (2 * cross + square) * (1 + gd) + gd * n2;
         const x = ds2 / (n2 + Hf * p.eps_n);
         const ri = if (x < 0.5) 0.5 * x / (1 - x) else 1;
@@ -163,8 +149,7 @@ pub fn before(biased: []const f64, a: u32, b: u32) bool {
     return a < b;
 }
 
-/// Inkling2TopKRouter's picks for one row: the first `ids.len` experts of the full ranking by score + bias (`order` is
-/// scratch of biased.len), in rank order.
+/// TopKRouter's picks: the first `ids.len` of the full ranking by score + bias, in rank order (`order` is scratch).
 pub fn rank(biased: []const f64, order: []u32, ids: []u32) void {
     for (order[0..biased.len], 0..) |*o, i| o.* = @intCast(i);
     std.mem.sort(u32, order[0..biased.len], biased, before);

@@ -1,8 +1,4 @@
-// Inkling 2 short causal convolutions (Inkling2ShortConvolution, Inkling2DynamicShortConvolution), four taps.
-// A stream's history is a ring of `ring` (32) input rows indexed by absolute position: row t of a call sits at
-// position pos0 + t, the three rows before it come from the call's own rows or, before row 0, from slot p % ring,
-// and a position below 0 reads as zero. Reads of history never depend on stale slots, so rolling a stream back to an
-// earlier position needs no repair. convStore (inkling2_conv_store) is a separate launch after the conv.
+// Inkling 2 short convs: four taps over a ring history by absolute position; a position below zero reads zero.
 
 constant constexpr uint I2_CONV_TAPS = 4;
 
@@ -21,8 +17,7 @@ inline float i2_conv_in(const device bfloat* x, const device bfloat* hist, const
   return float(hist[ulong(position % long(a.ring)) * a.channels + c]);
 }
 
-// y[t][c] = (sum_j w[c][j] * x[t - 3 + j] + x[t]) / sqrt(taps + 1); w is the checkpoint's [channels, 1, 4] conv1d
-// weight, tap 3 weighing the current row. Taps run oldest first, one fp32 chain.
+// y[t][c] = (sum_j w[c][j] * x[t - 3 + j] + x[t]) / sqrt(taps + 1); w is [channels, 1, 4], oldest tap first.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_conv_static(
     const device bfloat* x [[buffer(0)]], const device bfloat* hist [[buffer(1)]], const device bfloat* w [[buffer(2)]],
     device bfloat* y [[buffer(3)]], constant I2ConvArgs& a [[buffer(4)]], uint2 at [[thread_position_in_grid]]) {
@@ -33,9 +28,7 @@ inline float i2_conv_in(const device bfloat* x, const device bfloat* hist, const
   y[ulong(t) * a.channels + c] = bfloat((sum + float(x[ulong(t) * a.channels + c])) / a.divisor);
 }
 
-// The key/value convolution of a full-attention layer: tap weights are static[lag][c] + dyn[t][head][lag], lag 0 the
-// current row (the reference's flip), shared by the channels of a key/value head; (sum + x[t]) / sqrt(2 * taps + 1).
-// static_w is [4, channels]; dyn is the weight projection's bf16 output [rows, kv_heads * 4].
+// KV conv: taps static[lag][c] + dyn[t][head][lag], lag 0 current; (sum + x[t]) / sqrt(2 * taps + 1).
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_conv_dynamic(
     const device bfloat* x [[buffer(0)]], const device bfloat* hist [[buffer(1)]],
     const device bfloat* static_w [[buffer(2)]], const device bfloat* dyn [[buffer(3)]], device bfloat* y [[buffer(4)]],
@@ -52,8 +45,7 @@ inline float i2_conv_in(const device bfloat* x, const device bfloat* hist, const
   y[ulong(t) * a.channels + c] = bfloat((sum + float(x[ulong(t) * a.channels + c])) / a.divisor);
 }
 
-// hist[(pos0 + t) % ring] = x[t] for the newest min(rows, ring) rows. Its own launch: the conv above must have read
-// the old history of every row first.
+// hist[(pos0 + t) % ring] = x[t] for the newest min(rows, ring) rows; own launch, after the conv.
 [[kernel, max_total_threads_per_threadgroup(256)]] void inkling2_conv_store(
     const device bfloat* x [[buffer(0)]], device bfloat* hist [[buffer(1)]], constant I2ConvArgs& a [[buffer(2)]],
     uint2 at [[thread_position_in_grid]]) {

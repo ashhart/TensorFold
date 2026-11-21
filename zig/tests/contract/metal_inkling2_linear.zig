@@ -1,20 +1,4 @@
-//! Inkling 2's dense projections through `ops.linear` (the shared bf16 matvec for fewer than 16 rows, its bit-equal MMA
-//! tile from 16 rows), at the shapes the backbone and the tiny checkpoint call it, against float64 dot products.
-//!
-//! The bound is the fp32 chain's: gamma(depth) of the terms' magnitude (depth = a lane's FMAs, the butterfly's adds and
-//! the output's rounding) and the output's rounding; no oracle of the kernel's order is replayed. Gate 4 plants integer
-//! weights and rows whose partial sums reach 2^20 and cancel (the second half of each row mirrors the first), so fp32
-//! sums are exact in any order and fp16 / bf16 sums miss by far more than 100 times the exact bound.
-//!
-//! Row independence, the seam a prompt chunk, a verify window and a decode step cross: the `alone` kinds run all rows
-//! in one call and must equal every row as its own one-row call (the matvec tier) byte for byte; the `split` kind cuts
-//! the call at 1, 3, 16, 17 and 32 rows through views at non-zero offsets and must equal the whole call. Their gate 1
-//! runs 16 rows more than the harness asks (a full MMA tile and a partial one), so the tile meets the non-finite
-//! plants too. The x input has NaN rows around the call's rows. NaN and both infinities are planted in x rows and in
-//! three weight rows: float64 and the kernel agree on every class whatever the order (the terms' set decides it).
-//!
-//! The planted controls are the matvec's and tile's own (their kernels carry `TF_CTL` edits, as the dsv41 probes use):
-//! the probe swaps them into a private copy of the Ops, so they run through the same `ops.linear`.
+//! Projections via `ops.linear` (matvec, MMA tile) at backbone shapes vs float64 dots under the fp32 chain's bound.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -79,8 +63,7 @@ fn sweep() [sweep_rows.len]c.Shape {
     return out;
 }
 
-// Rows x outputs x K. Hidden 4608 (6144 into the output projection), heads 48/8 x 128, r 16 x 48, the tiny
-// checkpoint's hidden 128, and odd edges. The first shape with the largest K (6144) is gate 4's.
+// Rows x outputs x K: hidden 4608 (6144 out), heads 48/8 x 128, r 16 x 48, hidden 128, edges; first K 6144 is gate 4's.
 const plain_served = [_]c.Shape{
     .{ .rows = 1, .n = 3072, .k = 2304 },
     .{ .rows = 16, .n = 2304, .k = 3072 },
@@ -128,8 +111,7 @@ const seam_served = [_]c.Shape{
     .{ .rows = 33, .n = 128, .k = 128 },
 } ++ sweep();
 
-// The lm_head's vocabulary width (200058 outputs: grid dimensions past 65535 groups) at K 1024 so the float64
-// copy of the weights stays at 1.6 GB; K 4608 and 6144 are served by the plain kinds.
+// The lm_head's 200058 outputs (grid past 65535 groups) at K 1024 keep the float64 weights at 1.6 GB.
 const head_served = [_]c.Shape{
     .{ .rows = 5, .n = 200058, .k = 1024 },
     .{ .rows = 1, .n = 200058, .k = 1024 },
@@ -242,8 +224,7 @@ pub const Probe = struct {
         const wide = p.kind == .head;
         return .{ .ctx = p, .vt = &vt, .spec = .{
             .name = p.label,
-            // The head's gate 4 would replay 4 x 200058 chains nine times; the plain kinds prove the same kernels'
-            // sums at K 6144, so the head declares none and `bounds` gives gate 3 the fp32 chain's allowance itself.
+            // Gate 4 replays 4x200058 nine times, so the head declares none; plain kinds prove the sums at K 6144.
             .accum = if (wide) .none else .f32,
             .depth = depth,
             .out = if (f32Out(p.kind)) .f32 else .bf16,
@@ -307,8 +288,7 @@ pub const Probe = struct {
         fillBf16(rng, p.xs, 125, 5); // |x| in [1/4, 8)
         fillBf16(rng, p.wts, 120, 7); // |w| in [2^-7, 1)
         if (fill == .stress) {
-            // Weights 1..8 and their negations, rows 1..255 mirrored (the second half one larger in the first 8):
-            // every partial sum is an integer below 2^24 and the result is minus the first 8 weights.
+            // Weights 1..8 and negations, rows 1..255 mirrored: integer partial sums under 2^24, results -w0..7.
             const h = k / 2;
             const xmax: u32 = @min(255, ((1 << 24) - 1) / (8 * @as(u32, @intCast(k))));
             for (0..n) |j| {
@@ -413,9 +393,7 @@ pub const Probe = struct {
         reference_threads.run(RefJob, jobs[0..workers], .normal);
     }
 
-    /// The head's allowance, derived here as it declares no accumulator: gamma(depth, 2^-24) of the terms' magnitude
-    /// (the fp32 chain), then the bf16 output's rounding of the value and of that error. The other kinds keep the
-    /// generic bound, which is the same formula.
+    /// The head's allowance: gamma(depth, 2^-24) of the terms' magnitude plus the bf16 output rounding.
     pub fn bounds(p: *Probe, want: []const f64, mag: []const f64, allow: []f64) !void {
         if (p.kind != .head) return;
         const gm = c.gamma(@floatFromInt(depth(p.shape)), 0x1p-24);

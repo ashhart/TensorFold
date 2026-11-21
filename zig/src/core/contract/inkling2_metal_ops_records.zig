@@ -1,13 +1,10 @@
-//! Inkling 2's backbone operator launches (kernels/metal/inkling2/*.metal through families/inkling2/metal_ops.zig):
-//! every kernel declares max_total_threads_per_threadgroup equal to the threads it is launched with, which the source
-//! reserves, so no M1/M2 compiled limit is needed; threadgroup bytes are the sources' static arrays.
+//! Inkling 2's backbone launches: each kernel's max threads matches its launch, threadgroup bytes are static arrays.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 
 const attn_groups = 8;
 
-/// Threadgroup floats of the attention chunk kernel with G heads a key/value head (attention.metal):
-/// q G * 128, rel G * 16, merge m and l 2 * 4 * G, merge acc 4 * G * 128.
+/// Threadgroup floats of the attention chunk kernel: q G*128, rel G*16, merge m/l 2*4*G, merge acc 4*G*128.
 fn attentionBytes(g: u32) u32 {
     return 4 * (g * 128 + g * 16 + 2 * 4 * g + 4 * g * 128);
 }

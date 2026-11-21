@@ -218,8 +218,7 @@ const Probe = struct {
     }
 
     pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
-        // FP32 sums/scales for the mix. Controller boundary ties may differ by one BF16 step
-        // in the down output; allow propagation of a small such perturbation through the gates.
+        // FP32 sums/scales; controller boundary ties may differ by one BF16 step in the down output, so propagate it.
         for (allow, want) |*e, v| e.* = if (p.isMix()) 5e-6 * (1 + @abs(v)) else 0.003 + 0x1p-7 * @abs(v);
     }
 };

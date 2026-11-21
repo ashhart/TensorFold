@@ -1,28 +1,4 @@
-//! Inkling 2's router (Ops.route: fp32 logits through the shared bf16 matvec, then the sigmoid / top-k / weights kernel)
-//! against Inkling2TopKRouter in float64 (inkling2_math_norm.zig): scores = sigmoid(x . w), picks = the top-k of
-//! scores + bias, weights = scores[picks] / (sum + 1e-20) * route_scale.
-//!
-//! Stated rule (the contract's nan rule; torch's topk leaves the order of ties and NaN unspecified): picks rank by
-//! biased score, a NaN above every number, equal values by the lower expert index, in rank order; a NaN score keeps its
-//! NaN in the weights (the sum is NaN). The reference ranks with a full sort under exactly that order.
-//!
-//! The data makes every logit exact in fp32 whatever the sum's order (x in eighths up to 1, w in sixteenths or
-//! sixty-fourths up to 2/denom: products are multiples of 2^-9 or 2^-7 and every partial sum stays under 2^12, so at
-//! most 21 bits), so float64's logits equal the kernel's. What can differ is the kernel's fp32 sigmoid and its
-//! bias add (a few units of 2^-24), so the check holds each pick to the rule up to that: a pick other than the rule's
-//! is accepted only when its biased score is within 2^-20 (1 + |b|) of the best remaining one, never for a NaN and
-//! never for an exact tie (an exact tie must go to the lower index). The weights are then checked against float64 over
-//! the picks the kernel made, to 64 * 2^-24 relative (the sigmoid's and the sum's roundings), classes exactly.
-//!
-//! Planted ties: two experts with identical weight rows and bias 8 (different simdgroup lanes, ranks 0 and 1); four
-//! experts at bias 6; three experts with identical rows and bias 4 in one lane (1, 33, 65) at ranks 6, 7 and 8, so the
-//! top-k cuts the tie. Non-finite fill: row 0 has a NaN input (every logit NaN: ids 0..7), row 1 a +inf at a column
-//! where three experts have weight 0 (their logits NaN, the others +-inf: three NaN picks then five numbers), row 2 a
-//! -inf where two do, row 3 both infinities. Weights beyond the last expert, the bias beyond it and the rows around x
-//! are NaN, so a read past a tensor shows.
-//!
-//! The `split` kind runs the same rows as two calls (15 rows or half), crossing the matvec / MMA-tile switch at 16 rows,
-//! and must equal the one call byte for byte.
+//! Router (Ops.route) vs float64 Inkling2TopKRouter: picks rank by score + bias, NaN highest, ties to the lower index.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");

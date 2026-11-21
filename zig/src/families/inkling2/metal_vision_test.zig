@@ -1,5 +1,4 @@
-//! Inkling 2 Mini's image path: processor, tables, the GEMMs, and the tower against an f64 reference on a synthetic
-//! single-shard checkpoint that, like the release, holds text tensors beside model.visual.* (reference: `reference`).
+//! Mini's image path: processor, tables, GEMMs, tower vs an f64 reference on a synthetic single-shard checkpoint.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -272,8 +271,7 @@ fn oracleTables(gh: usize, gw: usize, merge: usize, side: usize, hd: usize, taps
     };
 }
 
-/// The tower's f64 reference: `w` holds the checkpoint's own tensors (model.visual.*); every torch op's output rounds to
-/// bf16 where the model's does.
+/// Tower's f64 reference over the checkpoint's `model.visual.*` tensors; each op rounds to bf16 where the model's does.
 pub fn reference(a: std.mem.Allocator, w: *const ck.Checkpoint, c: config.Vision, pixels: []const f32, gh: u32, gw: u32) ![]f64 {
     return evaluate(a, w, c, pixels, gh, gw, &.{}, &.{});
 }
@@ -410,8 +408,7 @@ pub fn evaluate(a: std.mem.Allocator, w: *const ck.Checkpoint, c: config.Vision,
     return out;
 }
 
-/// Mini's vision tower narrowed to test widths: 3 layers, width 128 over 2 heads of 64 (the head width of 1024 / 16),
-/// an MLP of 4x, a 160-wide projector (ragged for the GEMM tiles) into the text width.
+/// Vision tower at test widths: 3 layers, width 128 over 2 heads of 64, MLP 4x, a 160-wide projector to text width.
 fn towerConfig(a: std.mem.Allocator) !config.Config {
     var c = try fxm.tinyConfig(a);
     c.vision.hidden = 128;
@@ -422,8 +419,7 @@ fn towerConfig(a: std.mem.Allocator) !config.Config {
     return c;
 }
 
-/// The names and values of a tower's tensors in file order: one text tensor first (the release sorts model.llm.* before
-/// model.visual.*), then the vision ones.
+/// A tower's tensors in file order: one text tensor first (model.llm.* before model.visual.*), then the vision ones.
 fn towerSpecs(a: std.mem.Allocator, c: config.Vision) ![]const Named {
     const h: usize = c.hidden;
     const ff = h * c.mlp_ratio;

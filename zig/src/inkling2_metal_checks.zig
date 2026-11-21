@@ -1,9 +1,7 @@
-//! Opt-in integration checks over a Mini-loop checkpoint.
-//!
-//! TF_INKLING2_MINI_SMOKE names a directory shaped like the Mini release: 24 physical layers whose core layers run three
-//! logical passes, NVFP4/MXFP8 experts, and the bundled mtp.safetensors head.
+//! Opt-in Mini checks: TF_INKLING2_MINI_SMOKE's dir (24 layers, 3 passes, NVFP4/MXFP8 experts, mtp.safetensors).
 const std = @import("std");
 const tf = @import("tensorfold");
+const environment = @import("sys").environment;
 const mtl = @import("metal");
 const api = @import("engine_api");
 const fl = tf.inkling2_metal;
@@ -12,7 +10,8 @@ const native = @import("native/inkling2_backend.zig");
 const t = std.testing;
 
 fn fixture() ![]const u8 {
-    return if (std.c.getenv("TF_INKLING2_MINI_SMOKE")) |p| std.mem.span(p) else error.SkipZigTest;
+    const raw = environment.rawText("TF_INKLING2_MINI_SMOKE");
+    return (try environment.path("TF_INKLING2_MINI_SMOKE", raw)) orelse error.SkipZigTest;
 }
 
 fn logits(m: *fl.Model, rows: usize) []const f32 {
@@ -131,7 +130,7 @@ test "inkling2 Mini Metal loop forward, shared rows, exact rollback, snapshots, 
         try t.expectEqual(@as(u8, 0), metadata.count);
         try t.expect(std.math.isFinite(metadata.logprob));
     }
-    // A kept prompt state resumes bit for bit: the pooled lane that restores it draws what a fresh pass over the whole prompt draws.
+    // A kept prompt state resumes bit for bit: the restored lane draws what a fresh pass over the whole prompt draws.
     {
         const long = [_]u32{ 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 };
         var head = try lanes.Stream.init(t.allocator, .{ .id = "keep-head", .prompt = long[0..16], .max_new = 1 });

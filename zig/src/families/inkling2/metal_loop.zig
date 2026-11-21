@@ -1,12 +1,4 @@
-//! Inkling 2 Mini's looped-core operators on Metal: the pass-to-pass message attention and the message gates
-//! (kernels/metal/inkling2/loop.metal). Like metal_ops.zig the caller owns the encoder and every buffer; each op only
-//! encodes dispatches in order. A row's bits never depend on the other rows of its call.
-//!
-//! The reference (transformers' Inkling2LoopMessageAttentionResidual and Inkling2LoopMessageGate), per row:
-//!   messages = attention-residual mixes of four learned queries over the previous pass's banked blocks and final hidden
-//!              state (each RMS-normed without a weight, softmax scale hidden^-0.5), fp32;
-//!   gate(h, m) = (1 - tanh(Wf d)) * h + tanh(Wg d) * m, d = bf16(Wd [rms(h), rms(m)]) rounded to bf16, Wf and Wg the
-//!              bf16-stored fp32 gate matrices, then the layer's weighted RMS norm rounds the mix to bf16.
+//! Mini's core ops on Metal: message attention, gates (loop.metal); caller owns encoder and buffers; rows independent.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -61,9 +53,7 @@ comptime {
 
 pub const Error = error{InvalidLoopOp};
 
-/// Block attention residual without its trailing norm: sources are `nb` bf16 blocks [nb][rows][hidden] (`block_stride`
-/// elements apart) then `partial` [rows][hidden] (fp32 when `partial_f32`, else bf16; rows `partial_ld` apart, 0 = hidden).
-/// Query q (fp32 [hidden], `queries[q]`) writes fp32 mixes [rows][hidden] at `out` + q * `out_stride` elements.
+/// Attention-residual mix of query q over `nb` bf16 blocks and `partial`; fp32 output, one plane per query.
 pub const MixArgs = struct {
     blocks: View,
     block_stride: u32,
@@ -80,8 +70,7 @@ pub const MixArgs = struct {
     eps_unweighted: f32 = 1e-6,
 };
 
-/// Gate g reads its state h[g] (fp32 [rows][hidden]) and the message plane slots[g] of `msg` (fp32, planes `msg_stride`
-/// elements apart) and its bf16 down matrix [rank][2 hidden]; down [gate][rows][rank] bf16 receives the rounded outputs.
+/// Gate g: h[g] (fp32), slot plane slots[g], bf16 down [rank][2 hidden]; output down [gate][rows][rank] bf16.
 pub const GateDownArgs = struct {
     h: [max_gates]View,
     msg: View,
@@ -96,8 +85,7 @@ pub const GateDownArgs = struct {
     eps_unweighted: f32 = 1e-6,
 };
 
-/// The gates' outputs: bf16 [rows][hidden] planes `out_stride` elements apart, each normed by norms[g] (bf16 [hidden]).
-/// forget[g] and gain[g] are bf16 [hidden][rank].
+/// Gate outputs: bf16 [rows][hidden] planes `out_stride` apart, normed by norms[g]; forget/gain bf16 [hidden][rank].
 pub const GateMixArgs = struct {
     h: [max_gates]View,
     msg: View,
