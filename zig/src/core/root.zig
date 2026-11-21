@@ -26,6 +26,7 @@ pub const draft_depth = @import("draft_depth.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
+pub const visit_plan = @import("visit_plan.zig"); // a looped stack's steps and state slots (Dory, Inkling 2 Mini)
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const proposal_rows = @import("proposal_rows.zig");
 pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec
@@ -152,6 +153,7 @@ test {
     _ = kv_pool;
     _ = kv_prompts;
     _ = state_walk;
+    _ = visit_plan;
 }
 
 pub const frame_rounds = @import("frame_rounds.zig");

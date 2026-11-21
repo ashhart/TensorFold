@@ -1,6 +1,7 @@
 //! Dory's sublayer order: input, the recurrent block `loops` times, output; per_loop KV caches, one an attention step.
 const std = @import("std");
 const config = @import("config.zig");
+const visit_plan = @import("core").visit_plan;
 
 const Config = config.Config;
 const Kind = config.Kind;
@@ -42,28 +43,38 @@ pub const Schedule = struct {
     }
 };
 
+/// Dory's one state kind: an attention sublayer's KV cache (sliding or full by its sublayer's kind).
+const State = enum { cache };
+const Walk = visit_plan.Plan(State, max_steps);
+
+const Holds = struct {
+    c: *const Config,
+    pub fn keeps(h: Holds, sub: u16, _: State) bool {
+        return h.c.kinds[sub] != .mlp;
+    }
+};
+
 /// The steps of `c` at `c.loops` loops: I + R * loops + O, caches numbered in the order the steps run.
 pub fn build(c: Config) Schedule {
+    const core_end: u32 = @intCast(c.input + c.recurrent);
+    const loop: visit_plan.Loop = .{ .start = @intCast(c.input), .end = core_end, .passes = @intCast(c.loops) };
+    // config.parse and withLoops bound sublayers by max_sublayers and loops to 1..max_loops
+    const w = Walk.build(@intCast(c.sublayers), loop, Holds{ .c = &c }) catch unreachable;
     var s: Schedule = .{};
-    const add = struct {
-        fn one(sch: *Schedule, cc: Config, sub: usize, loop: usize) void {
-            var st: Step = .{ .sub = @intCast(sub), .kind = cc.kinds[sub], .loop = @intCast(loop) };
-            if (st.kind != .mlp) {
-                st.cache = @intCast(sch.caches);
-                sch.cache_kind[sch.caches] = st.kind;
-                sch.caches += 1;
-            }
-            sch.steps[sch.len] = st;
-            sch.len += 1;
-        }
-    }.one;
-    for (0..c.input) |i| add(&s, c, i, 0);
-    for (0..c.loops) |l| {
-        for (c.input..c.input + c.recurrent) |i| add(&s, c, i, l);
-        s.steps[s.len - c.recurrent].enter = true;
-        s.steps[s.len - 1].leave = true;
+    for (w.slice()) |v| {
+        const st: Step = .{
+            .sub = v.layer,
+            .kind = c.kinds[v.layer],
+            .loop = v.pass,
+            .cache = v.of(.cache),
+            .enter = v.enter,
+            .leave = v.leave,
+        };
+        if (st.cache) |i| s.cache_kind[i] = st.kind;
+        s.steps[s.len] = st;
+        s.len += 1;
     }
-    for (c.input + c.recurrent..c.sublayers) |i| add(&s, c, i, 0);
+    s.caches = w.count(.cache);
     return s;
 }
 
