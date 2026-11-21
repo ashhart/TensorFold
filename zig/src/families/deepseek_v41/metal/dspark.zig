@@ -16,6 +16,7 @@ const st = @import("dspark_stage.zig");
 const undo_ = @import("dspark_undo.zig");
 const mkv = @import("markov.zig");
 const picks_ = @import("early_picks.zig");
+const round_prof = @import("round_prof.zig");
 
 const Config = host.config.Config;
 const Params = host.dspark.Params;
@@ -92,6 +93,8 @@ pub const Pass = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     opt: Options,
+    /// TF_DSV41_ROUND_PROF: where the passes book their times (null: no clock reads)
+    prof: ?*round_prof.RoundProf = null,
     b: forward.Bufs,
     plan: plan_.Plan,
     /// act_quant of the taps rows [16][targets * hidden]
@@ -109,6 +112,7 @@ pub const Pass = struct {
     resident: ?mtl.ResidencySet = null,
     /// command buffers committed and not yet waited for (`settle` waits), in commit order
     queued: [4]?mtl.CommandBuffer = @splat(null),
+    timing: [4]?Timing = @splat(null),
     /// a pass queued by `begin` that `collect` finishes
     begun: ?Begun = null,
     /// chains on the GPU (Options.gpu_chain, with a confidence head of a rank the kernels take)
@@ -227,16 +231,14 @@ pub const Pass = struct {
         x.undo.forget(slot);
     }
 
-    /// The command buffer of one encoder of `kind`: `f` encodes, then it is committed and waited for.
-    fn run(x: *Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
-        try x.queue1(F, f, kind);
-        try x.settle();
-    }
+    /// Timing attached to a queued command buffer until its existing wait.
+    const Timing = struct { start: u64, events: [2]round_prof.Event };
 
-    /// `run` without the wait: the buffer is committed and kept for `settle` (the queue runs buffers in order).
-    fn queue1(x: *Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
+    /// The buffer is committed and kept for `settle` (the queue runs buffers in order).
+    fn queue1(x: *Pass, comptime F: type, f: F, kind: mtl.DispatchType, events: [2]round_prof.Event) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const t0 = if (x.prof) |q| q.clock() else 0;
         const cb = x.queue.commandBuffer();
         const e = cb.compute(kind);
         f.encode(e) catch |err| {
@@ -244,14 +246,15 @@ pub const Pass = struct {
             return err;
         };
         e.end();
-        try x.hold(cb);
+        try x.hold(cb, if (x.prof != null) .{ .start = t0, .events = events } else null);
     }
 
     /// Commits `cb` and keeps it until `settle` (a full list is settled first).
-    pub fn hold(x: *Pass, cb: mtl.CommandBuffer) !void {
+    fn hold(x: *Pass, cb: mtl.CommandBuffer, timing: ?Timing) !void {
         if (x.queued[x.queued.len - 1] != null) try x.settle();
         cb.commit();
-        for (&x.queued) |*q| if (q.* == null) {
+        for (&x.queued, &x.timing) |*q, *tm| if (q.* == null) {
+            tm.* = timing;
             q.* = cb.retain();
             return;
         };
@@ -266,13 +269,19 @@ pub const Pass = struct {
         };
         if (last) |cb| cb.wait();
         var failed = false;
-        for (&x.queued) |*q| if (q.*) |cb| {
+        for (&x.queued, &x.timing) |*q, *tm| if (q.*) |cb| {
+            if (tm.*) |t| {
+                const p = x.prof.?;
+                p.event(t.events[0], p.clock() -| t.start);
+                p.event(t.events[1], round_prof.secondsNs(cb.gpuSeconds()));
+            }
             if (cb.failure()) |msg| {
                 std.debug.print("dspark command buffer failed: {s}\n", .{msg});
                 failed = true;
             }
             cb.release();
             q.* = null;
+            tm.* = null;
         };
         if (failed) return error.CommandBufferFailed;
     }
@@ -325,7 +334,7 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.queue1(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
+        try x.queue1(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial, .{ .ingest_wall, .ingest_gpu });
     }
 
     /// The ingest's encoders for `n` rows of `taps` (from its first row) with the plan's ingest rows, in `e` (serial).
@@ -413,6 +422,8 @@ pub const Pass = struct {
 
     /// Candidates and the Markov chain over a launch's head outputs, each ask's results into `out` (its order).
     pub fn finish(x: *Pass, l: *const Launch, out: []Proposal) !void {
+        const start = if (x.prof) |p| p.clock() else 0;
+        defer if (x.prof) |p| p.event(.finish, p.clock() -| start);
         const n: usize = l.n;
         const B: usize = x.c.dspark_block;
         const k: usize = @min(x.opt.candidates, x.c.vocab);
@@ -495,7 +506,8 @@ pub const Pass = struct {
                     try j.x.encodeAll(e, j.l);
                 }
             };
-            try x.run(job, .{ .x = x, .l = &l }, .concurrent);
+            try x.queue1(job, .{ .x = x, .l = &l }, .concurrent, .{ .propose_wall, .propose_gpu });
+            try x.settle();
             try x.finish(&l, out[at..][0..m]);
         }
     }
@@ -518,7 +530,7 @@ pub const Pass = struct {
                 try j.x.encodeAll(e, j.l);
             }
         };
-        x.queue1(job, .{ .x = x, .l = &b.l }, .concurrent) catch |e| {
+        x.queue1(job, .{ .x = x, .l = &b.l }, .concurrent, .{ .propose_wall, .propose_gpu }) catch |e| {
             x.begun = null;
             return e;
         };
