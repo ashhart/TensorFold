@@ -29,4 +29,12 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mod }));
     b.step("test-pull-host", "Checkpoint download paths: a nested shard folder, retries, resume and the whole-file fallback").dependOn(&run.step);
     test_step.dependOn(&run.step);
+    const security = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cli/pull_security_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "native_engines", .module = engines }, @import("exlr8.zig").cliImport(b, target, optimize, core) },
+    }) }));
+    test_step.dependOn(&security.step);
 }
