@@ -4,6 +4,30 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
+
+
+
+
+
+- Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
+
+- Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
+
+- Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass; it has not yet run on a GPU (#1858, after #1773 and #1767, for #1757). Thanks to @jayleaton.
+
+- TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
+
+- Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
+
+- CUDA: at `--tp 2` a Flash Next rank now waits for its peer to finish loading before the first collective, up to 10 minutes instead of failing at the collective's 30 s bound; a peer that fails or closes its link ends the wait with `RankDisconnected` (#2972, fixes #2970). Thanks to @swbiggart.
+
+- CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
+
+- CUDA: `capabilities --json` now advertises `modelopt-mixed` and `modelopt-nvfp4` for the dense Qwen3.5 family, matching the ModelOpt exports its loader serves (#4192). Thanks to @javierbits.
+- CUDA capabilities: the dense Qwen3.8-27B row now advertises the ModelOpt exports its loader reads, `modelopt-mixed` (`nvidia/Qwen3.8-27B-NVFP4`) and `modelopt-nvfp4`, beside `mlx-q4g64` and `exl3`; a client that filters on `capabilities --json` no longer hides a checkpoint the engine serves (#4150). Thanks to @Flyinpiz-dev.
+- HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
+
 - CI: the Zig format workflow runs again on pushes and pull requests; two concurrency settings had left its file with a duplicate key, which GitHub refused (#4339).
 
 - Server: `POST /v1/prompt_cache/flush` drops the prompt states the server keeps for resuming conversations, in RAM and on disk when it keeps them there (`--prompt-cache-disk`, `--learn-conversations` or `--spill-gib`), once no request is running, so replies in flight are unchanged; it needs a full or `[admin]` key when API keys are on (a loopback caller without keys), answers 503 if requests have not ended within 10 minutes and 501 on an engine without the prompt cache, and leaves `--learn`'s shared-prefix states on disk (#3210, fixes #3183).

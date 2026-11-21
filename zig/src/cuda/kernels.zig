@@ -109,6 +109,7 @@ pub const hy4_engram: []const u8 = if (available) &Blob("fatbin_hy4_engram").byt
 pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{};
 pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
 pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};
+pub const idol_decoder: []const u8 = if (available) &Blob("fatbin_idol_decoder").bytes else &.{};
 pub const inkling2_attn: []const u8 = if (available) &Blob("fatbin_inkling2_attn").bytes else &.{};
 pub const inkling2_pattn: []const u8 = if (available) &Blob("fatbin_inkling2_pattn").bytes else &.{};
 pub const inkling2_ops: []const u8 = if (available) &Blob("fatbin_inkling2_ops").bytes else &.{};
