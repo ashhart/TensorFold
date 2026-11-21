@@ -22,6 +22,7 @@ const pick = @import("pick.zig");
 const round_prof = @import("round_prof.zig");
 const pool_ = @import("pool.zig");
 const pool_bufs = @import("pool_bufs.zig");
+const pooled = @import("target_pool.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -112,17 +113,8 @@ pub const Target = struct {
         t.pick_ids = try a.alloc(u64, c.vocab);
         errdefer a.free(t.pick_ids);
         for (t.pick_ids, 0..) |*id, i| id.* = i;
-        t.max_new = try a.alloc(?u64, opt.slots);
-        errdefer a.free(t.max_new);
-        @memset(t.max_new, null);
-        if (opt.pool) |ps| {
-            t.pool = try pool_.Pool.init(a, opt.slots, ps.blocks);
-            t.pbufs = pool_bufs.Bufs.init(a, env.device, c, ps.blocks) catch |e| {
-                t.pool.?.deinit();
-                return e;
-            };
-        }
-        errdefer t.freePool();
+        try pooled.init(t);
+        errdefer pooled.deinit(t);
         const slots = try a.alloc(Slot, opt.slots);
         errdefer a.free(slots);
         var made: usize = 0;
@@ -160,18 +152,12 @@ pub const Target = struct {
     }
     fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
         try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
-        if (t.pbufs) |b| {
-            for (b.pools) |pbuf| if (pbuf) |b0| try out.append(t.a, b0);
-            for (b.keys) |kbuf| if (kbuf) |b0| try out.append(t.a, b0);
-        }
+        try pooled.appendBuffers(t, out);
         for (t.slots) |*s| {
             for (s.kv.regions) |r| {
                 try out.append(t.a, r.window);
+                if (r.owned) inline for (.{ "pool", "keys" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
                 inline for (.{ "carry", "inputs" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
-                if (r.owned) {
-                    if (r.pool) |b| try out.append(t.a, b);
-                    if (r.keys) |b| try out.append(t.a, b);
-                }
             }
             if (s.kv.taps) |b| try out.append(t.a, b);
             try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
@@ -188,11 +174,6 @@ pub const Target = struct {
         if (s.image_rows) |*r| r.deinit();
     }
 
-    fn freePool(t: *Target) void {
-        if (t.pbufs) |*b| b.deinit();
-        if (t.pool) |*p| p.deinit();
-    }
-
     pub fn deinit(t: *Target) void {
         t.tree.deinit(t);
         if (t.joined) {
@@ -204,8 +185,7 @@ pub const Target = struct {
         if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
-        t.freePool();
-        t.a.free(t.max_new);
+        pooled.deinit(t);
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
@@ -225,7 +205,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn, .admit = admit } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn, .admit = pooled.admit } };
     }
 
     pub fn self(ptr: *anyopaque) *Target {
@@ -284,6 +264,7 @@ pub const Target = struct {
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
+        errdefer pooled.giveBackAll(t, slot);
         const s = st.s;
         const prompt_ids = s.hist.items; // image positions carry their virtual ids
         if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
@@ -314,8 +295,8 @@ pub const Target = struct {
         const ids: []const u32 = vids orelse ids_in;
         for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
-        try t.place(slot, ids.len);
-        errdefer t.giveBackAll(slot);
+        try pooled.place(t, slot, ids.len);
+        errdefer pooled.giveBackAll(t, slot);
         s.whole = false;
         s.open = false;
         s.rows = 0;
@@ -474,7 +455,7 @@ pub const Target = struct {
             if (!s.live) return error.SlotNotLive;
             if (g.start != s.hist.items.len) return error.PositionMismatch;
             if (n == 0 or total + n > R or g.draws.len != n or out.len < n) return error.BadRows;
-            if (g.start + n > t.opt.limit or g.start + n > s.kv.limit) return error.PastLimit;
+            if (g.start + n > s.kv.limit) return error.PastLimit;
             // the decode forward runs consecutive positions: a tree's rows must be one chain
             if (g.parents) |ps| for (ps, 0..) |q, r| if (q != @as(i32, @intCast(r)) - 1) return error.TreeWindow;
             for (g.tokens) |id| if (id >= c.vocab) return error.BadToken;
@@ -606,55 +587,14 @@ pub const Target = struct {
         const t = self(ptr);
         if (slot >= t.slots.len) return;
         const s = &t.slots[slot];
-        if (s.filling) steps.abandon(t, s);
-        defer t.giveBack(slot);
+        if (s.filling) steps.abandon(t, s, slot);
+        defer pooled.giveBack(t, slot);
         if (!s.live) return;
         t.tree.forget(slot);
         s.live = false;
         if (s.open) t.commitTaps(s, s.rows);
         s.open = false;
         if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
-    }
-
-    // the shared pool --------------------------------------------------------------------------------------------
-
-    /// Before `prefill`: the request's max new tokens size the slot's run (without it, the run is the whole window).
-    fn admit(ptr: *anyopaque, slot: u32, max_new: u64) void {
-        const t = self(ptr);
-        if (slot < t.max_new.len) t.max_new[slot] = max_new;
-    }
-
-    /// The slot's run for a prompt of `n` ids, its max new tokens and a window of drafts; LaneMemory: not now.
-    fn place(t: *Target, slot: u32, n: usize) !void {
-        const p = if (t.pool) |*x| x else return;
-        const s = &t.slots[slot];
-        const mn = t.max_new[slot];
-        t.max_new[slot] = null;
-        t.giveBack(slot);
-        const want = @min(t.opt.limit, @as(u64, n) + (mn orelse t.opt.limit) + R);
-        const plan = p.take(slot, want) catch |e| return if (e == error.LaneMemory) error.LaneMemory else error.PastLimit;
-        const c = t.env.c;
-        t.pbufs.?.apply(c, plan);
-        for (plan.moves) |m| t.slots[m.seat].kv.bind(c, @as(u64, m.to) * pool_.block, t.slots[m.seat].kv.limit);
-        s.kv.bind(c, @as(u64, plan.run.start) * pool_.block, @intCast(@min(t.opt.limit, pool_.tokensOf(plan.run.blocks))));
-        s.high = 0; // the run reads as zeros past what this request writes
-    }
-
-    /// The slot's run goes back to the pool (the blocks its writes reached are zeroed for the next run).
-    fn giveBack(t: *Target, slot: u32) void {
-        const p = if (t.pool) |*x| x else return;
-        const s = &t.slots[slot];
-        if (p.runs[slot] == null) return;
-        p.give(slot, s.high);
-        s.kv.bind(t.env.c, 0, 0);
-    }
-
-    /// `giveBack` after a failed prompt: every block of the run counts as written.
-    fn giveBackAll(t: *Target, slot: u32) void {
-        const p = if (t.pool) |*x| x else return;
-        const r = p.runs[slot] orelse return;
-        t.slots[slot].high = pool_.tokensOf(r.blocks);
-        t.giveBack(slot);
     }
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
