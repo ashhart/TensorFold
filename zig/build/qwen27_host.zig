@@ -1,6 +1,7 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
+    @import("qwen27_admission.zig").tests(b, test_step);
     const real_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const recording = b.createModule(.{ .root_source_file = b.path("zig/qwen27_quant_metal.zig"), .target = b.graph.host, .imports = &.{.{ .name = "real_metal", .module = real_metal }} });
     const quant_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });

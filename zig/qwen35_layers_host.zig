@@ -168,7 +168,22 @@ const old = struct {
 };
 
 /// A Qwen3.5 target config.json found in a source file: its bytes, text tower and layer count.
-pub const Real = struct { file: []const u8, json: []const u8, tower: std.json.ObjectMap, layers: usize };
+pub const Real = struct { file: []const u8, json: []const u8, tower: std.json.ObjectMap, layers: usize, ordinal: usize = 0 };
+
+/// The five existing fixtures newly admitted by qwen27 Metal's tied-head support.
+pub const TiedMetal = enum { affine_2b, dense_checkpoint, moe_checkpoint, hf_bf16_checkpoint, mixed_moe_checkpoint };
+
+pub fn tiedMetal(r: Real) ?TiedMetal {
+    if (std.mem.eql(u8, r.file, "src/families/qwen3_5/config.zig") and r.ordinal == 0) return .affine_2b;
+    if (std.mem.eql(u8, r.file, "src/families/qwen3_5/weights/checkpoint_test.zig")) return switch (r.ordinal) {
+        0 => .dense_checkpoint,
+        1 => .moe_checkpoint,
+        2 => .hf_bf16_checkpoint,
+        3 => .mixed_moe_checkpoint,
+        else => null,
+    };
+    return null;
+}
 
 /// Every source holding real Qwen3.5 target configs, and how many each holds (whole literals, `++` joined).
 const sources = .{
@@ -190,6 +205,7 @@ pub fn reals(a: std.mem.Allocator) ![]const Real {
     inline for (sources) |s| {
         const before = out.items.len;
         try scan(a, s[0], @embedFile(s[0]), &out);
+        for (out.items[before..], 0..) |*r, i| r.ordinal = i;
         t.expectEqual(@as(usize, s[1]), out.items.len - before) catch |e| {
             std.debug.print("{s}: {d} configs\n", .{ s[0], out.items.len - before });
             return e;
@@ -253,6 +269,7 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
     defer arena.deinit();
     var admitted: usize = 0;
     var relaxed: usize = 0;
+    var tied: [std.enums.values(TiedMetal).len]usize = @splat(0);
     for (try reals(arena.allocator())) |r| {
         const read = Outcome.shared(r.tower, r.layers);
         for (std.enums.values(Backend)) |b| {
@@ -263,12 +280,17 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
             if (now == .pattern) try t.expect(Outcome.same(read, now) and (was == .refused or Outcome.same(was, now)));
             // a config an old rule read reads the same, and no entry point now refuses it for its layer keys
             if (was == .pattern and b != .xpu) try t.expect(Outcome.same(was, read) and !now.byReader());
-            admitted += @intFromBool(now == .pattern);
+            if (b == .metal27 and now == .pattern) {
+                const c = try metal27.parse(t.allocator, r.json, null);
+                try t.expectEqual(tiedMetal(r) != null, c.tied);
+                if (tiedMetal(r)) |row| tied[@backingInt(row)] += 1 else admitted += 1;
+            } else admitted += @intFromBool(now == .pattern);
             relaxed += @intFromBool(now == .pattern and was == .refused);
         }
     }
     try t.expectEqual(@as(usize, 21), admitted); // (config, backend) pairs, with #2046's and LightOnOCR-3's HIP BF16 and #1125's Ornith
     try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
+    try t.expectEqual([_]usize{ 1, 1, 1, 1, 1 }, tied);
 }
 
 /// `base` with `layers` layers (when given), an end id, and the layer keys of one row of the table.
@@ -319,14 +341,18 @@ test "qwen35 layers: #1863's table, the same answer or refusal from every backen
     defer arena.deinit();
     const a = arena.allocator();
     var took: std.EnumArray(Backend, usize) = .initFill(0);
-    for (try bases(a)) |base| for (std.enums.values(Backend)) |b| {
+    var tied_2b: usize = 0;
+    for (try bases(a), 0..) |base, i| for (std.enums.values(Backend)) |b| {
         // the agreed case, layer_types every fourth and an interval of 4: a backend refusing it takes another model
         const probe = entry(b, try variant(a, base, null, 4, false, "4"));
         if (probe == .refused) {
             try t.expect(!probe.byReader());
             continue;
         }
-        took.getPtr(b).* += 1;
+        if (b == .metal27 and i == 0) {
+            try t.expect((try metal27.parse(t.allocator, base, null)).tied);
+            tied_2b += 1;
+        } else took.getPtr(b).* += 1;
         for (table) |row| {
             const got = entry(b, try variant(a, base, null, row.types, row.null_types, row.interval));
             errdefer std.debug.print("{s}, {s}: {any}\n", .{ @tagName(b), row.name, got });
@@ -336,6 +362,8 @@ test "qwen35 layers: #1863's table, the same answer or refusal from every backen
     // the 2B: Metal's 2B engine, HIP and CUDA; the 27B: Metal's 27B engine, HIP, CUDA and XPU
     for (std.enums.values(Backend)) |b| try t.expect(took.get(b) >= 1);
     try t.expectEqual(@as(usize, 7), took.get(.metal27) + took.get(.metal2b) + took.get(.hip) + took.get(.cuda) + took.get(.xpu));
+    try t.expectEqual([_]usize{ 1, 1, 2, 2, 1 }, took.values);
+    try t.expectEqual(@as(usize, 1), tied_2b);
 }
 
 test "qwen35 layers: beside an unset interval, layer_types are read as written; fixed schedules refuse other ones" {

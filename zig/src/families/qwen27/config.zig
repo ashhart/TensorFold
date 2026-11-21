@@ -46,6 +46,8 @@ pub const Config = struct {
     moe_intermediate: usize = 0,
     /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
     renorm: bool = false,
+    /// The head is the embedding when the checkpoint ties them (CUDA and qwen27 Metal agree).
+    tied: bool = false,
 
     pub fn moe(c: Config) bool {
         return c.experts != 0;
@@ -274,7 +276,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
     } else return error.NotQwenDense;
     const experts = if (t.get("num_experts")) |v| try integer(v, true, tower.at("num_experts"), p) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
-    if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
+    const tied = try rules.tied(root, t, .metal27);
     try rules.check(t, .metal27);
     const heads = try required(tower, "num_attention_heads");
     const hidden = try required(tower, "hidden_size");
@@ -304,6 +306,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u
         .eps = @floatCast(try optional(tower, "rms_norm_eps", 1e-6)),
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rp) |r| try optional(r, "rope_theta", try optional(tower, "rope_theta", 10000000)) else try optional(tower, "rope_theta", 10000000),
+        .tied = tied,
     };
     if (routed) {
         c.experts = experts;
