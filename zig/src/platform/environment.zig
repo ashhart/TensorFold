@@ -350,12 +350,6 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
-    .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_GLM_WORLD gives one rank)" },
-    .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_GLM_WORLD gives one rank)" },
-    .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u64, .forms = "a whole rank index from 0 to 4294967295 (unset with TF_NEMOTRON_WORLD gives one rank)" },
-    .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_NEMOTRON_WORLD gives one rank)" },
-    .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_MINIMAX_WORLD gives one rank)" },
-    .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank count, 2 on CUDA (unset with TF_MINIMAX_WORLD gives one rank)" },
 } ++ @import("environment_deepseek.zig").rules(Rule);
 
 pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
