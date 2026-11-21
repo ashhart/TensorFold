@@ -214,3 +214,34 @@ pub const H3 = struct {
         return self.compute(.{ .acc = acc, .order = order }, out, mag);
     }
 };
+
+/// Every H3 kernel, on a device with tensor units: metal_main.zig's registration.
+pub const Suite = struct {
+    a: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    kernels: *std.ArrayList(g.Kernel),
+    list: std.ArrayList(*H3) = .empty,
+
+    pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        if (!s.device.tensorUnits()) return;
+        for (std.enums.values(Which)) |w| {
+            if (only) |o| if (std.mem.indexOf(u8, spec(w).name, o) == null) continue;
+            try s.list.ensureUnusedCapacity(s.a, 1);
+            const x = try s.a.create(H3);
+            errdefer s.a.destroy(x);
+            x.* = try H3.init(s.a, s.device, s.queue, w);
+            errdefer x.deinit();
+            try s.kernels.append(s.a, x.kernel());
+            s.list.appendAssumeCapacity(x);
+        }
+    }
+
+    pub fn deinit(s: *Suite) void {
+        for (s.list.items) |x| {
+            x.deinit();
+            s.a.destroy(x);
+        }
+        s.list.deinit(s.a);
+    }
+};

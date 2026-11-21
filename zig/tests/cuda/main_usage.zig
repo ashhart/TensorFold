@@ -198,4 +198,10 @@ pub const usage =
     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
+    \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
+    \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
+    \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
+    \\  ricursive-dflash2-attn-contract  Ripple's draft attention and top-32 through gates 1-4, controls red; timings
+    \\  ricursive-dflash2-contract Ripple's DFlash2 drafter glue (norms, prep, conv, SiLU) through gates 1-4, controls red
+    \\  ripple-drafted            Ripple drafted by DFlash2: drafted == plain at 1, 2 and 8 streams, admission (synthetic)
 ;

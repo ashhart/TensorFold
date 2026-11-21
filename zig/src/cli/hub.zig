@@ -24,6 +24,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "minimax_m3_vl", .title = "MiniMax-M3.1-Flash" },
     .{ .model_type = "llama", .title = "Llama architecture (Nanbeige4.3-33B)" },
     .{ .model_type = "flint", .title = "Flint" },
+    .{ .model_type = "ricursive", .title = "Ripple-65B (ricursive)" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
     .{ .model_type = "unlimited-ocr", .title = "Unlimited-OCR-2" },
 };
