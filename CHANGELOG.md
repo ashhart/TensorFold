@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: DFlash2's Q4 draft decode fuses its K/V, Q/K/V and gate/up projections where tensor units and the split allow, and batched heads read packed rows, without changing verified tokens; other geometries keep their current paths (#4258). Thanks to @gilby.
+
 - GLM on Metal: DFlash2 decoding skips inactive draft rows and their tap capture, and the tap mean writes into its ring in place, cutting sampling overhead without changing verified tokens (#4257). Thanks to @gilby.
 
 - Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
