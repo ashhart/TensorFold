@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU: Qwen3.8-27B decode attention merges its slices with 16 subgroups a head instead of one, adding them in the same order, so every output byte is unchanged (token hashes equal to main, drafted and plain, bf16 and int8 KV). On an Arc Pro B70 plain decode gains 1.8 to 2.0 % at about 8,000 prompt tokens, 14.7 to 16.0 % at about 30,000 and 39.8 to 42.2 % at 121,022; drafted decode is level. The kernel contract registers it as a bit-equal replacement with two planted controls (#2799).
+
 - drama3: a host test runs the codec's decode and encode schedules over a recording binding and pins their call lists, so a schedule change fails the test without a GPU; the lists are fixtures beside the test and it runs in `test-drama-host` (#2962). Thanks to @jschmied.
 
 - DeepSeek-V4.1 on Metal: `TF_DSV41_CALIB=measure`, off by default, times a draft cost table on the loaded model at start, reports it and prices the draft depth from it, and other values store or read a table; tokens are unchanged, and unset or blank times nothing and keeps the built-in table (#2952, refs #2984). Thanks to @gilby.
