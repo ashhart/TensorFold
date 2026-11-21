@@ -37,7 +37,7 @@ pub fn piece(ptr: *anyopaque, slot: u32, ids: []const u32, start: u64, end: u64,
     if (start != s.tail.end or end <= start or end >= ids.len) return error.NotAChain;
     if (start > s.resumed) t.stats.most_between = @max(t.stats.most_between, t.stats.launches - s.mark);
     // the shorter states `prefill` keeps as the prompt passes them (Target.keepPoints), kept as the pieces pass them
-    for (t.keepPoints(s.hist.items, s.resumed)) |k| if (k > s.tail.end and k <= end) try t.keepAt(s, k);
+    for (t.keepPoints(s).ends) |k| if (k > s.tail.end and k <= end) try t.keepAt(s, k);
     t.pr.encode(t.promptEnv(), &s.kv, &s.tail, s.hist.items, @intCast(end)) catch |e| return t.fail(e);
     t.stats.pieces += 1;
     s.mark = t.stats.launches;
@@ -53,7 +53,7 @@ pub fn finish(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling
         s.filling = false;
         return t.endPrompt(s, s.hit.items, smp, draw);
     }
-    for (t.keepPoints(s.hist.items, s.resumed)) |k| if (k > s.tail.end) try t.keepAt(s, k);
+    for (t.keepPoints(s).ends) |k| if (k > s.tail.end) try t.keepAt(s, k);
     const env = t.promptEnv();
     t.pr.encode(env, &s.kv, &s.tail, s.hist.items, n) catch |e| return t.fail(e);
     t.pr.finish(env, &s.kv, &s.tail) catch |e| return t.fail(e);

@@ -10,6 +10,7 @@ const forward = @import("forward.zig");
 const prompt = @import("prompt.zig");
 const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
+const prompt_marks = @import("prompt_marks.zig");
 const tree_ = @import("tree.zig");
 const steps = @import("prompt_steps.zig");
 const vision = @import("vision.zig");
@@ -24,8 +25,6 @@ const lanes = host.lanes;
 const Config = host.config.Config;
 const Allocator = std.mem.Allocator;
 const R = pipelines.max_rows;
-/// The shortest system part kept on its own for later conversations.
-const min_shared: usize = 256;
 
 /// What the target reads and borrows: the device, kernels, RoPE tables, layer scratch, weights and Engram rows.
 pub const Env = struct {
@@ -50,6 +49,7 @@ pub const Options = struct {
     prompt: prompt.Opts = .{},
     /// bytes of kept prompt states (0: no prompt cache)
     cache_bytes: u64 = 0,
+    cache_prefix: u32 = 0,
     /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
     resident: ?*mtl.resident.Resident = null,
 };
@@ -244,7 +244,7 @@ pub const Target = struct {
         const prompt_ids = s.hist.items; // image positions carry their virtual ids
         if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
         // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
-        for (t.keepPoints(prompt_ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
+        for (t.keepPoints(s).ends) |end| if (end > 0) try t.keepAt(s, end);
         t.pr.run(t.promptEnv(), &s.kv, &s.tail, prompt_ids) catch |e| return t.fail(e);
         return t.endPrompt(s, null, smp, draw);
     }
@@ -333,23 +333,17 @@ pub const Target = struct {
         s.live = true;
         s.whole = true;
         // a thinking prompt is kept short of its <think> instead (keepPoints)
-        if (t.cache.on() and s.resumed < n and t.keepPoints(s.hist.items, s.resumed)[1] == 0) t.cache.save(c, &s.kv, s.hist.items, s.ring, logits) catch {};
+        if (t.cache.on() and s.resumed < n and t.keepPoints(s).thinking == 0) t.cache.save(c, &s.kv, s.hist.items, s.ring, logits) catch {};
         return choice;
     }
 
-    /// Extra kept states (0: none): before the first user turn, and before a thinking prompt's closing <think>.
-    pub fn keepPoints(t: *const Target, ids: []const u32, at: u32) [2]u32 {
-        const c = t.env.c;
-        const n = ids.len;
-        var out: [2]u32 = .{ 0, 0 };
-        if (!t.cache.on()) return out;
-        // a fresh conversation shares the system text and tools, which end where the first user turn starts
-        if (std.mem.indexOfScalar(u32, ids, c.user)) |u| {
-            if (u >= min_shared and u > at) out[0] = @intCast(u);
+    pub fn keepPoints(t: *const Target, s: *const Slot) prompt_marks.Marks {
+        if (!t.cache.on()) return .{};
+        var prefix = t.opt.cache_prefix;
+        if (s.image_rows) |*im| {
+            if ((im.chunkEnd(0, prefix) catch 0) != prefix) prefix = 0;
         }
-        // the next turn renders this turn's <think> as </think>, so it shares the prompt but that tag
-        if (n >= 2 and ids[n - 1] == c.think_open and ids[n - 2] == c.assistant and n - 1 > @max(at, out[0])) out[1] = @intCast(n - 1);
-        return out;
+        return prompt_marks.of(t.env.c, s.hist.items, s.resumed, prefix);
     }
 
     pub fn promptEnv(t: *const Target) prompt.Env {
