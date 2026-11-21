@@ -82,10 +82,10 @@ pub fn on(r: *const Runner, head: forward.Head) bool {
 }
 
 /// The last layer of a pass that keeps no row: k and v into the cache, as the runner's attentionForward writes them.
-pub fn keysForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
+pub fn keysForward(ptr: *anyopaque, e: mtl.ComputeEncoder, attn_block: usize, weights: wts.Attention, f: *Frame, rows: u32) !void {
     const r: *Runner = @ptrCast(@alignCast(ptr));
     const plan = (r.current_attention orelse return error.RoundNotReady).*;
-    const layer = r.attention_index[block];
+    const layer = r.attention_index[attn_block];
     var views: [attn.planning.max_streams]attn.Cache = undefined;
     const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
     try r.bindings[layer].upload(plan, caches);
