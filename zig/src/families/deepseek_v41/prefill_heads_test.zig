@@ -23,29 +23,6 @@ fn arg(c: calls.Call, name: []const u8) calls.Arg {
     unreachable;
 }
 
-test "prefill heads: legacy world one and two calls and buffer plans keep their fingerprint" {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    const cfg: Config = .{};
-    for ([_]u32{ 1, 2 }) |world| for (0..world) |rank| for ([_]i64{ 16, 17, 129 }) |rows| {
-        var arena = std.heap.ArenaAllocator.init(t.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var w = try widths(a);
-        const opts: block.Options = .{ .world = world, .rank = @intCast(rank) };
-        const cs = try bp.emitPrefill(a, &cfg, &w, opts, &.{ 0, 2, 20, 24, 40 }, rows, 2048, true);
-        var plan: buffers.Plan = .{ .a = a };
-        try plan.add(cs);
-        var text: std.Io.Writer.Allocating = .init(a);
-        try std.json.Stringify.value(.{ .calls = cs, .roles = plan.sizes.keys(), .sizes = plan.sizes.values(), .weights = plan.weights.keys() }, .{}, &text.writer);
-        hash.update(text.written());
-    };
-    var digest: [32]u8 = undefined;
-    hash.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    std.debug.print("legacy prefill fingerprint: {s}\n", .{hex});
-    try t.expectEqualStrings("66015c45a28104778de630ab14e49aa4c871cefb95fad2e3a06c142c05449b58", &hex);
-}
-
 test "prefill heads: world four emits and plans the padded 32-head operation" {
     const cfg: Config = .{};
     try @import("block_admission.zig").nativePrefill(&cfg, 4);

@@ -158,9 +158,7 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
             j += 1;
         }
     }
-    const routed = try e.buf("L.routed", .{}, .f32, &.{ n, D });
-    try e.ext("tensorfold_exl3_experts_v1.combine", &.{ y, w6, routed, .{ .i = n }, .{ .i = D }, .{ .i = topk } });
-    // the shared expert (gate / up GEMMs, clamped SiLU, down); TF_DSV41_PF_OVERLAP: a row piece at a time
+    // the shared expert per row piece (PF_OVERLAP); combine_add adds it to the routed sum, never stored
     const k: i64 = if (e.cfg.shared_experts > 0 and n == seg_rows and part.t.role == .buf and std.mem.eql(u8, part.t.role.buf, "L.moe16")) s.pieces() else 1;
     if (k > 1) {
         const sh = try e.fmt("{s}.shared.0", .{pre});
@@ -183,7 +181,11 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
             try s.proj(try e.fmt("{s}.w3", .{sh}), .stored, xr, D, I, ur);
             try e.glue("swiglu", &.{ gr, ur, ar, .{ .f = lim } });
             try s.proj(try e.fmt("{s}.w2", .{sh}), .stored, ar, I, D, yr);
-            try e.glue("moe_sum", &.{ try rowsOf(e, routed, .f32, r[0], m, D), yr, try rowsOf(e, part, .bf16, r[0], m, D) });
+            try e.ext("tensorfold_exl3_experts_v1.combine_add", &.{
+                try rowsOf(e, y, .f32, r[0] * topk, m * topk, D), try rowsOf(e, w6, .f32, r[0], m, topk), yr,
+                try rowsOf(e, part, .bf16, r[0], m, D),           .{ .i = m },                            .{ .i = D },
+                .{ .i = topk },
+            });
             e.n = n;
             try s.sendPiece(part, gath, r[0], m, p, k);
         }
@@ -200,8 +202,12 @@ pub fn moeRows(s: *Seg, L: u32, n: i64, x: Arg, comptime bias: []const u8, part:
         try s.proj(try e.fmt("{s}.w3", .{sh}), .stored, x, D, I, u);
         try e.glue("swiglu", &.{ g, u, act, .{ .f = lim } });
         try s.proj(try e.fmt("{s}.w2", .{sh}), .stored, act, I, D, sy);
-        try e.glue("moe_sum", &.{ routed, sy, part });
-    } else try e.glue("moe_sum", &.{ routed, part });
+        try e.ext("tensorfold_exl3_experts_v1.combine_add", &.{ y, w6, sy, part, .{ .i = n }, .{ .i = D }, .{ .i = topk } });
+    } else {
+        const routed = try e.buf("L.routed", .{}, .f32, &.{ n, D });
+        try e.ext("tensorfold_exl3_experts_v1.combine", &.{ y, w6, routed, .{ .i = n }, .{ .i = D }, .{ .i = topk } });
+        try e.glue("moe_sum", &.{ routed, part });
+    }
 }
 
 /// Engram before the layer's first site (blocks.engram): wkv over the hashed rows (a prefill matmul), the fusion.

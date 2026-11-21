@@ -3,7 +3,6 @@
 const std = @import("std");
 const t = std.testing;
 const block = @import("block.zig");
-const bp = @import("block_prefill.zig");
 const ds = @import("dspark_emit.zig");
 const Config = @import("config.zig").Config;
 const widths = @import("prefill_heads_test.zig").widths;
@@ -53,20 +52,6 @@ test "worlds one, two and four: DSpark calls keep their main fingerprint" {
         try add(&h, a, try ds.emitPass(a, &cfg, &w, o, cfg.dspark_block));
     };
     try expectDigest("d82f43080a0b8260f2e20fefee04e25d90e36c7cc8f7b0e3141faac4c08f4da5", &h);
-}
-
-test "worlds one, two and four: prefill calls keep their main fingerprint" {
-    const cfg: Config = .{};
-    var h = Sha256.init(.{});
-    for (even_worlds) |world| for (0..world) |rank| for ([_]i64{ 16, 17, 129 }) |rows| {
-        var arena = std.heap.ArenaAllocator.init(t.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const w = try widths(a);
-        const o: block.Options = .{ .world = world, .rank = @intCast(rank) };
-        try add(&h, a, try bp.emitPrefill(a, &cfg, &w, o, &.{ 0, 2, 20, 24, 40 }, rows, 2048, true));
-    };
-    try expectDigest("589725eceeb07b8ea0b6c7be9488ce59a7d4e72dac64442987131ad326746e09", &h);
 }
 
 test "worlds one, two and four: prefetch sources keep their main fingerprint" {

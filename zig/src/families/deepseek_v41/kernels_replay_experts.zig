@@ -217,6 +217,11 @@ pub fn expertsExt(o: exl3.Ops, func: []const u8, args: []const Arg, kwargs: []co
         try o.combine(try c.ptr(0), try c.ptr(1), try c.ptr(2), try c.usz(3), try c.usz(4), try c.usz(5));
         return true;
     }
+    if (is(func, "combine_add")) {
+        const c: Call = .{ .args = args, .kwargs = kwargs, .names = &.{ "y", "wts", "sy", "out", "rows", "D", "slots" } };
+        try o.combineAdd(try c.ptr(0), try c.ptr(1), try c.ptr(2), try c.ptr(3), try c.usz(4), try c.usz(5), try c.usz(6));
+        return true;
+    }
     if (is(func, "down_combine")) {
         const c: Call = .{ .args = args, .kwargs = kwargs, .names = &.{ "Z", "pick", "svh_d", "y", "wts", "out", "rows", "P", "D", "SK", "slots", "E" } };
         const out = try c.tensor(5);
