@@ -7,7 +7,6 @@ const HcKeep = batch.HcKeep;
 const dims = wt.dims;
 const wide = wt.wide;
 const streams = wt.streams;
-const slots = wt.slots;
 const vocab = wt.vocab;
 const pss_n = batch.pss_n;
 pub fn head(self: anytype, logits_host: ?[]u8) !void {
@@ -59,8 +58,8 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
                 try self.copy(s.h, s.h + r * wide * 2, wide * 2);
                 try self.copy(s.pss, s.pss + r * pss_n * 4, pss_n * 4);
                 try self.copy(s.inj, s.inj + r * streams * 2, streams * 2);
-                try self.copy(s.y, s.y + r * slots * dims * 4, slots * dims * 4);
-                try self.copy(s.wts, s.wts + r * slots * 4, slots * 4);
+                try self.copy(s.y, s.y + r * s.slots * dims * 4, s.slots * dims * 4);
+                try self.copy(s.wts, s.wts + r * s.slots * 4, s.slots * 4);
                 if (self.pending_f32) try self.copy(s.moe_f32, s.moe_f32 + r * dims * 4, dims * 4);
             }
             if (self.hooks.streams == 0) try self.writeback(0, 1);

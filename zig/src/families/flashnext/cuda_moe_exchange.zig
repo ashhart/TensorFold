@@ -5,7 +5,6 @@ const mtp = @import("cuda_mtp.zig");
 const moe = @import("cuda_batch_moe.zig");
 
 const dims = wt.dims;
-const slots = wt.slots;
 const share = cuda.rank_scatter.share;
 
 /// Rows past any decode round or verify window: `world` and `n` are what both ranks' passes agree on.
@@ -28,7 +27,7 @@ pub fn run(pass: anytype, c: anytype, n: usize) !void {
     const s = pass.s;
     const h = block(n);
     const own = share(n, 2, c.rank);
-    try c.sumBlock(pass.stream, s.y, h * slots * dims);
+    try c.sumBlock(pass.stream, s.y, h * s.slots * dims);
     try moe.sumSlots(pass, own[0], own[1] - own[0]);
     try c.gatherF32(pass.stream, s.moe_f32 + own[0] * dims * 4, s.moe_f32, h * dims);
     pass.pending_f32 = true;

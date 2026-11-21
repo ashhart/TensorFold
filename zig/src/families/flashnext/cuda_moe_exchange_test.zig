@@ -65,7 +65,7 @@ const Fake = struct {
     }
 };
 
-const Bufs = struct { y: u64 = 0x1000_0000, wts: u64 = 0x2000_0000, moe_f32: u64 = 0x3000_0000 };
+const Bufs = struct { y: u64 = 0x1000_0000, wts: u64 = 0x2000_0000, moe_f32: u64 = 0x3000_0000, slots: usize = slots };
 
 const Pass = struct {
     s: *const Bufs,

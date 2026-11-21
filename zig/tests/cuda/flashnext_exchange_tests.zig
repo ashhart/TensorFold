@@ -77,7 +77,7 @@ fn planted(gpu: check.Gpu, c: *Collective, stream: cuda.Stream, rank: usize) !vo
 }
 
 const Kernels = struct { moe_sum: cuda.Function };
-const Bufs = struct { y: u64, wts: u64, moe_f32: u64 };
+const Bufs = struct { y: u64, wts: u64, moe_f32: u64, slots: usize = slots };
 const Pass = struct { s: *const Bufs, k: Kernels, stream: cuda.Stream, pending_f32: bool = false };
 
 /// A writeback's outputs over the pass's rows and the spare one, poisoned so a row no launch writes shows.

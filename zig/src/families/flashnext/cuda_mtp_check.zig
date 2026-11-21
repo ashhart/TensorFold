@@ -99,7 +99,7 @@ fn envF64(name: [:0]const u8, default: f64) f64 {
 pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, model_dir: []const u8, prompts: []const []const u32, count: usize) !bool {
     var e = try prompt.Engine.init(gpa, io, driver, stream, model_dir);
     defer e.deinit();
-    const h = try Head.init(gpa, io, driver, stream, model_dir);
+    const h = try Head.init(gpa, io, driver, stream, model_dir, e.widths);
     defer h.deinit();
     const o: Ops(Tri) = .{ .e = e, .tri = tri, .h = h };
     const depth = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);

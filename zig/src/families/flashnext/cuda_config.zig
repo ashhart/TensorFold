@@ -3,6 +3,7 @@
 const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
+const widths = @import("cuda_widths.zig");
 
 /// One config field and the value the kernels and buffers assume.
 const Want = struct { name: []const u8, value: i64 };
@@ -17,9 +18,7 @@ const shapes = [_]Want{
     .{ .name = "num_key_value_heads", .value = wt.kv_heads },
     .{ .name = "head_dim", .value = wt.head_dim },
     .{ .name = "num_experts", .value = wt.experts_n },
-    .{ .name = "num_experts_per_tok", .value = wt.slots - 1 },
     .{ .name = "moe_intermediate_size", .value = wt.moe_w },
-    .{ .name = "shared_expert_intermediate_size", .value = wt.moe_w },
     .{ .name = "hc_count", .value = wt.streams },
     .{ .name = "hc_lowrank", .value = wt.low },
     .{ .name = "linear_num_key_heads", .value = gdn.nk },
@@ -97,16 +96,24 @@ pub fn mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u
     if (int(q, "bits") != 4) return "quantization.bits";
     if (int(q, "group_size") != 32) return "quantization.group_size";
     if (q.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return "quantization.mode";
-    return geometry(text);
+    if (geometry(text)) |field| return field;
+    // the MLX path's experts and captured kernels route top-10 with a 640-wide shared expert only
+    return if (widthsOf(text).widths.isDefault()) null else "num_experts_per_tok";
+}
+
+/// The routing and shared widths `text` names: a supported shape, or the field whose value has none.
+pub fn widthsOf(text: std.json.ObjectMap) widths.Selected {
+    return widths.select(int(text, "num_experts_per_tok"), int(text, "shared_expert_intermediate_size"), int(text, learned_key) orelse 0);
 }
 
 fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
     const learned = int(text, learned_key) orelse 0;
     if (learned < 0 or learned > 128 or @mod(learned, 32) != 0) return learned_key;
-    for (shapes) |w| {
-        const want = if (std.mem.eql(u8, w.name, "shared_expert_intermediate_size")) w.value + learned else w.value;
-        if (int(text, w.name) != want) return w.name;
+    for (shapes) |w| if (int(text, w.name) != w.value) return w.name;
+    switch (widthsOf(text)) {
+        .field => |field| return field,
+        .widths => {},
     }
     return semantics(text);
 }
@@ -200,32 +207,67 @@ fn rope(text: std.json.ObjectMap) ?[]const u8 {
 
 /// Reads `dir`/config.json; error.UnsupportedCheckpoint names the field in a log line when one differs.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
-    _ = try mode(gpa, io, dir);
+    _ = try read(gpa, io, dir);
 }
 
 pub fn mode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Mode {
-    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
-    defer gpa.free(path);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
-    defer gpa.free(bytes);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+    return (try read(gpa, io, dir)).mode;
+}
+
+/// What a checked config.json selects: the quantization's mode and the routing and shared widths.
+pub const Checked = struct { mode: Mode, widths: widths.Widths };
+
+pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checked {
+    const parsed = try parse(gpa, io, dir);
     defer parsed.deinit();
-    if (parsed.value != .object) return error.UnsupportedCheckpoint;
     const root = parsed.value.object;
-    const text = if (root.get("text_config")) |v| (if (v == .object) v.object else root) else root;
+    const text = textOf(root);
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
     const selected: Mode = if (quant != null) .affine else .modelopt;
     var field = if (selected == .affine) mismatch(text, quant) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {
         field = "tie_word_embeddings";
     };
-    std.log.err("flashnext: config.json's {s} differs from the supported Flash Next CUDA layout", .{field orelse return selected});
+    if (field == null) return .{ .mode = selected, .widths = widthsOf(text).widths };
+    std.log.err("flashnext: config.json's {s} differs from the supported Flash Next CUDA layout", .{field.?});
     return error.UnsupportedCheckpoint;
+}
+
+/// The routing and shared widths `dir`/config.json selects; a width outside the supported list is refused by name.
+pub fn widthsIn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !widths.Widths {
+    const parsed = try parse(gpa, io, dir);
+    defer parsed.deinit();
+    switch (widthsOf(textOf(parsed.value.object))) {
+        .widths => |w| return w,
+        .field => |field| {
+            std.log.err("flashnext: config.json's {s} differs from the supported Flash Next CUDA layout", .{field});
+            return error.UnsupportedCheckpoint;
+        },
+    }
+}
+
+fn parse(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.Parsed(std.json.Value) {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
+    defer gpa.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+    if (parsed.value != .object) {
+        parsed.deinit();
+        return error.UnsupportedCheckpoint;
+    }
+    return parsed;
+}
+
+fn textOf(root: std.json.ObjectMap) std.json.ObjectMap {
+    return if (root.get("text_config")) |v| (if (v == .object) v.object else root) else root;
 }
 
 /// The served config's text fields, as the checked-in checkpoint has them (a test's base to change one at a time).
 fn served(gpa: std.mem.Allocator, text: *std.json.ObjectMap, rope_params: *std.json.ObjectMap, mtp: *std.json.ObjectMap, kinds: *std.json.Array, ple: *std.json.Array) !void {
     for (shapes) |w| try text.put(gpa, w.name, .{ .integer = w.value });
+    try text.put(gpa, "num_experts_per_tok", .{ .integer = @intCast(widths.default.top_k) });
+    try text.put(gpa, "shared_expert_intermediate_size", .{ .integer = @intCast(widths.default.shared) });
     try text.put(gpa, "rms_norm_eps", .{ .float = 1e-06 });
     try text.put(gpa, "output_gate_type", .{ .string = "sigmoid" });
     try text.put(gpa, "hidden_act", .{ .string = "silu" });
@@ -266,6 +308,31 @@ test "the served shapes pass and a 6-bit checkpoint or another width is named" {
     try text.put(gpa, "hidden_size", .{ .integer = 4096 });
     try std.testing.expectEqualStrings("hidden_size", mismatch(text, quant).?);
     try std.testing.expectEqualStrings("quantization", mismatch(text, null).?);
+}
+
+test "a top-5 config with a 1280-wide shared expert selects that shape, and the MLX path refuses it by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var text: std.json.ObjectMap = .empty;
+    var rope_params: std.json.ObjectMap = .empty;
+    var mtp: std.json.ObjectMap = .empty;
+    var kinds: std.json.Array = .init(gpa);
+    var ple: std.json.Array = .init(gpa);
+    try served(gpa, &text, &rope_params, &mtp, &kinds, &ple);
+    try std.testing.expectEqual(widths.default, widthsOf(text).widths);
+    try text.put(gpa, "num_experts_per_tok", .{ .integer = 5 });
+    try text.put(gpa, "shared_expert_intermediate_size", .{ .integer = 1280 });
+    try std.testing.expectEqual(@as(?[]const u8, null), geometry(text));
+    try std.testing.expectEqual(widths.Widths{ .top_k = 5, .shared = 1280 }, widthsOf(text).widths);
+    var quant: std.json.ObjectMap = .empty;
+    try quant.put(gpa, "bits", .{ .integer = 4 });
+    try quant.put(gpa, "group_size", .{ .integer = 32 });
+    try std.testing.expectEqualStrings("num_experts_per_tok", mismatch(text, quant).?);
+    try text.put(gpa, "shared_expert_intermediate_size", .{ .integer = 640 });
+    try std.testing.expectEqualStrings("shared_expert_intermediate_size", geometry(text).?);
+    try text.put(gpa, "num_experts_per_tok", .{ .integer = 8 });
+    try std.testing.expectEqualStrings("num_experts_per_tok", geometry(text).?);
 }
 
 test "a taught folder's wider shared expert passes with its pocket's count, and not without it" {
@@ -477,4 +544,8 @@ fn addMxfp8(a: std.mem.Allocator, entries: *std.json.ObjectMap, layer: usize, pr
     try p.put(a, "group_size", .{ .integer = 32 });
     const name = try std.fmt.allocPrint(a, "model.language_model.layers.{d}.{s}.{s}", .{ layer, prefix, part });
     try entries.put(a, name, .{ .object = p });
+}
+
+test {
+    _ = @import("cuda_widths.zig");
 }
