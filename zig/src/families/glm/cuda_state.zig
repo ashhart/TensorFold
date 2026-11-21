@@ -537,7 +537,6 @@ pub const State = struct {
         try st.setPos(stream, 0);
         try st.setMtpLen(stream, 0);
     }
-
     /// Host side of a state just copied back (a kept prompt state): position, MTP rows, KDA parity, nothing pending.
     pub fn restoreHost(st: *State, stream: cuda.Stream, pos: usize, mtp_len: usize, cur: []const u1, bases: [2]usize) !void {
         @memcpy(st.cur, cur);
@@ -547,32 +546,27 @@ pub const State = struct {
         try st.setPos(stream, pos);
         try st.setMtpLen(stream, mtp_len);
     }
-
     /// State.set_mtp_len: rows in the MTP layer's caches (the next MTP step writes from here).
     pub fn setMtpLen(st: *State, stream: cuda.Stream, n: usize) !void {
         st.mtp_len = n;
         const v: i32 = @intCast(n);
         try st.arena.buf.d.check(st.arena.buf.d.api.cuMemsetD32Async(st.mtp_pos_dev, @bitCast(v), 1, stream.handle), "cuMemsetD32Async");
     }
-
     pub fn setPos(st: *State, stream: cuda.Stream, pos: usize) !void {
         st.pos = pos;
         const v: i32 = @intCast(pos);
         try st.arena.buf.d.check(st.arena.buf.d.api.cuMemsetD32Async(st.pos_dev, @bitCast(v), 1, stream.handle), "cuMemsetD32Async");
     }
-
     /// Before a pass of `rows` rows at pos: within capacity, and the index rings holding them (rebased if not).
     pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
         if (st.pos + rows > st.capacity) return error.PastCapacity;
         if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
     }
-
     /// Before the MTP head's pass of `n` rows at mtp_len, likewise for its caches.
     pub fn readyMtp(st: *State, stream: cuda.Stream, n: usize) !void {
         if (st.mtp_len + n > st.capacity) return error.PastCapacity;
         if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
     }
-
     /// Rebase at the earliest pool a rollback may revisit; MTP retains a whole verify window before its cursor.
     fn rebase(st: *State, stream: cuda.Stream, mtp: bool) !void {
         const at = if (mtp) st.mtp_len else st.pos;
@@ -588,7 +582,6 @@ pub const State = struct {
         };
         if (mtp) st.setBases(st.base, nb) else st.setBases(nb, st.mtp_base);
     }
-
     /// The caches' ik and ig pointers for ring bases `main` and `mtp` (position p's row at pointer + p rows).
     fn setBases(st: *State, main: usize, mtp: usize) void {
         st.base = main;
@@ -601,7 +594,6 @@ pub const State = struct {
         st.mtp_caches.ik = st.rings[2 * j] -% mtp * st.ring_row;
         st.mtp_caches.ig = st.rings[2 * j + 1] -% mtp * st.ring_row;
     }
-
     pub fn recAt(st: *const State, copy: u1, li: usize) u64 {
         return st.rec + (@as(usize, copy) * st.kda_layers + li) * st.rec_layer;
     }
