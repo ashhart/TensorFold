@@ -377,7 +377,6 @@ pub const Engine = struct {
         @memcpy(e.taps[0..taps.len], taps);
         e.n_taps = taps.len;
     }
-
     /// The next `bytes` of the arena, 256-byte aligned.
     pub fn alloc(e: *Engine, bytes: usize) !u64 {
         const at = aligned(e.arena_at);
@@ -385,15 +384,12 @@ pub const Engine = struct {
         e.arena_at = at + bytes;
         return e.arena.ptr + at;
     }
-
     pub fn scratch(e: *Engine, rows: usize, mode: scratch_memory.Mode) !usize {
         return scratch_memory.scratch(e, rows, mode);
     }
-
     pub fn ensureScratch(e: *Engine, rows: usize) !void {
         return scratch_memory.ensureScratch(e, rows);
     }
-
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });
         var a: cuda.Args = .{};
@@ -417,7 +413,6 @@ pub const Engine = struct {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.attn);
         return @import("cuda_prompt.zig").runFrom(e, layer, from, end);
     }
-
     /// The projections: the row tiles, the prompt GEMM and the grouped form, in their own file.
     pub const proj = @import("cuda_projection.zig").proj;
     pub const projSums = @import("cuda_projection.zig").projSums;
@@ -436,7 +431,6 @@ pub const Engine = struct {
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
-
     /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
     fn argmax(e: *Engine, first: usize, n: usize, toks: u64) !void {
         if (n == 0) return;
@@ -446,12 +440,10 @@ pub const Engine = struct {
         try e.run(e.fns.argmax_slices, .{ slices, n, 1 }, .{ 256, 1, 1 }, .{ e.logits + first * e.g.vocab * 2, @as(c_int, @intCast(e.g.vocab)), pv, pi });
         try e.run(e.fns.argmax_merge, .{ n, 1, 1 }, .{ 32, 1, 1 }, .{ pv, pi, @as(c_int, @intCast(slices)), toks + first * 4 });
     }
-
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.norm);
         try e.runPdl(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
-
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
@@ -475,7 +467,6 @@ pub const Engine = struct {
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
         for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
     }
-
     /// A window's staged segment: one-row windows that skip their rollback copy read no `before`.
     pub fn stagedSeg(c: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize, undo: bool) Seg {
         var sg = c.fold(c.seg(e, len, row0, rows));
