@@ -5,7 +5,7 @@ const std = @import("std");
 pub const Phase = enum { prepare, encode, wait, choose, other, round, commit_done, gpu, gap, seam };
 const nphase = std.enums.values(Phase).len;
 /// The drafter's passes: host wall time of each command buffer, its GPU span, and a launch's `finish`.
-pub const Event = enum { ingest_wall, ingest_gpu, propose_wall, propose_gpu, finish };
+pub const Event = enum { ingest_wall, ingest_gpu, propose_wall, propose_gpu, finish, chain_wall, chain_gpu };
 const nevent = std.enums.values(Event).len;
 
 /// Command buffers a round can hold (forward.zig cuts a round into about five).

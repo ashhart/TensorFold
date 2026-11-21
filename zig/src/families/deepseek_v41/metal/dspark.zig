@@ -231,7 +231,7 @@ pub const Pass = struct {
         x.undo.forget(slot);
     }
 
-    /// The command buffer of one encoder of `kind`: `f` encodes, then it is committed and waited for.
+    /// Timing attached to a queued command buffer until its existing wait.
     const Timing = struct { start: u64, events: [2]round_prof.Event };
 
     /// The buffer is committed and kept for `settle` (the queue runs buffers in order).
@@ -281,6 +281,7 @@ pub const Pass = struct {
             }
             cb.release();
             q.* = null;
+            tm.* = null;
         };
         if (failed) return error.CommandBufferFailed;
     }
@@ -421,6 +422,8 @@ pub const Pass = struct {
 
     /// Candidates and the Markov chain over a launch's head outputs, each ask's results into `out` (its order).
     pub fn finish(x: *Pass, l: *const Launch, out: []Proposal) !void {
+        const start = if (x.prof) |p| p.clock() else 0;
+        defer if (x.prof) |p| p.event(.finish, p.clock() -| start);
         const n: usize = l.n;
         const B: usize = x.c.dspark_block;
         const k: usize = @min(x.opt.candidates, x.c.vocab);
@@ -505,9 +508,7 @@ pub const Pass = struct {
             };
             try x.queue1(job, .{ .x = x, .l = &l }, .concurrent, .{ .propose_wall, .propose_gpu });
             try x.settle();
-            const t0 = if (x.prof) |q| q.clock() else 0;
             try x.finish(&l, out[at..][0..m]);
-            if (x.prof) |q| q.event(.finish, q.clock() -| t0);
         }
     }
 
