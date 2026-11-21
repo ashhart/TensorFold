@@ -1,9 +1,10 @@
-//! Inkling 2 Mini routed W4A4 and W8A8. Borrow the original checkpoint bytes, no expanded or repacked weights.
-//! Scratch is reused by the serial encoder; weights and all borrowed arguments live until command completion.
+//! Inkling 2 Mini routed experts: original packed weights decoded to BF16 in registers.
+//! Only the NVFP4 per-expert factors and BF16 intermediates are owned by the Store.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const ck = @import("../../core/checkpoint_metal.zig");
+const bf16 = @import("bf16_round");
 const config = @import("config.zig");
 const Precision = @import("plan.zig").Precision;
 pub const View = @import("../../core/exl3_projection.zig").View;
@@ -15,7 +16,7 @@ const max_experts = 128;
 const max_topk = 8;
 const dot_rows = 4 * (threads / simd_width);
 
-const Kernel = enum { quant_nvfp4, quant_mxfp8, gate_up_nvfp4, gate_up_mxfp8, down_nvfp4, down_mxfp8, combine };
+const Kernel = enum { gate_up_nvfp4, gate_up_mxfp8, down_nvfp4, down_mxfp8, combine };
 pub const symbols = blk: {
     const names = @typeInfo(Kernel).@"enum".field_names;
     var result: [names.len][:0]const u8 = undefined;
@@ -23,7 +24,6 @@ pub const symbols = blk: {
     break :blk result;
 };
 
-const QuantArgs = extern struct { rows: u32, k: u32 };
 const DotArgs = extern struct {
     pairs: u32,
     src_div: u32,
@@ -37,59 +37,47 @@ const DotArgs = extern struct {
 const CombineArgs = extern struct { rows: u32, topk: u32, hidden: u32, experts: u32 };
 
 comptime {
-    std.debug.assert(@sizeOf(QuantArgs) == 8 and @sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16);
+    std.debug.assert(@sizeOf(DotArgs) == 32 and @sizeOf(CombineArgs) == 16);
 }
 
 pub const LoadOptions = struct {
     /// Contract controls compile substitutions through the same Store and dispatches.
     source: []const u8 = sources.inkling2_experts,
-    /// Device probes preserve intermediates for inspection; inference reuses them.
+    /// Device probes read the BF16 intermediates; inference keeps them device-private.
     shared_scratch: bool = false,
 };
 
 const Matrix = struct {
     weight: View,
     scales: View,
-    amax: View,
-    denominator: View,
+    factors: View,
 
-    fn load(cp: *const ck.Checkpoint, i: usize, comptime name: []const u8, prec: Precision, e: u32, n: u32, k: u32) !Matrix {
+    fn load(cp: *const ck.Checkpoint, i: usize, comptime name: []const u8, prec: Precision, e: u32, n: u32, k: u32, factor_view: ?View) !Matrix {
         const nv = prec == .nvfp4;
         const weight = try checked(try tensor(cp, i, name ++ "_weight"), if (nv) .u8 else .f8_e4m3,
             &.{ e, n, if (nv) k / 2 else k });
         const scales = try checked(try tensor(cp, i, name ++ "_weight_scale"), if (nv) .f8_e4m3 else .u8,
             &.{ e, n, k / if (nv) @as(u32, 16) else 32 });
-        // MXFP8 kernels ignore these arguments; bind a valid existing view without allocating dummy buffers.
-        const amax = if (nv) try checked(try tensor(cp, i, name ++ "_weight_amax"), .f32, &.{e}) else weight;
-        const denom_t = if (nv) try tensor(cp, i, name ++ "_weight_outer_scale_denominator") else null;
-        const denom = if (denom_t) |t| try checked(t, .f32, &.{1}) else weight;
-        if (denom_t) |t| {
-            const d = t.host(f32)[0];
-            if (!std.math.isFinite(d) or d <= 0 or !std.math.isFinite(d * 1536.0)) return error.ExpertScale;
+        if (factor_view) |v| {
+            const amax = try tensor(cp, i, name ++ "_weight_amax");
+            const denominator = try tensor(cp, i, name ++ "_weight_outer_scale_denominator");
+            _ = try checked(amax, .f32, &.{e});
+            _ = try checked(denominator, .f32, &.{1});
+            // Transformers casts both checkpoint tensors on materialization, then widens them for FP32 division.
+            const d = bf16.round32(denominator.host(f32)[0]);
+            if (!std.math.isFinite(d) or d <= 0) return error.ExpertScale;
+            const factors: [*]f32 = @ptrCast(@alignCast(v.buffer.contents() + v.offset));
+            for (amax.host(f32), factors[0..e]) |a, *f| f.* = bf16.round32(a) / d;
         }
-        return .{ .weight = weight, .scales = scales, .amax = amax, .denominator = denom };
+        // MXFP8 never reads slot 2; bind an existing view instead of allocating a dummy buffer.
+        return .{ .weight = weight, .scales = scales, .factors = factor_view orelse weight };
     }
 };
 
 const Layer = struct { precision: Precision, gate_up: Matrix, down: Matrix };
 
-const QuantRegion = struct {
-    values: usize,
-    scales: usize,
-    amax: usize,
-
-    fn reserve(at: *usize, elements: usize, rows: usize, has_nv: bool, has_mx: bool) QuantRegion {
-        return .{
-            .values = Scratch.reserve(at, if (has_mx) elements else elements / 2),
-            .scales = Scratch.reserve(at, elements / (if (has_nv) @as(usize, 16) else 32)),
-            .amax = Scratch.reserve(at, rows * @sizeOf(f32)),
-        };
-    }
-};
-
 const Scratch = struct {
     buffer: mtl.Buffer,
-    quants: [2]QuantRegion,
     stage: usize,
     down: usize,
 
@@ -99,18 +87,13 @@ const Scratch = struct {
         return off;
     }
 
-    fn init(device: mtl.Device, rows: u32, pairs: u32, hidden: usize, inter: usize, has_nv: bool, has_mx: bool, shared: bool) !Scratch {
+    fn init(device: mtl.Device, pairs: u32, hidden: usize, inter: usize, shared: bool) !Scratch {
         var bytes: usize = 0;
-        const quant = QuantRegion.reserve(&bytes, @max(rows * hidden, pairs * inter), pairs, has_nv, has_mx);
-        const quants = if (!shared) [2]QuantRegion{ quant, quant } else .{
-            quant, QuantRegion.reserve(&bytes, pairs * inter, pairs, has_nv, has_mx),
-        };
-        const stage = reserve(&bytes, pairs * @max(hidden, inter) * @sizeOf(u16));
-        const down = if (shared) reserve(&bytes, pairs * hidden * @sizeOf(u16)) else stage;
+        const stage = reserve(&bytes, pairs * inter * @sizeOf(u16));
+        const down = reserve(&bytes, pairs * hidden * @sizeOf(u16));
         if (bytes > device.maxBufferLength()) return error.ExpertScratchTooLarge;
         return .{
             .buffer = try device.buffer(bytes, if (shared) mtl.ResourceOptions.shared else mtl.ResourceOptions.private),
-            .quants = quants,
             .stage = stage,
             .down = down,
         };
@@ -126,6 +109,7 @@ pub const Store = struct {
     layers: []const Layer,
     pipes: [symbols.len]mtl.Pipeline,
     scratch: Scratch,
+    factor_buffer: ?mtl.Buffer,
     hidden: u32,
     inter: u32,
     experts: u32,
@@ -150,20 +134,24 @@ pub const Store = struct {
         const pairs = try std.math.mul(u32, max_rows, t.topk);
         const layers = try gpa.alloc(Layer, t.layers);
         errdefer gpa.free(layers);
-        var has_nv = false;
-        var has_mx = false;
+        const factor_stride = std.mem.alignForward(usize, @as(usize, t.experts) * @sizeOf(f32), ck.alignment);
+        var factor_buffer: ?mtl.Buffer = null;
+        errdefer if (factor_buffer) |b| b.deinit();
         for (layers, 0..) |*layer, i| {
             const precision: Precision = switch ((try tensor(cp, i, "w13_weight")).dtype) {
                 .u8 => .nvfp4,
                 .f8_e4m3 => .mxfp8,
                 else => return error.ExpertFormat,
             };
-            has_nv = has_nv or precision == .nvfp4;
-            has_mx = has_mx or precision == .mxfp8;
+            if (precision == .nvfp4 and factor_buffer == null)
+                factor_buffer = try d.buffer(layers.len * 2 * factor_stride, mtl.ResourceOptions.shared);
+            const factors = if (precision == .nvfp4) factor_buffer else null;
             layer.* = .{
                 .precision = precision,
-                .gate_up = try Matrix.load(cp, i, "w13", precision, t.experts, 2 * t.expert_inter, t.hidden),
-                .down = try Matrix.load(cp, i, "w2", precision, t.experts, t.hidden, t.expert_inter),
+                .gate_up = try Matrix.load(cp, i, "w13", precision, t.experts, 2 * t.expert_inter, t.hidden,
+                    if (factors) |b| .{ .buffer = b, .offset = 2 * i * factor_stride } else null),
+                .down = try Matrix.load(cp, i, "w2", precision, t.experts, t.hidden, t.expert_inter,
+                    if (factors) |b| .{ .buffer = b, .offset = (2 * i + 1) * factor_stride } else null),
             };
         }
         var compile = mtl.CompileOptions.mlx();
@@ -178,12 +166,13 @@ pub const Store = struct {
             loaded += 1;
             if (p.maxThreads() < threads or p.simdWidth() != simd_width) return error.ExpertLaunchLimit;
         }
-        const scratch = try Scratch.init(d, max_rows, pairs, t.hidden, t.expert_inter, has_nv, has_mx, options.shared_scratch);
+        const scratch = try Scratch.init(d, pairs, t.hidden, t.expert_inter, options.shared_scratch);
         return .{
             .allocator = gpa,
             .layers = layers,
             .pipes = pipes,
             .scratch = scratch,
+            .factor_buffer = factor_buffer,
             .hidden = t.hidden,
             .inter = t.expert_inter,
             .experts = t.experts,
@@ -198,16 +187,23 @@ pub const Store = struct {
         return s.scratch.buffer.length();
     }
 
-    /// The checkpoint owner manages its shard residency. Only scratch belongs to the Store.
+    /// The checkpoint owner manages shard residency; the Store owns scratch and NVFP4 factors.
     pub fn setResident(s: *Store, hook: ?mtl.ResidencySet.Follow) void {
-        if (s.follow) |f| f.leave(f.ctx, s.scratch.buffer);
+        if (s.follow) |f| {
+            f.leave(f.ctx, s.scratch.buffer);
+            if (s.factor_buffer) |b| f.leave(f.ctx, b);
+        }
         s.follow = hook;
-        if (hook) |f| f.join(f.ctx, s.scratch.buffer);
+        if (hook) |f| {
+            f.join(f.ctx, s.scratch.buffer);
+            if (s.factor_buffer) |b| f.join(f.ctx, b);
+        }
     }
 
     pub fn deinit(s: *Store) void {
         s.setResident(null);
         s.scratch.buffer.deinit();
+        if (s.factor_buffer) |b| b.deinit();
         for (s.pipes) |p| p.deinit();
         s.allocator.free(s.layers);
     }
@@ -216,22 +212,12 @@ pub const Store = struct {
         return s.pipes[@intFromEnum(k)];
     }
 
-    fn quant(s: *const Store, e: mtl.ComputeEncoder, prec: Precision, stage: usize, src: View, rows: u32, k: u32) void {
-        const b = s.scratch;
-        const q = b.quants[stage];
-        e.setPipeline(s.pipe(if (prec == .nvfp4) .quant_nvfp4 else .quant_mxfp8));
-        bind(e, &.{ src, b.at(q.values), b.at(q.scales), b.at(q.amax) });
-        e.setValue(QuantArgs{ .rows = rows, .k = k }, 4);
-        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(threads, 1, 1));
-    }
-
-    fn dot(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, ids: View, weights: View, pairs: u32) void {
+    fn dot(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, x: View, ids: View, pairs: u32) void {
         const nv = layer.precision == .nvfp4;
         const m = if (gate_up) &layer.gate_up else &layer.down;
         const b = s.scratch;
-        const q = b.quants[if (gate_up) 0 else 1];
         e.setPipeline(s.pipe(if (gate_up) (if (nv) .gate_up_nvfp4 else .gate_up_mxfp8) else (if (nv) .down_nvfp4 else .down_mxfp8)));
-        bind(e, &.{ m.weight, m.scales, m.amax, m.denominator, b.at(q.values), b.at(q.scales), b.at(q.amax), ids, weights, b.at(if (gate_up) b.stage else b.down) });
+        bind(e, &.{ m.weight, m.scales, m.factors, x, ids, b.at(if (gate_up) b.stage else b.down) });
         const out_width = if (gate_up) s.inter else s.hidden;
         e.setValue(DotArgs{
             .pairs = pairs,
@@ -242,7 +228,7 @@ pub const Store = struct {
             .out_width = out_width,
             .gate_cap = s.gate_cap,
             .up_cap = s.up_cap,
-        }, 10);
+        }, 6);
         e.dispatchGroups(mtl.Size.of(std.math.divCeil(u32, out_width, if (gate_up) dot_rows / 2 else dot_rows) catch unreachable, pairs, 1), mtl.Size.of(threads, 1, 1));
     }
 
@@ -260,17 +246,13 @@ pub const Store = struct {
         if (overlap(out, row_bytes, x, row_bytes) or overlap(out, row_bytes, ids, route_bytes) or
             overlap(out, row_bytes, weights, route_bytes)) return error.ExpertAliasing;
         const layer = &s.layers[physical_layer];
-        s.quant(e, layer.precision, 0, x, rows, s.hidden);
+        s.dot(e, layer, true, x, ids, pairs);
         e.barrier();
-        s.dot(e, layer, true, ids, weights, pairs);
-        e.barrier();
-        s.quant(e, layer.precision, 1, s.scratch.at(s.scratch.stage), pairs, s.inter);
-        e.barrier();
-        s.dot(e, layer, false, ids, weights, pairs);
+        s.dot(e, layer, false, s.scratch.at(s.scratch.stage), ids, pairs);
         e.barrier();
         e.setPipeline(s.pipe(.combine));
-        bind(e, &.{ s.scratch.at(s.scratch.down), out });
-        e.setValue(CombineArgs{ .rows = rows, .topk = s.topk, .hidden = s.hidden, .experts = s.experts }, 2);
+        bind(e, &.{ s.scratch.at(s.scratch.down), ids, weights, out });
+        e.setValue(CombineArgs{ .rows = rows, .topk = s.topk, .hidden = s.hidden, .experts = s.experts }, 4);
         e.dispatchThreads(mtl.Size.of(s.hidden, rows, 1), mtl.Size.of(threads, 1, 1));
     }
 

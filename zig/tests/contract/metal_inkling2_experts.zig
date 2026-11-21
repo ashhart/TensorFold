@@ -1,6 +1,5 @@
-//! Device contracts for both original Inkling 2 Mini expert formats through the Store used by the graph.
-//! Check both quantizers' codes, scales and row maxima, gamma-weighted BF16 SwiGLU, each BF16 down row,
-//! and the final FP32 route-slot reduction. The sparse fixture has the real projection widths and top-k.
+//! Output-only Metal contracts for the original Mini packed experts, through the model's Store.
+//! The independent scalar reference models the BF16 nodes; split dispatches check the same bytes at offset views.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -15,28 +14,16 @@ const c = u.c;
 const g = u.g;
 const Format = math.Format;
 const topk = fixture.topk;
-const max_k = 2304;
+const Range = math.Range;
 
-// rows, intermediate output width, hidden input width. K-group tails cross the 32-lane accumulation tile.
+// The actual Mini projection widths, with single-token and prompt dispatches.
 const served = [_]c.Shape{
-    .{ .rows = 8, .n = 1152, .k = 2304 },
-    .{ .rows = 1, .n = 1152, .k = 2304 },
-    .{ .rows = 1, .n = 32, .k = 64 },
-    .{ .rows = 3, .n = 544, .k = 1056 },
-    .{ .rows = 17, .n = 1152, .k = 2304 },
+    .{ .rows = 8, .n = fixture.inter, .k = fixture.hidden },
+    .{ .rows = 1, .n = fixture.inter, .k = fixture.hidden },
+    .{ .rows = 17, .n = fixture.inter, .k = fixture.hidden },
 };
 
-const rule = "NaN or infinity in an activation poisons its active rows; invalid routes are zero; UE8M0 byte 255 is NaN";
-
-const Quantized = struct {
-    values: [max_k]u8 = undefined,
-    scales: [max_k / 16]u8 = undefined,
-    amax: f64 = undefined,
-
-    fn quant(q: *Quantized, format: Format, x: []const u16) void {
-        q.amax = math.quant(format, x, q.values[0..x.len], q.scales[0 .. x.len / format.block()]);
-    }
-};
+const rule = "dense zero weights propagate nonfinite inputs; a nonfinite active route poisons the sum; inactive slots are ignored";
 
 fn round(v: f64, acc: c.Accum) f64 {
     return switch (acc) {
@@ -86,6 +73,7 @@ const Probe = struct {
     }
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        if (shape.n != fixture.inter or shape.k != fixture.hidden) return false;
         if (p.store) |*s| s.deinit();
         p.store = null;
         const a = u.reset(&p.arena, &p.rig);
@@ -105,7 +93,6 @@ const Probe = struct {
         const cfg = fixture.configuration(shape);
         p.store = try Store.loadWith(p.rig.a, p.rig.device, &cp, &cfg, @intCast(shape.rows), .{
             .source = p.source orelse sources.inkling2_experts,
-            .shared_scratch = true,
         });
         return true;
     }
@@ -116,49 +103,82 @@ const Probe = struct {
 
     pub fn run(p: *Probe) !void {
         const s = &p.store.?;
-        @memset(s.scratch.buffer.contents()[0..s.scratchBytes()], 0xff);
         @memset(p.rig.bytes(p.out, p.count() * 2), 0xff);
         try s.run(p.rig.queue, 0, u.view(p.input), u.view(p.route_ids), u.view(p.route_weights), u.view(p.out), @intCast(p.shape.rows));
     }
 
-    fn dot(p: *const Probe, q: *const Quantized, gate_up: bool, index: usize, expert: usize, acc: c.Accum, order: g.Order) f64 {
-        const f = p.format;
-        const block = f.block();
-        var buf: [4]fixture.Index = undefined;
-        const support = fixture.support(f, p.fill, gate_up, index, expert, if (gate_up) p.shape.k else p.shape.n, &buf);
-        var terms: [4]f64 = undefined;
-        for (support, 0..) |term, i| {
-            terms[i] = math.dotTerm(f, q.values[term.at], q.scales[term.at / block], term.code, term.scale);
+    fn factor(p: *const Probe, gate_up: bool, expert: usize) f64 {
+        return if (p.format == .nvfp4)
+            math.factor(fixture.wAmax(p.fill, gate_up, expert), fixture.denominator(gate_up))
+        else
+            1;
+    }
+
+    fn projectPair(p: *const Probe, x: []const u16, col: usize, expert: usize, outer: f64, band: bool) Range {
+        var proj: [2]f64 = undefined;
+        for (&proj, 0..) |*dst, i| {
+            var taps: [4]fixture.Index = undefined;
+            const terms = fixture.support(p.format, p.fill, true, 2 * col + i, expert, x.len, &taps);
+            var dot: f64 = 0;
+            for (terms) |term| dot += u.val(x[term.at]) * math.weight(p.format, term.code, term.scale, outer);
+            dst.* = u.bf(dot);
         }
-        const raw = if (support.len == 1) terms[0] else sumStress(terms, acc, order);
-        return math.dotOutput(f, raw, q.amax, fixture.wAmax(expert), fixture.den);
+        return if (band)
+            math.activation(proj[0], proj[1], fixture.gate_cap, fixture.up_cap)
+        else
+            .point(u.bf(math.swiglu(proj[0], proj[1], fixture.gate_cap, fixture.up_cap)));
     }
 
-    fn activation(p: *const Probe, q: *const Quantized, pair: usize, expert: usize, col: usize, acc: c.Accum, order: g.Order) f64 {
-        const gate = p.dot(q, true, 2 * col, expert, acc, order);
-        const up = p.dot(q, true, 2 * col + 1, expert, acc, order);
-        return math.swiglu(gate, up, p.weights[pair], fixture.gate_cap, fixture.up_cap);
+    fn projectDown(p: *const Probe, mid: []const Range, col: usize, expert: usize, outer: f64, acc: c.Accum, order: g.Order) Range {
+        var buf: [4]fixture.Index = undefined;
+        const taps = fixture.support(p.format, p.fill, false, col, expert, mid.len, &buf);
+        if (taps.len == 1) {
+            const t = taps[0];
+            return mid[t.at].mul(math.weight(p.format, t.code, t.scale, outer)).bf16();
+        }
+
+        // Stress uses four exact products, in distinct K blocks. A sparse sequential FP64
+        // dot is independent of the launch schedule; the reduced-precision replays are not.
+        var terms: [4]f64 = undefined;
+        for (taps, &terms) |t, *v| v.* = mid[t.at].lo * math.weight(p.format, t.code, t.scale, outer);
+        const dot = if (acc == .none)
+            terms[0] + terms[1] + terms[2] + terms[3]
+        else
+            sumStress(terms, acc, order);
+        return .point(u.bf(dot));
     }
 
-    fn oracle(p: *Probe, out: []f64, acc: c.Accum, order: g.Order) void {
-        const k = p.shape.k;
-        const n = p.shape.n;
-        @memset(out, 0);
-        var qi: Quantized = .{};
-        var qa: Quantized = .{};
-        var mid: [max_k]u16 = undefined;
-        for (0..p.shape.rows) |row| {
-            qi.quant(p.format, p.x[row * k ..][0..k]);
-            const dst = out[row * k ..][0..k];
-            for (0..topk) |j| {
-                const pair = row * topk + j;
-                const expert = p.ids[pair];
-                if (expert >= fixture.experts) continue;
-                for (mid[0..n], 0..) |*w, col| w.* = u.word(p.activation(&qi, pair, expert, col, acc, order));
-                qa.quant(p.format, mid[0..n]);
-                for (dst, 0..) |*v, col| v.* += p.dot(&qa, false, col, expert, acc, order);
+    fn rowReference(p: *const Probe, row: usize, out: []Range, acc: c.Accum, order: g.Order, band: bool) void {
+        const x = p.x[row * p.shape.k ..][0..p.shape.k];
+        const ids = p.ids[row * topk ..][0..topk];
+        const weights = p.weights[row * topk ..][0..topk];
+        // The dense zeros in both gate/up rows multiply NaN or infinity at the planted input columns.
+        const bad_input = p.fill == .nonfinite and row < 4;
+        @memset(out, .point(0));
+        var mid: [fixture.inter]Range = undefined;
+        // Eager Transformers visits experts in ascending index order, independent of route slot.
+        for (0..fixture.experts) |expert| {
+            const slot = std.mem.indexOfScalar(u32, ids, @intCast(expert)) orelse continue;
+            if (bad_input or std.math.isNan(weights[slot]) or (p.fill == .nonfinite and expert == 8)) {
+                @memset(out, .point(std.math.nan(f64)));
+                return;
             }
-            for (dst) |*v| v.* = u.bf(v.*);
+            const up = p.factor(true, expert);
+            const down = p.factor(false, expert);
+            for (&mid, 0..) |*v, col| v.* = p.projectPair(x, col, expert, up, band);
+            for (out, 0..) |*v, col| {
+                const projected = p.projectDown(&mid, col, expert, down, acc, order);
+                v.* = v.add(projected.mul(weights[slot]));
+            }
+        }
+        for (out) |*v| v.* = v.bf16();
+    }
+
+    fn oracle(p: *const Probe, out: []f64, acc: c.Accum, order: g.Order) void {
+        var want: [fixture.hidden]Range = undefined;
+        for (0..p.shape.rows) |row| {
+            p.rowReference(row, &want, acc, order, false);
+            for (out[row * p.shape.k ..][0..p.shape.k], want) |*v, w| v.* = w.lo;
         }
     }
 
@@ -171,81 +191,53 @@ const Probe = struct {
         p.oracle(out, acc, order);
     }
 
-    fn quantCheck(p: *Probe, q: *const Quantized, stage: usize, row: usize, width: usize) !?[]const u8 {
+    fn shifted(ref: rig_.Ref, offset: usize) u.View {
+        return .{ .buffer = ref.buf, .offset = ref.off + offset };
+    }
+
+    fn checkSplit(p: *Probe, expected: []const u8) !?[]const u8 {
         const s = &p.store.?;
-        const scratch = s.scratch;
-        const qr = scratch.quants[stage];
-        const bytes = scratch.buffer.contents();
-        const blocks = width / p.format.block();
-        const got_a = c.read(.f32, bytes[qr.amax .. qr.amax + (row + 1) * 4], row);
-        if (c.classOf(got_a) != c.classOf(q.amax) or (std.math.isFinite(q.amax) and got_a != q.amax))
-            return try std.fmt.bufPrint(&p.msg, "quantizer {d} row {d}: amax {e} != {e}", .{ stage, row, got_a, q.amax });
-        const sc = bytes[qr.scales + row * blocks ..][0..blocks];
-        for (sc, 0..) |got, b| if (got != q.scales[b]) {
-            return try std.fmt.bufPrint(&p.msg, "quantizer {d} row {d}, block {d}: scale {x} != {x}", .{ stage, row, b, got, q.scales[b] });
-        };
-        const nv = p.format == .nvfp4;
-        const pitch = if (nv) width / 2 else width;
-        const codes = bytes[qr.values + row * pitch ..][0..pitch];
-        for (0..width) |i| {
-            const sh: u3 = @intCast(4 * (i % 2));
-            const got = if (nv) (codes[i / 2] >> sh) & 15 else codes[i];
-            if (got != q.values[i])
-                return try std.fmt.bufPrint(&p.msg, "quantizer {d} row {d}, column {d}: code {x} != {x}", .{ stage, row, i, got, q.values[i] });
+        const out = try p.rig.scratch(expected.len);
+        const got = p.rig.bytes(out, expected.len);
+        @memset(got, 0xff);
+        const row_bytes = p.shape.k * @sizeOf(u16);
+        const route_bytes = topk * @sizeOf(u32);
+        const pass = p.rig.begin();
+        var i = p.shape.rows;
+        while (i != 0) {
+            i -= 1;
+            s.encode(pass.e, 0, shifted(p.input, i * row_bytes), shifted(p.route_ids, i * route_bytes),
+                shifted(p.route_weights, i * route_bytes), shifted(out, i * row_bytes), 1) catch |err| {
+                pass.e.end();
+                pass.pool.pop();
+                return err;
+            };
         }
+        try p.rig.finish(pass);
+        if (std.mem.indexOfDiff(u8, expected, got)) |i_byte|
+            return try std.fmt.bufPrint(&p.msg, "reverse one-row dispatch differs from batch at row {d}, byte {d}", .{ i_byte / row_bytes, i_byte % row_bytes });
         return null;
     }
 
-    pub fn check(p: *Probe, _: g.Gate) !?[]const u8 {
-        const s = &p.store.?;
-        const k = p.shape.k;
-        const n = p.shape.n;
-        const bytes = s.scratch.buffer.contents()[0..s.scratchBytes()];
-        const gpu_mid = bytes[s.scratch.stage..][0 .. p.shape.rows * topk * n * 2];
-        const gpu_down = bytes[s.scratch.down..][0 .. p.shape.rows * topk * k * 2];
-        const gpu_out = p.rig.bytes(p.out, p.count() * 2);
-        var qi: Quantized = .{};
-        var qa: Quantized = .{};
-        var mid: [max_k]u16 = undefined;
-        var total: [max_k]f64 = undefined;
-        var magnitude: [max_k]f64 = undefined;
+    pub fn check(p: *Probe, gate: g.Gate) !?[]const u8 {
+        const got = p.rig.bytes(p.out, p.count() * @sizeOf(u16));
+        var want: [fixture.hidden]Range = undefined;
         for (0..p.shape.rows) |row| {
-            qi.quant(p.format, p.x[row * k ..][0..k]);
-            if (try p.quantCheck(&qi, 0, row, k)) |why| return why;
-            @memset(total[0..k], 0);
-            @memset(magnitude[0..k], 0);
-            for (0..topk) |j| {
-                const pair = row * topk + j;
-                const expert = p.ids[pair];
-                const active = expert < fixture.experts;
-                for (mid[0..n], 0..) |*w, col| {
-                    w.* = std.mem.readInt(u16, gpu_mid[2 * (pair * n + col) ..][0..2], .little);
-                    const got = u.val(w.*);
-                    const ref = if (active) p.activation(&qi, pair, expert, col, .none, .sequential) else 0;
-                    // Exact sparse dots; allow 32 FP32 units for Metal vs host exp/tanh and product roundings, then BF16.
-                    const error_band = 32 * 0x1p-24 * @abs(ref);
-                    if (!bounded(got, ref, error_band))
-                        return try std.fmt.bufPrint(&p.msg, "pair {d} SwiGLU column {d}: {e} outside BF16 band around {e}", .{ pair, col, got, ref });
-                }
-                // Midpoint uncertainty ends here: independently check quantization of the verified BF16 activations.
-                qa.quant(p.format, mid[0..n]);
-                if (try p.quantCheck(&qa, 1, pair, n)) |why| return why;
-                for (0..k) |col| {
-                    const got = u.outBf(gpu_down, pair * k + col);
-                    const want = if (active) p.dot(&qa, false, col, expert, .none, .sequential) else 0;
-                    if (c.classOf(got) != c.classOf(want) or (std.math.isFinite(want) and got != want))
-                        return try std.fmt.bufPrint(&p.msg, "pair {d} down column {d}: {e} != {e}", .{ pair, col, got, want });
-                    total[col] += want;
-                    magnitude[col] += @abs(want);
-                }
-            }
-            for (0..k) |col| {
-                const got = u.outBf(gpu_out, row * k + col);
-                const limit = c.gamma(topk, c.unit(.f32)) * magnitude[col];
-                if (!bounded(got, total[col], limit))
-                    return try std.fmt.bufPrint(&p.msg, "row {d} combine column {d}: {e} outside BF16 band around {e}", .{ row, col, got, total[col] });
+            p.rowReference(row, &want, .none, .sequential, true);
+            for (want, 0..) |w, col| {
+                const i = row * p.shape.k + col;
+                const seen = u.outBf(got, i);
+                const class = c.classOf(w.lo);
+                if (c.classOf(seen) != class or (class == .finite and !(w.lo <= seen and seen <= w.hi)))
+                    return try std.fmt.bufPrint(&p.msg, "row {d} column {d}: {e} outside BF16 [{e}, {e}]", .{ row, col, seen, w.lo, w.hi });
+                if (gate == .nonfinite and row == 4 and std.mem.readInt(u16, got[2 * i ..][0..2], .little) != 0)
+                    return "the all-inactive token must store positive zero";
             }
         }
+        if (gate == .shapes and p.shape.rows > 1) {
+            if (try p.checkSplit(got)) |reason| return reason;
+        }
+        if (!try p.rig.intact()) return "the batch or split dispatch wrote beyond its bound buffer views";
         return null;
     }
 
@@ -263,37 +255,75 @@ const Probe = struct {
     }
 };
 
-fn bounded(got: f64, want: f64, allowance: f64) bool {
-    if (c.classOf(got) != c.classOf(want)) return false;
-    if (!std.math.isFinite(want)) return true;
-    return got >= u.bf(want - allowance) and got <= u.bf(want + allowance);
-}
-
 fn depth(shape: c.Shape) usize {
     return 2 * (32 + (std.math.divCeil(usize, shape.k, 16 * 32) catch unreachable) + 5) + topk;
 }
 
 const Mutation = struct { format: Format, gate: g.Gate, label: []const u8, from: []const u8, to: []const u8 };
 const mutations = [_]Mutation{
-    .{ .format = .nvfp4, .gate = .nonfinite, .label = "control: inkling2 experts NVFP4 drops a non-finite row amax",
-        .from = "row_amax[row] = bad ? NAN : amax;", .to = "row_amax[row] = bad ? 0.0f : amax;" },
-    .{ .format = .nvfp4, .gate = .shapes, .label = "control: inkling2 experts NVFP4 ties choose four",
-        .from = "const bool use4 = e4[0] < e6[0];", .to = "const bool use4 = e4[0] <= e6[0];" },
-    .{ .format = .nvfp4, .gate = .shapes, .label = "control: inkling2 experts NVFP4 swapped adjacent nibble order",
-        .from = "out[b * 8u + j] = uchar(lo | (hi << 4));", .to = "out[b * 8u + j] = uchar(hi | (lo << 4));" },
-    .{ .format = .nvfp4, .gate = .shapes, .label = "control: inkling2 experts NVFP4 missing raw BF16 rounding",
-        .from = "float4 v = i2x_bf4(accum);", .to = "float4 v = NV ? accum : i2x_bf4(accum);" },
-    .{ .format = .mxfp8, .gate = .shapes, .label = "control: inkling2 experts MXFP8 exponent divisor 480",
-        .from = "bm * (1.0f / 448.0f)", .to = "bm * (1.0f / 480.0f)" },
-    .{ .format = .mxfp8, .gate = .shapes, .label = "control: inkling2 experts omits gamma before SwiGLU rounding",
-        .from = "return ((gate * sigmoid) * up) * gamma;", .to = "return (gate * sigmoid) * up;" },
-    .{ .format = .mxfp8, .gate = .nonfinite, .label = "control: inkling2 experts MXFP8 treats UE8M0 zero as zero scale",
-        .from = "return (xs == 255u || ws == 255u) ? NAN : ldexp(dot, int(xs) + int(ws) - 254);",
-        .to = "return (xs == 255u || ws == 255u) ? NAN : (xs == 0u || ws == 0u ? 0.0f : ldexp(dot, int(xs) + int(ws) - 254));" },
-    .{ .format = .mxfp8, .gate = .sums, .label = "control: inkling2 experts MXFP8 rounds lane sums to BF16",
-        .from = "accum += part;", .to = "accum = i2x_bf4(accum + part);" },
-    .{ .format = .nvfp4, .gate = .sums, .label = "control: inkling2 experts NVFP4 rounds lane sums to BF16",
-        .from = "accum += part;", .to = "accum = i2x_bf4(accum + part);" },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts NVFP4 misreads the low nibble",
+        .from = "i2x_bf4((low * scale) * factor)",
+        .to = "i2x_bf4((high * scale) * factor)",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts NVFP4 skips decoded-weight BF16 rounding",
+        .from = "i2x_bf4((low * scale) * factor)",
+        .to = "(low * scale) * factor",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts MXFP8 skips projection BF16 rounding before SwiGLU",
+        .from = "const float4 v = i2x_bf4(accum);",
+        .to = "const float4 v = accum;",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts SwiGLU sigmoid sees the capped gate",
+        .from = "precise::exp(-gate)",
+        .to = "precise::exp(-precise::tanh(precise::divide(gate, gate_cap)) * gate_cap)",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .nonfinite,
+        .label = "control: inkling2 experts MXFP8 treats UE8M0 byte zero as a zero scale",
+        .from = "max(s, 1u) << 23",
+        .to = "s << 23",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .shapes,
+        .label = "control: inkling2 experts combine rounds the FP32 route product to BF16",
+        .from = "sum += float(down[first + slot * a.hidden]) * gammas[routes + slot];",
+        .to = "sum += float(bfloat(float(down[first + slot * a.hidden]) * gammas[routes + slot]));",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .shapes,
+        .label = "control: inkling2 experts combine uses route-slot order instead of expert order",
+        .from = "const uint slot = (order >> (4u * rank)) & 0xfu;",
+        .to = "const uint slot = rank; if (ids[routes + slot] >= a.experts) continue;",
+    },
+    .{
+        .format = .nvfp4,
+        .gate = .sums,
+        .label = "control: inkling2 experts NVFP4 rounds lane sums to BF16",
+        .from = "    accum += part;",
+        .to = "    accum = i2x_bf4(accum + part);",
+    },
+    .{
+        .format = .mxfp8,
+        .gate = .sums,
+        .label = "control: inkling2 experts MXFP8 rounds lane sums to BF16",
+        .from = "    accum += part;",
+        .to = "    accum = i2x_bf4(accum + part);",
+    },
 };
 
 pub const Suite = struct {

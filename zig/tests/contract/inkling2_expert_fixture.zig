@@ -11,7 +11,8 @@ pub const experts = 9;
 pub const topk = 8;
 pub const gate_cap = 4;
 pub const up_cap = 25;
-pub const den: f32 = 2688;
+pub const hidden = 2304;
+pub const inter = 1152;
 
 pub fn configuration(shape: u.c.Shape) cfg.Config {
     var c: cfg.Config = undefined;
@@ -29,46 +30,83 @@ pub const Index = struct { at: usize, code: u8, scale: u8 };
 
 pub fn support(f: Format, fill: u.g.Fill, gate_up: bool, index: usize, expert: usize, k: usize, out: *[4]Index) []const Index {
     const nv = f == .nvfp4;
+    const one: u8 = if (nv) 2 else 0x38;
+    const scale_one: u8 = if (nv) 0x38 else 127;
     if (fill == .stress) {
-        const big: u8 = if (nv) 0x78 else 139;
-        const small: u8 = if (nv) 0x28 else 129;
-        const pos: u8 = if (nv) 7 else 0x7e;
-        const neg: u8 = if (nv) 15 else 0xfe;
         if (gate_up) {
-            out[0] = .{ .at = 0, .code = if (nv) 7 else 0x38, .scale = if (nv) 0x78 else 127 };
+            out[0] = .{ .at = 0, .code = one, .scale = scale_one };
             return out[0..1];
         }
+        // All four activation columns are identical. The large terms cancel in FP32 without
+        // rounding; adding either small term to either large term loses it in FP16 or BF16.
         const b = f.block();
+        const large: u8 = if (nv) 7 else one;
+        const big_scale: u8 = if (nv) 0x78 else 137;
+        const little: u8 = if (nv) 1 else one;
+        const small_scale: u8 = if (nv) 0x18 else 122;
         out.* = .{
-            .{ .at = 0, .code = pos, .scale = big },
-            .{ .at = b, .code = pos, .scale = small },
-            .{ .at = 2 * b, .code = neg, .scale = big },
-            .{ .at = 32 * b, .code = pos, .scale = small },
+            .{ .at = 0, .code = large, .scale = big_scale },
+            .{ .at = b, .code = little, .scale = small_scale },
+            .{ .at = 2 * b, .code = if (nv) large | 8 else large | 128, .scale = big_scale },
+            .{ .at = 32 * b, .code = little, .scale = small_scale },
         };
         return out;
     }
-    if (!nv and fill == .nonfinite and expert >= 7) {
-        // On expert 7 the tiny input (UE8M0=0) is lifted by a 2^127 weight scale. Expert 8 uses the NaN scale.
-        out[0] = .{ .at = 0, .code = 0x38, .scale = if (expert == 8) 255 else if (gate_up) 254 else 127 };
+    if (fill == .nonfinite and expert >= 7) {
+        out[0] = .{ .at = 0, .code = one, .scale = scale_one };
+        if (gate_up) {
+            if (expert == 8) {
+                // NVFP4: an E4M3 NaN scale. MXFP8: a zero code in this block times exp2(128).
+                out[0].scale = if (nv) 0x7f else 255;
+            } else if (!nv) {
+                // UE8M0=0, but the decoded BF16 weight is normal (2^-119), as is the input.
+                out[0] = .{ .at = 0, .code = 0x78, .scale = 0 };
+            }
+        }
         return out[0..1];
     }
     const j = if (gate_up) index / 2 else index;
     const parity = if (gate_up) index % 2 else 0;
-    const at = if (index % 11 == 0) 0 else (j * 37 + expert * 19 + parity * 23) % k;
-    const code4 = [_]u8{ 1, 2, 3, 7, 4, 6, 14, 13 };
-    const code8 = [_]u8{ 0x38, 0x40, 0xab, 0x3e, 0x54, 0xc3, 0x50, 0xbe };
-    const scales4 = [_]u8{ 0x70, 0x78, 0x7c, 0x7e };
-    const scales8 = [_]u8{ 125, 126, 127, 128 };
-    out[0] = .{
-        .at = at,
-        .code = (if (nv) code4 else code8)[(j + expert + 3 * parity) % 8],
-        .scale = (if (nv) scales4 else scales8)[(j + expert + parity) % 4],
+    if (expert < 3 and j == 0) {
+        const negative = !gate_up and expert == 1;
+        const sign: u8 = if (nv) 8 else 128;
+        out[0] = .{ .at = 0, .code = one | (if (negative) sign else 0), .scale = scale_one };
+        return out[0..1];
+    }
+    if (nv and expert == 3 and j == 0) {
+        // Down weight 26/21 rounds to 79/64; with the unit-projection SwiGLU those
+        // two weights land on opposite sides of a BF16 midpoint in the down output.
+        out[0] = .{ .at = 0, .code = if (gate_up) 7 else 2, .scale = if (gate_up) 0x7e else 0x7d };
+        return out[0..1];
+    }
+    // Nonfinite inputs are planted in the last two columns, where every stored weight is zero.
+    const usable = k - @as(usize, if (fill == .nonfinite) 2 else 0);
+    const at = switch (index % 11) {
+        0 => 0,
+        1 => usable - 2,
+        else => 2 * ((j * 37 + expert * 19 + parity * 23) % (usable / 2)),
     };
-    return out[0..1];
+    const code4 = [_]u8{ 1, 2, 3, 7, 4, 6, 14, 13 };
+    const code8 = [_]u8{ 0x38, 0x40, 0xab, 0x3e, 0x54, 0xc3, 0x01, 0xbe };
+    const scales4 = if (expert < 3) [_]u8{ 0x20, 0x30, 0x38, 0x40 } else [_]u8{ 0x50, 0x68, 0x78, 0x7e };
+    const scales8 = [_]u8{ 125, 126, 127, 128 };
+    const code = (if (nv) code4 else code8)[(j + expert + 3 * parity) % 8];
+    const scale = (if (nv) scales4 else scales8)[(j + expert + parity) % 4];
+    // Alternate single low/high codes, with some gate/up rows exercising both nibbles of one byte.
+    const adjacent = gate_up and index % 3 == 0;
+    out[0] = .{ .at = at + @intFromBool(!adjacent and index % 2 != 0), .code = code, .scale = scale };
+    if (!adjacent) return out[0..1];
+    out[1] = .{ .at = at + 1, .code = code ^ @as(u8, if (nv) 8 else 128), .scale = scale };
+    return out[0..2];
 }
 
-pub fn wAmax(e: usize) f32 {
-    return 1.0 + @as(f32, @floatFromInt(e)) * 0.5;
+pub fn denominator(gate_up: bool) f32 {
+    return if (gate_up) 2693 else 923;
+}
+
+pub fn wAmax(fill: u.g.Fill, gate_up: bool, e: usize) f32 {
+    if (e < 3 or (fill == .nonfinite and e >= 7)) return if (gate_up) 2688 else 924;
+    return (if (gate_up) @as(f32, 1.003) else 1.253) + @as(f32, @floatFromInt(e)) * 0.5;
 }
 
 fn name(cp: *ck.Checkpoint, r: rig_.Ref, dtype: ck.DType, dims: []const usize, comptime part: []const u8, comptime suffix: []const u8) !void {
@@ -108,8 +146,9 @@ fn matrix(allocator: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: F
     try name(cp, try rig.input(scales), if (nv) .f8_e4m3 else .u8, &.{ experts, n, scale_pitch }, part, "_weight_scale");
     if (nv) {
         var peaks: [experts]f32 = undefined;
-        for (&peaks, 0..) |*v, e| v.* = wAmax(e);
+        for (&peaks, 0..) |*v, e| v.* = wAmax(fill, gate_up, e);
         try name(cp, try rig.input(std.mem.asBytes(&peaks)), .f32, &.{experts}, part, "_weight_amax");
+        const den = denominator(gate_up);
         try name(cp, try rig.input(std.mem.asBytes(&den)), .f32, &.{1}, part, "_weight_outer_scale_denominator");
     }
 }
@@ -122,56 +161,70 @@ pub fn tensors(a: std.mem.Allocator, rig: *rig_.Rig, cp: *ck.Checkpoint, f: Form
 pub fn rows(f: Format, shape: u.c.Shape, fill: u.g.Fill, seed: u64, x: []u16, ids: []u32, weights: []f32) void {
     var random = std.Random.DefaultPrng.init(seed);
     const rng = random.random();
-    // Distinct adjacent codes, mixed signs, a block straddling the 448/480 thresholds, out-of-range route IDs,
-    // and a final K block populated by the same test data as the first.
     for (0..shape.rows) |r| {
         const row = x[r * shape.k ..][0..shape.k];
         u.fillDyadic(rng, row, 31, 16);
-        row[0] = u.word(3.625);
-        row[1] = u.word(-0.875);
-        // Both NVFP4 candidates reconstruct this block identically: the calibration chooses six on the tie.
-        if (r == 0) {
-            @memset(row[1..f.block()], 0);
-            row[f.block() - 1] = u.word(-3.625);
-        }
+        row[row.len - 2] = u.word(1.25);
+        row[row.len - 1] = u.word(-1.5);
         for (0..topk) |s| {
             ids[r * topk + s] = @intCast((r * 3 + s * 5) % experts);
-            weights[r * topk + s] = @as(f32, @floatFromInt(1 + (s * 3 + r) % 7)) / 8.0;
+            weights[r * topk + s] = @as(f32, @floatFromInt(1 + (s * 3 + r) % 7)) / 13;
         }
-        if (r % 2 == 0) ids[r * topk + topk - 1] = std.math.maxInt(u32);
+        if (r % 2 == 0) inactive(ids, weights, r * topk + topk - 1);
     }
     switch (fill) {
+        .random => {
+            x[0] = u.word(1);
+            for (0..topk) |i| inactive(ids, weights, i);
+            // Column zero: expert 0 and 1 cancel exactly before adding 2's small result.
+            // Route-slot order instead loses the small result to FP32 rounding.
+            ids[0..3].* = .{ 2, 0, 1 };
+            weights[0..3].* = .{ 1, 0x1p27, 0x1p27 };
+            if (shape.rows > 1) {
+                x[shape.k] = u.word(1);
+                for (topk..2 * topk) |i| inactive(ids, weights, i);
+                // The equal and opposite BF16 down rows differ only by a small FP32 factor.
+                ids[topk..][0..2].* = .{ 0, 1 };
+                weights[topk..][0..2].* = .{ 1, 1 + 0x1p-10 };
+            }
+            if (shape.rows > 2 and f == .nvfp4) {
+                // Expert 3's gate/up weights are 2.5; this input rounds their projections to 1.
+                x[2 * shape.k] = u.word(0.4);
+                for (2 * topk..3 * topk) |i| inactive(ids, weights, i);
+                ids[2 * topk] = 3;
+                weights[2 * topk] = 1;
+            }
+        },
         .stress => {
             @memset(x, 0);
-            @memset(ids, std.math.maxInt(u32));
-            @memset(weights, 1);
+            for (0..ids.len) |i| inactive(ids, weights, i);
             for (0..shape.rows) |r| {
-                x[r * shape.k] = u.word(8);
+                x[r * shape.k] = u.word(1);
                 ids[r * topk] = 0;
+                weights[r * topk] = 1;
             }
         },
         .nonfinite => {
-            x[0] = u.nan_bits;
-            x[shape.k] = u.pinf_bits;
-            x[2 * shape.k] = u.ninf_bits;
-            x[3 * shape.k] = u.ninf_bits;
-            x[3 * shape.k + 1] = u.pinf_bits;
-            for (ids) |*id| if (id.* >= 7) {
-                id.* = std.math.maxInt(u32);
-            };
-            // One all-inactive token ignores even a non-finite input; one has a NaN routing weight.
+            for (0..ids.len) |i| inactive(ids, weights, i);
+            for (0..4) |r| {
+                x[(r + 1) * shape.k - 1] = ([_]u16{ u.nan_bits, u.pinf_bits, u.ninf_bits, u.pinf_bits })[r];
+                ids[r * topk + r] = 0;
+                weights[r * topk + r] = 1;
+            }
+            x[4 * shape.k - 2] = u.ninf_bits;
+            // One all-inactive token ignores even NaN input and route weights.
             x[4 * shape.k] = u.nan_bits;
-            @memset(ids[4 * topk ..][0..topk], std.math.maxInt(u32));
-            ids[7 * topk] = 0;
-            weights[7 * topk] = std.math.nan(f32);
-            if (f == .mxfp8) {
-                @memset(x[5 * shape.k ..][0..shape.k], 0);
-                x[5 * shape.k] = u.word(0x1p-127);
-                @memset(ids[5 * topk ..][0..2 * topk], std.math.maxInt(u32));
-                ids[5 * topk] = 7;
-                ids[6 * topk] = 8;
+            for (5..8) |r| {
+                @memset(x[r * shape.k ..][0..shape.k], 0);
+                x[r * shape.k] = u.word(if (r == 5 and f == .mxfp8) 0x1p119 else 1);
+                ids[r * topk + 1] = if (r == 7) 0 else @intCast(r + 2);
+                weights[r * topk + 1] = if (r == 7) std.math.nan(f32) else 1;
             }
         },
-        else => {},
     }
+}
+
+fn inactive(ids: []u32, weights: []f32, i: usize) void {
+    ids[i] = if (i % 2 == 0) experts else std.math.maxInt(u32);
+    weights[i] = std.math.nan(f32);
 }

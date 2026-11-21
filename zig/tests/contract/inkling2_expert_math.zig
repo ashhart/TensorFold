@@ -1,5 +1,4 @@
-//! Independent numeric oracle for packed experts: numerical FP4/FP8 grids, scalar FP32 quantizer decisions,
-//! FP64 products/sums and the Mini grouped-BF16 epilogue. This code does not emulate Metal's lanes for normal fixtures.
+//! Independent decoded-weight and BF16-node reference for Transformers PR #51050 at 6173a2f6.
 const std = @import("std");
 const u = @import("inkling2_util.zig");
 
@@ -33,121 +32,84 @@ pub fn e4m3(bits: u8) f64 {
     return if (bits & 128 == 0) v else -v;
 }
 
+// The converter evaluates exp2(byte - 127) in FP32; the reserved byte overflows to +Inf.
 pub fn e8m0(bits: u8) f64 {
-    return if (bits == 255) std.math.nan(f64) else std.math.ldexp(@as(f64, 1), @as(i32, bits) - 127);
+    return if (bits == 255) std.math.inf(f64) else std.math.ldexp(@as(f64, 1), @as(i32, bits) - 127);
 }
 
-fn nearest(value: f64, comptime decode: fn (u8) f64, max_code: u8, sign: u8) u8 {
-    const v = @abs(value);
-    var lo: u8 = 0;
-    var hi: u8 = max_code;
-    // Locate the two nearest representable values by numeric distance, not by FP32 representation bits.
-    while (hi - lo > 1) {
-        const m = lo + (hi - lo) / 2;
-        if (decode(m) < v) lo = m else hi = m;
-    }
-    const dl = v - decode(lo);
-    const dh = decode(hi) - v;
-    const mag = if (dh < dl or (dh == dl and hi % 2 == 0)) hi else lo;
-    return mag | (if (@as(u64, @bitCast(value)) >> 63 != 0) sign else 0);
+/// At BF16 load the F32 metadata tensors are cast separately; the converter divides them in FP32.
+pub fn factor(amax: f32, denominator: f32) f64 {
+    return fp32(u.bf(amax) / u.bf(denominator));
 }
 
-fn pairwise16(values: *[16]f64) f64 {
-    var stride: usize = 1;
-    while (stride < 16) : (stride *= 2) {
-        var i: usize = 0;
-        while (i < 16) : (i += 2 * stride) values[i] = fp32(values[i] + values[i + stride]);
-    }
-    return values[0];
-}
-
-fn nvCandidate(x: []const u16, row_max: f64, block_max: f64, divisor: f64, codes: *[16]u8) struct { u8, f64 } {
-    const fmax: f64 = std.math.floatMax(f32);
-    const encoder = @min(fp32(1536.0 / row_max), fmax);
-    const decoder = fp32(1.0 / encoder);
-    const scale = nearest(fp32(block_max * fp32(encoder * fp32(1.0 / divisor))), e4m3, 126, 128);
-    const s = e4m3(scale);
-    const inverse = @min(fp32(1.0 / fp32(s * decoder)), fmax);
-    const outer = fp32(row_max * fp32(1.0 / 1536.0));
-    var errors: [16]f64 = undefined;
-    for (x, &errors, codes) |word, *diff, *bits| {
-        const v = u.val(word);
-        bits.* = nearest(fp32(v * inverse), e2m1, 7, 8);
-        diff.* = @abs(fp32(fp32((e2m1(bits.*) * s) * outer) - v));
-    }
-    return .{ scale, pairwise16(&errors) };
-}
-
-fn mxBlock(x: []const u16, bm: f64, codes: []u8) u8 {
-    const raw = fp32(bm * fp32(1.0 / 448.0));
-    // Decompose the numeric value; a fraction of one half means `raw` is exactly a power of two.
-    const parts = std.math.frexp(raw);
-    const exponent = std.math.clamp(parts.exponent - @intFromBool(parts.significand == 0.5), -127, 127);
-    const scale: u8 = if (raw <= 0x1p-127) 0 else @intCast(exponent + 127);
-    for (x, codes) |w, *out| out.* = nearest(fp32(u.val(w) / e8m0(scale)), e4m3, 126, 128);
-    return scale;
-}
-
-/// Codes are unpacked on purpose (compare low/high nibbles separately when reading the GPU).
-pub fn quant(format: Format, x: []const u16, codes: []u8, scales: []u8) f64 {
-    var row_max: f64 = 0;
-    for (x) |w| {
-        const v = u.val(w);
-        if (!std.math.isFinite(v)) {
-            @memset(codes, 0);
-            @memset(scales, if (format == .nvfp4) 0 else 255);
-            return std.math.nan(f64);
-        }
-        row_max = @max(row_max, @abs(v));
-    }
-    const block = format.block();
-    for (scales, 0..) |*scale, b| {
-        const row = x[b * block ..][0..block];
-        const dst = codes[b * block ..][0..block];
-        var bm: f64 = 0;
-        for (row) |w| bm = @max(bm, @abs(u.val(w)));
-        switch (format) {
-            .nvfp4 => {
-                var at6: [16]u8 = undefined;
-                var at4: [16]u8 = undefined;
-                const s6, const e6 = nvCandidate(row, row_max, bm, 6, &at6);
-                const s4, const e4 = nvCandidate(row, row_max, bm, 4, &at4);
-                @memcpy(dst, if (e4 < e6) &at4 else &at6);
-                scale.* = if (e4 < e6) s4 else s6;
-            },
-            .mxfp8 => scale.* = mxBlock(row, bm, dst),
-        }
-    }
-    return if (format == .nvfp4) row_max else 1;
-}
-
-pub fn dotTerm(format: Format, x: u8, xs: u8, w: u8, ws: u8) f64 {
-    return switch (format) {
-        .nvfp4 => e2m1(x) * e4m3(xs) * e2m1(w) * e4m3(ws),
-        .mxfp8 => e4m3(x) * e8m0(xs) * e4m3(w) * e8m0(ws),
+/// The GEMM's operands are BF16, not the unrounded products of the checkpoint codes and scales.
+pub fn weight(format: Format, code: u8, scale: u8, outer: f64) f64 {
+    const decoded = switch (format) {
+        .nvfp4 => fp32(e2m1(code) * e4m3(scale)) * outer,
+        .mxfp8 => e4m3(code) * e8m0(scale),
     };
+    return u.bf(fp32(decoded));
 }
 
-pub fn dotOutput(format: Format, raw: f64, x_max: f64, w_max: f64, den: f64) f64 {
-    if (format == .mxfp8) return u.bf(raw);
-    const outer = fp32(fp32(x_max * w_max) * fp32(1.0 / fp32(1536.0 * den)));
-    return u.bf(fp32(u.bf(raw) * outer));
+pub const Range = struct {
+    lo: f64,
+    hi: f64,
+
+    pub fn point(v: f64) Range {
+        return .{ .lo = v, .hi = v };
+    }
+
+    pub fn add(a: Range, b: Range) Range {
+        return .{ .lo = fp32(a.lo + b.lo), .hi = fp32(a.hi + b.hi) };
+    }
+
+    pub fn mul(r: Range, v: f64) Range {
+        const a = fp32(r.lo * v);
+        const b = fp32(r.hi * v);
+        return if (v < 0) .{ .lo = b, .hi = a } else .{ .lo = a, .hi = b };
+    }
+
+    pub fn bf16(r: Range) Range {
+        return .{ .lo = u.bf(r.lo), .hi = u.bf(r.hi) };
+    }
+};
+
+fn capped(v: f64, cap: f64) f64 {
+    return std.math.tanh(v / cap) * cap;
 }
 
-/// Use FP64 transcendental functions and round each FP32 operation before the separate BF16 store.
-pub fn swiglu(g: f64, x: f64, gamma: f32, gate_cap: f64, up_cap: f64) f64 {
-    const sigmoid = fp32(1 / fp32(1 + fp32(@exp(-g))));
-    const gate = fp32(gate_cap * fp32(std.math.tanh(fp32(g / gate_cap))));
-    const up = fp32(up_cap * fp32(std.math.tanh(fp32(x / up_cap))));
-    return fp32(fp32(fp32(gate * sigmoid) * up) * gamma);
+/// The two projection stores have already rounded the inputs; the sigmoid sees the uncapped gate.
+pub fn swiglu(gate: f64, up: f64, gate_cap: f64, up_cap: f64) f64 {
+    return (capped(gate, gate_cap) / (1 + @exp(-gate))) * capped(up, up_cap);
 }
 
-test "Mini encodings distinguish signed nibbles and the smallest UE8M0 scale" {
+pub fn activation(gate: f64, up: f64, gate_cap: f64, up_cap: f64) Range {
+    const v = swiglu(gate, up, gate_cap, up_cap);
+    if (!std.math.isFinite(v)) return .point(v);
+    // The sparse fixture bounds the FP32 inputs; allow transcendental and elementary op rounding
+    // before the BF16 store, not a BF16 ULP after propagation through a potentially cancelling sum.
+    const err = @abs(v) * (64 * 0x1p-24);
+    return (Range{ .lo = v - err, .hi = v + err }).bf16();
+}
+
+test "Mini storage encodings preserve sign, subnormal and maximum codes" {
+    try std.testing.expectEqual(@as(u64, 1) << 63, @as(u64, @bitCast(e2m1(8))));
     try std.testing.expectEqual(@as(f64, -0.5), e2m1(9));
-    try std.testing.expectEqual(@as(f64, 448), e4m3(126));
+    try std.testing.expectEqual(@as(f64, 0x1p-9), e4m3(1));
+    try std.testing.expectEqual(@as(f64, -448), e4m3(0xfe));
+    try std.testing.expect(std.math.isNan(e4m3(0x7f)));
     try std.testing.expectEqual(@as(f64, 0x1p-127), e8m0(0));
-    try std.testing.expect(std.math.isNan(e8m0(255)));
-    try std.testing.expectEqual(@as(u8, 0), nearest(0.25, e2m1, 7, 8));
-    try std.testing.expectEqual(@as(u8, 2), nearest(0.75, e2m1, 7, 8));
-    try std.testing.expectEqual(@as(u8, 0x80), nearest(-0.0001, e4m3, 126, 128));
+    try std.testing.expectEqual(@as(f64, 0x1p-119), weight(.mxfp8, 0x78, 0, 1));
+    try std.testing.expectEqual(std.math.inf(f64), e8m0(255));
+    try std.testing.expect(std.math.isNan(weight(.mxfp8, 0, 255, 1)));
+}
+
+test "Mini NVFP4 load rounds operands but not the outer factor" {
+    const a = factor(1.003, 2693);
+    try std.testing.expectEqual(fp32(1.0 / 2688.0), a);
+    try std.testing.expect(a != u.bf(a));
+    try std.testing.expectEqual(u.bf(fp32(1536.0 / 2688.0)), weight(.nvfp4, 7, 0x78, a));
+    const fifth = factor(1.003, 5.003);
+    try std.testing.expectEqual(@as(f64, 0.224609375), weight(.nvfp4, 2, 0x39, fifth));
+    try std.testing.expectEqual(@as(f64, 0.2255859375), weight(.nvfp4, 2, 0x39, u.bf(fifth)));
 }
