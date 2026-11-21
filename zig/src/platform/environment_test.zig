@@ -134,6 +134,17 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "0", .n = 0 },
+    .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "16", .n = 16 },
+    .{ .name = "TF_PREFILL_CHUNK", .raw = "512", .n = 512 },
+    .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
+    .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
+    .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
+    .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
+    .{ .name = "TF_DSV41_PRODUCE_LINK", .raw = "tfkv2", .n = 0 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
@@ -252,6 +263,9 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_TIMING", "2" },                         .{ "TF_NO_TREES", "true" },
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TF_PREFILL_CHUNK", "0" },                  .{ "TF_PREFILL_CHUNK", "520" },
+        .{ "TF_PREFILL_KEEP", "true" },                .{ "TF_PREFILL_AHEAD", "0" },
+        .{ "TF_PREFILL_TIMEOUT_S", "0" },              .{ "TF_PREFILL_TIMEOUT_S", "86401" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));

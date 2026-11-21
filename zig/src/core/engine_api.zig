@@ -32,7 +32,6 @@ pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, em
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
-
 pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
@@ -92,6 +91,7 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    handoff: ?@import("lane_export.zig").Handoff = null, // kv_transfer_params.mcdma_handoff (#1594 step 2b)
     /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
     unread: ?*const std.atomic.Value(u32) = null,
 
@@ -322,6 +322,7 @@ pub const Open = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: @import("lane_remote.zig").Flags = .{}, // --prefill-from and --mcdma-link (#1594 step 2b)
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
     /// --learn-min-free-gib: filesystem space kept free before any learned-state write.
@@ -385,14 +386,10 @@ pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Memory = @import("engine_status.zig").Memory;
 pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
-
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
-/// What a request refused under critical memory pressure says (a 503).
-pub const pressure_message = "the system is under critical memory pressure: the server takes no new requests until it eases; retry shortly";
-
-/// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
-pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
+pub const pressure_message = @import("engine_messages.zig").pressure_message;
+pub const stale_message = @import("engine_messages.zig").stale_message;
 
 /// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
 pub const refusal_bytes = 256;
@@ -444,6 +441,8 @@ pub const Engine = struct {
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
         /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
+        /// The hand-off exports this engine holds, served over HTTP (`GET /v1/handoff/<id>`); null: it serves none.
+        handoff: ?*const fn (ctx: *anyopaque) ?@import("lane_export.zig").Serve = null,
         /// A reference WAV file's codec rows in `gpa`, on the speech engine's own thread; null: it encodes no voices.
         encode_voice: ?*const fn (ctx: *anyopaque, gpa: Allocator, wav: []const u8) EncodeVoiceError![][10]i32 = null,
     };

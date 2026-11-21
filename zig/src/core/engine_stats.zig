@@ -19,4 +19,8 @@ pub const Stats = struct {
     queued_seconds: f64 = 0,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
+    /// The restored prefix's tokens when it stands on another machine's state (#1594 step 2b): outside exactness.
+    remote_prefix: u32 = 0,
+    /// remote_prefix again when this reply pulled its prefix over the link; 0 when a kept remote state was restored.
+    pulled_prefix: u32 = 0,
 };

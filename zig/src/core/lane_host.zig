@@ -31,6 +31,8 @@ const scoring = @import("lane_host_score.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
 const lane_trace = @import("lane_trace.zig");
+const vtables = @import("lane_host_vtable.zig");
+const remote = @import("lane_remote.zig");
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -64,6 +66,10 @@ pub const LaneHost = struct {
     disk_status: ?api.Status.DiskCache = null, // published under mutex beside it
     cache_at: i64 = 0, // wall-clock ms of the last full cache and disk copy (republished at 1 Hz at most)
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
+    remote: ?remote.Source = null,
+    exporter: ?@import("lane_export.zig").Exporter = null, // #1594 step 2b
+    resume_peek: ?remote.ResumePeek = null,
+    keep_remote: bool = false, // TF_PREFILL_KEEP: a pulled prefix's rows stay, marked remote
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
@@ -104,6 +110,8 @@ pub const LaneHost = struct {
 
     pub const Job = @import("lane_job.zig").Job;
     pub const Load = load;
+    pub const Remote = remote; // #1594 step 2b: lane_remote.zig, and the producer side in lane_export.zig
+    pub const Export = @import("lane_export.zig");
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
@@ -158,7 +166,7 @@ pub const LaneHost = struct {
     pub fn engine(h: *LaneHost) Engine {
         // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
         const vt = h.core.backend.vtable;
-        return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
+        return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &vtables.decided else if (vt.score != null) &vtables.scored else &vtables.plain };
     }
 
     /// Advertise the cache capabilities: warm turns follow the store, so a cache-less start claims none.
@@ -167,34 +175,8 @@ pub const LaneHost = struct {
         h.info_.warm_turns = store != null;
     }
 
-    const plain_vtable: Engine.VTable = .{
-        .info = infoFn,
-        .submit = submitFn,
-        .cancel = cancelFn,
-        .status = status.read,
-        .memory = memoryFn,
-        .keepalive = keepaliveFn,
-        .learn = learn.submit,
-        .recall = recalls.attach,
-        .imprint = rows_host.ask,
-        .drain = rows_host.drain,
-        .load = load.attach,
-    };
-
-    const scored_vtable: Engine.VTable = blk: {
-        var v = plain_vtable;
-        v.score = scoring.score;
-        break :blk v;
-    };
-
-    const decided_vtable: Engine.VTable = blk: {
-        var v = scored_vtable;
-        v.decide = scoring.decide;
-        break :blk v;
-    };
-
     /// The family's queue as a keepalive target, when it set one.
-    fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
+    pub fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
         return self(ctx).keepalive_target;
     }
 
@@ -202,13 +184,13 @@ pub const LaneHost = struct {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn infoFn(ctx: *anyopaque) Info {
+    pub fn infoFn(ctx: *anyopaque) Info {
         return self(ctx).info_;
     }
 
-    fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
+    pub fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
-        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
+        if (@import("lane_prompt_only.zig").refuses(h, request) or !@import("lane_export.zig").exportable(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
@@ -231,7 +213,7 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    fn cancelFn(ctx: *anyopaque, id: Id) void {
+    pub fn cancelFn(ctx: *anyopaque, id: Id) void {
         const h = self(ctx);
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
@@ -239,7 +221,7 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
+    pub fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         const source = self(ctx).memory orelse return null;
         return source.read(source.ctx, reset_peak);
     }
@@ -320,7 +302,7 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .prefill_widths = s.prefill_widths.items, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .remote_prefix = if (s.reuse.remote) s.cached else 0, .pulled_prefix = if (s.reuse.pulled) s.cached else 0 } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
@@ -463,7 +445,7 @@ pub const LaneHost = struct {
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
         if (h.cache) |store| {
-            store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
+            store.report(job.request.prompt.len, remote.cachedOwn(job), store.counts.kept - job.kept0);
             if (job.request.promptOnly()) {
                 // never kept, so a repeat of it is not worth noting
             } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
@@ -472,7 +454,7 @@ pub const LaneHost = struct {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
             }
         }
-        emit(job, .{ .prefilled = job.stream.cached });
+        emit(job, .{ .prefilled = remote.cachedOwn(job) });
         if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
         recalls.prompted(h, job);
     }

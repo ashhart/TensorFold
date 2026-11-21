@@ -4,6 +4,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const model = @import("cuda_model.zig");
 const se = @import("serve_engine.zig");
+const split = @import("cuda_export_split.zig");
 
 fn drafts() !bool {
     return @import("sys").environment.read(bool, "TF_DSV41_DRAFTS", true);
@@ -12,8 +13,19 @@ fn drafts() !bool {
 pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {
     const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa) });
     defer m.close();
+    if (m.rank() == 0) return error.RankZeroServes;
+    // KV_SPLIT hand-offs: this rank exports its pool pages on its own link when the leader announces a cut
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const shard = shardExporter(gpa, io, arena.allocator(), m, pack, &problem) catch |err| {
+        std.log.err("rank {d}: the hand-off shard exporter did not open: {s} ({s})", .{ m.rank(), problem, @errorName(err) });
+        return err;
+    };
+    defer if (shard) |x| x.stop();
+    if (shard) |x| m.f.export_shard = x.ext();
     return followLoaded(m, followStartup) catch |err| {
-        if (m.rank() != 0) std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
+        std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
         return err;
     };
 }
@@ -34,6 +46,11 @@ fn followStartup(m: *model.Model) void {
         break :blk settings.floor != null;
     } else false;
     se.logStartup(m, floor);
+}
+
+fn shardExporter(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model.Model, pack: []const u8, problem: *[]const u8) !?*split.Follower {
+    const link = (try split.linkName(problem)) orelse return null;
+    return try split.Follower.open(gpa, io, m, link, try api.LaneHost.Remote.checkpointId(a, io, pack), problem);
 }
 
 const Box = struct {

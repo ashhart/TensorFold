@@ -1,6 +1,8 @@
 //! A queued request's disk state read ahead while other streams run: it waits for the read, then restores from memory.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const pc = @import("prompt_cache.zig");
+const exports = @import("lane_export.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const prefetch = @import("rows_prefetch.zig");
@@ -24,6 +26,7 @@ pub fn queue(h: *LaneHost) void {
         if (!f.on()) return; // TENSORFOLD_RESTORE_PREFETCH=0: nothing is looked up or read here
         write.reap(r);
         const q = job.request;
+        const key = readKey(h, store, q);
         if (job.fetch.writing) |name| {
             if (r.worker) |w| if (w.names(name)) {
                 if (write.nowNs() - job.fetch.since < f.limits.wait_ns) continue;
@@ -32,13 +35,13 @@ pub fn queue(h: *LaneHost) void {
                 continue;
             };
             job.fetch.writing = null;
-        } else if (prefetch.writing(store, q.cacheKey(), q.chunks, h.spans(q))) |name| {
+        } else if (prefetch.writing(store, key, q.chunks, h.spans(q))) |name| {
             job.fetch.writing = name;
             job.fetch.since = write.nowNs();
             continue;
         }
         job.fetch.looked = true;
-        job.fetch.name = f.start(r, prefetch.choose(store, q.cacheKey(), q.chunks, h.spans(q)) orelse continue);
+        job.fetch.name = f.start(r, prefetch.choose(store, key, q.chunks, h.spans(q)) orelse continue);
     }
 }
 
@@ -63,6 +66,14 @@ pub fn stop(h: *LaneHost) void {
 fn named(h: *LaneHost, name: Name) bool {
     for (h.queued.items) |j| if (j.fetch.name) |n| if (std.mem.eql(u8, &n, &name)) return true;
     return false;
+}
+
+/// The key a queued request's read-ahead uses: the disk state its admission reads first, as `open` looks it up.
+fn readKey(h: *LaneHost, store: *pc.Store, q: *const api.Request) []const u32 {
+    const key = q.cacheKey(); // `lane_stream.open` looks a handoff up whole, so its cut on disk is read there first
+    if (q.handoff == null) return key;
+    const at: usize = if (store.find(key, q.chunks, h.spans(q))) |e| e.at else 0;
+    return if (at + 1 >= q.prompt.len) exports.resumable(q) else key; // the cut in RAM: below() reads the state below
 }
 
 /// A request the host's lookup keys by its tokens alone (no pictures), as `lane_stream.open` looks it up.

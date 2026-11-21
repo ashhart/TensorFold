@@ -163,7 +163,7 @@ pub const flags = [_]Flag{
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
     .{ .name = "--execution-witness", .kind = .store_true, .native = true }, // GET /v1/execution/witness (witness.zig)
-};
+} ++ @import("cli_remote.zig").flags(Flag, served("--mcdma-produce"));
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "TENSORFOLD_DEVICE_CHECK", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
@@ -203,6 +203,7 @@ pub const Args = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link (cli_remote.zig)
     decode_share: ?f64 = null, // the reply's share x: the prompt owes 1 - x and only the flag offers the chunk cap (null: env time share only)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
@@ -423,7 +424,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return if (is(name, "--cors-origin")) repeated.cors.append(a, v) else repeated.origins.append(a, v);
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
-    if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
+    if (try @import("cli_recall.zig").flag(a, out, name, v, u) or try @import("cli_remote.zig").flag(a, &out.remote_prefill, name, v, u)) return;
     if (@import("voice_cli.zig").apply(&out.voice, name)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
@@ -519,18 +520,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
 
-/// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
-pub fn parallel(text: []const u8) ?u32 {
-    const t = std.mem.trim(u8, text, " ");
-    if (std.ascii.eqlIgnoreCase(t, "auto")) return 8;
-    const n = std.fmt.parseInt(i64, t, 10) catch return null;
-    return @intCast(@max(1, @min(n, 4096)));
-}
-
-/// ``--parallel`` named a number (an engine that fits fewer refuses), not "auto" (it serves what fits).
-pub fn parallelFixed(text: []const u8) bool {
-    return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
-}
+pub const parallel = @import("cli_parallel.zig").parallel;
+pub const parallelFixed = @import("cli_parallel.zig").parallelFixed;
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
@@ -555,6 +546,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .ssd_experts_gib = args.ssd_experts_gib,
         .ple_on_ssd = args.ple_on_ssd,
         .fsr_trace = args.fsr_trace,
+        .remote_prefill = args.remote_prefill,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else if (spills(args)) try api.prompt_cache.rows.spillRoot(a) else null,
         .learn_gib = if (spills(args)) @min(args.spill_gib.?, if (args.learn) args.learn_gib else std.math.inf(f64)) else args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,

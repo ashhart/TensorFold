@@ -74,6 +74,8 @@ pub const Lanes = struct {
     /// each slot's stream state (null: free)
     by_slot: []?*St,
     retired: [16]bool = @splat(false),
+    /// each slot's hand-off export point while its prompt runs in pieces (armed at `begin`, run by the target)
+    cuts: [16]cut.Cut = undefined,
     release_requested: [16]bool = @splat(false),
     pub const init = @import("lane_owner.zig").init;
     pub const deinit = @import("lane_owner.zig").deinit;
@@ -162,6 +164,7 @@ pub const Lanes = struct {
     }
 
     const ingest = @import("lane_ingest.zig").ingest;
+    const cut = @import("lane_cut.zig");
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -184,6 +187,8 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
+        const exporting = cut.arm(x, slot, s);
+        defer if (exporting) x.target.arm(slot, null);
         if (s.images.len > 0) try x.target.setImages(slot, s.images);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
@@ -220,6 +225,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         x.target.admit(slot, s.max_new);
         const b = try x.target.begin(slot, s.prompt());
+        _ = cut.arm(x, slot, s); // the target runs it in `finish` / `tail`, once the replay is in and the last token is not
         try x.streams.put(x.gpa, s, st);
         x.by_slot[slot] = st;
         return .{ .cached = b.at, .damaged = b.damaged };

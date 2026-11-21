@@ -1,6 +1,7 @@
 //! Restoration borrowers survive invalidation; collection and budget eviction cannot free their state early.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
+const lifetime = @import("prompt_cache_lifetime.zig");
 const Fake = @import("prompt_cache_fake.zig").Fake;
 const fresh = @import("prompt_cache_test.zig").fresh;
 const a = std.testing.allocator;
@@ -47,6 +48,24 @@ test "invalidating the longest prefix leaves a valid shorter prefix usable" {
     const plan = try s.begin(arena.allocator(), &prompt, 8, &.{}, &.{}, null, &.{});
     try std.testing.expectEqual(@as(u32, 4), plan.from);
     try std.testing.expectEqual(fresh(&prompt), f.pass(&s, &prompt, plan));
+}
+
+test "a borrow takes the longest state its prompt resumes and holds it through invalidation, as a lookup does" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 8, &.{}, &.{}, null, &.{}));
+    const entry = lifetime.borrow(&s, prompt[0..8], prompt.len, &.{}, &.{}).?; // the state at 8 leaves no row of these 8 tokens
+    try std.testing.expectEqual(@as(u32, 4), entry.at);
+    s.expired(entry.saved);
+    s.collectExpired();
+    try std.testing.expectEqual(@as(usize, 2), f.live);
+    s.release(entry);
+    try std.testing.expectEqual(@as(usize, 1), f.live);
+    try std.testing.expect(lifetime.borrow(&s, prompt[0..4], prompt.len, &.{}, &.{}) == null);
 }
 
 test "clear and forget invalidate borrowed entries without freeing them" {

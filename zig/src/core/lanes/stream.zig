@@ -12,17 +12,7 @@ const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
 
-pub const Reason = enum {
-    none,
-    stop,
-    length,
-    @"error",
-    cancelled,
-
-    pub fn name(r: Reason) []const u8 {
-        return if (r == .none) "" else @tagName(r);
-    }
-};
+pub const Reason = @import("stream_reason.zig").Reason;
 
 pub const Mode = enum { pipe, drain, verify, exit };
 pub const loop_max_period: usize = 8;
@@ -81,10 +71,13 @@ pub const CancelCheck = struct {
 
 /// A kept prompt state to restore before prefill, and destinations for new states.
 pub const Reuse = struct {
-    saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
-    at: u32 = 0,
+    saved: ?*anyopaque = null,
+    at: u32 = 0, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
+    progress: ?MarkHook = null, // the hand-off's: after each prompt segment the GPU finished
+    remote: bool = false,
+    pulled: bool = false, // another machine's prefix (pulled now, or kept then restored); #1594 step 2b
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).

@@ -6,6 +6,8 @@ const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const prefetch = @import("rows_prefetch.zig");
 const fixture = @import("rows_async_fixture.zig");
+const lifetime = @import("prompt_cache_lifetime.zig");
+const Exp = @import("lane_remote_test.zig").Exp;
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const LaneHost = api.LaneHost;
 const Reason = api.Reason;
@@ -117,9 +119,11 @@ const Slow = struct {
 const Gate = struct {
     var open: std.atomic.Value(bool) = .init(false);
     var entered: std.atomic.Value(u32) = .init(0);
+    var at: std.atomic.Value(u32) = .init(0); // the state the latest read is of: its own file comes last in the plan
 
     fn reader(f: *prefetch.Prefetch, rd: *prefetch.Read) anyerror!void {
         _ = entered.fetchAdd(1, .acq_rel);
+        at.store(rd.plan.pieces[rd.plan.pieces.len - 1].at, .release);
         while (!open.load(.acquire)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
         return prefetch.readFiles(f, rd);
     }
@@ -127,8 +131,8 @@ const Gate = struct {
 
 const Mode = enum { off, on, cancelled };
 
-/// What a returning turn saw: its reply, where it resumed, how it ended, and the reads ahead.
-const Seen = struct { tokens: [8]u32 = undefined, n: usize = 0, cached: ?u32 = null, reason: Reason = .failed, counts: prefetch.Counts = .{}, reads: u64 = 0 };
+/// What a returning turn saw: its reply, where it resumed, how it ended, and the reads ahead (`ahead`: the last one's).
+const Seen = struct { tokens: [8]u32 = undefined, n: usize = 0, cached: ?u32 = null, reason: Reason = .failed, counts: prefetch.Counts = .{}, reads: u64 = 0, ahead: u32 = 0 };
 
 fn prompt(n: usize) [700]u32 {
     var p: [700]u32 = undefined;
@@ -276,4 +280,144 @@ test "prefetch: a returning request cancelled while its read is under way ends o
     try t.expectEqual(@as(u64, 1), s.counts.freed);
     try t.expectEqual(@as(u64, 1), s.counts.cancelled);
     try t.expectEqual(@as(u64, 0), s.counts.used);
+}
+
+/// What a repeated handoff finds in RAM, read back before it is queued: its cut, the state below it, or neither.
+const Warm = enum { cut, below, cold };
+
+/// A producer over the fake backend and a rows store under `root`: handoff `p` alone, or queued with `warm` in RAM.
+fn producer(root: []const u8, p: *const [700]u32, warm: ?Warm, exp: *Exp, seen: *Seen) !void {
+    const behind = warm != null;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const family: pc.Snapshots = .{ .ptr = &target, .vtable = &Snaps.vtable };
+    const rows = try pc.rows.Rows.open(gpa, family, .{ .root = root, .identity = 5, .cap = 1 << 30, .floor = 0, .daily = 1 << 30 });
+    defer rows.deinit();
+    var store = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    store.disk = rows;
+    const f: ?*prefetch.Prefetch = if (behind) try prefetch.make(rows, t.io, .{ .reads = 1 }) else null;
+    if (f) |x| x.reader = Gate.reader;
+    Gate.open.store(!behind, .release);
+    Gate.entered.store(0, .release);
+    Gate.at.store(0, .release);
+    if (warm) |w| if (w != .cold) { // a recent pass leaves its cut, a branch the state below; the other stays on disk
+        const key: []const u32 = if (w == .cut) p else p[0..699];
+        const e = lifetime.borrow(&store, key, 700, &.{}, &.{}) orelse return error.NotOnDisk;
+        try t.expectEqual(@as(u32, if (w == .cut) 699 else 600), e.at);
+        store.release(e);
+    };
+    exp.fake = &target;
+    var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
+    host.cache = &store;
+    host.exporter = exp.exporter();
+    try host.start();
+    {
+        defer host.stop();
+        if (behind) try queued(&host, p, seen) else try alone(&host, p);
+    }
+    seen.reads = rows.counts.reads;
+    seen.ahead = Gate.at.load(.acquire);
+    if (f) |x| seen.counts = x.counts;
+}
+
+/// The handoff request: its prompt's last token stays pending, its history's state kept on the way to the cut.
+fn handoffOf(p: *const [700]u32) api.Request {
+    return .{ .prompt = p, .max_tokens = 1, .history_len = 600, .handoff = .{ .id = @splat(0x3b) } };
+}
+
+/// The first handoff: its pass keeps 600 and its cut, 699, both written to disk while the host idles.
+fn alone(h: *LaneHost, p: *const [700]u32) !void {
+    var b: Box = .{};
+    defer b.tokens.deinit(gpa);
+    const req = handoffOf(p);
+    try h.engine().submit(1, &req, .{ .ctx = &b, .event = Box.event });
+    try t.expectEqual(Reason.length, b.wait());
+    var waited: usize = 0;
+    while (waited < 500) : (waited += 1) {
+        var below: api.ImprintAsk = .{ .op = .where, .prompt = p[0..699] };
+        var cut: api.ImprintAsk = .{ .op = .where, .prompt = p };
+        try t.expect(h.engine().imprintAsk(&below) and h.engine().imprintAsk(&cut));
+        try t.expect(below.wait(t.io, 5000) and cut.wait(t.io, 5000));
+        if (below.out.disk == 600 and cut.out.disk == 699) return;
+        std.Io.sleep(t.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.NotWritten;
+}
+
+/// Another conversation decodes; the same handoff again is queued behind it, and waits for a read if one starts.
+fn queued(h: *LaneHost, p: *const [700]u32, seen: *Seen) !void {
+    const p2 = prompt(2);
+    var slow: Slow = .{};
+    var other: Box = .{};
+    defer other.tokens.deinit(gpa);
+    const req2: api.Request = .{ .prompt = &p2, .max_tokens = 4000, .stop = .{ .ctx = &slow, .check = Slow.check } };
+    try h.engine().submit(2, &req2, .{ .ctx = &other, .event = Box.event });
+    defer _ = other.wait();
+    defer slow.done.store(true, .release);
+    while (other.read().n == 0) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    var b: Box = .{};
+    defer b.tokens.deinit(gpa);
+    const req = handoffOf(p);
+    try h.engine().submit(3, &req, .{ .ctx = &b, .event = Box.event });
+    defer _ = b.wait();
+    defer Gate.open.store(true, .release);
+    const until = std.Io.Clock.awake.now(t.io).toNanoseconds() + 5 * std.time.ns_per_s;
+    while (Gate.entered.load(.acquire) == 0 and b.read().done == null and std.Io.Clock.awake.now(t.io).toNanoseconds() < until)
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    Gate.open.store(true, .release);
+    seen.reason = b.wait();
+    seen.cached = b.read().cached;
+    slow.done.store(true, .release);
+    try t.expectEqual(Reason.stop, other.wait());
+}
+
+/// A fresh root seeded by handoff `p` alone (600 and its cut, 699, on disk), then `p` again queued with `warm` in RAM.
+fn repeat(warm: Warm, p: *const [700]u32) !Seen {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-fetch-handoff-{s}-{d}", .{ @tagName(warm), platform.c.getpid() });
+    defer rmTree(root);
+    var first: Exp = .{};
+    var s: Seen = .{};
+    try producer(root, p, null, &first, &s);
+    try t.expectEqual(@as(?usize, 699), first.tokens);
+    var again: Exp = .{};
+    s = .{};
+    try producer(root, p, warm, &again, &s);
+    try t.expectEqual(Reason.length, s.reason);
+    try t.expectEqual(@as(?usize, 699), again.tokens); // exported at its cut again
+    try t.expectEqual(@as(?u32, 600), s.cached); // resumed below the cut, at its history's state
+    return s;
+}
+
+test "prefetch: a repeated handoff whose cut is kept in RAM reads ahead the state below the cut it resumes from" {
+    const p = prompt(3);
+    const s = try repeat(.cut, &p);
+    try t.expectEqual(@as(u32, 600), s.ahead); // read ahead while the other stream decoded, not the cut in RAM
+    try t.expectEqual(@as(u64, 1), s.counts.made);
+    try t.expectEqual(@as(u64, 1), s.counts.used); // and the borrow below the cut took it, not a read at admission
+    try t.expectEqual(@as(u64, 2), s.reads); // the cut's read into RAM, then the state below it
+}
+
+test "prefetch: a repeated handoff whose cut is on disk, the state below it in RAM, reads ahead the cut its lookup takes" {
+    const p = prompt(3);
+    const s = try repeat(.below, &p);
+    try t.expectEqual(@as(u32, 699), s.ahead); // the cut, which the admission lookup reads before below() lets it go
+    try t.expectEqual(@as(u64, 1), s.counts.made);
+    try t.expectEqual(@as(u64, 1), s.counts.used); // taken there: no read on the engine thread
+    try t.expectEqual(@as(u64, 2), s.reads); // the state below read into RAM, then the cut
+}
+
+test "prefetch: a repeated handoff with both states on disk reads its cut ahead and the shorter one at admission" {
+    const p = prompt(3);
+    const s = try repeat(.cold, &p);
+    try t.expectEqual(@as(u32, 699), s.ahead); // the larger read, off the engine thread
+    try t.expectEqual(@as(u64, 1), s.counts.made);
+    try t.expectEqual(@as(u64, 1), s.counts.used);
+    try t.expectEqual(@as(u64, 2), s.reads); // the cut, then the state below, which below() borrows at admission
 }
