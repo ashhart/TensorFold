@@ -112,6 +112,16 @@ pub const Probe = struct {
         return p.rig.input(std.mem.sliceAsBytes(words));
     }
 
+    fn sample(p: *const Probe, fill: g.Fill, rng: std.Random, left: bool, k: usize, n: usize) f32 {
+        if (fill == .stress) {
+            const pair = stress.pair(k, n);
+            return if (left) pair.left else pair.right;
+        }
+        // A bf16-dyadic fits in 10 fraction bits, so the M5 operand cut still matched. Wide inputs do not.
+        if (p.wide()) return @bitCast(0x3f000000 | (rng.int(u32) & 0x007ffffe));
+        return c.fromBf16(u.dyadic(rng, 255, 128));
+    }
+
     pub fn prepare(p: *Probe, s: c.Shape, fill: g.Fill, seed: u64) !bool {
         const a = u.reset(&p.arena, &p.rig);
         const lda = s.k + 4;
@@ -127,10 +137,10 @@ pub const Probe = struct {
         @memset(right, std.math.nan(f32));
         for (0..p.s.batch) |b| {
             for (0..s.rows) |i| for (0..s.k) |k| {
-                left[b * sa + i * lda + k] = if (fill == .stress) stress.pair(k, s.k).left else c.fromBf16(u.dyadic(rng, 255, 128));
+                left[b * sa + i * lda + k] = sample(p, fill, rng, true, k, s.k);
             };
             for (0..s.n) |j| for (0..s.k) |k| {
-                right[b * sb + p.bIndex(j, k)] = if (fill == .stress) stress.pair(k, s.k).right else c.fromBf16(u.dyadic(rng, 255, 128));
+                right[b * sb + p.bIndex(j, k)] = sample(p, fill, rng, false, k, s.k);
             };
         }
         if (fill == .nonfinite) {
