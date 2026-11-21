@@ -14,7 +14,7 @@ fn integer(d: *const g.Document, key: []const u8, expected: u64) !void {
     };
     if (n != expected) return error.UnsupportedLingGgufGeometry;
 }
-fn metadata(d: *const g.Document) !void {
+pub fn validateMetadata(d: *const g.Document) !void {
     const arch = d.get("general.architecture") orelse return error.MissingLingGgufMetadata;
     if (arch != .string or !std.mem.eql(u8, arch.string, "bailingmoe3")) return error.UnsupportedLingGgufArchitecture;
     const checks = .{ .{ "block_count", 24 }, .{ "embedding_length", 1536 }, .{ "feed_forward_length", 4608 }, .{ "attention.head_count", 16 }, .{ "expert_count", 128 }, .{ "expert_used_count", 8 }, .{ "expert_group_count", 8 }, .{ "expert_group_used_count", 4 }, .{ "expert_gating_func", 2 }, .{ "vocab_size", 157184 }, .{ "ssm.conv_kernel", 4 }, .{ "kda.head_dim", 128 }, .{ "attention.q_lora_rank", 256 }, .{ "attention.kv_lora_rank", 512 }, .{ "rope.dimension_count", 64 }, .{ "expert_feed_forward_length", 512 }, .{ "expert_shared_feed_forward_length", 512 }, .{ "leading_dense_block_count", 1 } };
@@ -60,6 +60,10 @@ pub fn checkTensor(t: g.Tensor, n: names.Name) !void {
         },
     }
 }
+pub fn validateTensors(d: *const g.Document, plan: []const names.Name) !void {
+    for (plan) |name| try checkTensor(d.getTensor(name.source) orelse return error.MissingLingGgufTensor, name);
+    if (d.tensors.len != plan.len) return error.UnexpectedLingGgufTensor;
+}
 pub const File = struct {
     const gguf_sdot = @import("cpu_gguf_q4_sdot.zig");
     const gguf_repack8 = @import("cpu_gguf_repack8.zig");
@@ -80,13 +84,12 @@ pub const File = struct {
     pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !File {
         var source = try g.File.open(a, io, path, .{});
         errdefer source.close(io);
-        try metadata(&source.document);
+        try validateMetadata(&source.document);
         var arena = std.heap.ArenaAllocator.init(a);
         errdefer arena.deinit();
         const dup_path = try arena.allocator().dupe(u8, path);
         const plan = try names.tiny(arena.allocator());
-        if (source.document.tensors.len != plan.len) return error.UnexpectedLingGgufTensor;
-        for (plan) |name| try checkTensor(source.document.getTensor(name.source) orelse return error.MissingLingGgufTensor, name);
+        try validateTensors(&source.document, plan);
         return .{ .source = source, .path = dup_path, .arena = arena, .plan = plan, .io = io };
     }
     /// Opt-in fast integer SDOT and 8x4 repacked weight cache; exact mode remains the default.
