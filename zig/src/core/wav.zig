@@ -99,7 +99,7 @@ pub fn pcm16(samples: []const f32, out: []u8) void {
 }
 
 /// torchaudio.functional.resample(x, from, to) for a float32 waveform, shared with the speech route (core/audio.zig).
-pub const resample = @import("core").audio.resample;
+pub const resample = @import("audio.zig").resample;
 
 test "a written 16-bit WAV parses back to its samples, clamped and rounded" {
     const gpa = std.testing.allocator;
