@@ -11,7 +11,7 @@ const Seq = prompt.Seq;
 
 /// A drafted window on one GPU as a graph (one chunk, scores left on the device, no media or adds); true once run.
 pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *Seq, ids: []const u32, hooks: batch.Hooks) !bool {
-    if (!window_graph.enabled() or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
+    if (!window_graph.enabled() or hooks.stream_rows.bases.len > 0 or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
     if (ids.len > @import("cuda_mtp.zig").max_rows or ids.len > p.s.cap or e.collective != null or seq.media != null or p.m.pocket != null) return false;
     const key = window_graph.Key.init(seq, seq.fed, ids.len, p.s, p.seq.scores, @intFromPtr(p.m.layers.ptr), hooks);
     try window_graph.stageWindow(p, ids, seq.fed);

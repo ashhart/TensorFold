@@ -113,7 +113,8 @@ fn checkBest(st: cuda.Stream, d: *mtp.Draft, rows: ?[]const u16) !void {
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
     var pending: [max_rows]u32 = undefined;
-    if (masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?))) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+    const scores = if (d.logit_paged) d.window_scores else d.logits.ptr; // on pieces: the rows its verify wrote
+    if (masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?))) try h.best(st, scores, vocab, vocab, n, d.best.ptr);
     if (!mtp.isSampled(sm) and masks.len == 0) {
         try st.synchronize();
         try checkBest(st, d, null);
@@ -123,7 +124,7 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
     }
     if (masks.len == 0) if (sm) |s| if (usable(s)) {
         const k: usize = s.top_k;
-        const c = try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
+        const c = try candidates(h, st, d, scores, vocab, vocab, n, k);
         for (pending[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
             if (err == error.ProposalNonfinite) {
                 try badCandidates(h, st, d, r);
@@ -134,7 +135,7 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
         return;
     };
     const rows = d.host[0 .. n * vocab];
-    try download(st, std.mem.sliceAsBytes(rows), d.logits.ptr);
+    try download(st, std.mem.sliceAsBytes(rows), scores);
     if (masks.len == 0) {
         try checkBest(st, d, rows);
     } else {
@@ -168,7 +169,8 @@ fn download(st: cuda.Stream, dst: []u8, src: u64) !void {
 
 /// Diagnostic reductions are only queued after a top-k sentinel refuses a verify row.
 pub fn badCandidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, row: usize) !void {
-    try h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
+    const scores = if (d.logit_paged) d.window_scores else d.logits.ptr;
+    try h.best(st, scores, vocab, vocab, d.rows, d.best.ptr);
     try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * d.rows]), d.best.ptr);
     badVerify(d, row, d.best_host[row * 4 ..][0..4].*, null, false);
 }

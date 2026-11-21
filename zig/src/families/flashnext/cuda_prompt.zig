@@ -406,7 +406,8 @@ pub const Engine = struct {
             const last = at + n == ids.len;
             e.ngram.warmAhead(ids, at + n, @min(ids.len, at + n + s.cap));
             p.hooks.logits = if (last) hooks.logits else .none;
-            p.hooks.streams = if (hooks.streams != 0) hooks.streams + at * wide * 2 else 0;
+            p.hooks.streams = if (hooks.streams != 0 and hooks.stream_rows.bases.len == 0) hooks.streams + at * wide * 2 else hooks.streams;
+            p.hooks.stream_rows.from = hooks.stream_rows.from + @as(u32, @intCast(at));
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }

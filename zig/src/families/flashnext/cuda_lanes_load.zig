@@ -31,6 +31,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
     if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null)) return error.FlashNextPagesUnsupported;
+    const state_pages = try @import("cuda_kv_lanes.zig").statePages();
+    if (state_pages and page_tokens == 0) return error.FlashNextStatePagesNeedKvPages;
     // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
     const Draft = @import("cuda_mtp_draft.zig").Draft;
     const late_fits = o.tp == 1;
@@ -111,7 +113,9 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
         own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk, own.engine.heads) else 0;
-        own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
+        const kvl = @import("cuda_kv_lanes.zig");
+        const extra = stream_bytes - own_seq_bytes - head_bytes;
+        own.kv.layout = if (state_pages) try kvl.layoutPieces(o.context, page_tokens, own.kv.head, extra) else kvl.layout(o.context, page_tokens, own.kv.head, extra);
     }
     if (own.ranks) |r| try load_cache.finishAfter(.{ r, std.math.maxInt(u64) }, ranks.Session.room) else load_cache.finish();
     // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM

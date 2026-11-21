@@ -7,6 +7,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.FlashNextRanksNeedModelopt => "--tp 2 splits Flash Next's ModelOpt checkpoints only; serve this MLX checkpoint on one GPU, without --tp",
         error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
+        error.BadFlashNextStatePages, error.FlashNextStatePagesNeedKvPages, error.PieceOverPage => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
         else => null,
     };
@@ -19,6 +20,9 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
         error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs one rank, our own glue and no --slide: unset it",
+        error.BadFlashNextStatePages => "TF_FLASHNEXT_STATE_PAGES takes 1 (states as pieces on pool pages) or 0",
+        error.FlashNextStatePagesNeedKvPages => "TF_FLASHNEXT_STATE_PAGES puts pool lanes' states on pages: set TF_FLASHNEXT_KV_PAGES too",
+        error.PieceOverPage => "TF_FLASHNEXT_STATE_PAGES: a page must hold a lane's largest piece (a layer's 3 MiB state); the log above names the smallest page that does",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.BadDenseSplit => "TF_FLASHNEXT_SPLIT_DENSE takes 1 (split the BF16 dense projections at --tp 2, the default) or 0",
         error.DecodeGraphWithDenseSplit => "TF_FLASHNEXT_DECODE_GRAPH is not qualified with the dense split: unset it or set TF_FLASHNEXT_SPLIT_DENSE=0",
