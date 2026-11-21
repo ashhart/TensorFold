@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const image = @import("image.zig");
+const config = @import("config.zig");
 
 const vit = cuda.vit;
 
@@ -11,8 +12,6 @@ pub const heads = 16;
 pub const head_dim = 64;
 pub const depth = 23;
 pub const mlp_inter = 4096;
-pub const proj_inter = 4096;
-pub const hidden = 4608; // the decoder's width
 const merged = image.merge * image.merge * width; // a token's four patch rows side by side
 const eps: f32 = 1e-5;
 const pre = "model.visual.backbone.";
@@ -75,9 +74,9 @@ const Layer = struct { ln1_w: u64, ln1_b: u64, qkv_w: u64, qkv_b: u64, out_w: u6
 const row_bytes: u64 = image.patch_width * 2 + 4 * width * 2 + 3 * width * 2 + mlp_inter * 2 + mlp_inter * 4 + 4 * 4 + 4 * 4 + 2 * image.pairs * 4;
 
 /// Scratch for pictures of up to `tokens` decoder tokens, plus cuBLASLt's workspace.
-pub fn scratchBytes(tokens: u32) u64 {
+pub fn scratchBytes(v: config.Vision, tokens: u32) u64 {
     const rows: u64 = @as(u64, tokens) * image.merge * image.merge + 1;
-    return rows * row_bytes + @as(u64, tokens) * proj_inter * 2 + (32 << 20);
+    return rows * row_bytes + @as(u64, tokens) * v.proj_hidden * 2 + (32 << 20);
 }
 
 /// The tower's weights and scratch on one GPU.
@@ -89,14 +88,16 @@ pub const Tower = struct {
     g: vit.Gemms,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     max_tokens: u32,
+    proj_inter: u32, // config.json's projection_hidden_dim
+    hidden: u32, // the decoder's width, config.json's text_hidden_size
     patch_w: u64 = 0, // [width][1200]: a native patch's row, column, channel
     table: u64 = 0, // [32 * 32][width] position rows
     cls: u64 = 0,
     cls_pos: u64 = 0,
     pre_w: u64 = 0,
     pre_b: u64 = 0,
-    proj_in: u64 = 0, // [4096][4096], no bias
-    proj_out: u64 = 0, // [hidden][4096], no bias
+    proj_in: u64 = 0, // [proj_inter][4096], no bias
+    proj_out: u64 = 0, // [hidden][proj_inter], no bias
     layers: [depth]Layer = undefined,
     px: u64 = 0, // bf16 [P][1200]
     x: u64 = 0, // bf16 [R][width]: the residual stream (row 0 the class token)
@@ -134,7 +135,7 @@ pub const Tower = struct {
     }
 
     /// The tower from the checkpoint at `dir` (its model.visual.* tensors, bf16 as released), scratch for `max_tokens`.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, max_tokens: u32) !*Tower {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, v: config.Vision, max_tokens: u32) !*Tower {
         if (max_tokens == 0) return error.ImageTokens;
         const t = try gpa.create(Tower);
         errdefer gpa.destroy(t);
@@ -142,7 +143,7 @@ pub const Tower = struct {
         errdefer k.unload();
         var vk = try vit.Kernels.load(d);
         errdefer vk.unload();
-        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens };
+        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens, .proj_inter = v.proj_hidden, .hidden = v.text_hidden };
         errdefer {
             for (t.bufs.items) |*b| b.free();
             t.bufs.deinit(gpa);
@@ -156,8 +157,8 @@ pub const Tower = struct {
         t.cls_pos = try t.get(&ck, pre ++ "embeddings.cls_position_embedding", &.{width});
         t.pre_w = try t.get(&ck, pre ++ "ln_pre.weight", &.{width});
         t.pre_b = try t.get(&ck, pre ++ "ln_pre.bias", &.{width});
-        t.proj_in = try t.get(&ck, "model.visual.proj_in.weight", &.{ proj_inter, merged });
-        t.proj_out = try t.get(&ck, "model.visual.proj_out.weight", &.{ hidden, proj_inter });
+        t.proj_in = try t.get(&ck, "model.visual.proj_in.weight", &.{ t.proj_inter, merged });
+        t.proj_out = try t.get(&ck, "model.visual.proj_out.weight", &.{ t.hidden, t.proj_inter });
         const w = try gpa.alloc(u8, 3 * width * width * 2);
         defer gpa.free(w);
         for (&t.layers, 0..) |*l, i| {
@@ -201,15 +202,15 @@ pub const Tower = struct {
         t.wts = try t.alloc(P * 4 * 4);
         t.cs = try t.alloc(R * image.pairs * 4);
         t.sn = try t.alloc(R * image.pairs * 4);
-        t.p1 = try t.alloc(@as(usize, max_tokens) * proj_inter * 2);
+        t.p1 = try t.alloc(@as(usize, max_tokens) * t.proj_inter * 2);
         return t;
     }
 
     /// The device bytes load takes for `dir`: the tower's tensors as stored, scratch and workspace for `max_tokens`.
-    pub fn bytesFor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, max_tokens: u32) !u64 {
+    pub fn bytesFor(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, v: config.Vision, max_tokens: u32) !u64 {
         var ck = try openTower(gpa, io, dir);
         defer core.checkpoint.cache.close(&ck);
-        var total: u64 = scratchBytes(max_tokens);
+        var total: u64 = scratchBytes(v, max_tokens);
         for (ck.files.items) |*f| for (f.names.keys()) |name| {
             total += f.get(name).?.bytes.len;
         };
@@ -273,9 +274,9 @@ pub const Tower = struct {
         for (t.layers[0..@min(t.layers_run, depth)]) |l| try t.layer(s, l, R);
         if (t.layers_run < depth) return;
         // the projector: each token's four patch rows (merge order, after the class row) as one 4096-wide row
-        try t.g.run(s, t.x + width * 2, t.proj_in, t.p1, T, proj_inter, merged, .bf16);
-        try t.vk.pointwise(s, t.p1, null, t.p1, T * proj_inter, .gelu);
-        try t.g.run(s, t.p1, t.proj_out, out, T, hidden, proj_inter, .bf16);
+        try t.g.run(s, t.x + width * 2, t.proj_in, t.p1, T, t.proj_inter, merged, .bf16);
+        try t.vk.pointwise(s, t.p1, null, t.p1, T * t.proj_inter, .gelu);
+        try t.g.run(s, t.p1, t.proj_out, out, T, t.hidden, t.proj_inter, .bf16);
     }
 
     fn layer(t: *Tower, s: cuda.Stream, l: Layer, R: usize) !void {
@@ -348,12 +349,17 @@ pub fn cut(sp: Span, lo: usize, hi: usize) ?Copy {
     return .{ .dst = @intCast(a - lo), .src = @intCast(sp.row + (a - sp.at)), .n = @intCast(b - a) };
 }
 
+/// A copy's bytes for bf16 rows `hidden` wide: the offset into the pass, the offset into the image rows, the length.
+pub fn copyBytes(c: Copy, hidden: u32) [3]u64 {
+    const row: u64 = @as(u64, hidden) * 2;
+    return .{ c.dst * row, c.src * row, c.n * row };
+}
+
 /// After the normed embedding, a pass's rows at positions [lo, hi) (bf16 at `x`) take their image rows (at `rows`).
-pub fn splice(d: *const cuda.Driver, s: cuda.Stream, rows: u64, list: []const Span, lo: usize, hi: usize, x: u64) !void {
+pub fn splice(d: *const cuda.Driver, s: cuda.Stream, hidden: u32, rows: u64, list: []const Span, lo: usize, hi: usize, x: u64) !void {
     for (list) |sp| {
-        const c = cut(sp, lo, hi) orelse continue;
-        const row: u64 = hidden * 2;
-        try d.check(d.api.cuMemcpyDtoDAsync_v2(x + c.dst * row, rows + c.src * row, c.n * row, s.handle), "cuMemcpyDtoDAsync");
+        const b = copyBytes(cut(sp, lo, hi) orelse continue, hidden);
+        try d.check(d.api.cuMemcpyDtoDAsync_v2(x + b[0], rows + b[1], b[2], s.handle), "cuMemcpyDtoDAsync");
     }
 }
 
@@ -394,7 +400,26 @@ test "chunked passes give every placeholder the row masked_scatter gives it" {
     }
 }
 
+/// Inkling 2 Small's vision_config and Mini's, whose decoder is 2304 wide.
+fn testVision(text_hidden: u32) config.Vision {
+    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden };
+}
+
 test "scratch for the default limit stays under 256 MiB" {
-    try std.testing.expect(scratchBytes(default_tokens) < 256 << 20);
+    try std.testing.expect(scratchBytes(testVision(4608), default_tokens) < 256 << 20);
     try std.testing.expectEqual(@as(u32, 36864), attn_smem);
+}
+
+test "the splice copies rows as wide as the config's decoder, Small's 4608 and Mini's 2304" {
+    const sp: Span = .{ .at = 3, .n = 5, .row = 7 };
+    for ([_]u32{ 4608, 2304 }) |h| {
+        const v = testVision(h);
+        const b = copyBytes(cut(sp, 4, 6).?, v.text_hidden);
+        try std.testing.expectEqual([3]u64{ 0, 8 * @as(u64, h) * 2, 2 * @as(u64, h) * 2 }, b);
+    }
+    // the projector's scratch row is projection_hidden_dim wide (4096 in both releases)
+    var v = testVision(2304);
+    const wide = scratchBytes(v, 16);
+    v.proj_hidden = 2048;
+    try std.testing.expectEqual(@as(u64, 16 * 2048 * 2), wide - scratchBytes(v, 16));
 }
