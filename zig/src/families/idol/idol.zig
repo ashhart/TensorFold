@@ -1,4 +1,4 @@
-//! Idol image to 3D: its denoiser, decoders, DINOv3 encoder and FLUX.2 VAE on Metal (beside the lane engine, not a token family).
+//! Idol image to 3D: denoiser, decoders, DINOv3 and FLUX.2 VAE on Metal; not a token family.
 pub const config = @import("config.zig");
 pub const host = @import("host.zig");
 pub const weights = @import("weights.zig");
