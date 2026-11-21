@@ -80,17 +80,16 @@ kernel void tf_inkling2_loop_messages(
   }
 }
 
+// The gates' first launch: h and m each to unit RMS and BF16, as normalized[row][h | m].
 kernel void tf_inkling2_loop_gates(
     const device float* h [[buffer(0)]], const device float* m [[buffer(1)]],
-    const device bfloat* down [[buffer(2)]], const device bfloat* forget [[buffer(3)]],
-    const device bfloat* gain [[buffer(4)]], device float* out [[buffer(5)]],
-    constant InkLoopArgs& a [[buffer(6)]], uint t [[thread_position_in_threadgroup]],
+    device bfloat* normalized [[buffer(2)]], constant InkLoopArgs& a [[buffer(3)]],
+    uint t [[thread_position_in_threadgroup]],
     uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
   if (row >= a.rows) return;
   const device float* inputs[2] = { h + size_t(row) * INKLING_LOOP_H,
                                     m + size_t(row) * INKLING_LOOP_H };
-  threadgroup float sums[2 * 8], inverse[2], zeta[INKLING_LOOP_RANK];
-  threadgroup bfloat normalized[2 * INKLING_LOOP_H];
+  threadgroup float sums[2 * 8], inverse[2];
   for (uint s = 0; s < 2; ++s) {
     float ss = 0.0f;
     for (uint d = t; d < INKLING_LOOP_H; d += 256) {
@@ -107,23 +106,48 @@ kernel void tf_inkling2_loop_gates(
     inverse[s] = precise::rsqrt(precise::divide(ss, 2304.0f) + INKLING_LOOP_EPS);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
+  device bfloat* y = normalized + size_t(row) * (2 * INKLING_LOOP_H);
   for (uint d = t; d < INKLING_LOOP_H; d += 256) {
-    normalized[d] = bfloat(h[size_t(row) * INKLING_LOOP_H + d] * inverse[0]);
-    normalized[INKLING_LOOP_H + d] = bfloat(m[size_t(row) * INKLING_LOOP_H + d] * inverse[1]);
+    y[d] = bfloat(h[size_t(row) * INKLING_LOOP_H + d] * inverse[0]);
+    y[INKLING_LOOP_H + d] = bfloat(m[size_t(row) * INKLING_LOOP_H + d] * inverse[1]);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t < INKLING_LOOP_RANK) {
-    float dot = 0.0f;
-    for (uint d = 0; d < 2 * INKLING_LOOP_H; ++d)
-      dot += float(down[size_t(t) * (2 * INKLING_LOOP_H) + d]) * float(normalized[d]);
-    zeta[t] = float(bfloat(dot));
+}
+
+// The second: zeta[row][r] = bf16(down[r] . normalized[row]) in fp32, a simdgroup a rank, eight columns a lane a step.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_loop_zeta(
+    const device bfloat* normalized [[buffer(0)]], const device bfloat* down [[buffer(1)]],
+    device bfloat* zeta [[buffer(2)]], constant InkLoopArgs& a [[buffer(3)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint r = tg.x * 8 + sg, row = tg.y;
+  if (r >= INKLING_LOOP_RANK || row >= a.rows) return;
+  const device bfloat* w = down + size_t(r) * (2 * INKLING_LOOP_H);
+  const device bfloat* x = normalized + size_t(row) * (2 * INKLING_LOOP_H);
+  float acc = 0.0f;
+  for (uint i = 8 * lane; i < 2 * INKLING_LOOP_H; i += 256) {
+    const float4 w0 = float4(*(const device bfloat4*)(w + i)), w1 = float4(*(const device bfloat4*)(w + i + 4));
+    const float4 x0 = float4(*(const device bfloat4*)(x + i)), x1 = float4(*(const device bfloat4*)(x + i + 4));
+    acc += dot(w0, x0) + dot(w1, x1);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint d = t; d < INKLING_LOOP_H; d += 256) {
+  const float sum = simd_sum(acc);
+  if (lane == 0) zeta[row * INKLING_LOOP_RANK + r] = bfloat(sum);
+}
+
+// The third: each output's forget and gain dots over zeta in rank order, then the four-step blend.
+kernel void tf_inkling2_loop_blend(
+    const device float* h [[buffer(0)]], const device float* m [[buffer(1)]],
+    const device bfloat* zeta [[buffer(2)]], const device bfloat* forget [[buffer(3)]],
+    const device bfloat* gain [[buffer(4)]], device float* out [[buffer(5)]],
+    constant InkLoopArgs& a [[buffer(6)]], uint2 at [[thread_position_in_grid]]) {
+  const uint d = at.x, row = at.y;
+  if (d >= INKLING_LOOP_H || row >= a.rows) return;
+  {
     float fdot = 0.0f, gdot = 0.0f;
     for (uint r = 0; r < INKLING_LOOP_RANK; ++r) {
-      fdot += float(forget[size_t(d) * INKLING_LOOP_RANK + r]) * zeta[r];
-      gdot += float(gain[size_t(d) * INKLING_LOOP_RANK + r]) * zeta[r];
+      const float z = float(zeta[row * INKLING_LOOP_RANK + r]);
+      fdot += float(forget[size_t(d) * INKLING_LOOP_RANK + r]) * z;
+      gdot += float(gain[size_t(d) * INKLING_LOOP_RANK + r]) * z;
     }
     const float f = precise::tanh(fdot);
     const float g = precise::tanh(gdot);
