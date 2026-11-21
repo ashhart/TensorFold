@@ -463,7 +463,7 @@ test "MTP suffix filtering covers whole and stepped prefill, including capped bo
     @memset(prompt, 7);
 
     var one_engine: Fake.Engine = .{};
-    defer one_engine.rows.deinit(t.allocator);
+    defer one_engine.deinit();
     var one_shot: Fake = .{ .e = &one_engine, .mtp = @ptrCast(&marker) };
     defer one_shot.deinit();
     var full = try lanes.Stream.init(t.allocator, .{ .id = "mtp-full", .prompt = prompt, .max_new = 1, .drafts = true });
@@ -478,7 +478,7 @@ test "MTP suffix filtering covers whole and stepped prefill, including capped bo
     try t.expectEqual(@as(?usize, 6143), one_engine.calls.items[1].tap_from);
 
     var step_engine: Fake.Engine = .{};
-    defer step_engine.rows.deinit(t.allocator);
+    defer step_engine.deinit();
     var stepped: Fake = .{ .e = &step_engine, .mtp = @ptrCast(&marker) };
     defer stepped.deinit();
     var partial = try lanes.Stream.init(t.allocator, .{ .id = "mtp-stepped", .prompt = prompt, .max_new = 1, .drafts = true });
@@ -493,7 +493,7 @@ test "MTP suffix filtering covers whole and stepped prefill, including capped bo
     for (step_engine.calls.items) |call| try t.expectEqual(@as(?usize, 6143), call.tap_from);
 
     var capped_engine: Fake.Engine = .{};
-    defer capped_engine.rows.deinit(t.allocator);
+    defer capped_engine.deinit();
     var capped_fake: Fake = .{ .e = &capped_engine, .mtp = @ptrCast(&marker) };
     defer capped_fake.deinit();
     var capped_stream = try lanes.Stream.init(t.allocator, .{ .id = "mtp-capped", .prompt = prompt, .max_new = 1, .drafts = true });
@@ -518,7 +518,7 @@ test "MTP suffix filtering covers whole and stepped prefill, including capped bo
     try t.expectEqual(@as(usize, 8192), at);
 
     var no_draft_engine: Fake.Engine = .{};
-    defer no_draft_engine.rows.deinit(t.allocator);
+    defer no_draft_engine.deinit();
     var no_drafts: Fake = .{ .e = &no_draft_engine, .mtp = @ptrCast(&marker) };
     defer no_drafts.deinit();
     var target_only = try lanes.Stream.init(t.allocator, .{ .id = "mtp-attached-no-drafts", .prompt = prompt, .max_new = 1, .drafts = false });
@@ -538,7 +538,7 @@ test "MTP suffix filtering is disabled for chunked, resumed, and reuse-marked pr
     @memset(prompt, 7);
 
     var chunk_engine: Fake.Engine = .{};
-    defer chunk_engine.rows.deinit(t.allocator);
+    defer chunk_engine.deinit();
     var chunked: Fake = .{ .e = &chunk_engine, .mtp = @ptrCast(&marker) };
     defer chunked.deinit();
     var chunks = try lanes.Stream.init(t.allocator, .{ .id = "mtp-request-chunks", .prompt = prompt, .max_new = 1, .drafts = true, .chunks = &.{4096} });
@@ -551,7 +551,7 @@ test "MTP suffix filtering is disabled for chunked, resumed, and reuse-marked pr
     }
 
     var reuse_engine: Fake.Engine = .{};
-    defer reuse_engine.rows.deinit(t.allocator);
+    defer reuse_engine.deinit();
     var reuse_fake: Fake = .{ .e = &reuse_engine, .mtp = @ptrCast(&marker) };
     defer reuse_fake.deinit();
     var marked = try lanes.Stream.init(t.allocator, .{ .id = "mtp-reuse-mark", .prompt = prompt, .max_new = 1, .drafts = true, .reuse = .{ .marks = &.{4096} } });
@@ -564,7 +564,7 @@ test "MTP suffix filtering is disabled for chunked, resumed, and reuse-marked pr
     }
 
     var resumed_engine: Fake.Engine = .{};
-    defer resumed_engine.rows.deinit(t.allocator);
+    defer resumed_engine.deinit();
     var resumed_fake: Fake = .{ .e = &resumed_engine, .mtp = @ptrCast(&marker) };
     defer resumed_fake.deinit();
     var saved: u8 = 0;
