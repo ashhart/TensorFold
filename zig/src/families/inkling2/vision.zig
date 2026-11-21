@@ -260,9 +260,8 @@ pub const Tower = struct {
     }
 
     pub fn encodeWith(t: *Tower, s: cuda.Stream, p: image.Prepared, out: u64, rope: bool) !void {
+        try admit(p, t.max_tokens);
         const T: usize = p.tokens();
-        if (T == 0 or p.pixels.len != T * image.side * image.side * 3) return error.ImageGrid;
-        if (T > t.max_tokens) return error.ImageTooLarge;
         try t.stage(s, p, rope);
         const P = image.patchCount(p);
         const R = P + 1;
@@ -309,6 +308,13 @@ pub const Tower = struct {
         try go(t.k.scale_add, s, .{ .x = @intCast((n + 255) / 256) }, 256, 0, &a);
     }
 };
+
+/// A picture encode takes: pixels that fill its grid, and no more tokens than the tower's scratch covers.
+fn admit(p: image.Prepared, max_tokens: u32) !void {
+    const T: usize = p.tokens();
+    if (T == 0 or p.pixels.len != T * image.side * image.side * 3) return error.ImageGrid;
+    if (T > max_tokens) return error.ImageTooLarge;
+}
 
 /// Prompt rows [at, at + n) take image rows [row, row + n) (rows of the encoded pictures, in prompt order).
 pub const Span = struct { at: u32, n: u32, row: u32 };
@@ -422,4 +428,21 @@ test "the splice copies rows as wide as the config's decoder, Small's 4608 and M
     const wide = scratchBytes(v, 16);
     v.proj_hidden = 2048;
     try std.testing.expectEqual(@as(u64, 16 * 2048 * 2), wide - scratchBytes(v, 16));
+}
+
+test "encode refuses a picture whose pixels do not fill its grid" {
+    var px: [2 * image.side * image.side * 3]f32 = undefined;
+    try admit(.{ .pixels = &px, .rows = 1, .cols = 2 }, 2);
+    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = &px, .rows = 1, .cols = 3 }, 4));
+    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = px[0..0], .rows = 0, .cols = 2 }, 4));
+}
+
+test "encode refuses a picture with more tokens than the tower's scratch covers" {
+    var px: [2 * image.side * image.side * 3]f32 = undefined;
+    try std.testing.expectError(error.ImageTooLarge, admit(.{ .pixels = &px, .rows = 2, .cols = 1 }, 1));
+}
+
+test "a tower with scratch for no image tokens is refused before any device work" {
+    const got = Tower.load(std.testing.allocator, std.testing.io, undefined, "", testVision(4608), 0);
+    try std.testing.expectError(error.ImageTokens, got);
 }
