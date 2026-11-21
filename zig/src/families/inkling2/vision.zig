@@ -334,7 +334,7 @@ pub fn copyBytes(c: image_rows.Cut, lo: usize, hidden: u32) [3]u64 {
 /// A copy's bytes for bf16 rows `hidden` wide: the offset into the pass, the offset into the image rows, the length.
 pub fn copyBytes(c: Copy, hidden: u32) [3]u64 {
     const row: u64 = @as(u64, hidden) * 2;
-    return .{ c.dst * row, c.src * row, c.n * row };
+    return .{ (c.at - lo) * row, c.row * row, c.n * row };
 }
 
 /// After the normed embedding, a pass's rows at positions [lo, hi) (bf16 at `x`) take their image rows (at `rows`).
