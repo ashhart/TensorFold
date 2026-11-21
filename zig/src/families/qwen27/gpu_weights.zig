@@ -400,7 +400,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
 }
 
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
-fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, head: Linear) !void {
+pub fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, head: Linear) !void {
     var jobs: std.ArrayList(lane.Order) = .empty;
     defer jobs.deinit(a);
     for (layers) |l| {

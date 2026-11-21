@@ -2,6 +2,7 @@
 pub const dflash = @import("dflash/root.zig");
 pub const yarn = @import("yarn.zig");
 pub const loop = @import("loop.zig");
+pub const loop_affine = @import("loop_affine.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
@@ -52,6 +53,7 @@ test {
     _ = dflash;
     _ = yarn;
     _ = loop;
+    _ = loop_affine;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = session;

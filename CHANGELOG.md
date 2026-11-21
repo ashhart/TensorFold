@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: serve and draft SenseNova-Loop-9B in MLX affine group-64 checkpoints (`mlx-q4g64`, `mlx-q5g64`, `mlx-q6g64`, `mlx-q8g64`), reusing shared physical weights across execution steps and supporting BF16 or quantized embeddings (#3781).
+
 - Metal: draft SenseNova-Loop-9B with its published mtp.safetensors head, keys-only intermediate prompt absorb and multi-stream batched draft rounds (#3868, fixes #3781).
 
 - Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
