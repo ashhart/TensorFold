@@ -39,6 +39,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
 
 - CI: the Zig format and TensorFold Web workflows cancel a pull request's older run when it gets a newer push, so superseded runs no longer queue; main pushes all run (#3850).
+- DeepSeek-V4.1 on Metal: the Metal family's host tests compile on macOS again (the vision rows take the prompt length as u32).
 
 - Server: chat and legacy completions requests take `deadline_s` (seconds, more than 0 and at most 1,000,000; any other value is refused before the engine): at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave and its usage; a reply the engine ended first, or a cancel that came first, keeps its own ending, and without the field nothing changes (#3438). Thanks to @jayleaton.
 
