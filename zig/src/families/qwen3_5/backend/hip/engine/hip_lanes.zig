@@ -536,11 +536,11 @@ test "Qwen HIP image begin receives the stream's original cancellation hook" {
 }
 
 test "Qwen HIP facts price plain rounds for a copies-only engine" {
-    var engine: Engine = undefined;
-    engine.o = .{};
-    engine.o.policy.mtp.drafts = 3;
+    var test_engine: Engine = undefined;
+    test_engine.o = .{};
+    test_engine.o.policy.mtp.drafts = 3;
     var h: Hip = undefined;
-    h.e = &engine;
+    h.e = &test_engine;
     h.head = null;
     h.costs = .{};
     h.costs.windows = 1;
