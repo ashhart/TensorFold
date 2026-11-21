@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_GATHER_EARLY=1` (default `0`) gathers a shared decode pass's n-gram rows for every lane in one pooled call instead of one call a stream, for passes of at most 64 lanes (wider passes keep the per-stream call); which rows are read and how a row is dequantized do not change, so replies stay main's, and the measured mean decode gain on one GB10 rises to +2.10% at eight streams (#4009). Thanks to @BadAd84.
+
 - Tests: the idle-unload host tests wait on the ticker's event and the manager's condition instead of a 2-second real-clock bound, so a loaded CI host no longer fails them (#4352).
 
 - Tests: three host tests (Qwen3.5 CUDA kept-state read-back, the grammar compile deadline, the chats resume store) wait on events instead of real-clock bounds, so a loaded CI host no longer fails them (#4358).
