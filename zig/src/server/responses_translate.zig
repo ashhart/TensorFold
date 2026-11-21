@@ -586,17 +586,11 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "truncation", .{ .string = "disabled" });
     try echo.put(a, "user", body.get("user") orelse .null);
     const background = json.truthyField(body, "background");
-    if (background) try backgroundAsked(cx, body, store);
+    if (background) try @import("responses_background_request.zig").validate(cx, body, store);
     try echo.put(a, "background", .{ .bool = background });
     return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .background = background, .format = if (rf != null) "text.format" else null, .rows_if_offered = listed and !asked };
 }
 
-/// What a background request needs: a boolean, a stored response to poll, and no stream on the POST.
-fn backgroundAsked(cx: *Cx, body: Value, store: bool) errors.Refused!void {
-    if (body.get("background").? != .bool) return cx.refuse("background must be a boolean");
-    if (!store) return cx.refuse("background: true needs store: true (the default): GET /v1/responses/{id} polls the stored response");
-    if (json.truthyField(body, "stream")) return cx.refuse("background: true with stream: true is not supported: send stream: false and poll GET /v1/responses/{id}");
-}
 test {
     _ = @import("responses_translate_test.zig");
 }
