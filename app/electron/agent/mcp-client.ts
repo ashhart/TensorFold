@@ -22,6 +22,7 @@ import type {
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 const REQUEST_TIMEOUT_MS = 20_000
 const MAX_LOG_LINES = 80
+const MAX_STARTUP_STDERR_BYTES = 64 * 1024
 // Cap *_list pagination so a server that returns a non-advancing or never-terminating
 // nextCursor can't wedge connect() in an unbounded request loop.
 const MAX_LIST_PAGES = 1000
@@ -234,6 +235,7 @@ export class McpHost {
     }
 
     const config = state.config
+    let finishStartupStderr: (() => void) | undefined
     try {
       const provenance = await commandProvenance(config).catch(() => null)
       this.assertLaunchCurrent(state, fingerprint, generation)
@@ -249,7 +251,8 @@ export class McpHost {
       state.runtime.pid = proc.pid ?? null
 
       proc.stdout.on('data', (chunk: Buffer) => this.handleStdout(state, chunk))
-      proc.stderr.on('data', (chunk: Buffer) => this.appendLog(state, chunk.toString('utf8')))
+      finishStartupStderr = this.captureStartupStderr(state, proc.stderr)
+      proc.stderr.once('end', finishStartupStderr)
       proc.on('error', (error) => {
         this.rejectAll(state, error)
         state.runtime = { ...state.runtime, status: 'error', pid: null, lastError: error.message }
@@ -285,6 +288,7 @@ export class McpHost {
       await this.refreshResources(state)
       await this.refreshPrompts(state)
       this.assertLaunchCurrent(state, fingerprint, generation)
+      finishStartupStderr()
       state.runtime = {
         ...state.runtime,
         status: 'connected',
@@ -296,6 +300,7 @@ export class McpHost {
     } catch (error: any) {
       const message = error?.message ? String(error.message) : String(error)
       if (state.generation === generation) {
+        finishStartupStderr?.()
         state.runtime = { ...state.runtime, status: 'error', pid: null, tools: [], resources: [], prompts: [], lastError: message }
         this.stopState(state)
       }
@@ -469,6 +474,30 @@ export class McpHost {
       id,
       error: { code: -32601, message: `TensorFold does not implement client method ${method}.` },
     })}\n`, 'utf8')
+  }
+
+  private captureStartupStderr(state: ClientState, stderr: ChildProcessWithoutNullStreams['stderr']): () => void {
+    let chunks: Buffer[] = []
+    let bytes = 0
+    let finished = false
+    stderr.on('data', (chunk: Buffer) => {
+      if (finished) {
+        this.appendLog(state, chunk.toString('utf8'))
+      } else if (bytes <= MAX_STARTUP_STDERR_BYTES) {
+        bytes += chunk.length
+        if (bytes <= MAX_STARTUP_STDERR_BYTES) chunks.push(chunk)
+        else chunks = []
+      }
+    })
+    return () => {
+      if (finished) return
+      finished = true
+      const diagnostics = bytes > MAX_STARTUP_STDERR_BYTES
+        ? 'MCP startup diagnostics exceeded the log limit.'
+        : Buffer.concat(chunks, bytes).toString('utf8')
+      chunks = []
+      this.appendLog(state, diagnostics)
+    }
   }
 
   private appendLog(state: ClientState, text: string) {

@@ -10,6 +10,7 @@ const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
 pub const dense = @import("launches/dense.zig");
+pub const item = @import("launches/matrix_item.zig");
 
 const util = @import("launches/util.zig");
 
@@ -46,6 +47,7 @@ const columns = @import("launches/columns.zig");
 const vision = @import("launches/vision.zig");
 const dense_text = @import("launches/dense_text.zig");
 pub const draft = @import("launches/draft.zig");
+pub const exl3 = @import("launches/exl3.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -109,6 +111,8 @@ pub const Launcher = struct {
     nemo: nemotron_moe.Fns,
     /// The DFlash2 drafter's kernels (draft/draft.hip).
     draft: draft.Fns,
+    /// EXL3 projections for decode rows (exl3/exl3.hip).
+    exl3: exl3.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -120,6 +124,8 @@ pub const Launcher = struct {
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
         score2_act: [2]Function,
+        score256: [2]Function, // d 256 on long spans, kScoreSteps steps a block
+        score256_act: [2]Function,
         sum_act: Function,
         attend: [2]Function,
         apply: [2]Function,
@@ -212,6 +218,8 @@ pub const Launcher = struct {
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
             .score2_act = .{ try pl.function("tf_plan_score2_act_f16"), try pl.function("tf_plan_score2_act_bf16") },
+            .score256 = .{ try pl.function("tf_plan_score256_f16"), try pl.function("tf_plan_score256_bf16") },
+            .score256_act = .{ try pl.function("tf_plan_score256_act_f16"), try pl.function("tf_plan_score256_act_bf16") },
             .sum_act = try pl.function("tf_sum_partials_act"),
             .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
@@ -326,6 +334,7 @@ pub const Launcher = struct {
         l.sum_partials = try att.function("tf_sum_partials");
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         l.draft = try draft.Fns.load(l.mods[@backingInt(kernels.Group.draft)]);
+        l.exl3 = try exl3.Fns.load(l.mods[@backingInt(kernels.Group.exl3)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;

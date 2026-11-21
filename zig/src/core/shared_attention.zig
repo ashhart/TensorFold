@@ -1,23 +1,20 @@
-//! Shared-context attention, per-row RoPE and cache append; byte masks alone decide what each row sees.
+//! Shared-context attention and cache append; byte masks alone decide what each row sees.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
 pub const Output = enum { f32, bf16 };
-pub const Rope = enum { split_half, interleaved };
 pub const Shape = struct {
     query_heads: usize,
     kv_heads: usize,
     head_dim: usize,
-    rotary_dim: usize,
-    rope: Rope = .split_half,
     capacity: usize,
     output: Output = .f32,
 
     pub fn validate(s: Shape) !void {
         if (s.query_heads == 0 or s.kv_heads == 0 or s.query_heads % s.kv_heads != 0 or
             s.query_heads > 128 or s.head_dim == 0 or s.head_dim > 256 or s.head_dim % 32 != 0 or
-            s.rotary_dim > s.head_dim or s.rotary_dim % 2 != 0 or s.capacity == 0 or s.capacity > std.math.maxInt(u32)) return error.InvalidAttentionShape;
+            s.capacity == 0 or s.capacity > std.math.maxInt(u32)) return error.InvalidAttentionShape;
         _ = try std.math.mul(usize, s.capacity, try std.math.mul(usize, s.kv_heads, s.head_dim));
     }
 };
@@ -30,8 +27,8 @@ const Args = extern struct { rows: u32, keys: u32 = 0, mask_stride: u32 = 0, hea
 
 pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
     try s.validate();
-    return std.fmt.allocPrint(a, "#define TF_QH {d}\n#define TF_KVH {d}\n#define TF_D {d}\n#define TF_RD {d}\n#define TF_INTERLEAVED {d}\n#define TF_OUT {s}\n{s}", .{
-        s.query_heads, s.kv_heads, s.head_dim, s.rotary_dim, @intFromBool(s.rope == .interleaved), if (s.output == .f32) "float" else "bfloat", sources.core_shared_attention,
+    return std.fmt.allocPrint(a, "#define TF_QH {d}\n#define TF_KVH {d}\n#define TF_D {d}\n#define TF_OUT {s}\n{s}", .{
+        s.query_heads, s.kv_heads, s.head_dim, if (s.output == .f32) "float" else "bfloat", sources.core_shared_attention,
     });
 }
 
@@ -39,7 +36,6 @@ pub const Attention = struct {
     shape: Shape,
     attend: mtl.Pipeline,
     decode: mtl.Pipeline,
-    rope: mtl.Pipeline,
     append: mtl.Pipeline,
     split: mtl.Pipeline,
     merge: mtl.Pipeline,
@@ -55,8 +51,6 @@ pub const Attention = struct {
         errdefer attend.deinit();
         const decode = try mtl.Pipeline.init(device, lib, "tf_core_decode_attention", false);
         errdefer decode.deinit();
-        const rope = try mtl.Pipeline.init(device, lib, "tf_lane_rope", false);
-        errdefer rope.deinit();
         const append = try mtl.Pipeline.init(device, lib, "tf_lane_append_kv", false);
         errdefer append.deinit();
         const split = try mtl.Pipeline.init(device, lib, "tf_shared_lane_attention_split", false);
@@ -65,12 +59,11 @@ pub const Attention = struct {
         errdefer merge.deinit();
         if (attend.simdWidth() != 32 or attend.maxThreads() < 32 or split.simdWidth() != 32 or merge.simdWidth() != 32) return error.UnsupportedAttentionPipeline;
         const part = try device.buffer(16 * s.query_heads * chunksOf(s.capacity) * (s.head_dim + 2) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        return .{ .shape = s, .attend = attend, .decode = decode, .rope = rope, .append = append, .split = split, .merge = merge, .part = part };
+        return .{ .shape = s, .attend = attend, .decode = decode, .append = append, .split = split, .merge = merge, .part = part };
     }
     pub fn deinit(p: Attention) void {
         p.attend.deinit();
         p.decode.deinit();
-        p.rope.deinit();
         p.append.deinit();
         p.split.deinit();
         p.merge.deinit();
@@ -145,25 +138,6 @@ pub const Attention = struct {
         e.dispatchGroups(mtl.Size.of(p.shape.query_heads, 1, 1), mtl.Size.of(32, 1, 1));
     }
 
-    /// positions u32[rows], frequencies f32[rotary_dim/2], storage bf16[rows,heads,D]; prompt chunks too.
-    pub fn rotate(p: Attention, e: mtl.ComputeEncoder, rows: usize, heads: usize, x: Ref, positions: Ref, frequencies: Ref, y: Ref) !void {
-        if (rows == 0 or rows > p.shape.capacity or (heads != p.shape.query_heads and heads != p.shape.kv_heads)) return error.InvalidRopeView;
-        const elements = try std.math.mul(usize, rows, heads * p.shape.head_dim);
-        if (elements > std.math.maxInt(u32)) return error.InvalidRopeView;
-        try check(x, elements * 2, 2);
-        try check(y, elements * 2, 2);
-        try check(positions, rows * 4, 4);
-        try check(frequencies, @max(p.shape.rotary_dim / 2 * 4, 4), 4);
-        try disjoint(x, y);
-        try disjoint(y, positions);
-        try disjoint(y, frequencies);
-        e.setPipeline(p.rope);
-        for ([_]Ref{ x, positions, frequencies }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-        e.setValue(Args{ .rows = @intCast(rows), .heads = @intCast(heads) }, 3);
-        e.setBuffer(y.buf, y.off, 4);
-        e.dispatchThreads(mtl.Size.of(elements, 1, 1), mtl.Size.of(128, 1, 1));
-    }
-
     /// Prepared K and unmodified V go directly to unique physical slots; caller orders subsequent attention.
     pub fn appendKv(p: Attention, e: mtl.ComputeEncoder, slots: []const u32, k: Ref, v: Ref, cache_k: Ref, cache_v: Ref) !void {
         if (slots.len == 0 or slots.len > 16) return error.InvalidAppendView;
@@ -202,17 +176,14 @@ fn disjoint(a: Ref, b: Ref) !void {
     if (a.buf.id == b.buf.id) return error.AliasedAttentionBuffer;
 }
 
-test "attention shapes keep grouped-query and rotary dimensions explicit" {
+test "attention shapes keep grouped-query dimensions explicit" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const good = Shape{ .query_heads = 4, .kv_heads = 2, .head_dim = 64, .rotary_dim = 32, .capacity = 128 };
+    const good = Shape{ .query_heads = 4, .kv_heads = 2, .head_dim = 64, .capacity = 128 };
     const text = try source(arena.allocator(), good);
     try std.testing.expect(std.mem.indexOf(u8, text, "#define TF_QH 4\n#define TF_KVH 2\n") != null);
     var bad = good;
     bad.query_heads = 3;
-    try std.testing.expectError(error.InvalidAttentionShape, bad.validate());
-    bad = good;
-    bad.rotary_dim = 33;
     try std.testing.expectError(error.InvalidAttentionShape, bad.validate());
     bad = good;
     bad.head_dim = 31;

@@ -16,7 +16,7 @@ Readers require macOS `F_NOCACHE` and use positional reads directly into shared 
 
 Decode prefetch uses the next layer's own router on the current state. One bounded worker reads predictions into unleased slots behind submitted expert compute. The later real router remains authoritative. A wrong prediction wastes reads and cannot change routes or output. Prompt chunks load each layer's complete demand union once per chunk. Streaming chunks use one command stream so host storage cuts cannot wait on an unsubmitted staggered sibling; concurrent request windows and MTP still use the lane core.
 
-Loading doesn't bring the whole expert set into memory: the peak stays about 2 GiB above where memory settles. Flash Next MLX 4-bit MTP on an M3 Ultra, `--context 65536 --parallel 1`, physical footprint sampled every 250 ms through load, a short reply, a 16,000-token prompt and a 512-token reply, one run each, with the same reply bytes in every row:
+Earlier measurements, before the prompt-workspace change: Flash Next MLX 4-bit MTP on an M3 Ultra, `--context 65536 --parallel 1`, physical footprint sampled every 250 ms through load, a short reply, a 16,000-token prompt and a 512-token reply, one run each, with the same reply bytes in every row:
 
 | Flags | After load | Peak | 16K prompt and 32 tokens |
 | --- | --- | --- | --- |
@@ -26,6 +26,32 @@ Loading doesn't bring the whole expert set into memory: the peak stays about 2 G
 | `--ssd-experts 17` | 74.9 GiB | 76.9 GiB | 34.9 s |
 | `--ssd-experts 35` | 92.9 GiB | 94.9 GiB | 35.9 s |
 | Everything in memory | 129.7 GiB | 131.6 GiB | 11.2 s |
+
+## Prompt workspace footprint
+
+On a 256 GiB M5 Ultra, the unused sibling and its selector account for 6.161249 GiB at the trained physical capacity. Streaming, PLE-only and route-trace prompt calls use one workspace; ordinary staggered and paired calls retain separate workspaces. Prompt chunks remain 8192 rows, with the same marks and draft widths.
+
+These are one-run process-footprint measurements with the verified Flash Next MLX affine 4-bit group32 MTP checkpoint, `--context 65536 --parallel 1 --ssd-experts 8 --ple-on-ssd` and automatic prompt caching. Footprint is sampled at 10 Hz. After load uses samples before the first request; the 16K peak covers a 16,384-token prompt and 32 reply tokens after a short reply. Both arms below retain the trained physical capacity of 262,144 rows.
+
+| Workspace ownership | After load | 16K peak |
+| --- | --- | --- |
+| Two prompt workspaces | 35.42 GiB | 36.01 GiB |
+| Only the reachable prompt workspace | 29.26 GiB | 29.84 GiB |
+
+This saving alone does not qualify a 32 GiB Mac: even a valid 1.5 GiB expert pool plans 26.19 GiB against a 22.4 GiB load ceiling. The plan includes a 2 GiB runtime reserve; it is distinct from physical footprint. The larger Mac also retains filesystem cache, so these measurements do not predict smaller-device SSD performance.
+
+## Smaller explicit contexts
+
+A smaller `--context` now sizes physical KV, indexer and score allocations, with the existing 32-row margin and four-row alignment. The physical floor is one unchanged 8192-row prompt chunk. Logical request limits remain separate from allocation padding and the trained rotary identity. Smaller contexts retain unscaled rotary; no-context allocation and past-trained rotary policy remain unchanged. A request outside its context is refused rather than truncated.
+
+At the same SSD8 setting on the M5 Ultra above, the physical allocation becomes 65,568 rows:
+
+| Physical context allocation | After load | 16K peak |
+| --- | --- | --- |
+| 262,144 rows, one workspace | 29.26 GiB | 29.84 GiB |
+| 65,568 rows, one workspace | 22.11 GiB | 22.69 GiB |
+
+The SSD8 startup plan is still 25.55 GiB and refuses a 22.4 GiB ceiling. A 4 GiB expert pool lowers that plan to about 21.55 GiB without changing stored bytes or routes. Admission and real peak footprint must both be checked for the selected workload. A budget imposed on a larger Mac is not a fit or speed qualification for a physical 32 GiB Mac.
 
 ## Bound read overhead
 

@@ -6,6 +6,7 @@ import { mock } from 'node:test'
 import ts from 'typescript'
 import { executeTool, TOOL_SCHEMAS } from './tools'
 import { runAgent } from './loop'
+import { installDnsFixture } from './test-fixtures/dns'
 import type { Thread } from './types'
 
 const endpoint = 'https://search.parallel.ai/mcp'
@@ -74,6 +75,7 @@ globalThis.fetch = async (input, init) => {
 
 const search = (thread: Thread, extra: Record<string, unknown> = {}, context: any = {}) => executeTool('web_search', { query: 'public research question', provider: 'parallel', ...extra }, { cwd: '', currentThread: thread, ...context })
 const calls = () => requests.filter(({ body }) => body.method === 'tools/call').map(({ body }) => body.params)
+const restoreDns = installDnsFixture({ 'news.google.com': '8.8.8.8' })
 try {
   process.env.PARALLEL_API_KEY = 'synthetic-ignored-key'
   for (const name of ['web_search', 'web_fetch']) {
@@ -184,6 +186,7 @@ try {
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())) }
   console.log('Parallel caller checks passed: dispatch, scripted loop consumption, discovery, JSON/SSE, identity, permissions, errors, timeout and cancellation.')
 } finally {
+  restoreDns()
   globalThis.fetch = originalFetch
   delete process.env.PARALLEL_API_KEY
   mock.timers.reset()

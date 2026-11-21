@@ -283,16 +283,17 @@ const Probe = struct {
     }
 };
 
-const KvWhere = struct { slot: usize, pos: usize, key: bool };
+pub const KvWhere = struct { slot: usize, pos: usize, key: bool };
 
 /// The first attention slot and position below `len` whose keys or values differ between the two streams.
-fn kvDiffers(
+pub fn kvDiffers(
     e: *nem.engine.Engine,
     gpa: std.mem.Allocator,
     a: *nem.pages.Stream,
     b: *nem.pages.Stream,
     len: usize,
 ) !?KvWhere {
+    try e.stream.synchronize();
     const pool = &e.pool;
     const d = e.model_().dims;
     const row = d.head_dim * e.act.size();

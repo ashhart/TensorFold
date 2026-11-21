@@ -189,6 +189,7 @@ pub const Lane = struct {
     prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls, loadPrompt() fills it on sm_12x
     prompt_sms: usize = 0, // the device's SMs: the tile runs when its blocks fill more than half of them
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
+    pdl: bool = false, // decode launches dependent (qmmf_kernel waits after its weight loads); weights fixed after load
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -307,6 +308,7 @@ pub const Lane = struct {
             .block = .{ .x = if (prompt) 256 else threads, .y = 1, .z = 1 },
             .shared = if (k32) prompt_k32_shared else if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
             .cluster = if (p.cluster) .{ .x = 1, .y = 1, .z = p.sk } else null,
+            .pdl = l.pdl and !prompt, // the prompt entries do not wait
         }, s, &args);
         if (p.reduce) {
             const total: usize = m * w.n;
@@ -319,6 +321,7 @@ pub const Lane = struct {
             try launch_.launch(l.reduce[@backingInt(out)], .{
                 .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 },
                 .block = .{ .x = 256, .y = 1, .z = 1 },
+                .pdl = l.pdl,
             }, s, &r);
         }
     }
@@ -515,6 +518,42 @@ test "prompt dispatch changes CTA geometry and output instance without changing 
     try lane.matmulF32(s, 0, w.k, 4218, w, 0, 0);
     try std.testing.expectEqual(@as(usize, 10), Trace.id);
     try std.testing.expectEqual(@as(i32, 4), Trace.sk);
+}
+
+test "a dependent lane launches its decode tile and reduce dependent, its prompt tile plain" {
+    const Seen = struct {
+        var plain: usize = 0;
+        var dependent: usize = 0;
+        fn run(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+            plain += 1;
+            return abi.success;
+        }
+        fn ex(c: *const abi.LaunchConfig, _: abi.Function, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) abi.Result {
+            if (c.attrs) |attrs| for (attrs[0..c.num_attrs]) |at| if (at.id == .programmatic_stream_serialization and at.value.int == 1) {
+                dependent += 1;
+                return abi.success;
+            };
+            plain += 1;
+            return abi.success;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuLaunchKernel = Seen.run;
+    d.api.cuLaunchKernelEx = Seen.ex;
+    const f: Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    var lane: Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .half = @splat(@splat(@splat(f))), .half_below = 0, .prompt = .{ .{ f, f }, .{ f, f } }, .prompt_k32 = .{ f, f }, .clusters = false, .pdl = true };
+    const s: Stream = .{ .d = &d, .handle = null };
+    const w = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 2560, .k = 6144, .npad = 2560 }, 4);
+    try lane.matmulOut(s, 0, w.k, 1, w, 0, .bf16, 0x1000); // a decode row: the 16-row tile's 4 slices, then their reduce
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 0), Seen.plain);
+    try lane.matmulOut(s, 0, w.k, 4218, w, 0, .bf16, 0x1000); // the prompt tile does not wait: plain
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 1), Seen.plain);
+    lane.pdl = false;
+    try lane.matmulOut(s, 0, w.k, 1, w, 0, .bf16, 0x1000);
+    try std.testing.expectEqual(@as(usize, 2), Seen.dependent);
+    try std.testing.expectEqual(@as(usize, 3), Seen.plain);
 }
 
 test "a cut weight pinned to the whole weight's K slices plans as the whole one at every row count" {

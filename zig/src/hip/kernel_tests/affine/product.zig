@@ -101,7 +101,14 @@ pub const Product = struct {
     fn makePlan(p: *Product, pairs: usize) !void {
         const c = p.c;
         p.expert_of = try gpa.alloc(u32, pairs);
-        if (c.shared or c.served) {
+        if (c.loads.len != 0) {
+            var at: usize = 0;
+            for (c.loads, 0..) |load, e| {
+                @memset(p.expert_of[at..][0..load], @intCast(e));
+                at += load;
+            }
+            std.debug.assert(at == pairs and c.loads.len <= c.experts);
+        } else if (c.shared or c.served) {
             drawServed(p.expert_of, c, &p.rig.rng);
         } else for (p.expert_of, 0..) |*e, i| {
             e.* = if (c.even) @intCast(i % c.experts) else @intCast(p.rig.rng.next() % c.experts);
@@ -113,7 +120,10 @@ pub const Product = struct {
     fn planExperts(p: *Product, pairs: usize) !void {
         const c = p.c;
         // served: serving's tile, and the capacity it sizes the plan for (one token: an item a slot)
-        const tile = if (c.served) moe.tileOf(c.rows, false) else c.item_rows;
+        const tile = if (c.served) moe.tileOf(c.rows, false, c.path == .prefill, moe.card_prompt_from) else c.item_rows;
+        // served: the stacked shared expert (the last id) takes serving's own tile, whole below 64 rows in a prompt
+        const shared: ?u32 = if (c.served and c.shared) @intCast(c.experts) else null;
+        const shared_tile = if (c.served) moe.sharedTileOf(c.rows, false, c.path == .prefill) else tile;
         const size = if (c.exact) c.rows else moe.bucket(c.rows);
         const cap = if (c.served and c.rows > 1) moe.capacity(size * c.slots, c.experts + @intFromBool(c.shared)) else 0;
         const order = try gpa.alloc(i32, pairs);
@@ -137,7 +147,8 @@ pub const Product = struct {
         while (i < pairs) {
             const e = p.expert_of[@intCast(order[i])];
             var j = i;
-            while (j < pairs and j - i < tile and p.expert_of[@intCast(order[j])] == e) j += 1;
+            const cut = if (shared != null and shared.? == e) shared_tile else tile;
+            while (j < pairs and j - i < cut and p.expert_of[@intCast(order[j])] == e) j += 1;
             items[count * 3 ..][0..3].* = .{ @intCast(e), @intCast(i), @intCast(j - i) };
             p.max_rows = @max(p.max_rows, j - i);
             count += 1;
@@ -147,7 +158,7 @@ pub const Product = struct {
         std.debug.assert(cap == 0 or count <= cap);
         std.debug.assert(!slot_order or count == pairs);
         p.items = @max(count, cap);
-        if (c.served) p.max_rows = @min(tile, c.rows);
+        if (c.served) p.max_rows = @min(moe.itemRowsOf(c.rows, false, c.path == .prefill, shared != null, moe.card_prompt_from), c.rows);
         p.plan = try Buffer.fromHost(p.rig.base, items[0 .. p.items * 3]);
         errdefer {
             p.plan.?.free();

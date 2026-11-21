@@ -12,6 +12,7 @@ const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
 const mixers = @import("mixers.zig");
 const index = @import("../index.zig");
+const gdn = @import("gdn_replay.zig");
 
 pub const Options = struct {
     device: c_int = 0,
@@ -31,9 +32,9 @@ pub const Options = struct {
     want: usize = 1,
 };
 
-/// Whether the smaller chunk's scratch admits more of `want` streams of `per` bytes in `room` than the larger's.
-pub fn narrows(room: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
-    return @min(want, (room -| smaller) / per) > @min(want, (room -| larger) / per);
+/// Whether the smaller chunk admits more of `want` streams than the larger's in `room`, after the `slots` bytes.
+pub fn narrows(room: u64, slots: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
+    return @min(want, (room -| slots -| smaller) / per) > @min(want, (room -| slots -| larger) / per);
 }
 
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
@@ -88,6 +89,8 @@ pub const Engine = struct {
     stopped: bool,
     /// The chunk the options asked for when the engine took their fallback (null: it took what they asked).
     narrowed: ?usize = null,
+    /// The cache slots' DeltaNet plans (null: a window keeps its state a row, from the snapshots).
+    gdn: ?*gdn.Slots = null,
 
     /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -181,6 +184,20 @@ pub const Engine = struct {
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
         e.pool = .{};
+        // a window runs from the plan where its shapes are the plan kernels': else a snapshot a row stays
+        e.gdn = null;
+        if (gdn.supported(e.weights.model.dims, e.cfg.layers)) {
+            const slots = try gpa.create(gdn.Slots);
+            errdefer gpa.destroy(slots);
+            slots.* = try gdn.Slots.init(gpa, &e.driver, e.weights.model.dims, @max(o.want, 1));
+            e.gdn = slots;
+            e.weights.model.gdn = slots;
+        }
+        errdefer if (e.gdn) |p| {
+            p.deinit();
+            gpa.destroy(p);
+            e.weights.model.gdn = null;
+        };
         _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
@@ -197,6 +214,11 @@ pub const Engine = struct {
             },
         );
         e.graphs.deinit();
+        if (e.gdn) |p| {
+            p.deinit();
+            e.gpa.destroy(p);
+            e.weights.model.gdn = null;
+        }
         e.pool.deinit(e.gpa);
         if (e.votes) |*v| v.deinit();
         e.drawer.deinit();
@@ -238,6 +260,7 @@ pub const Engine = struct {
 
     /// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        // a stream's plan is made for its slot when the engine opens, before any room is measured
         var buf: [config.max_layers]bool = undefined;
         const ks = e.kinds(&buf) catch return std.math.maxInt(usize);
         const l = cache.Layout.of(e.weights.model.dims, ks, cap, e.act);
@@ -257,10 +280,14 @@ pub const Engine = struct {
         if (small >= e.o.chunk) return larger;
         const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
         const room = pool.room(hip.usage(false).device);
+        const slots: u64 = if (gdn.supported(e.weights.model.dims, e.cfg.layers))
+            @intCast(gdn.Slots.bytes(e.weights.model.dims, @max(e.o.want, 1)))
+        else
+            0;
         const asked = e.o.chunk;
         e.o.chunk = small;
         const smaller = try e.scratchBytes();
-        if (!narrows(room, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
+        if (!narrows(room, slots, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
             e.o.chunk = asked;
             return larger;
         }
@@ -304,7 +331,8 @@ pub const Engine = struct {
             defer hc.deinit(e.gpa);
             var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
             defer ones.free();
-            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+            const hsegs = [_]forward.Seg{.{ .c = &hc, .tokens = tokens, .pos = pos }};
+            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hsegs, out.streams, ones);
         }
         _ = try e.logits(o, out.mixed, verify_rows);
         // the peak, not what is left at the end: each layer hands its scratch back when it is done
@@ -335,23 +363,29 @@ pub const Engine = struct {
         if (kept == 0 or kept > tokens.len) return error.BadKeep;
         const l = c.layout;
         const s = e.stream.handle;
-        if (kept < tokens.len) for (c.linear, 0..) |linear, i| {
-            if (!linear) continue;
-            const from = c.snapshot(i, kept - 1);
-            const to = c.linearAt(i);
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.conv),
-                @ptrFromInt(from.conv),
-                l.conv_bytes,
-                s,
-            ));
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.state),
-                @ptrFromInt(from.state),
-                l.state_bytes,
-                s,
-            ));
-        };
+        const plan = if (e.weights.model.gdn) |p| p.planFor(c.id) else null;
+        // a plan leaves the state where its window began, so a keep always runs; a one-row window wrote it back
+        if (plan) |p| {
+            try p.keep(e.ops(&e.arena), kept);
+        } else if (kept < tokens.len) {
+            for (c.linear, 0..) |linear, i| {
+                if (!linear) continue;
+                const from = c.snapshot(i, kept - 1);
+                const to = c.linearAt(i);
+                try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                    @ptrFromInt(to.conv),
+                    @ptrFromInt(from.conv),
+                    l.conv_bytes,
+                    s,
+                ));
+                try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                    @ptrFromInt(to.state),
+                    @ptrFromInt(from.state),
+                    l.state_bytes,
+                    s,
+                ));
+            }
+        }
         const row = l.tail_bytes / l.tail_rows;
         try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
             @ptrFromInt(c.tail()),
@@ -366,12 +400,17 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
+        return e.promptMarked(c, tokens, &.{});
+    }
+
+    /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
+    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
-        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
         const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
         const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
         c.len += tokens.len;
@@ -404,6 +443,11 @@ pub const Engine = struct {
         e.host.used = 0;
         e.arena.reset();
         const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
+        // a window's plan words are written here, outside the graph its round may replay, which copies them up
+        if (e.weights.model.gdn) |s| for (segs) |g| {
+            const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+            try p.fill(g.c, g.tokens.len);
+        };
         const began = nowNs(e.io);
         defer e.graphs.submit_ns += @intCast(nowNs(e.io) - began);
         e.graphs.rounds += 1;
@@ -444,6 +488,11 @@ pub const Engine = struct {
     /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
     pub fn lease(e: *Engine, slot: u32) !cache.Caches {
         return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
+    }
+
+    /// The first stream's caches made now (at load) rather than by the first prompt; later slots on their first lease.
+    pub fn makeFirstSlot(e: *Engine) !void {
+        try e.pool.make(e.gpa, 0, e.o.capacity, e);
     }
 
     /// A finished stream's caches back to their slot.
@@ -492,13 +541,23 @@ fn weightMapOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.Obje
 test "a chunk narrows only when its scratch costs a stream the server asked for" {
     const gib: u64 = 1 << 30;
     // one stream asked, room for many either way: the larger chunk stays
-    try std.testing.expect(!narrows(40 * gib, 7 * gib, 2 * gib, 3 * gib, 1));
+    try std.testing.expect(!narrows(40 * gib, 0, 7 * gib, 2 * gib, 3 * gib, 1));
     // one stream fits only beside the smaller chunk's scratch
-    try std.testing.expect(narrows(9 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    try std.testing.expect(narrows(9 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
     // four asked: the larger chunk leaves three, the smaller four
-    try std.testing.expect(narrows(20 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    try std.testing.expect(narrows(20 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 4));
     // four asked and four fit beside either
-    try std.testing.expect(!narrows(30 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    try std.testing.expect(!narrows(30 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 4));
     // neither fits one: nothing to gain
-    try std.testing.expect(!narrows(3 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    try std.testing.expect(!narrows(3 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
+}
+
+test "the chunk fallback leaves the window plan slots' bytes off the room" {
+    const gib: u64 = 1 << 30;
+    // one stream fits beside either chunk's scratch: the larger stays
+    try std.testing.expect(!narrows(13 * gib, 0, 7 * gib, 2 * gib, 4 * gib, 1));
+    // the same room with the slots' bytes off it: one stream fits only beside the smaller chunk's scratch
+    try std.testing.expect(narrows(13 * gib, 4 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    // the room was already tight for four with no slots: the subtraction stays a narrowing
+    try std.testing.expect(narrows(20 * gib, 4 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
 }

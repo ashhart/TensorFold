@@ -30,6 +30,7 @@ import {
 } from './helpers'
 import { RoomAgentsSection, RoomCanvas, RoomFlowTicker, RoomStatePill, RoomStat, RoomSupervisorPanel, RoomTicketQueue } from './RoomPanels'
 import { RoomGitBanner } from './RoomGitBanner'
+import { RoomWorktree } from './RoomWorktree'
 import { RoomTimeline, RoomHandoffStrip } from './RoomTimeline'
 import { RoomFinalGatePanel, RoomHandoffQueuePanel, RoomLivePlanPanel, RoomModePresets } from './RoomPlans'
 
@@ -352,10 +353,11 @@ export function RoomView({ id }: { id: string }) {
           </div>
           <div className="grid grid-cols-2 gap-1.5">
             <RoomStat icon="cpu" label={tx("Seats")} value={String(room.seats.length)} />
-            <RoomStat icon="list" label={tx("Tasks")} value={`${leftToWork.length}/${roomTasks.length}`} accent={leftToWork.length > 0} />
+            <RoomStat icon="list" label={tx("Tasks")} value={`${roomTasks.length - leftToWork.length}/${roomTasks.length}`} accent={leftToWork.length > 0} />
             <RoomStat icon="file" label={tx("Files")} value={String(filesTouched.length)} />
             <RoomStat icon="message" label={tx("Asks")} value={String(pendingQuestions.length)} accent={pendingQuestions.length > 0} />
           </div>
+          <RoomWorktree room={room} />
           <RoomTicketQueue tickets={leftToWork} total={roomTasks.length} blockers={conflictBlockers} ticketJobsByTicket={ticketJobsByTicket} />
         </div>
 

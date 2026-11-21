@@ -8,7 +8,8 @@ pub fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), compti
         count += 1;
         const known = scope == .default and (std.mem.eql(u8, format, "checkpoint has no tensor {s}") or
             std.mem.eql(u8, format, "{s}: {t} {any}, expected {t} {any}") or
-            std.mem.eql(u8, format, "unused checkpoint tensor {s}"));
+            std.mem.eql(u8, format, "unused checkpoint tensor {s}") or
+            std.mem.eql(u8, format, "{s}: not a ModelOpt {t} vision linear of the tower's shape"));
         if (!known) unexpected += 1;
     }
     std.debug.print(format ++ "\n", args);

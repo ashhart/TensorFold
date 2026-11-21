@@ -32,7 +32,8 @@ const Header = extern struct {
     /// Payload bytes after the header.
     bytes: u64 = 0,
     sender: u32,
-    pad2: u32 = 0,
+    /// Which slot-sized part of a staged call this is (`stage.zig`), 0 for a whole call.
+    part: u32 = 0,
 };
 
 /// The first failure, kept for `check` (later calls are `Aborted`: the streams are out of step).
@@ -59,6 +60,8 @@ pub const Rank = struct {
     fail: std.atomic.Value(Fail) = .init(.none),
     scratch: std.ArrayList(u8) = .empty,
     var_agreed: ?bool = null,
+    /// The part the next frames carry and expect: a staged call split alike on every rank (`stage.zig`).
+    part: u32 = 0,
 
     /// A rank over connected sockets (`fds[peer]`, -1 at `me`); it owns them from here and makes them non-blocking.
     pub fn init(gpa: std.mem.Allocator, me: u32, world: u32, fds: []const sock.Fd, opts: Options) Rank {
@@ -346,7 +349,7 @@ pub const Rank = struct {
                 if (h.magic != magic) return r.close(.invalid);
                 if (h.call == @backingInt(Call.abort)) return r.close(.aborted);
                 if (h.sender != l.peer or h.seq != r.got[l.peer] or h.call != w.call or h.t != w.t or h.op != w.op or
-                    h.count != w.count or h.bytes != plen + l.into.len) return r.close(.invalid);
+                    h.count != w.count or h.part != w.part or h.bytes != plen + l.into.len) return r.close(.invalid);
             }
             if (plen > 0 and before < hlen + plen and l.got >= hlen + plen) {
                 if (!std.mem.eql(u8, l.prefix_buf[0..plen], l.want_prefix)) return r.close(.invalid);
@@ -357,8 +360,8 @@ pub const Rank = struct {
     }
 
     fn leg(r: *Rank, peer: u32, call: Call, t: DType, op: Op, count: usize, out: []const u8, into: []u8) Leg {
-        const h: Header = .{ .call = @backingInt(call), .t = @backingInt(t), .op = @backingInt(op), .seq = r.sent[peer], .count = count, .bytes = out.len, .sender = r.me };
-        return .{ .peer = peer, .out_hdr = h, .out = out, .want = .{ .call = @backingInt(call), .t = @backingInt(t), .op = @backingInt(op), .seq = 0, .count = count, .sender = peer }, .into = into };
+        const h: Header = .{ .call = @backingInt(call), .t = @backingInt(t), .op = @backingInt(op), .seq = r.sent[peer], .count = count, .bytes = out.len, .sender = r.me, .part = r.part };
+        return .{ .peer = peer, .out_hdr = h, .out = out, .want = .{ .call = @backingInt(call), .t = @backingInt(t), .op = @backingInt(op), .seq = 0, .count = count, .sender = peer, .part = r.part }, .into = into };
     }
 
     fn bytesAt(p: DevicePtr, n: usize) []u8 {

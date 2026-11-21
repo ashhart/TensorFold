@@ -1,0 +1,59 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+19.0,9215766540,38764,237740.3,207043.0,174754,1575860,184905.2,"void tf_qmmf::qmmf_kernel<(int)2, (int)16, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)0, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+15.5,7522358303,42672,176283.2,176195.0,163970,493831,8230.5,tf_nvfp4_fact_swiglu
+13.7,6666381280,90424,73723.6,84641.0,16416,317924,57172.1,"dsv41_l2pace::paced_kernel(const long *, int, unsigned int, unsigned long, unsigned long)"
+8.0,3900797710,42672,91413.5,90785.0,83713,395269,5954.9,"void tf_nvfp4_experts::nvfp4_expert_waves<(int)1, (int)0, (int)4>(const __nv_bfloat16 *, int, int, const uint4 *, const float *, int, int, const int *, const int *, const int *, void *, int, float, int)"
+6.7,3256302173,65280,49882.1,51745.0,26592,250787,7634.1,"void tf_qmmf::qmmf_kernel<(int)3, (int)16, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+5.8,2813477032,54060,52043.6,24160.0,20801,522214,54992.1,"void tf_qmmf::qmmf_kernel<(int)3, (int)16, (int)64, (int)1, (int)4, (int)4, (bool)1, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+5.2,2532116742,34544,73301.2,73697.0,56161,261347,5079.5,"void tfl2pf::segments_kernel<(bool)1>(const long *, int, unsigned int)"
+4.8,2314715011,92480,25029.4,17601.0,5408,9676923,56154.5,roce_gather
+4.6,2221854713,37756,58847.7,53345.0,23936,320004,18576.4,"void tf_qmmf::qmmf_kernel<(int)2, (int)16, (int)64, (int)1, (int)4, (int)4, (bool)1, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+2.3,1133806930,114808,9875.7,8768.0,5632,137921,2780.4,glm_mm16_16
+1.6,784147945,92160,8508.5,8384.0,4864,142530,2926.6,tf_glm_hc_partial8
+1.5,749652656,34544,21701.4,20640.0,16928,195170,4434.1,tf_glm_kda_step
+1.2,565709572,344,1644504.6,1591748.5,170050,3203209,590615.7,tf_nvfp4_prompt_swiglu
+1.0,490008795,11272,43471.3,42113.0,38144,187874,5480.1,tf_glm_absorb_q
+0.9,458537971,46080,9950.9,9888.0,6368,179747,2276.5,tf_glm_hc_finish
+0.9,441706444,54288,8136.4,7264.0,6976,140578,2354.7,tf_glm_router_tile
+0.9,432733632,11272,38390.1,38208.0,33505,147618,5378.4,tf_glm_expand_v
+0.9,423134079,11272,37538.5,37120.0,36705,175715,3197.9,tf_glm_chunks_16
+0.8,364981781,46080,7920.6,7712.0,7360,119585,1794.7,tf_glm_hc_finish_f32w
+0.7,331383620,34544,9593.1,9472.0,1632,84993,3003.7,tf_glm_kda_out
+0.6,283816415,344,825047.7,795946.0,89058,1574548,301803.1,tf_nvfp4_prompt_down
+0.6,277139589,92160,3007.2,2784.0,1696,115682,1384.4,tf_glm_hc_post
+0.5,240226964,43016,5584.6,5504.0,5312,109793,738.6,tf_glm_topk
+0.3,166870170,34544,4830.7,4672.0,2816,41921,1178.5,tf_glm_kda_prep
+0.3,127813775,43016,2971.3,2912.0,2816,82913,583.8,"tf_experts::plan_kernel(const int *, int, int, int, int *, int *, int *)"
+0.3,127324796,43016,2959.9,3008.0,2432,124098,1346.8,tf_glm_combine
+0.2,103252706,54288,1901.9,1888.0,1632,74945,528.5,tf_glm_slice_sum
+0.2,74457067,45720,1628.5,1600.0,1536,20320,233.8,glm_mm_reduce
+0.1,61179315,1440,42485.6,34704.0,8480,469958,43249.6,ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<(unsigned long)4096>)
+0.1,53578661,46088,1162.5,1088.0,1056,94082,945.1,tf_glm_swiglu_512
+0.1,52930019,43016,1230.5,1184.0,1088,77313,791.4,tf_glm_put_slot
+0.1,39702841,11272,3522.3,2592.0,2368,49345,1460.2,tf_glm_lat_write
+0.1,37075989,148,250513.4,247091.5,237443,331812,11824.5,"void tf_qmmf::qmmf_kernel<(int)2, (int)32, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)0, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.1,32908373,912,36083.7,9312.0,8128,352901,42483.5,glm_mm16_rows
+0.1,30382230,11272,2695.4,2592.0,2496,72065,979.6,tf_glm_rmsnorm_1536
+0.1,26290018,11272,2332.3,1760.0,1664,12512,824.1,tf_glm_index_write
+0.1,25224239,272,92736.2,116577.5,63265,182178,26979.4,tf_glm_kda_chain
+0.0,20460110,11272,1815.1,1760.0,1696,61793,938.6,tf_glm_rmsnorm_512
+0.0,18017025,11272,1598.4,1504.0,1312,32096,835.8,tf_glm_merge
+0.0,17546750,256,68542.0,66992.5,60608,131713,6950.5,"void tf_qmmf::qmmf_kernel<(int)3, (int)32, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,16451906,11272,1459.5,896.0,832,70112,1293.3,tf_glm_pool_keys
+0.0,14774237,148,99825.9,96385.5,87681,139650,11282.0,"void tf_qmmf::qmmf_kernel<(int)2, (int)32, (int)64, (int)1, (int)4, (int)4, (bool)1, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,13393631,2056,6514.4,6720.0,2944,28448,3250.8,ncclDevKernel_Broadcast_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+0.0,13039967,1280,10187.5,12000.0,1120,31841,4777.1,tf_glm_conv_shift
+0.0,12956390,212,61115.0,25985.0,23424,284260,68848.9,"void tf_qmmf::qmmf_kernel<(int)3, (int)32, (int)64, (int)1, (int)4, (int)4, (bool)1, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,8372426,16,523276.6,440069.5,112578,1354705,431595.5,ncclDevKernel_AllReduce_Sum_f64_RING_LL(ncclDevKernelArgsStorage<(unsigned long)4096>)
+0.0,6983430,1024,6819.8,6496.0,6176,117154,3754.0,tf_glm_top1
+0.0,4376594,1032,4240.9,4032.0,1728,26625,1557.6,tf_glm_embed_b16
+0.0,3755703,1024,3667.7,2912.0,2784,17473,1078.3,tf_glm_rmsnorm_4096_f32w
+0.0,2060796,2056,1002.3,864.0,608,7776,714.2,tf_glm_put_words
+0.0,1749461,544,3215.9,3344.0,928,17633,2584.6,tf_glm_copy_rows
+0.0,1710837,1024,1670.7,1632.0,1600,12320,384.0,tf_glm_stream_mean
+0.0,898253,16,56140.8,54209.0,49216,67425,6546.2,"void tf_qmmf::qmmf_kernel<(int)2, (int)16, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,598214,12,49851.2,63152.5,16640,71584,24496.8,"void tf_qmmf::qmmf_kernel<(int)2, (int)32, (int)64, (int)1, (int)4, (int)4, (bool)0, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,137857,40,3446.4,3088.0,2752,8480,1057.0,tf_glm_rmsnorm_4096
+0.0,48544,4,12136.0,11984.0,11872,12704,382.6,"void tf_qmmf::qmmf_kernel<(int)2, (int)16, (int)32, (int)1, (int)4, (int)4, (bool)0, (bool)1, (bool)0>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, float, void *, float *, int, int, int, int, int, int, int)"
+0.0,36192,8,4524.0,4768.0,2912,4832,654.9,tf_glm_add_i32
+0.0,28448,16,1778.0,1760.0,1632,2016,107.1,tf_glm_residual_add

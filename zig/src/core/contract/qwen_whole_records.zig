@@ -1,4 +1,4 @@
-//! nvcc 13.0 five-SM usage for separate whole-window and paged prompt ABIs.
+//! nvcc 13.0 five-SM usage for separate whole-window, paged prompt and join rows ABIs.
 const std = @import("std");
 const reg = @import("registry.zig");
 pub const records = [_]reg.CudaRecord{
@@ -31,6 +31,20 @@ pub const records = [_]reg.CudaRecord{
         .{ .regs = 255, .static = 39936, .bound = 256 },
         .{ .regs = 243, .static = 39936, .bound = 256 },
         .{ .regs = 243, .static = 39936, .bound = 256 },
+    }, .later_pending = true },
+    .{ .launch = .{ .name = "tf_q35_attn_rows_join", .symbol = "tf_q35_attn_rows_join", .image = "qwen35", .threads = 256, .dynamic = 65536, .opt_in = true, .min_sm = 80 }, .usage = .{
+        .{ .regs = 255, .static = 7168, .bound = 256 },
+        .{ .regs = 255, .static = 7168, .bound = 256 },
+        .{ .regs = 255, .static = 7168, .bound = 256 },
+        .{ .regs = 249, .static = 7168, .bound = 256 },
+        .{ .regs = 249, .static = 7168, .bound = 256 },
+    }, .later_pending = true },
+    .{ .launch = .{ .name = "tf_q35_attn_rows8_join", .symbol = "tf_q35_attn_rows8_join", .image = "qwen35_kv8", .threads = 256, .dynamic = 0, .opt_in = false, .min_sm = 80 }, .usage = .{
+        .{ .regs = 254, .static = 40192, .bound = 256 },
+        .{ .regs = 254, .static = 40192, .bound = 256 },
+        .{ .regs = 255, .static = 40192, .bound = 256 },
+        .{ .regs = 243, .static = 40192, .bound = 256 },
+        .{ .regs = 243, .static = 40192, .bound = 256 },
     }, .later_pending = true },
     .{ .launch = .{ .name = "_ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi", .symbol = "_ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi", .image = "prefill_attention", .threads = 256, .dynamic = 98304, .opt_in = true, .min_sm = 80 }, .usage = .{
         .{ .regs = 254, .static = 0, .bound = 256 },

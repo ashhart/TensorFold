@@ -9,9 +9,11 @@ const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
 const auth_scope = @import("auth_scope.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
+const ollama = @import("ollama.zig");
 const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
 const systemone = @import("systemone.zig");
@@ -21,6 +23,7 @@ const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const slide_forget = @import("slide_forget.zig");
+const voice_routes = @import("drama_voice_routes.zig");
 const Server = @import("server.zig").Server;
 const request_gate = @import("request_gate.zig");
 const admission = @import("request_admission.zig");
@@ -31,6 +34,8 @@ const Allocator = std.mem.Allocator;
 
 /// DELETE's per-fact route: the fact's id follows it.
 const fact_path = "/v1/slide/fact/";
+/// DELETE's per-voice route under --manage-voices: the voice's name follows it.
+const voice_path = "/v1/voices/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
@@ -49,6 +54,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
         if (std.mem.startsWith(u8, route, fact_path)) return slide_forget.route(srv, conn, a, route[fact_path.len..]);
         if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
         if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);
+        if (srv.config.voice.manage and std.mem.startsWith(u8, route, voice_path)) return voice_routes.delete(srv, conn, a, route[voice_path.len..]);
         return responses.delete(srv, conn, a, responses.route(route));
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
@@ -86,7 +92,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/voices")) {
         if (srv.info.speech == null) return unknown(conn, a);
-        const value = @import("drama_voice.zig").listing(a, srv.voices) catch return;
+        const value = srv.voices.listing(a) catch return;
         return sendValue(conn, a, 200, value);
     }
     if (std.mem.eql(u8, route, "/memory") or std.mem.eql(u8, route, "/v1/memory"))
@@ -105,6 +111,11 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
+    if (std.mem.eql(u8, route, "/api/tags")) return ollama.tags(srv, conn, a);
+    if (std.mem.eql(u8, route, "/api/show")) return ollama.show(srv, conn, a);
+    if (std.mem.eql(u8, route, "/api/ps")) return ollama.ps(srv, conn, a);
+    if (std.mem.eql(u8, route, "/api/version")) return ollama.version(srv, conn, a);
+    if (auth_scope.modelId(route)) |id| return status.model(srv, conn, a, id) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
 }
@@ -116,8 +127,17 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
-    for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
+    if (cancel_ids.match(route)) |rid| { // an admin action: answered at once, outside admission
+        discardBody(conn, a);
+        return cancel_ids.post(srv, conn, a, rid);
+    }
+    if (@import("responses_background.zig").cancelPath(route)) |rid| { // cancel bypasses admission
+        discardBody(conn, a);
+        return @import("responses_background.zig").cancel(srv, conn, a, rid);
+    }
+    for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
+    const is_voices = srv.config.voice.manage and std.mem.eql(u8, route, "/v1/voices");
     const is_images = std.mem.eql(u8, route, "/v1/images/generations");
     const is_embedding = std.mem.eql(u8, route, "/v1/embeddings");
     const is_anthropic = anthropic.route(conn.path);
@@ -127,27 +147,38 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
-    if (!is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_rerank = @import("score_routes.zig").route(route);
+    const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
+    const is_ollama_chat = std.mem.eql(u8, route, "/api/chat");
+    const is_ollama_generate = std.mem.eql(u8, route, "/api/generate");
+    const is_ollama_embed = std.mem.eql(u8, route, "/api/embed");
+    const is_ollama_show = std.mem.eql(u8, route, "/api/show");
+    if (!is_voices and !is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !is_ollama_chat and !is_ollama_generate and !is_ollama_embed and !is_ollama_show and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
-    const group: api.load_ledger.RouteGroup = if (is_chat) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
-    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
-    const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding, .rerank = is_rerank, .systemone = is_systemone };
+    const group: api.load_ledger.RouteGroup = if (is_chat or is_ollama_chat or is_ollama_generate) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding or is_ollama_embed) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
+    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or is_ollama_chat or is_ollama_generate or std.mem.endsWith(u8, route, "/completions");
+    const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding or is_ollama_embed, .rerank = is_rerank, .systemone = is_systemone };
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
     if (entered.refusal) |refusal| return refuse(conn, a, is_anthropic, refusal);
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
+    if (is_voices) return voice_routes.post(srv, conn, a);
     if (is_images) return images.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);
+    if (is_ollama_chat) return ollama.chat(srv, conn, a);
+    if (is_ollama_generate) return ollama.generate(srv, conn, a);
+    if (is_ollama_embed) return ollama.embed(srv, conn, a);
+    if (is_ollama_show) return ollama.show(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
-    if (is_rerank) return @import("rerank.zig").post(srv, conn, a);
+    if (is_rerank) return @import("score_routes.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
-    if (is_responses) return responses.post(srv, conn, a);
+    if (is_responses) return responses.postGated(srv, conn, a, &entered.held);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);
 }
 

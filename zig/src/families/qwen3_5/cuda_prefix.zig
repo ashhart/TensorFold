@@ -14,9 +14,10 @@ const Cache = caches.Cache;
 pub fn sharing() !usize {
     const v = @import("core").profile.given(.TF_QWEN_KV_SHARE) orelse return 0;
     const snaps = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenKvShare;
-    if (snaps > 0) if (@import("core").profile.get(.TF_QWEN_REQUEST_STARTS)) |starts| {
+    if (snaps > 0) {
+        const starts = @import("core").profile.lookup("TF_QWEN_REQUEST_STARTS") orelse return snaps;
         if (std.mem.eql(u8, starts, "1")) return error.QwenRequestStartsWithSharedKv;
-    };
+    }
     return snaps;
 }
 
@@ -97,7 +98,7 @@ pub const Prefix = struct {
 
     /// Before a pass: the deepest kept boundary (pages in `adopt`, state in `owner.pending`) and the marks to keep.
     pub fn begin(x: *Prefix, prompt: []const u32, history_len: u32, shared: []const u32, owner: *Owner, adopt: *std.ArrayList(u32)) !radix.Plan {
-        return x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
+        return x.store.begin(x.gpa, .of(prompt), history_len, shared, owner, adopt);
     }
 
     /// The pending state copied into the stream's cache (its lane open and its pages adopted).
@@ -121,7 +122,7 @@ pub const Prefix = struct {
         const mine = try x.gpa.dupe(u32, cache.paged.?.ids[0..n]);
         defer x.gpa.free(mine);
         var owner: Owner = .{ .cache = cache };
-        const kept = x.store.keep(prompt, @intCast(at), &owner, mine, path);
+        const kept = x.store.keep(.of(prompt), @intCast(at), &owner, mine, path);
         try x.pages.swap(cache, path[0..kept.shared]);
     }
 
@@ -130,7 +131,7 @@ pub const Prefix = struct {
         var owner: Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(x.gpa);
-        var plan = try x.store.begin(x.gpa, ids, history_len, shared, &owner, &adopt);
+        var plan = try x.store.begin(x.gpa, .of(ids), history_len, shared, &owner, &adopt);
         // the adopted pages are held for this call until openWith takes them
         plan.marks = x.onGrid(plan) catch |err| {
             for (adopt.items) |id| x.pages.pool.release(id);
@@ -150,7 +151,7 @@ pub const Prefix = struct {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(x.gpa);
         for (plan.marks) |m| {
-            const g = m - m % engine.max_rows;
+            const g = m - m % engine.grid_rows;
             if (g > plan.from and (out.items.len == 0 or out.items[out.items.len - 1] != g)) try out.append(x.gpa, g);
         }
         return out.toOwnedSlice(x.gpa);

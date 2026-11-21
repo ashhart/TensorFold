@@ -1,6 +1,7 @@
 //! Byte runs of large files on one shared queue: each is checked in memory before it is written to its file.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Auth = @import("pull_auth.zig").Auth;
 
 pub const workers = 16;
 const attempts = 6;
@@ -33,6 +34,7 @@ const Link = struct {
 
 const Shared = struct {
     io: std.Io,
+    auth: Auth,
     targets: []const Target,
     links: []Link,
     runs: []const Run,
@@ -45,7 +47,7 @@ const Shared = struct {
 };
 
 /// Fetches every run over up to 16 connections; a run whose bytes fail `check` comes again, up to six times.
-pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Run, check: Check, progress: ?*std.Io.Writer) !void {
+pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Run, check: Check, auth: Auth, progress: ?*std.Io.Writer) !void {
     if (runs.len == 0) return;
     const w = std.Io.Dir.cwd();
     for (targets) |t| {
@@ -62,7 +64,7 @@ pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Ru
         max = @max(max, r.end - r.first);
         left += r.end - r.first;
     }
-    var s: Shared = .{ .io = io, .targets = targets, .links = links, .runs = runs, .check = check, .max = max };
+    var s: Shared = .{ .io = io, .auth = auth, .targets = targets, .links = links, .runs = runs, .check = check, .max = max };
     var failures: [workers]?anyerror = @splat(null);
     var threads: [workers]std.Thread = undefined;
     const n = @min(workers, runs.len);
@@ -143,12 +145,14 @@ fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u
     var wait_ms: u64 = 250;
     for (0..attempts) |_| {
         const link = location(s, client, r.file) catch |e| {
+            if (e == error.HubDenied) return e;
             last = e;
             std.Io.sleep(s.io, .fromMilliseconds(@intCast(wait_ms)), .awake) catch {};
             wait_ms *= 2;
             continue;
         };
-        get(client, link, r.first, buf) catch |e| {
+        get(client, s.auth, link, r.first, buf) catch |e| {
+            if (e == error.HubDenied) return e;
             last = e;
             if (e == error.Forbidden) forget(s, r.file, link);
             std.Io.sleep(s.io, .fromMilliseconds(@intCast(wait_ms)), .awake) catch {};
@@ -174,7 +178,7 @@ fn location(s: *Shared, client: *std.http.Client, file: u32) ![]const u8 {
     const now = std.Io.Clock.awake.now(s.io).toNanoseconds();
     if (l.url) |u| if (now - l.at < fresh_ns) return u;
     // an older link may still be in use by another worker: it stays allocated (a few a file an hour)
-    const u = try resolve(std.heap.page_allocator, client, s.targets[file].url);
+    const u = try resolve(std.heap.page_allocator, client, s.auth, s.targets[file].url);
     l.url = u;
     l.at = now;
     return u;
@@ -188,11 +192,10 @@ fn forget(s: *Shared, file: u32, link: []const u8) void {
 }
 
 /// Where `url` lands: the Location of a redirect, else `url` itself.
-pub fn resolve(a: Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
-    var req = try client.request(.HEAD, try std.Uri.parse(url), .{ .redirect_behavior = .unhandled, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
+pub fn resolve(a: Allocator, client: *std.http.Client, auth: Auth, url: []const u8) ![]u8 {
+    var req: std.http.Client.Request = undefined;
+    const response = try auth.send(client, &req, .HEAD, try std.Uri.parse(url), .{ .redirect_behavior = .unhandled, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &.{});
     defer req.deinit();
-    try req.sendBodiless();
-    const response = try req.receiveHead(&.{});
     if (response.head.status.class() == .redirect) {
         const to = response.head.location orelse return error.HttpRedirectLocationMissing;
         if (!std.mem.startsWith(u8, to, "https://") and !std.mem.startsWith(u8, to, "http://")) return error.RelativeRedirect;
@@ -203,13 +206,12 @@ pub fn resolve(a: Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
 }
 
 /// Bytes [first, first + buf.len) of `link` into `buf`; the storage must answer 206 for exactly that range.
-fn get(client: *std.http.Client, link: []const u8, first: u64, buf: []u8) !void {
+fn get(client: *std.http.Client, auth: Auth, link: []const u8, first: u64, buf: []u8) !void {
     var range_buf: [64]u8 = undefined;
     const headers = [_]std.http.Header{.{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ first, first + buf.len - 1 }) }};
-    var req = try client.request(.GET, try std.Uri.parse(link), .{ .redirect_behavior = .not_allowed, .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
+    var req: std.http.Client.Request = undefined;
+    var response = try auth.send(client, &req, .GET, try std.Uri.parse(link), .{ .redirect_behavior = .not_allowed, .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &.{});
     defer req.deinit();
-    try req.sendBodiless();
-    var response = try req.receiveHead(&.{});
     if (response.head.status == .forbidden or response.head.status == .gone) return error.Forbidden;
     if (response.head.status != .partial_content) return error.RangeUnsupported;
     var reader_buf: [64 << 10]u8 = undefined;

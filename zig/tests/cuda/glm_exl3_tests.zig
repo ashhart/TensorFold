@@ -219,6 +219,12 @@ fn expect(r: *Rig, name: []const u8, out: Run, s: Set, x: []const u16, pk: []con
     try check.expect(most <= 1, "{s} within its float64 tolerance", .{name});
 }
 
+/// The glm-exl3 command and its items form: this file's check, or the item plan against the plain decode.
+pub fn runCmd(gpu: Gpu, cmd: []const u8) !void {
+    if (std.mem.eql(u8, cmd, "glm-exl3-items")) return @import("glm_exl3_items_tests.zig").run_(gpu);
+    return run_(gpu);
+}
+
 pub fn run_(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -235,7 +241,7 @@ pub fn run_(gpu: Gpu) !void {
     defer pm.unload();
     var k = try glm.exl3.Kernels.load(gpu.d);
     defer k.unload();
-    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
+    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), null);
     defer ek.unload();
     for ([_]bool{ true, false }) |one| {
         const s = try weights(&r, one);

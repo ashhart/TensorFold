@@ -5,10 +5,14 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const pyrepr = @import("pyrepr.zig");
 const tool_specs = @import("tool_specs.zig");
+const structural_tag = @import("structural_tag.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
 pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_regex", "guided_choice", "guided_grammar", "structured_outputs" };
+
+/// The most bytes a grammar's text may be: xgrammar compiles it under one lock, in time that grows with its square.
+pub const max_text = 512 * 1024;
 
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
@@ -30,6 +34,11 @@ fn bareMessage(full: []const u8) []const u8 {
 }
 
 fn schemaText(cx: *Cx, raw: Value, where: []const u8) errors.Refused![]const u8 {
+    return json.stringify(cx.a, try schemaValue(cx, raw, where), .{ .ascii = false });
+}
+
+/// A schema field as its object: JSON text parsed, true as {}, anything else but an object refused.
+pub fn schemaValue(cx: *Cx, raw: Value, where: []const u8) errors.Refused!Value {
     var value = raw;
     if (raw == .string) value = switch (try json.parseText(cx.a, raw.string)) {
         .ok => |v| v,
@@ -37,7 +46,7 @@ fn schemaText(cx: *Cx, raw: Value, where: []const u8) errors.Refused![]const u8 
     };
     if (value == .bool) value = if (value.bool) .{ .object = try json.newObject(cx.a) } else .null;
     if (value != .object) return cx.fail(.request, "{s} must be a JSON schema object", .{where});
-    return json.stringify(cx.a, value, .{ .ascii = false });
+    return value;
 }
 
 fn text(cx: *Cx, v: Value, where: []const u8) errors.Refused![]const u8 {
@@ -73,6 +82,7 @@ pub fn spec(cx: *Cx, body: Value) errors.Refused!?Spec {
             if (js == null or js.? != .object or js.?.field("schema") == null) return cx.refuse("response_format json_schema needs json_schema.schema (a JSON schema object)");
             return .{ .kind = .json_schema, .text = try schemaText(cx, js.?.get("schema").?, "response_format json_schema.schema") };
         }
+        if (kind != null and kind.? == .string and std.mem.eql(u8, name, "structural_tag")) return .{ .kind = .structural_tag, .text = try structural_tag.build(cx, rf) };
         if (!(kind != null and kind.? == .string and std.mem.eql(u8, name, "text")))
             return cx.fail(.request, "response_format type must be text, json_object or json_schema, not {s}", .{try pyrepr.repr(cx.a, kind)});
     }

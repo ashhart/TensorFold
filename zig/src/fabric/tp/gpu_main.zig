@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | tcp-host | hca | kernel`
+//! `tf-tp-test`: suite, device, failfast, roce-host, tcp-host, tcp-hip, hca or kernel, as gpu_cli.zig's usage spells
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !u8 {
     const cfg = try tp.Config.fromEnv();
     if (command == .@"roce-host") return @import("roce_host.zig").run(cfg, init.gpa);
     if (command == .@"tcp-host") return @import("tcp_host.zig").run(cfg, init.gpa);
+    if (command == .@"tcp-hip") return @import("tcp_hip.zig").run(cfg, init.gpa);
     if (command == .hca) return hca(cfg, init.io);
     if (command == .device) return device(cfg);
     if (command == .failfast and (!cfg.failfast or command.failfast.hold != null) and !hostOnlyAllowed(cfg)) {
@@ -165,7 +166,7 @@ const DeviceRun = struct {
 
 /// The failed-transport check's host-only forms (fail-fast off, a hold): TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire.
 fn hostOnlyAllowed(cfg: tp.Config) bool {
-    const flag = std.mem.eql(u8, std.mem.span(std.c.getenv("TF_TP_ALLOW_HOST_ONLY") orelse ""), "1");
+    const flag = std.mem.eql(u8, (@import("sys").environment.Process{}).get("TF_TP_ALLOW_HOST_ONLY") orelse "", "1");
     return flag and (cfg.backend != .roce or cfg.roce_wire == .shm);
 }
 

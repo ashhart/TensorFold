@@ -44,9 +44,13 @@ pub const Job = struct {
     prefix: @import("lane_host_prefix.zig").Waiting = .{}, // its wait for another fill's cut, while queued
     fetch: @import("lane_host_fetch.zig").Ticket = .{}, // its disk state read ahead, while queued
     lease: @import("kv_ledger.zig").Lease = .{}, // its caches' bytes in the host's ledger, from admission to its end
+    wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
+    fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
+    backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
 
-    /// Record first admission once, including a family planner and a background pass that later yields.
+    /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
+        job.wait_reason = .engine_busy;
         if (job.admitted_ns == null) job.admitted_ns = std.Io.Clock.awake.now(job.host.io).toNanoseconds();
     }
 
@@ -57,10 +61,19 @@ pub const Job = struct {
 
     /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
     pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, false);
+    }
+
+    pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, true);
+    }
+
+    fn keepAt(ptr: *anyopaque, s: *lanes.Stream, at: u32, cancelled: bool) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
-        @import("lane_cache_queue.zig").keep(job.host, job, s, at);
+        const cache = @import("lane_cache_queue.zig");
+        if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.

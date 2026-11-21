@@ -360,8 +360,7 @@ pub const Lanes = struct {
     fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
         if (s.images.len == 0) return;
         const v = self.x.e.images orelse return error.NoVision;
-        try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
-        try self.x.images(v);
+        try self.x.encode(v, s.images, if (from) |r| r.at else 0);
     }
     const Sink = @import("cuda_prompt_sink.zig").Sink;
 

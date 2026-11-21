@@ -7,25 +7,63 @@ Open an issue before a new model family, backend or arithmetic change so we can 
 
 ## Coordinate before editing
 
-TensorFold uses [ATC](https://github.com/ashhart/ATC) to coordinate contributors and coding agents; check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
-Follow the [README workflow](README.md#contributing-with-agents) to check, claim, publish your session, pulse while working and land when you finish.
-With ATC 0.7.0 or later, a successful new claim automatically starts an anonymous public session; keep its returned session number and avoid starting a second one.
-Showing a GitHub name is an explicit opt-in with `--github-name`; `--local` keeps a new session on your machine.
+TensorFold uses [ATC](https://github.com/ashhart/ATC) (Agent Traffic Control) to coordinate contributors and coding agents, so they can avoid duplicate work and conflicting changes.
+Check the [live agent radar](https://tensorfold.dev/atc) before choosing an issue.
 If an issue is taken, offer to pair, split or review instead of opening a competing implementation.
-Run `atc overlap --json` before opening a pull request and resolve conflicts with overlapping work.
 Agents must also read the [ATC contributor instructions](docs/atc/SKILL.md).
+Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
+
+### Contributing with agents
+
+Install or upgrade ATC to 0.9.4 or later, then run from an updated TensorFold clone:
+
+```sh
+npm install -g github:ashhart/ATC
+atc check ISSUE --json
+atc claim ISSUE --json
+```
+
+Replace `ISSUE` with the issue number and claim only after a complete check says the work is free.
+TensorFold enables automatic public check-ins: with ATC 0.7.0 or later, a successful new claim starts an anonymous session on the radar and returns its `session` number.
+Keep that number instead of starting a duplicate session.
+For work already yours, start a session with `atc start ISSUE --json`.
+Add `--github-name` to `claim` or `start` only if you want your verified GitHub name shown; showing it is an explicit opt-in. `--local` keeps a new session on your machine.
+The board shows the issue, activity state and last check-in; GitHub still associates the verification comment with its author.
+Check that `publication` is `public`; `unavailable` means the public update failed even if the local claim or session succeeded.
+
+Pulse only while the agent is working, before its five-minute check-in expires:
+
+```sh
+atc pulse ISSUE SESSION working --json
+atc who path/to/file --json
+atc overlap --json
+atc land ISSUE SESSION --json
+atc release ISSUE --json
+```
+
+Use `reviewing` or `blocked` when appropriate, and land the session when it stops.
+Run `atc overlap --json` before opening a pull request and resolve conflicts with overlapping work.
+Before opening a pull request, have the agent run the [pull request skill](docs/pr/SKILL.md); agents that support skills can install it as `tensorfold-pull-request`.
 
 ## Build and host tests
 
 Use the exact Zig version in `.zig-version`, currently 0.17.0.
-Metal builds need Xcode's macOS SDK and Metal toolchain.
+Metal builds need Xcode's macOS SDK and Metal toolchain: the `.metal` sources need Xcode's Metal compiler. Install full Xcode and its
+Metal Toolchain component (`xcodebuild -downloadComponent MetalToolchain`); the Command Line Tools alone fail every kernel compile with
+`unable to find utility "metal"`.
 
 ```sh
 zig build native -Dcpu=apple_m1 -Dversion=1.0.0
 zig build test test-golden -Dcpu=apple_m1
 ```
 
-`native` writes `zig-out/native/bin/tensorfold-native`.
+`native` writes `zig-out/native/bin/tensorfold-native`, the server.
+On Linux, `zig build native` compiles for the build machine's CPU, so the binary can stop with `Illegal instruction` on a
+machine without the same features (AVX-512, for example). To build for another machine, name its CPU: `-Dcpu=baseline`
+runs on any x86_64, as the release archives do, and `-Dcpu=x86_64_v3` on an x86-64-v3-capable machine (AVX2 class).
+
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+To build one stripped server for one GPU (`zig build -Dgpu=spark -Dnvcc=...`, about 69% smaller than the four-target server), see [Build a server for one GPU](RUNBOOK.md#build-a-server-for-one-gpu).
 The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
 `test` runs unit tests; on macOS it also runs available Metal device checks, including GLM MLA and KDA checks.
 Run the full suite on an isolated machine when the local GPU is serving a model.
@@ -41,6 +79,15 @@ zig build test-cuda-host
 
 This subset does not replace the complete `test` suite.
 
+Native Linux no-GPU CI runs `zig build -Dfixed-cpu test-host --test-timeout 20m`.
+It includes `test` and every configured `test-*` and `check-*` step, including compile-only checks.
+New named checks join automatically, even when a build module registers them last.
+The reviewed exclusions in `zig/build/host_tests.zig` cover the optional xgrammar tests,
+the separately scheduled `check-release-paths` gate, manual large-state timing commands, and temporary failures tracked in #2031.
+An empty named check, a stale exclusion, or an alias that brings excluded work back into the aggregate fails it.
+When a fix lands, remove its temporary exclusion and the matching fixture entry in `tools/zig/host_tests_test.py`.
+This aggregate is only registered for native Linux; other hosts keep their existing `test` and device steps.
+
 HIP is an explicit build opt-in. Add `-Dhip=true` to enable its host tests and named HIP targets:
 
 ```sh
@@ -53,6 +100,7 @@ The HIP backend uses the same shared core and serving contracts. Device qualific
 checkpoint, compiler, runtime and architecture; a host build does not establish those receipts.
 
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
+Release archives include the native executable, runtime assets and license notices.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.
 Compile success alone does not qualify a GPU or checkpoint.
 
@@ -80,6 +128,8 @@ A documented one-step tie policy applies only to the same two contenders with bo
 
 ## Performance receipts
 
+For cache-aware performance receipts, see [observed cache benchmark evidence](docs/cache-benchmarks.md).
+The clients retain server usage and output fingerprints, and verify cold/reused states rather than inferring them.
 Measure before and after on the same machine, using the same checkpoint, public prompt IDs and settings.
 Name the commit/version, GPU, OS, checkpoint revision, runtime libraries and request parameters.
 Record pass, fail and skip counts and explain any unrun platform or feature.
@@ -126,6 +176,7 @@ Before pushing, run `python3 tools/pr_check.py --base origin/main --pr NUMBER` t
 Attach the baseline count and identify inherited findings instead of claiming a nonzero checker exit is clean.
 Write tests that demonstrate a real failure and its correction; keep the failing receipt when changing arithmetic or lifecycle behavior.
 Run the host suite and the device/model checks for every affected platform.
+Coding agents should also load [docs/recipes/SKILL.md](docs/recipes/SKILL.md); agents that support skills can install it as `tensorfold-contributor`.
 We review a candidate, preserve its authorship and run the release gates before landing it.
 
 ## Public identity and privacy
@@ -142,5 +193,5 @@ A clean diff or a passing test suite does not replace that review.
 Include the native version, model revision, GPU/OS, exact command, startup error and a public request that reproduces the problem.
 A token mismatch report should include both drafted and plain token hashes at the same settings.
 
-TensorFold is Apache-2.0; a contribution follows that license.
+TensorFold is Apache-2.0; a contribution follows that license. See [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Model weights keep their own licenses, and the archive retains the project's required third-party notices.

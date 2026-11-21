@@ -171,10 +171,7 @@ fn prepare(
             a,
             problem,
             "{s}",
-            .{try hip.admission.badSetting(a, if (err == error.BadReserve) error.BadReserve else error.BadLimit, .{
-                .reserve = @import("sys").getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
-                .limit = @import("sys").getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
-            })},
+            .{try hip.admission.badSetting(a, if (err == error.BadReserve) error.BadReserve else error.BadLimit, hip.admission.envTexts())},
         ),
         error.HostMemoryUnavailable => steps.refuseAll(
             a,

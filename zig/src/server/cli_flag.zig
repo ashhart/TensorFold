@@ -15,4 +15,6 @@ pub const Flag = struct {
     native: bool = false,
     /// The values it honours when only some of the choices.
     native_values: ?[]const []const u8 = null,
+    /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
+    path: bool = false,
 };

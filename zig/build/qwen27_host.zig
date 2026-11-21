@@ -91,7 +91,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
-    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 reply cache:"} })).step);
+    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born" } })).step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
     const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
     for ([_]?[]const u8{ null, "1" }) |value| {

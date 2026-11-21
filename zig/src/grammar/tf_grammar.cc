@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "tf_budget.h"
+#include "tf_compile.h"
 
 namespace {
 
@@ -58,31 +59,39 @@ std::shared_ptr<const Spellings> spellings(const xgrammar::TokenizerInfo& info) 
     return out;
 }
 
-struct Compiler {
+constexpr int BLANKS = 32;                      // grammar.py BLANKS
+constexpr int64_t CACHE_BYTES = 256ll << 20;    // grammar.py CACHE_BYTES
+const char* OBJECT = "{\"type\": \"object\"}";  // grammar.py OBJECT: json_object
+
+// One tokenizer's compiler, kept by every handle and compile thread that uses it (tfg_close drops one).
+struct CompilerState {
     xgrammar::TokenizerInfo info;
     xgrammar::GrammarCompiler compiler;
     int vocab;
     std::shared_ptr<const Spellings> spell;
     tfb::Cache budgets;
+    tfc::Cache<xgrammar::CompiledGrammar> compiles;
+    CompilerState(const xgrammar::TokenizerInfo& i, int v)
+        : info(i), compiler(i, 8, true, CACHE_BYTES), vocab(v), spell(spellings(i)), budgets(i) {}
+};
+
+struct Compiler {
+    std::shared_ptr<CompilerState> state;
 };
 
 struct Compiled {
     xgrammar::CompiledGrammar g;
     std::shared_ptr<const Spellings> spell;
-    Compiler* owner;
+    std::shared_ptr<CompilerState> owner;
 };
 
 struct Matcher {
     xgrammar::GrammarMatcher m;
     std::shared_ptr<const Spellings> spell;
-    Compiler* owner;
+    std::shared_ptr<CompilerState> owner;
     xgrammar::CompiledGrammar g;
     std::unique_ptr<tfb::Follower> budget;  // armed by tfg_budget before the first token (grammar_budget)
 };
-
-constexpr int BLANKS = 32;                      // grammar.py BLANKS
-constexpr int64_t CACHE_BYTES = 256ll << 20;    // grammar.py CACHE_BYTES
-const char* OBJECT = "{\"type\": \"object\"}";  // grammar.py OBJECT: json_object
 
 }  // namespace
 
@@ -124,7 +133,7 @@ void* tfg_open(const char* tokenizer_json, size_t len, int vocab, const int32_t*
         bool prefix = mo2.at("add_prefix_space").get<bool>();
         std::vector<int32_t> stop(stops, stops + nstops);
         xgrammar::TokenizerInfo info(encoded, type, vocab, stop, prefix);
-        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab, spellings(info), tfb::Cache(info)};
+        return new Compiler{std::make_shared<CompilerState>(info, vocab)};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -136,14 +145,13 @@ void* tfg_open(const char* tokenizer_json, size_t len, int vocab, const int32_t*
 void tfg_close(void* c) { delete static_cast<Compiler*>(c); }
 
 // Words a row's bitmask holds.
-int tfg_words(void* c) { return (static_cast<Compiler*>(c)->vocab + 31) / 32; }
+int tfg_words(void* c) { return (static_cast<Compiler*>(c)->state->vocab + 31) / 32; }
 
 // kind: 0 json (any object), 1 json_schema, 2 regex, 3 choice (JSON strings), 4 EBNF, 5 structural tag (xgrammar JSON).
 void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, size_t errlen) {
-    auto* c = static_cast<Compiler*>(cp);
+    const auto c = static_cast<Compiler*>(cp)->state;
     try {
-        std::string t(text, len);
-        xgrammar::CompiledGrammar g = [&] {
+        auto work = [c, kind](const std::string& t) -> xgrammar::CompiledGrammar {
             switch (kind) {
                 case 0: return c->compiler.CompileJSONSchema(OBJECT, true, std::nullopt, std::nullopt, true, BLANKS);
                 case 1: return c->compiler.CompileJSONSchema(t, true, std::nullopt, std::nullopt, true, BLANKS);
@@ -164,7 +172,8 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                 case 5: return c->compiler.CompileStructuralTag(t);
                 default: return c->compiler.CompileGrammar(t);
             }
-        }();
+        };
+        xgrammar::CompiledGrammar g = c->compiles.Compile(kind, std::string(text, len), work);
         return new Compiled{g, c->spell, c};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
@@ -173,6 +182,9 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
     }
     return nullptr;
 }
+
+// Compiles holding a slot, abandoned ones included; tests wait for 0 before they end.
+int tfg_compiling(void* c) { return (int)static_cast<Compiler*>(c)->state->compiles.Active(); }
 
 void tfg_free(void* g) { delete static_cast<Compiled*>(g); }
 
@@ -221,7 +233,7 @@ int tfg_budget_ready(void* g) {
 }
 
 // The work exploring a grammar may take, for grammars first looked up after this (tfb::Limits); tests lower it.
-void tfg_budget_limits(void* c, int64_t work) { static_cast<Compiler*>(c)->budgets.Limit({work}); }
+void tfg_budget_limits(void* c, int64_t work) { static_cast<Compiler*>(c)->state->budgets.Limit({work}); }
 
 // n == 0 arms a fresh matcher, else clears bits that leave no completion in left - 1 more: 0, 1 not covered, -1 failed.
 int tfg_budget(void* m, int32_t* words, int n, int left) {

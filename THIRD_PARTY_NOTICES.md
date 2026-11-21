@@ -292,8 +292,7 @@ below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0
 Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
-The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
-without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model card states Apache-2.0 too. Each checkpoint keeps its own license.
 
 ## Structured output: libtfgrammar
 
@@ -336,6 +335,7 @@ These follow a model's release code or a library's model code for their math, ro
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+- `zig/kernels/metal/idol.metal`, `zig/kernels/cuda/idol.cu` and `zig/kernels/cuda/idol_attention.cuh`: the rounding points of Idol's denoiser in [speridlabs/idol-sdk](https://github.com/speridlabs/idol-sdk) at `4702a7f0`. Copyright speridlabs, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
@@ -446,6 +446,14 @@ common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
+## DeepSeek-V4.1 Metal image preparation
+
+The image preparation (`zig/src/families/deepseek_v41/metal/vision_prep.zig`,
+`zig/src/families/deepseek_v41/metal/vision_prepare.zig`) follows the image budgets and geometry of
+`image_processor.py` in DeepSeek AI's MIT licensed
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+(revision 08c8657f02291e11b6f6b63e0e16014f8e748518), Copyright (c) 2023 DeepSeek.
+
 ## Shared EXL3 resolver setup
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
@@ -495,3 +503,72 @@ The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files
   [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
   `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
   [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).
+- `qwen38.jinja` and `qwen38-tokenizer_config.json` come from
+  [TensorFold/Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) at revision
+  `70ae7fac63274ff2eac54152031433374cb80f2f` (an MLX conversion of
+  [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), whose template it carries), under the Apache License 2.0.
+  See [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
+
+## Unlimited-OCR-2
+
+The `unlimited-ocr` family (`zig/src/families/uocr/` and its kernels) follows these parts of the Python code that ships
+with [baidu/Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) at revision
+`0480966938291445591f69f08a13b041c073a96a`, the release's own files:
+
+- `modeling_unlimitedocr.py`: the page guard (`_uocr_page_count_guard`), gundam's tiles (`dynamic_preprocess`,
+  `find_closest_aspect_ratio`), the views' token layout and the prompt (`_uocr_build_inputs`, `infer`), which
+  `generate.zig`, `preprocess.zig`, `prompt.zig` and `chat_template.jinja` repeat;
+- `deepencoder.py`, its CLIP section only (`CLIPVisionEmbeddings`, `NoTPTransformer`, `VitModel`, `quick_gelu`,
+  `get_abs_pos`; the release's own code, citing no library there): the class row, the position table resized to a
+  tile, the pre-norm, `quick_gelu`'s 1.702 and the layer order, which `vision.zig`'s CLIP steps repeat;
+- `dash_attention.py` and `modeling_deepseekv2.py`: the DASH router (block keys, page-aware candidates, top 16,
+  entmax-1.5).
+
+The release ships no LICENSE file; its model card states `license: mit`, and these notices carry that licence's text
+("MIT License text" above). The SAM encoder, the decoder's attention, its page2d rotary and its MoE gate follow none of
+the release's code: they are written from the papers and from the release's modules measured through their inputs and
+outputs. `resize.zig` follows no code either: it is the antialiased bicubic the release asks of torch
+(`F.interpolate(mode="bicubic", antialias=True, align_corners=False)`, Keys' cubic with a = -0.5, taps spread by the
+scale and normalised) for the position tables, written to that operator's definition, with its fp32 rounding order fixed
+by measuring torch's output on the release's tables bit for bit.
+
+TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
+own code as the reference.
+
+## Indian-script tokenizer fixture
+
+`INDIC` in `tools/zig/tokenizer_parity.py` holds one sentence of
+[IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
+and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
+
+## Inkling 2 Small test fixtures
+
+`zig/src/families/inkling2/fixtures/` holds files and values taken from Thinking Machines' Inkling 2 Small release at
+revision `2ad1157016e1aac77b6ff1b770e7c05229403134`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, `chat_template.jinja`, `mini_tokenizer.json` (its
+`tokenizer.json` cut to the added tokens, the byte alphabet and the first 1,500 merges) and the prompts and ids in
+`prompt_cases.json` and `mini_cases.json`, which the Hugging Face transformers and tokenizers libraries produced from
+those files. `tiny_config.json` and the tensor tables
+`tiny_model_header.txt` and `tiny_mtp_header.txt` describe `tiny-random/inkling-2` at revision
+`0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
+model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
+
+## Inkling 2 attention kernels
+
+`zig/kernels/cuda/inkling2/attention.cu`, `zig/kernels/cuda/inkling2/prompt_attention.cu` and
+`zig/src/families/inkling2/kernels.zig` compute the attention of Hugging Face transformers'
+`src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0). The query and key L2 clips come
+from `Inkling2L2Clip` and `Inkling2ScaledL2Clip`, the relative-position logits from `Inkling2RelativeLogits`, and the
+sinks and sigmoid output gate from `Inkling2SlidingAttention` and `Inkling2FullAttention`. The kernels, their chunked
+layout and their rounding points are TensorFold's own.
+
+## Inkling 2 glue kernels
+
+`zig/kernels/cuda/inkling2/ops.cu`, `zig/kernels/cuda/inkling2/rows.cu` and `zig/src/families/inkling2/ops.zig` compute
+these layers of Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit
+`109a7d19bf66` ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0):
+`Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
+`Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
+are TensorFold's own.

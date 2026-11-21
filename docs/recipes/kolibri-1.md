@@ -6,13 +6,14 @@ in; the EAGLE-3 drafter is the next step and is not loaded here.
 
 ## Checkpoint
 
-Tested revision: `Aleph-Alpha/Kolibri-1` at `e52eb4627d11516b0c01de49210ab5a4e4061444` (32 shards, 74 GB). The
+Tested revision: `Aleph-Alpha/Kolibri-1` at `e52eb4627d11516b0c01de49210ab5a4e4061444` (32 shards, 78.9 GB). The
 weights are block FP8: e4m3 codes in 128 x 128 blocks with fp32 `weight_scale_inv`, the routers, norms, embeddings and
 head in bf16. Publisher sha256 of `model.safetensors.index.json`:
 `c6769a34820c9057b404b2a5cae1ac24fd7b4a9ca08b84eb0a06e7b5bad3005e`.
 
 ```bash
-tensorfold-native serve /path/to/Kolibri-1 --name kolibri-1 --context 32768 --parallel 8
+tensorfold-native pull Aleph-Alpha/Kolibri-1@e52eb4627d11516b0c01de49210ab5a4e4061444
+tensorfold-native serve Aleph-Alpha/Kolibri-1 --name kolibri-1 --context 32768 --parallel 8
 ```
 
 The model has 50 layers, 2,560 wide, 48 query heads over 4 key heads of 128. Every fifth layer (4, 9, ..., 49) attends

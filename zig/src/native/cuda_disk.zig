@@ -125,32 +125,66 @@ pub fn keptKey(comptime K: type, a: Allocator, io: std.Io, g: *const cuda.Contex
     const facts = K.facts(owner); // an array, or a slice
     const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
     const id = try identityOf(a, io, g, dir, kernels, list, probed, profile);
-    if (comptime !@hasDecl(K, "policy")) return id;
-    const resolved = K.policy(owner);
-    return persistence_policy.extend(id, K.policy_domain, &resolved);
+    const P = if (@hasDecl(K, "view")) K.view else K; // a kept image's family declares its policy in its view
+    if (comptime !@hasDecl(P, "policy")) return id;
+    const resolved = P.policy(owner);
+    return persistence_policy.extend(id, P.policy_domain, &resolved);
 }
 
 /// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
 pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, facts: []const u64, probed: u64, profile: disk_identity.Profile) !u64 {
     var h = std.hash.Wyhash.init(0x6375);
-    try @import("sys").file_identity.current(&h, a, io);
-    try disk_identity.checkpoint(&h, a, io, dir);
+    const binary = try @import("sys").file_identity.running(a, io);
+    var name_buf: [256]u8 = undefined;
+    try components(&h, a, io, .{ .binary = binary, .checkpoint = dir, .kernels = kernels, .device = try deviceOf(g, &name_buf), .facts = facts, .probed = probed, .profile = profile });
+    return h.final();
+}
+
+/// The GPU's name (or "GPU" when the driver gives none), compute capability and driver version.
+pub const Device = struct { name: []const u8, capability: u64, driver: u64 };
+
+pub fn deviceOf(g: *const cuda.Context, name_buf: []u8) !Device {
+    const name = g.name(name_buf) catch "GPU";
+    return .{ .name = name, .capability = try g.capability(), .driver = @intCast(try g.d.version()) };
+}
+
+/// What a kept key binds; a null part is bound otherwise by its caller (the witness binds bytes, not stamps).
+pub const Components = struct {
+    binary: ?[32]u8,
+    checkpoint: ?[]const u8,
+    kernels: ?[]const u8,
+    device: Device,
+    facts: []const u64,
+    probed: ?u64,
+    profile: disk_identity.Profile,
+};
+
+/// The components in one order into any hasher with `update(bytes)`: a kept key's Wyhash, or a SHA-256.
+pub fn components(h: anytype, a: Allocator, io: std.Io, c: Components) !void {
+    if (c.binary) |digest| @import("sys").file_identity.bind(h, digest);
+    if (c.checkpoint) |dir| try disk_identity.checkpoint(h, a, io, dir);
     inline for (comptime std.meta.declarations(cuda.kernels)) |d| {
         const v = @field(cuda.kernels, d);
         if (comptime @TypeOf(v) == []const u8) h.update(v);
     }
-    if (kernels) |k| {
-        const captured = try cuda.aot.identity.hash(a, io, k);
-        h.update(std.mem.asBytes(&captured));
-    }
-    var name_buf: [256]u8 = undefined;
-    h.update(g.name(&name_buf) catch "GPU");
-    const device = [_]u64{ try g.capability(), @intCast(try g.d.version()) };
+    if (c.kernels) |k| try captured(h, a, io, k);
+    h.update(c.device.name);
+    const device = [_]u64{ c.device.capability, c.device.driver };
     h.update(std.mem.sliceAsBytes(&device));
-    h.update(std.mem.sliceAsBytes(facts));
-    h.update(std.mem.asBytes(&probed));
-    disk_identity.profile(&h, profile);
-    return h.final();
+    h.update(std.mem.sliceAsBytes(c.facts));
+    if (c.probed) |p| h.update(std.mem.asBytes(&p));
+    disk_identity.profile(h, c.profile);
+}
+
+/// A captured set as a nested digest: a kept key folds its 64-bit Wyhash, a SHA-256 its SHA-256.
+fn captured(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
+    if (@TypeOf(h.*) == std.hash.Wyhash) {
+        const v = try cuda.aot.identity.hash(a, io, dir);
+        return h.update(std.mem.asBytes(&v));
+    }
+    var s = std.crypto.hash.sha2.Sha256.init(.{});
+    try cuda.aot.identity.write(&s, a, io, dir);
+    h.update(&s.finalResult());
 }
 
 /// A fixed prompt's state at a mark inside its last chunk, hashed (a kernel, driver or arithmetic change moves it).
@@ -195,11 +229,12 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
     const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target, o.model_type);
-    try open(o, root, id.id, id.rate, store, "nemotron", null);
+    try open(o, root, id.id, id.rate, store, "nemotron", null, 0);
 }
 
 /// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
 pub fn keptDisk(comptime F: type) ?type {
+    if (@hasDecl(F, "kept_view")) return @import("cuda_kept.zig").Kept(F.kept_view);
     return if (@hasDecl(F, "kept_disk")) F.kept_disk else null;
 }
 
@@ -210,7 +245,11 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
         if (@hasDecl(K, "bind")) K.bind(loaded.target, ctx); // the context the store's copies make current
         const p = try K.probe(a, io, loaded.backend, loaded.target);
         const staging = stagingOf(K, loaded.target);
-        try open(o, root, try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name, staging);
+        const id = try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" });
+        // a kept image's key also binds the prompt's files and a drafter's checkpoint (native/cuda_kept.zig)
+        const key = if (comptime @hasDecl(K, "prompted")) try K.prompted(a, io, o, id) else id;
+        const longest: u32 = if (comptime @hasDecl(K, "longest")) K.longest(loaded.target) else 0;
+        try open(o, root, key, p.rate, store, name, staging, longest);
     }
 }
 
@@ -219,7 +258,7 @@ fn stagingOf(comptime K: type, t: anytype) ?u64 {
     return if (@hasDecl(K, "staging")) K.staging(t) else null;
 }
 
-fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: ?u64) !void {
+fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: ?u64, longest: u32) !void {
     const gibs = struct {
         fn bytes(g: f64) u64 {
             return @intFromFloat(g * (1 << 30));
@@ -228,6 +267,7 @@ fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_ca
     // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
     var opts: rows.Options = .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) };
     if (staging) |bytes| opts.staging_bytes = bytes; // else the store's own default
+    opts.longest = longest; // a whole state at the served window: core prices the permit (rows.attach)
     const r = try rows.attach(store.gpa, store, opts);
     r.prefill_rate = rate;
     std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
@@ -236,6 +276,7 @@ fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_ca
 test {
     std.testing.refAllDecls(@This());
     _ = @import("disk_spill.zig");
+    _ = @import("cuda_kept.zig");
 }
 
 test "a disk module that declares attach opens the store itself" {
@@ -256,7 +297,7 @@ test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store"
     // a disk module that opens the store itself, through this file's open, under a fixed identity and no device
     const K = struct {
         pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, o: api.Open, root: []const u8, _: ?[]const u8, _: anytype, store: *api.prompt_cache.Store) !void {
-            try open(o, root, 7, 1.0, store, "fake", 3 << 30);
+            try open(o, root, 7, 1.0, store, "fake", 3 << 30, 0);
         }
         fn bytes(_: *anyopaque, _: u32) u64 {
             return 0;

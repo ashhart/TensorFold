@@ -30,6 +30,7 @@ pub const clock = @import("clock.zig");
 pub const pass_metrics = @import("pass_metrics.zig");
 pub const counters = @import("counters.zig");
 pub const ane = @import("ane.zig");
+pub const metal4 = @import("metal4.zig");
 
 test {
     std.testing.refAllDecls(@This());

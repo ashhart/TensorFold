@@ -29,7 +29,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
-        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
+        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
     } else |_| {};
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");
@@ -59,6 +59,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .loop_guard = r.loop_guard,
         .loop_stop = r.loop_stop,
         .chunks = r.chunks,
+        .message_starts = r.message_starts,
         .history_len = r.history_len,
         .shared_prefixes = r.shared_prefixes,
         .reuse = reuse,

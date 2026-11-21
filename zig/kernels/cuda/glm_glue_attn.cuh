@@ -1,6 +1,8 @@
 // latent.py's MLA attention and sparse.py's index scores by hand: the chunk kernels' online softmax, the chunk merge.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_glue_router.cuh"
 #include <cuda_fp8.h>
 #include "common/mla.cuh"
@@ -10,6 +12,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_16(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
                      const int* pt, int64_t pstep) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<16>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
@@ -17,6 +20,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
                      const int* pt, int64_t pstep) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse, pt, pstep);
 }
 
@@ -25,6 +29,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_16_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<16, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
                                  po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
@@ -32,6 +37,7 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
                          const int* tok, const int* cnt, float* po, float* pm, float* pl,
                          int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_pdl::enter();
   glm_attn::chunks_wide<32, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
                                  po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
@@ -40,6 +46,7 @@ extern "C" __global__ void __launch_bounds__(256)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_merge(const float* po, const float* pm, const float* pl, __nv_bfloat16* out, const int* cnt, int64_t rows,
                  int64_t heads, int nch, int sparse) {
+  glm_pdl::enter();
   constexpr int LW = glm_attn::LW;
   const int64_t r = blockIdx.x, h = blockIdx.y;
   if (sparse && cnt[r] == 0) return;
@@ -69,6 +76,7 @@ extern "C" __global__ void __launch_bounds__(128)
     tf_glm_scores(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride, const __nv_bfloat16* pk,
                   float* out, const int* pos, int64_t np, int64_t nb, float scale, float wscale, int64_t heads,
                   int loop, const int* pt, int64_t ps) {
+  glm_pdl::enter();
   constexpr int D = 128, HP = 32, BP = 64;
   __shared__ __align__(16) __nv_bfloat16 sm[4 * 2 * 16 * D];  // q's 32 rows, then each warp's two 16-pool buffers
   auto at = [](int row, int u) { return row * D + ((u ^ (row & 7)) << 3); };

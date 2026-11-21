@@ -10,9 +10,10 @@ const g = contract.gates;
 const fx = cuda.experts.Nvfp4Experts;
 const Y = cuda.experts32.Nvfp4b32Experts;
 const grouped = cuda.grouped;
+const nz5 = @import("contract_nvfp4_nz5.zig");
 
-/// Fact up/down, a control, experts_waves' entries, 1-warp CTAs, two cut controls, block 32's five and its control.
-pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control };
+/// Fact up/down, a control, waves' entries, 1-warp CTAs, two cut controls, block 32's and NVFP4_NZ5's five, controls.
+pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control, nz5_up, nz5_down, nz5_down_bf16, nz5_prompt_up, nz5_prompt_down, nz5_control, nz5_sums_control };
 
 /// experts_waves.zig's entry a kind launches, or null for the prompt-tile and classic kinds.
 fn wavesEntry(kind: Kind) ?usize {
@@ -26,7 +27,7 @@ fn wavesEntry(kind: Kind) ?usize {
 
 fn isDown(kind: Kind) bool {
     return switch (kind) {
-        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one, .b32_down, .b32_down_bf16, .b32_prompt_down => true,
+        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one, .b32_down, .b32_down_bf16, .b32_prompt_down, .nz5_down, .nz5_down_bf16, .nz5_prompt_down => true,
         else => false,
     };
 }
@@ -41,7 +42,7 @@ fn isOne(kind: Kind) bool {
 
 fn epiOf(kind: Kind) cuda.experts.Epi {
     return switch (kind) {
-        .down_bf16_one, .b32_down_bf16, .b32_prompt_down => .down_bf16,
+        .down_bf16_one, .b32_down_bf16, .b32_prompt_down, .nz5_down_bf16, .nz5_prompt_down => .down_bf16,
         else => if (isDown(kind)) .down_f32 else .up,
     };
 }
@@ -50,13 +51,27 @@ fn epiOf(kind: Kind) cuda.experts.Epi {
 fn isB32(kind: Kind) bool {
     return switch (kind) {
         .b32_up, .b32_down, .b32_down_bf16, .b32_prompt_up, .b32_prompt_down, .b32_control => true,
+        .nz5_up, .nz5_down, .nz5_down_bf16, .nz5_prompt_up, .nz5_prompt_down, .nz5_control, .nz5_sums_control => true,
         else => false,
     };
 }
 
 /// Block 32's prompt entries, whose block 16 is the prompt tile and not the decode form.
 fn isB32Prompt(kind: Kind) bool {
-    return kind == .b32_prompt_up or kind == .b32_prompt_down;
+    return kind == .b32_prompt_up or kind == .b32_prompt_down or kind == .nz5_prompt_up or kind == .nz5_prompt_down;
+}
+
+/// NVFP4_NZ5's kinds: block 32's entries that read 0b1000 as +5, against block 16 on the same values.
+fn isNz5(kind: Kind) bool {
+    return switch (kind) {
+        .nz5_up, .nz5_down, .nz5_down_bf16, .nz5_prompt_up, .nz5_prompt_down, .nz5_control, .nz5_sums_control => true,
+        else => false,
+    };
+}
+
+/// NVFP4_NZ5's planted controls: E2M1's entry on its codes, each +5 read as -0.
+fn isNz5Control(kind: Kind) bool {
+    return kind == .nz5_control or kind == .nz5_sums_control;
 }
 
 const experts = 4;
@@ -130,6 +145,13 @@ pub fn spec(kind: Kind) c.Spec {
         .b32_prompt_up => .{ .name = "cuda nvfp4 block 32 prompt gate-up tf_nvfp4_prompt32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "tf_nvfp4_prompt_swiglu", .nan = .{ .stated = rule }, .tiles = up32_tiles, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
         .b32_prompt_down => .{ .name = "cuda nvfp4 block 32 prompt down tf_nvfp4_prompt32_down", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "tf_nvfp4_prompt_down", .nan = .{ .stated = rule }, .tiles = down32_tiles, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
         .b32_control => .{ .name = "control: tf_nvfp4_decode32_swiglu on offsets with each byte's nibbles swapped, posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = b32_up_served[1..2] },
+        .nz5_up => .{ .name = "cuda nvfp4 block 32 NVFP4_NZ5 decode gate-up tf_nvfp4_nz5_decode32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .nz5_down => .{ .name = "cuda nvfp4 block 32 NVFP4_NZ5 decode down tf_nvfp4_nz5_decode32_down_f32", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served },
+        .nz5_down_bf16 => .{ .name = "cuda nvfp4 block 32 NVFP4_NZ5 decode down bf16 tf_nvfp4_nz5_decode32_down_bf16", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 3, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .nz5_prompt_up => .{ .name = "cuda nvfp4 block 32 NVFP4_NZ5 prompt gate-up tf_nvfp4_nz5_prompt32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "tf_nvfp4_prompt_swiglu", .nan = .{ .stated = rule }, .tiles = up32_tiles, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .nz5_prompt_down => .{ .name = "cuda nvfp4 block 32 NVFP4_NZ5 prompt down tf_nvfp4_nz5_prompt32_down", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "tf_nvfp4_prompt_down", .nan = .{ .stated = rule }, .tiles = down32_tiles, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .nz5_control => .{ .name = "control: tf_nvfp4_decode32_swiglu on NVFP4_NZ5's codes, each +5 read as -0, posing as its nz5 entry", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = b32_up_served[1..2] },
+        .nz5_sums_control => .{ .name = "control: tf_nvfp4_decode32_swiglu on NVFP4_NZ5's stress codes, each +5 read as -0, posing as its nz5 entry", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
     };
 }
 
@@ -140,6 +162,7 @@ pub const Experts = struct {
     k1: *const fx, // Group's one
     tile: ?*const cuda.experts_tile.Tile = null,
     k32: ?*const Y = null, // block 32's kernels, under test in its kinds
+    k32nz: ?*const Y = null, // NVFP4_NZ5's entries, under test in its kinds
     router: grouped.Router,
     shape: c.Shape = undefined,
     x: []u16 = &.{}, // bf16 rows: a token's for up, a pair's for down
@@ -147,6 +170,7 @@ pub const Experts = struct {
     scales: []u8 = &.{}, // [experts][parts][n][k/16] e4m3
     bases: []u8 = &.{}, // block 32's: [experts][parts][n] e4m3
     offsets: []u8 = &.{}, // block 32's: [experts][parts][n][k/64], a group a nibble
+    nz: []u8 = &.{}, // NVFP4_NZ5's codes: block 16's with each planted 4 a 0b1000, and the stress fill's pairs of +5
     globals: [experts * 2]f32 = undefined, // [experts][parts]
     picks: []i32 = &.{},
     allow_extra: []f64 = &.{}, // up: the SwiGLU roundings' share of each output's bound
@@ -173,6 +197,7 @@ pub const Experts = struct {
         a.free(self.scales);
         a.free(self.bases);
         a.free(self.offsets);
+        a.free(self.nz);
         a.free(self.picks);
         a.free(self.allow_extra);
         self.x = &.{};
@@ -180,6 +205,7 @@ pub const Experts = struct {
         self.scales = &.{};
         self.bases = &.{};
         self.offsets = &.{};
+        self.nz = &.{};
         self.picks = &.{};
         self.allow_extra = &.{};
     }
@@ -205,7 +231,8 @@ pub const Experts = struct {
             entry.served = &self.served;
         };
         return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
-            .control, .cut_waves, .cut_waves_one, .b32_control => .shapes,
+            .control, .cut_waves, .cut_waves_one, .b32_control, .nz5_control => .shapes,
+            .nz5_sums_control => .sums,
             else => null,
         } };
     }
@@ -279,6 +306,12 @@ pub const Experts = struct {
             .stress => self.stress(rng),
         }
         if (isB32(self.kind)) try self.jam();
+        if (isNz5(self.kind)) {
+            const rows = experts * self.parts() * n;
+            self.nz = try a.alloc(u8, self.codes.len);
+            nz5.plant(self.codes, self.nz, self.scales, rows, k, rng, fill != .stress);
+            if (fill == .stress) nz5.stress(self.x, self.nz, self.xRows(), rows, k, rng);
+        }
         self.xd = try self.rig.input(std.mem.sliceAsBytes(self.x));
         // pack on the host as the loader does: [E][n/32][k/32][parts][144] int32
         const per = fx.bytes(1, n, k, self.parts()) / 4;
@@ -340,7 +373,9 @@ pub const Experts = struct {
         const n = self.shape.n;
         const g64 = self.shape.k / 64;
         const at = (e * self.parts() + part) * n;
-        return .{ .codes = self.codesOf(e, part), .bases = self.bases[at..][0..n], .offsets = self.offsets[at * g64 ..][0 .. n * g64] };
+        const per = n * self.shape.k / 2;
+        const codes = if (isNz5(self.kind)) self.nz[(e * self.parts() + part) * per ..][0..per] else self.codesOf(e, part);
+        return .{ .codes = codes, .bases = self.bases[at..][0..n], .offsets = self.offsets[at * g64 ..][0 .. n * g64] };
     }
 
     /// Gate 4: bf16-integer inputs, codes 4 and 6 at scale 1, K's halves mirrored: fp32 sums exact in any order.
@@ -367,6 +402,7 @@ pub const Experts = struct {
 
     fn weight(self: *const Experts, e: usize, part: usize, j: usize, i: usize) f64 {
         const k = self.shape.k;
+        if (isNz5(self.kind)) return nz5.weight(self.nz, self.bases, self.offsets, k, (e * self.parts() + part) * self.shape.n + j, i);
         const b = self.codesOf(e, part)[j * k / 2 + i / 2];
         const nib: u4 = @truncate(if (i % 2 == 0) b & 0xf else b >> 4);
         return core.quant.nvfp4.e2m1(nib) * core.quant.fp8.e4m3(self.scalesOf(e, part)[j * k / 16 + i / 16]);
@@ -422,10 +458,11 @@ pub const Experts = struct {
         const plan = if (prompt) self.wide else self.plan;
         const items = grouped.maxItems(self.pairs(), experts, if (prompt) cuda.experts.promptTile(.nvfp4) else 16);
         if (under) {
+            const k32 = if (isNz5(self.kind) and !isNz5Control(self.kind)) self.k32nz.? else self.k32.?;
             l.format = .nvfp4_csf0;
             l.up = self.wd32;
             l.down = self.wd32;
-            if (prompt) try self.k32.?.runPrompt(self.rig.s, epi, in, l, plan, out, items, -1) else try self.k32.?.run(self.rig.s, epi, in, l, plan, out, items, -1);
+            if (prompt) try k32.runPrompt(self.rig.s, epi, in, l, plan, out, items, -1) else try k32.run(self.rig.s, epi, in, l, plan, out, items, -1);
         } else if (prompt) try self.k.runPrompt(self.rig.s, epi, in, l, plan, out, items, -1) else try self.k.run(self.rig.s, epi, in, l, plan, out, items, -1);
     }
 
