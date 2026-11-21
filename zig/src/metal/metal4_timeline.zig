@@ -59,12 +59,21 @@ pub const Timeline = struct {
             std.log.warn("metal 4 timeline: no timestamp heap ({s})", .{objc.errorText(err)});
             return null;
         };
-        const t = heap.create(Timeline) catch return null;
+        const freq: f64 = @floatFromInt(objc.msg(u64, device, "queryTimestampFrequency", .{}));
+        return initHeap(counters, freq, want, heap) catch {
+            objc.release(counters);
+            return null;
+        };
+    }
+
+    fn initHeap(counters: Id, freq: f64, want: u32, a: std.mem.Allocator) !*Timeline {
+        const t = try a.create(Timeline);
+        errdefer a.destroy(t);
         t.* = .{
             .counters = counters,
-            .freq = @floatFromInt(objc.msg(u64, device, "queryTimestampFrequency", .{})),
+            .freq = freq,
             .want = want,
-            .marks = heap.alloc(Mark, cap) catch return null,
+            .marks = try a.alloc(Mark, cap),
         };
         return t;
     }
@@ -102,10 +111,16 @@ pub const Timeline = struct {
     }
 
     fn find(t: *Timeline, name: []const u8) ?*Rounds {
+        return t.findUsing(heap, name) catch null;
+    }
+
+    fn findUsing(t: *Timeline, a: std.mem.Allocator, name: []const u8) !*Rounds {
         for (t.rounds.items) |r| if (std.mem.eql(u8, r.name, name)) return r;
-        const r = heap.create(Rounds) catch return null;
-        r.* = .{ .name = heap.dupe(u8, name) catch return null };
-        t.rounds.append(heap, r) catch return null;
+        const r = try a.create(Rounds);
+        errdefer a.destroy(r);
+        r.* = .{ .name = try a.dupe(u8, name) };
+        errdefer a.free(r.name);
+        try t.rounds.append(a, r);
         return r;
     }
 
@@ -176,14 +191,11 @@ pub const Timeline = struct {
             r.inside += d;
             r.dispatches += m.n;
             const key = t.keyOf(m) catch continue;
-            const g = r.kernels.getOrPut(heap, key) catch continue;
-            if (g.found_existing) heap.free(key) else g.value_ptr.* = .{};
-            g.value_ptr.s += d;
-            g.value_ptr.stages += 1;
+            const kernel = Timeline.addKernel(r, heap, key, d) catch continue;
             if (first) {
-                r.each.append(heap, d) catch {};
-                r.keys.append(heap, heap.dupe(u8, g.key_ptr.*) catch "") catch {};
-                r.encs.append(heap, m.enc) catch {};
+                Timeline.appendStage(r, heap, d, kernel, m.enc) catch {
+                    r.fits = false;
+                };
             } else if (j < r.each.items.len) r.each.items[j] += d else r.fits = false;
             j += 1;
         }
@@ -193,6 +205,17 @@ pub const Timeline = struct {
 
     fn secs(t: *const Timeline, a: u64, b: u64) f64 {
         return if (b > a) @as(f64, @floatFromInt(b - a)) / t.freq else 0;
+    }
+
+    fn addKernel(r: *Rounds, a: std.mem.Allocator, key: []u8, d: f64) ![]const u8 {
+        const g = r.kernels.getOrPut(a, key) catch |err| {
+            a.free(key);
+            return err;
+        };
+        if (g.found_existing) a.free(key) else g.value_ptr.* = .{};
+        g.value_ptr.s += d;
+        g.value_ptr.stages += 1;
+        return g.key_ptr.*;
     }
 
     /// The stage's kernels by label, joined.
@@ -208,11 +231,29 @@ pub const Timeline = struct {
     }
 
     fn label(t: *Timeline, id: Id) []const u8 {
-        const g = t.labels.getOrPut(heap, @intFromPtr(id)) catch return "?";
-        if (g.found_existing) return g.value_ptr.*;
+        if (t.labels.get(@intFromPtr(id))) |known| return known;
         const text = if (objc.msg(?Id, id, "label", .{})) |s| std.mem.span(objc.utf8(s)) else "unnamed kernel";
-        g.value_ptr.* = heap.dupe(u8, text) catch "?";
+        return t.rememberLabel(heap, id, text);
+    }
+
+    fn rememberLabel(t: *Timeline, a: std.mem.Allocator, id: Id, text: []const u8) []const u8 {
+        const g = t.labels.getOrPut(a, @intFromPtr(id)) catch return "?";
+        if (g.found_existing) return g.value_ptr.*;
+        g.value_ptr.* = a.dupe(u8, text) catch {
+            _ = t.labels.remove(@intFromPtr(id));
+            return "?";
+        };
         return g.value_ptr.*;
+    }
+
+    fn appendStage(r: *Rounds, a: std.mem.Allocator, d: f64, key: []const u8, enc: u32) !void {
+        const owned = try a.dupe(u8, key);
+        errdefer a.free(owned);
+        try r.each.append(a, d);
+        errdefer _ = r.each.pop();
+        try r.keys.append(a, owned);
+        errdefer _ = r.keys.pop();
+        try r.encs.append(a, enc);
     }
 
     fn report(t: *Timeline, r: *Rounds) void {
@@ -253,3 +294,62 @@ pub const Timeline = struct {
         }
     }
 };
+
+test "timeline stage records: allocation failures keep parallel arrays valid" {
+    for (0..4) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        const a = failing.allocator();
+        var r: Rounds = .{ .name = @constCast("test") };
+        defer {
+            for (r.keys.items) |key| a.free(key);
+            r.each.deinit(a);
+            r.keys.deinit(a);
+            r.encs.deinit(a);
+        }
+        Timeline.appendStage(&r, a, 1.0, "kernel", 2) catch |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(r.each.items.len, r.keys.items.len);
+        try std.testing.expectEqual(r.each.items.len, r.encs.items.len);
+    }
+}
+
+test "timeline rounds: failed construction releases every allocation" {
+    for (0..3) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        const a = failing.allocator();
+        var timeline: Timeline = undefined;
+        timeline.rounds = .empty;
+        defer timeline.rounds.deinit(a);
+        try std.testing.expectError(error.OutOfMemory, timeline.findUsing(a, "round"));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "timeline init: failed host storage releases its allocations" {
+    for (0..2) |fail_at| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_at });
+        const a = failing.allocator();
+        const counters: Id = @ptrFromInt(16);
+        try std.testing.expectError(error.OutOfMemory, Timeline.initHeap(counters, 1.0, 1, a));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "timeline kernels: failed insertion releases the owned key" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const a = failing.allocator();
+    var r: Rounds = .{ .name = @constCast("test") };
+    defer r.kernels.deinit(a);
+    const key = try a.dupe(u8, "kernel");
+    try std.testing.expectError(error.OutOfMemory, Timeline.addKernel(&r, a, key, 1.0));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "timeline labels: a refused copy leaves no borrowed entry" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const a = failing.allocator();
+    var t: Timeline = undefined;
+    t.labels = .empty;
+    defer t.labels.deinit(a);
+    try std.testing.expectEqualStrings("?", t.rememberLabel(a, @ptrFromInt(16), "kernel"));
+    try std.testing.expectEqual(@as(u32, 0), t.labels.count());
+}
