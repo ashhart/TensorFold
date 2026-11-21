@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the first gfx1201 receipt in the repository, Flash Next oQ2-MTP at `--tp 2` on two Radeon AI PRO R9700s against #2401's 1.2.3 numbers on the same card class, and `docs/recipes/flash-next-hip.md` as the home for Flash Next on HIP (#3608, refs #2401). Thanks to @timmyit.
+
 ## 1.3.3
 
 - Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 as well as 4, with gates 1 to 4, a planted control for each wider width, and gate-5 records on the four RDNA chips (#3163, part of #3061). Thanks to @gilby.
