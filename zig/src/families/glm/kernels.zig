@@ -323,7 +323,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true, .glm_m3_fast = m3_fast });
     defer gpa.free(m32_src);
     var m16_out: [m16_names.len]mtl.Pipeline = undefined;
-    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = &m16_names, .out = &m16_out };
+    const grouped_from: usize = if (m3_fast) affine_mm.names.len else 0;
+    jobs[generated.len + 7] = .{ .device = device, .source = m16_src, .names = m16_names[grouped_from..], .out = m16_out[grouped_from..] };
     jobs[generated.len + 8] = .{ .device = device, .source = m32_src, .names = &affine_mm.names, .out = &k.mm_f32 };
     const m3_def = if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
     const kda_src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, m3_def, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
