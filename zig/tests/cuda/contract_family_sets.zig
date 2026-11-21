@@ -102,6 +102,7 @@ pub const Sets = struct {
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
         const zonos3, const hy4_ihc_hc = try initPair(
             @import("contract_zonos3.zig").Set,
