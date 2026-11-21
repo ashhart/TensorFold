@@ -3,6 +3,7 @@
 pub const usage =
     \\usage: tf-cuda-test <command>
     \\  qwen4                     synthetic native Qwen4: binary64 logits/tokens, state seams, lanes and copied drafts
+    \\  inkling2-serving MODEL IDS_FILE  Mini CUDA host-reference, resume, admission and copy-rollback serving equivalence
     \\  qwen-draft-frames MODEL DRAFTER IDS OUT  native 27B DFlash frames: raw bytes equal across partitions, controls red
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
