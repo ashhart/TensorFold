@@ -126,9 +126,13 @@ async function main() {
     assert.ok(blocked.calls.filter((url) => url.endsWith('/config.json')).length <= 6, 'same-origin redirect loops are bounded')
   }
 
-  // Installed already.
+  // Installed already, with or without an app-managed selection.
   const installed = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']) }))
   assert.equal(installed.verdict, 'installed')
+  const selected = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => SHA }))
+  assert.equal(selected.verdict, 'installed')
+  const external = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => null }))
+  assert.equal(external.verdict, 'installed')
 
   // Unsupported family, and a drafter on its own.
   const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4' }))

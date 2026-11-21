@@ -220,7 +220,7 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            if (h.queued.items.len == 0 and !h.closing) {
+            if ((h.queued.items.len == 0 or h.disk.holding()) and !h.closing) { // a flush goes before the next request
                 const ms_: i64 = if (disk.idleWork(h)) 10 else 100; // writes waiting for the quiet look again soon
                 if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
                 h.unlock();
