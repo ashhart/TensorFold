@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_GATHER_EARLY=1` (default `0`) gathers a shared decode pass's n-gram rows for every lane in one pooled call instead of one call a stream, for passes of at most 64 lanes (wider passes keep the per-stream call); which rows are read and how a row is dequantized do not change, so replies stay main's, and the measured mean decode gain on one GB10 rises to +2.10% at eight streams (#4009). Thanks to @BadAd84.
+
 ## 1.3.3
 
 - Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 as well as 4, with gates 1 to 4, a planted control for each wider width, and gate-5 records on the four RDNA chips (#3163, part of #3061). Thanks to @gilby.
