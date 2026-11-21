@@ -555,19 +555,15 @@ test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance 
     h.inner.chunk_invariant = false;
     try std.testing.expect(!h.backend().chunk_invariant);
 }
-
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
     try @import("cuda_prompt_cancel_test.zig").check(Host, Host.serve);
 }
-
 test "family readiness reaches production lane admission without binding CUDA" {
     try @import("cuda_health_test.zig").check(Host, Host.readiness, Host.serve);
 }
-
 test "Flash Next takes kept prompt states and drafts together on any rank count" {
     try @import("cuda_flashnext_refusal_test.zig").cache();
 }
-
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
@@ -593,16 +589,13 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
 }
-
 test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {
     try @import("cuda_qwen3_test.zig").flags(open);
     try @import("cuda_qwen3_test.zig").kernels(open);
