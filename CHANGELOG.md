@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: vectorized prompt, KDA and indexer kernels on Macs without tensor units cut cold prompt time 5.17% to 5.68% (2K to 64K tokens) with 0/64 token differences (#3921, refs #3152). Thanks to @gilby.
+
 - Qwen dense and MoE hybrids on CUDA: opt-in `TF_QWEN_KV_HOST=1` keeps the KV pages in mapped pinned host memory, with the state and verify runs on the device, so a long window can fit on a card with little room left beside the weights; it needs `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `--parallel 1` and a discrete GPU, takes an optional `TF_QWEN_KV_HOST_GIB` cap, refuses spill, disk snapshots and `TF_QWEN_KV_SHARE` by name, and trades speed for room, since attention reads the pages over the device interconnect; unset, the plan and every path stay as they were (#2637). Thanks to @MaverickKB.
 
 - GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
