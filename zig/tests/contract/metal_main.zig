@@ -125,7 +125,6 @@ const Moe = struct {
             try kernels.append(a, x.kernel());
         }
     }
-
     fn deinit(m: *Moe, a: std.mem.Allocator) void {
         for (m.extra.items) |x| x.deinit();
         m.extra.deinit(a);
@@ -137,12 +136,10 @@ const Moe = struct {
         m.combine.deinit(a);
     }
 };
-
 fn wanted(o: Opts, name: []const u8) bool {
     const only = o.only orelse return true;
     return std.mem.indexOf(u8, name, only) != null;
 }
-
 pub fn main(init: std.process.Init) !u8 {
     const a = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
