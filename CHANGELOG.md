@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a pass can be cancelled keeping the state at the last chunk's end; chunks are cut exactly as before, so replies are unchanged (#3088, part of #3021).
+
 - LFM3 on Metal: in a shared round, every stream's qk now runs in one dispatch instead of once per stream per attention layer, with the same arithmetic per row, so replies are unchanged (#3079).
 
 - Server: `/v1/messages` and its `count_tokens` accept Anthropic's deferred tools: a tool with `defer_loading: true` stays out of the prompt until a `tool_reference` block in a `tool_result` loads it, rendered by a template that reads both fields (GLM-5.3's) or else as the tool's name, description and parameters in text; a reference to a tool the request does not offer, a non-boolean `defer_loading` or all tools deferred is refused, and requests without these fields are unchanged (#3212, fixes #3115).
@@ -19,8 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on Metal can draft with a published DFlash2 checkpoint behind `--drafter DIR` (and `--drafter-bits`); drafted replies equal plain ones, and the default stays MTP (#3920). Thanks to @gilby.
 
 - Qwen3.5-2B on Metal: a new stream's prompt runs one chunk a call at the same cuts as before, so other streams' decode rounds run between its chunks instead of waiting for the whole prompt; a cancel between chunks keeps the state at the last chunk's end (#3090, refs #3021).
-
-
 
 - Tools: add tf-h3-image to compare MiniMax-H3-Image Metal transformer steps with exported picture cases (#2766).
 
@@ -678,7 +678,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-Flash-Next on HIP: when several streams draft in one round, the MTP head drafts them together, one forward and one draw a step instead of one per stream, as on CUDA and Metal; on a Strix Halo iGPU distinct-prompt decode is 2.8-3.9% faster at 2 streams and 6.6-7.1% at 4, and one stream is unchanged. Replies are unchanged (#2696). Thanks to @gilby.
 - Nemotron on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds, instead of stalling them for its whole prefill. Chunks are cut exactly as before, so replies are unchanged (#3054, part of #3021).
-- LFM3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a pass can be cancelled keeping the state at the last chunk's end. Chunks are cut exactly as before, so replies are unchanged (#3088, part of #3021).
 - Flash Next on CUDA: `TF_FLASHNEXT_CHUNK` and `TF_FLASHNEXT_CHUNK_SOLO` are checked by name when the engine loads, so a malformed value names the variable, the supplied text and the accepted range, and a value that is empty or only spaces and tabs now reads as unset like every other setting; valid values and defaults are unchanged (#3308, #3591). Thanks to @devopsfortunato.
 
 - Ling-3.0-tiny: a host KDA reference, and a Metal check that Kimi's `k3_kda` matches it at Ling-tiny's shape; nothing is served yet (#3055, part of #1247). Thanks to @ThinkOffApp.
