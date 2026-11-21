@@ -337,3 +337,19 @@ test "inkling2 reply: a tool block that is not a call stays content" {
         try t.expectEqualStrings(payload, r.content);
     }
 }
+
+test "inkling2 reply: args are the member keyed args, whatever the values, key escapes and whitespace" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const cases = [_][2][]const u8{
+        .{ "{\"name\":\"f\",\"why\":\"args\",\"args\":{\"k\":\"name\"}}", "{\"k\":\"name\"}" },
+        .{ "{\"why\":\"args\",\"name\":\"f\",\"args\":[\"args\"]}", "[\"args\"]" },
+        .{ "{\"name\":\"f\",\"\\u0061rgs\":{\"k\":2}}", "{\"k\":2}" },
+        .{ "{\n\t\"name\"\t:\t\"f\" ,\r\n\t\"args\"\n:\t{\"k\":\t3}\n}", "{\"k\":\t3}" },
+    };
+    for (cases) |c| {
+        const r = try splitT(&arena, try std.mem.concat(arena.allocator(), u8, &.{ "<|message_model|>f<|content_invoke_tool_json|>", c[0], "<|end_message|>" }));
+        try t.expectEqual(@as(usize, 1), r.calls.len);
+        try t.expectEqualStrings(c[1], r.calls[0].arguments);
+    }
+}
