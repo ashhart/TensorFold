@@ -43,6 +43,8 @@ pub const Attn = struct {
     qkv: std.ArrayList(u16) = .empty,
     /// The key head whose K and V rows the reference holds now.
     held: ?usize = null,
+    /// Gate 4's inputs: every key alike, so every token's outputs are token 0's.
+    alike: bool = false,
     dev: u64 = 0,
     out: u64 = 0,
 
@@ -75,6 +77,7 @@ pub const Attn = struct {
         t.heads = shape.rows;
         t.tokens = shape.n;
         t.held = null;
+        t.alike = fill == .stress;
         try t.qkv.resize(a, t.tokens * t.stride());
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
@@ -150,11 +153,27 @@ pub const Attn = struct {
     }
 
     pub fn reference(t: *Attn, want: []f64, mag: []f64) !void {
-        return t.ref.?.reference(t, t.outputs(), 1.0 / 8.0, want, mag);
+        try t.ref.?.reference(t, t.computed(), 1.0 / 8.0, want, mag);
+        t.repeat(want);
+        t.repeat(mag);
     }
 
     pub fn simulate(t: *Attn, acc: c.Accum, order: g.Order, out: []f64) !void {
-        return t.ref.?.simulate(t, t.outputs(), 1.0 / 8.0, acc, order, out);
+        try t.ref.?.simulate(t, t.computed(), 1.0 / 8.0, acc, order, out);
+        t.repeat(out);
+    }
+
+    /// The output heads float64 computes: token 0's alone when the keys are alike (gate 4 at 8,192 tokens).
+    fn computed(t: *Attn) usize {
+        return if (t.alike) t.heads else t.outputs();
+    }
+
+    /// Token 0's outputs copied to every token when the keys are alike.
+    fn repeat(t: *const Attn, out: []f64) void {
+        if (!t.alike) return;
+        const w = t.heads * r.D;
+        var i = w;
+        while (i < out.len) : (i += w) @memcpy(out[i..][0..w], out[0..w]);
     }
 };
 
@@ -186,4 +205,21 @@ test "gate 4's attention inputs at the joint rows: fp32 sums exact in every orde
         }
     }
     try std.testing.expect(margin[0] >= 100 and margin[1] >= 100);
+}
+
+test "gate 4's alike keys: token 0's outputs copied to every token match float64 over every token" {
+    const a = std.testing.allocator;
+    var t: Attn = .{ .rig = undefined, .k = undefined, .name = "host" };
+    defer if (t.ref) |*x| x.deinit();
+    defer t.qkv.deinit(a);
+    try t.inputs(a, .{ .rows = 3, .n = 37, .k = 37 }, .stress, 0x1d02);
+    const n = t.count();
+    const buf = try a.alloc(f64, 4 * n);
+    defer a.free(buf);
+    try t.reference(buf[0..n], buf[n .. 2 * n]);
+    try t.ref.?.reference(&t, t.outputs(), 1.0 / 8.0, buf[2 * n .. 3 * n], buf[3 * n ..]);
+    try std.testing.expectEqualSlices(f64, buf[2 * n ..], buf[0 .. 2 * n]);
+    try t.simulate(.f16, .strided, buf[0..n]);
+    try t.ref.?.simulate(&t, t.outputs(), 1.0 / 8.0, .f16, .strided, buf[n .. 2 * n]);
+    try std.testing.expectEqualSlices(f64, buf[n .. 2 * n], buf[0..n]);
 }
