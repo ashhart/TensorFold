@@ -173,12 +173,6 @@ pub const Fx = struct {
         return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
-    /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.
-    fn sideBuffer(c: *const cache.Caches, i: usize) ?u64 {
-        const at = i * std.mem.alignForward(usize, c.layout.restBytes(), 256);
-        return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
-    }
-
     fn free(f: *Fx, l: *Lane) void {
         f.e.stream.synchronize() catch {};
         f.e.unlease(l.caches);
