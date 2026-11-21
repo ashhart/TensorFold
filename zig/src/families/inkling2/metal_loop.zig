@@ -9,6 +9,8 @@ pub const View = exl3.View;
 pub const max_sources = 9;
 pub const max_queries = 4;
 pub const max_rank = 128;
+/// Gate-down ranks one threadgroup computes (LP_RANK_BLOCK in loop.metal).
+pub const rank_block = 8;
 pub const max_gates = 3;
 pub const max_hidden = 6144;
 
@@ -178,7 +180,7 @@ pub const Ops = struct {
             .eps_unweighted = a.eps_unweighted,
             .eps_norm = 0,
         }, 8);
-        e.dispatchGroups(mtl.Size.of(a.rows, a.gates, 1), mtl.Size.of(256, 1, 1));
+        e.dispatchGroups(mtl.Size.of(a.rows, a.gates, std.math.divCeil(u32, a.rank, rank_block) catch unreachable), mtl.Size.of(256, 1, 1));
     }
 
     pub fn gateMix(o: *const Ops, e: mtl.ComputeEncoder, a: GateMixArgs) !void {

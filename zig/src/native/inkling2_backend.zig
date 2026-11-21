@@ -9,7 +9,7 @@ const be = lanes.backend;
 const Allocator = std.mem.Allocator;
 
 pub const window_rows = 16;
-pub const max_rows = 128;
+pub const max_rows = 512;
 const max_items = 64;
 const ring_size = 4096;
 

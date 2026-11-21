@@ -4,6 +4,7 @@ constant constexpr uint LP_MAX_SOURCES = 9;   // sources of one attention-residu
 constant constexpr uint LP_MAX_QUERIES = 4;   // queries of one mix: q, k, v, mlp of a message; 1 or 3 of an input
 constant constexpr uint LP_MAX_RANK = 128;    // gate rank
 constant constexpr uint LP_MAX_GATES = 3;     // gates one dispatch mixes (the attention q, k and v inputs)
+constant constexpr uint LP_RANK_BLOCK = 8;    // gate-down ranks one threadgroup computes
 
 struct LpMixArgs {
   uint hidden, blocks, block_stride, partial_f32;
@@ -116,11 +117,12 @@ inline uint lp_slot(constant LpGateArgs& a, uint g) { return g == 0 ? a.slot0 : 
     const device float* h0 [[buffer(0)]], const device float* h1 [[buffer(1)]], const device float* h2 [[buffer(2)]],
     const device float* msg [[buffer(3)]], const device bfloat* w0 [[buffer(4)]], const device bfloat* w1 [[buffer(5)]],
     const device bfloat* w2 [[buffer(6)]], device bfloat* down [[buffer(7)]], constant LpGateArgs& a [[buffer(8)]],
-    uint2 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint3 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float scratch[I2_SGS];
-  threadgroup float part[I2_SGS][LP_MAX_RANK];
-  const uint row = grid.x, g = grid.y;
+  threadgroup float part[I2_SGS][LP_RANK_BLOCK];
+  const uint row = grid.x, g = grid.y, r0 = grid.z * LP_RANK_BLOCK;
+  const uint ranks = min(LP_RANK_BLOCK, a.rank - r0);
   const uint H = a.hidden;
   const device float* h = (g == 0 ? h0 : (g == 1 ? h1 : h2)) + ulong(row) * H;
   const device float* m = msg + ulong(lp_slot(a, g)) * a.msg_stride + ulong(row) * H;
@@ -141,25 +143,31 @@ inline uint lp_slot(constant LpGateArgs& a, uint g) { return g == 0 ? a.slot0 : 
     xh[e] = float(bfloat(xh[e] * inv_h));
     xm[e] = float(bfloat(xm[e] * inv_m));
   }
-  for (uint r = 0; r < a.rank; ++r) {
-    const device bfloat* wr = w + ulong(r) * 2 * H;
-    float acc = 0.0f;
-    for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
-      const uint i = tid + e * I2_TG;
-      if (i < H) acc = fma(float(wr[i]), xh[e], acc);
-    }
-    for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
-      const uint i = tid + e * I2_TG;
-      if (i < H) acc = fma(float(wr[H + i]), xm[e], acc);
-    }
-    acc = simd_sum(acc);
-    if (lane == 0) part[sg][r] = acc;
+  // Eight ranks, each in the old element order: hidden half, then message half.
+  float acc[LP_RANK_BLOCK];
+  for (uint j = 0; j < LP_RANK_BLOCK; ++j) acc[j] = 0.0f;
+  const device bfloat* wr = w + ulong(r0) * 2 * H;
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i < H)
+      for (uint j = 0; j < LP_RANK_BLOCK; ++j)
+        if (j < ranks) acc[j] = fma(float(wr[ulong(j) * 2 * H + i]), xh[e], acc[j]);
+  }
+  for (uint e = 0; e < I2_MAX_ELEMS; ++e) {
+    const uint i = tid + e * I2_TG;
+    if (i < H)
+      for (uint j = 0; j < LP_RANK_BLOCK; ++j)
+        if (j < ranks) acc[j] = fma(float(wr[ulong(j) * 2 * H + H + i]), xm[e], acc[j]);
+  }
+  for (uint j = 0; j < LP_RANK_BLOCK; ++j) {
+    const float t = simd_sum(acc[j]);
+    if (lane == 0) part[sg][j] = t;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (tid < a.rank) {
+  if (tid < ranks) {
     float t = part[0][tid];
     for (uint s = 1; s < I2_SGS; ++s) t += part[s][tid];
-    down[(ulong(g) * a.rows + row) * a.rank + tid] = bfloat(t);
+    down[(ulong(g) * a.rows + row) * a.rank + r0 + tid] = bfloat(t);
   }
 }
 
