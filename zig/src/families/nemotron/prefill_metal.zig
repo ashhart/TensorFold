@@ -85,7 +85,7 @@ const Ops = struct {
         const self = o.m;
         const ids = s.prompt();
         try backend.limits.check(ids.len, s.max_new, self.o.capacity);
-        if (s.isCancelled()) return error.Cancelled;
+        try @import("prompt_flight.zig").checkpoint(s);
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + backend.max_lanes + 1); // the reply and a widest window past it
         try self.drain();
         if (self.caches.get(s)) |old| {

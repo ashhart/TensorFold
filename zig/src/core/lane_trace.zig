@@ -2,7 +2,7 @@
 const std = @import("std");
 
 /// A line: a request's arrival, a prompt call, a decode round, a readout's completion, a cancel after a prompt began.
-pub const Kind = enum { submit, fill, round, complete, cancel };
+pub const Kind = enum { submit, fill, round, complete, cancel, warm };
 
 /// One action on the awake clock: the request (round: 0), its admission number (round: live streams), its prompt rows.
 pub const Event = struct {

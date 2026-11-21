@@ -7,13 +7,21 @@ const Store = @import("prompt_cache.zig").Store;
 pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
     const be = h.core.backend;
     if (h.cache) |store| if (job.marks.len == 0 and !keepsEnd(store, job)) return h.cancel(job); // it would keep nothing
+    var observed: @import("lane_trace.zig").Event = .{ .t0_ns = 0, .t1_ns = 0, .kind = .warm, .id = job.id };
+    if (h.trace) |t| {
+        observed.t0_ns = t.now();
+        t.line(observed);
+    }
+    defer if (h.trace) |t| t.end(&observed); // the event owns its fields after finish frees the job
     @import("lane_host_load.zig").calling(h, job);
     be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
+        observed.failed(job.stream.fill_at.load(.monotonic));
         if (e != error.Cancelled and e != error.Yielded) return @import("lane_host_end.zig").dropFailed(h, job, e);
         if (e == error.Yielded) @import("lane_host_load.zig").yielded(h);
         be.release(&job.stream);
         return h.cancel(job);
     };
+    observed.rows_to = job.request.prompt.len;
     h.prefilled(job, began);
     if (h.cache) |store| _ = if (keepsEnd(store, job)) store.keepBornFrame(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request), job.request.images, job.frame) else false;
     be.release(&job.stream);
