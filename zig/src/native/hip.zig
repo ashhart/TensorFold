@@ -529,7 +529,6 @@ test "the group flags: one rank source, a supported world, a master past one ran
     outside.rank = 2;
     try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, outside, &problem));
 }
-
 test "--drafter on qwen3_5 passes the group check on one rank; a group, another family, and --mtp-drafts past three are refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
