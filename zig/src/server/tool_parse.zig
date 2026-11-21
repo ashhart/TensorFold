@@ -250,7 +250,7 @@ fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
-/// ``_openai_tool_call``: the call under ``name`` (``callName``), arguments as compact JSON; null for non-finite arguments.
+/// A named ``_openai_tool_call`` with compact JSON arguments, or null when arguments are non-finite.
 fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!?Value {
     if (!tool_params.finiteDecoded(arguments)) return null;
     const function = try json.newObject(a);
