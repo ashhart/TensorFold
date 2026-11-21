@@ -173,9 +173,9 @@ export interface PreflightContext extends HubDeps {
   // App admission policy per checkpoint family: a user load-limit override applies to its own family only.
   memoryLimitFor?: (modelType: string | null) => { bytes: number; basis: string }
   installed: Set<string>
+  installedRevision?: (repo: string) => Promise<string | null>
   drafterFor: (repo: string) => string | null
   cachedBytes: (repo: string) => Promise<number>
-  freeDiskBytes: () => Promise<number | null>
   now?: () => number
 }
 
@@ -218,7 +218,8 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   const neededDiskBytes = Math.max(0, totalBytes - cachedBytes)
   const freeDiskBytes = await ctx.freeDiskBytes()
   const fitsDisk = freeDiskBytes == null ? null : freeDiskBytes >= neededDiskBytes + DISK_HEADROOM_BYTES
-  const installed = ctx.installed.has(repo)
+  const selectedRevision = ctx.installedRevision ? await ctx.installedRevision(repo) : null
+  const installed = ctx.installed.has(repo) && (selectedRevision == null || selectedRevision === sha)
 
   const reasons: string[] = []
   if (!modelType) reasons.push('Its config.json names no model_type, so no engine family can be matched.')

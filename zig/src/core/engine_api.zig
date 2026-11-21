@@ -17,6 +17,7 @@ pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
+pub const execution_witness = @import("engine_witness.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -241,6 +242,8 @@ pub const Info = struct {
     admit: ?Admit = null,
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
+    /// --execution-witness: this engine's attestation of its supported path (null: an unsupported path).
+    witness: ?execution_witness.Source = null,
 
     pub const Capability = @import("engine_capabilities.zig").Capability;
 
@@ -433,7 +436,7 @@ pub const Engine = struct {
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
         /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
         recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
-        /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
+        /// A kept-state question for the engine thread (valid until `done`, for good once withdrawn); false: refused.
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
@@ -573,6 +576,7 @@ pub const prompt_learn = @import("prompt_learn.zig");
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
+pub const ImprintClaim = @import("rows_ask.zig").Claim;
 pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
