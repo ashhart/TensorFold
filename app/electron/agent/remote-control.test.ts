@@ -1,22 +1,9 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
-import { connect, createServer } from 'node:net'
-import { createRemoteControlServer, PairingAttemptLimiter, type RemoteControlServerDeps } from './remote-control'
+import { createRemoteControlServer, PairingAttemptLimiter } from './remote-control'
 import { createEventSpine } from './event-spine'
 import { createPairingRegistry } from './pairing-sessions'
+import { approvals, freePort, ok2, remoteDeps, settings, ticketDeletes } from './remote-control-test-fixture'
 import type { RemoteControlSettings } from './types'
-
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const probe = createServer()
-    probe.once('error', reject)
-    probe.listen(0, '127.0.0.1', () => {
-      const address = probe.address()
-      const port = typeof address === 'object' && address ? address.port : 0
-      probe.close(() => resolve(port))
-    })
-  })
-}
 
 async function withSecurityRole<T>(role: 'viewer' | 'operator' | 'owner', run: () => Promise<T>): Promise<T> {
   const before = process.env.VONTRA_SECURITY_ROLE
@@ -27,91 +14,7 @@ async function withSecurityRole<T>(role: 'viewer' | 'operator' | 'owner', run: (
   }
 }
 
-const settings: RemoteControlSettings = {
-  enabled: true,
-  serverName: 'TensorFold Studio Test',
-  bindHost: '127.0.0.1',
-  allowLan: false,
-  port: await freePort(),
-  authToken: 'test-token',
-  lastStartedAt: null,
-  lastClientAt: null,
-  lastError: null,
-}
-
 const terminalRenames: Array<{ sessionId: string; title: string }> = []
-const approvals: Array<{ callId: string; decision: 'allow' | 'allow_always' | 'deny' }> = []
-const ticketDeletes: string[] = []
-
-function remoteDeps(s: RemoteControlSettings, deps: Partial<RemoteControlServerDeps> = {}): RemoteControlServerDeps {
-  return {
-    getSettings: () => s,
-    getSnapshot: async () => ({ secretRawThreadContent: 'do-not-return-from-doctor' }) as any,
-    getArchives: async () => ({ projects: [], threads: [], rooms: [], tickets: [] }),
-    getPairedArchives: async () => ({ projects: [], threads: [], rooms: [], tickets: [] }),
-    getDoctor: async () => ({
-      generatedAt: 123,
-      serverName: s.serverName,
-      appVersion: '1.0.0',
-      headless: true,
-      counts: {
-        threads: 2,
-        projects: 1,
-        rooms: 0,
-        tickets: 0,
-        automations: 0,
-        missions: 0,
-        jobs: 0,
-        connectorEvents: 0,
-        activeThreads: 1,
-        activeRooms: 0,
-        activeMissions: 0,
-      },
-      work: {
-        jobs: { total: 0, visible: 0, queued: 0, running: 0, waitingApproval: 0, paused: 0, stalled: 0, failed: 0, deadLetter: 0, retryable: 0 },
-        leases: { active: 0, expired: 0, expiringSoon: 0, missingRunning: 0 },
-        approvals: { pending: 0, tool: 0, connector: 0, mission: 0 },
-        nextWakeAt: null,
-        nextWakeJobId: null,
-        generatedAt: 123,
-      },
-    }),
-    createThread: async () => ({ id: 't1', title: 'Remote task', kind: 'task', projectId: 'p1', cwd: '/tmp', workspace: null, providerId: null, providerAccountId: null, model: null, createdAt: Date.now(), updatedAt: Date.now(), status: 'idle', apiMessages: [], timeline: [] }) as any,
-    startThread: async () => ({ runId: 'run' }),
-    guideThread: async () => ({ queued: true, queueDepth: 1 }),
-    cancelThread: async () => {},
-    deleteThread: async () => ({ id: 't1', archivedAt: Date.now() }) as any,
-    restoreThread: async () => ({ id: 't1', archivedAt: null }) as any,
-    approve: async (callId, decision) => { approvals.push({ callId, decision }) },
-    updateProject: async () => ({ id: 'p1', name: 'Remote project', cwd: '/tmp', memory: '', team: '', createdAt: Date.now(), updatedAt: Date.now() }) as any,
-    deleteProject: async () => ({ id: 'p1', name: 'Remote project', cwd: '/tmp', memory: '', team: '', archivedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now() }) as any,
-    restoreProject: async () => ({ id: 'p1', name: 'Remote project', cwd: '/tmp', memory: '', team: '', archivedAt: null, createdAt: Date.now(), updatedAt: Date.now() }) as any,
-    createRoom: async () => ({ id: 'r1', projectId: 'p1', name: 'Room' }) as any,
-    updateRoom: async () => ({ id: 'r1', projectId: 'p1', name: 'Room' }) as any,
-    renameRoom: async (_id, name) => ({ id: 'r1', projectId: 'p1', name }) as any,
-    steerRoom: async (_id, text) => ({ id: 'steer', tick: 1, kind: 'user', seat: 'you', target: 'all', text, createdAt: Date.now() }),
-    mutateRoomMemory: async () => ({ id: 'r1', projectId: 'p1', name: 'Room', memory: [] }) as any,
-    deleteRoom: async () => ({ id: 'r1', projectId: 'p1', name: 'Room', archivedAt: Date.now() }) as any,
-    restoreRoom: async () => ({ id: 'r1', projectId: 'p1', name: 'Room', archivedAt: null }) as any,
-    startRoom: async () => ({ ok: true }),
-    cancelRoom: async () => {},
-    createTicket: async () => ({ id: 'tk1', projectId: 'p1', title: 'Ticket' }) as any,
-    startTicketExecution: async () => ({ ticket: { id: 'tk1', projectId: 'p1', title: 'Ticket' }, thread: { id: 't1' }, runId: 'run' }) as any,
-    updateTicket: async () => ({ id: 'tk1', projectId: 'p1', title: 'Ticket' }) as any,
-    transitionTicket: async () => ({ id: 'tk1', projectId: 'p1', title: 'Ticket' }) as any,
-    deleteTicket: async (id) => { ticketDeletes.push(id); return id === 'missing' ? null : { id, archivedAt: Date.now() } as any },
-    restoreTicket: async (id) => ({ id, archivedAt: null }) as any,
-    setMissionStatus: async () => ({ id: 'm1' }) as any,
-    recordMissionHeartbeat: async () => ({ id: 'm1' }) as any,
-    listDirectories: async () => ({ ok: true, path: '/tmp', parent: '/', entries: [] }),
-    createProject: async () => ({ id: 'p1', name: 'Remote project', cwd: '/tmp', memory: '', team: '', createdAt: Date.now(), updatedAt: Date.now() }) as any,
-    onClientSeen: () => {},
-    onStarted: () => {},
-    onError: () => {},
-    audit: () => {},
-    ...deps,
-  }
-}
 
 const server = createRemoteControlServer(remoteDeps(settings, {
   heartbeatIntervalMs: 20,
@@ -732,57 +635,6 @@ await (async () => {
   }
 })()
 
-
-// --- unauthenticated request-body caps ---
-await (async () => {
-  let redeems = 0
-  const s = createRemoteControlServer(remoteDeps({ ...settings, port: await freePort() }, {
-    pairing: {
-      issuePairingLink: async () => ({ credential: 'unused', expiresAt: 1 }),
-      authorizeSessionToken: () => ({ ok: false }),
-      redeemPairingLink: async () => { redeems += 1; throw new Error('must not redeem') },
-      listSessions: () => [],
-      revokeSession: async () => false,
-    },
-  }))
-  await s.syncFromSettings()
-  try {
-    const atCap = await fetch(`${s.status().url}/v1/auth/pair`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: 'A'.repeat(64 * 1024),
-    })
-    assert.equal(atCap.status, 400, 'the exact cap reaches JSON parsing')
-    for (const route of ['/v1/auth/pair', '/v1/auth/pair/session']) {
-      const response = await fetch(`${s.status().url}${route}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: Buffer.alloc(20 * 1024 * 1024, 0x41),
-      })
-      assert.equal(response.status, 413)
-      assert.match(await response.text(), /payload too large/i)
-    }
-    const socket = connect(s.status().port!, '127.0.0.1')
-    const closed = new Promise<void>((resolve) => { socket.once('close', () => resolve()) })
-    let data = ''
-    socket.on('data', (chunk) => { data += chunk.toString('utf8') })
-    socket.on('error', (error: NodeJS.ErrnoException) => {
-      assert.ok(error.code === 'EPIPE' || error.code === 'ECONNRESET', `unexpected socket error: ${error}`)
-    })
-    socket.on('connect', () => {
-      socket.write('POST /v1/auth/pair HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n')
-      // Cross the 64 KiB cap without a 20 MiB client write race discarding the response.
-      for (let i = 0; i < 3; i++) socket.write('8000\r\n' + 'A'.repeat(32768) + '\r\n')
-      socket.write('0\r\n\r\n')
-    })
-    await closed
-    assert.match(data, /^HTTP\/1\.1 413/)
-    assert.equal(redeems, 0, 'oversized unauthenticated requests never reach pairing redemption')
-    ok2('unauthenticated pairing bodies are capped before JSON parsing or token redemption')
-  } finally {
-    await s.stop()
-  }
-})()
 // --- static web client + query-token + provider redaction (VST-035) ---
 await (async () => {
   const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
@@ -862,7 +714,5 @@ await (async () => {
   assert.ok(!flat.includes('SECRET') && !flat.includes('hunter2') && !flat.includes('LEAK') && !flat.includes('internal'), 'no credential material survives redaction')
   ok2('redactProvidersForRemote: picked identity fields only, secrets cannot leak')
 }
-
-function ok2(name: string) { console.log(`  \u2713 ${name}`) }
 
 console.log('remote-control pairing/session tests passed')
