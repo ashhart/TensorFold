@@ -99,6 +99,7 @@ pub const Metal = struct {
     draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
     held_taps: ?mtl.Buffer = null,
     features_state: @import("sensenova_features.zig").State = .{},
+    sn_features: bool = false, // SenseNova-Loop's MTP head in front: its tap slots are sensenova_features.zig's
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -170,8 +171,9 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        const feat = @import("sensenova_features.zig");
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .prefill_features = feat.prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        const feat = @import("sensenova_features.zig"); // SenseNova-Loop's head keeps its own taps; else the 27B's
+        if (b.sn_features) return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .prefill_features = feat.prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = feat.prepareFeaturesFn, .features = feat.featuresFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
