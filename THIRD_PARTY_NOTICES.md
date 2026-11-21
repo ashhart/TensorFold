@@ -573,3 +573,14 @@ these layers of Hugging Face transformers' `src/transformers/models/inkling2/mod
 `Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
 `Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
 are TensorFold's own.
+
+## Inkling 2 expert and vision kernels
+
+`zig/kernels/cuda/inkling2/experts.cu` and `zig/src/families/inkling2/experts.zig` run `Inkling2Experts` from Hugging
+Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0) on main's EXL3 grouped-expert
+arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2/vision.zig` compute the same file's
+vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
+`Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
+in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
+
