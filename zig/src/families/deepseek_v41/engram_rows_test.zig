@@ -369,3 +369,38 @@ test "engram rows: a long run of bulk reads and evictions leaves the record map 
     errdefer std.debug.print("record map: {d} free of {d} slots at the worst\n", .{ worst[0], worst[1] });
     try testing.expect(worst[0] * 10 >= worst[1]);
 }
+
+// Linux O_DIRECT: the serial retry (engram_io.zig:560) is off a sector; a kernel refusing it would say EngramReadFailed
+test "engram rows: a row past a shard shortened after open fails by name in every mode and is never served" {
+    const a = testing.allocator;
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var lut_sha: [32]u8 = undefined;
+    const fx = try parseFx(arena.allocator(), &lut_sha);
+    const first: i64 = @intCast(fx.lo);
+    const last: i64 = @intCast(fx.lo + fx.rows - 1);
+    // the shard ends 100 bytes into the last row's record, off the 512-byte sectors its extents align to
+    var end = er.header_bytes + (fx.rows - 1) * er.row_bytes + 100;
+    if (end % er.sector == 0) end += 1;
+    const out = try arena.allocator().alloc(u16, 256);
+    for (modes) |mode| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try writeShard(a, io, tmp.dir, fx);
+        const r = try openRows(a, io, &tmp, mode);
+        defer r.close();
+        {
+            const f = try tmp.dir.openFile(io, "engram-l1-r0of2.bin", .{ .mode = .read_write });
+            defer f.close(io);
+            try f.setLength(io, end);
+        }
+        // Linux's serial reader names the short read; a batch on threads, AIO or the ring, and Darwin's, says it failed
+        const want = if (@import("builtin").os.tag == .linux and mode == .sync) error.EngramShortRead else error.EngramReadFailed;
+        try testing.expectError(want, r.rows(0, &.{last}, 256, out));
+        // a row before the new end still reads, and the failed row is read again, not served from a cache
+        try r.rows(0, &.{first}, 256, out);
+        try testing.expectEqual(r.lut[@as(usize, recordByte(fx.lo, 256)) << 8 | recordByte(fx.lo, 0)], out[0]);
+        try testing.expectError(want, r.rows(0, &.{last}, 256, out));
+    }
+}

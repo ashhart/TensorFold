@@ -12,9 +12,17 @@ const pages = @import("pages.zig");
 const hip_lanes = @import("lanes.zig");
 const worker = @import("worker.zig");
 const costs = @import("costs.zig");
+const widths = @import("widths.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats = admit.formats;
+/// MTP drafts the HIP head chains on one rank: `--mtp-drafts` is refused past this.
+pub const mtp_max_drafts: u32 = @import("head.zig").max_depth;
+
+/// Device bytes one lane holds (`window` tokens, `rw` window rows); `pub` so `deep_drafts_test.zig` checks it.
+pub fn laneBytesFor(window: usize, rw: usize, page: u64, state: u64, hidden: u64, act: u64) u64 {
+    return pages.pagesFor(window + rw + 1) * page + state * (rw + 2) + rw * hidden * act;
+}
 /// Positions a stream holds when neither --context nor the checkpoint's config names a window.
 pub const default_context: i64 = 32768;
 /// The engine cuts prompts itself.
@@ -64,6 +72,12 @@ fn mtpNames(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const []const
     return out.items;
 }
 
+/// The quantization the MTP head's file states, or null when the file is not there or states none.
+fn mtpQuantization(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    if (!exists(a, dir, tensors.mtp_file)) return null;
+    return widths.headQuantization(a, io, try std.fs.path.join(a, &.{ dir, tensors.mtp_file }));
+}
+
 /// What admission reads from `dir`.
 pub fn factsOf(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) Refused!admit.Facts {
     var lesson: [64]u8 = undefined;
@@ -84,6 +98,12 @@ pub fn factsOf(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]co
             a,
             problem,
             "cannot read {s}/{s} ({t})",
+            .{ dir, tensors.mtp_file, err },
+        ),
+        .mtp_quantization = mtpQuantization(a, io, dir) catch |err| return refuse(
+            a,
+            problem,
+            "cannot read {s}/{s}'s header ({t})",
             .{ dir, tensors.mtp_file, err },
         ),
         .living = exists(a, dir, living.fileName(&lesson, 0) catch unreachable),
@@ -187,19 +207,19 @@ fn prepare(
         .policy = dev.policy,
         .mtp = dev.policy.mtp.drafts > 0,
         .pool = false,
+        .cfg = v.config,
     }) catch |err| return switch (err) {
         error.PeerRefused, error.LinkFailed => steps.stoppedBy(a, problem),
         else => steps.refuseAll(a, problem, "the native HIP engine cannot load {s} ({t})", .{ dir, err }),
     };
     errdefer e.deinit();
-    const capacity: usize = window + hip_lanes.max_window + 1;
+    const capacity: usize = window + e.window + 1;
     const token = try plan.tokenBytes(c, o.world, act, v.mtp);
     const state = try plan.streamBytes(c, o.world, act);
     const page = token * pages.tokens;
     const snap = state + c.hidden * act;
     // a lane: its pages, its Mamba state, its window's snapshots and the head's rows
-    const lane: u64 = pages.pagesFor(capacity) * page + state * (hip_lanes.max_window + 2) +
-        hip_lanes.max_window * c.hidden * act;
+    const lane: u64 = laneBytesFor(window, e.window, page, state, c.hidden, act);
     const fixed: u64 = v.weights + admit.scratch_bytes + (64 << 20);
     if (fixed >= room) return heard(steps, problem, admit.tooBig(a, v, .{ .window = window, .room = room }, problem));
     const left = room - fixed;
@@ -236,14 +256,16 @@ fn prepare(
     cache = .{ .pages = @intCast(fit[0]), .snaps = @intCast(fit[1]) };
     e.sizePool(capacity, streams, cache.pages) catch |err|
         return steps.refuseAll(a, problem, "the native HIP engine cannot allocate its pages ({t})", .{err});
+    var label: [64]u8 = undefined;
     const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: Nemotron-H model " ++
-        "{d:.2} GiB, MTP head {s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.2} " ++
+        "{s} {d:.2} GiB, MTP head {s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.2} " ++
         "GiB left after the model and {d:.1} GiB of scratch; prompt cache {d:.2} GiB ({d} pages, {d} " ++
         "snapshots); prompts in {d}-row chunks; windows of {d} rows", .{
         hip.kernels.arch,
         dev.index,
         o.rank,
         o.world,
+        widths.label(c, &label),
         admit.gibs(v.weights),
         if (e.model_().mtp != null) "loaded" else "off",
         streams,
@@ -256,7 +278,7 @@ fn prepare(
         cache.pages,
         cache.snaps,
         e.o.chunk,
-        hip_lanes.max_window,
+        e.window,
     });
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup };
 }
@@ -310,7 +332,7 @@ pub fn open(
     return .{
         .backend = backend.backend(),
         .facts = backend.facts(),
-        .rows = hip_lanes.max_window,
+        .rows = @intCast(p.e.window),
         .ctx = own,
         .deinit = release,
         .streams = p.streams,
@@ -347,4 +369,5 @@ pub fn follow(
 test "the registry entry names the family and its format" {
     try std.testing.expectEqualStrings("nemotron_h", model_type);
     try std.testing.expectEqualStrings("mlx-q4g64", formats[0]);
+    try std.testing.expectEqualStrings("mlx-q8g64", formats[formats.len - 1]);
 }

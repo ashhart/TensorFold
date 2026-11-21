@@ -1,7 +1,6 @@
 // Batched DFlash glue: stream-local convolution and rotary positions, then 256-key attention chunks.
 #pragma once
 struct DraftSegment { unsigned long long ring; long long begin, position; };
-constexpr int DRAFT_CHUNKS = 9;
 
 extern "C" __global__ void tf_q35d_dyn_conv_batch(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
                                               const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
@@ -63,10 +62,11 @@ extern "C" __global__ void tf_q35d_mask_rows(const __nv_bfloat16* X, __nv_bfloat
     for (int c = threadIdx.x; c < D; c += blockDim.x) OUT[(size_t)row * D + c] = X[(size_t)source * D + c];
 }
 
-// 256 keys of one row, its stream's ring and block rows only: four warps' lanes score them, warp 0 merges the slices.
+// 256 keys of one row, its stream's ring and block rows (causal: those up to its own) only; warp 0 merges the slices.
 extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __nv_bfloat16* Q,
         const __nv_bfloat16* KB, const __nv_bfloat16* VB, const DraftSegment* segments,
-        int block_rows, int heads, int kv_heads, int W, int window, int layer, float* PM, float* PL, float* PO) {
+        int block_rows, int heads, int kv_heads, int W, int window, int layer, int chunks, int causal, float* PM, float* PL,
+        float* PO) {
     constexpr int DPL = HD / 32, CHUNK = 256, WARPS = 4, SLICE = CHUNK / WARPS, PER = SLICE / 32, BATCH = 16;
     __shared__ float qs[HD];
     __shared__ float ps[CHUNK];
@@ -80,8 +80,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __n
     const __nv_bfloat16* RK = reinterpret_cast<const __nv_bfloat16*>(sg.ring) + (size_t)layer * 2 * W * width;
     const __nv_bfloat16* RV = RK + (size_t)W * width;
     const long long first = max(sg.begin, sg.position + local - window + 1);
-    const int ring_keys = (int)(sg.position - first), keys = ring_keys + block_rows;
-    const size_t slot = ((size_t)m * heads + h) * DRAFT_CHUNKS + chunk;
+    const int ring_keys = (int)(sg.position - first), keys = ring_keys + (causal ? local + 1 : block_rows);
+    const size_t slot = ((size_t)m * heads + h) * chunks + chunk;
     if (chunk * CHUNK >= keys) {  // past the stream's keys: an empty partial, which the merge skips
         if (threadIdx.x == 0) { PM[slot] = -INFINITY; PL[slot] = 0.0f; }
         return;
@@ -174,14 +174,14 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __n
 }
 
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn_merge(const float* PM, const float* PL,
-        const float* PO, int heads, __nv_bfloat16* OUT) {
+        const float* PO, int heads, int chunks, __nv_bfloat16* OUT) {
     constexpr int DPL = HD / 32;
     const int lane = threadIdx.x, m = blockIdx.x, h = blockIdx.y;
-    const size_t base = ((size_t)m * heads + h) * DRAFT_CHUNKS;
+    const size_t base = ((size_t)m * heads + h) * chunks;
     float mx = -INFINITY, sum = 0.0f, out[DPL];
 #pragma unroll
     for (int i = 0; i < DPL; ++i) out[i] = 0.0f;
-    for (int chunk = 0; chunk < DRAFT_CHUNKS; ++chunk) {
+    for (int chunk = 0; chunk < chunks; ++chunk) {
         const size_t slot = base + chunk;
         if (PL[slot] == 0.0f) continue;
         const float next = fmaxf(mx, PM[slot]), a = __expf(mx - next), b = __expf(PM[slot] - next);

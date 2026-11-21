@@ -14,3 +14,4 @@ __device__ half2 __halves2half2(half,half); __device__ half __low2half(half2); _
 __device__ float __low2float(half2); __device__ float __high2float(half2);
 __device__ half2 __hadd2(half2,half2); __device__ half2 __hsub2(half2,half2); __device__ half2 __hmul2(half2,half2);
 __device__ half2 __hfma2(half2,half2,half2); __device__ half __hadd(half,half);
+__device__ half __hmul(half,half);

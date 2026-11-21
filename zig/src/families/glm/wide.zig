@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const affine = @import("affine.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const kernels = @import("kernels.zig");
+const fp8 = @import("fp8.zig");
 pub const gather = @import("gather.zig");
 const Affine = affine.Affine;
 const Ref = affine.Ref;
@@ -29,9 +30,12 @@ pub const Pipes = struct {
     glu_sorted: [nw]mtl.Pipeline,
     moe: [nw]mtl.Pipeline, // routed experts by pick at each width and the 8-bit shared expert, one launch
     moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
+    moe_u: [nw]mtl.Pipeline, // `moe` by unique expert (2+ rows): an expert's weights read once for the rows that picked it
+    moe_glu_u: [nw]mtl.Pipeline,
+    f8: [fp8.names.len]mtl.Pipeline, // FP8 routed experts (Affine.fp8), by fp8.Kernel
     gather: [2]mtl.Pipeline, // four gathered rows sharing the sorted row arithmetic
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj, scalar path; decode-side path keeps this)
-    bf16_nax: ?mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16`
+    bf16_nax: ?mtl.Pipeline, // bf16 GEMM on tensor units: prefill-side eh_proj replacement for `bf16` (null: `bf16` serves)
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
@@ -53,6 +57,9 @@ pub const Pipes = struct {
             &p.glu_sorted,
             &p.moe,
             &p.moe_glu,
+            &p.moe_u,
+            &p.moe_glu_u,
+            &p.f8,
             &p.embed,
             &p.kda_fg,
         }) |set| for (set) |x| x.deinit();
@@ -108,7 +115,7 @@ pub const gather_source = sources.core_row_projection ++ glue_math ++ sources.gl
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 9 + 7 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 11 + 7 + fp8.names.len + 4 * affine_mm.names.len]mtl.Pipeline = undefined, // 11 a width, then f8
     n: usize = 0,
     released: usize = 0,
 
@@ -141,8 +148,9 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var p: Pipes = undefined;
+    const eh_tile = try @import("sys").environment.read(bool, "GLM_EHPROJ_NAX", true); // 0: no tile pipeline, `bf16` serves
     var h = std.hash.Wyhash.init(0x77);
-    const rows_src = try std.mem.concat(gpa, u8, &.{ sources.core_row_projection, glue_math, sources.glm_rows, sources.glm_gather });
+    const rows_src = try gpa.dupe(u8, gather_source);
     defer gpa.free(rows_src);
     h.update(rows_src);
     {
@@ -158,29 +166,22 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
             p.glu_sorted[i] = try made.add(device, l, "glm_rows_glu_sorted" ++ q);
             p.moe[i] = try made.add(device, l, "glm_moe_rows" ++ q ++ "_s8");
             p.moe_glu[i] = try made.add(device, l, "glm_moe_rows_glu" ++ q ++ "_s8");
+            p.moe_u[i] = try made.add(device, l, "glm_moe_rows_u" ++ q ++ "_s8");
+            p.moe_glu_u[i] = try made.add(device, l, "glm_moe_rows_glu_u" ++ q ++ "_s8");
         }
+        for (fp8.names, &p.f8) |name, *pipe| pipe.* = try made.add(device, l, name);
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
         for (gather.names, &p.gather) |name, *pipe| pipe.* = try made.add(device, l, name);
-        p.bf16_nax = made.add(device, l, "glm_rows_bf16_nax") catch blk: {
+        p.bf16_nax = if (!eh_tile) null else made.add(device, l, "glm_rows_bf16_nax") catch blk: {
             std.log.warn("glm: the eh_proj tile kernel cannot build here; eh_proj serves on the scalar path", .{});
             break :blk null;
         };
     }
-    const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
-    defer gpa.free(pre_a);
-    const pre_src = try std.mem.replaceOwned(u8, gpa, pre_a, pre_g[0], pre_g[1]);
+    const pre_src = try kdaPreSource(gpa, kda);
     defer gpa.free(pre_src);
-    if (std.mem.indexOf(u8, pre_src, pre_f[0]) != null or std.mem.indexOf(u8, pre_src, pre_g[0]) != null or std.mem.indexOf(u8, pre_src, pre_f[1]) == null) return error.KernelCompile;
     h.update(pre_src);
     try lib(made, device, pre_src, &.{comptime kernels.generatedFunction("kda_rows")}, @as(*[1]mtl.Pipeline, &p.kda_pre));
-    const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
-    const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
-    const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
-    const fg_src = try std.mem.concat(
-        gpa,
-        u8,
-        &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances },
-    ); // not its own
+    const fg_src = try kdaFgSource(gpa, kda);
     defer gpa.free(fg_src);
     h.update(fg_src);
     try lib(made, device, fg_src, &fg_names, &p.kda_fg);
@@ -308,7 +309,7 @@ fn pickDims(m: Picks, slots: u32, ldo: u32) PickDims {
 /// Slot y [0, slots) through expert ids[y] (i32) on x row y / repeat, into out row y.
 pub fn byIds(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, ids: Ref, out: Ref, slots: u32) void {
     const u = m.up orelse m.w;
-    e.setPipeline(if (m.up != null) p.glu_ids[at(m.w.bits)] else p.ids[at(m.w.bits)]);
+    e.setPipeline(if (m.w.fp8) p.f8[@backingInt(@as(fp8.Kernel, if (m.up != null) .glu_ids else .ids))] else if (m.up != null) p.glu_ids[at(m.w.bits)] else p.ids[at(m.w.bits)]);
     bind(e, 0, .{ x, m.w.w, m.w.s, m.w.b });
     e.setValue(pickDims(m, slots, m.w.n), 4);
     bind(e, 5, .{ out, ids, u.w, u.s, u.b });
@@ -330,14 +331,21 @@ pub fn glu(p: *const Pipes, e: mtl.ComputeEncoder, gu: Affine, n: u32, x: Ref, o
 /// A MoE block's routed experts and shared expert (`sh`: [gate; up] one run, then down), all g64, the shared at 8 bits.
 pub const Moe = struct { gate: Affine, up: Affine, down: Affine, sh_gate_up: Affine, sh_down: Affine };
 
-/// Whether `m` takes `moe`: every matrix one run, g64, the routed of one width (not 4/64), the shared at 8 bits.
+/// Whether `m` takes `moe`: one run each, g64 or the routed all FP8, the routed one width (not 4/64), the shared 8/64.
 pub fn moeOne(m: Moe) bool {
     if (native(m.gate) and native(m.up) and native(m.down)) return false; // routed 4/64 keeps the generated gathers
-    for ([_]Affine{ m.gate, m.up, m.down, m.sh_gate_up, m.sh_down }) |q| if (q.more != 0 or q.group != 64) return false;
+    if (m.sh_gate_up.fp8 or m.sh_down.fp8 or m.up.fp8 != m.gate.fp8 or m.down.fp8 != m.gate.fp8) return false;
+    for ([_]Affine{ m.gate, m.up, m.down, m.sh_gate_up, m.sh_down }) |q| if (q.more != 0 or (q.group != 64 and !q.fp8)) return false;
     return m.up.bits == m.gate.bits and m.down.bits == m.gate.bits and m.sh_gate_up.bits == 8 and m.sh_down.bits == 8;
 }
 
-/// byIds's GLU and down for the slots, glu and dense for the shared expert's rows: a launch each step, the same bits.
+/// The route's unique experts (ids, their picks GLM_MAXR a list, their count): `moe` by expert, not by pick.
+pub const Unique = struct { ids: Ref, members: Ref, count: Ref };
+
+/// The member lists' length in glm_rows.metal (GLM_MAXR): a window's most rows.
+pub const max_members = 16;
+
+/// byIds's GLU and down, glu and dense for the shared expert, a launch a step; with `u` at 2+ rows, by unique expert.
 pub fn moe(
     p: *const Pipes,
     e: mtl.ComputeEncoder,
@@ -347,8 +355,11 @@ pub fn moe(
     lim: f32,
     io: MoeIo,
     rows: u32,
+    u: ?Unique,
 ) void {
+    std.debug.assert(rows <= max_members);
     const slots = rows * topk;
+    const by_expert = u != null and rows >= 2;
     const g = m.sh_gate_up;
     const steps = [2]struct {
         pipe: mtl.Pipeline,
@@ -362,7 +373,7 @@ pub fn moe(
         repeat: u32,
     }{
         .{
-            .pipe = p.moe_glu[at(m.gate.bits)],
+            .pipe = if (m.gate.fp8) p.f8[@backingInt(fp8.Kernel.moe_glu)] else p.moe_glu[at(m.gate.bits)],
             .w = m.gate,
             .up = m.up,
             .sh = g,
@@ -373,7 +384,7 @@ pub fn moe(
             .repeat = topk,
         },
         .{
-            .pipe = p.moe[at(m.down.bits)],
+            .pipe = if (m.gate.fp8) p.f8[@backingInt(fp8.Kernel.moe)] else p.moe[at(m.down.bits)],
             .w = m.down,
             .up = null,
             .sh = m.sh_down,
@@ -384,9 +395,10 @@ pub fn moe(
             .repeat = 1,
         },
     };
-    for (steps) |s| {
-        const u = s.up orelse s.w;
-        e.setPipeline(s.pipe);
+    for (steps, 0..) |s, si| {
+        const uw = s.up orelse s.w;
+        const pipe = if (!by_expert) s.pipe else if (m.gate.fp8) p.f8[@backingInt(@as(fp8.Kernel, if (si == 0) .moe_glu_u else .moe_u))] else if (si == 0) p.moe_glu_u[at(m.gate.bits)] else p.moe_u[at(m.down.bits)];
+        e.setPipeline(pipe);
         bind(e, 0, .{ s.x, s.w.w, s.w.s, s.w.b });
         e.setValue(PickDims{
             .k = @intCast(s.w.k),
@@ -398,7 +410,13 @@ pub fn moe(
             .ldo = @intCast(s.w.n),
             .lim = lim,
         }, 4);
-        bind(e, 5, .{ s.out, io.ids, u.w, u.s, u.b, s.x2, s.sh.w, s.sh.s, s.sh.b, s.out2 });
+        if (by_expert) {
+            const q = u.?;
+            bind(e, 5, .{ s.out, q.ids, uw.w, uw.s, uw.b, s.x2, s.sh.w, s.sh.s, s.sh.b, s.out2, q.members, q.count });
+            e.dispatchGroups(mtl.Size.of((s.w.n + 3) / 4, slots + 1, 1), mtl.Size.of(32 * rows, 1, 1));
+            continue;
+        }
+        bind(e, 5, .{ s.out, io.ids, uw.w, uw.s, uw.b, s.x2, s.sh.w, s.sh.s, s.sh.b, s.out2 });
         e.dispatchGroups(mtl.Size.of((s.w.n + 7) / 8, slots + rows, 1), mtl.Size.of(64, 1, 1));
     }
 }
@@ -419,7 +437,7 @@ pub fn bySorted(
     pairs: u32,
 ) void {
     const u = m.up orelse m.w;
-    e.setPipeline(if (m.up != null) p.glu_sorted[at(m.w.bits)] else p.sorted[at(m.w.bits)]);
+    e.setPipeline(if (m.w.fp8) p.f8[@backingInt(@as(fp8.Kernel, if (m.up != null) .glu_sorted else .sorted))] else if (m.up != null) p.glu_sorted[at(m.w.bits)] else p.sorted[at(m.w.bits)]);
     bind(e, 0, .{ x, m.w.w, m.w.s, m.w.b });
     e.setValue(pickDims(m, pairs, ldo), 4);
     bind(e, 5, .{ out, offsets, order, u.w, u.s, u.b });
@@ -508,7 +526,7 @@ test "a failed compile releases every pipeline built before it; a load counts ea
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
-    try std.testing.expectEqual(@as(usize, nw * 8 + 4), made.released);
+    try std.testing.expectEqual(@as(usize, nw * 10 + 4 + fp8.names.len), made.released);
     try std.testing.expectEqual(@as(usize, 0), made.n);
     var all: Made = .{};
     var p = try build(gpa, device, comptime kernels.generatedSource("kda_rows"), &all);
@@ -556,4 +574,26 @@ test "f_b and g_b of one width (g64) take glm_rows's dots inside kda_rows, two w
     var five = q;
     five.bits = 5;
     for ([_]Affine{ q, five }) |x| try std.testing.expect(kdaGate(&p, x, x) == .fused);
+}
+
+/// The alternate-width KDA prep source used by build.
+pub fn kdaPreSource(gpa: std.mem.Allocator, kda: []const u8) ![]u8 {
+    const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
+    defer gpa.free(pre_a);
+    const pre_src = try std.mem.replaceOwned(u8, gpa, pre_a, pre_g[0], pre_g[1]);
+    if (std.mem.indexOf(u8, pre_src, pre_f[0]) != null or std.mem.indexOf(u8, pre_src, pre_g[0]) != null or std.mem.indexOf(u8, pre_src, pre_f[1]) == null) return error.KernelCompile;
+    return pre_src;
+}
+
+/// The alternate-width KDA gate source used by build.
+pub fn kdaFgSource(gpa: std.mem.Allocator, kda: []const u8) ![]u8 {
+    const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
+    const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
+    const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
+    const fg_src = try std.mem.concat(
+        gpa,
+        u8,
+        &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances },
+    ); // not its own
+    return fg_src;
 }

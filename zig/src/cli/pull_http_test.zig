@@ -176,7 +176,10 @@ test "pull connect: a pending attempt observes real I/O cancellation and closes 
     };
     Pending.entered.store(false, .monotonic);
     Pending.closes.store(0, .monotonic);
-    const io = std.testing.io;
+    var client_io: @import("pull_test_client.zig").Client = undefined;
+    client_io.init();
+    defer client_io.deinit();
+    const io = client_io.io();
     var future = try io.concurrent(Pending.run, .{io});
     while (!Pending.entered.load(.acquire)) try Io.sleep(io, .fromMilliseconds(1), .awake);
     try std.testing.expectError(error.Canceled, future.cancel(io));

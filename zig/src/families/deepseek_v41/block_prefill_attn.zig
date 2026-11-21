@@ -170,7 +170,7 @@ pub fn attention(s: *Seg, L: u32) !void {
     const n = e.n;
     const D: i64 = e.cfg.hidden;
     const md = e.cfg.mode(L);
-    const H: i64 = e.cfg.heads / e.o.world;
+    const H: i64 = try e.rankHeads();
     const hd: i64 = e.cfg.head_dim;
     const IH: i64 = e.cfg.index_heads;
     const ID: i64 = e.cfg.index_dim;
@@ -218,7 +218,7 @@ pub fn attention(s: *Seg, L: u32) !void {
         try e.glue("ix_w", &.{ w64, try e.buf("L.ix_w", .{}, .f32, &.{ n, IH }) });
     }
     // the CSA2 steps a segment at a time, into the group-major core output
-    const groups: i64 = e.cfg.o_groups / e.o.world;
+    const groups: i64 = try e.rankGroups();
     if ((H != 16 and @mod(H, bmq) != 0) or @mod(H, groups) != 0) return error.Unsupported;
     const core_q = if (H == 16) try pf_heads.query(e, q, hd) else q;
     const hg = @divExact(H, groups);
@@ -272,10 +272,10 @@ pub fn core(s: *Seg, L: u32, q: Arg, kv: Arg, cproj: Arg, own_kv: bool, indexer:
     const e = s.e;
     const n = e.n;
     const ratio: i64 = e.cfg.compressRatio(L);
-    const real_heads: i64 = e.cfg.heads / e.o.world;
+    const real_heads: i64 = try e.rankHeads();
     const H: i64 = if (real_heads == 16) 32 else real_heads;
     const hd: i64 = e.cfg.head_dim;
-    const groups: i64 = e.cfg.o_groups / e.o.world;
+    const groups: i64 = try e.rankGroups();
     const hg = @divExact(real_heads, groups);
     // blocks._segment: a segment the slot's ring cannot hold runs on the staging ring, the window before it in
     const rows = try s.swa(L);

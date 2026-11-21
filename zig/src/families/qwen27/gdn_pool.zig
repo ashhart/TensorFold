@@ -65,7 +65,6 @@ pub const Budget = struct {
     decay: usize,
     mixing: usize,
     snapshots: usize,
-    conv_tails: usize,
     scratch: usize,
 
     pub fn init(shape: abi.Shape, layers: usize, slots: usize, rows: usize) !Budget {
@@ -77,7 +76,6 @@ pub const Budget = struct {
         const decay = try abi.countBytes(f32, shape.c.v_heads, layer_rows);
         const mixing = try abi.countBytes(u16, shape.c.v_heads, layer_rows);
         const snapshot = try abi.countBytes(f32, shape.state, @min(rows, abi.snapshot_rows)); // trees only: a chain keeps no snapshots
-        const tails = try abi.countBytes(u16, shape.conv, rows);
         const outputs = try abi.countBytes(u16, shape.value, rows * 2);
         return .{
             .shape = shape,
@@ -93,13 +91,12 @@ pub const Budget = struct {
             .decay = decay,
             .mixing = mixing,
             .snapshots = snapshot,
-            .conv_tails = tails,
-            .scratch = try std.math.add(usize, try std.math.add(usize, snapshot, tails), outputs),
+            .scratch = try std.math.add(usize, snapshot, outputs),
         };
     }
 
-    pub fn allocationSizes(b: Budget) [12]usize {
-        return .{ b.state, b.history, b.history, b.projections, b.query, b.key, b.value, b.decay, b.mixing, b.snapshots, b.conv_tails, b.rows * b.shape.value * 2 };
+    pub fn allocationSizes(b: Budget) [11]usize {
+        return .{ b.state, b.history, b.history, b.projections, b.query, b.key, b.value, b.decay, b.mixing, b.snapshots, b.rows * b.shape.value * 2 };
     }
 
     pub fn stateOffset(b: Budget, layer: usize, slot: usize) !usize {

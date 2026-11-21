@@ -458,7 +458,7 @@ pub const Rows = struct {
         s.tokens = try r.gpa.dupe(u32, @alignCast(std.mem.bytesAsSlice(u32, m[12..][0 .. 4 * nt])));
         s.spans = try r.gpa.dupe(Span, @alignCast(std.mem.bytesAsSlice(Span, m[12 + 4 * nt ..][0 .. 8 * ns])));
         s.starts = try r.gpa.dupe(u32, @alignCast(std.mem.bytesAsSlice(u32, m[12 + 4 * nt + 8 * ns ..][0 .. 4 * nst])));
-        if (s.at == 0 or s.tokens.len != s.at + r.keying.lookahead or o.trailer.block != r.keying.block) return error.RowsRead;
+        if (s.at == 0 or s.tokens.len != @as(usize, s.at) + r.keying.lookahead or o.trailer.block != r.keying.block) return error.RowsRead;
         if (!std.mem.eql(u8, &chain.state(r.keying, s.tokens, s.spans, s.starts, s.at), &s.name)) return error.RowsRead;
         modes.validate(s.spans) catch return error.RowsRead;
         r.clock += 1;

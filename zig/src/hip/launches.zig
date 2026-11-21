@@ -10,6 +10,7 @@ const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
 pub const dense = @import("launches/dense.zig");
+pub const item = @import("launches/matrix_item.zig");
 
 const util = @import("launches/util.zig");
 
@@ -45,6 +46,8 @@ const nemotron_moe = @import("launches/nemotron_moe.zig");
 const columns = @import("launches/columns.zig");
 const vision = @import("launches/vision.zig");
 const dense_text = @import("launches/dense_text.zig");
+pub const draft = @import("launches/draft.zig");
+pub const exl3 = @import("launches/exl3.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -74,6 +77,7 @@ pub const Launcher = struct {
     gdn_gate: Triple,
     gated_delta_tile: [2]Function, // dk 128, 16
     gated_delta_wave: [2]Function,
+    gdn_prompt: Function, // dk = dv = 128, a prompt's rows, half a value head a block
     score_keys: Triple, // by cache kind
     apply_values: Triple,
     causal: Triple,
@@ -105,6 +109,10 @@ pub const Launcher = struct {
     mamba: mamba.Fns,
     /// Nemotron-H's MoE pick and relu^2 (nemotron_moe.hpp).
     nemo: nemotron_moe.Fns,
+    /// The DFlash2 drafter's kernels (draft/draft.hip).
+    draft: draft.Fns,
+    /// EXL3 projections for decode rows (exl3/exl3.hip).
+    exl3: exl3.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -116,6 +124,8 @@ pub const Launcher = struct {
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
         score2_act: [2]Function,
+        score256: [2]Function, // d 256 on long spans, kScoreSteps steps a block
+        score256_act: [2]Function,
         sum_act: Function,
         attend: [2]Function,
         apply: [2]Function,
@@ -156,6 +166,7 @@ pub const Launcher = struct {
         argmax_join: Function,
         topk: Function,
         conv_prefill: Function,
+        gdn_prompt_prep: Function,
         gdn_gate_prefill: Function,
         dense_rows: Function,
         moe_route: Function,
@@ -207,6 +218,8 @@ pub const Launcher = struct {
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
             .score2_act = .{ try pl.function("tf_plan_score2_act_f16"), try pl.function("tf_plan_score2_act_bf16") },
+            .score256 = .{ try pl.function("tf_plan_score256_f16"), try pl.function("tf_plan_score256_bf16") },
+            .score256_act = .{ try pl.function("tf_plan_score256_act_f16"), try pl.function("tf_plan_score256_act_bf16") },
             .sum_act = try pl.function("tf_sum_partials_act"),
             .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
@@ -242,6 +255,7 @@ pub const Launcher = struct {
             .argmax_join = try ops.function("tf_argmax_join"),
             .topk = try ops.function("tf_topk"),
             .conv_prefill = try ops.function("tf_conv_prefill"),
+            .gdn_prompt_prep = try ops.function("tf_gdn_prompt_prep"),
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
             .dense_rows = try ops.function("tf_dense_rows"),
             .moe_route = try ops.function("tf_moe_route"),
@@ -290,6 +304,7 @@ pub const Launcher = struct {
             try gd.function(ns ++ "16gated_delta_tileILi128ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
             try gd.function(ns ++ "16gated_delta_tileILi16ELi8ELi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
         };
+        l.gdn_prompt = try gd.function("tf_gdn_prompt_128");
         l.gated_delta_wave = .{
             try gd.function(ns ++ "18gated_delta_kernelILi128EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
             try gd.function(ns ++ "18gated_delta_kernelILi16EEEvPKfS3_S3_S3_S3_PfS4_iiiiS4_"),
@@ -318,6 +333,8 @@ pub const Launcher = struct {
         l.softmax_stats = try att.function("tf_softmax_stats");
         l.sum_partials = try att.function("tf_sum_partials");
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
+        l.draft = try draft.Fns.load(l.mods[@backingInt(kernels.Group.draft)]);
+        l.exl3 = try exl3.Fns.load(l.mods[@backingInt(kernels.Group.exl3)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
@@ -341,6 +358,7 @@ pub const Launcher = struct {
     pub const tf_conv_rows = conv.tf_conv_rows;
     pub const tf_conv_split = conv.tf_conv_split;
     pub const tf_conv_prefill = conv.tf_conv_prefill;
+    pub const tf_gdn_prompt_prep = conv.tf_gdn_prompt_prep;
     pub const tf_qk_rope = rope.tf_qk_rope;
     pub const tf_rope_decode = rope.tf_rope_decode;
     pub const tf_rope_prefill = rope.tf_rope_prefill;
@@ -407,11 +425,17 @@ pub const Launcher = struct {
     pub const fn_idx_scores = flashnext.idxScores;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext.sparseAttention;
+    pub const fn_sparse_attention_scalar = flashnext.sparseAttentionScalar;
     pub const tf_mamba_conv = mamba.tf_mamba_conv;
     pub const tf_mamba_dt = mamba.tf_mamba_dt;
     pub const tf_mamba_scan = mamba.tf_mamba_scan;
     pub const tf_mamba_gnorm = mamba.tf_mamba_gnorm;
     pub const tf_mamba_window = mamba.tf_mamba_window;
+    pub const draftGather = draft.gather;
+    pub const draftRingPut = draft.ringPut;
+    pub const draftDynConv = draft.dynConv;
+    pub const draftMaskRows = draft.maskRows;
+    pub const draftAttention = draft.attention;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {

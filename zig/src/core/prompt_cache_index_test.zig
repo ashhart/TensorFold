@@ -240,8 +240,11 @@ test "snapshot index: RAM keep unwinds every allocation failure and failed famil
         try std.testing.expectEqual(s.entries.items.len, f.live);
         if (failing.has_induced_failure) {
             failures += 1;
-            try std.testing.expect(!kept);
-            try std.testing.expectEqual(old_len, s.entries.items.len);
+            if (kept) {
+                try std.testing.expect(s.links_lost);
+                try std.testing.expectEqual(old_len + 1, s.entries.items.len);
+                try std.testing.expectEqual(@as(u32, 100), s.find(&prompt, &.{}, &.{.{ 2, 7 }}).?.at);
+            } else try std.testing.expectEqual(old_len, s.entries.items.len);
         } else {
             succeeded = true;
             try std.testing.expect(kept);
@@ -255,7 +258,7 @@ test "snapshot index: RAM keep unwinds every allocation failure and failed famil
         }
     }
     try std.testing.expect(succeeded); // spans, Entry, the one prompt copy, the save, then both publication reserves
-    try std.testing.expectEqual(@as(usize, 6), failures);
+    try std.testing.expectEqual(@as(usize, 7), failures);
 }
 
 /// A conversation tree: each prompt a kept one's prefix and new tokens, so states share long prefixes and fork.

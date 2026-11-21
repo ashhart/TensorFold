@@ -11,7 +11,7 @@ const patch = @import("tree.zig").patch;
 pub const heads = 2;
 
 /// Each head keeps its own scores, online softmax and combine in the recorded order; only K and V loads are shared.
-const edits = [_][2][]const u8{
+pub const edits = [_][2][]const u8{
     .{ "  constexpr int PER = D / 32;\n", "  constexpr int PER = D / 32, HPT = 2;\n" },
     .{ "  const int h = int(threadgroup_position_in_grid.x);\n", "  const int h0 = int(threadgroup_position_in_grid.x) * HPT;\n" },
     .{ "  const int kvh = h / (H / KVH);\n", "  const int kvh = h0 / (H / KVH);\n" },

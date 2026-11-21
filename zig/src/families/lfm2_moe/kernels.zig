@@ -86,9 +86,9 @@ pub fn load(device: mtl.Device) !Kernels {
     // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
     out.attn_nax = null;
     out.prompt_mask = null;
-    out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
+    out.nax = if (@import("source.zig").optionalAvailable(device)) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
-    if (device.tensorUnits()) {
+    if (@import("source.zig").optionalAvailable(device)) {
         try attnNaxLoad(device, &out);
         errdefer out.attn_nax.?.deinit();
         out.prompt_mask = try @import("prompt_mask.zig").Pipelines.load(device);
@@ -99,9 +99,7 @@ pub fn load(device: mtl.Device) !Kernels {
 /// lfm2_attn_nax compiled after lfm2.metal's text (its constants and merge) with nax.h inlined.
 fn attnNaxLoad(device: mtl.Device, out: *Kernels) !void {
     const a = std.heap.c_allocator;
-    const attn = try frags.source(device, a, sources.lfm2_attn_nax);
-    defer a.free(attn);
-    const src = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", attn });
+    const src = try @import("source.zig").prompt(device, a, false);
     defer a.free(src);
     const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
     defer lib.deinit();

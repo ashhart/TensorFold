@@ -13,12 +13,19 @@ const Fake = struct {
     var asked_len: usize = 0;
     var loaded: [1024]u16 = undefined;
     var loaded_len: usize = 0;
+    var dropped: usize = 0;
+    var loads_before_drop: usize = 0;
     fn reset() void {
         result = null;
         full = &.{};
         fail_load = false;
         resolves = 0;
         loads = 0;
+        dropped = 0;
+        loads_before_drop = 0;
+    }
+    pub fn withoutWorkingDirectory() void {
+        dropped += 1;
     }
     pub fn fullPath(path: [:0]const u16, out: []u16) usize {
         resolves += 1;
@@ -29,6 +36,7 @@ const Fake = struct {
         return n;
     }
     pub fn load(path: [:0]const u16) ?Handle {
+        if (dropped == 0) loads_before_drop += 1;
         loads += 1;
         loaded_len = path.len;
         @memcpy(loaded[0..loaded_len], path);
@@ -74,4 +82,14 @@ test "Windows DLL: bare names, failed resolution, bounds and failed loads" {
     try t.expectError(error.InvalidWtf8, library.open(Fake, &.{0xff}));
     try t.expectEqual(@as(usize, 0), Fake.loads);
     try t.expectEqual(@as(usize, 0), Fake.resolves);
+}
+test "security: the working directory is out of the DLL search before any name or path is loaded" {
+    for ([_][]const u8{ "turbojpeg.dll", "runtime/cublasLt.dll", "C:\\CUDA\\cublas.dll" }) |path| {
+        Fake.reset();
+        Fake.full = u("C:\\project\\runtime\\cublasLt.dll");
+        _ = try library.open(Fake, path);
+        try t.expectEqual(@as(usize, 1), Fake.loads);
+        try t.expect(Fake.dropped >= 1);
+        try t.expectEqual(@as(usize, 0), Fake.loads_before_drop);
+    }
 }

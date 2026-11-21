@@ -61,10 +61,11 @@ pub const Modules = struct {
 
     /// The grouped experts' scratch for a window of `rows` (allocated before serving, never mid-forward).
     pub fn reserve(m: *const Modules, c: *const cfg.Config, share: anytype, rows: usize, prefill: bool) !void {
-        const items = cuda.grouped.maxItems(rows * c.topk, c.experts, if (prefill) 64 else 16);
+        const pairs = rows * c.topk;
+        const tile: usize = if (prefill) 64 else 16;
         const ni = share.moe.len();
-        const up = try cuda.exl3_grouped.Grouped.bytes(c.hidden, ni, items, try cuda.exl3_experts.plan(c.hidden, ni, true), 2);
-        const down = try cuda.exl3_grouped.Grouped.bytes(ni, c.hidden, items, try cuda.exl3_experts.plan(ni, c.hidden, false), 1);
+        const up = try cuda.exl3_grouped.Grouped.bytes(c.hidden, ni, pairs, tile, try cuda.exl3_experts.plan(c.hidden, ni, true), 2);
+        const down = try cuda.exl3_grouped.Grouped.bytes(ni, c.hidden, pairs, tile, try cuda.exl3_experts.plan(ni, c.hidden, false), 1);
         const need = @max(up, down);
         const g = &m.x3.grouped;
         if (g.storage != null and g.storage.?.len >= need) return;
@@ -104,6 +105,8 @@ pub const Forward = struct {
     taps: ?u64 = null, // a drafter's feature rows [rows][taps][hidden] bf16
     tap_at: []const i32 = &.{}, // each layer's tap slot, or -1
     images: ?ImageRows = null, // a prompt pass's image rows over their positions (its sequence only)
+    /// A prompt chunk's last-layer first row (cuda_prompt_tail.first): rows before it stop at their cache writes.
+    tail: ?usize = null,
 
     fn c(f: *const Forward) *const cfg.Config {
         return &f.w.config;
@@ -156,20 +159,24 @@ pub const Forward = struct {
         try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, co.hidden);
         if (f.images) |im| if (segs.len == 1) try @import("cuda_vision.zig").splice(&f.m.k, f.stream, im.rows, im.spans, segs[0].st.pos, segs[0].st.pos + R, b.resid);
         try kern.norm(&f.m.k, f.stream, b.resid, f.w.layers[0].in_norm, b.x, R, co.hidden, co.eps);
+        const last = f.w.layers.len - 1;
+        const t0: usize = if (f.tail) |x| x else 0;
+        if (t0 > R or (t0 > 0 and (segs.len != 1 or !b.prefill))) return error.BadWindow;
         for (f.w.layers, 0..) |l, j| {
-            try f.layer(l, j, R, segs, if (j + 1 < f.w.layers.len) f.w.layers[j + 1].in_norm else 0);
+            try f.layer(l, j, R, segs, if (j + 1 < f.w.layers.len) f.w.layers[j + 1].in_norm else 0, if (j == last) t0 else 0);
             if (f.taps) |t| if (j < f.tap_at.len and f.tap_at[j] >= 0) try kern.tap(&f.m.k, f.stream, b.resid, t, R, co.hidden, 5, @intCast(f.tap_at[j]));
             if (f.watch) |wt| try wt.call(wt.ctx, j, b.resid, R);
         }
         for (segs) |g| g.st.pending = g.rows;
+        if (t0 == R) return; // no row of the chunk is read: its head is not either
         const first: usize = if (b.prefill) R - 1 else 0;
         const n = R - first;
         try kern.norm(&f.m.k, f.stream, b.resid + first * co.hidden * 4, f.w.norm, b.fnormed, n, co.hidden, co.eps);
         try f.x3(f.w.head, b.fnormed, n, b.logits, .bf16);
     }
 
-    /// Layer `l` on every segment's rows (b.x their normed input); the last add norms the residual by `next` (0: none).
-    fn layer(f: *const Forward, l: weights.Layer, j: usize, R: usize, segs: []const Seg, next: u64) !void {
+    /// Layer `l` on every segment's rows (b.x their normed input), the last add normed by `next`; rows < `t0` stop.
+    fn layer(f: *const Forward, l: weights.Layer, j: usize, R: usize, segs: []const Seg, next: u64, t0: usize) !void {
         const b = f.b;
         const co = f.c();
         const h: usize = co.hidden;
@@ -179,20 +186,24 @@ pub const Forward = struct {
         try f.x3(l.attn.k, b.x, R, in.k, .bf16);
         try f.x3(l.attn.v, b.x, R, in.v, .bf16);
         try f.mx(l.attn.index, b.x, h, R, in.i, .bf16);
-        for (segs) |g| try f.attention(l.attn, j, g, R);
-        try f.x3(l.attn.o, b.o, R, f.slot(R, 1), .f32);
-        try f.gather(R, 1);
-        try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, world, 1, 1.0, l.post_norm, b.x, R, h, co.eps);
+        for (segs) |g| try f.attention(l.attn, j, g, R, t0);
+        const n = R - t0;
+        if (n == 0) return; // every rank decides the same tail: no gather goes out unpaired
+        const resid = b.resid + t0 * h * 4;
+        const ow: usize = f.w.share.queries(co).len() * @as(usize, co.head_dim); // this rank's query heads' width
+        try f.x3(l.attn.o, b.o + t0 * ow * 2, n, f.slot(n, 1), .f32);
+        try f.gather(n, 1);
+        try kern.addNorm(&f.m.k, f.stream, resid, b.gathered, world, 1, 1.0, l.post_norm, b.x, n, h, co.eps);
         switch (l.ffn) {
             .dense => |m| {
-                try f.mlp(m, f.w.share.dense.len(), R, f.slot(R, 1), .f32);
-                try f.gather(R, 1);
-                try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, world, 1, 1.0, next, b.x, R, h, co.eps);
+                try f.mlp(m, f.w.share.dense.len(), n, f.slot(n, 1), .f32);
+                try f.gather(n, 1);
+                try kern.addNorm(&f.m.k, f.stream, resid, b.gathered, world, 1, 1.0, next, b.x, n, h, co.eps);
             },
             .moe => |m| {
-                try f.moe(m, R);
-                try f.gather(R, 2);
-                try kern.addNorm(&f.m.k, f.stream, b.resid, b.gathered, world, 2, co.routed_scale, next, b.x, R, h, co.eps);
+                try f.moe(m, n);
+                try f.gather(n, 2);
+                try kern.addNorm(&f.m.k, f.stream, resid, b.gathered, world, 2, co.routed_scale, next, b.x, n, h, co.eps);
             },
         }
     }
@@ -243,14 +254,14 @@ pub const Forward = struct {
         const in_up: cuda.experts.Rows = .{ .x = b.x, .stride = h, .slots = topk };
         const in_down: cuda.experts.Rows = .{ .x = b.eact, .stride = m.routed.width };
         // one path for a prompt chunk and a window: every pick's down rows in fp32, so a row's bits never depend on it
-        try g.decode(f.stream, .up, in_up, m.routed, b.plan(), b.eact, b.max_items, -1);
-        try g.decode(f.stream, .down_f32, in_down, m.routed, b.plan(), b.ey, b.max_items, -1);
+        try g.decode(f.stream, .up, in_up, m.routed, b.plan(), b.eact, b.max_items, pairs, tile, -1);
+        try g.decode(f.stream, .down_f32, in_down, m.routed, b.plan(), b.ey, b.max_items, pairs, tile, -1);
         try f.mlp(m.shared, f.w.share.shared.len(), R, b.sy, .f32);
         try kern.moePartial(&f.m.k, f.stream, b.ey, b.wts, b.sy, f.slot(R, 2), R, topk, h);
     }
 
-    /// One segment's rows: q, k, v and the index pair prepared, the block selection, attention into b.o.
-    fn attention(f: *const Forward, a: weights.Attention, j: usize, g: Seg, window: usize) !void {
+    /// One segment's rows prepared (q, k, v, index pair), its rows from `from` selected and attended into b.o.
+    fn attention(f: *const Forward, a: weights.Attention, j: usize, g: Seg, window: usize, from: usize) !void {
         const b = f.b;
         const co = f.c();
         const s = f.w.share;
@@ -290,6 +301,7 @@ pub const Forward = struct {
             .eps = co.eps,
             .theta = co.theta,
         });
+        if (from == R) return; // its keys, values and index keys are in the caches; nothing reads its rows
         const nb = co.blocks(pos + R);
         const topk: usize = co.topk_blocks;
         const all = nb <= topk;
@@ -299,12 +311,18 @@ pub const Forward = struct {
         // every row on the tensor units, a prompt chunk's and a window's alike: a row's bits never depend on its window
         const words = b.selWords(co);
         const bits = b.bits + sel_at * words * 4;
+        // the tail's rows from their own pointers and position; the selection's scratch is the call's own
+        const n = R - from;
+        const at = pos + from;
+        const tq = q + from * hq * D * 2;
+        const tiq = iq + from * hi * co.index_dim * 2;
+        const to = o + from * hq * D * 2;
         if (!all) {
-            try kern.indexScores(&f.m.k, f.stream, iq, st.indexKeys(co, j), scores, R, pos, hi, nb);
-            try kern.indexSelect(&f.m.k, f.stream, scores, sel, bits, R, pos, hi, nb, topk, words);
+            try kern.indexScores(&f.m.k, f.stream, tiq, st.indexKeys(co, j), scores, n, at, hi, nb);
+            try kern.indexSelect(&f.m.k, f.stream, scores, sel, bits, n, at, hi, nb, topk, words);
         }
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(D)));
-        try kern.attnPrompt(&f.m.k, f.stream, q, st.keys(j), st.values(co, j), bits, o, R, pos, hq, hk, if (all) 0 else words, scale);
+        try kern.attnPrompt(&f.m.k, f.stream, tq, st.keys(j), st.values(co, j), bits, to, n, at, hq, hk, if (all) 0 else words, scale);
     }
 
     /// The first `keep` rows of the last forward committed on each segment's sequence.

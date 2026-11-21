@@ -21,8 +21,8 @@ extern "C" __global__ void __launch_bounds__(512) qwen4_ple_gate(const __nv_bflo
         }
         kss = block_sum_serial(kss, scratch);
         qss = block_sum_serial(qss, scratch);
-        const float krinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(kss, fd), eps)));
-        const float qrinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(qss, fd), eps)));
+        const float krinv = tf_common::rms_scale(kss, D, eps);
+        const float qrinv = tf_common::rms_scale(qss, D, eps);
         float dot = 0.0f;
         for (int d = threadIdx.x; d < D; d += blockDim.x) {
             const float kn = rbf(__fmul_rn(__fmul_rn(bf(KEYS[static_cast<long long>(r) * (S + 1) * D + s * D + d]), krinv), NK[s * D + d]));

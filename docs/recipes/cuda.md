@@ -17,7 +17,7 @@ DeepSeek requires sm_90 or newer and remains refused by the release server pendi
 Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
 GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
 this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
-See the [qualified models](../../README.md#qualified-models), [changes](../../CHANGELOG.md) and
+See the [qualified models](../supported-models.md#qualified-models), [changes](../../CHANGELOG.md) and
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for recorded serving scope.
 Native [GLM](glm-5.3-flash-cuda.md) has TP=2 and TP=3 serving receipts; native EXL3 loading and DFlash2 drafting
 also exist for the families and formats recorded there.
@@ -355,9 +355,11 @@ CUDA context and workspace memory the estimate does not count. `TENSORFOLD_MEMOR
 the MLX one. A floor close to the smallest can end requests with CUDA errors mid-reply
 (`PYTORCH_CUDA_ALLOC_CONF` `=` `expandable_segments:True` reduces fragmentation near the cap).
 Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses the
-host's available memory, reclaimable page cache included, less a floor of a tenth of RAM (at least 4 GiB) that
+host's available memory, at most the free memory CUDA reports (which leaves out the page cache, so the
+checkpoint's own shards leave the page cache before the load), less a floor of a tenth of RAM (at least 4 GiB) that
 `TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
 window. It accounts for stream count and retained caches where concurrency is enabled.
+The native engine's memory plan and its settings are in the [API reference](../api.md#context-and-errors).
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
 collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA

@@ -102,7 +102,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .cancel_prefill = fill.Callbacks(Backend).cancelPrompt, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true } };
     }
 
     pub const facts = batch_costs.facts;
@@ -232,8 +232,8 @@ pub const Backend = struct {
     pub fn chunkPrompt(b: *Backend, stream: *Stream, slot: usize, at: u32, rows: u32) !void {
         try prompt_gpu.chunk(b, stream, slot, at, rows);
     }
-    pub fn markPrompt(b: *Backend, stream: *Stream, at: u32) !void {
-        try prompt_gpu.mark(b, stream, at);
+    pub fn markPrompt(b: *Backend, stream: *Stream, at: u32, interrupted: bool) !void {
+        try prompt_gpu.mark(b, stream, at, interrupted);
     }
     pub fn finishPrompt(b: *Backend, stream: *Stream) !void {
         try prompt_gpu.finish(b, stream);

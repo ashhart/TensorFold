@@ -43,7 +43,9 @@ def _stamp(path: str) -> tuple:
 MANAGED = {"--host": "TensorFold Web sets it (Settings, Share on the network)", "--port": "the engine address in Settings",
            "--context": "Longest conversation in Settings", "--thinking": "Thinking in Settings",
            "--no-thinking": "Thinking in Settings", "--dashboard": "TensorFold Web turns it on",
-           "--cortheon": "Web research in Settings, which says what leaves the machine"}
+           "--cortheon": "Web research in Settings, which says what leaves the machine",
+           # a config file can hold any serve flag, the ones above and the secret and learning ones among them
+           "--config": "a config file could set the flags TensorFold Web keeps to itself; add its flags here one by one"}
 # Living Weights: learning is turned on by TensorFold Web for a copy that learns, bound to loopback; never by hand
 LEARNING = ("--slide",)
 

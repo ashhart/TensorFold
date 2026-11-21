@@ -59,6 +59,9 @@ fn bodyMode(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: 
     const so = try json.newObject(a);
     try so.put(a, "include_usage", .{ .bool = true });
     try o.put(a, "stream_options", .{ .object = so });
+    // the protocol names every draw setting: a served default (the instruct set's presence_penalty 1.5) shapes none
+    try o.put(a, "presence_penalty", .{ .float = 0 });
+    try o.put(a, "frequency_penalty", .{ .float = 0 });
     if (t > 0) {
         try o.put(a, "top_k", try json.intValue(a, 20));
         try o.put(a, "top_p", .{ .float = 0.95 });
@@ -231,7 +234,8 @@ const BodyWait = struct {
     }
 };
 
-fn eventStream(content_type: ?[]const u8) bool {
+/// A ``text/event-stream`` reply, parameters aside.
+pub fn eventStream(content_type: ?[]const u8) bool {
     const t = content_type orelse return false;
     const media = std.mem.trim(u8, t[0 .. std.mem.indexOfScalar(u8, t, ';') orelse t.len], " \t");
     return std.ascii.eqlIgnoreCase(media, "text/event-stream");
@@ -316,6 +320,7 @@ pub const Fetch = struct {
     token: ?[]const u8 = null,
     limit: usize,
     timeout_s: f64,
+    agent: []const u8 = user_agent,
 };
 
 pub const Fetched = struct {
@@ -340,7 +345,7 @@ const FetchTask = struct {
         var req = x.client.request(x.f.method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
-            .headers = .{ .authorization = auth, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent }, .content_type = if (x.f.body != null) .{ .override = "application/json" } else .default },
+            .headers = .{ .authorization = auth, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = x.f.agent }, .content_type = if (x.f.body != null) .{ .override = "application/json" } else .default },
             .extra_headers = &.{.{ .name = "accept", .value = "application/json" }},
         }) catch return;
         defer req.deinit();

@@ -206,7 +206,7 @@ pub const records = [48]Record{
         .usage = .{
             .{ .vgprs = 125, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 124, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 124, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 124, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 124, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
@@ -215,7 +215,7 @@ pub const records = [48]Record{
         .usage = .{
             .{ .vgprs = 176, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 182, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 182, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 182, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },

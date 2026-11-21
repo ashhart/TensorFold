@@ -85,7 +85,7 @@ pub const Matrix = struct {
     fn check(m: Matrix) !void {
         const r = m.record;
         const ok = switch (r.format) {
-            .trellis => m.data[0].is(.u8, &.{ std.math.divExact(usize, if (r.side == .input) r.in else r.out, 128) catch return error.BadExlr8Shape, (if (r.side == .input) r.out else r.in) * 16 * @as(usize, r.k) }) and
+            .trellis => m.data[0].is(.u8, &.{ std.math.divExact(usize, if (r.side == .input) r.in else r.out, 128) catch return error.BadExlr8Shape, std.math.mul(usize, if (r.side == .input) r.out else r.in, 16 * @as(usize, r.k)) catch return error.BadExlr8Shape }) and
                 m.data[1].is(.f16, &.{r.in}) and m.data[2].is(.f16, &.{r.out}),
             .int4 => if (r.side == .input)
                 m.data[0].is(.u8, &.{ r.in / 128, r.out, 64 }) and m.data[1].is(.f16, &.{ r.in / 128, r.out, 4 })
@@ -270,4 +270,26 @@ test "an fp32 matrix (format 7, which the GLM-5.3 release does not use) reads as
     try std.testing.expect(try m.verify());
     sum[0] ^= 1;
     try std.testing.expect(!try m.verify());
+}
+
+/// A trellis record sharded by input with out = 2^60 (`out * 16 * k` is 2^64), beside tensors a file could hold.
+fn checkWrapped() !void {
+    var rec: [64]u8 = undefined;
+    for ([8]i64{ 1, 1 << 60, 128, 1, 2, 0, 0, 0 }, 0..) |v, i| std.mem.writeInt(i64, rec[8 * i ..][0..8], v, .little);
+    const scales: [256]u8 = @splat(0);
+    const m: Matrix = .{
+        .record = try Record.parse(.{ .dtype = .i64, .rank = 1, .shape = .{ 8, 1, 1, 1, 1 }, .bytes = &rec }),
+        .data = .{
+            .{ .dtype = .u8, .rank = 2, .shape = .{ 1, 0, 1, 1, 1 }, .bytes = &.{} },
+            .{ .dtype = .f16, .rank = 1, .shape = .{ 128, 1, 1, 1, 1 }, .bytes = &scales },
+            .{ .dtype = .f16, .rank = 1, .shape = .{ 128, 1, 1, 1, 1 }, .bytes = &scales },
+        },
+        .checksum = null,
+    };
+    try std.testing.expectError(error.BadExlr8Shape, m.check());
+}
+
+// In a child: if check's trellis width `out * 16 * k` is unchecked, a safe build panics and only this test fails
+test "a trellis record whose row width wraps past 2^64 is refused, not compared at the wrapped width" {
+    try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(checkWrapped, .{}));
 }

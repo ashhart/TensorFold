@@ -9,6 +9,7 @@ const Proj = engine.Proj;
 
 /// out (rows, n) = x (rows, k) through `l`: row tiles with batch-independent bits or a prompt GEMM.
 pub fn proj(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.o);
     return projSums(e, l, x, e.xs, out, rows, prompt, e.tables.ptr + Engine.params_at);
 }
 
@@ -18,16 +19,19 @@ pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, pro
 }
 
 pub fn projAgain(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.o);
     return project(e, l, x, e.xs, out, rows, prompt, e.tables.ptr + Engine.params_at, false);
 }
 
 /// `projAgain` of each of `ls` into `outs` over one x; on the split form's GPUs one segmented launch a row tile.
 pub fn projMany(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.kv);
     return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, false);
 }
 
 /// The landed forward's shared-input projections; on GB10 their prompt CTAs may share one launch.
 pub fn projManyPrompt(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.kv);
     return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, true);
 }
 
@@ -88,6 +92,8 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
     }
 }
 
+/// The whole model's shape decides, so a pipeline stage takes the tile one engine takes.
 fn qwen38LargePromptTile(e: *const Engine, n: usize, k: usize, rows: usize) bool {
-    return e.affine.pdl and e.g.hidden == 5120 and e.g.intermediate == 17408 and e.g.layers == 64 and e.g.experts == 0 and projection_many.qwen38LargePromptShape(n, k, rows);
+    const big = @import("cuda_geometry.zig").dense27(e.g.model()) and e.g.intermediate == 17408;
+    return e.affine.pdl and big and projection_many.qwen38LargePromptShape(n, k, rows);
 }

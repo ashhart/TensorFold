@@ -1,5 +1,6 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
+pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("benchmark_group.zig");
 pub const weight_only = @import("weight_only.zig");
 pub const profile = @import("profile");
@@ -13,17 +14,22 @@ pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const dfloat11_config = @import("dfloat11_config.zig");
 pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
+pub const dfloat11_fixtures = @import("dfloat11_fixtures.zig");
 pub const exl3_load = @import("exl3_load.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const direct_gather = @import("direct_gather.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
+pub const checkpoint_host = checkpoint; // the name the engine module (tensorfold.zig) also gives it
 pub const draft_depth = @import("draft_depth.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const proposal_rows = @import("proposal_rows.zig");
+pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec
+pub const wav = @import("wav.zig"); // reference clips in, speech out
 pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
@@ -57,6 +63,7 @@ pub const picture = @import("picture/picture.zig");
 pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
+pub const dspine = @import("dspine.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
 pub const attention_range = @import("attention_range.zig");
@@ -68,9 +75,14 @@ pub const dense_ref = @import("dense_ref.zig");
 pub const checkpoint_weights = @import("checkpoint_weights.zig");
 pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
+pub const state_walk = @import("state_walk.zig");
 
 test {
+    _ = torch_pth;
+    _ = wav;
+    _ = startup_receipt;
     _ = benchmark_group;
+    _ = dspine;
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;
@@ -82,6 +94,7 @@ test {
     _ = shard_edit;
     _ = lora_merge;
     _ = quant;
+    _ = quant.gptq;
     _ = nvfp4_rows;
     _ = route_ref;
     _ = nvfp4_csf;
@@ -111,6 +124,9 @@ test {
     _ = checkpoint;
     _ = @import("checkpoint_prefetch.zig");
     _ = @import("checkpoint_direct.zig");
+    _ = @import("dfloat11.zig");
+    _ = dfloat11_config;
+    _ = @import("checkpoint_coded_test.zig");
     _ = checkpoint_identity;
     _ = direct_io;
     _ = direct_gather;
@@ -133,6 +149,7 @@ test {
     _ = @import("expert_groups.zig");
     _ = @import("safetensors_security_test.zig");
     _ = kv_prompts;
+    _ = state_walk;
 }
 
 pub const frame_rounds = @import("frame_rounds.zig");

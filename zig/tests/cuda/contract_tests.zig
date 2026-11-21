@@ -10,6 +10,8 @@ const tail_k = @import("contract_norms_tail.zig");
 const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
+const qwen_router_k = @import("contract_qwen_router.zig");
+const glm_router_k = @import("contract_glm_router.zig");
 const mm_k = @import("contract_mm.zig");
 const prefill_many_k = @import("contract_qmm_prefill_many.zig");
 const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
@@ -178,6 +180,14 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     try kernels.append(a, logits.kernel());
     try kernels.append(a, logits_tiles.kernel());
     try kernels.append(a, latent_topk.kernel());
+    var moe_mod = try cuda.Module.load(gpu.d, cuda.kernels.moe);
+    defer moe_mod.unload();
+    var qwen_router = qwen_router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .router = try moe_mod.function("tf_moe_router"), .tiles = try moe_mod.function("tf_moe_router_tiles") };
+    defer qwen_router.deinit();
+    var qwen_router_ctl = qwen_router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .router = qwen_router.router, .tiles = qwen_router.tiles, .ctl = try mods[5].function("tf_ctl_moe_router_tiles_row") };
+    defer qwen_router_ctl.deinit();
+    try kernels.append(a, qwen_router.kernel());
+    try kernels.append(a, qwen_router_ctl.kernel());
     var scan = scan_k.Scan{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[7].function("tf_nemo_scan"), .host = .init(a) };
     defer scan.deinit();
     try kernels.append(a, scan.kernel());
@@ -305,11 +315,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
     defer h3_topk.deinit();
     try kernels.append(a, h3_topk.kernel());
-    var d3_mod = try cuda.Module.load(gpu.d, kk.drama3);
-    defer d3_mod.unload();
-    var d3_norm = try drama3_k.Norm.init(gpu, s, d3_mod);
-    defer d3_norm.deinit();
-    try kernels.append(a, d3_norm.kernel());
+    const d3 = try drama3_k.Group.create(a, gpu, s, &kernels);
+    defer d3.destroy();
     var ck: ?cuda.ck.Ck = null;
     var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
     if (cap >= 120) {
@@ -512,6 +519,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     }));
     defer for (&f32ws) |*x| x.deinit();
     for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
+    defer for (&glm_routers) |*x| x.deinit();
+    for (&glm_routers) |*x| try kernels.append(a, x.kernel());
     var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
     for (f32w_k.bf16_entries, &bf16s) |e, *x| {
         x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
@@ -551,6 +561,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
+    const mla = try @import("contract_mla.zig").Group.create(a, gpu, s, glm_fns.merge, &kernels);
+    defer mla.destroy();
     var q35_flat_mod = try cuda.Module.load(gpu.d, kk.qwen35);
     defer q35_flat_mod.unload();
     var q35_fp8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);

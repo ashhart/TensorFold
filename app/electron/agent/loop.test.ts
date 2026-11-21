@@ -383,27 +383,27 @@ console.log('loop prompt tests:')
 
 {
   // delegateChildToolSchemas: the safety filter routing delegate_task's requested tool_names
-  // down to a known-safe subset. No request (or empty) -> the Explore default 4 tools.
-  const defaultTools = delegateChildToolSchemas()
+  // down to a known-safe subset. No request (or empty) -> the Explore default tools the parent offers.
+  const offered = new Set(['glob', 'list_dir', 'read_file', 'search', 'web_search', 'run_command', 'edit_file'])
+  const defaultTools = delegateChildToolSchemas(undefined, offered)
   const defaultNames = defaultTools.map((t) => t.function!.name).sort()
   assert.deepEqual(defaultNames, ['glob', 'list_dir', 'read_file', 'search'])
-  assert.deepEqual(delegateChildToolSchemas([]).map((t) => t.function!.name).sort(), defaultNames)
+  assert.deepEqual(delegateChildToolSchemas([], offered).map((t) => t.function!.name).sort(), defaultNames)
 
   // A request for tools that are read-only (but outside the original 4) is honored.
-  const withWebSearch = delegateChildToolSchemas(['web_search'])
+  const withWebSearch = delegateChildToolSchemas(['web_search'], offered)
   assert.deepEqual(withWebSearch.map((t) => t.function!.name), ['web_search'])
 
   // A request that includes a NON-read-only tool (e.g. a write/shell tool) drops that name —
   // delegate_task children never get write/shell tools even if explicitly requested by name.
-  const withWriteAttempt = delegateChildToolSchemas(['read_file', 'run_command', 'edit_file'])
+  const withWriteAttempt = delegateChildToolSchemas(['read_file', 'run_command', 'edit_file'], offered)
   const namesGranted = withWriteAttempt.map((t) => t.function!.name)
   assert.ok(namesGranted.includes('read_file'))
   assert.ok(!namesGranted.includes('run_command'), 'run_command must never be granted to a delegate_task child')
   assert.ok(!namesGranted.includes('edit_file'), 'edit_file must never be granted to a delegate_task child')
 
-  // A request entirely made of unsafe/unknown tool names falls back to the safe default
-  // rather than returning an empty toolset (which would strand the child with nothing to do).
-  assert.deepEqual(delegateChildToolSchemas(['run_command', 'totally_unknown_tool']).map((t) => t.function!.name).sort(), defaultNames)
+  // A request with no safe, parent-offered names grants no tools instead of widening the default.
+  assert.deepEqual(delegateChildToolSchemas(['run_command', 'totally_unknown_tool'], offered), [])
 
   ok('delegateChildToolSchemas keeps delegate_task children read-only by default and filters write/shell tools out of any explicit request')
 }

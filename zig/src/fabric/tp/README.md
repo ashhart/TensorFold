@@ -14,7 +14,7 @@ zig build tf-tp-test -Doptimize=ReleaseSafe -Dtp-nvcc=/usr/local/cuda/bin/nvcc
 zig build tf-tp-test -Doptimize=ReleaseSafe -Dtp-fatbin=/abs/path/tp_mailbox.fatbin
 ```
 
-A build without `-Dtp-nvcc` or `-Dtp-fatbin` still runs `nccl` and `roce-host`, which needs no GPU.
+A build without `-Dtp-nvcc` or `-Dtp-fatbin` still runs `nccl`, `roce-host` and `tcp-host`; the last two need no GPU.
 In that build the `mailbox` and `roce` suites fail at load with `NoKernel` (an engine falls back to NCCL instead).
 The `INFO` line `tf-tp-test` prints at start shows the embedded kernel's size; `0 B` means none was built in.
 
@@ -60,6 +60,71 @@ zig/src/fabric/tp/run_hosts.sh 1 192.0.2.1 ./zig-out/bin/tf-tp-test out-rank1   
 `/sys/class/infiniband/NAME/ports/1/gids/N` and `gid_attrs/ndevs/N` show each GID and its netdev.
 `ulimit -l` must allow the RoCE region to be pinned (`unlimited` is simplest).
 
+## TCP between two hosts without RDMA
+
+`tcp.zig` is the `Collective` contract over one stream socket a pair of ranks, `Kind.tcp`, for hosts with no RDMA
+(two AMD boxes on USB4 networking, or plain Ethernet). It moves host memory; `stage.zig`, below, puts device memory
+behind it. It is not a `TF_COMM_BACKEND` value yet: only its tests and `tf-tp-test tcp-host` and `tcp-hip` open it.
+
+- Every frame starts with a header both ranks check: call, element type, operation, count, the link's frame number
+  and the part of a staged call; a variable-length gather sends every rank's lengths first in its payload, and those
+  are compared too. A call one rank makes differently fails as `Invalid`, or `Aborted` where the other rank refused it
+  first.
+  Exchange partners that disagree (rank 0 trades with 1 while 1 trades with 2) wait on frames that never come and fail
+  as `Timeout`.
+- A frame that has not arrived by the call's deadline (`Options.timeout_ns`) is `Timeout`, and the communicator is
+  closed. The transport never resends a frame, so a late one can never land in another call or reorder a sum. The
+  kernel may still retransmit a lost segment, in order, within the deadline; its retransmit floor is a host setting
+  (`ip route ... rto_min 8ms`), not a transport one.
+- A frame that cannot be sent fails its call (`PeerFailed`, or what the peer's frame says), and no frame starts on a
+  link where one was half sent.
+- `abort`, from any thread, wakes this rank's waits and queues an abort frame on every link with no frame half sent
+  (waiting at most 50 ms for room). A rank waiting on any peer hears it as `Aborted`, even in a call that does not
+  involve the rank that aborted, when the abort frame is the next thing on that link; a frame the aborting rank had
+  already queued for a later call comes first, and then the call ends on its own links or at its deadline. On a link
+  where a frame was half sent no abort frame can go, and the peer sees `PeerFailed`, as it does from a peer that hangs
+  up without one. A rank whose peer timed out after its frame was sent may finish that call and fail on its next.
+- Sums add the ranks in rank order (`reference.reduce`), so every rank's bytes equal the reference's.
+
+`tf-tp-test tcp-host`, which needs no GPU, checks it between two hosts over the bootstrap's plan link (rank 0 listens on
+one port, `TF_TP_PLAN_PORT`, else `TF_TP_PORT` + 7): all-gathers, fp32
+and bf16 sums, exchanges, send and recv and variable-length gathers from 1 B to 4 MiB, bit for bit, then each size's
+median and p90 time (`gb_s_p50` is shard bytes over the median). Every result names the link from `TF_TP_LINK`, so a
+TCP number is never read as a RoCE one:
+
+```sh
+# both hosts; rank 0's link address is 192.0.2.1
+export TF_TP_WORLD=2 TF_TP_MASTER=192.0.2.1 TF_TP_LINK="USB4 networking, cable 1 of 2, MTU 1500"
+TF_TP_RANK=0 ./zig-out/bin/tf-tp-test tcp-host   # host A
+TF_TP_RANK=1 ./zig-out/bin/tf-tp-test tcp-host   # host B
+```
+
+## Device memory over the TCP Kind
+
+`stage.zig` stages device memory through `tcp.zig`, still `Kind.tcp`. A call only queues on its stream and returns:
+the stream writes the call's `ready` word, then waits until its `done` word is set (64-bit words in pinned host memory).
+A proxy thread sees `ready`, copies the input into a pinned slab on a stream of its own, moves it with `tcp.zig`, copies
+the result back and sets `done`. `stage_hip.zig` is the HIP side: `hipStreamWriteValue64` and `hipStreamWaitValue64` on
+mapped coherent host memory; a GPU without them is refused by name.
+
+- The caller's stream gets no copies of ours, only the two words. With the copies queued on it around the wait, two
+  ranks of one process hung, or read stale bytes, once a call reached 16 KiB (ROCm 10.0, gfx1151).
+- A call larger than `Options.part_bytes` (default 4 MiB, the same on every rank or the open fails) moves in parts.
+  Each frame names its part, so one call in two parts never pairs with two whole calls.
+- The stream writes `ready` only after the work queued before it on that stream has finished, so when the proxy sees
+  it the input is complete in device memory, and the proxy's own stream reads it from there.
+- A failure, the peer's, a timeout or a device call's, sets every `done` word, so no stream waits on it; it shows at
+  the next call or at `check`, and the outputs of the calls in flight are not defined.
+- The proxy waits for each of its copies at most `Hip.limit_ns` (30 s), then fails the call: past the runtime's
+  hardware queues (`GPU_MAX_HW_QUEUES`, 4 by default) its stream can share one with a stream parked on a word.
+- A capturing stream is refused (`Unsupported`): a replay would write and wait on the words' old values.
+- `allGatherV` moves whole strides, as `Collective` does for a transport without its own.
+- `deinit` frees the slab once every stream has passed its last call; the caller synchronises its streams first.
+
+`tf-tp-test tcp-hip` runs `tcp-host`'s checks and timings from HIP memory on the GPU of `TF_TP_DEVICE`: each call is
+checked after its stream synchronised, and each time is a call and its stream's synchronisation (`queue_p50_us` is the
+call alone). Its results name the link from `TF_TP_LINK` too.
+
 ## RoCE limits and the failed-transport check
 
 No RDMA write is larger than 1 MiB, so on `TF_COMM_BACKEND=roce` a `TF_TP_MAILBOX_MAX_KB` above 1024 fails at boot.
@@ -70,3 +135,22 @@ A rank whose transport fails moves its queue pairs to the error state and keeps 
 
 `run_transport.sh MASTER_ADDR PEER_SSH OUTDIR` checks that failure path on two hosts with `tf-tp-test failfast V
 transport` and stops at the first kernel log line or HCA error counter that grows; run it with no arguments for help.
+
+## Experimental four-rank ring
+
+The multirank wire supports gathers for three through eight ranks. Its reductions and exchange use NCCL.
+For exactly four ranks, `TF_TP_ROCE_RELAY=1` opts into a ring with one HCA to each neighbour and no opposite link.
+Name both neighbour HCAs explicitly. The rank order follows the physical ring. All four ranks must opt in;
+the connection table and the existing NCCL byte probe must agree before the wire is retained.
+Default mesh and two- and three-rank paths keep their existing protocol.
+
+Each neighbour receives both halves and forwards one to the opposite rank. Consumers wait for six flags.
+The proxy completes each forward before posting the other direction and posts sequence s only after consuming
+s-2 and receiving every rank's s-1. Variable-length shards carry their padded length beside each half flag.
+A producer must use the existing sequential stream contract: its preceding consumer completes before staging
+another collective. One proxy owns every QP. Wait failures report the source rank and sequence.
+
+`zig build test-roce-multi-host` runs 100,000 random collectives on each of the fake-verbs and shared-memory
+wires, checks every payload word, and covers held readers, full slot boundaries and sequence wrap.
+`zig build test-roce-relay-controls-host` runs the focused custody, fault and arithmetic controls.
+These are host protocol checks. Four-rank CUDA/RDMA execution and performance remain unqualified.

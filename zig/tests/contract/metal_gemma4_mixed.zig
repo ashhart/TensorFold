@@ -129,6 +129,7 @@ pub const Probe = struct {
 };
 pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
     if (only) |s| if (std.mem.indexOf(u8, name, s) == null) return 0;
+    if (!@import("metal_support.zig").tensor(device.tensorUnits(), name)) return 0;
     var problems: usize = 0;
     for (bits) |width| {
         const x = weights.Linear{ .w = undefined, .sb = undefined, .n = 32, .k = 256, .format = .{ .bits = width, .group = 64 }, .y_stride = pitch };

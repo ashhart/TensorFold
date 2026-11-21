@@ -70,7 +70,7 @@ const families = std.enums.values(Family);
 fn mainFacts(family: Family) lanes.Model {
     if (family == .glm_mtp or family == .glm_block) {
         const block = family == .glm_block;
-        return .{ .allocate_shared_drafts = true, .exact_width = 8, .first_copy_rows = 4, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .drafts = if (block) 7 else 3, .draft_streams = block, .mtp_step_ms = if (block) 1.6 / @as(f64, 7) else 0, .draft_probabilities = block, .window_costs = if (block) &glm_window_costs else &.{}, .shared_costs = if (block) &glm_shared_costs else &.{}, .hidden_rows = true, .batch_rows = 32, .max_streams = 16 };
+        return .{ .allocate_shared_drafts = !block, .exact_width = 32, .first_copy_rows = 4, .gpu_tokens = false, .mtp = true, .speculate = true, .speculate_early = false, .drafts = if (block) 7 else 15, .draft_streams = block, .mtp_step_ms = if (block) 1.6 / @as(f64, 7) else 0, .draft_probabilities = block, .window_costs = if (block) &glm_window_costs else &.{}, .shared_costs = if (block) &glm_shared_costs else &.{}, .shared_drafts = if (block) 0 else 3, .floor_rates = !block, .hidden_rows = true, .batch_rows = 32, .max_streams = 16 };
     }
     if (family == .minimax or family == .minimax_head) {
         const head = family == .minimax_head;
@@ -83,7 +83,7 @@ fn glmCosts(comptime n: usize, comptime base: f64, comptime row: f64) [n]lanes.c
     for (&costs, 0..) |*c, i| c.* = .{ .width = i + 1, .ms = base + row * @as(f64, @floatFromInt(i)) };
     return costs;
 }
-const glm_window_costs = glmCosts(8, 52.0, 6.8);
+const glm_window_costs = glmCosts(32, 52.0, 6.8);
 const glm_shared_costs = glmCosts(32, 76.0, 4.1);
 
 const main_ms = [_]f64{ 54.5, 64.4, 74.1, 84.1, 94.6, 102.6, 108.5, 114.2, 120.8, 124.9, 130.1, 136.2, 140.6, 145.2, 149.7, 152.7, 166.2, 173.4, 175.9, 182.2, 188.6, 195.5, 199.6, 203.1, 207.6, 211.8, 213.4, 215.3, 223.2, 224.9, 226.0, 244.8 };
@@ -321,7 +321,7 @@ test "CUDA lane copies: GLM uses paid target costs and expensive copies get zero
     for ([_]Family{ .glm_mtp, .glm_block }) |family| {
         const m = facts(family, true);
         try std.testing.expect(m.own_copy_rates and m.plain_guard);
-        try std.testing.expectEqual(@as(usize, 8), m.window_costs.len);
+        try std.testing.expectEqual(@as(usize, @import("glm_cuda").lanes.max_rows), m.window_costs.len);
         try std.testing.expectEqual(@as(usize, 32), m.shared_costs.len);
         for ([_]usize{ 1, 4 }) |count| {
             const cheap = try glmGrant(m, false, count);
@@ -426,4 +426,65 @@ test "CUDA lane copies: GLM confidence bounds the actual held offer even when wi
     _ = b.factsWithCopies(false);
     try lanes.Engine.testing.askDrafts(&e, &.{.{ .stream = &s, .depth = 3, .position = 1, .follow = &.{}, .rows = null, .start = 0 }});
     try std.testing.expectEqual(@as(u32, 3), s.next.?.count);
+}
+
+test "GLM window prices: every width from the timed ones, straight between them and never falling" {
+    const f = @import("glm_cuda").lane_costs;
+    var k: f.Kept = .{ .ms = undefined, .step_ms = 0.25, .fact = 1 };
+    for (&k.ms, f.widths) |*m, w| m.* = 10 + 0.5 * @as(f64, @floatFromInt(w));
+    k.ms[4] = k.ms[5] + 1; // a dip the sweep's smoothing let through
+    try std.testing.expect(f.usable(k));
+    const t = f.table(k);
+    for (t.window, 1..) |c, w| try std.testing.expectEqual(@as(u32, @intCast(w)), c.width);
+    for (t.window[1..], t.window[0 .. t.window.len - 1]) |c, before| try std.testing.expect(c.ms >= before.ms);
+    try std.testing.expectEqual(k.ms[0], t.window[0].ms);
+    try std.testing.expectApproxEqAbs(@as(f64, 10 + 0.5 * 20), t.window[19].ms, 1e-9); // between 16 and 24
+    try std.testing.expectEqual(k.ms[f.widths.len - 1], t.window[t.window.len - 1].ms);
+    k.ms[2] = 0;
+    try std.testing.expect(!f.usable(k));
+    k.ms[2] = 1;
+    k.step_ms = std.math.nan(f64);
+    try std.testing.expect(!f.usable(k));
+}
+
+test "GLM window prices: MTP takes timed prices and DFlash2 keeps every consumed seed price" {
+    const f = @import("glm_cuda");
+    var k: f.lane_costs.Kept = .{ .ms = undefined, .step_ms = 0.25, .fact = 0 };
+    for (&k.ms, f.lane_costs.widths) |*m, w| m.* = 9 + 0.5 * @as(f64, @floatFromInt(w));
+    var e: f.engine.Engine = undefined;
+    e.mtp = true;
+    for ([_]?*@TypeOf(e.drafter.?.*){ null, @ptrFromInt(16) }) |drafter| {
+        e.drafter = drafter;
+        var b: f.lanes.Lanes = .{ .x = .{ .e = &e, .link = undefined } };
+        const seeded = b.factsWithCopies(true);
+        try std.testing.expect(seeded.window_costs[0].ms > 50);
+        b.costs = f.lane_costs.table(k);
+        for ([_]bool{ false, true }) |copies| {
+            const m = b.factsWithCopies(copies);
+            try std.testing.expectEqual(@as(usize, f.lanes.max_rows), m.window_costs.len);
+            const family: Family = if (drafter == null) .glm_mtp else .glm_block;
+            const main = mainFacts(family);
+            try std.testing.expectEqual(if (drafter == null) k.ms[0] else main.window_costs[0].ms, m.window_costs[0].ms);
+            if (drafter == null) try std.testing.expectEqual(@intFromPtr(b.costs.?.window[0..].ptr), @intFromPtr(m.window_costs.ptr));
+            try std.testing.expectEqualDeep(main.shared_costs, m.shared_costs);
+            var cfg = try lanes.Config.init(a, m, 32, 31);
+            defer cfg.deinit(a);
+            var fake: lanes.fake.Fake = .{ .gpa = a };
+            defer fake.deinit();
+            var clock: lanes.fake.FixedClock = .{};
+            var core = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());
+            defer core.deinit();
+            try std.testing.expectEqual(main.mtp_step_ms, core.rule.sharedStepMs());
+            const steps: f64 = if (drafter == null) 14 else 7;
+            try std.testing.expectApproxEqAbs(main.mtp_step_ms * steps, core.rule.headMs(&.{ 7, 7 }), 1e-12);
+            var main_cfg = try lanes.Config.init(a, main, 32, 31);
+            defer main_cfg.deinit(a);
+            if (!copies) for (1..33) |width| {
+                try std.testing.expectEqual(main_cfg.shared_costs.get(@intCast(width)), cfg.shared_costs.get(@intCast(width)));
+            };
+            try std.testing.expectEqual(if (drafter == null) k.step_ms else main.mtp_step_ms, m.mtp_step_ms);
+            try std.testing.expectEqual(copies, m.root_copies);
+            try std.testing.expectEqual(!copies and drafter == null, m.window_costs_lone);
+        }
+    }
 }

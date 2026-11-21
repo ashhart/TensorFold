@@ -1,7 +1,7 @@
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { authoredText } from '../lib/preferences/language-packs'
 import { useStore as useLocaleStore } from '../lib/store'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
 import { Icon, type IconName } from '../lib/icons'
@@ -17,40 +17,52 @@ const MODES: { id: ExportMode; label: string; icon: IconName; blurb: string }[] 
   { id: 'eval', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Eval replay") }, icon: 'spark', blurb: 'Replay skeleton — prompts, tool calls and outcomes only; reasoning dropped, anonymized.' },
 ]
 
+type ExportSelection = { threadId: string; mode: ExportMode; redact: boolean }
+type ExportPreview = { selection: ExportSelection; result: ExportResult | null }
+
 export function ExportPanel() {
   const tx = useAuthoredText()
-  const [threadId, setThreadId] = useState<string | null>(null)
-  const [mode, setMode] = useState<ExportMode>('full')
-  const [redact, setRedact] = useState(true)
-  const [result, setResult] = useState<ExportResult | null>(null)
-  const [building, setBuilding] = useState(false)
+  const [selection, setSelection] = useState<ExportSelection | null>(null)
+  const [preview, setPreview] = useState<ExportPreview | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  const reqRef = useRef(0)
+  const selectionRef = useRef(selection)
+  const choose = useCallback((next: ExportSelection | null) => {
+    selectionRef.current = next
+    setSelection(next)
+    setPreview(null)
+    setSaved(null)
+    setCopied(false)
+  }, [])
 
   useEffect(() => {
     const onOpen = (e: Event) => {
       const id = (e as CustomEvent).detail?.threadId
-      if (typeof id !== 'string') return
-      setThreadId(id); setMode('full'); setRedact(true); setSaved(null); setCopied(false)
+      if (typeof id !== 'string' || !id) return
+      choose({ threadId: id, mode: 'full', redact: true })
     }
     window.addEventListener('vontra:export', onOpen as EventListener)
     return () => window.removeEventListener('vontra:export', onOpen as EventListener)
-  }, [])
+  }, [choose])
 
-  // Rebuild the bundle whenever the target or options change (request-id guards races).
   useEffect(() => {
-    if (!threadId) { setResult(null); return }
-    const req = ++reqRef.current
-    setBuilding(true); setSaved(null); setCopied(false)
+    if (!selection) return
+    const { threadId, mode, redact } = selection
+    let active = true
+    const finish = (result: ExportResult | null) => {
+      if (active && selectionRef.current === selection) setPreview({ selection, result })
+    }
     api.buildExport(threadId, { mode, redact })
-      .then((r) => { if (req === reqRef.current) setResult(r) })
-      .catch(() => { if (req === reqRef.current) setResult(null) })
-      .finally(() => { if (req === reqRef.current) setBuilding(false) })
-  }, [threadId, mode, redact])
+      .then(finish, () => finish(null))
+    return () => { active = false }
+  }, [selection])
 
-  if (!threadId) return null
-  const close = () => setThreadId(null)
+  if (!selection) return null
+  const { threadId, mode, redact } = selection
+  const currentPreview = preview?.selection === selection ? preview : null
+  const building = currentPreview === null
+  const result = currentPreview?.result
+  const close = () => { if (selectionRef.current === selection) choose(null) }
   const bundle = result?.bundle
   const totalRedactions = bundle?.redactionReport.reduce((n, r) => n + r.count, 0) ?? 0
   const evidence = bundle?.evidence
@@ -59,13 +71,18 @@ export function ExportPanel() {
     : 0
 
   const onCopy = async () => {
-    if (!result) return
-    try { await navigator.clipboard.writeText(result.json); setCopied(true); setTimeout(() => setCopied(false), 1600) } catch { /* clipboard blocked */ }
+    if (!result || selectionRef.current !== selection) return
+    try {
+      await navigator.clipboard.writeText(result.json)
+      if (selectionRef.current !== selection) return
+      setCopied(true)
+      setTimeout(() => { if (selectionRef.current === selection) setCopied(false) }, 1600)
+    } catch { /* clipboard blocked */ }
   }
   const onSave = async () => {
-    if (!threadId) return
+    if (!result || selectionRef.current !== selection) return
     const res = await api.saveExport(threadId, { mode, redact })
-    if (res.saved) setSaved(res.path ?? 'saved')
+    if (res.saved && selectionRef.current === selection) setSaved(res.path ?? 'saved')
   }
 
   return (
@@ -86,7 +103,9 @@ export function ExportPanel() {
           {/* mode picker */}
           <div className="grid grid-cols-3 gap-2">
             {MODES.map((m) => (
-              <button key={m.id} onClick={() => setMode(m.id)} className={clsx('flex flex-col gap-1 rounded-lg border px-2.5 py-2 text-left transition-colors', mode === m.id ? 'border-ink-3 bg-ink-5' : 'border-line hover:border-line-strong')}>
+              <button key={m.id} onClick={() => {
+                if (m.id !== mode && selectionRef.current === selection) choose({ ...selection, mode: m.id })
+              }} className={clsx('flex flex-col gap-1 rounded-lg border px-2.5 py-2 text-left transition-colors', mode === m.id ? 'border-ink-3 bg-ink-5' : 'border-line hover:border-line-strong')}>
                 <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name={m.icon} size={13} className="text-ink-3" />{m.label}</span>
               </button>
             ))}
@@ -95,7 +114,9 @@ export function ExportPanel() {
 
           {/* redaction control */}
           <label className="mt-3 flex items-start gap-2.5 rounded-lg border border-line bg-card-2 px-3 py-2.5">
-            <input type="checkbox" checked={redact} onChange={(e) => setRedact(e.target.checked)} className="mt-0.5 accent-[var(--ink)]" />
+            <input type="checkbox" checked={redact} onChange={(e) => {
+              if (selectionRef.current === selection) choose({ ...selection, redact: e.target.checked })
+            }} className="mt-0.5 accent-[var(--ink)]" />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="shield" size={13} className={redact ? 'text-positive' : 'text-warn'} />{tx("Redact secrets & PII")}</span>
               <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-3">{redact ? tx("Scans every value for API keys, tokens, private keys, JWTs, emails and home paths before export.") : tx("Off — the bundle may contain raw secrets. Only disable for a local, trusted destination.")}</span>

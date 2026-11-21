@@ -4,6 +4,14 @@ These receipts cover native LFM3-1.7B and LFM3-VL-2B from the official MLX expor
 They distinguish implementation checks from the still-required maintainer model/performance gate.
 Checkpoint revisions and run instructions are in the [family recipe](../../recipes/lfm3-native.md).
 
+## Qualification ledger
+
+The recipe's [qualification rules](../../recipes/lfm3-native.md#qualification-rules) and
+[evidence ledger](../../recipes/lfm3-native.md#evidence-ledger) record what each receipt ran, on what,
+and what it showed, one table beside the run instructions. Rows for the pending
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added there once that PR
+lands and its files are on main.
+
 ## Runner-only maintenance
 
 The follow-up to `1c45d29ed8bbaaa67acc5ebbd021302ff1f59066` inlines three import aliases at their use sites to keep the Metal contract runner at 600 lines; no suite, kernel or serving arithmetic changes.

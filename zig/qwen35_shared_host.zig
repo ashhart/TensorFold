@@ -43,6 +43,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     d.api.cuMemcpyDtoDAsync_v2 = Driver.copyAsync;
     d.api.cuLaunchKernel = Driver.launch;
     var e: q.engine.Engine = undefined;
+    e.scratch_rows = q.engine.grid_rows;
     e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
@@ -102,17 +103,17 @@ test "Shared verification: empty multi-row keep preserves the root and completed
     var cache: q.engine.Cache = .{ .state = b, .kv = b, .log = b, .cap = 256, .len = 7, .logits = &.{} };
     Driver.launches = 0;
     Driver.copies = 0;
-    cache.advanced(64, true);
+    cache.advanced(64, true, true);
     try cache.keep(&e, &.{});
     try std.testing.expectEqual(@as(usize, 7), cache.len);
     try std.testing.expectEqual(@as(usize, 0), Driver.copies);
-    cache.advanced(1, true);
+    cache.advanced(1, true, true);
     try std.testing.expect(cache.last != null);
     try cache.settle(&e);
     try std.testing.expectEqual(@as(usize, 8), cache.len);
     try std.testing.expect(cache.last == null);
     try std.testing.expectEqual(@as(usize, 0), Driver.launches);
-    cache.advanced(128, false);
+    cache.advanced(128, false, true);
     try std.testing.expect(cache.last == null);
     try std.testing.expectEqual(@as(usize, 136), cache.len);
     // the before copy sits inside the log's bytes (one overlaid block), so a stream holds one state beside it

@@ -61,11 +61,12 @@ pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 pub const Place = struct { rank: usize, world: usize };
 
 pub fn place() !Place {
-    const r = std.c.getenv("TF_MINIMAX_RANK");
-    const w = std.c.getenv("TF_MINIMAX_WORLD");
+    const env = @import("sys").environment;
+    const r = try env.read(?u64, "TF_MINIMAX_RANK", null);
+    const w = try env.read(?u64, "TF_MINIMAX_WORLD", null);
     if (r == null and w == null) return .{ .rank = 0, .world = 1 };
     if (r == null or w == null) return error.NoRank;
-    const p: Place = .{ .rank = std.fmt.parseInt(usize, std.mem.span(r.?), 10) catch return error.NoRank, .world = std.fmt.parseInt(usize, std.mem.span(w.?), 10) catch return error.NoRank };
+    const p: Place = .{ .rank = @intCast(r.?), .world = @intCast(w.?) };
     if (p.world < 1 or p.rank >= p.world) return error.NoRank;
     return p;
 }
@@ -105,7 +106,8 @@ fn draftBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 }
 
 /// Bytes this rank's weights take: its share of the split axes; the embeddings, the routers and dspark/ counted whole.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+    _ = drafts; // dspark/ is counted whole (drafts are on by default)
     const p = place() catch return total;
     const c = cfg.Config.read(a, io, dir) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
@@ -137,6 +139,7 @@ const Owned = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels;
+    try @import("sys").environment.checkScope(.minimax_m3, @import("sys").environment.Process{});
     const p = try place();
     try admit(@intCast(try ctx.attribute(.compute_capability_major) * 10 + try ctx.attribute(.compute_capability_minor)), p.world);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
@@ -191,7 +194,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (p.world > 1) {
         // small gathers by RoCE writes on two ranks, both or neither (TF_ROCE=0: NCCL; TF_ROCE_MAX_KB: the cap)
         own.group = .{ .lib = own.lib.?, .comm = own.comm, .rank = p.rank, .world = p.world };
-        try own.group.?.openRoce(gpa, io, ctx.d, own.e.stream, try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null));
+        if (p.world == 2) try own.group.?.openRoce(gpa, io, ctx.d, own.e.stream, try roceBytes((@import("sys").environment.Process{}).get("TF_ROCE_MAX_KB")));
         own.e.exchange = .{ .nccl = .{ .lib = &own.lib.?, .comm = own.comm, .group = &own.group.? } };
     }
     errdefer if (own.group) |*g| if (g.fast) |f| f.deinit();

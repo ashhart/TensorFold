@@ -2,8 +2,10 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const engine = @import("cuda_engine.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
+const prompt_cuts = @import("cuda_prompt_cuts.zig");
 const images_mod = @import("cuda_images.zig");
 const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
@@ -14,7 +16,7 @@ const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -22,7 +24,7 @@ pub const Header = extern struct {
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
     flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
+    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -37,6 +39,9 @@ pub const Header = extern struct {
 
 /// tf_glm_put_words' argument: a step's header (16 words) and up to `put_ids` ids.
 pub const Words = extern struct { w: [96]u32 };
+/// Ids the first broadcast of a step carries beside its header: a window's, or a block's reqs, in one message.
+const inline_ids = 48;
+const first_bytes = 64 + inline_ids * 4;
 pub const put_ids = 96 - 16;
 
 /// The most ids one step carries (a prompt at the engine's capacity).
@@ -58,7 +63,7 @@ pub const Link = struct {
             var owned = buf;
             owned.free();
         }
-        const wait = if (std.c.getenv("TF_GLM_LINK_WAIT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
         return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
     }
 
@@ -89,14 +94,15 @@ pub const Link = struct {
             a.add(l.buf.ptr);
             a.add(@as(u32, @intCast(16 + ids.len)));
             a.add(w);
-            try cuda.launch.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
-            try l.post(64);
-            if (ids.len > 0) try l.post(64 + ids.len * 4);
+            try cuda_pdl.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
+            try l.post(first_bytes);
+            if (ids.len > inline_ids) try l.post(64 + ids.len * 4);
             return;
         }
         try l.buf.uploadAsync(0, std.mem.asBytes(&hh), l.stream.handle);
-        try l.bcast(64);
-        if (ids.len > 0) {
+        if (ids.len > 0 and ids.len <= inline_ids) try l.buf.uploadAsync(64, std.mem.sliceAsBytes(ids), l.stream.handle);
+        try l.bcast(first_bytes);
+        if (ids.len > inline_ids) {
             try l.buf.uploadAsync(64, std.mem.sliceAsBytes(ids), l.stream.handle);
             try l.bcast(64 + ids.len * 4);
         }
@@ -110,13 +116,16 @@ pub const Link = struct {
 
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
-        try l.bcast(64);
-        var h: Header = undefined;
-        try l.buf.download(0, std.mem.asBytes(&h));
+        try l.bcast(first_bytes);
+        var first: [first_bytes]u8 align(8) = undefined;
+        try l.buf.download(0, &first);
+        const h = std.mem.bytesAsValue(Header, first[0..@sizeOf(Header)]).*;
         if (h.n > l.ids.len) return error.TooManyIds;
-        if (h.n > 0) {
+        if (h.n > inline_ids) {
             try l.bcast(64 + h.n * 4);
             try l.buf.download(64, std.mem.sliceAsBytes(l.ids[0..h.n]));
+        } else if (h.n > 0) {
+            @memcpy(l.ids[0..h.n], std.mem.bytesAsSlice(u32, first[64..][0 .. h.n * 4]));
         }
         return .{ .h = h, .ids = l.ids[0..h.n] };
     }
@@ -146,7 +155,7 @@ pub const Leader = struct {
         return @intFromBool(x.e.prompt_logprobs != null);
     }
 
-    /// No stream is left: the other ranks sleep on their lines until the next step instead of spinning in NCCL.
+    /// No stream is left, or rank 0's tower is about to run: the other ranks sleep on their lines until the next step.
     pub fn idle(x: Leader) !void {
         if (x.link.asleep or !cuda.tp_watch.open()) return;
         try x.send(.{ .kind = @backingInt(Kind.idle) }, &.{});
@@ -208,6 +217,13 @@ pub const Leader = struct {
         try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
     }
 
+    /// Rank 0's tower encodes the bound slot's images past `from` with the other ranks asleep (#3614), then their rows.
+    pub fn encode(x: Leader, v: *images_mod.Images, list: []const @import("lanes").stream.Image, from: usize) !void {
+        try x.idle(); // a net plugin may time out an NCCL wait as long as the pass: they wait on their lines instead
+        try v.begin(x.e.slot, list, from); // a refusal leaves every rank as it was, asleep until rank 0's next step
+        try x.images(v);
+    }
+
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
     pub fn images(x: Leader, v: *const images_mod.Images) !void {
         try x.flush();
@@ -224,11 +240,19 @@ pub const Leader = struct {
         return x.e.prefill(ids, from, cancel, marks);
     }
 
-    /// One prompt step on every rank (Engine.prefillChunk): a chunk, or two if `alone` and solo or pair rules allow.
+    /// The bound sequence's request chunk starts (TF_GLM_REQUEST_STARTS) to every rank, before its first prompt step.
+    pub fn cuts(x: Leader, starts: []const u32) !void {
+        try prompt_cuts.set(x.e.gpa, &x.e.cur.cuts, starts); // a refusal here leaves every rank as it was
+        try x.flush();
+        try x.send(.{ .kind = @backingInt(Kind.cuts) }, starts);
+    }
+
+    /// One prompt step on every rank (Engine.prefillChunk): to the next cut, or two if `alone` and solo or pair allow.
     pub fn chunk(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
-        const n: usize = if (alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks))) engine.solo_rows else engine.prompt_rows;
+        const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
+        const n = prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide);
         const part = ids[start..@min(ids.len, start + n + 1)];
         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
         try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
@@ -299,6 +323,12 @@ pub const Leader = struct {
         try x.e.draftBlock(reqs);
     }
 
+    /// Every rank's expert forms, bit r - 1 for a window of r rows (the same bits; load timing picks them by width).
+    pub fn expertForm(x: Leader, forms: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.form), .a = forms }, &.{});
+        x.e.m.experts.fact = forms;
+    }
+
     /// The other ranks leave their loops.
     pub fn end(x: Leader) !void {
         try x.send(.{ .kind = @backingInt(Kind.end) }, &.{});
@@ -327,13 +357,13 @@ fn structuredStep(h: Header) bool {
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
     var chances: [engine.max_drafts]f64 = undefined;
-    var sampled: [16]u32 = undefined;
+    var sampled: [engine.shared_rows]u32 = undefined;
     cuda.tp_watch.sleep(e.io); // rank 0 starts with no stream: its first step wakes this rank
     while (true) {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
@@ -345,6 +375,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 if (e.pages != null) return error.BadStep;
                 e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
             },
+            .cuts => try prompt_cuts.set(e.gpa, &e.cur.cuts, step.ids), // the bound sequence's, before its first prompt step
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
@@ -389,6 +420,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try e.prefillMany(decoded, &firsts);
             },
             .keep => try e.keep(@intCast(h.a)),
+            .form => e.m.experts.fact = h.a,
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);

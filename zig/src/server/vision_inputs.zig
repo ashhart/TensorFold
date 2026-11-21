@@ -299,7 +299,7 @@ fn videoGlm(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.glm.Vide
     const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var gs: GlmSize = .{ .budget = 16384 };
     gs.budget = @import("sys").environment.read(u64, "TENSORFOLD_VIDEO_TOKENS", gs.budget) catch {
-        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", @import("sys").getenv("TENSORFOLD_VIDEO_TOKENS").?));
+        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", (@import("sys").environment.Process{}).get("TENSORFOLD_VIDEO_TOKENS").?));
     };
     var v: TfVideo = undefined;
     const rc = l.decode(bytes.ptr, bytes.len, 2.0, 2, 256, 3600.0, 8192, sizeForGlm, @ptrCast(&gs), &v);
@@ -328,7 +328,7 @@ fn video(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.Video {
     const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var budget: u64 = 16384;
     budget = @import("sys").environment.read(u64, "TENSORFOLD_VIDEO_TOKENS", budget) catch {
-        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", @import("sys").getenv("TENSORFOLD_VIDEO_TOKENS").?));
+        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", (@import("sys").environment.Process{}).get("TENSORFOLD_VIDEO_TOKENS").?));
     };
     var v: TfVideo = undefined;
     const rc = l.decode(bytes.ptr, bytes.len, 2.0, 4, 256, 3600.0, 8192, sizeFor, @ptrCast(&budget), &v);

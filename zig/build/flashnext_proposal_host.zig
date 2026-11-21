@@ -11,6 +11,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, la
     }) }));
     b.step("test-flashnext-pages-contract-host", "Paged media fixtures, address controls and production wrappers without a GPU").dependOn(&pages.step);
     b.top_level_steps.get("test-cuda-host").?.step.dependOn(&pages.step);
+    const nonfinite = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"Flash Next nonfinite:"} }));
+    b.step("test-flashnext-nonfinite-host", "Actual single, shared and main-model score selection without a GPU").dependOn(&nonfinite.step);
+    b.top_level_steps.get("test-cuda-host").?.step.dependOn(&nonfinite.step);
     const pack = b.createModule(.{ .root_source_file = b.path("zig/flashnext_proposal_pack_host.zig"), .target = b.graph.host, .link_libc = true });
     b.step("test-flashnext-proposal-pack-host", "Original Flash Next padded support, pack bytes and fingerprints").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pack, .filters = &.{"Flash Next proposal:"} })).step);
 }

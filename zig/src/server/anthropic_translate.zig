@@ -153,6 +153,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                 var texts: std.ArrayList([]const u8) = .empty;
                 var result_parts: std.ArrayList(Value) = .empty;
                 var has_image = false;
+                var has_reference = false;
                 for (try parts(cx, block.get("content") orelse Value{ .string = "" })) |part| {
                     if (part.typeIs("text")) {
                         const t = try string(cx, part.get("text"), "tool_result.text", true);
@@ -164,6 +165,13 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                     } else if (part.typeIs("document")) {
                         try result_parts.append(a, try document(cx, part));
                         has_image = true;
+                    } else if (part.typeIs("tool_reference")) {
+                        const name = try string(cx, part.get("tool_name"), "tool_reference.tool_name", false);
+                        const ref = try json.newObject(a);
+                        try ref.put(a, "type", .{ .string = "tool_reference" });
+                        try ref.put(a, "name", .{ .string = name });
+                        try result_parts.append(a, .{ .object = ref });
+                        has_reference = true;
                     } else return cx.fail(.request, "unsupported tool_result content type {s}", .{try pyrepr.repr(a, part.get("type"))});
                 }
                 var text = try std.mem.join(a, "\n", texts.items);
@@ -174,7 +182,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                 const m = try json.newObject(a);
                 try m.put(a, "role", .{ .string = "tool" });
                 try m.put(a, "tool_call_id", .{ .string = try string(cx, block.get("tool_use_id"), "tool_use_id", false) });
-                try m.put(a, "content", if (has_image) .{ .array = result_parts.items } else .{ .string = text });
+                try m.put(a, "content", if (has_image or has_reference) .{ .array = result_parts.items } else .{ .string = text });
                 try out.append(a, .{ .object = m });
             } else return cx.fail(.request, "unsupported {s} content block type {s}", .{ role, try pyrepr.repr(a, kind) });
         }
@@ -241,6 +249,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const tools = body.get("tools") orelse Value{ .array = &.{} };
     if (tools != .array) return cx.refuse("tools must be an array");
     var translated: std.ArrayList(Value) = .empty;
+    var deferred: usize = 0;
     for (tools.array) |tool| {
         const kind = if (tool == .object) tool.get("type") orelse Value{ .string = "custom" } else Value.null;
         if (tool != .object or kind != .string or !std.mem.eql(u8, kind.string, "custom")) return cx.refuse("only client-defined function tools are supported");
@@ -251,11 +260,19 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         try function.put(a, "name", .{ .string = name });
         try function.put(a, "parameters", schema);
         if (tool.has("description")) try function.put(a, "description", .{ .string = try string(cx, tool.get("description"), "tool.description", true) });
+        if (tool.get("defer_loading")) |d| {
+            if (d != .bool) return cx.refuse("tool.defer_loading must be a boolean");
+            if (d.bool) { // false is the default: the tool translates as it does without the field
+                try function.put(a, "defer_loading", d);
+                deferred += 1;
+            }
+        }
         const t = try json.newObject(a);
         try t.put(a, "type", .{ .string = "function" });
         try t.put(a, "function", .{ .object = function });
         try translated.append(a, .{ .object = t });
     }
+    if (deferred > 0 and deferred == translated.items.len) return cx.refuse("At least one tool must have defer_loading=false. All tools cannot be deferred.");
     if (translated.items.len > 0) try chat.put(a, "tools", .{ .array = translated.items });
     if (body.field("tool_choice")) |choice| {
         if (choice != .object) return cx.refuse("tool_choice must be an object");

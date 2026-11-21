@@ -22,7 +22,8 @@ pub const Env = struct {
 };
 
 pub const usage =
-    \\usage: tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
+    \\usage: tensorfold config validate FILE
+    \\       tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
     \\       tensorfold cluster check --cluster FILE [--model ID] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
     \\       tensorfold cluster status --cluster FILE [--model ID] [--probe | --probes DIR]
     \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--hold SECONDS] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
@@ -386,9 +387,8 @@ fn describe(env: Env, c: config.Config, p: Prepared) !void {
 
 /// Bring this node up over MCDMA and hold: `hold_ns`, then goodbye (serve), or null until a node says goodbye (node).
 fn hostRun(env: Env, p: Prepared, probed: node.Inventory, hold_ns: ?u64) !u8 {
-    // membership knows a node by its unique name in the file, not its probed hardware id, which nodes on a host share
+    // membership knows a node by its unique name in the file (its id is the name's), not its probed hardware id
     var inv = probed;
-    inv.id = node.idFrom(p.spec.names[p.spec.rank]);
     inv.name = .of(p.spec.names[p.spec.rank]);
     try env.out.flush();
     var diag: bringup.Diag = .{};

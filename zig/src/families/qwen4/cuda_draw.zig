@@ -77,9 +77,7 @@ pub fn Drawer(comptime C: type, comptime L: type, comptime B: type) type {
                 args.add(@as(u32, @intCast(d.words)));
                 try C.launch.launch(d.mask, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 256 } }, d.backend.stream, &args);
             }
-            const active = if (sampling) |s| s.temperature > 0 else false;
-            if (active) {
-                const rule = C.sample.Rule.from(L.gpu_rule.rule(sampling.?));
+            if (C.sample.ruleFor(sampling)) |rule| {
                 const rules: [128]C.sample.Rule = @splat(rule);
                 try d.backend.write(d.meta, 0, std.mem.sliceAsBytes(rules[0..n]));
                 const off = d.rows * @sizeOf(C.sample.Rule);

@@ -63,9 +63,9 @@ fn slotUsed(g: Geometry, i: usize, slot: Slot) bool {
     };
 }
 
-/// A plain BF16 checkpoint's kinds: every module and the untied head bf16, on the ModelOpt loader's HF names.
+/// A plain BF16 checkpoint's kinds: every module and the head bf16 (a tied head packs embed_tokens), on HF names.
 pub fn plain(g: Geometry) !Kinds {
-    if (g.tied or g.moe()) return error.UnsupportedQwenQuantization;
+    if (g.moe()) return error.UnsupportedQwenQuantization;
     var out: Kinds = .{ .modelopt = true, .head = .bf16 };
     for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
         if (slotUsed(g, i, slot)) out.proj[i][@backingInt(slot)] = .bf16;
@@ -315,6 +315,15 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
     if (rows >= cuda.qmmf.fused_rows) return error.WindowTooWide; // the fused tile sums its slices in another order
     return l.decode(e.stream, w, in, out, rows);
+}
+
+/// NVFP4 prompt gate and up in one lean pair launch into `act`, the bytes of main's path; false: not taken.
+pub fn swiglu(e: *Engine, gate: Proj, up: Proj, x: u64, act: u64, rows: usize, prompt: bool, rows_at: u64) !bool {
+    if (!prompt or rows <= 16 or gate != .ql or up != .ql or gate.ql != .nvfp4 or up.ql != .nvfp4) return false;
+    const k = if (e.mo) |*m| m else return false;
+    if (!cuda.nvfp4.Prompt.pairs(gate.ql.nvfp4, up.ql.nvfp4)) return false;
+    try k.prompt.swiglu(e.stream, x, gate.ql.nvfp4.k, rows, gate.ql.nvfp4, up.ql.nvfp4, act, rows_at);
+    return true;
 }
 
 /// An fp32 tensor of one element.

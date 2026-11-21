@@ -16,6 +16,25 @@ pub const nowNs = serve.backend.nowNs;
 /// A stream's window position in the timings (the caches are scratch).
 const at = 16;
 
+/// A timed forward's tokens: one repeated for a lone window, one a row for shared rows, which an MoE routes apart.
+pub fn fillTokens(tokens: []u32, windows: usize, vocab: usize) void {
+    const span = @min(vocab, 65536) - 1;
+    // two primes whose product passes every span: at most one divides it, so the stride is coprime to the span
+    const stride: usize = if (span % 7919 == 0) 7927 else 7919;
+    for (tokens, 0..) |*t, k| t.* = if (windows > 1) @intCast(1 + (k * stride) % span) else 1;
+}
+
+/// A timed round over windows of `widths`: each row's greedy draw and its token, by the window count; returns its rows.
+pub fn fillRound(tokens: []u32, reqs: []draw.Request, widths: []const usize, vocab: usize) usize {
+    var total: usize = 0;
+    for (widths) |w| {
+        for (0..w) |j| reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
+        total += w;
+    }
+    fillTokens(tokens[0..total], widths.len, vocab);
+    return total;
+}
+
 const Rig = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -33,7 +52,6 @@ const Rig = struct {
         r.caches = try gpa.alloc(state.Caches, streams);
         r.rows = try gpa.alloc(Engine.Rows, streams);
         r.tokens = try gpa.alloc(u32, most);
-        @memset(r.tokens, 1);
         r.reqs = try gpa.alloc(draw.Request, most);
         r.out = try gpa.alloc(u32, most);
         // a bucket's rows over the streams can outgrow a lone window when `most` passes 16 rows a stream
@@ -55,11 +73,11 @@ const Rig = struct {
 
     /// Mean ms of a verify of `streams` windows of the given widths.
     pub fn time(r: *Rig, widths: []const usize) !f64 {
-        var total: usize = 0;
+        const total = fillRound(r.tokens, r.reqs, widths, r.e.model().spec.vocab);
+        var from: usize = 0;
         for (widths, 0..) |w, i| {
-            r.rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[total..][0..w] };
-            for (0..w) |j| r.reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
-            total += w;
+            r.rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[from..][0..w] };
+            from += w;
         }
         const n = shared.runs(total);
         var spent: u64 = 0;

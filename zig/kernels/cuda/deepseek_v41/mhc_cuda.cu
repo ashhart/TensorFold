@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include "common/cp_async.cuh"
+#include "common/fold.cuh"
+#include "common/reduce.cuh"
 
 namespace dsv41_mhc {
 
@@ -154,7 +156,7 @@ __device__ __forceinline__ void chains(const Args& a, const uint16_t* xs, const 
 
 // row r's coefficients on 16 lanes (comb (i, j) at lane bits 3..2, 1..0): _finish_k's ops and butterfly order
 __device__ __forceinline__ void coefs_of(const Args& a, const float* mx, int r, bool store, int e) {
-    const float rinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(mx[24], 4.0f * D), a.eps)));
+    const float rinv = tf_common::rms_scale(mx[24], 4 * D, a.eps);
     const float LOG2E = __int_as_float(0x3FB8AA3B), NLOG2E = __int_as_float(0xBFB8AA3B);
     if (e < 4) {
         const float pl = __fadd_rn(__fmul_rn(__fmul_rn(mx[e], rinv), __ldg(a.scale + 0)), __ldg(a.base + e));
@@ -235,7 +237,7 @@ __device__ void finish(const Args& a, float* rowv, float4* st, int t) {
                 rv[4 * qi] = acc.x; rv[4 * qi + 1] = acc.y; rv[4 * qi + 2] = acc.z; rv[4 * qi + 3] = acc.w;
             } else {
                 rv[24] = acc.x;
-                rv[25] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ssc, 1.0f * D), a.eps)));
+                rv[25] = tf_common::rms_scale(ssc, D, a.eps);
             }
         }
     } else if (t < R) {  // final: the collapsed row's square sum alone
@@ -243,10 +245,8 @@ __device__ void finish(const Args& a, float* rowv, float4* st, int t) {
         float v[NB];
 #pragma unroll
         for (int e = 0; e < NB; ++e) v[e] = __ldcg(p + e * PW);
-        float ssc = 0.0f;
-#pragma unroll
-        for (int e = 0; e < NB; ++e) ssc = __fadd_rn(ssc, v[e]);
-        rowv[t * (ROWB / 4) + 25] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ssc, 1.0f * D), a.eps)));
+        const float ssc = tf_common::sum_rn<NB>(NB, [&](int e) { return v[e]; });
+        rowv[t * (ROWB / 4) + 25] = tf_common::rms_scale(ssc, D, a.eps);
     }
     __syncthreads();
     const int warp = t >> 5, lane = t & 31;

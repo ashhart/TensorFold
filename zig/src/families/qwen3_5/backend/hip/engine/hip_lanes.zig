@@ -193,6 +193,7 @@ pub const Hip = struct {
             .max_streams = @intCast(h.e.o.batch_rows),
             .draft_streams = drafting,
             .plain_guard = plain_guard,
+            .copy_guard = h.costs.windows > 0, // a lone stream's copies too, with a head or without (lanes/lone_copy.zig)
             .window_costs = h.costs.window[0..h.costs.windows],
             .shared_costs = h.costs.shared[0..h.costs.shareds],
             .mtp_step_ms = h.costs.step_ms,
@@ -267,6 +268,7 @@ pub const Hip = struct {
     pub fn begin(h: *Hip, s: *lanes.Stream) !*Lane {
         const prompt = s.prompt();
         if (prompt.len == 0 or prompt.len + s.max_new + 1 > h.e.o.capacity) return error.PromptTooLong;
+        for (prompt) |t| if (t >= h.e.model().spec.vocab) return error.InvalidQwenToken; // before the other ranks hear it
         const gop = try h.streams.map.getOrPut(h.gpa, s);
         if (gop.found_existing) h.free(gop.value_ptr.*);
         errdefer h.streams.map.removeByPtr(gop.key_ptr);

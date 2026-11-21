@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import type { Readable } from 'node:stream'
 import type { PullProgress } from '../types'
 import { repoCachedBytes, type EngineBinary } from './paths'
+import { PullInactivity, type PullTimeout } from './pull-inactivity'
+import { pullEnvironment, pullFailure, redactPullDiagnostic } from './pull-network'
 
 // Runs `tensorfold-native pull` for a repo and then any companion (the 27B's drafter), one process
 // at a time in its own process group. pull prints a line per finished file but no byte counts, so
@@ -20,6 +23,7 @@ export interface PullOptions {
   totalBytes: number | null
   pollMs?: number
   killGraceMs?: number
+  inactivityTimer?: PullTimeout
   onUpdate: (progress: PullProgress) => void
 }
 
@@ -30,6 +34,7 @@ export interface PullHandle {
 }
 
 const KEEP_LINES = 40
+const MAX_LINE_CHARS = 64 * 1024
 
 // Cache bytes are measured, not guessed from the advertised model size. A resumed download's
 // existing bytes establish the baseline and never count as this session's transfer speed.
@@ -85,20 +90,42 @@ export function startPull(opts: PullOptions): PullHandle {
   const lines: string[] = []
   let child: ChildProcess | null = null
   let cancelled = false
+  let env = opts.env
+  let stalled: string | null = null
   let killTimer: ReturnType<typeof setTimeout> | null = null
   const emit = () => opts.onUpdate({ ...state })
+  const terminate = () => {
+    killGroup(child, 'SIGTERM')
+    if (killTimer) clearTimeout(killTimer)
+    killTimer = setTimeout(() => killGroup(child, 'SIGKILL'), opts.killGraceMs ?? 3000)
+    killTimer.unref?.()
+  }
+  const inactivity = new PullInactivity(() => {
+    if (!child || cancelled || state.state !== 'running') return
+    stalled = pullFailure('', env, true)
+    inactivity.stop()
+    state.message = stalled
+    state.phase = 'Stopping stalled download'
+    state.bytesPerSecond = state.etaSeconds = null
+    emit()
+    // Retry is admitted only after close confirms the cache writer has stopped.
+    terminate()
+  }, opts.inactivityTimer)
 
   const rate = new TransferRateEstimator()
+  let cacheBytes = 0
   let measuring: Promise<void> | null = null
   const measure = (): Promise<void> => {
     if (measuring) return measuring
     measuring = (async () => {
       let received = 0
       for (const step of opts.steps) received += await repoCachedBytes(opts.hub, step.repo)
+      cacheBytes = received
+      inactivity.sample(received)
       if (state.totalBytes != null) received = Math.min(received, state.totalBytes)
       if (state.state === 'running') {
         const now = Date.now()
-        const measuredRate = rate.sample(received, now)
+        const measuredRate = stalled ? null : rate.sample(received, now)
         const estimate = measuredRate != null && state.totalBytes != null && state.totalBytes > received ? Math.ceil((state.totalBytes - received) / measuredRate) : null
         state.receivedBytes = received
         state.bytesPerSecond = measuredRate
@@ -116,37 +143,63 @@ export function startPull(opts: PullOptions): PullHandle {
     state.phase = index === 0 ? `Downloading ${step.repo}` : `Downloading companion ${step.repo}`
     emit()
     const spec = step.revision ? `${step.repo}@${step.revision}` : step.repo
-    const proc = spawn(opts.binary.command, [...opts.binary.args, 'pull', spec], { env: opts.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn(opts.binary.command, [...opts.binary.args, 'pull', spec], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     child = proc
-    const onText = (chunk: Buffer) => {
-      for (const raw of chunk.toString('utf8').split(/\r?\n/)) {
-        const line = raw.trimEnd()
-        if (!line.trim()) continue
-        lines.push(line.trim())
+    lines.length = 0
+    inactivity.start(cacheBytes)
+    const onLines = (records: string[]) => {
+      let changed = false
+      for (const raw of records) {
+        // A line past the cap is dropped whole, never cut: a cut can keep a fragment of a URL's path or credentials.
+        if (raw.length > MAX_LINE_CHARS) continue
+        const line = redactPullDiagnostic(raw, env).trim()
+        if (!line) continue
+        lines.push(line)
         if (lines.length > KEEP_LINES) lines.shift()
-        state.lastLine = line.trim()
+        state.lastLine = line
+        changed = true
       }
-      emit()
+      if (changed) emit()
     }
-    proc.stdout?.on('data', onText)
-    proc.stderr?.on('data', onText)
-    proc.once('error', (error) => reject(new Error(`Could not start tensorfold-native pull: ${error.message}`)))
+    const capture = (stream: Readable | null) => {
+      if (!stream) return
+      let pending = ''
+      let dropping = false
+      stream.setEncoding('utf8')
+      stream.on('data', (chunk: string) => {
+        const records = (pending + chunk).split('\n')
+        pending = records.pop()!
+        if (dropping && records.length) { records.shift(); dropping = false }
+        onLines(records)
+        // Drop an oversized partial line whole, so truncation cannot expose half of a credential.
+        if (dropping || pending.length > MAX_LINE_CHARS) { pending = ''; dropping = true }
+      })
+      stream.once('end', () => { if (!dropping) onLines([pending]) })
+    }
+    capture(proc.stdout)
+    capture(proc.stderr)
+    proc.once('error', (error) => reject(new Error(`Unable to start tensorfold-native pull: ${redactPullDiagnostic(error.message, env)}`)))
     proc.once('close', (code, signal) => {
+      inactivity.stop()
+      if (killTimer) clearTimeout(killTimer)
       child = null
       if (cancelled) reject(new Error('cancelled'))
+      else if (stalled) reject(new Error(stalled))
       else if (code === 0) resolve()
-      else reject(new Error(lines.at(-1) || `tensorfold-native pull exited with ${signal ?? code}.`))
+      else reject(new Error(pullFailure(lines.at(-1) || `tensorfold-native pull exited with ${signal ?? code}.`, env)))
     })
   })
 
   const done = (async () => {
     try {
+      env = await pullEnvironment(opts.env)
       await measure()
       for (const [index, step] of opts.steps.entries()) {
         if (cancelled) throw new Error('cancelled')
         await runStep(step, index)
       }
       await measure()
+      if (cancelled) throw new Error('cancelled')
       state.state = 'done'
       state.phase = 'Downloaded'
       if (state.totalBytes != null) state.receivedBytes = state.totalBytes
@@ -155,6 +208,7 @@ export function startPull(opts: PullOptions): PullHandle {
       state.phase = cancelled ? 'Cancelled' : 'Failed'
       state.message = cancelled ? 'Download cancelled. Download again to resume.' : (error as Error).message
     } finally {
+      inactivity.stop()
       clearInterval(poll)
       if (killTimer) clearTimeout(killTimer)
       state.finishedAt = Date.now()
@@ -171,9 +225,8 @@ export function startPull(opts: PullOptions): PullHandle {
     cancel: () => {
       if (state.state !== 'running' || cancelled) return
       cancelled = true
-      killGroup(child, 'SIGTERM')
-      killTimer = setTimeout(() => killGroup(child, 'SIGKILL'), opts.killGraceMs ?? 3000)
-      killTimer.unref?.()
+      inactivity.stop()
+      terminate()
     },
     done,
   }

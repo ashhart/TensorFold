@@ -1,6 +1,7 @@
 //! A Qwen checkpoint's rope: plain, or static YaRN from its config or --rope-yarn, and the window that allows.
 const std = @import("std");
 const core = @import("core");
+const rope_config = @import("rope_config");
 
 /// The rope base every admitted Qwen3.5/3.6 checkpoint declares (cuda_geometry.zig checks it).
 pub const theta: f64 = 10000000;
@@ -50,15 +51,10 @@ pub fn resolveDir(a: std.mem.Allocator, io: std.Io, dir: []const u8, flag: ?f64)
 
 /// The YaRN block, null for plain rope; anything else, or a parameter outside transformers' default formula, refused.
 fn scaling(text: std.json.ObjectMap, rope: std.json.ObjectMap) Error!?std.json.ObjectMap {
-    var older = false; // the block came from the tower's rope_scaling, which only a scaled rope has
-    const block = if (text.get("rope_scaling")) |v| switch (v) {
-        .null => rope,
-        .object => |o| blk: {
-            older = true;
-            break :blk o;
-        },
-        else => return error.UnsupportedRopeScaling,
-    } else rope;
+    // a legacy rope_scaling block, which only a scaled rope has, else rope_parameters
+    const from = rope_config.block(text, rope) catch return error.UnsupportedRopeScaling;
+    const block = from.map;
+    const older = from.legacy;
     const kind = block.get("rope_type") orelse block.get("type") orelse return if (older) error.UnsupportedRopeScaling else null;
     if (kind != .string) return error.UnsupportedRopeScaling;
     if (std.mem.eql(u8, kind.string, "default") and !older) return null;

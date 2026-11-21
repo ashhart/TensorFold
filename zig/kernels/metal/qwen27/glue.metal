@@ -18,34 +18,6 @@ inline void q27_write(device uchar* p, uint i, float v, uint type) {
   else ((device float*)p)[i] = v;
 }
 
-struct Norm { uint width, rows, activation, gain, residual; float eps; };
-
-// Each thread owns 16 contiguous values, then simd_sum and simdgroups in increasing order as row_glue.add_norm.
-[[max_total_threads_per_threadgroup(1024)]]
-kernel void q27_norm(device const uchar* X [[buffer(0)]], device const uchar* R [[buffer(1)]],
-                     device const uchar* W [[buffer(2)]], constant Norm& a [[buffer(3)]],
-                     device uchar* H [[buffer(4)]], device uchar* Y [[buffer(5)]],
-                     uint2 group [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-                     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float sums[32];
-  const uint row = group.y, base = row * a.width + 16 * t;
-  float values[16], square = 0.0f;
-  for (uint j = 0; j < 16; ++j) {
-    float h = q27_read(X, base + j, a.activation);
-    if (a.residual) h = q27_round(h + q27_read(R, base + j, a.activation), a.activation);
-    values[j] = h;
-    q27_write(H, base + j, h, a.activation);
-    square = fma(h, h, square);
-  }
-  square = simd_sum(square);
-  if (lane == 0) sums[sg] = square;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float total = 0.0f;
-  for (uint s = 0; s < a.width / 512; ++s) total += sums[s];
-  const float inv = rsqrt(total / float(a.width) + a.eps);
-  for (uint j = 0; j < 16; ++j) q27_write(Y, base + j, q27_read(W, 16 * t + j, a.gain) * (values[j] * inv), a.activation);
-}
-
 struct Head { uint width, rows, stride, activation, gain; float eps; };
 
 // Head RMSNorm retains its native-input rounding before gain multiplication, as the shared Metal RMS implementation.
@@ -124,15 +96,6 @@ kernel void q27_rope(device const uchar* X [[buffer(0)]], device const int* posi
 
 struct Element { uint width, heads, rows, activation; };
 
-// SiLU(gate) times up reads stacked [gate|up] rows with one final native activation rounding.
-kernel void q27_mlp(device const uchar* GU [[buffer(0)]], constant Element& a [[buffer(1)]],
-                    device uchar* OUT [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
-  if (at.x >= a.width || at.y >= a.rows) return;
-  const float gate = q27_read(GU, at.y * 2 * a.width + at.x, a.activation);
-  const float up = q27_read(GU, at.y * 2 * a.width + a.width + at.x, a.activation);
-  q27_write(OUT, at.y * a.width + at.x, gate / (1.0f + exp(-gate)) * up, a.activation);
-}
-
 // Attention uses the native-rounded sigmoid before multiplying its output, matching the Metal row family.
 kernel void q27_gate(device const uchar* O [[buffer(0)]], device const uchar* QG [[buffer(1)]],
                      constant Element& a [[buffer(2)]], device uchar* OUT [[buffer(3)]],
@@ -142,26 +105,4 @@ kernel void q27_gate(device const uchar* O [[buffer(0)]], device const uchar* QG
   const float gate = q27_read(QG, (at.z * a.heads + at.y) * 2 * a.width + a.width + at.x, a.activation);
   const float sig = q27_round(1.0f / (1.0f + exp(-gate)), a.activation);
   q27_write(OUT, index, q27_read(O, index, a.activation) * sig, a.activation);
-}
-
-struct Post { uint width, heads, rows, stride, offset, activation, gain; float eps; };
-
-// GDN post-norm retains the rounded normalized result before the fp32 SiLU product, as row_glue.gdn_post.
-kernel void q27_gdn_post(device const uchar* REC [[buffer(0)]], device const uchar* Z [[buffer(1)]],
-                         device const uchar* W [[buffer(2)]], constant Post& a [[buffer(3)]],
-                         device uchar* OUT [[buffer(4)]], uint3 group [[threadgroup_position_in_grid]],
-                         uint lane [[thread_index_in_simdgroup]]) {
-  const uint head = group.y, row = group.z, per = a.width / 32;
-  float values[16], square = 0.0f;
-  for (uint j = 0; j < per; ++j) {
-    values[j] = q27_read(REC, (row * a.heads + head) * a.width + lane * per + j, a.activation);
-    square += values[j] * values[j];
-  }
-  const float inv = rsqrt(simd_sum(square) / float(a.width) + a.eps);
-  for (uint j = 0; j < per; ++j) {
-    const uint d = lane * per + j;
-    const float norm = q27_round(q27_read(W, d, a.gain) * (values[j] * inv), a.activation);
-    const float z = q27_read(Z, row * a.stride + a.offset + head * a.width + d, a.activation);
-    q27_write(OUT, (row * a.heads + head) * a.width + d, z / (1.0f + exp(-z)) * norm, a.activation);
-  }
 }

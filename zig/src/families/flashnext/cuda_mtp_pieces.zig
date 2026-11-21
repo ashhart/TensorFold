@@ -1,4 +1,4 @@
-//! The draft head's passes as kernels alone (their ids staged first), so a graph can hold them on one GPU.
+//! The draft head's passes as kernels alone (their ids staged first), so a graph can hold them on any rank.
 const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -70,12 +70,12 @@ pub fn Piece(comptime O: type, comptime P: type) type {
     };
 }
 
-/// A piece on one GPU as its graph, keyed by what its kernels read (eagerly with media or tensor parallelism).
+/// A piece as its graph, keyed by what its kernels read (eagerly with media); the head's layer runs no collective.
 pub fn runPiece(one: anytype, score_rows: u64) !void {
     const e = one.o.e;
     const d = one.d;
     const s = one.p.s;
-    if (!window_graph.enabled() or d.media != null or e.collective != null) return one.run();
+    if (!window_graph.enabled() or d.media != null) return one.run();
     const key: window_graph.HeadKey = .init(d, one.m, one.last, one.score, one.input, s, score_rows);
     try e.graphs.head.run(e.gpa, e.stream.*, key, one);
 }
@@ -143,11 +143,11 @@ pub fn Group(comptime O: type, comptime P: type, comptime G: type) type {
     };
 }
 
-/// A group on one GPU as its graph, keyed by each lane's draft buffers, rows and geometry, then the scratch.
+/// A group as its graph, keyed by each lane's draft buffers, rows and geometry, then the scratch.
 pub fn runGroup(run: anytype, score_rows: u64) !void {
     const e = run.o.e;
     const s = run.p.s;
-    if (!window_graph.enabled() or e.collective != null) return run.run();
+    if (!window_graph.enabled()) return run.run();
     const key: window_graph.HeadManyKey = .init(run.group.ds, run.group.nexts, run.group.rows, run.total, run.group.scores, s, score_rows);
     try e.graphs.head_many.run(e.gpa, e.stream.*, key, run);
 }

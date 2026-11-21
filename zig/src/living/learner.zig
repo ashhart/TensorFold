@@ -27,7 +27,7 @@ const disownLesson = examples.disownLesson;
 pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
 pub const Report = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, candidate: bool = false },
     failed: []const u8,
 };
 
@@ -39,7 +39,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire, shrink };
 
 /// The lessons over host H: its trainer and hooks (family.zig), routed blocks only when its trainer keeps `sites`.
 pub fn Learner(comptime H: type) type {
@@ -142,7 +142,12 @@ pub fn Learner(comptime H: type) type {
             if (has_pocket and l.trainer != null) {
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
+            if (lesson.against.len > 0 and (!@hasDecl(H.Trainer, "causalLogit") or !l.whole or l.method != .pocket)) return error.CorrectionsUnsupported;
             l.lesson = lesson;
+            if (lesson.shrink != .none) {
+                l.phase = .shrink;
+                return;
+            }
             if (lesson.undo) {
                 l.phase = .undo;
                 return;
@@ -271,7 +276,11 @@ pub fn Learner(comptime H: type) type {
                     try l.settleLast(&.{});
                     return .{ .done = true, .changed = true };
                 },
-                .save => return l.saveOnce(),
+                .save => return @import("learner_save.zig").once(l, has_sites, has_whole),
+                .shrink => {
+                    l.phase = .idle;
+                    return if (has_pocket) whole_lessons.shrink(l) else .{ .done = true };
+                },
                 .retire => {
                     l.phase = .idle;
                     if (has_whole and l.whole) if (try whole_lessons.retire(l, l.lesson)) |s| return s;
@@ -285,23 +294,6 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = if (has_edits) l.edits.last_loss else 0 } } };
                 },
             }
-        }
-
-        /// Every kept lesson not yet written goes beside the model's shards, a file each.
-        fn saveOnce(l: *Self) !Step {
-            l.phase = .idle;
-            const t = l.trainer orelse return .{ .done = true };
-            if (l.whole) { // a lesson of the model itself goes into its own shards: the pocket, or an edit's codes
-                if (has_whole and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
-                return .{ .done = true, .changed = true };
-            }
-            if (comptime !has_sites) return .{ .done = true };
-            const ranks = t.sites.rank - @as(usize, if (l.opened and l.kept_rounds == 0) adapters.block else 0);
-            if (ranks == 0) return .{ .done = true };
-            const t0 = H.seconds(l.io);
-            const bytes = try H.write(l.b, l.gpa, l.io, t, ranks);
-            std.log.info("slide: {d} lessons beside the model's shards, a file each with its router: {d} MB written in {d:.1} s", .{ ranks / adapters.block, bytes >> 20, H.seconds(l.io) - t0 });
-            return .{ .done = true };
         }
 
         /// The lessons already kept that act on a reply to `ex` (their routers' scores at its decision row, read once).

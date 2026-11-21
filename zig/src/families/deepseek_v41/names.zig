@@ -47,9 +47,9 @@ pub fn blockGroups(c: *const Config, layer: u32, rank: u32, world: u32, has_shar
     try g.push(.{ .proj = .wq_a, .suffix = "attn.wq_a", .split = .whole, .k = c.hidden, .n = c.q_lora });
     try g.push(.{ .proj = .wkv, .suffix = "attn.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim });
     try g.push(.{ .proj = .wq_b, .suffix = "attn.wq_b", .split = .col, .k = c.q_lora, .n = c.heads * c.head_dim });
-    const gl = c.o_groups / world;
-    var s = rank * gl;
-    while (s < (rank + 1) * gl) : (s += 1) try g.push(.{ .proj = .wo_a, .suffix = "attn.wo_a.slice", .slice = s, .split = .whole, .k = per_group_k, .n = c.o_lora });
+    const own = try @import("partition.zig").outputGroups(c.o_groups, rank, world);
+    var s = own.lo;
+    while (s < own.lo + own.len) : (s += 1) try g.push(.{ .proj = .wo_a, .suffix = "attn.wo_a.slice", .slice = s, .split = .whole, .k = per_group_k, .n = c.o_lora });
     try g.push(.{ .proj = .wo_b, .suffix = "attn.wo_b", .split = .row, .k = c.o_groups * c.o_lora, .n = c.hidden });
     if (c.isBackbone(layer) and c.isKvSource(layer)) {
         try g.push(.{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim });
@@ -70,6 +70,21 @@ pub fn blockGroups(c: *const Config, layer: u32, rank: u32, world: u32, has_shar
 /// The group's full name under `block`.
 pub fn groupName(spec: GroupSpec, block: []const u8, buf: []u8) ![]const u8 {
     return if (spec.proj == .wo_a) std.fmt.bufPrint(buf, "{s}.{s}.{d}", .{ block, spec.suffix, spec.slice }) else std.fmt.bufPrint(buf, "{s}.{s}", .{ block, spec.suffix });
+}
+
+/// TF_DSV41_FLOAT_LINEAR: the float matrix a pack may keep for a whole projection in place of its EXL3 group.
+pub fn plainOf(spec: GroupSpec) ?NativeSpec {
+    if (spec.split != .whole) return null;
+    const suffix = switch (spec.proj) {
+        .wq_a => "attn.wq_a.weight",
+        .comp_wkv => "attn.compressor.wkv.weight",
+        .comp_wgate => "attn.compressor.wgate.weight",
+        .ix_wk => "attn.indexer.wk.weight",
+        .ix_wq_b => "attn.indexer.wq_b.weight",
+        else => return null,
+    };
+    // `.half` is the indexer weights_proj's own storage rule: bf16 or fp16 in the pack, bf16 values in the forward
+    return NativeSpec.m(suffix, .half, spec.n, spec.k);
 }
 
 /// The release's own projections of a block: whole matrices, each with a `.scale` beside it.

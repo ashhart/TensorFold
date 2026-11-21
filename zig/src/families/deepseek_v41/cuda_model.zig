@@ -226,6 +226,7 @@ pub const Model = struct {
             if (!quiet) std.log.err("{s}", .{text});
             return error.UnsupportedCheckpoint;
         }
+        try @import("block_admission.zig").serving(&m.cfg, world);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
@@ -235,7 +236,8 @@ pub const Model = struct {
         };
         var ds: [8]u32 = undefined;
         const blocks = if (o.drafts) try std.mem.concat(a, u32, &.{ backbone, dspark_emit.blocks(&m.cfg, &ds) }) else backbone;
-        m.pl = try plan.build(gpa, &m.cfg, &m.pack, .{ .rank = m.tcfg.rank, .world = world, .blocks = blocks, .top = true, .dspark = o.drafts });
+        const float_linear = try @import("serve_knobs.zig").floatLinear(&@import("serve_knobs.zig").env);
+        m.pl = try plan.build(gpa, &m.cfg, &m.pack, .{ .rank = m.tcfg.rank, .world = world, .blocks = blocks, .top = true, .dspark = o.drafts, .float_linear = float_linear });
         try load.admitPlan(io, &m.cfg, &m.pack, &m.pl);
         m.weights = .{ .gpa = gpa, .digest = false }; // no weights check reads the digests here (load.zig)
         // TF_DSV41_PREPARED (prepared.zig): each layer's host images read back instead of rebuilt from the pack

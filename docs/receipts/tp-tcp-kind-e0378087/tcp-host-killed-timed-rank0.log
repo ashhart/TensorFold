@@ -1,0 +1,2 @@
+error: PeerFailed
+wrapper: rank 0 exit 1; started 1794269086.961, SIGKILL sent to rank 1 (over ssh) at 1794269089.964, rank 0 exited at 1794269090.193: 0.228 s after the kill was sent, 3.2 s into the run

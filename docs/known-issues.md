@@ -8,6 +8,9 @@ release fixes it, and the release notes say which one.
 - GLM-5.3 (EXLR8) decodes slowly next to the other models: a one-row round on two M5 Ultras takes about 45 ms. No CUDA
   engine serves it, and only the `home` profile on M5 Ultras has run. Replies past 2,048 tokens, where the sparse indexer
   starts picking keys, have not been compared with a whole-model reference.
+- Dory on CUDA with `TF_KV_SHARE=n`: a kept state resumes on a 256-token page edge, so a turn prefills up to 255 more
+  tokens than the copy store would. A short resume that also keeps a new state can start 17-23 ms later than the copy
+  store's on a GB10 (153 against 130 ms at 3K tokens). Each state's sliding caches take 12 pool pages (168 MiB at two loops).
 - Kolibri-1 on CUDA with `TF_KV_SHARE=n`: the prompt store keeps whole 512-token pages, so a shared start shorter
   than a page (a chat template's first 45 tokens, say) is not reused, and a prompt is cut at a page boundary. On a GB10,
   cold 2K chat prompts take about 10% longer to the first token than without the store (0.87 against 0.79 s). Decode

@@ -1,6 +1,7 @@
 //! A prompt pass's image rows on every rank: rank 0's tower encodes them, the others receive them, all splice them.
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const lanes = @import("lanes");
 const vision = @import("cuda_vision.zig");
 const vcfg = @import("vision_config.zig");
@@ -74,6 +75,7 @@ pub const Images = struct {
         if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir, ql);
         v.marks = .{ .image = cfg.image_token, .open = cfg.image_start, .close = cfg.image_end };
         v.mark_ids = .{ cfg.image_start, cfg.image_token, cfg.image_end };
+        if (tower and v.video_ids != null) noteVideo(a, io, limits.video_tokens);
         return v;
     }
 
@@ -216,7 +218,7 @@ pub const Images = struct {
         a.add(@as(c_int, @intCast(n)));
         a.add(@as(c_int, @intCast(vcfg.out_hidden)));
         a.add(@as(c_int, @intCast(copies)));
-        try cuda.launch.launch(v.run.f.inject, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 256 } }, s, &a);
+        try cuda_pdl.launch(v.run.f.inject, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 256 } }, s, &a);
     }
 
     /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).
@@ -232,6 +234,26 @@ pub const Images = struct {
         return image.prepare(v.io, a, data, v.cfg.?, max_tokens);
     }
 };
+
+/// Rank 0 with a checkpoint that reads videos: when no video library loads, the rows set aside for them say so.
+fn noteVideo(a: std.mem.Allocator, io: std.Io, tokens: u32) void {
+    if (tokens <= 64) return; // the flag's floor
+    const sys = @import("sys");
+    const libs = sys.optional_libraries;
+    const exe = std.process.executableDirPathAlloc(io, a) catch null;
+    if (libs.found(libs.spec(.video), a, sys, exe)) return;
+    var buf: [256]u8 = undefined;
+    std.log.warn("{s}", .{libs.spec(.video).message}); // native open's boundary mutes libs.warn here
+    std.log.warn("{s}", .{videoRows(&buf, tokens)});
+}
+
+/// The rows note: `tokens` bf16 rows of the language model's width a stream, and the 64 of the flag's floor.
+fn videoRows(buf: []u8, tokens: u32) []const u8 {
+    const row = vcfg.out_hidden * 2;
+    const text = "GLM-5.3-Flash on CUDA: no video library loads, so no request fills the {d} MiB each stream's plan sets " ++
+        "aside for --vision-video-tokens {d}'s rows; --vision-video-tokens 64 on every rank sets aside {d} KiB";
+    return std.fmt.bufPrint(buf, text, .{ (@as(usize, tokens) * row) >> 20, tokens, (64 * row) >> 10 }) catch buf[0..0];
+}
 
 test "a splice's map: rows inside a span take its rows, others keep their embedding" {
     var host: [8]i32 = undefined;
@@ -277,6 +299,12 @@ test "a follower's failed image admission clears its partial spans, and the same
         try std.testing.expectEqual(@as(usize, 128), v.spans.items.len);
         try std.testing.expectEqual(@as(usize, 128), v.rowCount());
     }
+}
+
+test "with no video library, the rows note names the MiB --vision-video-tokens sets aside a stream and the floor's" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("GLM-5.3-Flash on CUDA: no video library loads, so no request fills the 128 MiB each stream's plan sets aside for --vision-video-tokens 16384's rows; --vision-video-tokens 64 on every rank sets aside 512 KiB", videoRows(&buf, 16384));
+    try std.testing.expectEqualStrings("GLM-5.3-Flash on CUDA: no video library loads, so no request fills the 8 MiB each stream's plan sets aside for --vision-video-tokens 1024's rows; --vision-video-tokens 64 on every rank sets aside 512 KiB", videoRows(&buf, 1024));
 }
 
 test "a row budget whose image and video sum overflows is refused" {

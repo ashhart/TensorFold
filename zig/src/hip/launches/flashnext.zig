@@ -33,6 +33,7 @@ pub const Fns = struct {
     idx_scores: Function,
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
+    sparse_lanes: [2][2]Function, // the same sums from fp16 and bf16 caches, a lane a key and several heads
     sparse_merge: Function,
 
     pub fn load(m: Module) Error!Fns {
@@ -50,6 +51,10 @@ pub const Fns = struct {
             .idx_scores = try m.function("tf_fn_idx_scores"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
+            .sparse_lanes = .{
+                .{ try m.function("tf_fn_sparse_lanes6_f16"), try m.function("tf_fn_sparse_lanes6_bf16") },
+                .{ try m.function("tf_fn_sparse_lanes12_f16"), try m.function("tf_fn_sparse_lanes12_bf16") },
+            },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
         };
     }
@@ -431,6 +436,102 @@ pub fn sparseAttention(
     parts: c_int,
     s: S,
 ) Error!void {
+    return sparseWith(
+        .auto,
+        l,
+        q,
+        k,
+        v,
+        cache_kind,
+        ids,
+        id_stride,
+        count,
+        sparse,
+        parts_o,
+        parts_ms,
+        out,
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        s,
+    );
+}
+
+/// `sparseAttention` on the kernel that stages keys as fp32 one tile at a time, for tests of the faster kernel's bits.
+pub fn sparseAttentionScalar(
+    l: *const Launcher,
+    q: CF,
+    k: C,
+    v: C,
+    cache_kind: c_int,
+    ids: CI,
+    id_stride: i64,
+    count: CI,
+    sparse: CI,
+    parts_o: F,
+    parts_ms: F,
+    out: F,
+    rows: c_int,
+    heads: c_int,
+    kv_heads: c_int,
+    dims: c_int,
+    cap: i64,
+    scale: f32,
+    parts: c_int,
+    s: S,
+) Error!void {
+    return sparseWith(
+        .scalar,
+        l,
+        q,
+        k,
+        v,
+        cache_kind,
+        ids,
+        id_stride,
+        count,
+        sparse,
+        parts_o,
+        parts_ms,
+        out,
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        s,
+    );
+}
+
+fn sparseWith(
+    kernel: enum { auto, scalar },
+    l: *const Launcher,
+    q: CF,
+    k: C,
+    v: C,
+    cache_kind: c_int,
+    ids: CI,
+    id_stride: i64,
+    count: CI,
+    sparse: CI,
+    parts_o: F,
+    parts_ms: F,
+    out: F,
+    rows: c_int,
+    heads: c_int,
+    kv_heads: c_int,
+    dims: c_int,
+    cap: i64,
+    scale: f32,
+    parts: c_int,
+    s: S,
+) Error!void {
     if (dims > 256 or @rem(heads, kv_heads) != 0 or @divExact(heads, kv_heads) > 12)
         return util.invalid("sparseAttention");
     var a: Args = .{};
@@ -453,7 +554,28 @@ pub fn sparseAttention(
         parts,
     }) |x| try a.add(x);
     const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
-    try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
+    if (kernel == .auto and (cache_kind == 1 or cache_kind == 2) and @rem(dims, 8) == 0) {
+        var c: Args = .{};
+        inline for (.{
+            ad(q),
+            ad(k),
+            ad(v),
+            ad(ids),
+            id_stride,
+            ad(count),
+            ad(sparse),
+            ad(parts_o),
+            ad(parts_ms),
+            heads,
+            kv_heads,
+            dims,
+            cap,
+            scale,
+            parts,
+        }) |x| try c.add(x);
+        const kind: usize = @intCast(cache_kind - 1);
+        try l.go(l.fnx.sparse_lanes[wide][kind], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &c);
+    } else try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
     var b: Args = .{};
     inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, parts }) |x| try b.add(x);
     try l.go(l.fnx.sparse_merge, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);

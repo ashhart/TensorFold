@@ -99,9 +99,7 @@ pub const Model = struct {
         m.rows = try rows.Pipelines.load(m.device);
         errdefer m.rows.deinit();
         {
-            const body = try frags.source(m.device, gpa, ks.minimax_m3_attention_nax);
-            defer gpa.free(body);
-            const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define WORDS {d}\n#define SCALE {e}f\n{s}", .{ c.head_dim, c.heads, c.heads / c.kv_heads, c.kv_heads, st.selWords(c), 1.0 / @sqrt(@as(f64, @floatFromInt(c.head_dim))), body });
+            const src = try attentionSource(m.device, gpa, c);
             defer gpa.free(src);
             const lib = try mtl.Library.fromSource(m.device, src, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -109,9 +107,7 @@ pub const Model = struct {
         }
         errdefer m.prompt_attn.deinit();
         {
-            const body = try frags.source(m.device, gpa, ks.minimax_m3_index_nax);
-            defer gpa.free(body);
-            const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define IH {d}\n{s}", .{ c.index_dim, c.index_heads, body });
+            const src = try indexSource(m.device, gpa, c);
             defer gpa.free(src);
             const lib = try mtl.Library.fromSource(m.device, src, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -119,15 +115,11 @@ pub const Model = struct {
         }
         errdefer m.index_nax.deinit();
         {
-            const generated = sampler() orelse return error.MiniMaxSamplerMissing;
-            const v = try std.fmt.allocPrint(gpa, "constexpr int V = {d};", .{c.vocab});
-            defer gpa.free(v);
-            const text = try std.mem.replaceOwned(u8, gpa, generated.source, "constexpr int V = 131072;", v);
+            const text = try samplerSource(gpa, c);
             defer gpa.free(text);
-            if (std.mem.indexOf(u8, text, v) == null) return error.MiniMaxSamplerMissing;
             const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
             defer lib.deinit();
-            m.sample = try mtl.Pipeline.init(m.device, lib, generated.function, false);
+            m.sample = try mtl.Pipeline.init(m.device, lib, (sampler() orelse return error.MiniMaxSamplerMissing).function, false);
         }
         errdefer m.sample.deinit();
         {
@@ -239,3 +231,29 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
+
+/// The exact source specialization shared by the loader and compiler gate.
+pub fn attentionSource(device: mtl.Device, gpa: std.mem.Allocator, c: *const cfg.Config) ![]u8 {
+    const body = try frags.source(device, gpa, ks.minimax_m3_attention_nax);
+    defer gpa.free(body);
+    const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define WORDS {d}\n#define SCALE {e}f\n{s}", .{ c.head_dim, c.heads, c.heads / c.kv_heads, c.kv_heads, st.selWords(c), 1.0 / @sqrt(@as(f64, @floatFromInt(c.head_dim))), body });
+    return src;
+}
+
+/// The exact source specialization shared by the loader and compiler gate.
+pub fn indexSource(device: mtl.Device, gpa: std.mem.Allocator, c: *const cfg.Config) ![]u8 {
+    const body = try frags.source(device, gpa, ks.minimax_m3_index_nax);
+    defer gpa.free(body);
+    const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define IH {d}\n{s}", .{ c.index_dim, c.index_heads, body });
+    return src;
+}
+
+/// The exact source specialization shared by the loader and compiler gate.
+pub fn samplerSource(gpa: std.mem.Allocator, c: *const cfg.Config) ![]u8 {
+    const generated = sampler() orelse return error.MiniMaxSamplerMissing;
+    const v = try std.fmt.allocPrint(gpa, "constexpr int V = {d};", .{c.vocab});
+    defer gpa.free(v);
+    const text = try std.mem.replaceOwned(u8, gpa, generated.source, "constexpr int V = 131072;", v);
+    if (std.mem.indexOf(u8, text, v) == null) return error.MiniMaxSamplerMissing;
+    return text;
+}

@@ -4,6 +4,7 @@ const fill = @import("lane_host_fill.zig");
 const lane_halt = @import("lane_halt.zig");
 const lane_stream = @import("lane_stream.zig");
 const recalls = @import("lane_host_recall.zig");
+const load = @import("lane_host_load.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
@@ -30,6 +31,7 @@ pub fn takeCancels(h: *LaneHost) void {
         h.unlock();
         if (found) |job| {
             if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
+                @import("lane_host_load.zig").calling(h, job);
                 keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
                     _ = dropFailed(h, job, err);
                     continue;
@@ -54,6 +56,7 @@ pub fn failed(h: *const LaneHost, err: anyerror) void {
 /// A request the backend failed: the failure hook hears the error and the request ends with the backend's words.
 pub fn dropFailed(h: *LaneHost, job: *Job, err: anyerror) bool {
     failed(h, err);
+    load.failed(h, .backend_prompt);
     return h.drop(job, h.words(err));
 }
 
@@ -62,15 +65,54 @@ pub fn deliverPending(h: *LaneHost) void {
     var i: usize = 0;
     while (i < h.admitted.items.len) {
         const job = h.admitted.items[i];
+        if (h.srpt.on and job.stream.finished) h.srpt.seen(&job.stream);
         if (h.deliver(job)) continue;
         i += 1;
     }
 }
 
-/// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
+/// A failed round takes the live streams (paused among them) and its unrun finals' prompts; the rest keep their places.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
-    failAll(h, @errorName(err));
+    std.log.warn("lane host: a round failed ({s}): the round's streams fail", .{@errorName(err)});
+    h.core.sweep() catch {};
+    h.lock();
+    var jobs = h.admitted;
+    h.admitted = .empty;
+    h.unlock();
+    defer jobs.deinit(h.gpa);
+    for (jobs.items) |job| {
+        var in_round = false;
+        if (job.started) for (h.core.live.items) |x| {
+            if (x == &job.stream) {
+                in_round = true;
+                break;
+            }
+        };
+        if (!in_round) {
+            // the planner has this prompt decoding and offers it to no later plan: fail it, not strand its lane
+            if (job.started and !job.stream.finished and plannedToEnd(h, job)) {
+                endFailed(h, job, @errorName(err));
+                continue;
+            }
+            h.lock();
+            const kept = h.admitted.append(h.gpa, job);
+            h.unlock();
+            // the list could not take the job back; fail it rather than leak it
+            if (kept) |_| continue else |_| {}
+        }
+        endFailed(h, job, @errorName(err));
+    }
+}
+
+/// Whether the plan carried the prompt to its end: its final is listed, or a piece ends at the prompt's last row.
+fn plannedToEnd(h: *const LaneHost, job: *const Job) bool {
+    const key = @intFromPtr(job);
+    for (h.finals.items) |at| if (at == key) return true;
+    const end: u64 = job.request.prompt.len -| 1;
+    if (end == 0) return false;
+    for (h.pieces.items) |piece| if (piece.key == key and piece.end == end) return true;
+    return false;
 }
 
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
@@ -80,14 +122,19 @@ pub fn failAll(h: *LaneHost, message: []const u8) void {
     h.lock();
     var jobs = h.admitted;
     h.admitted = .empty;
-    h.filling.clearRetainingCapacity();
     h.unlock();
     defer jobs.deinit(h.gpa);
-    for (jobs.items) |job| {
-        // a job admitted this round has no stream yet when the planner's admitted callback fails
-        if (job.started and !job.stream.finished) h.core.discard(&job.stream);
-        h.finish(job, .failed, message);
-    }
+    for (jobs.items) |job| endFailed(h, job, message);
+}
+
+/// Ends a failed job: off the filling list, its stream discarded unless already finished.
+fn endFailed(h: *LaneHost, job: *Job, message: []const u8) void {
+    h.lock();
+    fill.unfill(h, job);
+    h.load.failures[@backingInt(load.Failure.backend_round)] += 1;
+    h.unlock();
+    if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+    h.finish(job, .failed, message);
 }
 
 /// Ends every queued and admitted job cancelled (the cancellations named before it first), copying nothing.
@@ -124,11 +171,11 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         h.queued.insert(h.gpa, 0, job) catch break :blk false;
         break :blk true;
     };
-    @import("lane_host_load.zig").ended(job); // before the teardown: this attempt's time leaves with it
+    load.ended(job); // before the teardown: this attempt's time leaves with it
     if (waits) {
         h.load.requeued += 1;
         h.memory_lanes = others; // under the lock: a publish reads it
-    }
+    } else if (others == 0) h.load.failures[@backingInt(load.Failure.lane_memory_alone)] += 1;
     h.unlock();
     if (!waits) {
         h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
@@ -143,6 +190,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.started = false;
     job.fill_began = false;
     job.reached = 0;
+    job.cache_promise = .{};
     job.entry = null; // looked up again at its next admission
     h.gpa.free(job.marks);
     job.marks = &.{};

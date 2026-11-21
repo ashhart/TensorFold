@@ -29,15 +29,20 @@ pub const Plan = struct {
 
 /// Explicit long-lived buffers, plus the shared margin for warm-up staging, driver/command buffers and small metadata.
 pub fn plan(weights: u64, capacity: usize) !Plan {
-    if (capacity < window.trained or capacity > window.maximum or capacity % 4 != 0) return error.ContextTooLong;
+    return planFor(weights, capacity, true);
+}
+
+pub fn planFor(weights: u64, capacity: usize, second_prompt: bool) !Plan {
+    if (capacity < prompt.PMAX or capacity > window.maximum or capacity % 4 != 0) return error.ContextTooLong;
     const cap: u64 = capacity;
+    const planes: u64 = 1 + @as(u64, @intFromBool(second_prompt));
     const so = 48 * 128 * 128 * 4;
     return .{
         .weights = weights,
-        .prompts = 2 * prompt.bytes(),
+        .prompts = planes * prompt.bytes(),
         .attention = 13 * cap * (2304 + 64),
         .states = 36 * (1 + 16 + 4) * (prompt.CS_ROW + so),
-        .selectors = 2 * selector(prompt.PMAX, cap) + selector(16, cap) + 2 * (16 * cap + 16 * 2051 * 4 + 4096),
+        .selectors = planes * selector(prompt.PMAX, cap) + selector(16, cap) + 2 * (16 * cap + 16 * 2051 * 4 + 4096),
     };
 }
 
@@ -91,8 +96,12 @@ pub fn budget(weights: u64, capacity: usize, inventory: weights_plan.Inventory, 
 }
 
 pub fn budgetLive(source_files: u64, capacity: usize, inventory: weights_plan.Inventory, extra: u64, existing: u64) !Budget {
+    return budgetLiveFor(source_files, capacity, inventory, extra, existing, true);
+}
+
+pub fn budgetLiveFor(source_files: u64, capacity: usize, inventory: weights_plan.Inventory, extra: u64, existing: u64, second_prompt: bool) !Budget {
     _ = source_files; // source file padding and transformed source payloads are not resident decode weights
-    const fixed = try std.math.add(u64, try minimum(inventory.raw, capacity), extra);
+    const fixed = try std.math.add(u64, try (try planFor(inventory.raw, capacity, second_prompt)).total(), extra);
     return .{
         .steady = try std.math.add(u64, fixed, try inventory.resident()),
         .building = try std.math.add(u64, try std.math.add(u64, margin, existing), try inventory.building()),
@@ -240,4 +249,34 @@ test "Flash Next memory: cold construction has no future prompt, session or visi
     try std.testing.expectEqual(ordinary.building, requested.building);
     try std.testing.expectEqual(ordinary.steady + 8 * GiB, requested.steady);
     try std.testing.expectEqual(@as(u64, 10 * GiB + 512), requested.building);
+}
+
+test "Flash Next memory: the unused prompt plane is omitted at the same capacity and build phase" {
+    const one = try planFor(0, trained, false);
+    const twin = try plan(0, trained);
+    try std.testing.expectEqual(prompt.bytes(), one.prompts);
+    try std.testing.expectEqual(prompt.bytes(), twin.prompts - one.prompts);
+    try std.testing.expectEqual(@as(u64, 6615590788), (try twin.total()) - (try one.total()));
+    try std.testing.expectEqual(one.attention, twin.attention);
+    try std.testing.expectEqual(one.states, twin.states);
+    const inventory: weights_plan.Inventory = .{ .raw = GiB };
+    const a = try budgetLiveFor(0, trained, inventory, 0, 0, false);
+    const b = try budgetLive(0, trained, inventory, 0, 0);
+    try std.testing.expectEqual((try twin.total()) - (try one.total()), b.steady - a.steady);
+    try std.testing.expectEqual(a.building, b.building);
+}
+
+test "Flash Next memory: smaller capacities and one prompt plane charge their actual selectors and scratch" {
+    const small = try planFor(0, 65568, false);
+    const twin = try planFor(0, 65568, true);
+    const full = try planFor(0, trained, true);
+    try std.testing.expectEqual(prompt.bytes(), small.prompts);
+    try std.testing.expectEqual(prompt.bytes(), twin.prompts - small.prompts);
+    try std.testing.expect(small.selectors < twin.selectors and twin.selectors < full.selectors);
+    try std.testing.expect(small.attention < full.attention);
+    const inventory: weights_plan.Inventory = .{ .raw = GiB };
+    const a = try budgetLiveFor(0, 65568, inventory, 0, 0, false);
+    const b = try budgetLiveFor(0, 65568, inventory, 0, 0, true);
+    try std.testing.expectEqual((try twin.total()) - (try small.total()), b.steady - a.steady);
+    try std.testing.expectEqual(a.building, b.building);
 }

@@ -4,6 +4,7 @@ const disk = @import("src/native/disk_identity.zig");
 const glm = @import("src/families/glm/load_plan.zig");
 const pack = @import("src/families/flashnext/pack_io.zig");
 const Imprint = @import("engine_api").prompt_imprint.Imprint;
+const fixture = @import("src/native/persistence_fixture.zig");
 const binary = @import("sys").file_identity;
 const t = std.testing;
 const io = t.io;
@@ -50,9 +51,8 @@ fn changedWeightMiss(kind: Kind) !void {
         try t.expect(state.best(&tokens, &.{}, false, 0) != null);
     }
     // An unvisited tensor can change without changing a fixed probe, config, index or shard header.
-    try std.Io.sleep(io, .fromMilliseconds(5), .awake);
     shard[shard.len - 1] = 1;
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &shard });
+    try fixture.rewrite(tmp.dir, "model.safetensors", &shard);
     try t.expectEqual(old, try legacy(a, dir, kind));
     const after = try disk.scoped(a, io, dir, old);
     var fresh = try Imprint.open(a, root, after, 1 << 20);
@@ -148,4 +148,12 @@ test "persistence identity: tokenizer and template edits reuse only identical ca
     try t.expect(kept.best(&.{ 5, 9, 11 }, &.{ 1, 2 }, true, 0) == null);
     try t.expect(kept.best(&.{ 5, 7, 13 }, &.{ 1, 2 }, true, 0) == null);
     try t.expect(kept.best(&ids, &.{ 0, 2 }, true, 0) == null);
+}
+
+test {
+    _ = @import("persistence_policy_test.zig");
+}
+
+test {
+    _ = @import("persistence_checkpoint_test.zig");
 }

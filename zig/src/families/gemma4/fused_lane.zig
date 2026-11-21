@@ -4,6 +4,11 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const lane = @import("../../core/lane_projection.zig");
 const frags = @import("../../core/frags.zig");
+/// Whether the fused-lane loader can compile its reg-layout projection.
+pub fn available(device: mtl.Device) bool {
+    return device.tensorUnits();
+}
+
 pub const Layout = struct {
     projection: lane.Layout,
     source: []const u8,
@@ -41,7 +46,7 @@ pub const Projection = struct {
     layout: Layout,
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
-        if (!device.tensorUnits()) return error.TensorUnitsRequired;
+        if (!available(device)) return error.TensorUnitsRequired;
         const text = try source(a, l);
         defer a.free(text);
         const adapted = try frags.source(device, a, text);

@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
 const rows = @import("../../core/row_projection.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 const cfg = @import("config.zig");
 const st = @import("metal_state.zig");
 
@@ -62,13 +63,9 @@ fn name(buf: []u8, a: []const u8, b: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ a, b });
 }
 
-/// `t` is `dtype` with exactly `dims`, its bytes those dims' extent.
+/// `t` is `dtype` with exactly `dims`, its bytes those dims' extent (the core reader's check, under Spark's error).
 fn require(t: Tensor, dtype: ck.DType, dims: []const usize) error{UnexpectedSparkTensor}!void {
-    if (t.dtype != dtype or t.rank != dims.len or t.rank > t.shape.len) return error.UnexpectedSparkTensor;
-    if (!std.mem.eql(usize, t.shape[0..t.rank], dims)) return error.UnexpectedSparkTensor;
-    var bytes: usize = dtype.size();
-    for (dims) |n| bytes = std.math.mul(usize, bytes, n) catch return error.UnexpectedSparkTensor;
-    if (t.bytes != bytes) return error.UnexpectedSparkTensor;
+    mlx_affine.require(t, dtype, dims) catch return error.UnexpectedSparkTensor;
 }
 
 fn norm(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8) !Tensor {
@@ -82,18 +79,9 @@ fn norm(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8) !Tensor
     return t;
 }
 
-/// An affine [n, k] matrix at the checkpoint's one width, groups of 64, words stored as u32.
+/// An affine [n, k] matrix at the checkpoint's one width, groups of 64, through the core MLX affine reader.
 fn affine(c: *const ck.Checkpoint, bits: u8, base: []const u8, n: usize, k: usize) !Linear {
-    var b2: [256]u8 = undefined;
-    const w = try c.get(try name(&b2, base, ".weight"));
-    const s = try c.get(try name(&b2, base, ".scales"));
-    const z = try c.get(try name(&b2, base, ".biases"));
-    try require(w, .u32, &.{ n, k * bits / 32 });
-    try require(s, .bf16, &.{ n, k / cfg.group });
-    try require(z, .bf16, &.{ n, k / cfg.group });
-    const out = rows.Weights{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = cfg.group, .bits = bits };
-    try out.validate();
-    return .{ .affine = out };
+    return .{ .affine = try rows.affine(try mlx_affine.read(c, base, .{ .n = n, .k = k, .bits = bits, .group = cfg.group })) };
 }
 
 /// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 16-byte aligned for the row kernel.

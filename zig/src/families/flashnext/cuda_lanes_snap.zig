@@ -4,14 +4,14 @@ const lanes = @import("lanes");
 const snap = @import("cuda_snap.zig");
 const parts = @import("cuda_batch_state.zig");
 
+/// Marks inside a chunk kept without cutting the pass (TF_FLASHNEXT_KEEP_INPASS=0: cut there), read once at load.
+pub fn keepInPass() bool {
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_KEEP_INPASS", true) catch true;
+}
+
 pub fn Snaps(comptime Cuda: type) type {
     return struct {
-        /// Prompt cache marks inside a chunk kept without cutting the pass (TF_FLASHNEXT_KEEP_INPASS=0: cut there).
-        pub fn keepInPass() bool {
-            const v = std.c.getenv("TF_FLASHNEXT_KEEP_INPASS") orelse return true;
-            return !std.mem.eql(u8, std.mem.span(v), "0");
-        }
-
         /// The n-gram history (the last two tokens) at position `to` of a pass from `from` that began at `old`.
         pub fn historyAt(old: [2]i64, ids: []const u32, from: usize, to: usize) [2]i64 {
             if (to - from >= 2) return .{ ids[to - 2], ids[to - 1] };
@@ -22,7 +22,8 @@ pub fn Snaps(comptime Cuda: type) type {
         /// The chunk's stop: the first cache mark in [at, stop0) it cannot keep on the way; kept ones into `marks`.
         pub fn cut(self: *Cuda, s: *lanes.Stream, l: anytype, ids: []const u32, at: usize, stop0: usize, marks: *[parts.max_marks]parts.Mark) struct { stop: usize, kept: usize } {
             var n: usize = 0;
-            const inpass = keepInPass() and self.ranks == null and l.seq.media == null and @import("cuda_gdn_fused.zig").on();
+            const forms = self.engine.batch_k.forms; // TF_FLASHNEXT_KEEP_INPASS and _GDN_FUSED as the load read them
+            const inpass = forms.in_pass and self.ranks == null and l.seq.media == null and forms.gdn_fused;
             for (s.reuse.marks) |m| if (m > at and m < stop0) {
                 if (inpass and n < parts.max_marks) {
                     if (snap.prepare(self.gpa, self.engine.driver, m, historyAt(l.seq.history, ids, at, m), l.draft != null, l.seq.heads)) |p| {

@@ -157,4 +157,5 @@ pub fn run(gpu: check.Gpu) !void {
         try prompt(gpu, arena.allocator(), s, &g, prng.random(), c, p32);
     };
     check.pass("window pages 512: decode over shuffled pages of 16, 37 and 256 positions and prompt rows (P as bf16 and P32) over pages of 32, 64 and 256 (NaN in every unused slot) bit-equal to the contiguous cache, the float64 replays included", .{});
+    try @import("window_pages_slide_tests.zig").run(gpu); // head dim 256 with a window: the sliding layers' pages
 }

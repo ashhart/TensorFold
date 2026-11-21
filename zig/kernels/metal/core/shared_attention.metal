@@ -149,34 +149,6 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     tf_context_row<false>(Q, K, V, (const device uchar*)nullptr, O, 0, head, args.keys, 0, as_type<float>(args.scale_bits), lane);
 }
 
-// Position is supplied per row. Caller-supplied inverse frequencies preserve the model's RoPE convention.
-[[kernel]] void tf_lane_rope(const device bfloat* X [[buffer(0)]], const device uint* positions [[buffer(1)]],
-    const device float* frequencies [[buffer(2)]], constant tf_context_args& args [[buffer(3)]],
-    device bfloat* Y [[buffer(4)]], uint index [[thread_position_in_grid]]) {
-  if ((size_t)index >= (size_t)args.rows * args.heads * TF_D) return;
-  const uint d = index % TF_D;
-#if TF_RD > 0
-  if (d >= TF_RD) { Y[index] = X[index]; return; }
-#if TF_INTERLEAVED
-  const uint pair = d / 2;
-  const uint first = pair * 2, second = first + 1;
-  const bool high = (d & 1) != 0;
-#else
-  const uint pair = d % (TF_RD / 2);
-  const uint first = pair, second = first + TF_RD / 2;
-  const bool high = d >= TF_RD / 2;
-#endif
-  const uint row = index / (args.heads * TF_D);
-  const size_t base = index - d;
-  const float angle = float(positions[row]) * frequencies[pair];
-  const float c = precise::cos(angle), s = precise::sin(angle);
-  const float x = float(X[base + first]), y = float(X[base + second]);
-  Y[index] = bfloat(high ? fma(x, s, y*c) : fma(x, c, -y*s));
-#else
-  Y[index] = X[index];
-#endif
-}
-
 // Only newly produced rows are written. Prompt and previous-round cache slots are never copied or rewritten.
 [[kernel]] void tf_lane_append_kv(const device bfloat* K [[buffer(0)]], const device bfloat* V [[buffer(1)]],
     constant uint* slots [[buffer(2)]], constant tf_context_args& args [[buffer(3)]],

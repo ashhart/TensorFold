@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const cacheRules = @import("cuda_snaps.zig").cacheRules;
+const warmQuiet = @import("cuda_snaps.zig").warmQuiet;
 
 /// Copies that hold nothing: a store keys its states by tokens and position, all that its plans read.
 const Held = struct {
@@ -84,4 +85,57 @@ test "snap fork: a family that opts in keeps where the questions part, and the n
     const planned = try questions(GridFork, a, 4, 16, 2, false);
     try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, planned.marks[1]);
     try std.testing.expectEqual(@as(u32, 16), planned.from[2]);
+}
+
+test "CUDA warm rules: a warm end stays usable only where a family declares it, and its own wait comes through" {
+    const Both = struct {
+        pub const warm_quiet: u64 = 7;
+        pub const warm_usable = true;
+    };
+    const Ends = struct {
+        pub const warm_quiet: u64 = 7;
+    };
+    try std.testing.expectEqual(@as(u64, 7), warmQuiet(Both));
+    try std.testing.expectEqual(@as(u64, 7), warmQuiet(Ends));
+    try std.testing.expectEqual(@as(u64, 0), warmQuiet(struct {}));
+    // A family's wait and the rule that follows it come from one declaration: a nonzero wait is a waiting family.
+    inline for (@import("cuda.zig").registry) |F| {
+        try std.testing.expectEqual(warmQuiet(F) > 0, cacheRules(F).warm == .waits);
+    }
+    try std.testing.expect(cacheRules(Both).warm_usable);
+    try std.testing.expect(!cacheRules(Ends).warm_usable);
+}
+
+test "snap hooks: a family's spare, trim and reuses reach the prompt cache, and the Qwen entries declare all three" {
+    const Snaps = @import("cuda_snaps.zig").Snaps;
+    const Plain = struct {
+        pub const snap_bytes = Held.bytes;
+        pub const snap_save = Held.save;
+        pub const snap_restore = Held.restore;
+        pub const snap_drop = Held.drop;
+    };
+    const Pooled = struct {
+        pub const snap_bytes = Held.bytes;
+        pub const snap_save = Held.save;
+        pub const snap_restore = Held.restore;
+        pub const snap_drop = Held.drop;
+        pub fn snap_spare(_: *anyopaque) u64 {
+            return 7;
+        }
+        pub fn snap_trim(_: *anyopaque, _: u64) void {}
+        pub fn snap_reuses(_: *anyopaque, _: u32) bool {
+            return true;
+        }
+    };
+    const plain = Snaps(Plain, null).vtable;
+    try std.testing.expect(plain.spare == null and plain.trim == null and plain.reuses == null);
+    const pooled = Snaps(Pooled, null).vtable;
+    try std.testing.expect(pooled.spare.? == &Pooled.snap_spare and pooled.trim.? == &Pooled.snap_trim and pooled.reuses.? == &Pooled.snap_reuses);
+    var qwen: usize = 0;
+    inline for (@import("cuda.zig").registry) |F| if (comptime std.mem.startsWith(u8, F.model_type, "qwen3_5")) {
+        const v = Snaps(F, null).vtable;
+        try std.testing.expect(v.spare != null and v.trim != null and v.reuses != null);
+        qwen += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), qwen); // the dense and MoE entry points
 }

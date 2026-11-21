@@ -19,6 +19,12 @@ const ring_len = 64;
 
 /// One stream's rows in a shared window: its pending token, then the drafts the slot holds, then host drafts.
 pub const Win = struct { slot: u32, pending: u32, held: u32, tokens: []const u32 };
+/// A pass encoded in each window's buffer behind its forward, and told whether that buffer completed.
+pub const Follow = struct {
+    ctx: *anyopaque,
+    encode: *const fn (*anyopaque, *Slots, mtl.CommandBuffer, mtl.ComputeEncoder, []const Win) void,
+    land: *const fn (*anyopaque, *Slots, bool) void,
+};
 
 /// One stream's head: it absorbs the prompt's last row or the last window's first rows (a next token each), drafts.
 pub const Draft = struct { slot: u32, prompt: bool, follow: []const u32, depth: u32 };
@@ -54,6 +60,7 @@ pub const Slots = struct {
     picks: Ref, // u32 [max_rows]: a draft level's picks, a stream each
     open: ?Open = null, // keeps and drafts encode here; the next window commits them with its forward
     windows: u64 = 0,
+    follow: ?Follow = null, // the drafter's same-buffer pass behind each verify window
     log: bool = false, // GLM_WINDOWS=1: each window's streams, rows, GPU time and the GPU's idle gap before it
     last_end: f64 = 0,
     last_ret: u64 = 0, // when the last window's wait returned (host clock ticks)
@@ -135,6 +142,11 @@ pub const Slots = struct {
     /// Commit the open command buffer and wait for it (and for work committed ahead of it).
     pub fn flush(sl: *Slots) !void {
         return sl.flushBy(false);
+    }
+
+    /// The open buffer committed without a wait, ahead of a drafter that reads what it wrote; the next one reaps it.
+    pub fn commitAhead(sl: *Slots) !void {
+        try sl.launch();
     }
 
     /// flush; `spin`: the host spins on the buffer's status (Engine.finishBy).
@@ -301,12 +313,17 @@ pub const Slots = struct {
         x.segs = segs[0..wins.len];
         fwd.backbone(&x, enc, e.sc.ids, total, segs[0].pos);
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, e.sc.picks, total);
+        if (sl.follow) |f| f.encode(f.ctx, sl, sl.open.?.cb, enc, wins);
         sl.ahead = .{ 0, 0 };
-        try sl.flushBy(true);
+        const waited = sl.flushBy(true);
+        if (sl.follow) |f| f.land(f.ctx, sl, if (waited) |_| true else |_| false);
+        try waited;
         const ret = platform.c.mach_absolute_time();
         if (sl.log) {
             const first = if (sl.ahead[1] > 0) sl.ahead[0] else e.gpu[0];
-            std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3 });
+            // start: commit to GPU start; seen: GPU end to the host seeing it (GPU times are host-clock seconds)
+            const s_of = @as(f64, @floatFromInt(e.committed)) / 24e6;
+            std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms start {d:.3} seen {d:.3} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3, (e.gpu[0] - s_of) * 1e3, (@as(f64, @floatFromInt(ret)) / 24e6 - e.gpu[1]) * 1e3 });
         }
         sl.last_ret = ret;
         sl.last_end = e.gpu[1];

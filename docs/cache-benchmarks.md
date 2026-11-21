@@ -70,24 +70,41 @@ reply cannot qualify in any phase; its receipt is preserved with null fingerprin
 
 ## Latency figures
 
-`tools/bench_metrics.py` derives these figures from the chunk arrivals a client records.
-Every time is the client's clock, so each includes HTTP and queueing.
+`tools/bench_stream.py` reads each streamed reply and `tools/bench_metrics.py` derives these figures from the
+arrivals it records. Every time is the client's clock, so each includes HTTP and queueing.
 
-- TTFT: the first content or reasoning chunk's arrival minus the request's send time.
-- Prefill tok/s: `prompt_tokens / TTFT`, only for a `cold` request; otherwise null.
+- Boundaries, in seconds after the send and only for a reply that reached `[DONE]`: `headers_s` (status and
+  headers returned), `first_payload_s` (the first non-empty body line; lines are what the client clocks, so this
+  bounds the first byte from above), `first_content_s`, `first_reasoning_s`, `first_tool_s` (a tool name or argument
+  fragment), `first_output_s` (the earliest of the three) and `last_output_s`. A usage-only final chunk is not output.
+- `completion`: `finished`, `truncated` (a choice ended with `length`), `unfinished` (no finish reason), `no_output`
+  (usage only), `incomplete` (closed before `[DONE]`), `error` or `cancelled`. `complete` is unchanged: `[DONE]`
+  seen and no error. A tool-only reply has a `first_tool_s` and a `tool_sha256` but still no `output_sha256`, so it
+  cannot qualify a cache receipt.
+- TTFT: the first content or reasoning chunk's arrival minus the request's send time (unchanged).
+- Prompt/TTFT tok/s (`prompt_ttft_tps`): `prompt_tokens / TTFT`, only for a `cold` request; otherwise null. It is a
+  client figure that includes queueing, HTTP and the first decode step, not the engine's prefill time. The old key
+  `prefill_tps` (and `aggregate_prefill_tps`) is still written with the same value and listed in `deprecated_keys`.
   Run the server with `--prompt-cache-gib 0` so no prefix is kept between requests.
-- ITL: the gaps between consecutive tokens, the first token excluded. A chunk of k tokens counts as
-  k tokens arriving together: its first token takes the gap since the previous chunk, the other k - 1 take 0 ms.
-  The client knows only the reply's token count. Of its `tokens - 1` samples, `chunks - 1` are chunk gaps and
-  `tokens - chunks` are zeros, so the ITL mean equals the decode span over `tokens - 1`.
-- Round gap: the time between consecutive chunks. A drafted round that lands several tokens in one chunk
-  makes ITL bursty: zeros, then one long gap. `tokens_per_chunk` is `tokens / chunks`.
-- Pooled ITL and round gaps: every concurrent stream's samples in one list.
-- Aggregate prefill tok/s: the cold requests' prompt tokens over the time from the first send to the last
+- Token ITL and TPOT (`itl_*`, `tpot_ms`): the gaps between consecutive tokens, known only when every output chunk
+  holds one token (as many chunks as the reply's tokens; `token_timing` is `token`). When any chunk carries several
+  tokens, their own arrival times are unknown, so these are null and `token_timing` is `chunk`. A reply with several
+  choices has no token timing.
+- Chunk-level estimate (`chunk_tpot_estimate_ms`): the decode span over `tokens - 1`, given whenever the chunks can be
+  matched to the tokens. It equals `tpot_ms` when timing is per token; otherwise it is an estimate, not a measurement.
+- Round gap: the time between consecutive output chunks (content, reasoning or tool). `tokens_per_chunk` is
+  `tokens / chunks`.
+- Pooled ITL and round gaps: every concurrent stream's samples in one list; token ITL only from streams with
+  token timing (`streams_token_timed`).
+- Aggregate prompt/TTFT tok/s: the cold requests' prompt tokens over the time from the first send to the last
   first chunk, for requests sent together; null unless every request in the group is cold.
+- `collector_us_per_chunk` (`bench_concurrent` receipts): the client's own parsing and clock cost a chunk, measured on
+  an in-memory stream at start.
 
 Percentiles (`_p50`, `_p95`) are nearest-rank. A stream with fewer than two chunks, more chunks than tokens,
-an incomplete reply or an unknown token count gives null ITL and round-gap figures.
+an incomplete reply or an unknown token count gives null ITL, TPOT and round-gap figures.
+Receipts written before this change padded multi-token chunks with 0 ms ITL samples: there `itl_mean_ms` is the
+chunk-level estimate and `itl_p50_ms`/`itl_p95_ms` count those zeros, so neither compares with token ITL.
 
 ## Distinct prompts on concurrent streams
 
@@ -116,6 +133,53 @@ python3 tools/bench_fill.py http://127.0.0.1:8080 MODEL --corpus FILE --long 655
 `FILE` is any text long enough for `--long` tokens. The report gives `reply_s` (sent to last token), `long_ttft_s`,
 `both_done_s` and the reply's largest gaps for each order, plus `alone` for the sum to compare `both_done_s` with. `exact`
 is true only when every reply's `token_sha256` equals its run alone; the tool exits 1 when it isn't, or when `cold` isn't.
+
+## Sequential agent eviction traces
+
+`tools/bench_cache_agents.py` measures one trace with one request in flight at a time.
+Use `agent_loops` for stable conversations or `agent_cohorts` to replace every conversation halfway through.
+Each agent turn is followed by two unique one-off prompts. Histories grow through public user messages and
+the measured assistant replies, including reasoning when present. One-off replies are discarded.
+Matching token replies preserve identical A/B histories; request fingerprints detect later divergence if replies differ.
+The schedule follows the replay's shapes (`zig/cache_agent_trace.zig`, `zig build cache-agent-replay`), with tokenizer-dependent chat-template overhead and Python's seeded one-off choices.
+
+```sh
+python3 tools/bench_cache_agents.py run http://127.0.0.1:8080 MODEL \
+  --trace agent_loops --conversations 6 --rounds 48 --prefix-tokens 8192 \
+  --tokens 16 --seed 11 --output A.json
+python3 tools/bench_cache_agents.py compare A.json B.json --output comparison.json
+```
+
+Start a fresh model process for every trace and policy, using the same checkpoint, template, cache budget,
+context, generation settings and idle-machine conditions. Run A with `TF_CACHE_EVICT` unset and B with
+`TF_CACHE_EVICT=decayed_resume`. Repeat separately for `agent_cohorts`. The client does not restart the server,
+clear caches, warm up, retry, or change any policy. Persistent state must not make the two starting caches differ.
+As with the other clients, a first request's observed reuse is recorded rather than presumed cold.
+
+`--prefix-tokens` sizes the standalone system text through authenticated `/tokenize` and `/detokenize` calls,
+including a token-ID roundtrip check. It is not a claim about the rendered chat prompt length. Initial user
+fixtures have roughly another prefix's worth of tokens, with session offsets; growth is a sixteenth of the
+prefix per turn, plus message labels and template overhead. One-off fixture lengths scale from one eighth to
+about one and a half prefixes. The setup calls are tokenizer operations, not inference warmups.
+
+Rows contain trace, request index, conversation, round, turn, request fingerprint/seed, `prompt_tokens`,
+`cached_tokens`, `cache_state`, TTFT, completion state/count, `token_sha`, `token_sha256` and `output_sha256`.
+Usage counters and TTFT follow the evidence rules above; malformed/missing usage remains `unverified`, with
+no fabricated rebuilt-row sum. TTFT is time from send to the first nonempty content or reasoning chunk,
+including HTTP and queueing. Failed/incomplete streams retain a row, stop the schedule and exit 1.
+Missing usage in an otherwise complete reply retains the full schedule but cannot qualify it.
+
+`compare` requires matching settings, fixture/prefix fingerprints, thinking modes, ordered request identities,
+and per-request prompt/completion counts. Text/reasoning output fingerprints must also agree.
+Exactness uses each complete reply's full `token_sha256`; short or
+missing token hashes cannot establish equality. It reports per-request equality and per-trace sums of
+`prompt_tokens - cached_tokens` and TTFT. Incompatible or non-exact pairs retain raw summaries but have no
+comparative deltas. Exit 0 means complete, verified, token-equal evidence; exit 1 means mismatch or unverified
+evidence; invalid receipts/arguments exit 2. It reports cost/time changes without imposing a performance threshold.
+
+Receipts omit raw text, endpoint, model alias, local paths and credentials. Use `--api-key-env NAME` for explicit
+bearer authentication on discovery, tokenizer and inference calls; environment keys are ignored otherwise.
+These remain model-specific served receipts, not physical-memory or hardware qualification claims.
 
 ## Model-free checks
 

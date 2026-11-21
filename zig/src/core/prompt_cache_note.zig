@@ -14,6 +14,12 @@ pub const Heard = struct {
 /// The current thread's sink (null: lines go nowhere, as before).
 pub threadlocal var sink: ?*Heard = null;
 
+/// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr), a sink may hear.
+pub fn note(comptime fmt: []const u8, args: anytype) void {
+    if (@import("builtin").is_test) return hear(fmt, args);
+    std.log.warn("prompt cache: " ++ fmt, args);
+}
+
 pub fn hear(comptime fmt: []const u8, args: anytype) void {
     const h = sink orelse return;
     var w: std.Io.Writer = .fixed(h.bytes[h.len..]);

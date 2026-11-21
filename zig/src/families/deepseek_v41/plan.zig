@@ -119,6 +119,8 @@ pub const Options = struct {
     top: bool = false,
     /// with `blocks` and `top`: also DSpark's heads (main_proj, its norms, the Markov and confidence heads)
     dspark: bool = false,
+    /// TF_DSV41_FLOAT_LINEAR: a backbone projection the pack keeps as a float matrix alone is a native, not a group
+    float_linear: bool = false,
 };
 
 const Builder = struct {
@@ -146,7 +148,13 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try partition.group(g, split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+    }
+
+    /// The rank's part of a group: `wq_b` and `wo_b` follow the output groups, everything else whole blocks.
+    fn partOf(b: *const Builder, proj: names.Proj, g: exl3.Group, split: exl3.Split) !exl3.Part {
+        if (proj == .wq_b or proj == .wo_b) return partition.outputGroup(g, split, b.c.o_groups, b.o.rank, b.o.world);
+        return partition.group(g, split, b.o.rank, b.o.world);
     }
 
     fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
@@ -165,8 +173,8 @@ const Builder = struct {
             .whole => info.nbytes,
             .vocab_rows => info.nbytes / info.shape[0] * (try partition.share(@intCast(info.shape[0]), b.o.rank, b.o.world)).len,
             .heads => blk: {
-                if (info.shape[0] % b.o.world != 0) return error.SplitNotEven;
-                break :blk info.nbytes / b.o.world;
+                const s = partition.outputShare(@intCast(info.shape[0]), b.c.o_groups, b.o.rank, b.o.world) catch return error.SplitNotEven;
+                break :blk info.nbytes / info.shape[0] * s.len;
             },
         };
         return .{ .name = try b.dupe(name), .info = info, .slice = spec.slice, .bytes = bytes };
@@ -192,18 +200,39 @@ const Builder = struct {
         return .{ .proj = proj, .parts = parts, .prefixes = prefixes, .layout = try exl3.Layout.of(b.a, parts) };
     }
 
+    /// Whether the pack stores `prefix` as a float `.weight` alone: no trellis, and no rotation scales to apply.
+    fn plainOnly(b: *Builder, prefix: []const u8) !bool {
+        inline for (.{ "trellis", "suh", "svh", "su", "sv" }) |part|
+            if (b.pack.has(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}))) return false;
+        return b.pack.has(try std.fmt.bufPrint(&b.buf, "{s}.weight", .{prefix}));
+    }
+
+    /// The float matrix `s` is kept as instead of its EXL3 group; null when the setting is off or the group stands.
+    fn plainSpec(b: *Builder, s: names.GroupSpec, index: u32, name: []const u8) !?names.NativeSpec {
+        if (!b.o.float_linear or !b.c.isBackbone(index)) return null;
+        const spec = names.plainOf(s) orelse return null;
+        return if (try b.plainOnly(name)) spec else null;
+    }
+
     fn layer(b: *Builder, index: u32) !LayerPlan {
         var pb: [32]u8 = undefined;
         const block = try b.dupe(try names.blockPrefix(b.c, index, &pb));
         const has_shared = b.pack.has(try std.fmt.bufPrint(&b.buf, "{s}.ffn.shared_experts.w1.trellis", .{block}));
         const specs = try names.blockGroups(b.c, index, b.o.rank, b.o.world, has_shared);
-        const groups = try b.a.alloc(GroupPlan, specs.len);
-        for (specs.items(), groups) |s, *g| {
+        var nspecs = try names.blockNatives(b.c, index);
+        var kept: std.ArrayList(GroupPlan) = try .initCapacity(b.a, specs.len);
+        for (specs.items()) |s| {
             var nb: [128]u8 = undefined;
-            g.* = try b.group(s.proj, try names.groupName(s, block, &nb), s.split, s.k, s.n);
+            const name = try names.groupName(s, block, &nb);
+            if (try b.plainSpec(s, index, name)) |spec| {
+                try nspecs.push(spec);
+                continue;
+            }
+            var g = try b.group(s.proj, name, s.split, s.k, s.n);
             g.slice = s.slice;
+            kept.appendAssumeCapacity(g);
         }
-        const nspecs = try names.blockNatives(b.c, index);
+        const groups = kept.items;
         const natives = try b.a.alloc(NativePlan, nspecs.len);
         for (nspecs.items(), natives) |s, *v| {
             var nb: [128]u8 = undefined;
@@ -266,9 +295,11 @@ const Builder = struct {
     }
 };
 
-/// Heads and groups split evenly; expert and vocabulary slices retain whole 128-column blocks.
+/// Heads split by whole output groups; expert and vocabulary slices keep whole 128-column blocks.
 pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Options) !Plan {
-    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0) return error.BadWorld;
+    if (o.world == 0 or o.rank >= o.world) return error.BadWorld;
+    if (o.world != 3 and (c.heads % o.world != 0 or c.o_groups % o.world != 0)) return error.BadWorld;
+    _ = partition.outputGroups(c.o_groups, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -385,4 +416,49 @@ test "CUDA rank planning selects EXL3 over a kept dense sibling from headers alo
     try testing.expectError(error.MissingTensor, p.group(prefix, &buf));
     try p.addHeader("dense-only.safetensors", dense, 5242880);
     try testing.expectError(error.UnsupportedDenseProjection, p.group(prefix, &buf));
+}
+
+test "TF_DSV41_FLOAT_LINEAR off refuses a float-only projection; on, it plans as a native matrix" {
+    const a = testing.allocator;
+    const prefix = "layers.2.attn.compressor.wkv";
+    const c: Config = .{};
+    var p = Pack.init(a);
+    defer p.deinit();
+    try p.addHeader("float.safetensors", "{\"layers.2.attn.compressor.wkv.weight\":{\"dtype\":\"BF16\",\"shape\":[512,5120],\"data_offsets\":[0,5242880]}}", 5242880);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const spec: names.GroupSpec = .{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim };
+    // off (the default): the groups are planned as before, and a projection with no trellis is refused as before
+    var off: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = 1, .world = 2 } };
+    try testing.expect(try off.plainSpec(spec, 2, prefix) == null);
+    try testing.expectError(error.MissingTensor, off.group(spec.proj, prefix, spec.split, spec.k, spec.n));
+    var on: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = 1, .world = 2, .float_linear = true } };
+    const v = try on.native("layers.2.attn.compressor.wkv.weight", (try on.plainSpec(spec, 2, prefix)).?);
+    try testing.expectEqual(@as(u64, 5242880), v.bytes);
+    try testing.expect(on.used.contains("layers.2.attn.compressor.wkv.weight"));
+    // these keep their group: a DSpark block, a rank-split or unlisted projection, one also stored as EXL3
+    try testing.expect(try on.plainSpec(spec, c.layers, prefix) == null);
+    try testing.expect(names.plainOf(.{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .split = .col, .k = c.hidden, .n = c.head_dim }) == null);
+    try testing.expect(names.plainOf(.{ .proj = .wkv, .suffix = "attn.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim }) == null);
+    try p.addHeader("layer-02.safetensors", "{\"layers.2.attn.compressor.wkv.trellis\":{\"dtype\":\"I16\",\"shape\":[320,32,80],\"data_offsets\":[0,1638400]}}", 1638400);
+    try testing.expect(try on.plainSpec(spec, 2, prefix) == null);
+}
+
+test "TF_DSV41_FLOAT_LINEAR leaves a dense projection with rotation scales refused, on or off" {
+    const a = testing.allocator;
+    const prefix = "layers.2.attn.compressor.wkv";
+    const c: Config = .{};
+    var p = Pack.init(a);
+    defer p.deinit();
+    try p.addHeader("dense.safetensors", "{\"layers.2.attn.compressor.wkv.weight\":{\"dtype\":\"BF16\",\"shape\":[512,5120],\"data_offsets\":[0,5242880]}," ++
+        "\"layers.2.attn.compressor.wkv.suh\":{\"dtype\":\"F16\",\"shape\":[5120],\"data_offsets\":[5242880,5253120]}," ++
+        "\"layers.2.attn.compressor.wkv.svh\":{\"dtype\":\"F16\",\"shape\":[512],\"data_offsets\":[5253120,5254144]}}", 5254144);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const spec: names.GroupSpec = .{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .split = .whole, .k = c.hidden, .n = c.head_dim };
+    for ([_]bool{ false, true }) |on| {
+        var b: Builder = .{ .a = arena.allocator(), .c = &c, .pack = &p, .o = .{ .rank = 1, .world = 2, .float_linear = on } };
+        try testing.expect(try b.plainSpec(spec, 2, prefix) == null);
+        try testing.expectError(error.UnsupportedDenseProjection, b.group(spec.proj, prefix, spec.split, spec.k, spec.n));
+    }
 }

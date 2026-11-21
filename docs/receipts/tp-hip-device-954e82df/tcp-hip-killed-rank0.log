@@ -1,0 +1,3 @@
+error: PeerFailed
+kill sent at 1794449237.143134077; rank 0 exited at 1794449237.266893595, 0.124 s later
+exit 1

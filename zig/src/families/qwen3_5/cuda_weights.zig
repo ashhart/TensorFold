@@ -81,10 +81,11 @@ fn raw3Bytes(count: usize, n: usize, k: usize) usize {
 /// What `load` takes from the arena: every packed projection and vector, each allocation aligned.
 pub fn total(g: Geometry) usize {
     const mo = g.kinds.modelopt;
-    var t: usize = if (mo) aligned(g.vocab * g.hidden * 2) else embedBytes(g);
-    t += if (mo) modelopt.packedBytes(g.vocab, g.hidden, g.kinds.head) else packedBytes(g.vocab, g.hidden, g.bits.head); // the head
-    t += aligned(g.hidden * 2);
-    for (0..g.layers) |i| {
+    var t: usize = 0;
+    if (g.embeds) t += if (mo) aligned(g.vocab * g.hidden * 2) else embedBytes(g);
+    if (g.heads) t += if (mo) modelopt.packedBytes(g.vocab, g.hidden, g.kinds.head) else packedBytes(g.vocab, g.hidden, g.bits.head);
+    if (g.heads) t += aligned(g.hidden * 2); // the final norm
+    for (g.first..g.first + g.layers) |i| {
         t += 2 * aligned(g.hidden * 2);
         if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
@@ -104,15 +105,15 @@ pub fn total(g: Geometry) usize {
 pub fn stageBytes(g: Geometry) usize {
     if (g.kinds.modelopt) {
         var raw = modelopt.rawBytes(g.vocab, g.hidden, g.kinds.head);
-        for (0..g.layers) |i| for (slots(g, i)) |slot| {
+        for (g.first..g.first + g.layers) |i| for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
             raw = @max(raw, modelopt.rawBytes(nk[0], nk[1], g.kinds.of(i, slot)));
         };
         return if (g.moe()) @max(raw, modelopt_experts.stageBytes(g)) else raw;
     }
-    var most = rawBytes(g.vocab, g.hidden, g.bits.head);
-    if (rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
-    for (0..g.layers) |i| for (slots(g, i)) |slot| {
+    var most: usize = if (g.heads) rawBytes(g.vocab, g.hidden, g.bits.head) else 0;
+    if (g.embeds and rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
+    for (g.first..g.first + g.layers) |i| for (slots(g, i)) |slot| {
         const nk = shape(g, slot);
         most = @max(most, rawBytes(nk[0], nk[1], g.bits.of(i, slot)));
     };
@@ -231,6 +232,24 @@ pub fn linearSlice(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *Devi
     return q;
 }
 
+/// A pipeline stage's ends (an MLX checkpoint's): the embedding from layer 0, the head where the stage holds it.
+fn loadStage(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const u8) !void {
+    const g = e.g; // an MLX checkpoint's: stage_fwd.geometry refused the others
+    e.embed_bits = rowBits(g.bits.embed);
+    e.embed_w = 0;
+    e.embed_s = 0;
+    e.embed_b = 0;
+    if (g.embeds) {
+        e.embed_w = try embedWords(e, ck, stage, m);
+        e.embed_s = try tensor(e, ck, "{s}embed_tokens.scales", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
+        e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
+    }
+    e.final_norm = 0;
+    e.head = .{ .a4 = std.mem.zeroes(Affine4) }; // never read: a stage without the head runs no finish
+    if (!g.heads) return;
+    e.head = if (g.tied) try linear(e, e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, e, ck, stage, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
+}
+
 fn bf16f(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
@@ -337,12 +356,13 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     const g = e.g;
     const mo = g.kinds.modelopt;
     const m = if (mo) modelopt.prefix else "language_model.model.";
-    if (mo) {
+    if (g.whole != 0) try loadStage(e, ck, stage, m) else if (mo) {
         e.embed_bits = 16; // bf16 rows as stored
         e.embed_w = try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .bf16, &.{ g.vocab, g.hidden });
         e.embed_s = 0;
         e.embed_b = 0;
-        e.head = try modelopt.linear(e, ck, stage, "", "lm_head", g.vocab, g.hidden, g.kinds.head);
+        // a tied plain BF16 head is the embedding's rows, packed again into the lane's layout
+        e.head = if (g.bf16 and g.tied) try modelopt.linear(e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.kinds.head) else try modelopt.linear(e, ck, stage, "", "lm_head", g.vocab, g.hidden, g.kinds.head);
     } else {
         e.embed_bits = rowBits(g.bits.embed);
         e.embed_w = try embedWords(e, ck, stage, m);
@@ -352,17 +372,17 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     }
     // a plain BF16 checkpoint keeps HF's raw w: its norm kernels (the _shift ones) scale by 1 + w in FP32
     const shift = mo and !g.bf16;
-    e.final_norm = try normVec(e, ck, shift, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
+    if (g.heads) e.final_norm = try normVec(e, ck, shift, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
     const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
     const readers = try core.checkpoint.loadReaders();
     // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: #1928's read-ahead)
     var direct = core.checkpoint.direct.Layers.init(e.gpa, ck, readers);
     defer direct.deinit();
-    for (e.layers, 0..) |*l, i| {
+    for (e.layers, g.first..) |*l, i| {
         var pbuf: [2][96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf[0], "{s}layers.{d}.", .{ m, i });
-        const last = i + 1 == e.layers.len;
+        const last = i + 1 == g.first + e.layers.len;
         try direct.enter(p, if (last) null else try std.fmt.bufPrint(&pbuf[1], "{s}layers.{d}.", .{ m, i + 1 }));
         // a read-ahead layer is on the device: its pages leave the cache (none: main's one release at close)
         defer if (readers > 0 and !direct.on()) ck.release();
@@ -424,6 +444,19 @@ test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own w
     g.bits.head = 6;
     try std.testing.expect(total(g) > uniform);
     try std.testing.expectEqual(rawBytes(g.vocab, g.hidden, 6), stageBytes(g));
+}
+
+test "Qwen stage: a pipeline's stages load one engine's weights between them, the embedding and the head once" {
+    var g: Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = 8, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(false) };
+    for (0..8) |i| g.linear[i] = i % 4 != 3;
+    const a = try g.stage(0, 3, true);
+    const b = try g.stage(3, 8, false);
+    try std.testing.expectEqual(total(g), total(a) + total(b));
+    try std.testing.expectEqual(g.stateBytes(), a.stateBytes() + b.stateBytes());
+    try std.testing.expectEqual(g.kvBytes(64, false), a.kvBytes(64, false) + b.kvBytes(64, false));
+    try std.testing.expect(a.embeds and !b.embeds and !b.heads and b.model().layers == 8 and b.deltas() == 3);
+    try std.testing.expectError(error.BadStageRange, g.stage(3, 9, false));
+    try std.testing.expectError(error.BadStageRange, b.stage(0, 1, false));
 }
 
 test {
