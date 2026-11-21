@@ -130,7 +130,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
         for ([2]*anyopaque{ from_own, from_paged }, 0..) |saved, way| { // own into paged, then paged into own
             const into = if (way == 0) seq else &e.own;
             e.bind(into);
-            _ = try e.prefillFrom(other, 0, null, h, null, null, &.{}); // every row the prompt reads holds another prompt's
+            _ = try e.prefillFrom(other, 0, null, h, null, null, &.{}); // prompt-read rows belong to another prompt
             try reuse.restore(&target, null, saved);
             const d = try digest(gpa, e, h, if (way == 0) p else null, ids.len, try e.prefillFrom(ids, at, null, h, null, null, &.{}));
             const same = std.mem.eql(u8, &fresh, &d);
