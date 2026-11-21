@@ -60,3 +60,9 @@ const Hook = struct {
         b.queue(b.ctx, h.group, h.t.b.logits.buf, h.t.b.logits.off, tb);
     }
 };
+
+/// Whether the next segment would repeat a slot already in this launch.
+pub fn duplicateSlot(done: []const iface.Segment, slot: u32) bool {
+    for (done) |o| if (o.slot == slot) return true;
+    return false;
+}
