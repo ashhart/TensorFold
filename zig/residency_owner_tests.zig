@@ -58,6 +58,7 @@ test "residency owner GLM: actual arena slots tower and snapshots match live uni
             e.k = &kernels;
             e.fused_route = true;
             e.draft_vocab = 8;
+            e.dflash = null;
             e.ep = null;
             e.ev = 0;
             e.event = .{};
@@ -143,6 +144,7 @@ test "residency owner GLM: zero and a failed bound never publish a set or keepal
             e.arena = .{ .device = device, .gpa = a };
             defer e.arena.deinit();
             e.vision = null;
+            e.dflash = null;
             e.residency = null;
             e.residency_enabled = try glm.residency.policy.flag(if (enabled) "1" else "0");
             e.limit = std.mem.zeroes(@TypeOf(e.limit));
