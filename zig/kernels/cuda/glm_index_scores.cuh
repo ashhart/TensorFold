@@ -114,10 +114,12 @@ extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
       }
       for (int nt = 0; nt < 2; ++nt)
         for (int e = 0; e < 2; ++e) {
-          const float v0 = fmaxf(__fmul_rn(acc[0][nt][e], scale), 0.0f),
-                      v1 = fmaxf(__fmul_rn(acc[0][nt][e + 2], scale), 0.0f);
-          const float v2 = fmaxf(__fmul_rn(acc[1][nt][e], scale), 0.0f),
-                      v3 = fmaxf(__fmul_rn(acc[1][nt][e + 2], scale), 0.0f);
+          float v0 = __fmul_rn(acc[0][nt][e], scale), v1 = __fmul_rn(acc[0][nt][e + 2], scale);
+          float v2 = __fmul_rn(acc[1][nt][e], scale), v3 = __fmul_rn(acc[1][nt][e + 2], scale);
+          v0 = isnan(v0) ? v0 : fmaxf(v0, 0.0f);
+          v1 = isnan(v1) ? v1 : fmaxf(v1, 0.0f);
+          v2 = isnan(v2) ? v2 : fmaxf(v2, 0.0f);
+          v3 = isnan(v3) ? v3 : fmaxf(v3, 0.0f);
           float s = __fmul_rn(wv[1], v1);
           s = __fmaf_rn(wv[0], v0, s);
           s = __fmaf_rn(wv[2], v2, s);

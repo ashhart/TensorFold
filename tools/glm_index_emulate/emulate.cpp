@@ -85,7 +85,8 @@ static float model_score(const std::vector<__nv_bfloat16>& q, const std::vector<
       for (int k = 0; k < 16; k++) sum += (double)bf(q[(r * heads + h) * 128 + kq * 16 + k]) * (double)bf(key[kq * 16 + k]);
       acc = (float)((double)acc + sum);
     }
-    x[h] = std::fmax(acc * scale, 0.0f);
+    const float scaled = acc * scale;
+    x[h] = std::isnan(scaled) ? scaled : std::fmax(scaled, 0.0f);
     wv[h] = bf(w[r * w_stride + h]) * wscale;
   }
   float s[8];
