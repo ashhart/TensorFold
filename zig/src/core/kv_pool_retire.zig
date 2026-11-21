@@ -83,6 +83,7 @@ pub fn freeOrPend(p: *Pool, id: u32) void {
     const r = &p.retired;
     if (r.token(id) > r.settled) return r.pending.appendAssumeCapacity(id); // reserved before its mark
     clear(p, id);
+    if (p.freed) |f| f.call(f.ctx, id);
     p.free[p.nfree] = id;
     p.nfree += 1;
 }
@@ -100,6 +101,7 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
             keep += 1;
         } else {
             clear(p, id);
+            if (p.freed) |f| f.call(f.ctx, id);
             p.free[p.nfree] = id;
             p.nfree += 1;
         }

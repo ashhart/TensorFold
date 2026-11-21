@@ -43,6 +43,11 @@ pub fn tests(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) void 
     step.dependOn(&run.step);
     const lifetime = b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{ "an unowned device span", "an empty unowned readback", "closing a driver drops" } }));
     step.dependOn(&lifetime.step);
+    const tail = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_mtp_verify_tail.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+    const tail_test = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/mtp_tail_readback_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "tail", .module = tail } } }) }));
+    b.step("test-mtp-tail-readback-host", "Actual MTP tail readback waits and preserves integrated/discrete output bytes").dependOn(&tail_test.step);
+    step.dependOn(&tail_test.step);
+    all.dependOn(&tail_test.step);
     all.dependOn(&run.step);
 }
 

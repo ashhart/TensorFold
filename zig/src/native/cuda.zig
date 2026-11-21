@@ -59,6 +59,7 @@ pub const Host = struct {
     gpu: ?*Gpu, // null in host tests: no context to bind
     family: *anyopaque,
     release: *const fn (*anyopaque) void,
+    prepare_close: ?*const fn (*anyopaque) void = null,
     inner: lanes.backend.Backend,
     vtable: lanes.backend.Backend.VTable,
     cfg: lanes.Config,
@@ -380,7 +381,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
+    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .prepare_close = if (@hasDecl(F, "prepareClose")) F.prepareClose else null, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
     h.kv_plan = counted.ledger; // a ledger's plan placed the cache already, beside --parallel full-window requests
     const kept = if (host_cache) kv_pages.kept(F, loaded, paged, o, room, held, final_host_budget, true) else if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, 0, false);

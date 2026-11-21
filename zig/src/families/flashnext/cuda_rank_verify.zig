@@ -74,13 +74,29 @@ pub fn ensure(map: anytype, gpa: std.mem.Allocator, keys: []const u64, ctx: anyt
     }
 }
 
-/// Rank 1's window state for a sequence: one draft row, the head's absorb rows (Session.window's form).
+/// Rank 1's window state: EXL3 keeps no head cache; classic retains the sequence's head geometry.
 pub fn makeWindow(s: *Session, q: *const prompt.Seq) !mtp.Draft {
-    return mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk, s.engine.heads);
+    const cap = if (s.engine.scratch_format == .exl3) 1 else q.cap;
+    return mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, cap, 1, s.engine.chunk, s.engine.heads);
 }
 
 fn limitOf(s: *const Session) usize {
     return @min(mtp.round_rows, s.engine.chunk);
+}
+
+pub fn tokenIds(ids: []const u32) !void {
+    for (ids) |id| if (id >= wt.vocab) return error.InvalidToken;
+}
+
+pub fn sendWithTail(session: *Session, comptime Tri: type, tri: Tri, seq: *prompt.Seq, draft_state: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) !void {
+    if (tail != null and session.rank != 0) return error.UnsupportedRankOperation;
+    if (!session.drafting or ids.len == 0 or ids.len > mtp.max_rows or seq.fed + ids.len > seq.cap) return error.UnsupportedRankOperation;
+    try tokenIds(ids);
+    const header = try session.command(.{ .kind = .verify, .object = seq.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
+    errdefer session.poison();
+    const ops: mtp.Ops(Tri) = .{ .e = session.engine, .tri = tri, .h = undefined };
+    try ops.verifyWithTail(seq, draft_state, ids, tail);
+    try session.ack(header);
 }
 
 /// Rank 0: the frame to rank 1, the same pass here, then rank 1's ack; a failure after the send poisons the session.

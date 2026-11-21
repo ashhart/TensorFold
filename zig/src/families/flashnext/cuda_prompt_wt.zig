@@ -6,6 +6,7 @@ const core = @import("core");
 const hc = @import("cuda_hc.zig");
 const qmm = @import("cuda_qmm.zig");
 const gdn = @import("cuda_gdn.zig");
+const exl3_store = @import("exl3/pack/cuda_exl3_store.zig");
 
 pub const layers_n: usize = 48;
 pub const linear_n: usize = 36;
@@ -96,7 +97,7 @@ const Shard = struct {
     }
 };
 
-fn runtimePage(name: []const u8) bool {
+pub fn runtimePage(name: []const u8) bool {
     return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null;
 }
 
@@ -120,14 +121,18 @@ pub const Store = struct {
     /// Shards a load already opened, kept open until it ends (loaded or deinit): reopening one parses its header again.
     released: std.ArrayList(Held) = .empty,
     norm_offset: f32 = 0,
+    /// An EXL3 pack's dense F16 weights widened to BF16 exactly (freed at release()) and the kernels/scratch it shares.
+    widened: std.ArrayList([]u16) = .empty,
+    exl3_ops: ?*@import("exl3/pack/cuda_exl3_load.zig").Ops = null,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
         const index = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
         defer gpa.free(index);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, index, gpa, .limited(1 << 26));
         defer gpa.free(text);
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+        var parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
         errdefer parsed.deinit();
+        try exl3_store.addPatch(io, dir, &parsed);
         _ = try core.safetensors.index.weightMap(parsed.value);
         return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = parsed };
     }
@@ -163,6 +168,7 @@ pub const Store = struct {
 
     pub fn deinit(self: *Store) void {
         self.dropStaging();
+        if (self.exl3_ops) |o| o.release();
         self.release();
         self.held.deinit(self.gpa);
         self.closeReleased();
@@ -195,6 +201,8 @@ pub const Store = struct {
 
     /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
+        for (self.widened.items) |w| self.gpa.free(w);
+        self.widened.clearAndFree(self.gpa);
         for (self.held.items) |h| {
             // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's
             h.file.drop(self.gpa);
@@ -234,21 +242,21 @@ pub const Store = struct {
         const key = try self.resolveKey(requested, &mapped);
         const file = try self.shard(key);
         for (self.held.items) |*h| {
-            if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
+            if (std.mem.eql(u8, h.rel, file)) return self.dense(key, h.file.get(key) orelse return error.MissingTensor);
         }
         try self.held.ensureUnusedCapacity(self.gpa, 1);
         for (self.released.items, 0..) |cached, i| {
             if (std.mem.eql(u8, cached.rel, file)) {
                 self.held.appendAssumeCapacity(cached);
                 _ = self.released.swapRemove(i);
-                return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
+                return self.dense(key, self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor);
             }
         }
         self.held.appendAssumeCapacity(try self.openShard(file));
-        return self.held.items[self.held.items.len - 1].file.get(key) orelse {
+        return self.dense(key, self.held.items[self.held.items.len - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
-        };
+        });
     }
 
     pub fn closeFile(self: *Store) void {
@@ -277,11 +285,10 @@ pub const Store = struct {
 
     fn shard(self: *Store, key: []const u8) ![]const u8 {
         const wm = self.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
-        const v = wm.object.get(key) orelse {
+        return (wm.object.get(key) orelse {
             std.debug.print("missing {s}\n", .{key});
             return error.MissingTensor;
-        };
-        return v.string;
+        }).string;
     }
 
     /// `file` (relative to the checkpoint) opened, its header parsed, with its own copy of the name.
@@ -314,10 +321,15 @@ pub const Store = struct {
         var mapped: [512]u8 = undefined;
         const key = try self.resolveKey(requested, &mapped);
         try self.use(key);
-        return self.file.?.get(key) orelse {
+        return self.dense(key, self.file.?.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
-        };
+        });
+    }
+
+    /// An EXL3 pack's dense F16 weight as the BF16 the loaders read (exact or refused); any other tensor as stored.
+    fn dense(self: *Store, key: []const u8, t: Tensor) !Tensor {
+        return if (!exl3_store.widens(key, t)) t else exl3_store.widen(self.gpa, key, t, &self.widened);
     }
 
     /// Check the exact or compatibility name without mapping its shard.
@@ -585,10 +597,4 @@ pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: 
 
 test {
     _ = @import("cuda_prompt_wt_test.zig");
-}
-
-test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
-    try std.testing.expect(runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
-    try std.testing.expect(!runtimePage("language_model.model.norm.weight"));
-    try std.testing.expect(!runtimePage("language_model.mtp.norm.weight"));
 }

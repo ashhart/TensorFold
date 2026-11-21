@@ -142,3 +142,9 @@ test "centered scales add one in FP32 while direct scales preserve the original 
     defer std.testing.allocator.free(direct);
     try std.testing.expectEqualSlices(f32, &raw, direct);
 }
+
+test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
+    try std.testing.expect(owner.runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
+    try std.testing.expect(!owner.runtimePage("language_model.model.norm.weight"));
+    try std.testing.expect(!owner.runtimePage("language_model.mtp.norm.weight"));
+}

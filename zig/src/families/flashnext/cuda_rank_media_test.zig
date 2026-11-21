@@ -111,6 +111,8 @@ test "a leader whose peer leaves after the image broadcast is enqueued drains be
     var d = Fake.driver();
     var stream: cuda.Stream = .{ .d = &d, .handle = null };
     var engine: prompt.Engine = undefined;
+    engine.exl3_prefill = .{};
+    engine.exl3_chain = .{};
     engine.driver = &d;
     engine.stream = &stream;
     var pair: [2]c_int = undefined;
@@ -132,6 +134,8 @@ test "a follower whose image broadcast fails after it is enqueued keeps the feat
     var d = Fake.driver();
     var stream: cuda.Stream = .{ .d = &d, .handle = null };
     var engine: prompt.Engine = undefined;
+    engine.exl3_prefill = .{};
+    engine.exl3_chain = .{};
     engine.driver = &d;
     engine.stream = &stream;
     var v: images.Vision = undefined;

@@ -7,6 +7,7 @@ Each path places its ranks its own way:
 | Path | Places ranks by | Documented by |
 | --- | --- | --- |
 | Flash Next on two Macs | `--speed-up FILE`, one file per rank | [Speed-up mode](speed-up-mode.md) |
+| Flash Next EXL3 on CUDA | `--tp 2 --rank N --master HOST` | [Its CUDA recipe](recipes/flash-next-cuda.md) places the pack across two GPUs |
 | Native GLM-5.3-Flash on CUDA | `TF_GLM_RANK` of `TF_GLM_WORLD`, with `NCCL_COMM_ID` on rank 0's address | [Its recipe](recipes/glm-5.3-flash-cuda.md) starts two; [native placement and limits](../zig/src/families/glm/cuda_native.zig): the engine refuses a world past 16 |
 | Nemotron 3.5 Super on CUDA | `TF_NEMOTRON_RANK` of `TF_NEMOTRON_WORLD`, with `NCCL_COMM_ID` | [Its recipe](recipes/nemotron-3.5-super-vl.md) starts two; a world must divide the expert shares |
 | Legacy Python 0.6.6 engine | `--tp`, `--rank`, `--master` | [The Python GLM recipe](recipes/glm-5.3-flash.md) |
@@ -18,6 +19,8 @@ Placement is family-specific; use the selected family's current native recipe. `
 ## What a receipt can carry
 
 New community-v2 receipts carry an optional `group` object with 1-8 loaded ranks, per-node hardware and a `single-node` or `multi-node` category. The server gathers it at startup and HTTP reads its frozen snapshot. `settings.rank_count` must agree. [Loaded group receipts](loaded-group-receipts.md) defines the fields, validation and receiver partitions. Ranks sharing a node are not multiple nodes; identical hardware names on two nodes do not merge them.
+
+Flash Next registers engine cleanup before constructing its loaded-rank inventory, so a failed startup inventory releases the loaded engine.
 
 V1 remains byte-for-byte unchanged, accepting 1, 2 or null as before. Legacy v2 receipts without `group` keep that bound. Missing, unsupported or inconsistent inventories remain unranked. No client or environment rank hint can fill them. ROCm distributed inventory remains unavailable. Community-v2 publication stays disabled until the receiver accepts and separates its new fields.
 

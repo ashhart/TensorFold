@@ -22,6 +22,7 @@ pub const Vision = struct {
     /// prep and pool through a stream's page table (TF_FLASHNEXT_KV_PAGES).
     prep_paged: cuda.Function,
     pool_paged: cuda.Function,
+    planes: ?media.Planes = null,
     pub fn load(a: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, limits: Limits, rank: usize, prep: cuda.Function, pool: cuda.Function, prep_paged: cuda.Function, pool_paged: cuda.Function) !*Vision {
         try shared.media.checkLimits(limits);
         const settings = (try shared.Settings.read(a, io, dir)) orelse return error.NoVisionTower;
@@ -70,11 +71,11 @@ pub const Vision = struct {
         return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
     }
     pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image) !media.State {
-        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
+        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged, .planes = v.planes };
     }
     pub fn receive(v: *Vision, n: usize, runs: []const shared.media.Run) !media.State {
         const p = try shared.media.Plan.init(v.a, n, runs, v.limits);
-        return .{ .image = try shared.media.Media.allocate(p, v.encoder), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
+        return .{ .image = try shared.media.Media.allocate(p, v.encoder), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged, .planes = v.planes };
     }
     pub fn explain(err: anyerror) ?[]const u8 {
         return switch (err) {

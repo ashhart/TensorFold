@@ -1,6 +1,7 @@
 //! Wrapper ABI, logical positions and per-row routing. This does not emulate CUDA numerical arithmetic.
 const std = @import("std");
 const cuda = @import("cuda");
+const endian = @import("builtin").cpu.arch.endian();
 const media = @import("cuda_media.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const Capture = struct {
@@ -8,24 +9,40 @@ const Capture = struct {
     var values: [8][22]u64 = undefined;
     var configs: [8][7]u32 = undefined;
     var fns: [8]usize = undefined;
+    var pages: [8][5]u64 = undefined;
     fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, by: c_uint, bz: c_uint, sm: c_uint, s: cuda.abi.Stream, args: ?[*]?*anyopaque, extra: ?[*]?*anyopaque) callconv(.c) c_int {
         std.debug.assert(extra == null and s == @as(cuda.abi.Stream, @ptrFromInt(99)));
         const id = @intFromPtr(f);
-        // the paged forms (4, 5) take the flat ones' arguments and a Pg last, read here by its table's address
+        // The paged launches end in PgMain (4, 5) or the two-plane Pg (6, 7).
         const count: usize = switch (id) {
             1 => 7,
             2 => 21,
-            4 => 22,
-            5 => 14,
+            4, 6 => 22,
+            5, 7 => 14,
             else => 13,
         };
         for (0..count) |i| {
             const wide = switch (id) {
                 1 => i < 3,
-                2, 4 => i < 11 or i == 18 or i == 21,
+                2, 4, 6 => i < 11 or i == 18 or i == 21,
                 else => i < 5 or i == 10 or i == 13,
             };
             values[calls][i] = if (wide) @as(*const u64, @ptrCast(@alignCast(args.?[i].?))).* else @as(*const u32, @ptrCast(@alignCast(args.?[i].?))).*;
+        }
+        if (id >= 4) {
+            const at: usize = if (id == 4 or id == 6) 21 else 13;
+            const bytes: [*]const u8 = @ptrCast(args.?[at].?);
+            pages[calls] = .{
+                std.mem.readInt(u64, bytes[0..8], endian),
+                std.mem.readInt(u64, bytes[8..16], endian),
+                std.mem.readInt(u32, bytes[16..20], endian),
+                0,
+                0,
+            };
+            if (id == 6 or id == 7) {
+                pages[calls][3] = std.mem.readInt(u64, bytes[24..32], endian);
+                pages[calls][4] = std.mem.readInt(u64, bytes[32..40], endian);
+            }
         }
         configs[calls] = .{ gx, gy, gz, bx, by, bz, sm };
         fns[calls] = id;
@@ -67,7 +84,7 @@ test "the splice, attention and pooled indexer launches get every pointer, scala
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 3, 1, 1, 1 }, Capture.fns[0..6]);
 }
 
-test "a paged stream's media rows take the paged launches: the same arguments, its pages last" {
+test "exl3: a paged stream's media rows take the paged launches: the same arguments, its pages last" {
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     const s: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(99) };
@@ -83,4 +100,24 @@ test "a paged stream's media rows take the paged launches: the same arguments, i
     try std.testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5, eps, 8, wt.index_dim, wt.half, wt.index_ratio, 3000, 20, delta, 7000 }, Capture.values[1][0..14]);
     try std.testing.expectEqual([7]u32{ 3, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1, 256, 1, 1, 0 }, Capture.configs[0]);
     try std.testing.expectEqual([7]u32{ 8 / wt.index_ratio + 2, 1, 1, 128, 1, 1, 0 }, Capture.configs[1]);
+    for (Capture.pages[0..2]) |pg_args|
+        try std.testing.expectEqualSlices(u64, &.{ 7000, 985088, 64, 0, 0 }, &pg_args);
+}
+
+test "exl3: host-tier media passes both page planes and refuses kernels without the planes ABI" {
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Capture.launch;
+    const s: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(99) };
+    Capture.calls = 0;
+    var m = view(&d, 1000);
+    const pg: @import("cuda_glue.zig").Pg = .{ .pt = 7000, .ps = 985088, .ptok = 64, .ips = 12288, .ipt = 9000 };
+    try std.testing.expectError(error.NoPlanesKernel, m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, .full, pg));
+    try std.testing.expectError(error.NoPlanesKernel, m.pooled(s, 1, 2, 3, 4, 5, 1e-6, 8, pg));
+    try std.testing.expectEqual(@as(usize, 0), Capture.calls);
+    m.planes = .{ .prep = .{ .d = &d, .handle = @ptrFromInt(6) }, .pool = .{ .d = &d, .handle = @ptrFromInt(7) } };
+    try m.attn(s, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 3, .full, pg);
+    try m.pooled(s, 1, 2, 3, 4, 5, 1e-6, 8, pg);
+    try std.testing.expectEqualSlices(usize, &.{ 6, 7 }, Capture.fns[0..2]);
+    for (Capture.pages[0..2]) |pg_args|
+        try std.testing.expectEqualSlices(u64, &.{ 7000, 985088, 64, 12288, 9000 }, &pg_args);
 }
