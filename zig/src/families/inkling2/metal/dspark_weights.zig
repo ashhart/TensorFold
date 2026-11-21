@@ -64,15 +64,13 @@ pub const Loaded = struct {
     }
 };
 
-fn require(t: ck.Tensor, dims: []const usize, name: []const u8) !ck.Tensor {
+fn require(t: ck.Tensor, dims: []const usize, _: []const u8) !ck.Tensor {
     if (t.dtype != .bf16 or t.rank != dims.len) {
-        std.log.err("DSpark tensor {s} must be BF16 with rank {d}", .{ name, dims.len });
         return error.DSparkTensorShape;
     }
     var count: usize = 1;
     for (dims, 0..) |d, i| {
         if (t.shape[i] != d) {
-            std.log.err("DSpark tensor {s} dimension {d} must be {d}, not {d}", .{ name, i, d, t.shape[i] });
             return error.DSparkTensorShape;
         }
         count = std.math.mul(usize, count, d) catch return error.DSparkTensorShape;
