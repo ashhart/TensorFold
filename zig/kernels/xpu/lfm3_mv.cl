@@ -1,4 +1,7 @@
 // LFM3 decode matvecs fused by launch: attn.cl's qmv_row unchanged (same contraction), more per launch.
+#ifndef QG
+#define QG 64 // MLX group size (the _g32 images: 32)
+#endif
 inline float bf(ushort v) { return as_float((uint)v << 16); }
 inline ushort to_bf(float f) {
     uint u = as_uint(f);
@@ -11,10 +14,10 @@ inline float qmv_row(__global const uint *w, __global const ushort *scales, __gl
                      __global const ushort *x, uint row, uint in_dim) {
     const uint lane = get_sub_group_local_id();
     const uint words = in_dim / 8;
-    const uint groups = in_dim / 64;
+    const uint groups = in_dim / QG;
     float acc = 0.0f;
     for (uint wi = lane; wi < words; wi += 16) {
-        const uint g = wi / 8;
+        const uint g = wi / (QG / 8);
         const float sc = bf(scales[row * groups + g]);
         const float bi = bf(biases[row * groups + g]);
         const uint pk = w[row * words + wi];
