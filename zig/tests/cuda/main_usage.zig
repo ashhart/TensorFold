@@ -12,7 +12,7 @@ pub const usage =
     \\  flashnext-windows MODEL IDS_FILE  several streams' windows in one shared verify against each alone
     \\  flashnext-mtp-parity MODEL IDS_FILE  several streams' MTP heads in one shared pass against each alone
     \\  flashnext-score MODEL IDS_FILE  decisions' label scores against a plain pass's last row
-    \\  flashnext-model-rank MODEL RANK PORT IDS_FILE  explicit full-model replay experiment (no drafts)
+    \\  flashnext-model-rank MODEL RANK PORT IDS_FILE [leave]  full-model rounds == eager rows; leave: the peer is stopped
     \\  flashnext-rank RANK PORT [sum|eof|timeout|missing|eof-scatter|timeout-scatter|exchange]  two-process collectives, failures, the expert exchange
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
     \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
