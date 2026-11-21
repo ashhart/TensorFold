@@ -5,10 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
-
+- Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#PR).
 - Hardening: cluster launch, session restore, the app's shell policy, Hub pulls, Web pairing and media downloads fail closed on malformed input (#4381).
-
-
 - Hardening: cluster launch, session restore, the app's shell policy, Hub pulls, Web pairing and media downloads fail closed on malformed input (#PR).
 - Idol's DINOv3 ViT-H+/16 image encoder runs natively on M5 Metal: one 1024 x 1024 image to the denoiser's feature1 in bf16, as idol-sdk's ImageEncoder makes it, from the ungated timm weights (DINOv3 License), which `tools/zig/idol_case.py dino` shows to be Meta's gated checkpoint byte for byte and feature for feature. On an M5 Ultra an encode takes 0.120 s against the SDK's 0.261 s on torch MPS, with a 2.28 GB peak footprint. feature1 and each of the 32 blocks on torch's own input sit as close to a float32 ruler as torch's bf16 run, within the 2x gate; `tf-idol-dino` runs those gates, and its eight kernels pass the kernel contract (#1775, after #1766, for #1757). Thanks to @jayleaton.
 
@@ -57,15 +55,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: with `--execution-witness`, native Qwen3.5-2B on CUDA (one rank, MLX affine 4-bit, text only) attests its path: once the server is ready it reads every checkpoint shard, after stamping the files before the load, and binds them with the kernel images, GPU, driver, family facts and resolved profile values; other engines still read `unsupported` (#2956, refs #2741). Thanks to @kotevcode.
 
-
-- Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#PR).
-
 - Server: every image takes a fixed share of the visual-token budget, `--vision-image-tokens / --vision-max-images` (1,024 tokens at the defaults), whatever the request's image count, so a turn that adds an image no longer re-sizes earlier ones and the prompt cache can resume from the first image; a lone image gets that share, not the whole budget, and a budget that leaves no share is refused by name, naming the image and both flags (#2717, fixes #2510). Thanks to @devopsfortunato.
 
 - OCR: GLM-OCR on native HIP serves `POST /v1/ocr`, returning normalized page Markdown with pipe or spanned-HTML tables and `$`/`$$` math, `blocks: []` because it has no geometry, and named refusals for header/footer extraction (#2572). Thanks to @laudney.
 
 - MiniMax-H3-Image on Metal: `tf-h3-image-encoder` turns an edit's reference pictures into their clean rows with the VAE's encoder in fp32 on any Apple GPU, with a selftest of each kernel against a float64 host reference; the reference rules (sizes, crops, grids, encoder layers, clean and anchor rows) run on the host (#2778, on #2775).
-- Hardening: cluster launch, session restore, the app's shell policy, Hub pulls, Web pairing and media downloads fail closed on malformed input (#PR).
 
 - GLM on Metal: vectorized prompt, KDA and indexer kernels on Macs without tensor units cut cold prompt time 5.17% to 5.68% (2K to 64K tokens) with 0/64 token differences (#3921, refs #3152). Thanks to @gilby.
 
