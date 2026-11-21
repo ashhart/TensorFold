@@ -590,4 +590,5 @@ test {
     _ = @import("glp_publication_test.zig");
     _ = @import("glp_paired_test.zig");
     _ = @import("glp_paired_api_test.zig");
+    _ = @import("glp_checkpoint.zig");
 }

@@ -8,6 +8,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 CUDA: whole-prefill usage receipts report the prompt rows actually restored from saved state instead of zero; rejected prompts clear the previous count. Model arithmetic and the saved-state identity are unchanged.
 
+- GLP provenance: Hugging Face snapshot repository/revision checks recognize native Windows paths as well as forward slashes, rather than treating a Windows snapshot as an unnamed local conversion (#4273).
+
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
 
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
