@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: cold prompts read the early Engram rows beside the first rows of a chunk, the Engram row cache keeps more records by default, and the keepalive probes residency while a request runs; prompt bits stay equal to decode bits (#3459).
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_ROUND_PROF=1` times every decode round (host prepare, encode, wait and choose, each command buffer's GPU span and the gaps between them, and the drafter's ingest, propose and finish) and logs mean, p50 and p95 by slots, rows and drafted or plain every 4096 rounds and at close; it is off by default and changes no token (#2951, refs #2984). Thanks to @gilby.
 
 - Drama 3 on CUDA and Metal: the codec's weight map, decoder stage plan and decode and encode schedules live once in `codec_net.zig`, and each backend binds only its own kernels; a new `check-drama-codec-bindings` build step, run by `zig build test`, compiles both bindings on any host, and the waveform and codes are byte-identical to before on the author's CUDA and Metal runs (#2893, refs #2118). Thanks to @jschmied.
