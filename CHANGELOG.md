@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- drama3: a host test runs the codec's decode and encode schedules over a recording binding and pins their call lists, so a schedule change fails the test without a GPU; the lists are fixtures beside the test and it runs in `test-drama-host` (#2962). Thanks to @jschmied.
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_CALIB=measure`, off by default, times a draft cost table on the loaded model at start, reports it and prices the draft depth from it, and other values store or read a table; tokens are unchanged, and unset or blank times nothing and keeps the built-in table (#2952, refs #2984). Thanks to @gilby.
 
 - Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
