@@ -13,7 +13,9 @@ void require(bool value, const char* why) {
     if (!value) throw std::runtime_error(why);
 }
 
-// A fake compile blocks here until Release (or 5 s, so a broken test cannot hang the run).
+// A fake compile blocks here until Release; every test holds a Release guard (or releases the
+// gate itself), so the wait always opens — a real-clock fuse would let a gated compile "finish"
+// while a slow host had not yet run the caller, which is exactly the race these tests assert on.
 struct Gate {
     std::mutex mutex;
     std::condition_variable changed;
@@ -23,7 +25,7 @@ struct Gate {
     void Wait() {
         entered++;
         std::unique_lock<std::mutex> hold(mutex);
-        changed.wait_for(hold, std::chrono::seconds(5), [&] { return released; });
+        changed.wait(hold, [&] { return released; });
         exited++;
     }
     void Release() {
@@ -39,12 +41,10 @@ struct Release {
     ~Release() { gate->Release(); }
 };
 
+// Waits for a condition the gated compiles always reach (Release opens every gate, so every
+// compile returns and its slot frees): a slow host only makes this wait longer.
 template <class Ready> void until(Ready ready) {
-    const auto deadline = Clock::now() + std::chrono::seconds(5);
-    while (!ready()) {
-        require(Clock::now() < deadline, "a fake compile did not reach its gate");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    while (!ready()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
 
 template <class Work> void refuses(Work work, const char* part) {
@@ -76,9 +76,13 @@ void deadline() {
     Release release{gate};
     auto calls = std::make_shared<std::atomic<int>>(0);
     auto slow = [gate, calls](const std::string&) { (*calls)++; gate->Wait(); return std::string("late"); };
-    const auto start = Clock::now();
     refuses([&] { cache.Compile(1, "slow", slow, 40); }, "40 ms time limit");
-    require(Clock::now() - start < std::chrono::seconds(1), "the caller waited for abandoned work");
+    // The gate is still shut, so the compile cannot have returned: the caller stopped at its own
+    // deadline rather than wait for the abandoned work — however long the host took to say so.
+    require(gate->exited.load() == 0, "the caller waited for abandoned work");
+    // The abandoned compile may not have been scheduled yet; wait for it to reach the gate rather
+    // than a wall-clock, so calls is provably 1 when the second caller meets it.
+    until([&] { return gate->entered.load() == 1; });
     refuses([&] { cache.Compile(1, "slow", slow, 40); }, "time limit");
     require(*calls == 1 && cache.Active() == 1, "an abandoned input compiled twice or lost its slot");
     gate->Release();
