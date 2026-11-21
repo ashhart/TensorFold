@@ -62,20 +62,42 @@ pub const Lease = struct {
     io: std.Io,
     slot: ?usize,
     released: bool = false,
+    extra: u32 = 0, // places past the first that `widen` took: n choices are n model requests
 
     pub fn release(lease: *Lease) void {
         if (lease.released) return;
         lease.owner.mutex.lockUncancelable(lease.io);
         defer lease.owner.mutex.unlock(lease.io);
-        std.debug.assert(lease.owner.inflight > 0);
-        lease.owner.inflight -= 1;
+        const held = 1 + lease.extra;
+        std.debug.assert(lease.owner.inflight >= held);
+        lease.owner.inflight -= held;
         if (lease.slot) |i| {
             const slot = &lease.owner.slots[i];
-            std.debug.assert(slot.count > 0);
-            slot.count -= 1;
+            std.debug.assert(slot.count >= held);
+            slot.count -= held;
             if (slot.count == 0 and slot.rate == 0) slot.* = .{};
         }
         lease.released = true;
+    }
+
+    /// `extra` more in-flight places, all or none, under acquire's caps (the rate charges once); null: taken.
+    pub fn widen(lease: *Lease, limits: Limits, extra: u32) ?Refusal {
+        const c = lease.owner;
+        c.mutex.lockUncancelable(lease.io);
+        defer c.mutex.unlock(lease.io);
+        if (limits.max_inflight > 0 and c.inflight + extra > limits.max_inflight) {
+            c.rejected_global +|= 1;
+            return .{ .reason = .global_limit };
+        }
+        if (lease.slot) |i| if (limits.max_inflight_per_key > 0 and c.slots[i].count + extra > limits.max_inflight_per_key) {
+            c.rejected_key +|= 1;
+            return .{ .reason = .key_limit };
+        };
+        c.inflight += extra;
+        c.peak = @max(c.peak, c.inflight);
+        if (lease.slot) |i| c.slots[i].count += extra;
+        lease.extra += extra;
+        return null;
     }
 };
 
