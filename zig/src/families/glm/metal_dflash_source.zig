@@ -125,6 +125,11 @@ pub const Chooser = struct {
         return cur;
     }
 
+    /// True when settled on MTP and at least two rounds away from probing DFlash2.
+    pub fn settledMtp(c: *const Chooser, rule: Rule) bool {
+        return c.chosen and c.current == .mtp and c.probing == 0 and rule.back_every > 2 and c.since + 2 < rule.back_every;
+    }
+
     /// The source the stream's next round uses. `dflash_ok`: the caps let it draft with DFlash2 at all.
     pub fn next(c: *Chooser, rule: Rule, dflash_ok: bool) Source {
         if (!dflash_ok) return .mtp;
@@ -177,6 +182,14 @@ pub const Shared = struct {
         return s.choosers[b].peek(rule, true);
     }
 
+    /// True when shared rounds are sampled-locked or settled on MTP before probing DFlash2.
+    pub fn settledMtp(s: *const Shared, rule: Rule, streams: usize, sampled: bool) bool {
+        if (sampled) return true;
+        if (streams == 0) return false;
+        const b = @min(streams - 1, s.choosers.len - 1);
+        return s.choosers[b].settledMtp(rule);
+    }
+
     pub fn step(s: *Shared, rule: Rule, streams: usize, eligible: usize, decode_n: usize, tokens: usize, sampled: bool, t: u64) Source {
         if (sampled) {
             s.used = .mtp;
@@ -196,7 +209,7 @@ pub const Shared = struct {
         else
             s.choosers[b].peek(rule, true);
         s.used = chosen;
-        s.last = if (decode_n == eligible or decode_n == 0) t else 0;
+        s.last = if (decode_n == eligible) t else 0;
         s.bucket = b;
         s.n = eligible;
         return chosen;
@@ -223,6 +236,14 @@ test "a chat-like stream (the drafter's rounds cost more than they gain) moves t
     run(.{}, true, .{ 2, 2 }, .{ 32.3, 24.7 }, 130, &used); // tokens a round 2.4 and 2.0 in the cells, rounded
     try std.testing.expect(count(used[0..20], .dflash) <= 9);
     try std.testing.expect(count(used[20..], .dflash) <= 2 * (110 / 64 + 1)); // only the periodic probes return
+}
+
+test "prefill-only rounds in Shared do not pollute the next decode round's timing" {
+    var s: Shared = .{};
+    try std.testing.expectEqual(Source.mtp, s.step(shared_rule, 2, 2, 0, 0, false, 1_000_000));
+    try std.testing.expectEqual(@as(u64, 0), s.last);
+    _ = s.step(shared_rule, 2, 2, 2, 4, false, 10_000_000);
+    try std.testing.expectEqual(@as(u32, 0), s.choosers[1].y(Source.mtp).n);
 }
 
 test "a code-like stream keeps DFlash2 without an MTP probe, the head only in its rare probes" {
