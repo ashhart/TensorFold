@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass; it has not yet run on a GPU (#1858, after #1773 and #1767, for #1757). Thanks to @jayleaton.
 
 - CI: the Zig format and TensorFold Web workflows cancel a pull request's older run when it gets a newer push, so superseded runs no longer queue; main pushes all run (#3850).
@@ -43,7 +45,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
 
 - Web: Qwen3.6-35B-A3B is listed for CUDA only, and starting it on a machine without CUDA is refused before anything launches, so a Mac is no longer pointed at the Python engine for it (#3738, refs #3710). Thanks to @AIFlowML.
-- Muse Spark on CUDA: model initialization now releases its host cache-index lists and embedding-row staging if any later allocation or device operation fails.
 
 - Flash Next on HIP: the first stream's caches are made at load, so the first prompt no longer waits on allocating them; each layer's weights are read past the page cache by threads, the next layer's read under way, and the n-gram gather spreads over all of the pool's parts instead of at most 32 (#3644).
 
