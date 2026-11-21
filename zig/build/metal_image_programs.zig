@@ -16,4 +16,5 @@ pub const rows = [_]Program{
     .{ .name = "tf-uocr-vision", .path = "zig/tests/uocr/vision.zig", .about = "Unlimited-OCR-2's image encoder on a reference dump's pixels: SAM gated against float32, CLIP and the projector reported" },
     .{ .name = "tf-uocr-blocks", .path = "zig/tests/uocr/blocks.zig", .about = "Unlimited-OCR-2's image encoder step by step: each SAM block, the neck, CLIP's front, each CLIP layer and the projector alone against float32" },
     .{ .name = "tf-idol-decode", .path = "zig/tests/idol_decode.zig", .about = "Idol's octree and Gaussian decoders on a reference case: each level, the rows and the PLY gated, then timed" },
+    .{ .name = "tf-idol-vae", .path = "zig/tests/idol_vae.zig", .about = "Idol's image encoder on a reference case: its condition rows gated against float64 beside the SDK's, then timed" },
 };
