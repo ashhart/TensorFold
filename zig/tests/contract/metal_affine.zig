@@ -18,6 +18,19 @@ pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, l
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's or simd_sums' planted fault.
 pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, control: bool = false, served: ?[]const c.Shape = null, inline_sums: bool = false };
+/// GLM-5.3-Flash's M3 fast tiles (#3921): row tile 32 a block where the plain path takes 64.
+pub const glm_m3 = [_]Reg{
+    .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q4 g64" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 64, .f32_out = true, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q4 g64 fp32 out" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 2, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q2 g64" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 5, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q5 g64" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 6, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q6 g64" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 8, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q8 g64" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 32, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q4 g32" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 128, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q4 g128" },
+    .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 64, .glm_m3_fast = true, .control = true }, .name = "control: metal affine_mm glm m3 q4 g64, wrong row tile height" },
+};
+
 pub const Reg = struct { v: Variant, name: []const u8 };
 /// The half-operand tiles, the chunk pairs on the prepass's sums, and their planted controls, beside simd_qmm's entry.
 pub const half = [_]Reg{
