@@ -3,6 +3,7 @@ const std = @import("std");
 const log = @import("log.zig");
 const sock = @import("sock.zig");
 const Config = @import("config.zig").Config;
+const auth = @import("sys").rank_auth;
 
 pub const max_ranks = 64;
 /// Largest blob a rank contributes to one `allGather`.
@@ -11,7 +12,7 @@ pub const max_blob = 64 * 1024;
 const magic: u32 = 0x31425054; // "TPB1"
 const version: u32 = 2;
 
-pub const Error = error{ Protocol, Mismatch, TooLarge } || sock.Error;
+pub const Error = error{ Protocol, Mismatch, TooLarge, Unproven } || sock.Error;
 
 /// `role`: 0 the control connection (bootstrap, then the fate channel), 1 the plan link.
 const Hello = extern struct { magic: u32, version: u32, world: u32, rank: u32, role: u32 };
@@ -25,6 +26,8 @@ pub const Bootstrap = struct {
     plan_fds: [max_ranks]sock.Fd = @splat(-1),
     /// Each call's limit for the peers' bytes (the connect timeout).
     timeout_ns: u64,
+    /// The group's key: every connection proves it before its hello (sys.rank_auth).
+    secret: auth.Secret = .none,
 
     fn deadline(b: *const Bootstrap) u64 {
         return sock.nowNs() + b.timeout_ns;
@@ -33,7 +36,7 @@ pub const Bootstrap = struct {
     /// Rank 0 listens on `link_port` and accepts every other rank; the others connect to `master` (connect timeout).
     pub fn open(cfg: Config) Error!Bootstrap {
         if (cfg.world > max_ranks or cfg.rank >= cfg.world) return error.Protocol;
-        var b: Bootstrap = .{ .rank = cfg.rank, .world = cfg.world, .timeout_ns = cfg.connect_timeout_ns };
+        var b: Bootstrap = .{ .rank = cfg.rank, .world = cfg.world, .timeout_ns = cfg.connect_timeout_ns, .secret = cfg.secret };
         errdefer b.close();
         if (cfg.world == 1) return b;
         if (cfg.rank == 0) {
@@ -45,6 +48,10 @@ pub const Bootstrap = struct {
             for ([_]u32{ 0, 1 }) |role| {
                 const fd = try sock.connect(cfg.master, cfg.link_port, until);
                 if (role == 0) b.fds[0] = fd else b.plan_fds[0] = fd;
+                _ = auth.connect(fd, &b.secret, purposeOf(role), cfg.rank, cfg.world, msUntil(until)) catch |e| {
+                    log.warn("tp bootstrap: rank {d} and rank 0 did not prove the group's key: {s}", .{ cfg.rank, auth.explain(e) orelse @errorName(e) });
+                    return error.Unproven;
+                };
                 const h: Hello = .{ .magic = magic, .version = version, .world = cfg.world, .rank = cfg.rank, .role = role };
                 try sock.sendBefore(fd, std.mem.asBytes(&h), until);
             }
@@ -52,10 +59,15 @@ pub const Bootstrap = struct {
         return b;
     }
 
-    /// Rank 0 over an already listening socket (tests: an ephemeral port).
+    /// Rank 0 over an already listening socket (tests: an ephemeral port), with no key.
     pub fn acceptOn(l: sock.Fd, world: u32, timeout_ns: u64) Error!Bootstrap {
+        return acceptWith(l, world, timeout_ns, .none);
+    }
+
+    /// `acceptOn` for a group whose ranks hold `secret`.
+    pub fn acceptWith(l: sock.Fd, world: u32, timeout_ns: u64, secret: auth.Secret) Error!Bootstrap {
         if (world == 0 or world > max_ranks) return error.Protocol;
-        var b: Bootstrap = .{ .rank = 0, .world = world, .timeout_ns = timeout_ns };
+        var b: Bootstrap = .{ .rank = 0, .world = world, .timeout_ns = timeout_ns, .secret = secret };
         errdefer b.close();
         try b.acceptAll(l);
         return b;
@@ -67,8 +79,15 @@ pub const Bootstrap = struct {
         const until = b.deadline();
         while (joined < 2 * (b.world - 1)) {
             const fd = try sock.accept(l, until);
+            // a connection that proves no key is closed and forgotten: it cannot take a rank's place or end the group
+            const proven = auth.accept(fd, &b.secret, &.{ .tp_control, .tp_plan }, msUntil(until)) catch |e| {
+                var at: [64]u8 = undefined;
+                log.warn("tp bootstrap: a connection from {s} proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
+                sock.close(fd);
+                continue;
+            };
             var h: Hello = undefined;
-            sock.recvExact(fd, std.mem.asBytes(&h), until) catch {
+            sock.recvExact(fd, std.mem.asBytes(&h), @min(until, sock.nowNs() + auth.budget_ms * std.time.ns_per_ms)) catch {
                 sock.close(fd);
                 continue;
             };
@@ -78,7 +97,8 @@ pub const Bootstrap = struct {
                 continue;
             }
             const table = if (h.role == 0) &b.fds else &b.plan_fds;
-            if (h.world != b.world or h.rank == 0 or h.rank >= b.world or h.role > 1 or table[h.rank] >= 0) {
+            const as_proven = h.role <= 1 and proven.purpose == purposeOf(h.role) and proven.rank == h.rank and proven.world == h.world;
+            if (!as_proven or h.world != b.world or h.rank == 0 or h.rank >= b.world or table[h.rank] >= 0) {
                 log.warn("tp bootstrap: rank {d} of {d} joined a world of {d}", .{ h.rank, h.world, b.world });
                 sock.close(fd);
                 return error.Mismatch;
@@ -176,6 +196,16 @@ pub const Bootstrap = struct {
         };
     }
 };
+
+/// The key proof's link for a hello's `role`.
+fn purposeOf(role: u32) auth.Purpose {
+    return if (role == 0) .tp_control else .tp_plan;
+}
+
+/// Whole milliseconds from now to `deadline` (monotonic nanoseconds), none once it has passed.
+fn msUntil(deadline: u64) u64 {
+    return (deadline -| sock.nowNs()) / std.time.ns_per_ms;
+}
 
 fn sendFrame(fd: sock.Fd, bytes: []const u8, deadline: u64) sock.Error!void {
     const l: u32 = @intCast(bytes.len);
@@ -316,6 +346,67 @@ test "a graph cache switched off on one rank stops both at start; 0 and OFF on t
     try std.testing.expectEqual(@as(?anyerror, null), same[1]);
     const family = try agreeDigests(.{ .graph_cache = .{ .max = 8 } }, .{ .graph_cache = .{ .max = 16 } });
     try std.testing.expectEqual(@as(?anyerror, error.Mismatch), family[0]);
+}
+
+/// A connection that is not a rank: it sends `bytes` and stops sending.
+fn testStranger(port: u16, bytes: []const u8) !sock.Fd {
+    const fd = try sock.connect("localhost", port, sock.nowNs() + 5 * std.time.ns_per_s);
+    errdefer sock.close(fd);
+    try sock.sendAll(fd, bytes);
+    _ = std.c.shutdown(fd, std.posix.SHUT.WR);
+    return fd;
+}
+
+test "security: a connection that proves no key cannot end the group or take a rank's place" {
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    const l = try testListener();
+    defer sock.close(l.fd);
+    // an older build's hello for another world: it ended the group for every rank
+    const old: Hello = .{ .magic = magic, .version = version, .world = 9, .rank = 1, .role = 0 };
+    const first = try testStranger(l.port, std.mem.asBytes(&old));
+    defer sock.close(first);
+    // rank 1's place claimed with a made-up proof
+    const nonce: auth.key.Nonce = @splat(7);
+    const guess: auth.key.Proof = @splat(9);
+    const second = try testStranger(l.port, &(auth.hello(@backingInt(auth.Purpose.tp_control), 1, 2, true, &nonce) ++ guess));
+    defer sock.close(second);
+    var out: [3][32]u8 = undefined;
+    var err: ?anyerror = null;
+    const cfg: Config = .{ .world = 2, .rank = 1, .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s, .secret = key };
+    const t = try std.Thread.spawn(.{}, testRank, .{ cfg, &out, &err });
+    var b = try Bootstrap.acceptWith(l.fd, 2, 5 * std.time.ns_per_s, key);
+    defer b.close();
+    var id: [32]u8 = undefined;
+    try b.broadcast(&@as([32]u8, @splat(0xAB)), &id);
+    var blobs: [max_ranks][]const u8 = undefined;
+    var buf: [256]u8 = undefined;
+    const all = try b.allGather(&.{0}, &buf, &blobs);
+    try b.agree("same", "settings");
+    t.join();
+    try std.testing.expectEqual(@as(?anyerror, null), err);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1 }, all[1]);
+    // the first got nothing; the second got rank 0's challenge and then nothing: no blob reached either
+    const soon = sock.nowNs() + std.time.ns_per_s;
+    var got: [auth.challenge_len]u8 = undefined;
+    try std.testing.expectError(error.Closed, sock.recvExact(first, got[0..1], soon));
+    try sock.recvExact(second, &got, soon);
+    try std.testing.expectError(error.Closed, sock.recvExact(second, got[0..1], soon));
+}
+
+test "security: a rank with another key or with none joins no keyed group" {
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    const other = try auth.Secret.fromBytes("another group's secret for the tests");
+    for ([_]auth.Secret{ other, auth.Secret.none }) |theirs| {
+        const l = try testListener();
+        defer sock.close(l.fd);
+        var out: [3][32]u8 = undefined;
+        var err: ?anyerror = null;
+        const cfg: Config = .{ .world = 2, .rank = 1, .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s, .secret = theirs };
+        const t = try std.Thread.spawn(.{}, testRank, .{ cfg, &out, &err });
+        try std.testing.expectError(error.Timeout, Bootstrap.acceptWith(l.fd, 2, std.time.ns_per_s, key));
+        t.join();
+        try std.testing.expectEqual(@as(?anyerror, error.Unproven), err);
+    }
 }
 
 test "Failure boundaries: acceptOn validates the world before touching a descriptor" {

@@ -9,6 +9,8 @@ const collective = @import("../collective.zig");
 const Startup = @import("../startup.zig").Startup;
 const loopback = @import("loopback.zig");
 const hello = loopback.hello;
+const posix = @import("sys").posix;
+const auth = @import("sys").rank_auth;
 
 /// A rank of a test group: what it says at join, and what it got.
 const Rank = struct {
@@ -18,16 +20,21 @@ const Rank = struct {
     err: ?link.Error = null,
     fault: agree.Fault = .{},
     words: [Policy.word_count]u32 = @splat(0),
+    secret: auth.Secret = .none,
     /// After joining: the startup steps it takes, and their verdicts; `leave` closes its link instead.
     steps: []const agree.Step = &.{},
     verdicts: [4]agree.Verdict = undefined,
     taken: usize = 0,
     leave: bool = false,
+    formation_ms: ?u64 = null,
 
     fn run(r: *Rank) void {
         const id: rccl.UniqueId = .{ .internal = @splat(7) };
         const policy: [Policy.word_count]u32 = @splat(@intCast(100 + r.hello.rank));
-        const out = link.Link.open(std.testing.io, "127.0.0.1", r.port, id, r.hello, policy, &r.fault) catch |err| {
+        const out = (if (r.formation_ms) |ms|
+            link.Link.openWithBudget(std.testing.io, "127.0.0.1", r.port, id, r.hello, policy, &r.fault, &r.secret, ms)
+        else
+            link.Link.open(std.testing.io, "127.0.0.1", r.port, id, r.hello, policy, &r.fault, &r.secret)) catch |err| {
             r.err = err;
             return;
         };
@@ -223,4 +230,139 @@ test "a change every rank makes: kept when all went through, else undone on ever
     for (gone.all[0..2]) |a| try std.testing.expectEqual(@as(?bool, false), a);
     try std.testing.expect(collective.everyRank(null, {}));
     try std.testing.expect(!collective.everyRank(null, error.OutOfMemory));
+}
+
+/// A connection that is not a rank: it reaches rank 0's port, sends `bytes`, and returns how many bytes came back.
+fn stranger(port: u16, bytes: []const u8) !usize {
+    var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+    var tries: usize = 0;
+    const fd: posix.socket_t = while (true) : (tries += 1) {
+        const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+        if (posix.errno(posix.system.connect(@intCast(rc), @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) == .SUCCESS) break @intCast(rc);
+        _ = posix.system.close(@intCast(rc));
+        if (tries >= 2000) return error.ConnectFailed;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+    };
+    defer _ = posix.system.close(fd);
+    if (posix.errno(posix.system.write(fd, bytes.ptr, bytes.len)) != .SUCCESS) return error.LinkClosed;
+    var got: usize = 0;
+    var buf: [256]u8 = undefined;
+    while (true) {
+        const rc = posix.system.read(fd, &buf, buf.len);
+        if (posix.errno(rc) != .SUCCESS or rc == 0) return got; // closed, or reset with its hello unread
+        got += @intCast(rc);
+    }
+}
+
+test "security: a stranger that says a rank's hello first hears nothing and takes no place" {
+    loopback.ignorePipe();
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    var ranks = [_]Rank{
+        .{ .hello = hello(0, 2), .port = try loopback.freePort(), .secret = key },
+        .{ .hello = hello(1, 2), .port = 0, .secret = key },
+    };
+    ranks[1].port = ranks[0].port;
+    const lead = try std.Thread.spawn(.{}, Rank.run, .{&ranks[0]});
+    // rank 1's own hello, word for word: before the proof it took rank 1's place and was sent RCCL's id
+    try std.testing.expectEqual(@as(usize, 0), try stranger(ranks[0].port, std.mem.asBytes(&hello(1, 2))));
+    ranks[1].run();
+    lead.join();
+    for (&ranks) |*r| {
+        try std.testing.expectEqual(@as(?link.Error, null), r.err);
+        r.got.?.close();
+    }
+    try std.testing.expectEqual(@as(u32, 100), ranks[1].words[0]);
+}
+
+test "security: a rank with another key or with none is refused by name, and rank 0 still takes its own" {
+    loopback.ignorePipe();
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    var lead: Rank = .{ .hello = hello(0, 2), .port = try loopback.freePort(), .secret = key };
+    const thread = try std.Thread.spawn(.{}, Rank.run, .{&lead});
+    var other: Rank = .{ .hello = hello(1, 2), .port = lead.port, .secret = try auth.Secret.fromBytes("another group's secret for the tests") };
+    other.run();
+    try std.testing.expectEqual(@as(?link.Error, error.RankAuthWrongKey), other.err);
+    var bare: Rank = .{ .hello = hello(1, 2), .port = lead.port };
+    bare.run();
+    try std.testing.expectEqual(@as(?link.Error, error.RankAuthPeerHasKey), bare.err);
+    var mine: Rank = .{ .hello = hello(1, 2), .port = lead.port, .secret = key };
+    mine.run();
+    thread.join();
+    try std.testing.expectEqual(@as(?link.Error, null), mine.err);
+    try std.testing.expectEqual(@as(?link.Error, null), lead.err);
+    mine.got.?.close();
+    lead.got.?.close();
+}
+
+test "security: rejected peers and a silent peer share rank 0's formation deadline" {
+    loopback.ignorePipe();
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    var ranks = [_]Rank{
+        .{ .hello = hello(0, 3), .port = try loopback.freePort(), .secret = key, .formation_ms = 250 },
+        .{ .hello = hello(1, 3), .port = 0, .secret = key },
+    };
+    ranks[1].port = ranks[0].port;
+    const lead = try std.Thread.spawn(.{}, Rank.run, .{&ranks[0]});
+    const follower = try std.Thread.spawn(.{}, Rank.run, .{&ranks[1]});
+    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
+    var nonce: auth.key.Nonce = @splat(0);
+    const rejected = auth.hello(@backingInt(auth.Purpose.rocm), 2, 3, false, &nonce);
+    for (0..3) |_| try std.testing.expectEqual(@as(usize, auth.challenge_len), try stranger(ranks[0].port, &rejected));
+    const silent_at = auth.nowMs();
+    const silent_got = stranger(ranks[0].port, &.{}) catch |err| switch (err) {
+        error.LinkClosed => 0,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), silent_got);
+    try std.testing.expect(auth.nowMs() - silent_at < auth.first_ms);
+    lead.join();
+    follower.join();
+    for (&ranks) |*r| {
+        try std.testing.expectEqual(@as(?link.Error, error.LinkClosed), r.err);
+        try std.testing.expect(r.got == null);
+    }
+}
+
+test "security: queued rejected peers cannot extend rank 0's formation deadline" {
+    const Churn = struct {
+        fn run(port: u16, active: *std.atomic.Value(bool)) void {
+            var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+            const until = auth.nowMs() +| 2000;
+            while (active.load(.acquire) and auth.nowMs() < until) {
+                const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+                if (posix.errno(rc) != .SUCCESS) continue;
+                const fd: posix.socket_t = @intCast(rc);
+                if (posix.errno(posix.system.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) {
+                    std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+                }
+                _ = posix.system.close(fd);
+                std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+            }
+        }
+    };
+    loopback.ignorePipe();
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    var ranks = [_]Rank{
+        .{ .hello = hello(0, 3), .port = try loopback.freePort(), .secret = key, .formation_ms = 250 },
+        .{ .hello = hello(1, 3), .port = 0, .secret = key },
+    };
+    ranks[1].port = ranks[0].port;
+    const lead = try std.Thread.spawn(.{}, Rank.run, .{&ranks[0]});
+    const follower = try std.Thread.spawn(.{}, Rank.run, .{&ranks[1]});
+    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
+    var active: std.atomic.Value(bool) = .init(true);
+    var churn: [4]std.Thread = undefined;
+    const started = auth.nowMs();
+    for (&churn) |*thread| thread.* = try std.Thread.spawn(.{}, Churn.run, .{ ranks[0].port, &active });
+    lead.join();
+    const elapsed = auth.nowMs() - started;
+    active.store(false, .release);
+    for (churn) |thread| thread.join();
+    follower.join();
+    for (&ranks) |*r| {
+        try std.testing.expectEqual(@as(?link.Error, error.LinkClosed), r.err);
+        try std.testing.expect(r.got == null);
+    }
+    try std.testing.expect(elapsed < 1500);
 }

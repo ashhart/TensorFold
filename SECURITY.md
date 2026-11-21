@@ -19,6 +19,7 @@ Only the latest release gets security fixes. The Python 0.6.6 engine at the `v0.
   what it does not catch.
 - Living Weights (`--slide` and `/v1/slide/*`): a lesson changes the checkpoint's own files. Serve it with `--api-key`.
 - `tensorfold pull` and the checkpoint loaders, which read files from Hugging Face as untrusted input.
+- The TCP links between the ranks of a multi-GPU group. See [Ranks on more than one host](#ranks-on-more-than-one-host).
 - The Mac app under `app/`.
 
 Out of scope: what a model writes, a model following instructions in text you gave it, and a client sending the server
@@ -48,6 +49,28 @@ An `--allowed-origin` exception sends no CORS headers and does not grant cross-o
 named with `--cors-origin ORIGIN` (exact, no wildcard, no credentials mode) get CORS preflights and
 `Access-Control-Allow-Origin`; their requests still need a valid key when keys are on.
 These browser checks do not replace `--api-key` for network access. See [API headers](docs/api.md#browser-request-headers).
+
+## Ranks on more than one host
+
+A multi-GPU group connects its ranks over TCP: `--tp` with `--master`, a ranked family's `NCCL_COMM_ID`, or the
+`TF_TP_*` settings. Every one of those connections proves a shared key before any other byte crosses. Both ends send a
+fresh 32-byte nonce and an HMAC-SHA256 over the nonces, the link, the rank and the group size. A connection that fails
+is closed. It is sent no checkpoint identity, no NCCL or RCCL id and no prompt, and it cannot stop the group.
+
+- Set `TF_RANK_SECRET_FILE` on every rank, or pass `--rank-secret FILE` to `serve`, naming a file with the same
+  contents on every host. It must be a regular file only its owner can read, holding 32 bytes to 4 KiB:
+  `head -c 32 /dev/urandom | base64 > rank.key && chmod 600 rank.key`. A symbolic link to such a file is fine, as
+  Kubernetes and secret managers mount them; the mode checked is the file's, so give a Kubernetes secret
+  `defaultMode: 0400`.
+- Rank 0 logs each connection it refuses with the peer's address and the reason: no key, a different key, or no hello
+  within 2 seconds. A connection that sends nothing is dropped after those 2 seconds.
+- Ranks with no key meet only on one host. A rank that reaches another host without a key refuses to start, and its
+  error names the setting.
+- To change the key, replace the file on every host and restart the group.
+
+The proof shows which process connected. It does not encrypt. The control links and the NCCL, RCCL and RDMA traffic are
+clear text, so run the ranks on a network you trust. The cluster links (`serve --cluster`, `tensorfold node`) are a
+separate transport and do not use this key.
 
 ## Release files
 
