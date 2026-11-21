@@ -486,7 +486,7 @@ test "draft sources: XPU lane target refuses another slot's prompt tail and draf
     var dflash: ad.Adapter(xq.drafter, L) = .{ .d = b.drafter.?, .host = &b };
     var x = try Drafted.init(gpa, t, dflash.drafter());
     defer x.deinit();
-    try x.lanes.put(gpa, &a, .{});
+    try x.lanes.put(gpa, &a, .{ .opened = true }); // context exists; only the target's feature ownership is invalid
     const w = x.backend();
     const first: be.DraftRequest = .{ .stream = &a, .follow = &.{}, .first = .{ .value = 9 }, .rows = null, .start = 40, .position = 41, .depth = 3 };
     try std.testing.expectError(error.FeaturesGone, w.vtable.draft(w.ptr, &.{first}));

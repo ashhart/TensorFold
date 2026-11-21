@@ -1,78 +1,43 @@
-//! Drafted.verify with held_on_target: windows of drafting streams reach the target with Window.held as asked.
+//! Drafted.held_on_target through the engine: a target reading held drafts from the drafter commits the plain decode.
 const std = @import("std");
-const be = @import("backend.zig");
-const dr = @import("drafter.zig");
-const Stream = @import("stream.zig").Stream;
-const Drafted = @import("drafted.zig").Drafted;
+const fixture = @import("drafted_test.zig");
+const Sampling = @import("sampling.zig").Sampling;
+const run = fixture.run;
+const freeOut = fixture.freeOut;
+const p1 = fixture.p1;
+const long = fixture.long;
+const sampled = fixture.sampled;
 
-/// A target that records each verify's held rows and host tokens, and a drafter that only counts host readbacks.
-const Fake = struct {
-    seen: u32 = 0,
-    tokens: [4]u32 = @splat(0),
-    readbacks: u32 = 0,
+test "held_on_target: windows reach the target held, its own readbacks draft and commit the one-token decode" {
+    for ([_]?Sampling{ null, sampled }) |s| {
+        const through = try run(&.{.{ .prompt = &p1, .sampling = s }}, .wrapped_held, false);
+        defer freeOut(through);
+        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false }}, .plain, false);
+        defer freeOut(plain);
+        const hosted = try run(&.{.{ .prompt = &p1, .sampling = s }}, .wrapped, false);
+        defer freeOut(hosted);
+        try std.testing.expectEqualSlices(u32, plain.tokens[0], through.tokens[0]);
+        try std.testing.expectEqualSlices(u32, plain.tokens[0], hosted.tokens[0]);
+        // the drafts landed, and every readback was the target's: the wrapper translated no window
+        try std.testing.expect(through.drafted > 0 and through.accepted > 0);
+        try std.testing.expect(through.seen.reads > 0);
+        try std.testing.expectEqual(through.head.helds, through.seen.reads);
+        // the host route (flag off) reads back in the wrapper and hands the target no held window
+        try std.testing.expectEqual(@as(u32, 0), hosted.seen.reads);
+        try std.testing.expect(hosted.head.helds > 0);
+    }
+}
 
-    fn cast(ptr: *anyopaque) *Fake {
-        return @ptrCast(@alignCast(ptr));
+test "held_on_target: fillers of a wholly restored prompt reach the target as host tokens, then held reads resume" {
+    for ([_]?Sampling{ null, sampled }) |s| {
+        const through = try run(&.{.{ .prompt = &long, .sampling = s, .restored = long.len }}, .wrapped_held, false);
+        defer freeOut(through);
+        const plain = try run(&.{.{ .prompt = &long, .sampling = s, .drafts = false }}, .plain, false);
+        defer freeOut(plain);
+        try std.testing.expectEqual(@as(u32, long.len), through.cached);
+        try std.testing.expectEqualSlices(u32, plain.tokens[0], through.tokens[0]);
+        try std.testing.expect(through.seen.fillers >= 1); // no row to draft from: the pending token, on the host
+        try std.testing.expect(through.seen.after_filler >= 1); // the filler is spent: the next rounds read held again
+        try std.testing.expectEqual(through.head.helds, through.seen.reads);
     }
-    fn verify(ptr: *anyopaque, windows: []const be.Window, _: []be.Verified) anyerror!void {
-        const f = cast(ptr);
-        f.seen = windows[0].held;
-        @memcpy(f.tokens[0..windows[0].tokens.len], windows[0].tokens);
-    }
-    fn held(ptr: *anyopaque, _: []const *Stream, out: []const []u32) anyerror!void {
-        cast(ptr).readbacks += 1;
-        for (out) |o| @memset(o, 5);
-    }
-    fn none(_: *anyopaque) []const u32 {
-        return &.{};
-    }
-    fn facts(_: *anyopaque) dr.Facts {
-        return .{ .depth = 3, .step_ms = 0, .prior = &.{}, .stream_bytes = 0 };
-    }
-    fn unused(_: *anyopaque, _: *Stream) anyerror!void {
-        return error.Unused;
-    }
-    fn absorb(_: *anyopaque, _: []const dr.Absorb) anyerror!void {
-        return error.Unused;
-    }
-    fn hold(_: *anyopaque, _: []const dr.Hold) anyerror!void {
-        return error.Unused;
-    }
-    fn release(_: *anyopaque, _: *Stream) void {}
-    fn first(_: *anyopaque, _: *Stream, _: u64) anyerror!u64 {
-        return error.Unused;
-    }
-    fn queue(_: *anyopaque, _: *Stream, _: be.Feed, _: u64) anyerror!u64 {
-        return error.Unused;
-    }
-    fn read(_: *anyopaque, _: u64) anyerror!u32 {
-        return error.Unused;
-    }
-    fn keep(_: *anyopaque, _: []const be.Window, _: []const []const u32) anyerror!void {}
-    fn draft(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {}
-};
-
-test "held_on_target passes held windows through, and a stream with fillers still gets host tokens" {
-    var f: Fake = .{};
-    const target: be.Backend = .{ .ptr = &f, .vtable = &.{ .prefill = Fake.unused, .first = Fake.first, .queue = Fake.queue, .read = Fake.read, .verify = Fake.verify, .keep = Fake.keep, .draft = Fake.draft, .release = Fake.release } };
-    const drafter: dr.Drafter = .{ .ptr = &f, .vtable = &.{ .taps = Fake.none, .facts = Fake.facts, .open = Fake.unused, .absorb = Fake.absorb, .hold = Fake.hold, .held = Fake.held, .release = Fake.release } };
-    var x: Drafted = .{ .gpa = std.testing.allocator, .target = target, .drafter = drafter, .held_on_target = true };
-    defer x.deinit();
-    var s: Stream = undefined;
-    try x.lanes.put(std.testing.allocator, &s, .{ .rows = true });
-    var sampled: [4]u32 = undefined;
-    var drafts: [3]u32 = undefined;
-    const w = [_]be.Window{.{ .stream = &s, .pending = 9, .held = 3, .tokens = &.{}, .parents = null, .positions = &.{ 1, 2, 3, 4 } }};
-    var o = [_]be.Verified{.{ .sampled = &sampled, .drafts = &drafts }};
-    try x.backend().verify(&w, &o);
-    try std.testing.expectEqual(@as(u32, 3), f.seen);
-    try std.testing.expectEqual(@as(u32, 0), f.readbacks);
-    x.lanes.getPtr(&s).?.filler = 3; // fillers: the pending token as host tokens, no readback
-    try x.backend().verify(&w, &o);
-    try std.testing.expectEqual(@as(u32, 0), f.seen);
-    try std.testing.expectEqualSlices(u32, &.{ 9, 9, 9 }, f.tokens[0..3]);
-    x.held_on_target = false; // off: the drafter's drafts as host tokens
-    try x.backend().verify(&w, &o);
-    try std.testing.expectEqual(@as(u32, 1), f.readbacks);
-    try std.testing.expectEqualSlices(u32, &.{ 5, 5, 5 }, f.tokens[0..3]);
 }

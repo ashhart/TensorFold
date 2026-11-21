@@ -161,7 +161,7 @@ test "shared head costs: GLM CUDA MTP is unpriced and DFlash2 already uses node 
         var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "node", .prompt = &.{1}, .max_new = 64 });
         defer stream.deinit(std.testing.allocator);
         stream.granted = 1;
-        var who = [_]lanes.depth.Who{lanes.windows.who(&stream)};
+        var who = [_]lanes.depth.Who{lanes.windows.who(&stream, core.rule.k.hold_costs.len > 0)};
         var old: [1]i64 = undefined;
         var expensive: [1]i64 = undefined;
         try core.rule.budgets(&who, lanes.windows.probe(&core), false, &old);

@@ -121,7 +121,7 @@ fn windows(m: *q.Model) !void {
                 const cb = m.queue.commandBuffer();
                 const e = cb.compute(.serial);
                 for (0..10) |_| switch (which) {
-                    0 => try tile.encodeTwin(e, t, tq(attn.q), sc.x, 0, sc.q, 0, w),
+                    0 => try tile.encodeTwin(e, t, tq(attn.q), sc.x, 0, sc.queries, 0, w),
                     1 => try tile.encodeTwin(e, t, tq(conv.in), sc.x, 0, sc.bcx, 0, w),
                     2 => try tile.encodeTwin(e, t, tq(m.weights.embedding), sc.x, 0, sc.logits, 0, w),
                     3 => {
@@ -225,7 +225,7 @@ fn promptBudget(m: *q.Model) !void {
             },
             2 => for ([_]q.weights.Linear{ attn.q, attn.k, attn.v, attn.out }) |w| {
                 tile.encodeSums(e, t, 2048, sc.x, 0, sc.sums, rows);
-                try tile.encode(e, t, tq(w), sc.x, 0, sc.sums, 0, sc.q, 0, rows);
+                try tile.encode(e, t, tq(w), sc.x, 0, sc.sums, 0, sc.queries, 0, rows);
             },
             3 => for ([_]q.weights.Linear{ dense.gate, dense.up, dense.down }) |w| {
                 tile.encodeSums(e, t, w.k, sc.act, 0, sc.sums, rows);
@@ -250,9 +250,8 @@ fn promptBudget(m: *q.Model) !void {
                 e.setBuffer(sc.picks, 0, 0);
                 e.setValue(@as(u32, slots), 1);
                 e.setBuffer(sc.starts, 0, 2);
-                e.setBuffer(sc.order, 0, 3);
-                e.setBuffer(sc.pos, 0, 4);
-                e.setBuffer(sc.tokens, 0, 5);
+                e.setBuffer(sc.pos, 0, 3);
+                e.setBuffer(sc.tokens, 0, 4);
                 e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(64 * 16, 1, 1));
                 tile.encodeWork(e, t, sc.starts, 64, sc.work);
             },
@@ -295,7 +294,7 @@ fn promptBudget(m: *q.Model) !void {
             else => {
                 const kv = cache.blocks[2].attention;
                 e.setPipeline(m.kernels.get("lfm2_attn_mma_r2"));
-                e.setBuffer(sc.queries, 0, 0);
+                e.setBuffer(sc.x, 0, 0);
                 e.setBuffer(kv.keys, 0, 1);
                 e.setBuffer(kv.values, 0, 2);
                 e.setBytes(std.mem.asBytes(&[4]u32{ 0, @intCast(cache.capacity), @bitCast(@as(f32, 0.125)), 1 }), 3);
@@ -334,7 +333,7 @@ fn attnLong(m: *q.Model, len: usize, rows: usize) !void {
     const kv_count = c.kv_heads * cache.capacity * c.head_dim;
     for (kv.keys.slice(u16, kv_count), 0..) |*v, i| v.* = @truncate(@as(u32, @bitCast(@as(f32, @floatFromInt(i % 89)) / 89.0 - 0.5)) >> 16);
     @memcpy(kv.values.contents()[0 .. kv_count * 2], kv.keys.contents()[0 .. kv_count * 2]);
-    @memcpy(sc.queries.contents()[0 .. rows * c.hidden * 2], kv.keys.contents()[0 .. rows * c.hidden * 2]);
+    @memcpy(sc.x.contents()[0 .. rows * c.hidden * 2], kv.keys.contents()[0 .. rows * c.hidden * 2]);
     const args = [4]u32{ @intCast(len), @intCast(cache.capacity), @bitCast(@as(f32, 0.125)), 1 };
     const used = (len + rows + st.chunk_keys - 1) / st.chunk_keys;
     var best: f64 = 1e9;
@@ -342,7 +341,7 @@ fn attnLong(m: *q.Model, len: usize, rows: usize) !void {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
         e.setPipeline(m.kernels.get("lfm2_attn_mma_r2"));
-        e.setBuffer(sc.queries, 0, 0);
+        e.setBuffer(sc.x, 0, 0);
         e.setBuffer(kv.keys, 0, 1);
         e.setBuffer(kv.values, 0, 2);
         e.setBytes(std.mem.asBytes(&args), 3);
@@ -433,26 +432,26 @@ fn decodeBudget(m: *q.Model, len: usize) !void {
                     const a = block.mixer.attention;
                     if (which == 4) {
                         for ([_]q.weights.Linear{ a.q, a.k, a.v, a.out }) |w| {
-                            try tile.encodeTwin(e, t, tq(w), sc.x, 0, sc.q, 0, 1);
+                            try tile.encodeTwin(e, t, tq(w), sc.x, 0, sc.queries, 0, 1);
                             bytes += linearBytes(w);
                             launches_n += 1;
                         }
                     } else {
                         const kv = cache.blocks[layer].attention;
                         e.setPipeline(m.kernels.get("lfm2_qk"));
-                        e.setBuffer(sc.q, 0, 0);
+                        e.setBuffer(sc.queries, 0, 0);
                         e.setBuffer(sc.k, 0, 1);
                         e.setBuffer(sc.v, 0, 2);
                         e.setBuffer(a.q_norm.buffer, a.q_norm.offset, 3);
                         e.setBuffer(a.k_norm.buffer, a.k_norm.offset, 4);
                         e.setBytes(std.mem.asBytes(&[4]u32{ @intCast(len), @intCast(cache.capacity), @bitCast(@as(f32, 1e-5)), @bitCast(@as(f32, 20.0)) }), 5);
-                        e.setBuffer(sc.queries, 0, 6);
+                        e.setBuffer(sc.x, 0, 6);
                         e.setBuffer(kv.keys, 0, 7);
                         e.setBuffer(kv.values, 0, 8);
                         e.dispatchGroups(mtl.Size.of(c.query_heads + c.kv_heads, 1, 1), mtl.Size.of(32, 1, 1));
                         const used = (len + 1 + st.chunk_keys - 1) / st.chunk_keys * st.subs;
                         e.setPipeline(m.kernels.get("lfm2_attn_mma"));
-                        e.setBuffer(sc.queries, 0, 0);
+                        e.setBuffer(sc.x, 0, 0);
                         e.setBuffer(kv.keys, 0, 1);
                         e.setBuffer(kv.values, 0, 2);
                         e.setBytes(std.mem.asBytes(&[4]u32{ @intCast(len), @intCast(cache.capacity), @bitCast(scale), st.subs }), 3);

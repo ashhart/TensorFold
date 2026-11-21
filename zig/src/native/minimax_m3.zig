@@ -242,12 +242,14 @@ fn servedInfo(h: *const Host, streams: u32, window: u32, vision: ?api.Vision) ap
 
 test "MiniMax capabilities: logprobs match the actual plain or external-draft backend" {
     var metal: fl.backend.Metal = undefined;
+    var head: lanes.FakeDrafter = .{};
+    defer head.deinit();
     var h: Host = undefined;
     h.wrap = null;
     const plain = servedInfo(&h, 2, 1024, null);
     try std.testing.expect(metal.backend().vtable.first_row != null);
     try std.testing.expect(plain.logprobs and plain.structures);
-    h.wrap = .{ .gpa = std.testing.allocator, .target = metal.backend(), .drafter = .{ .ptr = &metal, .vtable = undefined } };
+    h.wrap = .{ .gpa = std.testing.allocator, .target = metal.backend(), .drafter = head.drafter() };
     const wrapped = h.wrap.?.backend();
     const drafted = servedInfo(&h, 2, 1024, null);
     try std.testing.expect(wrapped.vtable.first_row == null);

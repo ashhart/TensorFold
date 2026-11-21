@@ -78,10 +78,10 @@ test "Drafted.adopt opens a missing stream, resets a present one, and the next d
     try std.testing.expectEqual(@as(u32, 1), f.absorbs);
     try std.testing.expectEqual(@as(u32, 1), f.holds);
     // present, with a past round's state left: adopt resets it without a second open
-    x.lanes.getPtr(&s).?.* = .{ .filler = 2, .tree_first = 7, .offered = 5, .stepped = 3 };
+    x.lanes.getPtr(&s).?.* = .{ .opened = true, .filler = 2, .tree_first = 7, .offered = 5, .stepped = 3 };
     try x.adopt(&s);
     try std.testing.expectEqual(@as(u32, 1), f.opens);
-    try std.testing.expectEqualDeep(x.lanes.get(&s).?, @TypeOf(x.lanes.get(&s).?){ .rows = true });
+    try std.testing.expectEqualDeep(x.lanes.get(&s).?, @TypeOf(x.lanes.get(&s).?){ .opened = true, .rows = true });
     try b.vtable.draft(b.ptr, &.{kept(&s, 10)});
     try std.testing.expectEqual(@as(u32, 2), f.absorbs);
     try std.testing.expectEqual(@as(u32, 0), f.offered);

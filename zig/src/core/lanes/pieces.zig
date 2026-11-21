@@ -43,7 +43,7 @@ pub fn prepareFinals(e: *Engine, streams: []const *Stream) !void {
 pub fn finishStream(e: *Engine, s: *Stream) !void {
     _ = e.arena.reset(.retain_capacity);
     // Config.join_tail: the last token waits for the next round (a forced or budget-cut first token keeps its row)
-    if (e.cfg.join_tail and e.cfg.family_mtp and s.drafts and s.prompt_len > 0 and s.force.items.len == 0 and !s.cutsNext()) {
+    if (e.cfg.join_tail and e.cfg.family_mtp and s.headDrafts() and s.prompt_len > 0 and s.force.items.len == 0 and !s.cutsNext()) {
         if (e.backend.vtable.join) |join| {
             if (join(e.backend.ptr, s) catch |x| return released(e, s, x)) return joined(e, s);
             return open.openedWith(e, s, .head);
@@ -62,7 +62,7 @@ pub fn finishStreams(e: *Engine, streams: []const *Stream, errs: []?anyerror) !u
     var joins: std.ArrayList(usize) = .empty;
     for (streams, errs, 0..) |s, *err, i| {
         err.* = null;
-        const can = e.cfg.join_tail and e.cfg.family_mtp and s.drafts and s.prompt_len > 0 and s.force.items.len == 0 and !s.cutsNext();
+        const can = e.cfg.join_tail and e.cfg.family_mtp and s.headDrafts() and s.prompt_len > 0 and s.force.items.len == 0 and !s.cutsNext();
         const join = if (can) e.backend.vtable.join else null;
         if (join) |j| {
             const ok = j(e.backend.ptr, s) catch |x| {

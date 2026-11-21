@@ -46,7 +46,7 @@ fn replay(model: lanes.Model, shared: bool, stale: bool, sampled: bool) !Result 
     for (streams[0..n], current[0..n], who[0..n], heads[0..n], 0..) |*s, *p, *w, *h, i| {
         s.* = try lanes.Stream.init(a, .{ .id = "code", .prompt = &.{ 1, 2, 3 }, .max_new = 128, .sampling = if (sampled) .{ .seed = 1234, .temperature = 1 } else null });
         made += 1;
-        @memset(try e.rule.rates(win.who(s)), if (i == 0) (if (stale) @as(f64, 0.983) else 0.99) else 0.01);
+        @memset(try e.rule.rates(win.who(s, e.rule.k.hold_costs.len > 0)), if (i == 0) (if (stale) @as(f64, 0.983) else 0.99) else 0.01);
         if (stale and i == 0) {
             var chance: f64 = 1;
             for (0..cfg.most_drafts) |_| {
@@ -56,7 +56,7 @@ fn replay(model: lanes.Model, shared: bool, stale: bool, sampled: bool) !Result 
         }
         if (i == 1) s.proposer = .{ .ptr = &got.calls, .vtable = &.{ .propose = Copy.propose, .last_match = Copy.match, .priced = true } };
         p.* = .{ .stream = s, .position = 0, .kind = .none };
-        w.* = win.who(s);
+        w.* = win.who(s, e.rule.k.hold_costs.len > 0);
         h.* = i;
     }
     if (shared) try lanes.shared_drafts.budgets(&e, current[0..n], heads[0..n], got.depths[0..n]) else try e.rule.budgets(who[0..n], win.probe(&e), sampled, got.depths[0..n]);

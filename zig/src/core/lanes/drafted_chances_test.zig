@@ -236,9 +236,15 @@ test "a granted depth: the deepest chain first, then the grant plus its slack, a
     who.granted = 3;
     try std.testing.expectEqual(@as(i64, 5), try rule.headDepth(&who, null, probe));
     who.granted = 0;
-    var drafted: usize = 0;
-    for (0..8) |_| drafted += @intFromBool(try rule.headDepth(&who, null, probe) > 0);
-    try std.testing.expectEqual(@as(usize, 1), drafted); // one probe of draft_slack drafts in the first eight rounds
+    rule.k.depth_probe_every = 4;
+    rule.k.plain_wait_most = 16;
+    for ([_][]const depth.HoldCost{ &.{}, &.{.{ .streams = 1, .depth = 1, .ms = 1000 }} }) |holds| {
+        rule.k.hold_costs = holds;
+        st.?.plain = 0;
+        st.?.wait = null;
+        for (0..3) |_| try std.testing.expectEqual(@as(i64, 0), try rule.headDepth(&who, null, probe));
+        try std.testing.expect(try rule.headDepth(&who, null, probe) > 0); // scalar callers own their probe clock
+    }
 }
 
 test "chance-priced holds preserve one-token replies across stream counts and slack choices" {

@@ -12,17 +12,17 @@ pub const Prepared = struct {
 };
 pub fn prepare(e: anytype, p: anytype) !Prepared {
     const a = e.arena.allocator();
-    if (p.held > 0) {
-        // the held drafts (a chain or a tree, in window order) come back as host tokens, grafts after them
+    const held_count = p.held;
+    const rows = try a.alloc(u32, 1 + held_count + p.tokens.len);
+    rows[0] = p.stream.pending.?;
+    @memcpy(rows[1 + held_count ..], p.tokens);
+    if (held_count > 0) {
+        // Read held drafts into their final rows, followed by any grafts.
         const read = e.backend.vtable.held orelse return error.HeldDraftsUnreadable;
-        const held = try a.alloc(u32, p.held);
-        try read(e.backend.ptr, p.stream, held);
-        p.tokens = try std.mem.concat(a, u32, &.{ held, p.tokens });
+        try read(e.backend.ptr, p.stream, rows[1 .. 1 + held_count]);
+        p.tokens = rows[1..];
         p.held = 0;
     }
-    const rows = try a.alloc(u32, 1 + p.tokens.len);
-    rows[0] = p.stream.pending.?;
-    @memcpy(rows[1..], p.tokens);
     const grows = p.stream.drafts and p.kind != .forced and e.alone;
     const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
     const row_parents = try accept.rowParents(a, rows.len, p.parents);

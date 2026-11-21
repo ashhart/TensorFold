@@ -42,7 +42,7 @@ fn replay(model: lanes.Model, policy: bool, stale: bool) !Result {
     for (&streams, 0..) |*s, i| {
         s.* = try lanes.Stream.init(a, .{ .id = "code", .prompt = &.{ 1, 2, 3 }, .max_new = 128 });
         made += 1;
-        const rates = try e.rule.rates(win.who(s));
+        const rates = try e.rule.rates(win.who(s, e.rule.k.hold_costs.len > 0));
         @memset(rates, if (i % 8 == 0) (if (stale) @as(f64, 0.983) else 0.99) else 0.3);
         // One accepted depth updates 0.98 to 0.983; the preceding window still cached its 0.98 prices.
         if (stale and i % 8 == 0) {
@@ -61,7 +61,7 @@ fn replay(model: lanes.Model, policy: bool, stale: bool) !Result {
         const start = batch * 8;
         for (&current, &who, streams[start..][0..8]) |*p, *w, *s| {
             p.* = .{ .stream = s, .position = s.cache_len, .kind = .none };
-            w.* = win.who(s);
+            w.* = win.who(s, e.rule.k.hold_costs.len > 0);
         }
         const budgets = got.budgets[start..][0..8];
         if (policy) try lanes.shared_drafts.budgets(&e, &current, &.{ 0, 1, 2, 3, 4, 5, 6, 7 }, budgets) else try e.rule.budgets(&who, win.probe(&e), false, budgets);

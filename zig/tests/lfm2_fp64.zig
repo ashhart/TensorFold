@@ -250,7 +250,7 @@ fn attention(p: Probe, len: usize, worse: *usize) !void {
     const rnd = prng.random();
     for (kv.keys.slice(u16, kv_count)) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
     for (kv.values.slice(u16, kv_count)) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
-    for (sc.queries.slice(u16, arows * c.hidden)) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
+    for (sc.x.slice(u16, arows * c.hidden)) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
     const scale: f32 = 1.0 / @sqrt(@as(f32, c.head_dim));
     var ys: [3]mtl.Buffer = undefined;
     for (&ys) |*y| y.* = try dev.buffer(arows * c.hidden * 2, opts);
@@ -267,7 +267,7 @@ fn attention(p: Probe, len: usize, worse: *usize) !void {
         if (which == 0) e.setPipeline(m.kernels.get("lfm2_attn_mma_r2"));
         if (which == 1) e.setPipeline(m.kernels.attn_nax.?);
         if (which == 2) e.setPipeline(m.kernels.get("lfm2_attn_mma"));
-        e.setBuffer(sc.queries, 0, 0);
+        e.setBuffer(sc.x, 0, 0);
         e.setBuffer(kv.keys, 0, 1);
         e.setBuffer(kv.values, 0, 2);
         e.setBytes(std.mem.asBytes(&args), 3);
@@ -294,7 +294,7 @@ fn attention(p: Probe, len: usize, worse: *usize) !void {
     }
     const keys = kv.keys.slice(u16, kv_count);
     const vals = kv.values.slice(u16, kv_count);
-    const qs = sc.queries.slice(u16, arows * c.hidden);
+    const qs = sc.x.slice(u16, arows * c.hidden);
     const pr = try m.gpa.alloc(f64, len + arows);
     defer m.gpa.free(pr);
     var worst = [3]f64{ 0, 0, 0 };
