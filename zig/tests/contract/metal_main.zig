@@ -188,6 +188,26 @@ pub fn main(init: std.process.Init) !u8 {
     var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);
+    var inkling2_suite: @import("metal_inkling2_suite.zig").Suite = .{
+        .a = a, .device = device, .queue = queue, .kernels = &kernels,
+    };
+    defer inkling2_suite.deinit();
+    try inkling2_suite.collect(o.only);
+    var inkling2_loop: @import("metal_inkling2_loop.zig").Suite = .{
+        .a = a, .device = device, .queue = queue, .kernels = &kernels,
+    };
+    defer inkling2_loop.deinit();
+    try inkling2_loop.collect(o.only);
+    var inkling2_experts: @import("metal_inkling2_experts.zig").Suite = .{
+        .a = a, .device = device, .queue = queue, .kernels = &kernels,
+    };
+    defer inkling2_experts.deinit();
+    try inkling2_experts.collect(o.only);
+    var inkling2_media: @import("metal_inkling2_media_suite.zig").Suite = .{
+        .a = a, .device = device, .queue = queue, .kernels = &kernels,
+    };
+    defer inkling2_media.deinit();
+    try inkling2_media.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;

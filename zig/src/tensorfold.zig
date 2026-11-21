@@ -84,6 +84,7 @@ pub const flint = @import("families/flint/flint.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 pub const lfm3 = @import("families/lfm3/lfm3.zig");
+pub const inkling2_metal = @import("families/inkling2/metal.zig");
 
 test {
     std.testing.refAllDecls(@This());

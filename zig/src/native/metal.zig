@@ -12,7 +12,6 @@ const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
 const metal_slide = @import("metal_slide.zig");
-const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
@@ -22,7 +21,6 @@ const linkProblem = @import("metal_link.zig").problem;
 const metal_shared = @import("metal_shared.zig");
 pub const chip = metal_shared.chip;
 pub const deviceName = metal_shared.deviceName;
-const prefillStep = metal_shared.prefillStep;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
 pub const backends: []const []const u8 = &.{"metal"};
@@ -64,6 +62,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
     .{ .model_type = "hy_v4_flash", .formats = &.{ "mlx-q4g64", "mlx-q8g64" } },
+    .{ .model_type = "inkling2_loop", .formats = &.{"modelopt-mixed"} },
     .{ .model_type = "qwen3", .formats = &.{"bf16"} },
     .{ .model_type = "llama", .formats = &.{ "bf16", "compressed-tensors-int4-g32" } },
     .{ .model_type = "flint", .formats = &.{"mlx-q4g64"} },
@@ -147,6 +146,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("qwen3_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "hy_v4_flash")) return @import("hy4_metal.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "inkling2_loop")) return @import("inkling2.zig").open(a, gpa, io, o, problem);
     const dense = ownsQwen27(a, io, o.model_type, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
@@ -196,7 +196,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.gpa = gpa;
     h.m = m;
     h.resident = null;
-    const step = prefillStep(h.m.device);
+    const step = metal_shared.prefillStep(h.m.device);
     const positions = nemotron.backend.limits.positions(@intCast(@max(window, 0)));
     const mamba = nemotron.state.Pool;
     const per_stream = nemotron.state.Cache.bytes(m.config, positions, o.drafts and m.weights.mtp != null);

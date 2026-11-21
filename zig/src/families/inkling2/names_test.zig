@@ -251,3 +251,56 @@ test "the real checkpoint's 24 shard headers and mtp.safetensors match the map (
     try t.expectEqual(@as(usize, 84), mtp.expected);
     try t.expect(mtp.clean());
 }
+
+test "original Mini main and MTP header digests and tensor layout" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: config.Why = .{};
+    const c = try config.parse(a, config_test.mini, &why);
+    const header = try unfold(a, @embedFile("fixtures/loop_model_header.txt"), "inkling2-loop-model");
+    const mtp = try unfold(a, @embedFile("fixtures/loop_mtp_header.txt"), "inkling2-loop-mtp");
+    const model_report = try names.check(a, &c, header, .model);
+    try t.expectEqual(@as(usize, 1244), model_report.expected);
+    try t.expect(model_report.clean());
+    const mtp_report = try names.check(a, &c, mtp, .mtp);
+    try t.expectEqual(@as(usize, 54), mtp_report.expected);
+    try t.expect(mtp_report.clean());
+    var prec: [config.max_layers]plan.Precision = undefined;
+    try names.precisions(header, c.text.layers, &prec);
+    for (prec[0..24], 0..) |p, i| try t.expectEqual(if (i < 20) plan.Precision.nvfp4 else .mxfp8, p);
+
+    const p = try plan.build(&c.text, prec[0..24]);
+    try t.expectEqual(@as(u32, 48), p.n_visits);
+    try t.expectEqual(@as(u32, 5), p.final_sources);
+    try t.expectEqual(@as(u32, 2), p.messageSources());
+    try t.expectEqual(@as(u32, 1), p.pre_blocks);
+    for (0..48) |k| {
+        const i: u32 = @intCast(k);
+        const expected: u32 = if (i < 6) i else if (i < 42) 6 + (i - 6) % 12 else i - 24;
+        const v = p.visit(i);
+        try t.expectEqual(expected, v.layer);
+        try t.expectEqual(i >= 18 and i < 42, v.messages);
+        try t.expectEqual(i == 18 or i == 30, p.restarts(i));
+        try t.expectEqual(@as(u32, if (i >= 6 and i < 42) (i - 6) / 12 else 0), v.pass);
+        try t.expectEqual(@as(u32, if (i >= 6 and i < 42) (i - 6) % 12 else 0), v.core_index);
+    }
+}
+
+test "Mini refuses a malformed cross-pass query table and missing controller" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: config.Why = .{};
+    const c = try config.parse(a, config_test.mini, &why);
+    var header = try unfold(a, @embedFile("fixtures/loop_model_header.txt"), "inkling2-loop-model");
+    const queries = "model.llm.middle_cycle_cross_pass_kv_queries";
+    const gain = "model.llm.layers.17.controllers.v.gain_weight";
+    header.getPtr(queries).?.shape[0] -= 1;
+    try t.expect(header.swapRemove(gain));
+    const report = try names.check(a, &c, header, .model);
+    try t.expectEqual(@as(usize, 1), report.wrong.items.len);
+    try t.expectEqual(@as(usize, 1), report.missing.items.len);
+    try t.expectEqualStrings(queries, report.wrong.items[0]);
+    try t.expectEqualStrings(gain, report.missing.items[0]);
+}
