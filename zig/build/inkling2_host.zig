@@ -7,6 +7,8 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     m.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path(dir ++ "tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("safetensors", b.createModule(.{ .root_source_file = b.path(dir ++ "safetensors.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    m.addImport("visit_plan", b.createModule(.{ .root_source_file = b.path(dir ++ "visit_plan.zig"), .target = target, .optimize = optimize }));
+    m.addImport("modelopt", b.createModule(.{ .root_source_file = b.path(dir ++ "modelopt_config.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     return m;
 }
 

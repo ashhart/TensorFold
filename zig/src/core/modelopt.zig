@@ -1,12 +1,23 @@
 //! ModelOpt config checks: NVFP4 (groups of 16; tensors, not ignore, say which linears) and MIXED_PRECISION recipes.
 
 const std = @import("std");
+const config = @import("modelopt_config.zig");
+
+/// The config checks (std only, so host-only family tests can import them without the checkpoint reader).
+pub const Why = config.Why;
+pub const admit = config.admit;
+pub const admitByTensors = config.admitByTensors;
+pub const object = config.object;
+pub const text = config.text;
+pub const int = config.int;
+const nvfp4 = config.nvfp4;
+const block = config.block;
 
 /// One projection's tensors read and checked (weight, block scales, weight_scale_2, input_scale).
 pub const part = @import("modelopt_part.zig");
 
 /// The NVFP4 group size ModelOpt writes for this format.
-pub const nvfp4_group = 16;
+pub const nvfp4_group = config.nvfp4_group;
 /// The group size of csf0_v1, this engine's own: no other reader takes it.
 pub const csf0_group = 32;
 
@@ -56,35 +67,6 @@ pub const Recipes = struct {
         self.arena.deinit();
     }
 };
-
-/// Why the check refused the checkpoint, kept for the caller's log line (tests read it instead).
-pub const Why = struct {
-    buf: [320]u8 = undefined,
-    len: usize = 0,
-
-    /// Keep the reason, cut short if it is long.
-    pub fn set(self: *Why, comptime fmt: []const u8, args: anytype) void {
-        var w: std.Io.Writer = .fixed(&self.buf);
-        w.print(fmt, args) catch {};
-        self.len = w.end;
-    }
-
-    pub fn text(self: *const Why) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
-
-/// config.json's quantization_config (top level, else text_config's) checked as ModelOpt NVFP4.
-pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !void {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), config_json, .{});
-    const q = block(root) orelse {
-        why.set("config.json has no ModelOpt quantization_config", .{});
-        return error.NotModelOpt;
-    };
-    try nvfp4(q, why);
-}
 
 /// `admit`'s check, with MIXED_PRECISION read: a quantized_layers entry no `Recipe` names is refused by its module.
 pub fn admitRecipes(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !Recipes {
@@ -160,59 +142,6 @@ fn pair(v: ?std.json.Value, rows: i64, cols: i64) bool {
     return int(x.array.items[0]) == rows and int(x.array.items[1]) == cols;
 }
 
-/// The quantization_config's NVFP4 check: quant_algo NVFP4, every config group 4-bit floats in groups of 16.
-fn nvfp4(q: std.json.ObjectMap, why: *Why) !void {
-    const algo = text(q.get("quant_algo")) orelse "";
-    if (!std.ascii.eqlIgnoreCase(algo, "NVFP4")) {
-        const named = if (algo.len > 0) algo else "without quant_algo";
-        why.set("ModelOpt {s}: this engine reads ModelOpt NVFP4 (nvidia/GLM-5.3-Flash-NVFP4's layout)", .{named});
-        return error.UnsupportedQuant;
-    }
-    const groups = object(q.get("config_groups")) orelse {
-        why.set("ModelOpt NVFP4 without config_groups", .{});
-        return error.UnsupportedQuant;
-    };
-    var it = groups.iterator();
-    while (it.next()) |g| {
-        const w = if (object(g.value_ptr.*)) |o| object(o.get("weights")) else null;
-        const bits = if (w) |o| int(o.get("num_bits")) else null;
-        const size = if (w) |o| int(o.get("group_size")) else null;
-        const kind = if (w) |o| text(o.get("type")) orelse "" else "";
-        if (bits != 4 or size != nvfp4_group or !std.mem.eql(u8, kind, "float")) {
-            why.set(
-                "ModelOpt NVFP4 group {s}: weights {?d}-bit {s} in groups of {?d}, " ++
-                    "expected 4-bit float in groups of 16",
-                .{ g.key_ptr.*, bits, kind, size },
-            );
-            return error.UnsupportedQuant;
-        }
-    }
-}
-
-fn block(root: std.json.Value) ?std.json.ObjectMap {
-    const top = object(root) orelse return null;
-    for ([_]?std.json.ObjectMap{ top, object(top.get("text_config")) }) |source| {
-        const q = object((source orelse continue).get("quantization_config")) orelse continue;
-        if (std.ascii.eqlIgnoreCase(text(q.get("quant_method")) orelse "", "modelopt")) return q;
-    }
-    return null;
-}
-
-pub fn object(v: ?std.json.Value) ?std.json.ObjectMap {
-    const x = v orelse return null;
-    return if (x == .object) x.object else null;
-}
-
-pub fn text(v: ?std.json.Value) ?[]const u8 {
-    const x = v orelse return null;
-    return if (x == .string) x.string else null;
-}
-
-pub fn int(v: ?std.json.Value) ?i64 {
-    const x = v orelse return null;
-    return if (x == .integer) x.integer else null;
-}
-
 test "nvidia/GLM-5.3-Flash-NVFP4's config is admitted" {
     var why: Why = .{};
     try admit(std.testing.allocator, @embedFile("fixtures/glm53_flash_nvfp4/config.json"), &why);
@@ -251,6 +180,24 @@ test "other ModelOpt formats, and configs without ModelOpt, are refused by name"
         \\{"text_config": {"quantization_config": {"quant_method": "modelopt", "quant_algo": "nvfp4", "config_groups":
         \\ {"g": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}}}}
     , &why);
+}
+
+test "admitByTensors: NVFP4 without config_groups is admitted; other algos and bad groups are refused by name" {
+    var why: Why = .{};
+    try admitByTensors(std.testing.allocator, "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\"}}", &why);
+    const fp8 = "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"FP8\"}}";
+    try std.testing.expectError(error.UnsupportedQuant, admitByTensors(std.testing.allocator, fp8, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "ModelOpt FP8") != null);
+    const g32 =
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups":
+        \\ {"g": {"weights": {"num_bits": 4, "type": "float", "group_size": 32}}}}}
+    ;
+    try std.testing.expectError(error.UnsupportedQuant, admitByTensors(std.testing.allocator, g32, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "groups of 32") != null);
+    try std.testing.expectError(error.NotModelOpt, admitByTensors(std.testing.allocator, "{\"text_config\": {}}", &why));
+    // admit itself still asks for config_groups
+    const bare = "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\"}}";
+    try std.testing.expectError(error.UnsupportedQuant, admit(std.testing.allocator, bare, &why));
 }
 
 test "nvidia/GLM-5.3-Flash-FP4-Local's recipes: a module's, and its tensors' under it" {

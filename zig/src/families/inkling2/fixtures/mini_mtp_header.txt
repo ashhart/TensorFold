@@ -1,0 +1,25 @@
+inkling2-mini-mtp 54 f962cd87735ebbd1af0639f7513f99eed98b61d8a30b083fb33fc1bb1c3a70d1
+fuse_weight BF16 4x4
+layers.{L}.dflare_norm.weight BF16 2304 0-2
+layers.{L}.input_layernorm.weight BF16 2304 0-2
+layers.{L}.mlp.down_proj.weight BF16 2304x9216 0-2
+layers.{L}.mlp.gate_proj.weight BF16 9216x2304 0-2
+layers.{L}.mlp.up_proj.weight BF16 9216x2304 0-2
+layers.{L}.post_attention_layernorm.weight BF16 2304 0-2
+layers.{L}.self_attn.k_norm.weight BF16 128 0-2
+layers.{L}.self_attn.k_norm_ctx.weight BF16 128 0-2
+layers.{L}.self_attn.k_proj.weight BF16 1024x2304 0-2
+layers.{L}.self_attn.k_proj_ctx.weight BF16 1024x2304 0-2
+layers.{L}.self_attn.o_proj.weight BF16 2304x3072 0-2
+layers.{L}.self_attn.q_norm.weight BF16 128 0-2
+layers.{L}.self_attn.q_proj.weight BF16 3072x2304 0-2
+layers.{L}.self_attn.v_proj.weight BF16 1024x2304 0-2
+layers.{L}.self_attn.v_proj_ctx.weight BF16 1024x2304 0-2
+markov_head.dflare_norm.weight BF16 2304
+markov_head.hidden_out.bias BF16 2304
+markov_head.hidden_out.weight BF16 2304x256
+markov_head.markov_w1.weight BF16 201024x256
+markov_head.rnn_proj.bias BF16 768
+markov_head.rnn_proj.weight BF16 768x5120
+mask_embed BF16 2304
+norm.weight BF16 2304

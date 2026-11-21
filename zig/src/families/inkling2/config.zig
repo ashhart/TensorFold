@@ -1,8 +1,15 @@
-//! Inkling 2 Small's shape from config.json (inkling2), refusing every layout the engine does not run.
+//! Inkling 2's shape from config.json: Small (inkling2) and the looped Mini (inkling2_loop); other layouts refused.
 const std = @import("std");
+const modelopt = @import("modelopt");
 
-/// The most backbone layers the plan tables hold (Inkling 2 Small has 48).
+/// The most backbone layers the plan tables hold (Inkling 2 Small has 48, Mini 24).
 pub const max_layers = 128;
+
+/// The most layer visits a token makes (Mini: 24 layers, layers 6..17 three times, so 48).
+pub const max_visits = 256;
+
+/// The widest gate rank the loop kernels hold (loop.cu kMaxRank; Mini's gate_rank is 64).
+pub const max_gate_rank = 128;
 
 /// Every sixth layer attends over the whole context; the reference derives its layer types the same way.
 pub const global_every = 6;
@@ -37,6 +44,9 @@ pub const Why = struct {
 /// One attention geometry: sliding layers read the `swa_*` keys, global layers the plain ones.
 pub const Heads = struct { q: u32, kv: u32, dim: u32 };
 
+/// loop_config: layers [start, end) run `passes` times; later passes restart at the core's entry with gated messages.
+pub const Loop = struct { start: u32, end: u32, passes: u32, rank: u32 };
+
 pub const Text = struct {
     hidden: u32,
     layers: u32,
@@ -61,6 +71,13 @@ pub const Text = struct {
     up_cap: f32,
     logit_cap: f32,
     max_context: u32,
+    loop: ?Loop = null, // inkling2_loop only
+
+    /// Layer visits a token makes: every layer once, the core's layers once a pass.
+    pub fn visits(c: *const Text) u32 {
+        const l = c.loop orelse return c.layers;
+        return c.layers + (l.passes - 1) * (l.end - l.start);
+    }
 
     pub fn heads(c: *const Text, i: u32) Heads {
         return if (isGlobal(i)) c.global else c.local;
@@ -72,7 +89,7 @@ pub const Text = struct {
     }
 };
 
-/// The draft head's shape (mtp_config); the target taps are indices into the backbone, `layers` meaning the final norm.
+/// The draft head's shape (mtp_config); taps are layer visits (`Text.visits()`: the output after the final norm).
 pub const Mtp = struct {
     layers: u32,
     q_heads: u32,
@@ -192,7 +209,7 @@ fn layerTypes(o: std.json.ObjectMap, layers: u32, why: *Why) !void {
     }
 }
 
-fn parseText(o: std.json.ObjectMap, why: *Why) !Text {
+fn parseText(o: std.json.ObjectMap, looped: bool, why: *Why) !Text {
     var t: Text = undefined;
     t.hidden = try int(o, "hidden_size", why);
     t.layers = try int(o, "num_hidden_layers", why);
@@ -261,7 +278,43 @@ fn parseText(o: std.json.ObjectMap, why: *Why) !Text {
         return error.Unsupported;
     };
     try layerTypes(o, t.layers, why);
+    t.loop = null;
+    if (looped) {
+        try fixed(o, "attn_res_normalize_values", true, why);
+        t.loop = try parseLoop(try object(o, "loop_config", why), &t, why);
+    } else if (o.get("loop_config") != null) {
+        why.set("loop_config needs model_type inkling2_loop", .{});
+        return error.Unsupported;
+    }
     return t;
+}
+
+/// loop_config: a fixed pass count (is_varloop refused) over a core of whole attention-residual blocks.
+fn parseLoop(o: std.json.ObjectMap, t: *const Text, why: *Why) !Loop {
+    if (o.get("is_varloop")) |v| if (v != .bool or v.bool) {
+        why.set("loop_config.is_varloop must be false: the engine runs a fixed number of passes", .{});
+        return error.Unsupported;
+    };
+    const l: Loop = .{
+        .start = try int(o, "core_start", why),
+        .end = try int(o, "core_end", why),
+        .passes = try int(o, "num_passes", why),
+        .rank = try int(o, "gate_rank", why),
+    };
+    if (l.start >= l.end or l.end > t.layers or l.start % t.block != 0 or l.end % t.block != 0) {
+        why.set("loop_config core [{d}, {d}) is not whole blocks of {d} inside the {d} layers", .{ l.start, l.end, t.block, t.layers });
+        return error.Layout;
+    }
+    if (l.passes < 2 or l.rank > max_gate_rank) {
+        why.set("loop_config: num_passes {d} must be at least 2 and gate_rank {d} at most {d}", .{ l.passes, l.rank, max_gate_rank });
+        return error.Layout;
+    }
+    const visits = @as(u64, t.layers) + @as(u64, l.passes - 1) * (l.end - l.start);
+    if (visits > max_visits) {
+        why.set("{d} layer visits: the plan tables hold {d}", .{ visits, max_visits });
+        return error.Layout;
+    }
+    return l;
 }
 
 fn parseVision(o: std.json.ObjectMap, text_hidden: u32, why: *Why) !Vision {
@@ -311,8 +364,12 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
         m.local[@intCast(e.integer)] = true;
     }
     for (taps.array.items) |e| {
-        if (e != .integer or e.integer < 0 or e.integer > t.layers) {
+        if (e != .integer or e.integer < 0 or e.integer > t.visits()) {
             why.set("mtp_config's target_layer_ids names a layer the backbone does not have", .{});
+            return error.Layout;
+        }
+        if (t.loop != null and m.taps_n > 0 and e.integer <= m.taps[m.taps_n - 1]) {
+            why.set("mtp_config's target_layer_ids must rise: they name visits in run order", .{});
             return error.Layout;
         }
         m.taps[m.taps_n] = @intCast(e.integer);
@@ -321,19 +378,21 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
     return m;
 }
 
-/// A quantization_config in config.json must be ModelOpt NVFP4, which the experts' header dtype refines per layer.
-fn quantization(o: std.json.ObjectMap, why: *Why) !void {
+/// A quantization_config must be ModelOpt NVFP4 (core.modelopt); each layer's expert format is its tensors' dtype.
+fn quantization(gpa: std.mem.Allocator, o: std.json.ObjectMap, json: []const u8, why: *Why) !void {
     const v = o.get("quantization_config") orelse return;
-    const q = if (v == .object) v.object else {
+    if (v != .object) {
         why.set("quantization_config is not an object", .{});
         return error.Quant;
-    };
-    const ok = std.ascii.eqlIgnoreCase(text(q, "quant_method") orelse "", "modelopt") and
-        std.ascii.eqlIgnoreCase(text(q, "quant_algo") orelse "", "NVFP4");
-    if (!ok) {
-        why.set("quantization_config: the loader reads ModelOpt NVFP4 experts (MXFP8 layers follow from their tensors)", .{});
-        return error.Quant;
     }
+    var core_why: modelopt.Why = .{};
+    modelopt.admitByTensors(gpa, json, &core_why) catch |e| switch (e) {
+        error.NotModelOpt, error.UnsupportedQuant => {
+            why.set("quantization_config: the loader reads ModelOpt NVFP4 experts (MXFP8 layers follow from their tensors): {s}", .{core_why.text()});
+            return error.Quant;
+        },
+        else => return e,
+    };
 }
 
 /// config.json as the reference (configuration_inkling2.py) and the checkpoint read it; a refusal is in `why`.
@@ -349,15 +408,18 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     }
     const o = parsed.value.object;
     const arch = o.get("architectures");
-    const ok = arch != null and arch.? == .array and arch.?.array.items.len == 1 and arch.?.array.items[0] == .string and
-        std.mem.eql(u8, arch.?.array.items[0].string, "Inkling2ForConditionalGeneration");
-    if (!ok or !std.mem.eql(u8, text(o, "model_type") orelse "", "inkling2")) {
-        why.set("not an Inkling 2 checkpoint: architectures Inkling2ForConditionalGeneration, model_type inkling2", .{});
+    const one = arch != null and arch.? == .array and arch.?.array.items.len == 1 and arch.?.array.items[0] == .string;
+    const name = if (one) arch.?.array.items[0].string else "";
+    const kind = text(o, "model_type") orelse "";
+    const small = std.mem.eql(u8, name, "Inkling2ForConditionalGeneration") and std.mem.eql(u8, kind, "inkling2");
+    const looped = std.mem.eql(u8, name, "Inkling2LoopForConditionalGeneration") and std.mem.eql(u8, kind, "inkling2_loop");
+    if (!small and !looped) {
+        why.set("not an Inkling 2 checkpoint: Inkling2ForConditionalGeneration (inkling2) or Inkling2LoopForConditionalGeneration (inkling2_loop)", .{});
         return error.NotInkling2;
     }
     try fixed(o, "tie_word_embeddings", false, why);
-    try quantization(o, why);
-    const t = try parseText(try object(o, "text_config", why), why);
+    try quantization(gpa, o, json, why);
+    const t = try parseText(try object(o, "text_config", why), looped, why);
     const eos = try int(o, "eos_token_id", why);
     if (eos >= t.vocab) {
         why.set("eos_token_id is not a token of the {d}-token vocabulary", .{t.vocab});

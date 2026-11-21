@@ -1,4 +1,4 @@
-//! Inkling 2 Small's weight map: each tensor the config implies, with dtype and shape, checked against headers.
+//! Inkling 2's weight map (Small and the looped Mini): each tensor the config implies, dtype and shape, vs headers.
 const std = @import("std");
 const st = @import("safetensors");
 const config = @import("config.zig");
@@ -77,6 +77,24 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
     }
 }
 
+/// The loop's tensors: four rank-r controllers a core layer (q, k, v and MLP inputs), two cross-pass query rows.
+fn loop(c: *const Text, l: config.Loop, sink: anytype) !void {
+    const h: u64 = c.hidden;
+    const r: u64 = l.rank;
+    const rows: u64 = 2 * @as(u64, l.end - l.start);
+    try put(sink, "model.llm.middle_cycle_cross_pass_queries", .{}, .f32, &.{ rows, h });
+    try put(sink, "model.llm.middle_cycle_cross_pass_kv_queries", .{}, .f32, &.{ rows, h });
+    for (l.start..l.end) |i| inline for (controllers) |gate| {
+        const pre = "model.llm.layers.{d}.controllers." ++ gate;
+        try put(sink, pre ++ ".down_weight", .{i}, .bf16, &.{ r, 2 * h });
+        try put(sink, pre ++ ".forget_weight", .{i}, .bf16, &.{ h, r });
+        try put(sink, pre ++ ".gain_weight", .{i}, .bf16, &.{ h, r });
+    };
+}
+
+/// A core layer's controllers in the order the engine holds them: the attention's q, k and v inputs, then the MLP's.
+pub const controllers = [_][]const u8{ "attn", "k", "v", "mlp" };
+
 fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
     const h: u64 = c.hidden;
     try put(sink, "model.llm.embed.weight", .{}, .bf16, &.{ c.vocab, h });
@@ -98,6 +116,7 @@ fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
         try put(sink, "model.llm.layers.{d}.mlp_sconv.weight", .{i}, .bf16, &.{ h, 1, config.conv_taps });
         try experts(c, i, prec[i], sink);
     }
+    if (c.loop) |l| try loop(c, l, sink);
 }
 
 fn vision(v: config.Vision, sink: anytype) !void {

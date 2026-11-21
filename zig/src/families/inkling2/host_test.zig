@@ -4,6 +4,7 @@ test {
     _ = @import("config_test.zig");
     _ = @import("names.zig");
     _ = @import("names_test.zig");
+    _ = @import("mini_host_test.zig");
     _ = @import("plan.zig");
     _ = @import("prompt.zig");
     _ = @import("template_test.zig");
