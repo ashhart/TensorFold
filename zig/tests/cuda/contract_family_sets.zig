@@ -75,6 +75,7 @@ pub const Sets = struct {
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const ling = try @import("contract_ling.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
