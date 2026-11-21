@@ -1,5 +1,15 @@
 # LFM3 Metal qualification receipts
 
+## Vision-only #1502 head
+
+This branch carries LFM3-VL-2B's image tower and projector above the existing text decoder, with the stepped
+prefill the image rows use. The development tensor-unit prompt route, tiled and split attention, wide prompt rows,
+the risk-fast attention predicate and the deferred prompt head are not part of this PR.
+The native server loads the tower only when started with `--vision`; without the flag a VL checkpoint serves text
+and refuses image parts.
+Host checks on this head are recorded on the PR; the maintainer's main-against-branch device comparison remains owed,
+and the older receipts below stay tied to their recorded sources.
+
 These receipts cover native LFM3-1.7B and LFM3-VL-2B from the official MLX exports.
 They distinguish implementation checks from the still-required maintainer model/performance gate.
 Checkpoint revisions and run instructions are in the [family recipe](../../recipes/lfm3-native.md).
@@ -14,23 +24,13 @@ The receipt includes artifact/checkpoint pins, exact input and output hashes, ti
 These are native text-context checks, including VL checkpoints; they do not establish image-context, FP64 or comparative speed acceptance.
 The earlier 20-request snapshot remains in `current-m5-long-context-partial.json`.
 
-## Tensor-unit route gates (M5 Ultra)
-
-- [`m5-nax-exactness.json`](m5-nax-exactness.json): prompt cuts, resume and verification windows against their one-pass references, byte for byte, at all six widths.
-- [`m5-nax-serving-lifecycle.json`](m5-nax-serving-lifecycle.json): served drafted/plain, concurrent/solo, cache, image and cancellation checks at all six widths, plus cancellation and concurrency with 31k-token prompts.
-- [`m5-nax-real-image-rows.json`](m5-nax-real-image-rows.json): native projected rows of five real images against an independent FP64 graph and official MLX BF16.
-- [`synthetic-image-fixture.json`](synthetic-image-fixture.json): the generated image and token fixture that replace the photograph (licence unrecorded, removed), their pins, and the historical receipts that still carry the photograph's identity.
-- [`m5-nax-32k-fidelity.json`](m5-nax-32k-fidelity.json): 32768-token prompt boundary and 16 teacher-forced rows against independent FP32 and official MLX BF16, for the tensor-unit and the earlier prompt route.
-- [`m5-nax-launch-fusion-rejected.json`](m5-nax-launch-fusion-rejected.json): fused decode dispatches measured and not adopted.
-- [`m5-nax-decode-share.json`](m5-nax-decode-share.json): four concurrent requests with and without `--decode-share` against mlx-vlm: TTFT, aggregate prefill and decode, mean and p95 ITL.
-
 ## Qualification ledger
 
 The recipe's [qualification rules](../../recipes/lfm3-native.md#qualification-rules) and
 [evidence ledger](../../recipes/lfm3-native.md#evidence-ledger) record what each receipt ran, on what,
-and what it showed, one table beside the run instructions. Rows for the pending
-[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added there once that PR
-lands and its files are on main.
+and what it showed, one table beside the run instructions. Rows for
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) are added there once that PR lands and its files
+are on main.
 
 ## Runner-only maintenance
 

@@ -76,7 +76,7 @@ For VL, it checks the text decoder only. A passing result does not validate visi
 For the focused format/launch-record and vision-residency host checks, without device execution:
 
 ```sh
-zig build test-lfm3-nax-format-host test-lfm3-vision-residency-host
+zig build test-lfm3-vision-residency-host
 ```
 
 The config reader preserves full-attention versus sliding-attention layers, distinct rotary settings, sandwich norms,
@@ -152,61 +152,24 @@ tier until long-context fidelity against the reference is measured and judged. T
 ### Evidence ledger
 
 The [receipts README](../receipts/lfm3/README.md#qualification-ledger) links here. Each row says what ran,
-on what, and what it showed; links locate files, not necessarily the measured commit. Rows for the pending
-[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added once that PR lands and its
-files are on main.
+on what, and what it showed; links locate files, not necessarily the measured commit. Rows for
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) are added once that PR lands and its files are on main.
 
 | Cell / evidence | What ran, on what | What it showed |
 |---|---|---|
 | Extracted text4/6/8 correctness, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/final-extracted-text.json) | text4/6/8 served, cancellation and focused-state checks on one M4 Pro (48 GiB, macOS 26.5.1), source `73bc567c039b7471ad621fa249b69801f1d86de5`, pinned checkpoint revisions | 120 served and 18 cancellation checks passed; 15 focused-state checks passed; logit-bridge bytes equal the combined build. No performance measured; no long-context transfer claim. |
 | Text4 runtime, [M5 maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6658620362) | text4 on M5 Ultra, candidate `a19bb6845`; checkpoint revision, RAM and full invocation not recorded in the comment | Two runs: 0/20 prompt rows differ, 12/12 concurrent replies equal solo, solo equals draft-disabled, thinking on/off. Runtime exactness only, not an FP32/BF16 fidelity verdict. |
 | Text4 runtime, [M3 Ultra maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6673067861) | text4 on M3 Ultra, candidate `a19bb6845`; same missing fields | 160/160 exact comparisons, 120 replies finished; 2k/8k prefill 2043/1508 tok/s, decode 133.5/138.6 tok/s. This host's observation, not every Apple chip or width. |
-| Default text/reference performance, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/m5-text-slice-vs-mlx.json) | text4/6/8 on M5 Ultra, default route without NAX/tiled/split/stepped, cache off, greedy max 128, context 70000, three timed runs after warm-up; measured commit and environment not recorded in the artifact | At 2k/8k, text4 client TTFT 0.85/4.61 s versus 0.095/0.350 s for mlx-vlm; contextual decode 169/165 versus 334/317 tok/s. The default route stays slower; the gap remains documented. |
+| Default text/reference performance, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/m5-text-slice-vs-mlx.json) | text4/6/8 on M5 Ultra, row-projection route, cache off, greedy max 128, context 70000, three timed runs after warm-up; measured commit and environment not recorded in the artifact | At 2k/8k, text4 client TTFT 0.85/4.61 s versus 0.095/0.350 s for mlx-vlm; contextual decode 169/165 versus 334/317 tok/s. The default route stays slower; the gap remains documented. |
 | CUDA lanes, [#1508](https://github.com/ashhart/TensorFold/pull/1508), [#1634](https://github.com/ashhart/TensorFold/pull/1634) | separate owner-maintained backend/hardware cells | Kept out of this Metal ledger; no CUDA verdict is inferred from Metal results. |
 
-## Opt-in tensor-unit routes
+## Stepped prefill
 
-`lfm3-nax-prompt`, `lfm3-tiled-attention` and 2048 prompt rows are off in every build, so a source build and a release
-serve a checkpoint with the same arithmetic. Enabling them is a development option on tensor-unit devices; release-version
-builds reject it. These remain draft routes; model
-fidelity is judged against an independent FP32 forward and the official MLX BF16 run, as agreed on
-[#1491](https://github.com/ashhart/TensorFold/issues/1491#issuecomment-6537143418), not against float64.
+The server fills prompts one 128-row chunk at a time (`prefill_step`), so the lane host runs the shortest remaining
+prompt next and decodes live streams between chunks instead of finishing every queued prompt first. Where a prompt
+is cut does not change its state (`tf-lfm3-exact`), so the backend declares `chunk_invariant` and `--decode-share S`
+lets the lane host interleave replies with those fills at the requested time share. Without the flag the server keeps
+its own cuts.
 
-```sh
-zig build native -Dcpu=apple_m1 -Dlfm3-nax-prompt=true -Dlfm3-tiled-attention=true -Dlfm3-prompt-rows=2048
-```
-
-`lfm3-nax-prompt` sends every dense prompt projection (attention q/k/v/out, convolution in/out, FFN gate/up/down)
-through `tf_qmmw_t_nax_win`, Flash Next's `tf_qmmw_t_nax` tile with scales and biases loaded eight groups at a time.
-It dequantizes each weight to BF16 as MLX does and accumulates in FP32, with the same bytes as `tf_qmmw_t_nax`. 4, 6
-and 8 bits with groups of 32 or 64 are covered, `n` divisible by 64 and `k` by eight groups; other shapes keep the row
-kernels. The LM head and decode keep their own kernels.
-`lfm3-tiled-attention` adds two attention kernels. Prompt rows use 64-query/32-key tiles with FP32 online softmax and
-the probabilities rounded once to BF16 for PV, as MLX does. A prompt segment of up to 2048 rows is one launch, so
-where a prompt is cut does not change its state. Decode, verification windows of any width and shared decode rows use a
-key-parallel kernel, so a window equals the same rows decoded one at a time: each query's keys split
-into at most 64 contiguous parts of at least 128 keys, merged in FP32. Both kernels replay a row through the exact
-attention path when its result is nonfinite, so nonfinite classes follow float64. Underflow and overflow of the FP32
-softmax follow MLX, not the earlier extended-range repair.
-Without them the build keeps the row kernels, decode attention and 128-row chunks.
-`tf-lfm3-nax-exact MODEL_DIR` checks these routes on real weights: prompts cut at many offsets, resumed from a saved
-prefix, and verification windows of 2 to 32 rows must equal their reference byte for byte.
-
-`-Dlfm3-prompt-rows=128`, `256`, or `2048` selects the development prompt batch; it is 2048 when both options above
-are enabled and 128 otherwise. Both options are required for a larger batch, and release-version builds reject them.
-Cache marks retain their existing 128-row policy and can split a larger batch. Cancellation and background yield
-are checked at chunk boundaries; a 2048-row chunk remains one atomic forward pass.
-The server fills prompts one chunk at a time (`prefill_step`), so the lane host runs the shortest remaining prompt next
-and decodes live streams between chunks instead of finishing every queued prompt first. Where a prompt is cut does
-not change its state (`tf-lfm3-nax-exact`), so the backend declares `chunk_invariant` and `--decode-share S` may cap
-chunks at 512 rows while replies decode: that lowers inter-token latency and raises aggregate decode at the cost of
-prompt throughput (`m5-nax-decode-share.json`). Without the flag the server keeps its own cuts.
-
-Kernel-contract probes: `metal LFM3 NAX prompt q{4,6,8}g{32,64}` and `metal LFM3 split structural full|sliding`,
-each with planted controls (`zig build tf-kernel-contract`, `--only "LFM3 NAX prompt"`).
-Developer harnesses (`tf-lfm3-forward ... --nax-prompt`, `tf-lfm3-profile` with `TF_LFM3_NAX_PROMPT=1` and
-`TF_LFM3_DECODE_STEPS=N`) enable the same kernels explicitly.
-
-These are work-in-progress arithmetic changes, not release-qualified replacements. Other Apple GPU generations and the
-weights' licence statement remain open. Licence: the LiquidAI LFM3 model cards declare `license: other` with
-`license_name: lfm1.0` and a LICENSE file in each repo. Macs checked: an M5 Ultra only.
+Other Apple GPU generations and the weights' licence statement remain open. Licence: the LiquidAI LFM3 model cards
+declare `license: other` with `license_name: lfm1.0` and a LICENSE file in each repo. Macs checked: an M5 Ultra only.

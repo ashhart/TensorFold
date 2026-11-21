@@ -12,8 +12,7 @@ const be = lanes.backend;
 const prefill_control = @import("prefill_control.zig");
 pub const greedy = @import("greedy.zig");
 
-pub const prompt_rows = @import("lfm3_options").prompt_rows;
-pub const Options = struct { capacity: usize, chunk: usize = prompt_rows, streams: u32 = 8, defer_prompt_head: bool = @import("lfm3_options").defer_prompt_head };
+pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
 pub const Metal = struct {
     residency: ?mtl.ResidencySet.Follow = null,
@@ -31,10 +30,8 @@ pub const Metal = struct {
     timed: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
-        if (options.chunk == 0 or options.chunk > 2048 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
+        if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
             return error.InvalidLfmOptions;
-        if (@import("lfm3_options").nax_prompt) try model.enableNaxPrompt();
-        if (@import("lfm3_options").tiled_attention) try model.enableTiledAttention();
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
         out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(gpa, model.device, &model.config.layer_types, @max(options.chunk, st.batch_rows)) };
@@ -186,13 +183,8 @@ pub const Metal = struct {
             end = @min(end, mark);
             break;
         };
-        // Reuse observers need logits at marks, and at any chunk if cancellation or yield may call them.
-        const marked = std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null;
-        const interrupted_observer = stream.reuse.hook != null and (stream.cancel_check != null or stream.yield_check != null);
-        const head: fwd.Head = if (prefill_control.deferHead(self.options.defer_prompt_head, end == ids.len, stream.reuse.hook != null and marked, interrupted_observer)) .none else .last;
-        const tiles: fwd.PromptTiles = if (self.model.prompt_nax != null) .nax else .baseline;
         const image_rows = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at, end) else null;
-        try fwd.runPromptWithImages(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], head, image_rows, tiles);
+        try fwd.runWithImages(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last, image_rows);
         prefill_control.completed(stream, end);
         if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null)
             hk.at(hk.ptr, stream, @intCast(end));
