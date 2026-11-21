@@ -15,6 +15,16 @@ test "Metal launch map: every registered launch and control has a resolver branc
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
 
+test "Metal launch map: every DSpark limit pipeline has a resolver branch" {
+    var count: usize = 0;
+    for (registry.all_metal) |d| {
+        if (!std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) continue;
+        try launches.requireMapped(d);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 11), count);
+}
+
 test "Metal launch map: unknown registrations stay errors on every chip" {
     try std.testing.expectError(error.UnknownLaunch, launches.requireMapped(.{ .name = "unregistered family missing_kernel", .threads = 32, .tg_memory = 0 }));
 }
