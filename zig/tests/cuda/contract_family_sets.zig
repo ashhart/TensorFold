@@ -11,6 +11,7 @@ const Grouped = @import("contract_gb10_many.zig").Registrations;
 pub const Sets = struct {
     gpa: std.mem.Allocator,
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
+    stored_experts: *@import("contract_stored_experts.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     inkling2: *@import("contract_inkling2.zig").Set,
@@ -34,6 +35,8 @@ pub const Sets = struct {
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
         const bf16_experts = try @import("contract_experts_bf16.zig").Set.init(gpu, s, a, list);
         errdefer bf16_experts.deinit();
+        const stored_experts = try @import("contract_stored_experts.zig").Set.init(gpu, s, a, list);
+        errdefer stored_experts.deinit();
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
@@ -82,6 +85,7 @@ pub const Sets = struct {
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
+            .stored_experts = stored_experts,
             .pocket = pocket,
             .minimax = minimax,
             .inkling2 = inkling2,
@@ -124,6 +128,7 @@ pub const Sets = struct {
         sets.inkling2.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();
+        sets.stored_experts.deinit();
         sets.bf16_experts.deinit();
     }
 };
