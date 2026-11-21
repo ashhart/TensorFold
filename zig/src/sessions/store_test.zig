@@ -190,10 +190,7 @@ fn tmpRoot(gpa: std.mem.Allocator, tmp: *std.testing.TmpDir, sub: []const u8) ![
     return tmp.dir.realPathFileAlloc(testing.io, sub, gpa);
 }
 
-// Runs in about half a second on a quiet host. Every wait on its paths is a mutex-guarded
-// condition whose publisher always signals (lanes, the staging free list, ops and the tier
-// thread's own queue, jobs.zig), or a bounded syscall — it cannot wait forever; a timeout means
-// the host was frozen, not that a wakeup was missed.
+// About 0.5 s on a quiet host; every wait is signalled or a bounded syscall, so a timeout means a frozen host.
 test "chats over turns: residency to NVMe, bit-identical resumes, deltas, older turns dropped (sync and async)" {
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});
