@@ -9,7 +9,7 @@ const eng = @import("engine.zig");
 const Engine = eng.Engine;
 
 /// A committed plain round: its command buffer and when its encoding began.
-const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64 };
+const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64, tap_at: u32 = 0 };
 
 /// Token from `from` (null: the ids as set), pick into `to`; after a round it waits on the fence, not the event.
 fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
@@ -35,13 +35,15 @@ fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
     b.enc.end();
     e.ev += 1;
     b.cb.signal(e.event, e.ev);
+    const tap_at = @import("../../core/route_tap_metal.zig").mark();
     b.cb.commit();
     e.committed = platform.c.mach_absolute_time();
-    return .{ .cb = b.cb, .t_enc = t_enc, .committed = e.committed };
+    return .{ .cb = b.cb, .t_enc = t_enc, .committed = e.committed, .tap_at = tap_at };
 }
 
 fn waitRound(e: *Engine, p: Pending) !void {
     p.cb.wait();
+    if (p.tap_at != 0) @import("../../core/route_tap_metal.zig").afterLand(p.tap_at);
     e.gpu = .{ p.cb.gpuStart(), p.cb.gpuEnd() };
     if (p.cb.failure()) |msg| {
         e.event.set(e.ev);

@@ -227,6 +227,7 @@ const Host = struct {
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
+        @import("core").route_tap.stop();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         h.release(h.family);
@@ -262,6 +263,10 @@ test "HIP optional family offers: image metadata comes from the loaded owner's o
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "hip", problem)) return null;
     if (try o.slideRefusal(a, "HIP")) |why| {
         problem.* = why;
         return null;
@@ -271,7 +276,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     inline for (registry) |F| {
-        if (fam.reads(F, o.model_type)) return openWith(F, a, gpa, io, o, problem);
+        if (fam.reads(F, o.model_type)) return route_tap.held(&tap_guard, try openWith(F, a, gpa, io, o, problem));
     }
     problem.* = try std.fmt.allocPrint(a, "the native HIP engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
     return null;

@@ -19,13 +19,11 @@ const tape = @import("prompt_tape.zig");
 const Ref = wts.Ref;
 const bind = fwd.bind;
 const size = fwd.size;
-
 /// Chunk heights a load picks from (tallest whose buffers fit this Mac's limit); expert parallel keeps one exchange's.
 pub const heights = [_]u32{ 16384, 8192, 6144, 4096, 2048 };
 pub const max_rows = heights[0];
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
-
 /// The chunk's buffers beyond the decode scratch's (whose stream fields `streams` points at prompt-sized ones).
 pub const Prompt = struct {
     k: pk.Kernels,
@@ -341,6 +339,8 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     bind(e, 3, .{ p.pick, p.wts });
     e.setValue(M, 5);
     e.dispatchThreads(size(32 * M, 1, 1), size(256, 1, 1));
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) tap_m.blit(e, k.copy_u32, p.pick.buf, p.pick.off, p.wts.buf, p.wts.off, M, c.topk);
     const blocks = (n + 255) / 256;
     e.setPipeline(p.k.get("custom_kernel_tf_sort_count_uint32_t_int32_t_int32_t"));
     bind(e, 0, .{p.pick});

@@ -38,7 +38,7 @@ pub const fused_rows = 16;
 
 pub const Kind = timing.Kind;
 
-const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind, prompt: ?@import("prompt_flight.zig").Prompt = null };
+const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind, tap_at: u32 = 0, prompt: ?@import("prompt_flight.zig").Prompt = null };
 
 /// A window's host rows in the token ring: the pending token at `stage`, then `n` tokens after its `held` drafts.
 const Fill = struct { stage: u64, held: usize, n: usize };
@@ -185,15 +185,22 @@ pub const Metal = struct {
         self.fence.wait(enc);
         var e = fwd.Enc{ .e = enc, .concurrent = self.concurrent };
         try body.encode(self, &e);
+        const tap = @import("../../core/route_tap.zig");
+        const tap_at = if (tap.live()) tap.reservedCount() else 0;
         self.fence.update(enc);
         enc.end();
         cb.commit();
         self.timing.dispatches += e.dispatches;
-        try self.flights.append(self.gpa, .{ .end = end, .cb = cb.retain(), .kind = kind });
+        try self.flights.append(self.gpa, .{ .end = end, .cb = cb.retain(), .kind = kind, .tap_at = tap_at });
     }
 
     /// Wait for the oldest command buffer in flight and record its GPU time.
     pub fn land(self: *Metal) !void {
+        if (@import("../../core/route_tap.zig").live()) {
+            const tap_at = self.flights.items[0].tap_at;
+            defer @import("../../core/route_tap_metal.zig").afterLand(tap_at);
+            return @import("prompt_flight.zig").land(self);
+        }
         return @import("prompt_flight.zig").land(self);
     }
 
