@@ -383,12 +383,15 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const group: u16 = if (has(d.name, "g128")) 128 else if (has(d.name, "g32")) 32 else 64;
         const out_t: []const u8 = if (has(d.name, "fp32")) "float" else "bfloat";
         const m3_head: []const u8 = if (has(d.name, "glm m3")) "#define TF_GLM_M3_FAST 1\n" else "";
+        const nonfinite: []const u8 = if (bits == 4 and has(d.name, "glm m3")) "#define TF_AM_EXACT_NONFINITE 1\n" else "";
         head = try std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n", .{ bits, group, out_t });
-        const pre_head = if (m3_head.len == 0) head else try std.mem.concat(a, u8, &.{ head, m3_head });
-        const pre = try preM5(a, pre_head, sources.core_affine_mm);
+        const full_head = try std.mem.concat(a, u8, &.{ head, nonfinite });
+        const pre_head = if (m3_head.len == 0) full_head else try std.mem.concat(a, u8, &.{ full_head, m3_head });
+        const core = try std.mem.replaceOwned(u8, a, sources.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", sources.core_affine_nonfinite);
+        const pre = try preM5(a, pre_head, core);
         const here = if (device.tensorUnits()) blk: {
-            const body = try tf.frags.source(device, a, sources.core_affine_mm);
-            break :blk try std.mem.concat(a, u8, &.{ head, body });
+            const body = try tf.frags.source(device, a, core);
+            break :blk try std.mem.concat(a, u8, &.{ full_head, body });
         } else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     } else if (has(d.name, "lane projection")) {
