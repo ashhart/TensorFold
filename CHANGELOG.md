@@ -4,13 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - GLM-5.3-Flash on CUDA: with `TF_GLM_KV_SPLIT=1`, admission counts each KV owner class on its own and chooses a stream's owner once inside the reservation, and a request larger than one whole class is refused by name even while other streams run (#3676, part of #2444). Thanks to @jschmied.
 
 - Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
-
-
-
-
 
 - Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
 
@@ -57,7 +55,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2-MoE on Metal: prefill runs one chunk a call with decode rounds between chunks, so a new prompt no longer stalls other streams' replies; the backend declares `prefill_step` and `cancel_prefill` beside `reports_fill` (#3058).
 
 - Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
-- GLM on CUDA: dependent launches stay off below compute capability 9.0 even when enabled, and the Q4 draft-head launch honours `TF_GLM_PDL=0` like the others; the GB10 default is unchanged.
 
 - CI: the Zig format and TensorFold Web workflows cancel a pull request's older run when it gets a newer push, so superseded runs no longer queue; main pushes all run (#3850).
 
