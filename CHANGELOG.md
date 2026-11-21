@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1: its 118 runtime settings (the `TF_DSV41_*` names and `TF_TP_KERNEL_IMAGE`) are declared in the shared environment validator, so a malformed value is refused by name at startup before any resource opens; valid values and existing modes are unchanged, and a blank value reads as unset like every other validated setting (#3557).
+
 - GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
 
 
