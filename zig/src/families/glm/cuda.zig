@@ -82,6 +82,7 @@ test {
     _ = experts;
     _ = exl3;
     _ = vision;
+    _ = vision_attn;
     _ = @import("vision_names.zig");
     _ = mm;
     _ = image_core;
