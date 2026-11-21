@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+
+
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
 
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
@@ -61,7 +63,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Lane host: a streamed reply whose client falls 1,024 tokens behind sits out rounds until the reader is within 512 again, and one whose client reads nothing for 60 seconds is cancelled like a disconnect, so a stalled reader stops holding its lane; the text a reader receives is unchanged (#3234).
 
 - Web: Qwen3.6-35B-A3B is listed for CUDA only, and starting it on a machine without CUDA is refused before anything launches, so a Mac is no longer pointed at the Python engine for it (#3738, refs #3710). Thanks to @AIFlowML.
-- Muse Spark on CUDA: model initialization now releases its host cache-index lists and embedding-row staging if any later allocation or device operation fails.
 
 - Flash Next on HIP: the first stream's caches are made at load, so the first prompt no longer waits on allocating them; each layer's weights are read past the page cache by threads, the next layer's read under way, and the n-gram gather spreads over all of the pool's parts instead of at most 32 (#3644).
 
