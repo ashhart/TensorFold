@@ -1,4 +1,4 @@
-//! One immutable target/drafter plan and its recoverable cache publication, before either artifact replaces the visible head.
+//! One immutable artifact plan with recoverable publication before either visible head changes.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const core = @import("core");
