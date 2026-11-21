@@ -21,6 +21,9 @@ pub const Pipelines = struct {
     logits: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
+    route_scores: mtl.Pipeline,
+    /// The router's dots for up to 64 rows; launches in one encoder run in order, so they share it.
+    route_dots: mtl.Buffer,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.glue);
@@ -28,7 +31,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [9]mtl.Pipeline = undefined;
+        var pipes: [10]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -41,6 +44,7 @@ pub const Pipelines = struct {
             "tf_inkling2_logits",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
+            "tf_inkling2_route_scores",
         }, &pipes) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -55,6 +59,8 @@ pub const Pipelines = struct {
             .logits = pipes[6],
             .expert_pick = pipes[7],
             .expert_combine = pipes[8],
+            .route_scores = pipes[9],
+            .route_dots = try device.buffer(64 * experts * @sizeOf(f32), mtl.ResourceOptions.shared),
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -104,9 +110,16 @@ const RouteArgs = extern struct { rows: u32 };
 /// Router IDs and weights are sorted by ascending expert index for the deterministic expert sum.
 pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
     std.debug.assert(rows > 0);
+    std.debug.assert(rows <= 64);
+    e.setPipeline(p.route_scores);
+    inline for (.{ x, weight }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setBuffer(p.route_dots, 0, 2);
+    e.setValue(RouteArgs{ .rows = rows }, 3);
+    e.dispatchGroups(mtl.Size.of(experts / 8, rows, 1), mtl.Size.of(256, 1, 1));
     e.setPipeline(p.router);
-    inline for (.{ x, weight, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(RouteArgs{ .rows = rows }, 5);
+    e.setBuffer(p.route_dots, 0, 0);
+    inline for (.{ bias, ids, weights }, 1..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 4);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
