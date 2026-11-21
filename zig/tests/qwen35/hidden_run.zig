@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const hip = @import("hip");
+const core = @import("core");
 const qwen35 = @import("qwen3_5");
 const ids_file = @import("ids_file.zig");
 
@@ -96,7 +97,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     @memset(out[10 + dict.len ..][0..pad], ' ');
     out[head - 1] = '\n';
     if (layers) try residuals(e, ids, out[head..]) else try rows(e, ids, cut, out[head..]);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = out });
+    try core.chunked_write.writeFileChunked(io, std.Io.Dir.cwd(), args[2], out);
     const what = if (layers) "layers' residual rows" else "final-norm rows";
     std.debug.print("wrote {d} {s} x {d} ({s}, pieces of {d}) to {s}\n", .{ ids.len, what, m.spec.hidden, descr, piece, args[2] });
 }
