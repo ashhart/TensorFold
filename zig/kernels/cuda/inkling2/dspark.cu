@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cuda_bf16.h>
 
+#include "common/reduce.cuh"
+
 namespace ink2d {
 
 constexpr int kD = 128;
@@ -16,20 +18,15 @@ __device__ __forceinline__ uint16_t tobf(float f) { return __bfloat16_as_ushort(
 
 __device__ __forceinline__ float bfr(float f) { return bf(tobf(f)); }
 
-__device__ __forceinline__ float warpSum(float v) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-
 // One sum over the block in a fixed order: warp shuffles, then warp 0 over the warps' partials.
 __device__ __forceinline__ float blockSum(float v, float* sh) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    v = warpSum(v);
+    v = tf_common::warp_sum(v);
     __syncthreads();
     if (lane == 0) sh[w] = v;
     __syncthreads();
     const float t = lane < nw ? sh[lane] : 0.0f;
-    return __shfl_sync(0xffffffffu, warpSum(t), 0);
+    return __shfl_sync(0xffffffffu, tf_common::warp_sum(t), 0);
 }
 
 }  // namespace ink2d
@@ -260,7 +257,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_ctx(const uint16_t
         }
     }
     for (int r = 0; r < kMaxRows; ++r) {
-        const float s = warpSum(acc[r]);
+        const float s = tf_common::warp_sum(acc[r]);
         if (lane == 0 && r < rows) out[static_cast<size_t>(r) * 3 * R + o] = s + bf(bias[o]);
     }
 }
@@ -281,7 +278,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_rnn(const float* _
     for (int o = wp; o < 3 * R; o += nw) {
         float s = 0.0f;
         for (int k = lane; k < 2 * R; k += 32) s += bf(W[static_cast<size_t>(o) * ld + k]) * in[k];
-        s = warpSum(s);
+        s = tf_common::warp_sum(s);
         if (lane == 0) raw[o] = s + ctx[o];
     }
     __syncthreads();
@@ -303,7 +300,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_vocab(const uint16
     const uint16_t* f = fold + static_cast<size_t>(v) * 256;
     float s = 0.0f;
     for (int k = lane; k < 256; k += 32) s += bf(latent[k]) * bf(f[k]);
-    s = warpSum(s);
+    s = tf_common::warp_sum(s);
     if (lane != 0) return;
     const float b = bfr(s + bf(fbias[v]));
     const float x = bfr(bf(base[v]) + b);
