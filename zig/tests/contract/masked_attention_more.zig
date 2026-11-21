@@ -35,15 +35,13 @@ pub fn label(k: Kind) []const u8 {
 }
 pub fn known(k: Kind, poison: data.Poison) bool {
     return switch (k) {
-        .glm_nax64, .glm_nax32, .glm_padding, .glm_split, .step_padding_nax, .h3_padding => true,
+        .step_padding_nax, .h3_padding => true,
         .step_full_nax, .step_sliding_nax, .step_sparse_nax => poison == .inf,
         else => false,
     };
 }
 pub fn finding(k: Kind) []const u8 {
     return switch (k) {
-        .glm_padding => "#1009: padding reads unselected latent key 0 at zero weight; visible NaN scores are also dropped",
-        .glm_nax64, .glm_nax32, .glm_split => "#1009: a visible exceptional latent key gives NaN scores in binary64, but the tensor path drops it",
         .step_padding_nax => "#1009: padding reads unselected V at key 0 with zero weight; visible Inf also multiplies zero residual P parts",
         .step_full_nax, .step_sliding_nax, .step_sparse_nax => "#1009: zero residual probability parts multiply visible Inf, giving NaN instead of the IEEE infinity",
         .h3_padding => "#1009: V in a tile's SIZES padding enters P x V at zero probability and gives a hidden output NaN",
