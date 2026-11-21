@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
+
 - Nemotron and LFM2 MoE on CUDA: the prompt cache keeps a state at each message start by default, so an agent's next request resumes from where its last message began instead of reading the conversation again, within the existing prompt-cache budget and slots (#3696, part of #3617).
 
 - DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build): structured output runs on the lane core's token grammars with drafts on: `response_format`, the `guided_*` fields, `tool_choice: "required"` or a named function, and strict tools under `tool_choice: "auto"`; a grammar's stop token ends the reply with `finish_reason` `stop` even with `ignore_eos` (#3026, closes #1664, from #1665). Thanks to @nuk3s.
