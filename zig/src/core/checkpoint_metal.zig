@@ -311,7 +311,7 @@ pub const Stage = struct {
 fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, @min(dest.len - done, 1 << 30), @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
