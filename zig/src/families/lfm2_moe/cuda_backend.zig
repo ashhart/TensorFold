@@ -494,13 +494,6 @@ pub const Lfm = struct {
     }
 };
 
-test "a request holds its prompt, its reply and one verify window in whole pages" {
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(1, 1));
-    try std.testing.expectEqual(@as(usize, 1), pagesFor(400, 96));
-    try std.testing.expectEqual(@as(usize, 2), pagesFor(400, 97));
-    try std.testing.expectEqual(@as(usize, 65), pagesFor(32768, 0));
-}
-
 test "a chunk taps marks and message starts, up to four, then ends at the next, the grid line or the prompt's end" {
     const cases = [_]struct { at: usize, len: usize, marks: []const u32, chunks: []const u32, end: usize, taps: []const usize }{
         .{ .at = 0, .len = 3000, .marks = &.{}, .chunks = &.{}, .end = prompt_rows, .taps = &.{} },

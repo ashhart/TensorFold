@@ -20,3 +20,10 @@ test "lfm2 moe prefill: cancellation keeps a completed prefix for exact resume" 
     try std.testing.expectError(error.Cancelled, backend.Lfm.cancelledPrefix(&s, 2));
     try std.testing.expectEqual(@as(u32, 2), stored.at);
 }
+
+test "a request holds its prompt, its reply and one verify window in whole pages" {
+    try std.testing.expectEqual(@as(usize, 1), backend.pagesFor(1, 1));
+    try std.testing.expectEqual(@as(usize, 1), backend.pagesFor(400, 96));
+    try std.testing.expectEqual(@as(usize, 2), backend.pagesFor(400, 97));
+    try std.testing.expectEqual(@as(usize, 65), backend.pagesFor(32768, 0));
+}

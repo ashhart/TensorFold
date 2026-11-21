@@ -541,8 +541,7 @@ test "draft sources: CUDA host preserves the calibrated proposal service identit
     var h: Host = undefined;
     h.inner = target.backend();
     h.inner.proposal_head = &service;
-    try std.testing.expectEqual(&service, h.backend().proposal_head.?);
-    try std.testing.expect(h.backend().vtable.proposal_draft == null); // legacy stays legacy until planned callbacks exist
+    try std.testing.expect(h.backend().proposal_head.? == &service and h.backend().vtable.proposal_draft == null); // legacy stays legacy until planned callbacks exist
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
