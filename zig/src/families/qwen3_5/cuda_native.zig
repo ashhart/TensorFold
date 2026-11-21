@@ -145,7 +145,6 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
 }
 
 pub const kvHostRefusal = kv_host_mod.refusal;
-
 /// Host bytes are absent before any geometry or cap read when the switch is unset.
 pub fn kvHostRoom(p: *anyopaque) !u64 {
     return kv_host_mod.room(@as(*Lanes, @ptrCast(@alignCast(p))));
