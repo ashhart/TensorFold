@@ -274,6 +274,16 @@ Metal also checks Nemotron's routed experts on the engine's route tables, one ro
 against float64 at tf_load16's bf16 x sums (up's relu2 as an interval over its two bf16 roundings), and the rows2, rows4
 and six geometry pipelines of each projection bit-equal to them (two controls: member rows read from one row, and
 w3's x sums without their bf16 steps).
+
+The DS4.1 dense FP8 block-order fixture runs with `--only dsv41_fp8`. On the W-KV shape, four nonzero K32
+partials are `[2^25, 1, -2^25, ±1]`. The released pair tree produces 0 for both signs. The ascending diagnostic
+produces +1 and −1. The exact dot products are 2 and 0. The test checks both FP32 and BF16 words in the released
+single-row kernel, both verifier orders at widths 1–16, and both prompt orders across the 32-row tile boundary.
+The ascending verifier uses one SIMD group for all K blocks. Half the columns place the last two terms beyond
+a K-split boundary to detect a verifier that sums each group separately. The test generates all signed inputs.
+[Issue #4281](https://github.com/ashhart/TensorFold/issues/4281) records the matched DeepSeek operator trace
+and exact-dot replay on checkpoint inputs.
+
 Metal also checks DeepSeek V4.1's routed experts at hidden 5120, width 2304, rows 1 to 16: the gate/up (`tf_dsv41_xp_up`:
 fp8 act_quant of the input, bf16 projections, clamped SwiGLU, route weight, bf16, act_quant of the result) against an
 oracle in the kernel's fp32 order whose silu may move by exp's error, and the down (`tf_dsv41_xp_down_one`/`_rows`, a

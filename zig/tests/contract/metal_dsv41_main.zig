@@ -200,6 +200,7 @@ pub const Suites = struct {
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8.timing(io);
         t.failed += try s.fp8_mma.invariance(seed);
         t.failed += try s.fp8_mma.accuracy(seed);
+        t.failed += try s.fp8_mma.blockOrder();
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
         t.failed += try s.fp8_tile.equality(seed);
         t.failed += try s.topk.invariance(seed);
