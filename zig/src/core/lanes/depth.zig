@@ -370,7 +370,6 @@ pub const Rule = struct {
     pub const headMs = hold_mod.headMs;
     pub const pricedHeadMs = hold_mod.pricedHeadMs;
     pub const observeOverhead = hold_mod.observeOverhead;
-
 };
 
 test {

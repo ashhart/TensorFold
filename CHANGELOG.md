@@ -4,6 +4,32 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS (#4344).
+
+- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
+
+- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+
+
+
+
+
+- Flash Next on HIP: on one GPU, a prompt's first token goes out before its last chunk's kept prompt states are saved, and they are saved before any later step writes the stream's caches; kept-state copies pass through one pinned 32 MiB buffer, and on Linux each kept state sits on small pages of its own (#3647).
+
+- Server: with `--execution-witness`, `"execution_witness": true` on a chat completion or completion adds an `execution_witness` object to the reply (on a stream, its finish chunk): the witness read when the engine takes the request and again at the end, the SHA-256 of the prompt ids, the resolved request and the reply tokens, the finish reason and a `binding` over them, or `unknown` with a reason (#2958, refs #2741). Thanks to @kotevcode.
+
+- Idol's octree and Gaussian decoders on CUDA, beside the Metal decoders and driven by the same `tf-idol-decode` case driver and gates. The stem, `to_kv` and the head norms run in fp32 and `input_layer` and the head in true fp32 (no TF32), the blocks through the denoiser's CUDA linears and norms. Attention keeps fp32 scores and sums and rounds P to nearest fp16 as torch's CUDA kernels do, fp32 throughout at 8 query rows or fewer as the cases' SDK runs them. The six kernels and 13 controls are registered with the kernel contract (`tf-cuda-test idol-decoder-contract`). It admits sm_121 (GB10) and sm_120 and refuses other GPUs. It compiles for both and its host tests pass; it has not yet run on a GPU (#1858, after #1773 and #1767, for #1757). Thanks to @jayleaton.
+
+- TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
+
+- Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
+
+- CUDA: at `--tp 2` a Flash Next rank now waits for its peer to finish loading before the first collective, up to 10 minutes instead of failing at the collective's 30 s bound; a peer that fails or closes its link ends the wait with `RankDisconnected` (#2972, fixes #2970). Thanks to @swbiggart.
+
+- CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
+
+- CUDA: `capabilities --json` now advertises `modelopt-mixed` and `modelopt-nvfp4` for the dense Qwen3.5 family, matching the ModelOpt exports its loader serves (#4192). Thanks to @javierbits.
+- CUDA capabilities: the dense Qwen3.8-27B row now advertises the ModelOpt exports its loader reads, `modelopt-mixed` (`nvidia/Qwen3.8-27B-NVFP4`) and `modelopt-nvfp4`, beside `mlx-q4g64` and `exl3`; a client that filters on `capabilities --json` no longer hides a checkpoint the engine serves (#4150). Thanks to @Flyinpiz-dev.
 - HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
 
 - CI: the Zig format workflow runs again on pushes and pull requests; two concurrency settings had left its file with a duplicate key, which GitHub refused (#4339).
@@ -1149,10 +1175,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the dense serving and gradient-serving pins follow three sources main changed (the DSpine draft kernels, Flash Next's shared RMS helpers with the same SASS, and its disk-state keys), so `test-qwen-serving-host` and `test-gradient-serving` pass on main again (#2738, refs #2031).
 
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
-
-- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
-
-- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
 
