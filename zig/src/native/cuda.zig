@@ -536,8 +536,7 @@ test "a family that names its ranks opens only at them; one that names none at a
     const Two = struct {
         pub const ranks: u32 = 2;
     };
-    try std.testing.expect(ranked(Two, .{ .dir = "d", .model_type = "m", .tp = 2 }) and !ranked(Two, .{ .dir = "d", .model_type = "m" }));
-    try std.testing.expect(ranked(struct {}, .{ .dir = "d", .model_type = "m", .tp = 2 }) and ranked(struct {}, .{ .dir = "d", .model_type = "m" }));
+    try std.testing.expect(ranked(Two, .{ .dir = "d", .model_type = "m", .tp = 2 }) and !ranked(Two, .{ .dir = "d", .model_type = "m" }) and ranked(struct {}, .{ .dir = "d", .model_type = "m", .tp = 2 }) and ranked(struct {}, .{ .dir = "d", .model_type = "m" }));
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
