@@ -12,6 +12,7 @@ const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
 const metal_slide = @import("metal_slide.zig");
+const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
