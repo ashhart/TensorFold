@@ -19,7 +19,10 @@ pub const Served = struct {
     /// The family's and the drafter's per-stream buffers for `streams`, once the server knows the count.
     pub fn reserve(s: *Served, streams: u32) !void {
         if (s.family) |f| try f.reserve(f.ctx, streams);
-        if (s.held) |h| try h.reserve(h.ctx, streams);
+        if (s.held) |h| {
+            try h.reserve(h.ctx, streams);
+            s.facts = h.drafted.facts(s.facts); // a drafter that times at reserve: its step, hold pass and round costs
+        }
     }
 
     pub fn calibrate(s: *Served, gpa: Allocator, cfg: *lanes.Config) !void {
@@ -110,4 +113,48 @@ test "--drafter: a family that loads its own drafter (GLM's DFlash2) serves as i
     };
     try std.testing.expect((try wrap(Plain, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) == null);
     try std.testing.expectEqualStrings("--drafter: plain checkpoints load no draft model on CUDA", problem);
+}
+
+test "--drafter: the served facts carry what the drafter timed at reserve, not the untimed facts it opened with" {
+    const Timed = struct {
+        timed: bool = false,
+        const holds = [_]lanes.hold_price.HoldCost{.{ .streams = 1, .depth = 3, .ms = 2 }};
+        const costs = [_]lanes.config.Cost{ .{ .width = 1, .ms = 12 }, .{ .width = 8, .ms = 20 } };
+        fn of(p: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(p));
+        }
+        fn facts(p: *anyopaque) lanes.drafter.Facts {
+            if (!of(p).timed) return .{ .depth = 3, .step_ms = 0 };
+            return .{ .depth = 3, .step_ms = 1.5, .hold_costs = &holds, .window_costs = &costs, .lane_costs = &costs };
+        }
+        fn reserve(p: *anyopaque, _: u32) anyerror!void {
+            of(p).timed = true;
+        }
+        fn close(_: *anyopaque) void {}
+        fn taps(_: *anyopaque) []const u32 {
+            return &.{};
+        }
+        fn open(_: *anyopaque, _: *lanes.Stream) anyerror!void {}
+        fn absorb(_: *anyopaque, _: []const lanes.drafter.Absorb) anyerror!void {}
+        fn hold(_: *anyopaque, _: []const lanes.drafter.Hold) anyerror!void {}
+        fn held(_: *anyopaque, _: []const *lanes.Stream, _: []const []u32) anyerror!void {}
+        fn release(_: *anyopaque, _: *lanes.Stream) void {}
+    };
+    const gpa = std.testing.allocator;
+    var d: Timed = .{};
+    const drafter: lanes.drafter.Drafter = .{ .ptr = &d, .vtable = &.{ .taps = Timed.taps, .facts = Timed.facts, .open = Timed.open, .absorb = Timed.absorb, .hold = Timed.hold, .held = Timed.held, .release = Timed.release } };
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var h: Held = .{ .drafted = try lanes.drafted.Drafted.init(gpa, target.backend(), drafter), .ctx = &d, .close = Timed.close, .reserve = Timed.reserve };
+    defer h.drafted.deinit();
+    const base: lanes.Model = .{ .exact_width = 8 };
+    var s: Served = .{ .backend = h.drafted.backend(), .facts = h.drafted.facts(base), .stream_bytes = 0, .held = &h };
+    try std.testing.expectEqual(@as(f64, 0), s.facts.mtp_step_ms); // opened untimed: no prices yet
+    try std.testing.expectEqual(@as(usize, 0), s.facts.hold_costs.len);
+    try s.reserve(8);
+    try std.testing.expectEqual(@as(f64, 1.5), s.facts.mtp_step_ms);
+    try std.testing.expectEqual(@as(usize, 1), s.facts.hold_costs.len);
+    try std.testing.expectEqual(@as(usize, 2), s.facts.window_costs.len);
+    try std.testing.expect(s.facts.limit_shared_drafts == base.limit_shared_drafts); // the rest as the drafter set it
+    try std.testing.expectEqual(@as(u32, 3), s.facts.drafts);
 }

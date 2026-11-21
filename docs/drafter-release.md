@@ -2,8 +2,9 @@
 
 A drafter release is a folder that a server can check against the target it loaded before it drafts a single token.
 It says which target the drafter was trained against, how that target turns tokens into rows and rows into logits,
-which of the target's rows the drafter reads, and the drafter's own shape. The format is version 1. It describes one
-architecture, the block drafter, and is read by `zig/src/core/drafter_release.zig` and `drafter_layout.zig`.
+which of the target's rows the drafter reads, and the drafter's own shape. The format is version 1. It describes two
+architectures, the block drafter and EAGLE-3 (`eagle3`), and is read by `zig/src/core/drafter_release.zig` and
+`drafter_layout.zig`. Releases published before it are read into the same checks (see "Published before version 1").
 
 A release holds three files:
 
@@ -86,7 +87,8 @@ loaded target reports, and refuses the release on the first one that differs, na
 ### drafter and serving
 
 The block drafter's shape. Row 0 of a block is a chain head on the anchor's own row; rows 1 to `block - 1` are drafted
-in the same pass. `pred_rank` and `spine_rank` are 0 when the predecessor head or the spine is absent. `hidden` must
+in the same pass. An `eagle3` drafter drafts one row a pass (`block` 1, no predecessor head or spine): each chain step
+reads its own last output in place of the fused taps, and `serving.depth` is 1 to 8. `pred_rank` and `spine_rank` are 0 when the predecessor head or the spine is absent. `hidden` must
 equal `target.hidden`, because the target's head reads the drafter's rows. `serving` holds defaults a server may
 override: `depth` (1 to `block`), and the formats the body and the head slice are converted to at load (`bf16`, `fp8`
 or `nvfp4`).
@@ -103,12 +105,14 @@ Every tensor is bf16, f16 or f32. D is `drafter.hidden`, T is `target.hidden`, A
 | `target.head_bias` | [V] | `head_bias` is true |
 | `fuse.weight` | [D, len(taps) x T] | always |
 | `fc.weight` | [D, T + D] | always: cat(embedding of the token after the row, fused row) |
-| `mask` | [D] | always |
-| `layers.i.{q,k,v,ck,cv}.weight` | [A, D] | each layer |
+| `mask` | [D] | block drafter |
+| `layers.i.{q,k,v}.weight` | [A, D] | each layer |
+| `layers.i.{ck,cv}.weight` | [A, D] | each layer, block drafter |
 | `layers.i.o.weight` | [D, A] | each layer |
 | `layers.i.{gate,up}.weight` | [ffn, D] | each layer |
 | `layers.i.down.weight` | [D, ffn] | each layer |
-| `layers.i.{n1,n2,nc}.w` | [D] | each layer |
+| `layers.i.{n1,n2}.w` | [D] | each layer |
+| `layers.i.nc.w` | [D] | each layer, block drafter |
 | `out_norm.w` | [D] | always |
 | `pred_h.weight`, `pred_e.weight`, `pred_out.weight` | [R, D], [R, T], [D, R] | `pred_rank` R > 0 |
 | `spine_n.i.w`, `spine_a.i.weight`, `spine_u.i.weight` | [D], [S, D], [D, S] | `spine_rank` S > 0, i < layers - 1 |
@@ -142,8 +146,23 @@ format. Its `config.json` counts taps from 0 (44, 47, 49), has no adapter, and i
 and neither target tensor. Re-exported with the embedding and its 60,614 head rows, and without `inp.weight`, its 66
 tensors pass the layout check above.
 
+## Published before version 1
+
+Kolibri-1's two drafters on the Hub were published before this format: `josch15366/Kolibri-1-EAGLE3-drafter`
+(`kolibri1-eagle3-drafter`) and `josch15366/Kolibri-1-block-drafter` (`kolibri1-block-drafter`).
+`zig/src/core/drafter_published.zig` reads such a folder into a version 1 `Config` and then runs the same `validate`,
+`check`, `parseVocab` and tensor checks:
+
+- taps count from 0 there (44, 47, 49): each becomes id + 1 (45, 48, 50); normed, bf16;
+- `target` names a repo only; it must equal the loaded target's, and the adapter is the loaded target's;
+- the embedding and head rows are not in the file: the server takes them from the target it loaded;
+- the EAGLE-3 release names its layer `blocks.0.*` and stores its norms as f32; the block release holds an unused
+  `inp.weight`, admitted by name; any other tensor is refused;
+- `window` (2,048, the training window) and the weights' file name are fixed; the block release's `serving` keeps its
+  values, the EAGLE-3 release serves depth 2 in bf16.
+
 ## Not in version 1
 
 - Weights stored as FP8 or NVFP4. The release stores floats; `serving` converts them at load.
 - A tap that merges several residual streams. `stream` has one value until a family needs another.
-- Drafter architectures other than the block drafter.
+- Drafter architectures other than the block drafter and EAGLE-3.
