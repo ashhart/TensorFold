@@ -24,8 +24,39 @@ pub fn marked(who: anytype, lone: bool) @TypeOf(who) {
     return w;
 }
 
-/// Measured full-round time at this width; otherwise the nearest sample plus the startup forward-time difference.
+/// Widths sampled before a line over rows is fitted: with fewer, a width keeps its own sample or its nearest one.
+const fit_least = 3;
+
+/// A line over rows through the samples beyond the startup model: one noisy timing moves no width's price alone.
+fn fitted(startup: Table, samples: Table, rows: usize) ?f64 {
+    var n: f64 = 0;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var sxx: f64 = 0;
+    var sxy: f64 = 0;
+    for (samples.slots, 1..) |ms, width| {
+        if (!usable(ms)) continue;
+        const model = startup.get(@intCast(width)) orelse continue;
+        if (!usable(model)) continue;
+        const x: f64 = @floatFromInt(width);
+        const y = ms.? - model;
+        n += 1;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    const spread = sxx - sx * sx / n;
+    if (n < fit_least or spread <= 0) return null;
+    const slope = (sxy - sx * sy / n) / spread;
+    const base = startup.get(@intCast(rows)) orelse return null;
+    const price = base + (sy - slope * sx) / n + slope * @as(f64, @floatFromInt(rows));
+    return if (usable(price)) price else null;
+}
+
+/// The fitted time once enough widths are sampled; else the width's own sample, else the nearest plus the startup gap.
 pub fn estimate(startup: Table, samples: Table, rows: usize, overhead: f64) ?f64 {
+    if (fitted(startup, samples, rows)) |ms| return ms;
     if (usable(samples.get(@intCast(rows - 1)))) return samples.get(@intCast(rows - 1));
     const base = startup.get(@intCast(rows)) orelse return null;
     var nearest: ?usize = null;
