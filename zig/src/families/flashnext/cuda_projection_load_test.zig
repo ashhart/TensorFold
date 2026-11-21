@@ -502,11 +502,10 @@ const MicroStore = struct {
     dtype: core.safetensors.DType = .f8_e4m3,
     scratch: [64 * 256]u8 = undefined,
 
-    /// Neither form carries a scale_inv a 128 x 128 block covers: the block-FP8 arm is not this projection's.
+    /// An MXFP8 or affine projection carries group-32 `weight_scale`, never a 128 x 128 `weight_scale_inv`.
     pub fn has(self: *MicroStore, name: []const u8) bool {
         _ = self;
-        _ = name;
-        return false;
+        return std.mem.endsWith(u8, name, ".weight_scale");
     }
 
     pub fn tensor(self: *MicroStore, name: []const u8) !Tensor {
