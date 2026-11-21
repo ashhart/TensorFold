@@ -174,6 +174,207 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
   if (lane == 0u) Y[ulong(group) * a.n + n] = bfloat(d);
 }
 
+// ---- Grouped by expert: the same sums a row as the kernels above, with each weight block decoded once a pass. ----
+struct Ink2GroupArgs { uint pairs, experts, cap; };
+struct Ink2GroupedArgs { uint k, n, topk, cap; };
+#define INK2_PASS 4u
+
+// Expert e's route pairs in pair order: counts[e], then members[e][0 .. counts[e]).
+kernel void tf_ink2_group(
+    device const int* ids [[buffer(0)]], device uint* counts [[buffer(1)]],
+    device uint* members [[buffer(2)]], constant Ink2GroupArgs& a [[buffer(3)]],
+    uint e [[thread_position_in_grid]]) {
+  if (e >= a.experts) return;
+  uint n = 0u;
+  for (uint p = 0u; p < a.pairs; ++p)
+    if (uint(ids[p]) == e) {
+      if (n < a.cap) members[e * a.cap + n] = p;
+      ++n;
+    }
+  counts[e] = min(n, a.cap);
+}
+
+// Block b of a packed NVFP4 row as its 16 BF16 weights, each as ink2_dot_nv decodes it.
+inline void ink2_nv_block(device const uchar* w, device const uchar* scales, float phi, uint b, thread float* out) {
+  const float half_scale = 0.5f * ink2_e4m3(scales[b]);
+  const uint lo = ink2_word(w + 8u * b), hi = ink2_word(w + 8u * b + 4u);
+  for (uint j = 0; j < 16u; ++j) {
+    const uint code = ((j < 8u ? lo : hi) >> (4u * (j & 7u))) & 15u;
+    out[j] = float(bfloat(ink2_e2m1_twice(code) * half_scale * phi));
+  }
+}
+
+// Block b of an MXFP8 row as its 32 BF16 weights, each as ink2_dot_mx decodes it.
+inline void ink2_mx_block(device const uchar* w, device const uchar* scales, uint b, thread float* out) {
+  const int shift = int(scales[b]) - 127;
+  for (uint j = 0; j < 32u; ++j) out[j] = float(bfloat(ldexp(ink2_e4m3_bits(w[32u * b + j]), shift)));
+}
+
+// Threadgroup (x, e): outputs 8x to 8x + 7 of expert e for each of its route pairs, four pairs a pass.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_nvfp4_gu_grouped(
+    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
+    device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
+    device const float* denominator [[buffer(4)]], device const uint* counts [[buffer(5)]],
+    device const uint* members [[buffer(6)]], device bfloat* Y [[buffer(7)]],
+    constant Ink2GroupedArgs& a [[buffer(8)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint n = tg.x * 8u + sg, expert = tg.y;
+  if (n >= a.n) return;
+  const uint count = counts[expert];
+  if (count == 0u) return;
+  const ulong expert_w = ulong(expert) * 2u * a.n * (a.k / 2u);
+  const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 16u);
+  const float phi = precise::divide(float(bfloat(amax[expert])), float(bfloat(denominator[0])));
+  device const uchar* gate_w = W + expert_w + ulong(2u * n) * (a.k / 2u);
+  device const uchar* gate_s = S + expert_s + ulong(2u * n) * (a.k / 16u);
+  device const uchar* up_w = gate_w + (a.k / 2u);
+  device const uchar* up_s = gate_s + (a.k / 16u);
+  for (uint first = 0u; first < count; first += INK2_PASS) {
+    uint pair[INK2_PASS];
+    device const bfloat* x[INK2_PASS];
+    float g[INK2_PASS], u[INK2_PASS];
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
+      x[j] = X + ulong(pair[j] / a.topk) * a.k;
+      g[j] = 0.0f;
+      u[j] = 0.0f;
+    }
+    for (uint b = lane; b < a.k / 16u; b += 32u) {
+      float gate[16], up[16];
+      ink2_nv_block(gate_w, gate_s, phi, b, gate);
+      ink2_nv_block(up_w, up_s, phi, b, up);
+      for (uint j = 0u; j < INK2_PASS; ++j)
+        for (uint i = 0u; i < 16u; ++i) {
+          const float v = float(x[j][16u * b + i]);
+          g[j] += gate[i] * v;
+          u[j] += up[i] * v;
+        }
+    }
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      const float gs = simd_sum(g[j]), us = simd_sum(u[j]);
+      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = ink2_act(gs, us);
+    }
+  }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_mxfp8_gu_grouped(
+    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
+    device const uchar* S [[buffer(2)]], device const uint* counts [[buffer(3)]],
+    device const uint* members [[buffer(4)]], device bfloat* Y [[buffer(5)]],
+    constant Ink2GroupedArgs& a [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint n = tg.x * 8u + sg, expert = tg.y;
+  if (n >= a.n) return;
+  const uint count = counts[expert];
+  if (count == 0u) return;
+  const ulong expert_w = ulong(expert) * 2u * a.n * a.k;
+  const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 32u);
+  device const uchar* gate_w = W + expert_w + ulong(2u * n) * a.k;
+  device const uchar* gate_s = S + expert_s + ulong(2u * n) * (a.k / 32u);
+  device const uchar* up_w = gate_w + a.k;
+  device const uchar* up_s = gate_s + (a.k / 32u);
+  for (uint first = 0u; first < count; first += INK2_PASS) {
+    uint pair[INK2_PASS];
+    device const bfloat* x[INK2_PASS];
+    float g[INK2_PASS], u[INK2_PASS];
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
+      x[j] = X + ulong(pair[j] / a.topk) * a.k;
+      g[j] = 0.0f;
+      u[j] = 0.0f;
+    }
+    for (uint b = lane; b < a.k / 32u; b += 32u) {
+      float gate[32], up[32];
+      ink2_mx_block(gate_w, gate_s, b, gate);
+      ink2_mx_block(up_w, up_s, b, up);
+      for (uint j = 0u; j < INK2_PASS; ++j)
+        for (uint i = 0u; i < 32u; ++i) {
+          const float v = float(x[j][32u * b + i]);
+          g[j] += gate[i] * v;
+          u[j] += up[i] * v;
+        }
+    }
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      const float gs = simd_sum(g[j]), us = simd_sum(u[j]);
+      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = ink2_act(gs, us);
+    }
+  }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_nvfp4_down_grouped(
+    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
+    device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
+    device const float* denominator [[buffer(4)]], device const uint* counts [[buffer(5)]],
+    device const uint* members [[buffer(6)]], device bfloat* Y [[buffer(7)]],
+    constant Ink2GroupedArgs& a [[buffer(8)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint n = tg.x * 8u + sg, expert = tg.y;
+  if (n >= a.n) return;
+  const uint count = counts[expert];
+  if (count == 0u) return;
+  const float phi = precise::divide(float(bfloat(amax[expert])), float(bfloat(denominator[0])));
+  device const uchar* row_w = W + ulong(expert) * a.n * (a.k / 2u) + ulong(n) * (a.k / 2u);
+  device const uchar* row_s = S + ulong(expert) * a.n * (a.k / 16u) + ulong(n) * (a.k / 16u);
+  for (uint first = 0u; first < count; first += INK2_PASS) {
+    uint pair[INK2_PASS];
+    device const bfloat* x[INK2_PASS];
+    float d[INK2_PASS];
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
+      x[j] = X + ulong(pair[j]) * a.k;
+      d[j] = 0.0f;
+    }
+    for (uint b = lane; b < a.k / 16u; b += 32u) {
+      float weight[16];
+      ink2_nv_block(row_w, row_s, phi, b, weight);
+      for (uint j = 0u; j < INK2_PASS; ++j)
+        for (uint i = 0u; i < 16u; ++i) d[j] += weight[i] * float(x[j][16u * b + i]);
+    }
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      const float ds = simd_sum(d[j]);
+      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = bfloat(ds);
+    }
+  }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_mxfp8_down_grouped(
+    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
+    device const uchar* S [[buffer(2)]], device const uint* counts [[buffer(3)]],
+    device const uint* members [[buffer(4)]], device bfloat* Y [[buffer(5)]],
+    constant Ink2GroupedArgs& a [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint n = tg.x * 8u + sg, expert = tg.y;
+  if (n >= a.n) return;
+  const uint count = counts[expert];
+  if (count == 0u) return;
+  device const uchar* row_w = W + ulong(expert) * a.n * a.k + ulong(n) * a.k;
+  device const uchar* row_s = S + ulong(expert) * a.n * (a.k / 32u) + ulong(n) * (a.k / 32u);
+  for (uint first = 0u; first < count; first += INK2_PASS) {
+    uint pair[INK2_PASS];
+    device const bfloat* x[INK2_PASS];
+    float d[INK2_PASS];
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      pair[j] = members[expert * a.cap + min(first + j, count - 1u)];
+      x[j] = X + ulong(pair[j]) * a.k;
+      d[j] = 0.0f;
+    }
+    for (uint b = lane; b < a.k / 32u; b += 32u) {
+      float weight[32];
+      ink2_mx_block(row_w, row_s, b, weight);
+      for (uint j = 0u; j < INK2_PASS; ++j)
+        for (uint i = 0u; i < 32u; ++i) d[j] += weight[i] * float(x[j][32u * b + i]);
+    }
+    for (uint j = 0u; j < INK2_PASS; ++j) {
+      const float ds = simd_sum(d[j]);
+      if (lane == 0u && first + j < count) Y[ulong(pair[j]) * a.n + n] = bfloat(ds);
+    }
+  }
+}
+
 // Weight decode helpers unpack checkpoint bytes and never quantize an activation.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_nvfp4_quantize(
     device const uchar* W [[buffer(0)]], device const uchar* S [[buffer(1)]],
