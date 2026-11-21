@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/prompt_cache/flush` drops the prompt states the server keeps for resuming conversations, in RAM and on disk when it keeps them there (`--prompt-cache-disk`, `--learn-conversations` or `--spill-gib`), once no request is running, so replies in flight are unchanged; it needs a full or `[admin]` key when API keys are on (a loopback caller without keys), answers 503 if requests have not ended within 10 minutes and 501 on an engine without the prompt cache, and leaves `--learn`'s shared-prefix states on disk (#3210, fixes #3183).
+
 
 
 - DeepSeek V4.1 on Metal keeps sampling scratch between picks and scans greedy logits in vectors with the same chosen IDs (#3288).
