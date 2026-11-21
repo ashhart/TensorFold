@@ -212,6 +212,9 @@ pub const Head = struct {
     service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
+    /// fn_row_best_max and fn_row_best_sum: fn_row_best's passes over 32 blocks a row (best and split_bytes scratch).
+    split_fns: [2]cuda.Function,
+    split: ?cuda.DeviceBuffer,
     draw_batch: @import("cuda_draw_batch.zig").Batch,
     topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
@@ -262,6 +265,12 @@ pub const Head = struct {
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
         h.best_fn = try h.module.function("fn_row_best");
+        h.split_fns = .{ try h.module.function("fn_row_best_max"), try h.module.function("fn_row_best_sum") };
+        const zeros = try gpa.alloc(u8, split_bytes);
+        defer gpa.free(zeros);
+        @memset(zeros, 0); // the per-row counters start, and are left, at 0
+        h.split = try cuda.DeviceBuffer.fromHost(driver, zeros);
+        errdefer h.split.?.free();
         h.topk_fn = try h.module.function("fn_row_topk");
         h.draw_batch = try @import("cuda_draw_batch.zig").Batch.init(gpa, driver, batch_on, h.ids.len);
         return h;
@@ -274,6 +283,7 @@ pub const Head = struct {
 
     pub fn deinit(h: *Head) void {
         h.draw_batch.deinit(h.gpa);
+        if (h.split) |*b| b.free();
         h.module.unload();
         h.draft.free();
         h.artifact.deinit();
@@ -300,6 +310,28 @@ pub const Head = struct {
         _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
     }
 
+    fn bestSplit(h: *const Head, stream: cuda.Stream, scratch: u64, scores: u64, v: usize, ld: usize, rows: usize, out: u64) !void {
+        const part = scratch;
+        const sums = part + round_rows * 32 * 8;
+        const done = sums + round_rows * 32 * 4;
+        const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = 32 };
+        var a: cuda.Args = .{};
+        a.add(scores);
+        a.add(cint(v));
+        a.add(@as(c_longlong, @intCast(ld)));
+        a.add(part);
+        try cuda.launch.launch(h.split_fns[0], .{ .grid = grid, .block = .{ .x = 32 } }, stream, &a);
+        var b: cuda.Args = .{};
+        b.add(scores);
+        b.add(cint(v));
+        b.add(@as(c_longlong, @intCast(ld)));
+        b.add(part);
+        b.add(sums);
+        b.add(done);
+        b.add(out);
+        try cuda.launch.launch(h.split_fns[1], .{ .grid = grid, .block = .{ .x = 32 } }, stream, &b);
+    }
+
     /// Each of `rows` rows' `k` best of its first `v` values (fn_row_topk): bf16 bits to out_v, columns to out_c.
     pub fn topk(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, k: usize, out_v: u64, out_c: u64) !void {
         var a: cuda.Args = .{};
@@ -312,8 +344,9 @@ pub const Head = struct {
         try cuda.launch.launch(h.topk_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
     }
 
-    /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).
+    /// fn_row_best over `rows` rows of `v` scores `ld` apart into [rows, 4] fp32 at `out`; split up to round_rows rows.
     pub fn best(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, out: u64) !void {
+        if (h.split) |b| if (rows > 0 and rows <= round_rows) return h.bestSplit(stream, b.ptr, scores, v, ld, rows, out);
         var a: cuda.Args = .{};
         a.add(scores);
         a.add(cint(v));
@@ -322,6 +355,9 @@ pub const Head = struct {
         try cuda.launch.launch(h.best_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
     }
 };
+
+/// The split best's scratch: each warp's best and id bits, its exponent sum, then a counter a row (round_rows rows).
+pub const split_bytes: usize = round_rows * 32 * 8 + round_rows * 32 * 4 + round_rows * 4;
 
 /// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
 pub fn headBytes(fp8: bool) usize {
