@@ -149,7 +149,7 @@ pub const Registry = struct {
         try r.enforceRetention();
     }
 
-    /// Call shutdown and drain external executors first; deinit alone models a stopped process whose callbacks are gone.
+    /// Drain external executors first: deinit alone models a stopped process whose callbacks are gone.
     pub fn deinit(r: *Registry) void {
         r.freeJobs();
         r.jobs.deinit(r.gpa);
