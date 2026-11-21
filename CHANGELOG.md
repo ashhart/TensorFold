@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on Metal: every resident kept state is staged to disk while its borrowed rows can still be read, whatever `--spill-gib` is set to, so a long conversation's disk copy no longer stays at an older depth and later turns resume from the newest state (#2755, refs #2669).
+
 - Tests: three host tests (Qwen3.5 CUDA kept-state read-back, the grammar compile deadline, the chats resume store) wait on events instead of real-clock bounds, so a loaded CI host no longer fails them (#4358).
 
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
