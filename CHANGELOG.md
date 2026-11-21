@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's DINOv3 ViT-H+/16 image encoder runs natively on M5 Metal: one 1024 x 1024 image to the denoiser's feature1 in bf16, as idol-sdk's ImageEncoder makes it, from the ungated timm weights (DINOv3 License), which `tools/zig/idol_case.py dino` shows to be Meta's gated checkpoint byte for byte and feature for feature. On an M5 Ultra an encode takes 0.120 s against the SDK's 0.261 s on torch MPS, with a 2.28 GB peak footprint. feature1 and each of the 32 blocks on torch's own input sit as close to a float32 ruler as torch's bf16 run, within the 2x gate; `tf-idol-dino` runs those gates, and its eight kernels pass the kernel contract (#1775, after #1766, for #1757). Thanks to @jayleaton.
+
 - Kernel contract: the GLM record for `df_sumn` under nvcc 13.3 (40 registers) is the one checked; a stale generic 33-register entry no longer overrides it (#4291). Thanks to @Bizuayeu.
 
 - Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
