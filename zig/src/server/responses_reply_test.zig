@@ -202,7 +202,7 @@ test "Responses foreground streamed failures persist exactly when store is true"
         }
     };
     const History = struct {
-        fn conversation(_: @This(), _: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
+        pub fn conversation(_: @This(), _: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
             return &.{};
         }
     };

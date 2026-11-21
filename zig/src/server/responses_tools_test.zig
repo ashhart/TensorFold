@@ -90,7 +90,7 @@ test "Responses named tool choice deactivates other names and same-name opposite
     const a = arena.allocator();
     var cx: errors.Cx = .{ .a = a };
     const tools = "\"tools\":[{\"type\":\"function\",\"name\":\"shared\"},{\"type\":\"custom\",\"name\":\"shared\"},{\"type\":\"function\",\"name\":\"other\"}]";
-    for ([_][]const u8{ "function", "custom" }) |selected_kind| {
+    inline for ([_][]const u8{ "function", "custom" }) |selected_kind| {
         const body = "{\"input\":\"next\"," ++ tools ++ ",\"tool_choice\":{\"type\":\"" ++ selected_kind ++ "\",\"name\":\"shared\"}}";
         const request = try turn(a, &cx, body);
         const offered = request.chat.get("tools").?.array;
