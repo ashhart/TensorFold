@@ -38,6 +38,7 @@ pub const Slot = struct {
 };
 
 pub const Forward = struct {
+    logprobs: @import("logprob_gpu.zig").State = .{},
     gpa: std.mem.Allocator,
     cfg: *const Config,
     widths: *const block.Widths,
@@ -171,6 +172,7 @@ pub const Forward = struct {
         if (f.gathered) |*b| b.free();
         if (f.prefill_state != null) hooks.set.prefill.?.deinit(f);
         f.calib_marks.deinit(f.gpa);
+        f.logprobs.deinit(f.gpa);
         if (f.gate) |x| hooks.set.gate.?.close(x);
         if (f.engram_rows) |x| x.close();
         if (f.branches != null) hooks.set.branches.?.close(f);

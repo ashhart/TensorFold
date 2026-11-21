@@ -6,6 +6,7 @@ const samp = @import("sampling_gpu.zig");
 const batch = @import("batch.zig");
 const gg = @import("grammar_gpu.zig");
 const Batch = batch.Batch;
+const lp = @import("logprob_gpu.zig");
 
 /// Target.window: the segments as one round (several forwards past the cap); each row's greedy or keyed choice.
 pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32, sampler: ?*samp.GpuSampler, grammar: ?*gg.Masks) !void {
@@ -16,6 +17,7 @@ pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32
         if (sg.parents != null) return error.TreeWindow;
         // structured output: each segment's bits checked before the first forward goes out
         if ((try gg.segmentRows(&masked, &.{sg})).len > 0 and grammar == null) return error.StructuresUnsupported;
+        if (sg.logrows.len != (if (sg.logprobs != null) sg.tokens.len else @as(usize, 0))) return error.LogprobRow;
         if (samp.sampled(sg.sampling) and sampler == null) return error.Sampling;
         if (sg.slot >= b.ss.n) return error.Slots;
         // a pending window must end where the segment starts (a chain never kept keeps every row)
@@ -34,6 +36,9 @@ pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32
         }
         if (grammar) |g| try g.stage(try gg.segmentRows(&masked, segments[rg[0]..rg[1]]));
         try b.window(mix[rg[0]..rg[1]], ids[0..n], j > 0);
+        var scored = false;
+        for (segments[rg[0]..rg[1]]) |sg| scored = scored or sg.logprobs != null;
+        if (scored) try lp.capture(b.f, 0, n);
         var greedy_rows = false;
         for (segments[rg[0]..rg[1]]) |sg| greedy_rows = greedy_rows or !samp.sampled(sg.sampling);
         if (greedy_rows) try b.f.greedy(picks[0..n]);
@@ -60,6 +65,7 @@ pub fn targetWindow(b: *Batch, segments: []const iface.Segment, choices: [][]u32
                 try sampler.?.choose(@intCast(a), @intCast(rows.len), sg.sampling.?, sg.draws, rows)
             else
                 @memcpy(rows, picks[a..][0..rows.len]);
+            if (sg.logprobs) |k| try lp.rows(b.f, a, rows, k, sg.logrows);
             a += rows.len;
         }
     }

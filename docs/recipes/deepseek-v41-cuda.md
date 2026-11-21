@@ -36,3 +36,11 @@ zig build dsv41-serve -Doptimize=ReleaseSafe -Dnvcc=/usr/local/cuda/bin/nvcc -Dd
 This installs rank zero's `tensorfold-dsv41` and the follower tool `tf-dsv41`. The runtime reads
 `TF_DSV41_ASSETS/{rope.bin,engram-token-map.bin,aot/}`. Compile-only targets use inert synthetic images and
 cannot produce a serving qualification receipt. Keep generated images and compiler caches outside source control.
+
+## Reply logprobs
+
+The experimental CUDA lane adapter accepts reply `logprobs` with up to 20 alternatives, including tensor parallel
+runs. Scored requests gather each rank's raw FP32 head columns before sampling or grammar masks, then normalize
+the complete vocabulary in float64 on rank zero. Unscored requests do not gather or copy these extra head rows.
+The head and sampling arithmetic are unchanged. This path has host-reference checks; real TP=2 qualification is
+still required. `prompt_logprobs` remains unsupported, since the CED prompt path does not evaluate every head row.
