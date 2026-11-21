@@ -4,23 +4,17 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `capabilities --json` now advertises `modelopt-mixed` and `modelopt-nvfp4` for the dense Qwen3.5 family, matching the ModelOpt exports its loader serves (#4192). Thanks to @javierbits.
+
 - Flash Next on CUDA: a bf16 language head's draft rows load as 4-bit affine groups of 32 by default, and `TF_FLASHNEXT_DRAFT_HEAD=bf16` keeps them as stored; a malformed value stops the start by name, and replies are unchanged because drafts are verified (#3477, refs #1870). Thanks to @BadAd84.
 
 - Idol's FLUX.2 VAE image encoder runs natively on Metal in fp32: one 1,024 x 1,024 picture to the denoiser's 4,101 condition rows, with the posterior's noise as an input. It is 0.185 s an encode on an M5 Ultra against 0.095 s for the SDK's bf16 encoder on torch MPS, and lies far closer to a float64 run: worst row 5.1e-5 against the SDK's 2.7e-2. `tf-idol-vae` gates it from a case `tools/zig/idol_case.py vae` records, with the ungated FLUX.2-klein-4B weights (#1774, after #1766, for #1757). Thanks to @jayleaton.
-
-
-
-
-
-
 
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
 
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
 
 - CUDA: Drama 3 loads compact NVFP4 checkpoints as stored, stages held experts in slot order, and masks routing to their original ids (#4144). Thanks to @plotarmordev.
-
-
 
 - CUDA: opt-in TF_DSV41_FLOAT_LINEAR runs DeepSeek-V4.1 backbone projections kept as float matrices on the plain path; with it unset, such a pack is still refused (#4076). Thanks to @BadAd84.
 
