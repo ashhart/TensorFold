@@ -187,8 +187,8 @@ pub const Mix = struct {
                     for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(Iv.of(self.at(j, r, col)));
                     rr[j] = ref.rms(s.sum(terms, d, scratch), C, 1e-6);
                     for (0..q) |qi| {
-                        for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(Iv.of(self.query[qi * C + col]));
-                        w[qi][j] = s.sum(terms, d, scratch).mul(rr[j]).mul(root);
+                        for (terms, 0..) |*t, col| t.* = Iv.of(self.at(j, r, col)).mul(rr[j]).mul(Iv.of(self.query[qi * C + col]));
+                        w[qi][j] = s.sum(terms, d, scratch).mul(root);
                     }
                 }
                 for (0..q) |qi| softmax(w[qi][0..n]);
@@ -224,4 +224,27 @@ fn softmax(l: []Iv) void {
         t = t.add(e[j]);
     }
     for (l, 0..) |*v, j| v.* = e[j].div(t);
+}
+
+test "mix normalizes each FP32 query term before reduction and scales after its dot" {
+    const source = [_]f32{
+        @bitCast(@as(u32, 0x3f800008)), @bitCast(@as(u32, 0x3f800001)),
+        @bitCast(@as(u32, 0x40400001)), 0,
+    };
+    const query = [_]f32{
+        @bitCast(@as(u32, 0x3f800010)), @bitCast(@as(u32, 0x3fffffff)),
+        @bitCast(@as(u32, 0xc0000001)), 0,
+    };
+    const inv: f32 = @bitCast(@as(u32, 0x3f800001));
+    var dot: f32 = 0;
+    var raw_dot: f32 = 0;
+    for (source, query) |x, q| {
+        dot = @mulAdd(f32, q, x * inv, dot);
+        raw_dot = @mulAdd(f32, q, x, raw_dot);
+    }
+    const inverse_root_h: f32 = 0.5;
+    const scaled = dot * inverse_root_h;
+    const old = raw_dot * inv * inverse_root_h;
+    try std.testing.expectEqual(@as(u32, 0xbfbffffb), @as(u32, @bitCast(scaled)));
+    try std.testing.expectEqual(@as(u32, 0xbfbffffa), @as(u32, @bitCast(old)));
 }
