@@ -32,11 +32,13 @@ pub const Args = struct {
     voice: @import("voice_cli.zig").Flags = .{},
     redraw: @import("speech_redraw.zig").Policy = .{},
     speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
-    prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
+    // Kept prompt states' budget: 0 disables them; null uses RAM left after loading.
+    prompt_cache_gib: ?f64 = null,
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
-    decode_share: ?f64 = null, // the reply's share x: the prompt owes 1 - x and only the flag offers the chunk cap (null: env time share only)
+    // Reply share x: prompt owes 1 - x; null uses environment time share only.
+    decode_share: ?f64 = null,
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
@@ -65,7 +67,8 @@ pub const Args = struct {
     tool_think_close: bool = false, // a required or named tool call closes thinking in time for the call
     no_drafts: bool = false,
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
-    idle_unload: i64 = 0, // seconds of idle past the last request before the engine closes (0: never; the next request reloads)
+    // Seconds idle past the last request before closing (0: never; next request reloads).
+    idle_unload: i64 = 0,
     compact_auto: bool = false,
     compact_fraction: ?f64 = null,
     compact_keep: ?u32 = null,
@@ -99,7 +102,8 @@ pub const Args = struct {
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
     execution_witness: bool = false, // a read-scoped snapshot of the engine, binary, text and settings that serve
-    cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
+    // Cortheon's program, pre-build research, and server-run cortheon_search/cortheon_fetch.
+    cortheon: bool = false,
     vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
     vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
     vision_pdf: bool = false, // with --vision, inline PDF document parts too (pdf.zig)
