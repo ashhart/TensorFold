@@ -109,7 +109,7 @@ pub const Runner = struct {
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool, kv_step: ?u32) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
-        const geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
+        var geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
         // with the MTP head loaded, its block is one more attention layer past the last (forward.layerAt)
