@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
+
 - Server: `/v1/messages` and its `count_tokens` accept Anthropic's deferred tools: a tool with `defer_loading: true` stays out of the prompt until a `tool_reference` block in a `tool_result` loads it, rendered by a template that reads both fields (GLM-5.3's) or else as the tool's name, description and parameters in text; a reference to a tool the request does not offer, a non-boolean `defer_loading` or all tools deferred is refused, and requests without these fields are unchanged (#3212, fixes #3115).
 
 - MiniMax-M3 on Metal: the DFlash2 and DSpark drafters hold up to eight streams' blocks in one pass and one wait instead of a pass per stream, and absorb no longer waits for the GPU; drafted replies are unchanged (#3121).
