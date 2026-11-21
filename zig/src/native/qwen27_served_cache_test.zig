@@ -8,7 +8,24 @@ const lb = served.lanes_backend;
 const startup = @import("qwen27_startup.zig");
 const StartupLine = startup.StartupLine;
 
-var fake_state: served.FakeStates = .{};
+var fake_state: FakeStates = .{};
+/// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
+const FakeStates = struct {
+    live: usize = 0,
+    pub fn bytes(_: *anyopaque, at: u32) u64 {
+        return @as(u64, at) << 16;
+    }
+    pub fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live += 1;
+        return @ptrFromInt(@as(usize, at) << 4);
+    }
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    pub fn drop(ptr: *anyopaque, _: pc.Saved) void {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live -= 1;
+    }
+};
 
 test "Qwen27 interior state uses a guaranteed cold request cut" {
     const gpa = std.testing.allocator;
@@ -17,7 +34,7 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
     const a = arena.allocator();
     const tokens = try a.alloc(u32, 128 * 1024 + 64);
     @memset(tokens, 7);
-    var store = pc.Store.init(gpa, .{ .ptr = &fake_state, .vtable = &.{ .bytes = served.FakeStates.bytes, .save = served.FakeStates.save, .restore = served.FakeStates.restore, .drop = served.FakeStates.drop } }, served.cacheRules(2048), 32 << 30);
+    var store = pc.Store.init(gpa, .{ .ptr = &fake_state, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, served.cacheRules(2048), 32 << 30);
     defer store.deinit();
     var starts: std.ArrayList(u32) = .empty;
     var at: u32 = 2048;
@@ -34,8 +51,8 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from kept states, never the one it restores" {
     const gpa = std.testing.allocator;
     const g: u64 = 1 << 30;
-    var fake: served.FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = served.FakeStates.bytes, .save = served.FakeStates.save, .restore = served.FakeStates.restore, .drop = served.FakeStates.drop } }, .{}, 40 * g);
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{}, 40 * g);
     defer store.deinit();
     const tokens = try gpa.alloc(u32, 200_000);
     defer gpa.free(tokens);
@@ -56,8 +73,8 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
 test "a reply's end is born with its request's prompt: the history mark that request kept outlives the reply's keep" {
     const gpa = std.testing.allocator;
     const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
-    var fake: served.FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = served.FakeStates.bytes, .save = served.FakeStates.save, .restore = served.FakeStates.restore, .drop = served.FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
     defer store.deinit();
     var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
     for (&other, 0..) |*t, i| t.* = @intCast(i);
@@ -78,8 +95,8 @@ test "a reply's end is born with its request's prompt: the history mark that req
 }
 
 test "a reply's end keeps its prompt's born: newest conversations precede redundant history under pressure" {
-    var fake: served.FakeStates = .{};
-    const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = served.FakeStates.bytes, .save = served.FakeStates.save, .restore = served.FakeStates.restore, .drop = served.FakeStates.drop } };
+    var fake: FakeStates = .{};
+    const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } };
     try @import("qwen27_reply_cache_test.zig").replyBorn(served.keepEnd, snapshots, &fake.live);
 }
 
