@@ -121,9 +121,8 @@ pub const Store = struct {
     /// Shards a load already opened, kept open until it ends (loaded or deinit): reopening one parses its header again.
     released: std.ArrayList(Held) = .empty,
     norm_offset: f32 = 0,
-    /// Dense F16 weights an EXL3 pack stores, widened to BF16 exactly (cuda_exl3_store.zig), freed at release().
+    /// An EXL3 pack's dense F16 weights widened to BF16 exactly (freed at release()) and the kernels/scratch it shares.
     widened: std.ArrayList([]u16) = .empty,
-    /// The EXL3 kernels and scratch this checkpoint's projections and experts share (cuda_exl3_load.zig), if any.
     exl3_ops: ?*@import("exl3/pack/cuda_exl3_load.zig").Ops = null,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
