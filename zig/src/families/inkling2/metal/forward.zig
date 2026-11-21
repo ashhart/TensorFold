@@ -83,8 +83,10 @@ fn widen(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, count: usiz
 
 fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, out: Ref, rows: usize) void {
     e.setPipeline(m.norm);
-    inline for (.{ input, r(weight), out }, 0..) |v, i| e.setBuffer(v.buf, v.off, i);
-    e.setValue(NormArgs{ .rows = @intCast(rows), .width = state.hidden, .eps = 1e-6 }, 3);
+    e.setBuffer(input.buf, input.off, 0);
+    e.setBuffer(weight.buffer, weight.offset, 1);
+    e.setValue(NormArgs{ .rows = @intCast(rows), .width = state.hidden, .eps = 1e-6 }, 2);
+    e.setBuffer(out.buf, out.off, 3);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
