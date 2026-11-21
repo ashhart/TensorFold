@@ -46,5 +46,5 @@ test "round progress: stall timeout is opt-in, checked and independent of health
     try t.expectEqual(@as(u64, 0), try progress.timeoutNs("0"));
     try t.expectEqual(@as(u64, 300) * std.time.ns_per_s, try progress.timeoutNs("300"));
     for ([_][]const u8{ "", "-1", "no", "18446744074", "18446744073709551616" }) |text|
-        try t.expectError(error.BadStallTimeout, progress.timeoutNs(text));
+        try t.expectError(error.InvalidEnvironment, progress.timeoutNs(text));
 }

@@ -323,5 +323,5 @@ test "TF_DSV41_KV_SPLIT_COMPACT values" {
     try testing.expectEqual(split.Compact.on, try split.parseCompact(" ON "));
     try testing.expectEqual(split.Compact.on, try split.parseCompact("1"));
     try testing.expectEqual(split.Compact.force, try split.parseCompact("force"));
-    try testing.expectError(error.BadCompactMode, split.parseCompact("2"));
+    try testing.expectError(error.InvalidEnvironment, split.parseCompact("2"));
 }

@@ -22,7 +22,7 @@ pub fn startup() !void {
 
 /// BIAS_VL has always selected the bias when nonempty, including 0; validation does not reinterpret that value.
 pub fn imageBiasEnv() !bool {
-    const raw = sys.getenv("TF_DSV41_BIAS_VL");
+    const raw = @import("sys").environment.Process.get(.{}, "TF_DSV41_BIAS_VL");
     try environment.check("TF_DSV41_BIAS_VL", raw);
     return raw != null and std.mem.trim(u8, raw.?, " \t\r\n").len > 0;
 }

@@ -27,7 +27,7 @@ test "TF_DSV41_PF_OVERLAP: unset / 0 / 1 off, 2-8 row pieces, anything else refu
     }
     for ([_][]const u8{ "9", "-1", "on" }) |v| {
         Fake.pairs = &.{.{ "TF_DSV41_PF_OVERLAP", v }};
-        try testing.expectError(error.BadKnob, pk.pfOverlap(&Fake.get));
+        try testing.expectError(error.InvalidEnvironment, pk.pfOverlap(&Fake.get));
     }
 }
 
@@ -174,7 +174,7 @@ test "TF_DSV41_PF_OVERLAP_SITE: unset / 0 off, 1 on, anything else refused" {
     try testing.expect(!try pk.pfOverlapSite(&Fake.get));
     for ([_][]const u8{ "2", "on", "-1" }) |v| {
         Fake.pairs = &.{.{ "TF_DSV41_PF_OVERLAP_SITE", v }};
-        try testing.expectError(error.BadKnob, pk.pfOverlapSite(&Fake.get));
+        try testing.expectError(error.InvalidEnvironment, pk.pfOverlapSite(&Fake.get));
     }
     Fake.pairs = &.{};
 }
@@ -305,7 +305,7 @@ test "TF_DSV41_MHC_SITE_ROWS: the reader, and every boundary site in row pieces 
     try testing.expectEqual(@as(i64, 512), try pk.mhcSiteRows(&Fake.get));
     for ([_][]const u8{ "128", "520", "8192", "x" }) |v| {
         Fake.pairs = &.{.{ "TF_DSV41_MHC_SITE_ROWS", v }};
-        try testing.expectError(error.BadKnob, pk.mhcSiteRows(&Fake.get));
+        try testing.expectError(error.InvalidEnvironment, pk.mhcSiteRows(&Fake.get));
     }
     Fake.pairs = &.{};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

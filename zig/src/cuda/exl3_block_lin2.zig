@@ -26,10 +26,7 @@ pub const Lin2Mode = struct { lanes: bool = false, linear: bool = false, pf: boo
 
 /// TF_DSV41_LIN2_CLUSTER's value: unset / empty / 0 off, 1 on, anything else refused.
 pub fn lin2Cluster(v: ?[]const u8) !bool {
-    const t = std.mem.trim(u8, v orelse "", " \t\r\n");
-    if (t.len == 0 or std.mem.eql(u8, t, "0")) return false;
-    if (std.mem.eql(u8, t, "1")) return true;
-    return error.BadLin2;
+    return @import("sys").environment.value(bool, "TF_DSV41_LIN2_CLUSTER", v, false);
 }
 
 /// The split count (2-8) shared by every segment of a dense3 launch of at most 32 rows, else null.
@@ -46,33 +43,15 @@ pub fn lin2Mode(v: ?[]const u8, pf: ?[]const u8) !Lin2Mode {
 }
 
 pub fn lin2ModeWk(v: ?[]const u8, pf: ?[]const u8, wk: ?[]const u8) !Lin2Mode {
-    var m: Lin2Mode = .{};
-    const t = std.mem.trim(u8, v orelse "", " \t\r\n");
-    if (t.len == 0 or std.mem.eql(u8, t, "0") or std.ascii.eqlIgnoreCase(t, "off")) {
-        m = .{};
-    } else if (std.mem.eql(u8, t, "1") or std.ascii.eqlIgnoreCase(t, "on")) {
-        m = .{ .lanes = true, .linear = true };
-    } else if (std.ascii.eqlIgnoreCase(t, "lanes")) {
-        m = .{ .lanes = true };
-    } else if (std.ascii.eqlIgnoreCase(t, "linear")) {
-        m = .{ .linear = true };
-    } else return error.BadLin2;
-    const p = std.mem.trim(u8, pf orelse "", " \t\r\n");
-    if (p.len == 0 or std.mem.eql(u8, p, "1")) {
-        m.pf = true;
-    } else if (std.mem.eql(u8, p, "0")) {
-        m.pf = false;
-    } else return error.BadLin2;
-    const w = std.mem.trim(u8, wk orelse "", " \t\r\n");
-    if (w.len == 0) {
-        m.wk4 = true;
-        m.wk8 = true;
-    } else if (std.mem.eql(u8, w, "4")) {
-        m.wk8 = false;
-    } else if (std.mem.eql(u8, w, "8")) {
-        m.wk4 = false;
-    } else return error.BadLin2;
-    return m;
+    const mode = try @import("sys").environment.value(u8, "TF_DSV41_LIN2", v, 0);
+    const warps = try @import("sys").environment.value(?u32, "TF_DSV41_LIN2_WK", wk, null);
+    return .{
+        .lanes = mode == 1 or mode == 2,
+        .linear = mode == 1 or mode == 3,
+        .pf = try @import("sys").environment.value(bool, "TF_DSV41_LIN2_PF", pf, true),
+        .wk4 = warps == null or warps.? == 4,
+        .wk8 = warps == null or warps.? == 8,
+    };
 }
 
 /// A launch of `m` rows the two-tile variant takes: the original's two passes (rows 17-32).

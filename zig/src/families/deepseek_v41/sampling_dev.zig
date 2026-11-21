@@ -30,10 +30,7 @@ pub const Gpu = struct {
 
     /// TF_DSV41_SAMP_STATS: split (default) | row.
     pub fn rowStats() !bool {
-        const v = std.mem.span(std.c.getenv("TF_DSV41_SAMP_STATS") orelse return false);
-        if (v.len == 0 or std.mem.eql(u8, v, "split")) return false;
-        if (std.mem.eql(u8, v, "row")) return true;
-        return error.BadSampStats;
+        return @import("sys").environment.read(bool, "TF_DSV41_SAMP_STATS", false);
     }
 
     pub fn deinit(g: *Gpu) void {

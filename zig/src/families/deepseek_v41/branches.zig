@@ -18,31 +18,16 @@ pub const Settings = struct {
 };
 
 fn get(name: [:0]const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, std.mem.span(std.c.getenv(name) orelse return null), " \t");
+    const v = std.mem.trim(u8, @import("sys").environment.Process.get(.{}, name) orelse return null, " \t");
     return if (v.len == 0) null else v;
 }
 
 pub fn settings() !Settings {
-    var s: Settings = .{};
-    if (get("TF_DSV41_BRANCHES")) |raw| {
-        var low: [16]u8 = undefined;
-        if (raw.len > low.len) return error.BadBranches;
-        const v = std.ascii.lowerString(&low, raw);
-        const one = std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "on") or std.mem.eql(u8, v, "streams");
-        const serial = std.mem.eql(u8, v, "serial") or std.mem.eql(u8, v, "e4");
-        if (!one and !serial and !std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "off")) {
-            log.err("TF_DSV41_BRANCHES={s}: expected 0, 1 or serial", .{raw});
-            return error.BadBranches;
-        }
-        s.on = one;
-    }
-    if (get("TF_DSV41_BRANCHES_ROWS")) |v| s.rows = std.fmt.parseInt(i64, v, 10) catch return error.BadBranches;
-    if (s.rows < 1 or s.rows > 4096) return error.BadBranches;
-    if (get("TF_DSV41_BRANCHES_PRIO")) |v| s.prio = std.meta.stringToEnum(Prio, v) orelse {
-        log.err("TF_DSV41_BRANCHES_PRIO={s}: expected main, side or equal", .{v});
-        return error.BadBranches;
+    return .{
+        .on = try @import("sys").environment.read(bool, "TF_DSV41_BRANCHES", false),
+        .rows = try @import("sys").environment.read(i64, "TF_DSV41_BRANCHES_ROWS", 64),
+        .prio = @fromBackingInt(@intCast(try @import("sys").environment.read(u8, "TF_DSV41_BRANCHES_PRIO", 0))),
     };
-    return s;
 }
 
 /// The side streams and their events (the runner's `br` / `dfr` point here).
@@ -78,10 +63,7 @@ pub fn mhcDefer() !bool {
 
 /// TF_DSV41_MHC_DEFER_AT: `exchange` holds each deferred coef launch to the next exchange; unset / 0 / off: after site.
 pub fn deferAt(v: ?[]const u8) !bool {
-    const t = std.mem.trim(u8, v orelse return false, " \t\r\n");
-    if (t.len == 0 or std.mem.eql(u8, t, "0") or std.ascii.eqlIgnoreCase(t, "off")) return false;
-    if (std.ascii.eqlIgnoreCase(t, "exchange")) return true;
-    return error.BadDeferAt;
+    return @import("sys").environment.value(bool, "TF_DSV41_MHC_DEFER_AT", v, false);
 }
 
 /// TF_DSV41_COEF_LATE (ours, default off; needs MHC_DEFER): block.Options.coef_late.
@@ -91,11 +73,7 @@ pub fn coefLate() !bool {
 
 /// TF_DSV41_MHC_DEFER_AT_ROWS: hold only in programs of at most this many rows (1-64); unset / 0: every program.
 pub fn deferAtRows(v: ?[]const u8) !i64 {
-    const t = std.mem.trim(u8, v orelse return 0, " \t\r\n");
-    if (t.len == 0) return 0;
-    const n = std.fmt.parseInt(i64, t, 10) catch return error.BadDeferAt;
-    if (n < 0 or n > 64) return error.BadDeferAt;
-    return n;
+    return @import("sys").environment.value(i64, "TF_DSV41_MHC_DEFER_AT_ROWS", v, 0);
 }
 
 /// The forward's side streams released (Forward.deinit through forward_hooks.Branches).

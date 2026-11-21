@@ -26,22 +26,14 @@ pub const Settings = struct {
 
     /// The knob values: 0 | 1 | on | off | true | false (case-insensitive), empty is 0.
     pub fn parse(spec: ?[]const u8, nucleus: ?[]const u8) !Settings {
-        return .{ .on = try flag(spec), .nucleus = try flag(nucleus) };
-    }
-
-    fn flag(v: ?[]const u8) !bool {
-        const t = std.mem.trim(u8, v orelse return false, " \t\r\n");
-        if (t.len == 0) return false;
-        var low: [8]u8 = undefined;
-        if (t.len > low.len) return error.BadSpecKnob;
-        const l = std.ascii.lowerString(&low, t);
-        for ([_][]const u8{ "1", "on", "true" }) |y| if (std.mem.eql(u8, l, y)) return true;
-        for ([_][]const u8{ "0", "off", "false" }) |n| if (std.mem.eql(u8, l, n)) return false;
-        return error.BadSpecKnob;
+        return .{
+            .on = try @import("sys").environment.value(bool, "TF_DSV41_SPEC_DRAFT", spec, false),
+            .nucleus = try @import("sys").environment.value(bool, "TF_DSV41_SPEC_NUCLEUS", nucleus, false),
+        };
     }
 
     fn env(name: [*:0]const u8) ?[]const u8 {
-        return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+        return @import("sys").environment.Process.get(.{}, std.mem.span(name));
     }
 };
 

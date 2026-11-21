@@ -33,8 +33,8 @@ const Ref = struct { prompt_ids: []const u32, tokens: []const u32 };
 const Line = struct { chat: u32, turn: u32, prompt: u64, tokens: []const u32 };
 
 fn envInt(name: [*:0]const u8, d: u64) !u64 {
-    const v = std.c.getenv(name) orelse return d;
-    return std.fmt.parseInt(u64, std.mem.span(v), 10);
+    const v = @import("sys").environment.Process.get(.{}, std.mem.span(name)) orelse return d;
+    return std.fmt.parseInt(u64, v, 10);
 }
 
 /// Submits every prompt at once and waits for all replies (eos ignored: every reply `steps` tokens).
@@ -113,14 +113,14 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
         try stats.writer.print("{{\"admits\": {d}, \"spills\": {d}, \"waits\": {d}, \"saves\": {d}, \"dups\": {d}, \"hits_ram\": {d}, \"hits_disk\": {d}, \"parks\": {d}, \"drops\": {d}, \"ms\": {d}}}\n", .{ x.stats.admits, x.stats.spills, x.stats.waits, st.saves, st.dups, st.hits_ram, st.hits_disk, st.parks, st.drops, ms });
         try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ out, "stats.json" }), .data = stats.written() });
         std.debug.print("session slots sessions: {s}", .{stats.written()});
-        if (std.c.getenv("TF_DSV41_SESSION_SLOTS_TIERS")) |v| if (std.mem.eql(u8, std.mem.span(v), "1")) {
+        if (@import("sys").environment.Process.get(.{}, "TF_DSV41_SESSION_SLOTS_TIERS")) |v| if (std.mem.eql(u8, v, "1")) {
             const tiers = st.hits_ram > 0 and st.hits_disk > 0;
             std.debug.print("{s} session slots tiers: {d} RAM and {d} NVMe resumes, {d} parks\n", .{ if (tiers) "PASS" else "FAIL", st.hits_ram, st.hits_disk, st.parks });
             pass = pass and tiers;
         };
     }
-    if (std.c.getenv("TF_DSV41_SESSION_SLOTS_FRESH")) |path| {
-        const ftext = try cwd.readFileAlloc(io, std.mem.span(path), a, .limited(1 << 30));
+    if (@import("sys").environment.Process.get(.{}, "TF_DSV41_SESSION_SLOTS_FRESH")) |path| {
+        const ftext = try cwd.readFileAlloc(io, path, a, .limited(1 << 30));
         var it = std.mem.tokenizeScalar(u8, ftext, '\n');
         var want: std.ArrayList(Line) = .empty;
         while (it.next()) |l| try want.append(a, try std.json.parseFromSliceLeaky(Line, a, l, .{}));

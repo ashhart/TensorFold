@@ -19,19 +19,12 @@ pub const Settings = struct {
     wait_ns: u64 = 300 * std.time.ns_per_s,
 };
 
-fn get(name: [:0]const u8) ?[]const u8 {
-    const v = std.mem.trim(u8, std.mem.span(std.c.getenv(name) orelse return null), " \t");
-    return if (v.len == 0) null else v;
-}
-
 pub fn settings() !Settings {
     var s: Settings = .{};
-    const raw = get("TF_DSV41_ENGRAM_GATE") orelse return s;
-    s.on = !std.mem.eql(u8, raw, "0");
-    if (get("TF_DSV41_ENGRAM_GATE_ROWS")) |v| s.rows = std.fmt.parseInt(u32, v, 10) catch return error.BadEngramGate;
-    if (s.rows == 0) return error.BadEngramGate;
-    if (get("TF_DSV41_ENGRAM_GATE_TIMEOUT_S")) |v| s.timeout_ns = @intFromFloat(1e9 * (std.fmt.parseFloat(f64, v) catch return error.BadEngramGate));
-    if (get("TF_DSV41_ENGRAM_WAIT_S")) |v| s.wait_ns = @intFromFloat(1e9 * (std.fmt.parseFloat(f64, v) catch return error.BadEngramGate));
+    if (try @import("sys").environment.read(?bool, "TF_DSV41_ENGRAM_GATE", null)) |on| s.on = on else return s;
+    s.rows = try @import("sys").environment.read(u32, "TF_DSV41_ENGRAM_GATE_ROWS", s.rows);
+    s.timeout_ns = @intFromFloat(1e9 * try @import("sys").environment.read(f64, "TF_DSV41_ENGRAM_GATE_TIMEOUT_S", 30));
+    s.wait_ns = @intFromFloat(1e9 * try @import("sys").environment.read(f64, "TF_DSV41_ENGRAM_WAIT_S", 300));
     return s;
 }
 
@@ -344,7 +337,7 @@ pub const Gate = struct {
                 g.stats.failed += 1;
                 if (!quiet) log.warn("engram gate: round {d} failed ({t})", .{ j.seq, e });
             };
-            if (j.seq != 0 and j.failed != null) for (0..g.layers.len) |k| g.publish(j, k); // the GPU must not wait on it
+            if (j.seq != 0 and j.failed != null) for (0..g.layers.len) |k| g.publish(j, k);
             _ = std.c.pthread_mutex_lock(&g.mu);
             j.finished = true;
             const warm_job = j.seq == 0;
