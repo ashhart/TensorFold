@@ -1,4 +1,4 @@
-//! Gemma 4 checkpoint staging, affine packing and layer loading; packed types and projection pipelines live in weights.zig.
+//! Gemma 4 checkpoint staging/packing and layer loading; packed types and projection pipelines live in weights.zig.
 const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
