@@ -25,13 +25,12 @@ run() { # TREE MODEL NAME [ARGS...]: greedy codes into NAME.codes, stderr into N
 run "$main_tree" "$fp8" fp8-main
 run "$root" "$fp8" fp8-head
 cmp "$out/fp8-main.codes" "$out/fp8-head.codes"
-# --replay 1 gates frames, graph, poison/reset and chunk 1 vs 1; main's CUDA codec may differ at chunk 4 (below)
-replay() { # NAME [ARGS...]: every check passes, or the first codec-chunk compare (chunk 4) is the only one that fails
+# --replay 1 gates frames, graph, poison/reset and chunk 1 vs 1; main's CUDA codec may differ at chunk 4 or 16 (below)
+replay() { # NAME [ARGS...]: every check passes, or a codec chunk 4 or 16 PCM compare is the only one that fails
     name=$1
     shift
     run "$root" "$compact" "$name" --codec "$codec" --replay 1 "$@" && return
-    [ "$(grep -o '^codec requested [0-9]*' "$out/$name.log" | cut -d' ' -f3 | tr '\n' ' ')" = '1 1 4 ' ] &&
-        tail -n 1 "$out/$name.log" | grep -qx 'error: ReplayMismatch'
+    "$root/tools/zig/drama3_replay_gate.sh" "$out/$name.log"
 }
 replay compact-replay
 # a pruned checkpoint compacts only the layers that dropped experts: NVFP4 in all 40 and at least one compact router
@@ -42,15 +41,15 @@ for chunk in 1 4 16; do
     run "$root" "$compact" "compact-$chunk" --codec "$codec" --first-chunk "$chunk" --chunk "$chunk" --pcm-out "$out/compact-$chunk.pcm"
     cmp "$out/compact-1.codes" "$out/compact-$chunk.codes"
 done
-pcm_diff() { # CHUNK: max abs and RMS of compact-CHUNK.pcm minus compact-1.pcm
-    python3 - "$out/compact-1.pcm" "$out/compact-$1.pcm" <<'EOF'
+for chunk in 4 16; do # one command each, so a missing or short PCM stops the run under set -e
+    python3 - "$out/compact-1.pcm" "$out/compact-$chunk.pcm" >"$out/pcm-$chunk.txt" <<'EOF'
 import array, math, sys
 a, b = (array.array('h', open(p, 'rb').read()) for p in sys.argv[1:])
 assert len(a) == len(b), (len(a), len(b))
 d = [x - y for x, y in zip(a, b)]
 print(f'max abs {max(map(abs, d))}, RMS {math.sqrt(sum(x * x for x in d) / len(d)):.4f} over {len(d)} samples')
 EOF
-}
+done
 # batched prefill is gated within its own capacity: cross-capacity frames may differ near a tie (docs/drama3-prefill.md)
 run "$root" "$compact" compact-batched --codec "$codec" --max-rows 64
 cmp -s "$out/compact-1.codes" "$out/compact-batched.codes" && capacity=equal || capacity=differ
