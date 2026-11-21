@@ -206,8 +206,8 @@ test "queued cache: progress a follow-up arriving mid-warm-chunk uses that chunk
 
 test "queued cache: progress a warm handoff keeps other promises and never replaces an unrelated key" {
     const queue = @import("lane_cache_queue.zig");
-    const Mode = enum { matching, different, reserved, full };
-    for ([_]Mode{ .matching, .different, .reserved, .full }) |mode| {
+    const Mode = enum { matching, different, reserved, full, unrelated };
+    for ([_]Mode{ .matching, .different, .reserved, .full, .unrelated }) |mode| {
         var cfg = try lanes.Config.init(a, .{ .exact_width = 8 }, 8, 7);
         defer cfg.deinit(a);
         var target: lanes.fake.Fake = .{ .gpa = a };
@@ -235,12 +235,19 @@ test "queued cache: progress a warm handoff keeps other promises and never repla
         try host.admitted.append(a, &warm);
         if (mode == .reserved or mode == .full) try host.admitted.append(a, &later);
         try host.queued.append(a, &next);
-        _ = family.pass(&store, words[0..4], .{});
-        try t.expect(store.keepBorn(&words, 4, 4, null, &.{}, &.{}));
+        const resident = if (mode == .unrelated) &other else &words;
+        _ = family.pass(&store, resident[0..4], .{});
+        try t.expect(store.keepBorn(resident, 4, 4, null, &.{}, &.{}));
         _ = family.pass(&store, words[0..8], .{});
         queue.interrupted(&host, &warm, &warm.stream, 8);
-        const want: u32 = if (mode == .matching or mode == .reserved) 8 else 4;
-        try t.expectEqual(want, store.find(&words, &.{}, &.{}).?.at);
+        if (mode == .unrelated) {
+            try t.expectEqual(@as(u32, 4), store.find(&other, &.{}, &.{}).?.at);
+            try t.expect(store.find(&words, &.{}, &.{}) == null);
+        } else {
+            // Main's cancelled keep can deepen its own key even without a matching queued follow-up.
+            const want: u32 = if (mode == .full) 4 else 8;
+            try t.expectEqual(want, store.find(&words, &.{}, &.{}).?.at);
+        }
         try t.expectEqual(@as(u64, 0), warm.cache_promise.bytes); // cancellation abandons it even without a warm handoff
         try t.expectEqual(@as(u64, if (mode == .full) 120 else 80), later.cache_promise.bytes);
         try t.expectEqual(@as(usize, 1), later.cache_promise.slots);
