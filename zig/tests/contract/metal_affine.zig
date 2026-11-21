@@ -212,6 +212,7 @@ pub const Proj = struct {
         if (p.v.kind == .affine_mm and p.v.bits == 4) f.off = 128;
         p.f = f;
         try f.fill(fill, seed);
+        if (p.v.kind == .simd_half and fill == .random) plant(f);
         if (p.v.identity and fill == .random) identity.plant(f);
         const words = try p.a.alloc(u32, shape.n * shape.k * p.v.bits / 32);
         defer p.a.free(words);
@@ -222,6 +223,7 @@ pub const Proj = struct {
             .row, .simd, .simd_half, .simd_sums, .simd_bits, .affine_mm => {
                 p.w = try p.rig.input(std.mem.sliceAsBytes(words));
                 p.s = try p.rig.input(std.mem.sliceAsBytes(f.scales));
+                p.b = try p.rig.input(std.mem.sliceAsBytes(f.biases));
                 if (p.v.kind == .affine_mm) {
                     p.sums = try p.rig.scratch(shape.rows * (shape.k / p.v.group) * 4);
                     if (p.v.identity) {
