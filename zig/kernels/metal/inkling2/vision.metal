@@ -79,7 +79,7 @@ struct Ik2vQkv {
   (which == 0 ? Q : K)[out] = tf_vis_bf(turned);
 }
 
-// Each row of S [rows, n] (fp32 scores) to softmax(scale * s) in place, rounded to bf16 values (as the reference).
+// Transformers eager rounds QK and QK * scale to BF16 before the FP32 softmax.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ik2v_softmax(
     device float* S [[buffer(0)]], constant uint& n [[buffer(1)]], constant float& scale [[buffer(2)]],
     uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
@@ -88,11 +88,14 @@ struct Ik2vQkv {
   threadgroup float part[33];
   device float* s = S + ulong(row) * n;
   float m = -INFINITY;
-  for (uint i = t; i < n; i += tn) m = max(m, s[i] * scale);
+  for (uint i = t; i < n; i += tn) {
+    s[i] = tf_vis_bf(tf_vis_bf(s[i]) * scale);
+    m = max(m, s[i]);
+  }
   m = tf_vis_max(m, part, tn, lane, sg);
   float z = 0.0f;
   for (uint i = t; i < n; i += tn) {
-    const float e = metal::precise::exp(s[i] * scale - m);
+    const float e = metal::precise::exp(s[i] - m);
     s[i] = e;
     z += e;
   }

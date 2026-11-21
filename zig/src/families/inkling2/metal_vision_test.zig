@@ -370,7 +370,7 @@ pub fn evaluate(a: std.mem.Allocator, w: *const ck.Checkpoint, c: config.Vision,
             for (0..S) |j| {
                 var s: f64 = 0;
                 for (0..hd) |d| s += q[r * h + hh * hd + d] * k[j * h + hh * hd + d];
-                sc[j] = s * scale;
+                sc[j] = rb(rb(s) * scale);
                 top = @max(top, sc[j]);
             }
             var z: f64 = 0;

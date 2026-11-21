@@ -23,7 +23,7 @@ pub fn name(comptime k: Kind) []const u8 {
 
 pub const controls = .{
     .{ Kind.layer_norm, "inkling2 vision layer norm control repeats channels", "#define IK2V_ROW(i) float(xr[i])", "#define IK2V_ROW(i) float(xr[(i) % 2])", c.Gate.shapes },
-    .{ Kind.softmax, "inkling2 vision softmax control ignores NaN exp", "const float e = metal::precise::exp(s[i] * scale - m);", "const float e = isnan(s[i] * scale - m) ? 0.0f : metal::precise::exp(s[i] * scale - m);", c.Gate.nonfinite },
+    .{ Kind.softmax, "inkling2 vision softmax control ignores NaN exp", "const float e = metal::precise::exp(s[i] - m);", "const float e = isnan(s[i] - m) ? 0.0f : metal::precise::exp(s[i] - m);", c.Gate.nonfinite },
     .{ Kind.mix_rms, "inkling2 draft mix_rms control repeats first tap", "float(fr[ulong(k) * p.width + i]) * float(alpha[k]);\n    s += m * m;", "float(fr[i]) * float(alpha[k]);\n    s += m * m;", c.Gate.shapes },
 };
 
@@ -219,8 +219,11 @@ pub const Probe = struct {
             if (p.kind == .softmax) {
                 var top = -std.math.inf(f64);
                 const src = p.scores[i * k ..][0..k];
-                for (src) |v| top = @max(top, @as(f64, v) / 8);
-                for (terms, src) |*x, v| x.* = @exp(@as(f64, v) / 8 - top);
+                for (terms, src) |*x, v| {
+                    x.* = u.val(u.word(u.val(u.word(v)) / 8));
+                    top = @max(top, x.*);
+                }
+                for (terms) |*x| x.* = @exp(x.* - top);
                 const z = roundSum(terms, acc, order);
                 for (out, terms) |*y, x| y.* = x / z;
                 if (mag) |m| for (m, out) |*x, y| { x.* = @abs(y); };
