@@ -79,7 +79,7 @@ zig/kernels/cuda/torch_ops/nucleus.cu	c3328dc3ad1fb28c820c343f22c10dd1b4f9a9d8c8
 zig/kernels/cuda/torch_ops/pointwise.cu	3d3118159265538679968e56a8c4b5d61b01c07487530e95e4f93ba8662f98c8	raw
 zig/kernels/cuda/torch_ops/topk.cu	0b5ddb5b02af2ebd9a3992cb11bb80eefd7547c32d6dfdafdf216ab484dd1627	raw
 zig/kernels/cuda/train_mixers.cuh	cec88446cede27c941da254d94f81afa1c92c6880e63bfd66a0efcdc7f95aa13	raw
-zig/kernels/cuda/vit.cu	516fbc7ec65afafd3a368d593c85d21d5ffa0da858703f257c4779745ebc239e	raw
+zig/kernels/cuda/vit.cu	a9adb9bd0ff79716ff7897e79a75c5682aa3ff46c3beb8f9c858800111195df5	raw	#4127: tf_vit_pointwise_gamma added for Inkling 2's layer scale, existing functions unchanged
 zig/src/cuda/abi.zig	fef21a6302d1863001496b3765899a265470cfdf78678d7f73fa7fd3115d2a93	raw	commits ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/aot.zig	bd4e41f32eebf8e75e6f40e036847aaca2900aee7628167552c661824c79d62b	raw	commits 9349e38bb; series patches 14-runtime-foundation.patch, 45-runtime-one-fallback.patch, 46-preserve-nospec-and-capture.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 3a7e6fac7 (identity export for persisted serving states)
 zig/src/cuda/carveout.zig	5ebe77d420ec42d1494fbe7259ce12e20e56427d8f7d931d672b7ca1240b1759	raw	main 6a1feb26e (malformed TF_CUDA_CARVEOUT settings refused by name)
@@ -113,7 +113,7 @@ zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125d
 zig/src/cuda/tp_group.zig	1a2acbdf2de6b827218deb45df5b5845beecde4eb718a4e4b3966582db51d7a7	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally); #2918 (communicator abort through its owner)
 zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0bd5f468ace3	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512)
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
-zig/src/cuda/vit.zig	76f9ab49d33715cd6f5568f61719bb25e727d6adfba623ac5884ac3ac8cad1bb	raw
+zig/src/cuda/vit.zig	05ad3a56e97a86c45639f2c01bd841d1a10a6f0ca53061376d00bf359c819154	raw	#4127: pointwiseGamma launches tf_vit_pointwise_gamma for Inkling 2's layer scale
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	f1c5ab1478497ab2c0abdf77776dfed36fa9092579d4306e4320a32cfadf6910	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #XXXX: the scratch test's ceiling restated at the 3,072-row default, #3413 (TF_FLASHNEXT_READOUT_FUSED's prompt read-out; unchanged when unset)
 zig/src/families/flashnext/cuda_batch_state.zig	7e940f58ec4ecba11a657983375e3cfec7492989c6246f037759b8051ce70129	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged; #XXXX: the default prompt chunk is 3,072 rows

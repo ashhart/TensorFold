@@ -16,6 +16,7 @@ pub const Set = struct {
     ek: ink.experts.Kernels = undefined,
     vk: ink.vision.Kernels = undefined,
     fa: cuda.vit.Attention = undefined,
+    vt: cuda.vit.Kernels = undefined,
     projections: [2]grouped.Grouped = undefined,
     embeds: [2]ref.Gated(vision.Embed) = undefined,
     ropes: [2]ref.Gated(vision.Rope) = undefined,
@@ -29,11 +30,13 @@ pub const Set = struct {
         errdefer set.vk.unload();
         set.fa = try cuda.vit.Attention.load(gpu.d);
         errdefer set.fa.unload();
+        set.vt = try cuda.vit.Kernels.load(gpu.d);
+        errdefer set.vt.unload();
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         for (&set.projections, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .fault = if (i == 1) .swapped else .none };
         for (&set.embeds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
         for (&set.ropes, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .swapped = i == 1 } };
-        for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
+        for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vt, .late = i == 1 } };
         set.attn = .{ .rig = rig, .att = &set.fa };
         set.live = true;
         for (&set.projections) |*x| try list.append(a, x.kernel());
@@ -50,6 +53,7 @@ pub const Set = struct {
         for (&set.ropes) |*x| x.deinit();
         for (&set.embeds) |*x| x.deinit();
         for (&set.projections) |*x| x.deinit();
+        set.vt.unload();
         set.fa.unload();
         set.vk.unload();
         set.ek.unload();
