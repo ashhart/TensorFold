@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on Metal serves the affine Flash 1017 pack through the native lane host when opted in. Metal can keep an exact shared-prefix checkpoint, and the release-weight attention path uses fewer temporaries in its ordered decode reduction (#4368).
 
+- GLM-5.3-Flash on CUDA: EXL3 `mcg` routed experts load at any whole-bit width from 1 to 8, mixed by projection within a layer, where only 4-bit was admitted, and the prompt expert kernels gain a 3-bit form; the 4-bit path is unchanged (#2094, refs #2093). Thanks to @MiaAI-Lab.
+
 
 
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.

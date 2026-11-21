@@ -129,6 +129,7 @@ pub const usage =
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  qwen35-tp-cut PACK [STEP]  the 27B's EXL3 weights cut for two ranks at the whole plan: each rank's columns, one run's bytes
+    \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time; DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
@@ -157,6 +158,7 @@ pub const usage =
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
     \\  glm-exl3 | glm-exl3-items  GLM's EXL3 routed experts, decode and prompt, against float64, and the item plan's decode against the plain decode, byte for byte (synthetic)
     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
+    \\  glm-exl3-layer <ckpt> <layer> <rank> <world>  one checkpoint layer's EXL3 experts through the GLM loader, against float64
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
