@@ -57,7 +57,6 @@ pub const Saved = struct {
     }
 };
 
-/// ssh with only the key: no passwords, no prompts; nodes with `via` go through their jump host.
 /// A literal POSIX-shell argument, including quotes and newlines, with NUL refused.
 fn shellQuote(a: Allocator, text: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidShellArgument;
