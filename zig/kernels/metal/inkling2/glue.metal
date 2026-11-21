@@ -138,7 +138,7 @@ kernel void tf_inkling2_conv_dynamic(
 }
 
 struct InkRouteArgs { uint rows; };
-// The router's first launch: dots[row][e] = weight[e] . x[row] in fp32, a simdgroup an expert, eight columns a lane a step.
+// The router's first launch: fp32 dots[row][e] = weight[e] . x[row], a simdgroup an expert, 8 columns a lane a step.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_route_scores(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
