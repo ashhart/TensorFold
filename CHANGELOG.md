@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: Drama 3 loads compact NVFP4 checkpoints as stored, stages held experts in slot order, and masks routing to their original ids (#4144). Thanks to @plotarmordev.
+
 - Docs: the README's build section says that a Linux `zig build native` compiles for the build machine's CPU, and that `-Dcpu=baseline` or `-Dcpu=x86_64_v3` builds a binary for another machine, with thanks to @Nipale-ai (#3179; #3301).
 
 - Spark 2.5 on CUDA: gate and up load as one stacked weight and decode in one launch on every CUDA chip instead of two launches, with the bits unchanged; only 4-bit checkpoints take this path (#3130).
