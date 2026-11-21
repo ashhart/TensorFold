@@ -567,71 +567,6 @@ pub const Target = struct {
         if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
     }
 
-    // calibration --------------------------------------------------------------------------------------------------
-
-    /// Calibration only, `wipe` follows: the last window's ids and rows dropped; the compressor carry is not rewound.
-    pub fn dropWindow(t: *Target, slot: u32) !void {
-        if (slot >= t.slots.len) return error.NoSlot;
-        const s = &t.slots[slot];
-        if (!s.open) return error.NoWindow;
-        s.open = false;
-        s.rows = 0;
-        s.hist.shrinkRetainingCapacity(@intCast(s.base));
-        s.tail.end = @intCast(s.base);
-        s.tail.done = s.tail.end;
-        s.after_prompt = true;
-    }
-
-    /// Ids a slot holds.
-    pub fn length(t: *const Target, slot: u32) u64 {
-        return t.slots[slot].hist.items.len;
-    }
-
-    /// The prompt cache's cap set to `cap`; the one it had.
-    pub fn setCacheCap(t: *Target, cap: u64) u64 {
-        const was = t.cache.cap;
-        t.cache.cap = cap;
-        return was;
-    }
-
-    /// What `wipe` did: slots cleared and bytes zeroed.
-    pub const Wiped = struct { slots: u32 = 0, bytes: u64 = 0 };
-
-    /// Every slot a request used as a new one: its state up to the most positions it wrote, ids, taps and bookkeeping.
-    pub fn wipe(t: *Target) Wiped {
-        var w: Wiped = .{};
-        for (t.slots) |*s| {
-            if (s.high == 0 and !s.live and s.hist.items.len == 0) continue;
-            w.slots += 1;
-            w.bytes += snapshots.clearedBytes(t.env.c, &s.kv, s.high);
-            snapshots.clear(t.env.c, &s.kv, s.high);
-            for (s.kv.regions) |r| if (r.inputs) |b| {
-                @memset(b.contents()[0..b.length()], 0);
-                w.bytes += b.length();
-            };
-            if (s.kv.taps) |b| {
-                @memset(b.contents()[0..b.length()], 0);
-                w.bytes += b.length();
-            }
-            @memset(s.ptaps.contents()[0..s.ptaps.length()], 0);
-            @memset(s.ring, 0);
-            w.bytes += s.ptaps.length() + s.ring.len * 2;
-            s.hist.clearRetainingCapacity();
-            s.tail.end = 0;
-            s.tail.done = 0;
-            s.high = 0;
-            s.base = 0;
-            s.rows = 0;
-            s.ptaps_rows = 0;
-            s.resumed = 0;
-            s.open = false;
-            s.live = false;
-            s.whole = false;
-            s.after_prompt = false;
-        }
-        return w;
-    }
-
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
     pub fn serial(t: *Target, slot: u32, ids: []const u32, n: usize, smp: ?lanes.Sampling) ![]u32 {
         var out: std.ArrayList(u32) = .empty;
@@ -649,19 +584,3 @@ pub const Target = struct {
         return out.toOwnedSlice(t.a);
     }
 };
-
-test "argmax: the first maximum, NaN rows as the scalar scan" {
-    const a = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(7);
-    const rnd = prng.random();
-    const row = try a.alloc(f32, 129280);
-    defer a.free(row);
-    for (0..200) |k| {
-        for (row) |*x| x.* = rnd.floatNorm(f32);
-        if (k % 5 == 1) row[rnd.uintLessThan(usize, row.len)] = 9.0;
-        if (k % 5 == 2) row[rnd.uintLessThan(usize, row.len)] = std.math.nan(f32);
-        if (k % 5 == 3) @memset(row, -std.math.inf(f32));
-        if (k % 5 == 4) row[rnd.uintLessThan(usize, 7)] = std.math.nan(f32);
-        try std.testing.expectEqual(pick.scan(row), pick.argmax(row));
-    }
-}

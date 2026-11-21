@@ -4,6 +4,7 @@ const host = @import("dsv41");
 const target_ = @import("target.zig");
 const pass_ = @import("pass.zig");
 const pipelines = @import("pipelines.zig");
+const snapshots = @import("snapshots.zig");
 
 const calib_lanes = host.calib_lanes;
 const calib_env = host.calib_env;
@@ -31,7 +32,7 @@ pub const Report = struct {
     prompts: u64 = 0,
     prompt_rows: u64 = 0,
     windows: u64 = 0,
-    wiped: target_.Target.Wiped = .{},
+    wiped: Wiped = .{},
 };
 
 const Rig = struct {
@@ -58,13 +59,13 @@ const Rig = struct {
     }
 
     fn drop(ctx: *anyopaque, slot: u32) anyerror!void {
-        return of(ctx).s.t.dropWindow(slot);
+        return dropWindow(of(ctx).s.t, slot);
     }
 
     /// The prompt cache is out for the run and back after it: a calibration text is neither resumed nor saved.
     fn detach(ctx: *anyopaque) void {
         const r = of(ctx);
-        if (r.detached) _ = r.s.t.setCacheCap(r.cap) else r.cap = r.s.t.setCacheCap(0);
+        if (r.detached) _ = setCacheCap(r.s.t, r.cap) else r.cap = setCacheCap(r.s.t, 0);
         r.detached = !r.detached;
     }
 
@@ -77,7 +78,7 @@ const Rig = struct {
         if (n == 0) return;
         var rows: [ingest_rows]u32 = undefined;
         for (rows[0..n], 0..) |*x, i| x.* = taps.rows - n + @as(u32, @intCast(i));
-        try ad.pass().ingest(slot, r.s.t.length(slot) - n, taps, rows[0..n]);
+        try ad.pass().ingest(slot, length(r.s.t, slot) - n, taps, rows[0..n]);
     }
 };
 
@@ -98,7 +99,7 @@ const Held = struct {
 
     fn leave(h: Held) void {
         const now = h.s.t.stats;
-        const wiped = h.s.t.wipe();
+        const wiped = wipe(h.s.t);
         if (h.s.report) |r| r.* = .{ .prompts = now.prompts - h.stats.prompts, .prompt_rows = now.prompt_rows - h.stats.prompt_rows, .windows = now.windows - h.stats.windows, .wiped = wiped };
         h.s.t.stats = h.stats;
         if (h.s.ad) |p| for (0..h.s.slots) |i| p.pass().reset(@intCast(i));
@@ -137,4 +138,67 @@ pub fn run(gpa: Allocator, io: std.Io, dir: []const u8, k: calib_env.Knobs, want
         std.log.warn("dsv41 metal: the draft costs could not be measured ({t}); the default table stands in", .{e});
         return .{ .costs = try host.costs.defaults(gpa, host.costs.max_rows), .path = null };
     };
+}
+
+/// Calibration only, `wipe` follows: the last window's ids and rows dropped; the compressor carry is not rewound.
+fn dropWindow(t: *target_.Target, slot: u32) !void {
+    if (slot >= t.slots.len) return error.NoSlot;
+    const s = &t.slots[slot];
+    if (!s.open) return error.NoWindow;
+    s.open = false;
+    s.rows = 0;
+    s.hist.shrinkRetainingCapacity(@intCast(s.base));
+    s.tail.end = @intCast(s.base);
+    s.tail.done = s.tail.end;
+    s.after_prompt = true;
+}
+
+/// Ids a slot holds.
+fn length(t: *const target_.Target, slot: u32) u64 {
+    return t.slots[slot].hist.items.len;
+}
+
+/// The prompt cache's cap set to `cap`; the one it had.
+fn setCacheCap(t: *target_.Target, cap: u64) u64 {
+    const was = t.cache.cap;
+    t.cache.cap = cap;
+    return was;
+}
+
+/// What `wipe` did: slots cleared and bytes zeroed.
+const Wiped = struct { slots: u32 = 0, bytes: u64 = 0 };
+
+/// Every slot a request used as a new one: its state up to the most positions it wrote, ids, taps and bookkeeping.
+fn wipe(t: *target_.Target) Wiped {
+    var w: Wiped = .{};
+    for (t.slots) |*s| {
+        if (s.high == 0 and !s.live and s.hist.items.len == 0) continue;
+        w.slots += 1;
+        w.bytes += snapshots.clearedBytes(t.env.c, &s.kv, s.high);
+        snapshots.clear(t.env.c, &s.kv, s.high);
+        for (s.kv.regions) |r| if (r.inputs) |b| {
+            @memset(b.contents()[0..b.length()], 0);
+            w.bytes += b.length();
+        };
+        if (s.kv.taps) |b| {
+            @memset(b.contents()[0..b.length()], 0);
+            w.bytes += b.length();
+        }
+        @memset(s.ptaps.contents()[0..s.ptaps.length()], 0);
+        @memset(s.ring, 0);
+        w.bytes += s.ptaps.length() + s.ring.len * 2;
+        s.hist.clearRetainingCapacity();
+        s.tail.end = 0;
+        s.tail.done = 0;
+        s.high = 0;
+        s.base = 0;
+        s.rows = 0;
+        s.ptaps_rows = 0;
+        s.resumed = 0;
+        s.open = false;
+        s.live = false;
+        s.whole = false;
+        s.after_prompt = false;
+    }
+    return w;
 }
