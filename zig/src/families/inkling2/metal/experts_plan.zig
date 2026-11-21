@@ -28,12 +28,19 @@ pub const Call = struct {
 };
 
 pub const Geometry = struct {
-    groups: u32,
-    threads: u32 = 32,
+    outputs: u32,
+    pairs: u32,
+    threads: u32 = 256,
 };
 
+/// A product's grid: eight outputs a threadgroup (one simdgroup each) by one route pair.
 pub fn geometry(c: Call) Geometry {
-    return .{ .groups = c.rows * c.topk };
+    return .{ .outputs = (c.n + 7) / 8, .pairs = c.rows * c.topk };
+}
+
+/// The combine's grid: 256 outputs a threadgroup (one thread each) by one token.
+pub fn combineGeometry(c: Call) Geometry {
+    return .{ .outputs = (c.n + 255) / 256, .pairs = c.rows };
 }
 
 pub fn check(c: Call) !void {
