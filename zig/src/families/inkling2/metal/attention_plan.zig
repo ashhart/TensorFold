@@ -5,7 +5,7 @@ pub const head_dim = 128;
 pub const d_rel = 16;
 pub const extent = 1024;
 pub const tile_keys = 64;
-pub const sliding_chunk = 256;
+pub const sliding_chunk = 32;
 pub const global_chunk = 16384;
 pub const global_sub = 1024;
 pub const subs = global_chunk / global_sub;
@@ -44,7 +44,7 @@ pub const Layer = struct {
         return .{ .window = window, .ring = ringFor(window, rows), .chunk = sliding_chunk, .tau = false };
     }
     pub fn global(capacity: u32) Layer {
-        return .{ .window = 0, .ring = @intCast(std.mem.alignForward(usize, capacity, tile_keys)), .chunk = global_chunk, .tau = true };
+        return .{ .window = 0, .ring = @intCast(std.mem.alignForward(usize, capacity, tile_keys)), .chunk = globalChunk(capacity), .tau = true };
     }
     pub fn cacheBytes(l: Layer, kv: usize) usize {
         return @as(usize, l.ring) * kv * head_dim * 2;
@@ -52,6 +52,13 @@ pub const Layer = struct {
 };
 pub const Prep = struct { qk_clip: f32 = 22.627416997969522, rel_clip: f32 = 8, floor: f32 = 8192, alpha: f32 = 0.1, eps: f32 = 1e-6 };
 pub const Rows = struct { rows: u32, heads: u32 = 24, kv_heads: u32 = 8, last_pos: u32, streams: u32 = 1 };
+
+/// The fewest keys a launch slot that fits `capacity` in 64 slots; any whole number of 1,024-key folds gives the same bits.
+pub fn globalChunk(capacity: u32) u32 {
+    var chunk: u32 = global_sub;
+    while (@as(u64, chunk) * 64 < capacity and chunk < global_chunk) chunk *= 2;
+    return chunk;
+}
 
 pub fn ringFor(window: u32, rows: u32) u32 {
     return @intCast(std.mem.alignForward(usize, @as(usize, window) + rows - 1, tile_keys));

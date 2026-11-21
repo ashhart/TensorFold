@@ -22,11 +22,11 @@ test "inkling2 metal Mini ring and window boundaries" {
     try t.expectEqual(@as(u32, 1088), p.ringFor(1024, 2));
     try t.expectEqual(@as(u32, 3072), p.Layer.sliding(1024, 2048).ring);
     const l = p.Layer.sliding(1024, 1);
-    try t.expectEqual(@as(u32, 5), p.slotsFor(l, 1048576));
-    try t.expectEqual(@as(?usize, 3), p.partialSlot(l, 3, 1023));
-    try t.expectEqual(@as(?usize, null), p.partialSlot(l, 4, 1023));
-    try t.expectEqual(@as(?usize, 4), p.partialSlot(l, 4, 1024));
-    try t.expectEqual(@as(?usize, 3), p.partialSlot(l, 7, 2047));
+    try t.expectEqual(@as(u32, 33), p.slotsFor(l, 1048576));
+    try t.expectEqual(@as(?usize, 31), p.partialSlot(l, 31, 1023));
+    try t.expectEqual(@as(?usize, null), p.partialSlot(l, 32, 1023));
+    try t.expectEqual(@as(?usize, 32), p.partialSlot(l, 32, 1024));
+    try t.expectEqual(@as(?usize, 31), p.partialSlot(l, 63, 2047));
     try t.expectEqual(@as(usize, 1023), @as(usize, 8191) % 1024);
     try t.expectEqual(@as(usize, 0), @as(usize, 8192) % 8192);
 }
@@ -41,12 +41,15 @@ test "inkling2 metal tau starts strictly above its 8192 floor" {
 test "inkling2 metal decode and prompt dispatch geometry" {
     const sl = p.Layer.sliding(1024, 8);
     const sr = p.Rows{ .rows = 8, .last_pos = 4095, .streams = 2 };
-    const sd = try p.attend(sr, sl, 5, 8 * 24 * 5);
+    const sd = try p.attend(sr, sl, 33, 8 * 24 * 33);
     try t.expectEqual(p.Path.decode, sd.path);
-    try t.expectEqual([3]u32{ 192, 5, 1 }, sd.grid);
+    try t.expectEqual([3]u32{ 192, 33, 1 }, sd.grid);
     try t.expectEqual([3]u32{ 192, 1, 1 }, sd.merge_grid);
     try t.expectEqual(@as(u32, 32), sd.threads);
     const gl = p.Layer.global(1048576);
+    try t.expectEqual(@as(u32, 16384), gl.chunk);
+    try t.expectEqual(@as(u32, 1024), p.Layer.global(65536).chunk);
+    try t.expectEqual(@as(u32, 4096), p.Layer.global(262144).chunk);
     const one = p.Rows{ .rows = 1, .last_pos = 1048575 };
     const gd = try p.attend(one, gl, 64, 24 * 64 * p.subs - 1);
     try t.expectEqual(p.Path.prompt, gd.path);
