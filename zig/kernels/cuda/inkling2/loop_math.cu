@@ -67,18 +67,25 @@ __device__ void ar(const ArArgs a) {
                               : static_cast<const float*>(a.partial)[row * a.C + c];
     };
     for (int j = 0; j < n; ++j) {
-        float v[1 + kMaxQueries] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float ss[1] = {0.0f};
         for (int c = threadIdx.x; c < a.C; c += blockDim.x) {
             const float x = entry(j, c);
-            v[0] = __fmaf_rn(x, x, v[0]);
-            for (int q = 0; q < a.nq; ++q) v[1 + q] = __fmaf_rn(x, a.query[static_cast<size_t>(q) * a.C + c], v[1 + q]);
+            ss[0] = __fmaf_rn(x, x, ss[0]);
         }
-        blockSums<1 + kMaxQueries>(v, sh);
-        if (threadIdx.x == 0) {
-            rr[j] = rsqrtf(__fadd_rn(__fdiv_rn(v[0], static_cast<float>(a.C)), a.eps));
+        blockSums<1>(ss, sh);
+        if (threadIdx.x == 0) rr[j] = rsqrtf(__fadd_rn(__fdiv_rn(ss[0], static_cast<float>(a.C)), a.eps));
+    }
+    __syncthreads();
+    for (int j = 0; j < n; ++j) {
+        float dots[kMaxQueries] = {0.0f, 0.0f, 0.0f};
+        for (int c = threadIdx.x; c < a.C; c += blockDim.x) {
+            const float normalized = __fmul_rn(entry(j, c), rr[j]);
             for (int q = 0; q < a.nq; ++q)
-                wts[q][j] = __fmul_rn(__fmul_rn(v[1 + q], rr[j]), queryScale(a.C));
+                dots[q] = __fmaf_rn(a.query[static_cast<size_t>(q) * a.C + c], normalized, dots[q]);
         }
+        blockSums<kMaxQueries>(dots, sh);
+        if (threadIdx.x == 0)
+            for (int q = 0; q < a.nq; ++q) wts[q][j] = __fmul_rn(dots[q], queryScale(a.C));
     }
     __syncthreads();
     if (threadIdx.x < a.nq) {

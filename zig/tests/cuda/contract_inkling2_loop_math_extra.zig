@@ -257,8 +257,8 @@ pub const Ar = struct {
             for (0..self.shape.k) |q| {
                 var logits: [3]ref.Iv = undefined;
                 for (0..3) |j| {
-                    for (terms, 0..) |*t, i| t.* = ref.Iv.of(self.entry(j, row, i)).mul(ref.Iv.of(self.query[q * cols + i]));
-                    logits[j] = s.sum(terms, depth(self.shape), scratch).mul(inv[j]).mul(queryScale(cols));
+                    for (terms, 0..) |*t, i| t.* = ref.Iv.of(self.entry(j, row, i)).mul(inv[j]).mul(ref.Iv.of(self.query[q * cols + i]));
+                    logits[j] = s.sum(terms, depth(self.shape), scratch).mul(queryScale(cols));
                 }
                 softmax(&logits);
                 for (0..cols) |i| {
@@ -294,8 +294,7 @@ pub const Ar = struct {
                 var m = -std.math.inf(f32);
                 for (0..sources) |j| {
                     const query = self.query[q * cols ..][0..cols];
-                    for (raw, 0..) |*v, i| v.* = self.entry(j, row, i);
-                    logits[j] = reduce(query, raw, 512) * invs[j] * scale(cols);
+                    logits[j] = reduce(query, beta[j * cols ..][0..cols], 512) * scale(cols);
                     m = cudaMax(m, logits[j]);
                 }
                 var den: f32 = 0;
@@ -316,6 +315,25 @@ pub const Ar = struct {
         return null;
     }
 };
+
+test "AR normalizes each FP32 query term before reduction and scales after its dot" {
+    const source = [_]f32{
+        @bitCast(@as(u32, 0x3f800008)), @bitCast(@as(u32, 0x3f800001)),
+        @bitCast(@as(u32, 0x40400001)), 0,
+    };
+    const query = [_]f32{
+        @bitCast(@as(u32, 0x3f800010)), @bitCast(@as(u32, 0x3fffffff)),
+        @bitCast(@as(u32, 0xc0000001)), 0,
+    };
+    const inv: f32 = @bitCast(@as(u32, 0x3f800001));
+    var normalized: [4]f32 = undefined;
+    for (&normalized, source) |*v, x| v.* = x * inv;
+    const dot = reduce(&query, &normalized, 512);
+    const old = reduce(&query, &source, 512) * inv * scale(source.len);
+    const scaled = dot * scale(source.len);
+    try std.testing.expectEqual(@as(u32, 0xbfbffffb), @as(u32, @bitCast(scaled)));
+    try std.testing.expectEqual(@as(u32, 0xbfbffffa), @as(u32, @bitCast(old)));
+}
 
 const round_shapes = [_]c.Shape{
     .{ .rows = 1, .n = mini_h, .k = 1 },
