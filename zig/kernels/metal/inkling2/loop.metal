@@ -9,7 +9,8 @@ constant uint INKLING_LOOP_H = 2304;
 constant uint INKLING_LOOP_RANK = 64;
 constant uint INKLING_LOOP_MESSAGES = 48;
 
-struct InkLoopArgs { uint rows; };
+// stride: floats from one row's m to the next (the messages interleave 48 entries a row).
+struct InkLoopArgs { uint rows, stride; };
 
 kernel void tf_inkling2_loop_messages(
     const device bfloat* bank0 [[buffer(0)]], const device bfloat* bank1 [[buffer(1)]],
@@ -88,7 +89,7 @@ kernel void tf_inkling2_loop_gates(
     uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
   if (row >= a.rows) return;
   const device float* inputs[2] = { h + size_t(row) * INKLING_LOOP_H,
-                                    m + size_t(row) * INKLING_LOOP_H };
+                                    m + size_t(row) * a.stride };
   threadgroup float sums[2 * 8], inverse[2];
   for (uint s = 0; s < 2; ++s) {
     float ss = 0.0f;
@@ -108,8 +109,8 @@ kernel void tf_inkling2_loop_gates(
   threadgroup_barrier(mem_flags::mem_threadgroup);
   device bfloat* y = normalized + size_t(row) * (2 * INKLING_LOOP_H);
   for (uint d = t; d < INKLING_LOOP_H; d += 256) {
-    y[d] = bfloat(h[size_t(row) * INKLING_LOOP_H + d] * inverse[0]);
-    y[INKLING_LOOP_H + d] = bfloat(m[size_t(row) * INKLING_LOOP_H + d] * inverse[1]);
+    y[d] = bfloat(inputs[0][d] * inverse[0]);
+    y[INKLING_LOOP_H + d] = bfloat(inputs[1][d] * inverse[1]);
   }
 }
 
@@ -154,7 +155,7 @@ kernel void tf_inkling2_loop_blend(
     // Four separately rounded binary32 steps; do not fold these into one expression.
     const float keep = 1.0f - f;
     const float left = keep * h[size_t(row) * INKLING_LOOP_H + d];
-    const float right = g * m[size_t(row) * INKLING_LOOP_H + d];
+    const float right = g * m[size_t(row) * a.stride + d];
     out[size_t(row) * INKLING_LOOP_H + d] = left + right;
   }
 }

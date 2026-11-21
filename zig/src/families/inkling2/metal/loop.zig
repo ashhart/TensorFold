@@ -57,25 +57,32 @@ pub fn crossPassMessageAttention(p: *const Pipelines, e: mtl.ComputeEncoder, ban
     std.debug.assert(rows > 0 and rows <= 64);
     e.setPipeline(p.messages);
     bind(e, &.{ bank0, bank1, q_mlp, kv, out });
-    e.setValue(RowsArgs{ .rows = rows }, 5);
+    e.setValue(GateArgs{ .rows = rows, .stride = hidden }, 5);
     e.dispatchGroups(mtl.Size.of(rows * message_entries, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
+const GateArgs = extern struct { rows: u32, stride: u32 };
+
 /// One controller tuple; h, m and output are [token][H] binary32 tensors.
 pub fn gates(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32) void {
+    gatesStrided(p, e, h, m, down, forget, gain, out, rows, hidden);
+}
+
+/// As gates, with row r's m at `m_stride` binary32 values from row r - 1's.
+pub fn gatesStrided(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32, m_stride: u32) void {
     std.debug.assert(rows > 0 and rows <= 64);
     const normalized = Ref{ .buf = p.scratch };
     const zeta = Ref{ .buf = p.scratch, .off = 64 * 2 * hidden * 2 };
     e.setPipeline(p.gates);
     bind(e, &.{ h, m, normalized });
-    e.setValue(RowsArgs{ .rows = rows }, 3);
+    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 3);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
     e.setPipeline(p.zeta);
     bind(e, &.{ normalized, down, zeta });
-    e.setValue(RowsArgs{ .rows = rows }, 3);
+    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 3);
     e.dispatchGroups(mtl.Size.of(rank / 8, rows, 1), mtl.Size.of(256, 1, 1));
     e.setPipeline(p.blend);
     bind(e, &.{ h, m, zeta, forget, gain, out });
-    e.setValue(RowsArgs{ .rows = rows }, 6);
+    e.setValue(GateArgs{ .rows = rows, .stride = m_stride }, 6);
     e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(32, 1, 1));
 }
