@@ -77,6 +77,7 @@ fn run(rows: usize, prompt: bool, shared: bool, count: usize) !void {
     Record.reset();
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Record.launch;
+    d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Record.launch);
     d.api.cuMemcpy2DAsync_v2 = Record.copy;
     var k: glm.exl3.Kernels = undefined;
     inline for (.{ "group", "rot_in", "gateup", "down_combine" }, .{ 9, 5, 13, 14 }) |field, id| @field(k, field) = Record.function(&d, id);
