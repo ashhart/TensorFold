@@ -412,7 +412,7 @@ const RouteCache = struct {
         return .{ .ctx = k, .vtable = &.{ .info = info, .submit = submit, .cancel = Keys.cancel, .status = Keys.status, .memory = Keys.memory } };
     }
     fn info(k: *anyopaque) api.Info {
-        return .{ .context_window = 4096, .prompt_cache = true, .cache_salt = true, .vision = .{ .ctx = k, .prepare = prepare, .image_token = '#', .image_tokens = 64, .max_images = 4 }, .ocr = .{ .prompt = "Read the page.", .parse = parse } };
+        return .{ .context_window = 4096, .prompt_cache = true, .cache_salt = true, .vision = .{ .ctx = k, .prepare = prepare, .image_token = '#', .image_tokens = 64, .max_images = 4 }, .ocr = .{ .prompt = "Read the page.", .geometry = .block, .parse = parse } };
     }
     fn prepare(_: *anyopaque, a: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
         return .{ .pixels = try a.alloc(f32, 0), .gh = 1, .gw = 1, .tokens = 1, .hash = 7, .frame = .{ .width = 100, .height = 50 } };
