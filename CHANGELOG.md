@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: Desktop's packaged release notes move to `app/CHANGELOG.md`, apart from the engine's, with a link each way (#4284). Thanks to @garvrao80.
+
 
 
 - Qwen3.8-27B on Metal: a lone sampled stream's DFlash2 draft tree ranks its candidates with the stream's own keyed draw, so the drafts follow what the target samples; the target still decides every token, and greedy and multi-stream rounds are unchanged (#3978). Thanks to @hobbesd.
