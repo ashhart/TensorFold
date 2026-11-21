@@ -179,8 +179,8 @@ pub const Hip = struct {
     /// The facts the round loop reads at setup: shared rounds of exact windows, and the MTP head's batched chains.
     pub fn facts(h: *const Hip) lanes.Model {
         const drafting = h.head != null and h.e.o.policy.mtp.drafts > 0;
-        // plain rounds compete with drafted ones once the forwards are timed
-        const plain_guard = drafting and h.costs.windows > 0;
+        // plain rounds compete with drafted or copy-only ones once the forwards are timed
+        const plain_guard = h.costs.windows > 0;
         return .{
             .exact_width = max_window,
             .gpu_tokens = false,
@@ -521,4 +521,20 @@ test "Qwen HIP image begin receives the stream's original cancellation hook" {
     try serve.cancel.poll(hook);
     stopped = true;
     try std.testing.expectError(error.Cancelled, serve.cancel.poll(hook));
+}
+
+test "Qwen HIP facts price plain rounds for a copies-only engine" {
+    var engine: Engine = undefined;
+    engine.o = .{};
+    engine.o.policy.mtp.drafts = 3;
+    var h: Hip = undefined;
+    h.e = &engine;
+    h.head = null;
+    h.costs = .{};
+    h.costs.windows = 1;
+    h.costs.window[0] = .{ .width = 1, .ms = 1 };
+    const facts = h.facts();
+    try std.testing.expect(facts.plain_guard);
+    try std.testing.expect(facts.copy_guard);
+    try std.testing.expect(!facts.mtp and !facts.speculate and !facts.draft_streams);
 }
