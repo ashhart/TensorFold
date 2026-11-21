@@ -9,7 +9,7 @@ constant uint DSP_HEAD = 128;
 constant uint DSP_RANK = 256;
 constant uint DSP_RNN = 768;
 constant float DSP_EPS = 1e-6f;
-constant float DSP_SCALE = 0x1.6a09e6p-7f;
+constant float DSP_SCALE = 0x1.6a09e6p-4f;
 
 struct DsparkPositionArgs { uint base; };
 struct DsparkContextArgs { uint base, rows, ring; };
@@ -199,7 +199,7 @@ kernel void tf_ink2_dspark_kappa(const device bfloat* y [[buffer(0)]], const dev
   out[i] = sum;
 }
 
-kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device bfloat* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+kernel void tf_ink2_dspark_recurrent(const device bfloat* state [[buffer(0)]], const device float* kappa [[buffer(1)]], const device bfloat* rnn_weight [[buffer(2)]], const device bfloat* markov [[buffer(3)]], device bfloat* z [[buffer(4)]], device bfloat* next_state [[buffer(5)]], device bfloat* lambda [[buffer(6)]], constant DsparkTokenArgs& a [[buffer(7)]], uint i [[thread_position_in_grid]]) {
   if (i >= DSP_RANK) return;
   float values[3];
   for (uint part = 0; part < 3; ++part) {
