@@ -254,9 +254,10 @@ pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryU
     return card;
 }
 
-/// Unified Linux free: CUDA's plus the checkpoint's clean cached bytes, capped by MemAvailable; stable and #1857-safe.
+/// Unified free: MemAvailable when CUDA fits the checkpoint's bytes, else those bytes added back (#1857).
 pub fn boundFree(host_counts: bool, counted: u64, card_free: u64, cached: u64) u64 {
-    return if (host_counts) @min(counted, card_free +| cached) else counted;
+    if (!host_counts) return counted; // discrete cards and Windows keep their own counts
+    return if (card_free < cached) @min(counted, card_free +| cached) else counted;
 }
 
 test "the memory plan: reserve, cap, and admission that fails closed" {
@@ -472,12 +473,13 @@ test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay 
     try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
 }
 
-test "CUDA's free plus the checkpoint's cached bytes bounds a unified Linux pool only" {
+test "a just-read checkpoint keeps 1.3.2's budget when CUDA can fit its bytes" {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(115 * g, boundFree(true, 115 * g, 60 * g, 60 * g)); // 6 Nov: 1.3.2's grant, no drop
-    try std.testing.expectEqual(70 * g, boundFree(true, 115 * g, 60 * g, 10 * g)); // other memory still bounds
-    try std.testing.expectEqual(96 * g, boundFree(true, 96 * g, 128 * g, 0)); // card above the host: host stands
-    try std.testing.expectEqual(40 * g, boundFree(false, 40 * g, 30 * g, 99 * g)); // discrete: own counts
+    const host: u64 = 121477530 * 1024; // the 6 Nov GB10's MemAvailable, 115.85 GiB
+    const card: u64 = 6017 * g / 100; // CUDA's 60.17 GiB after a 60 GB checkpoint read
+    try std.testing.expectEqual(host, boundFree(true, host, card, 60 * g)); // 1.3.2's number
+    try std.testing.expectEqual(60 * g + 10 * g, boundFree(true, host, 10 * g, 60 * g)); // #1857: CUDA cannot fit the checkpoint
+    try std.testing.expectEqual(40 * g, boundFree(false, 40 * g, 30 * g, 99 * g)); // discrete unchanged
 }
 
 test "CUDA cache default counts streams before taking half the unified room" {
