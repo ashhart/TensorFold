@@ -38,7 +38,7 @@
     "jpeg_sha256": "d1b324f529a96d8d8a16d973d88e1e974905d9c2c0e3e8b21a50b1c0e3fe2379",
     "status": "removed from the tree: no licence for it is recorded in the repository or its receipts",
     "provenance_found": "real-image-fp64.json records only the URL, the JPEG and PNG hashes and 'macOS sips JPEG to PNG'; no licence, author or terms.",
-    "other_images_in_m5-nax-real-image-rows.json": "hero, logo, speeds and banner are the repository's own assets/ files; only 'cat' was the photograph."
+    "other_photograph_receipts": "hero, logo, speeds and banner are the repository's own assets/ files; only 'cat' was the photograph."
   },
   "receipts_tied_to_withdrawn_photo": {
     "policy": "Historical receipts keep their bytes, source identities and values. They are listed, not edited: each names the photograph (or an artifact made from it), so none of them is evidence about the synthetic image. `ties` are strings that occur verbatim in the file; the tests check that.",
@@ -95,14 +95,6 @@
           "corrected_photo_patches_sha256"
         ],
         "measures": "corrected-pixel tower rows, 4/6/8-bit"
-      },
-      {
-        "file": "risk-fused-width-image.json",
-        "ties": [
-          "png_sha256",
-          "corrected_photo_patches_sha256"
-        ],
-        "measures": "VL4/6/8 decoder inputs with 70 projected rows in 512-token prompts, baseline equivalence"
       }
     ],
     "derived_artifact_identity": [
@@ -113,13 +105,6 @@
           "photo_token_fixture_sha256"
         ],
         "measures": "corrected-pixel teacher-forced decoder, all 90 rows"
-      },
-      {
-        "file": "deferred-prompt-head.json",
-        "ties": [
-          "corrected_photo_patches_sha256"
-        ],
-        "measures": "deferred prompt head with injected projected rows (image512)"
       },
       {
         "file": "final-six-eight-short.json",
@@ -148,20 +133,6 @@
     ],
     "named_without_hash": [
       {
-        "file": "scratch-alias.json",
-        "ties": [
-          "image512"
-        ],
-        "measures": "image512 fixture: corrected native projected rows injected into a 512-token prompt"
-      },
-      {
-        "file": "m5-width-image-route-comparison.json",
-        "ties": [
-          "real-image fixture"
-        ],
-        "measures": "VL4/6/8 retained projected rows from the earlier real-image fixture, baseline against tiled route"
-      },
-      {
         "file": "fourbit-numerical-closure.json",
         "ties": [
           "real-cat ownvision"
@@ -181,33 +152,6 @@
           "image_conditioned"
         ],
         "measures": "VL8 90-row image-conditioned logits (same logits SHA-256 as kv-pair.json)"
-      },
-      {
-        "file": "m5-nax-real-image-rows.json",
-        "ties": [
-          "\"cat\""
-        ],
-        "measures": "native projected rows of five images; 'cat' is the photograph, the other four are repository assets"
-      }
-    ],
-    "references_only": [
-      {
-        "file": "risk-fused-text-widths.json",
-        "ties": [
-          "risk-fused-width-image.json"
-        ]
-      },
-      {
-        "file": "risk-fused-fullmodel.json",
-        "ties": [
-          "risk-fused-width-image.json"
-        ]
-      },
-      {
-        "file": "risk-fused-experiment.json",
-        "ties": [
-          "risk-fused-width-image.json"
-        ]
       }
     ],
     "prose": [

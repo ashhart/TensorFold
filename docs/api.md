@@ -744,8 +744,8 @@ the next one: a short request starts at the next chunk, and a long prompt still 
 between chunks for `--decode-share` of each chunk's time (0.25 is the Python engine's default). On a native server
 the flag is the reply's share, and the prompt owes its complement: it also offers a 512-row cap on a filling
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
-behind device token-hash qualification; LFM3 on Metal declares it (cut-invariance by `tf-lfm3-nax-exact`, served
-token equality under the flag), and no other native family does yet. Absent the flag the engines keep their own cuts
+behind device token-hash qualification; LFM3 on Metal declares it (cut-invariance by `tf-lfm3-exact`, row
+path), and no other native family does yet. Absent the flag the engines keep their own cuts
 and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
 are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow

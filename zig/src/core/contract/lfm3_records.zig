@@ -2,7 +2,6 @@
 const M = @import("limits.zig").MetalLaunch;
 
 pub const metal = [_]M{
-    .{ .name = "LFM3 tiled attention lfm3_attn_tiled_bf16", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "binned bad-nonfinite tf_binned_twin_q4_g64", .threads = 64, .tg_memory = 0, .reserved = 64 },
     .{ .name = "binned bad-nonfinite tf_binned_sums", .threads = 64, .tg_memory = 0, .reserved = 64 },
     .{ .name = "binned bad-nonfinite tf_binned_q4_g64", .threads = 64, .tg_memory = 5776, .reserved = 64 },
@@ -85,20 +84,8 @@ pub const metal = [_]M{
     .{ .name = "lfm3 range-skip lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "lfm3 range-clear lfm3_attn_partial", .threads = 128, .tg_memory = 2096, .reserved = 128 },
     .{ .name = "lfm3 range-clear lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
-    .{ .name = "lfm3 risk-fast lfm3_attn_partial", .threads = 128, .tg_memory = 2096, .reserved = 128 },
-    .{ .name = "lfm3 risk-fast lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "lfm3 lfm3_attn_partial", .threads = 128, .tg_memory = 2096, .reserved = 128 },
     .{ .name = "lfm3 lfm3_attn_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "lfm3 postnorm-bad lfm3_post_norm", .threads = 256, .tg_memory = 144, .reserved = 256 },
     .{ .name = "lfm3 lfm3_post_norm", .threads = 256, .tg_memory = 144, .reserved = 256 },
-    .{ .name = "LFM3 split attention lfm3_attn_split", .threads = 128, .tg_memory = 2592, .reserved = 128 },
-    .{ .name = "LFM3 split attention lfm3_attn_split_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
-    .{ .name = "LFM3 split attention lfm3_attn_split_segments", .threads = 128, .tg_memory = 2592, .reserved = 128 },
-    .{ .name = "LFM3 split attention lfm3_attn_split_segments_merge", .threads = 32, .tg_memory = 0, .reserved = 32 },
-    .{ .name = "LFM3 NAX prompt q4g64 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
-    .{ .name = "LFM3 NAX prompt q6g64 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
-    .{ .name = "LFM3 NAX prompt q8g64 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
-    .{ .name = "LFM3 NAX prompt q4g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
-    .{ .name = "LFM3 NAX prompt q6g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
-    .{ .name = "LFM3 NAX prompt q8g32 tf_qmmw_t_nax_win", .threads = 128, .tg_memory = 11264, .reserved = 128, .offline = false },
 };
