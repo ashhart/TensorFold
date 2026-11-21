@@ -41,7 +41,6 @@ const affine_widths = blk: {
 };
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
-
 pub const families: []const api.Family = &.{
     .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
     .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
@@ -69,17 +68,14 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "flint", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "unlimited-ocr", .formats = &.{"bf16"} },
 };
-
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
 fn isGemma4(model_type: []const u8) bool {
     return std.mem.eql(u8, model_type, "gemma4") or std.mem.eql(u8, model_type, "gemma4_unified");
 }
-
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
 }
-
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
