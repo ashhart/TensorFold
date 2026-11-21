@@ -23,6 +23,14 @@ pub const dino = @import("dino.zig");
 pub const picture = @import("picture.zig");
 /// torch's CPU generator, for the starting noise.
 pub const torch_rng = @import("torch_rng.zig");
+/// BiRefNet background removal and the SDK's host preprocessing for raw photos.
+pub const preprocess = @import("preprocess.zig");
+pub const photo = @import("photo.zig");
+pub const birefnet = @import("birefnet.zig");
+pub const birefnet_kernels = @import("birefnet_kernels.zig");
+pub const birefnet_reference = @import("birefnet_reference.zig");
+pub const birefnet_decoder = @import("birefnet_decoder.zig");
+pub const birefnet_weights = @import("birefnet_weights.zig");
 pub const Model = model.Model;
 pub const Condition = model.Condition;
 pub const Timing = model.Timing;
@@ -48,4 +56,11 @@ test {
     _ = dino;
     _ = picture;
     _ = torch_rng;
+    _ = preprocess;
+    _ = photo;
+    _ = birefnet;
+    _ = birefnet_kernels;
+    _ = birefnet_reference;
+    _ = birefnet_decoder;
+    _ = birefnet_weights;
 }
