@@ -585,9 +585,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
-    if (o.limits) {
-        lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
-    }
+    if (o.limits) lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {
         fn of(x: std.Io.Timestamp, y: std.Io.Timestamp) i64 {
