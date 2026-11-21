@@ -108,7 +108,8 @@ If decision 4 picks the 4-bit checkpoint, which ships no drafter file, M6 needs 
 ## Hardware
 
 Each claimant states the chips they can run. The plan needs at least one sm_12x GPU (the model card names one DGX Spark, sm_121) and one Mac with 32 GB or more; an M5 and an earlier chip are both needed for M1.
-The author of this plan would take one group of slices after the decision and has not chosen which.
+The author of this plan can run one GB10 (DGX Spark, sm_121) and one M4 Max with 128 GiB, and would take one group of slices after the decision; which group is not chosen.
+That covers the CUDA slices on sm_121 and the earlier-chip side of the Metal slices. It leaves two gaps for other testers: an M5 for the tensor-unit prompt path, and any CUDA chip other than sm_121.
 
 ## Related
 
