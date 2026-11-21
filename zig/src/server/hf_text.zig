@@ -36,6 +36,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    inkling: bool = false, // the tokenizer holds Inkling 2's block markers: replies read as .inkling
     schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     overridden: bool = false, // the chat template is --chat-template's file
     unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
@@ -141,6 +142,7 @@ pub const HfText = struct {
             };
         }
         if (t.tool_source.len > 0) t.tool_compiled = template.compile(gpa, t.tool_source, null) catch null;
+        t.inkling = @import("inkling_reply.zig").speaks(t.text());
         return t;
     }
 
@@ -258,7 +260,12 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = if (t.inkling) &comptime table(.inkling) else &comptime table(.template) };
+    }
+
+    fn table(comptime format: model_text.Text.Format) model_text.Text.VTable {
+        return .{
+            .format = format,
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,
@@ -272,7 +279,7 @@ pub const HfText = struct {
             .token_bytes = tokenBytesFn,
             .encode_plain = encodePlainFn,
             .encode_masked = encodeMaskedFn,
-        } };
+        };
     }
 
     pub fn identity(t: *const HfText, a: Allocator) Allocator.Error![32]u8 {

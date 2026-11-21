@@ -6,11 +6,6 @@ const chat = @import("chat.zig");
 const Result = @import("kimi_reply.zig").Result;
 const Value = json.Value;
 
-/// Inkling 2's replies end their sampling with this marker; a tokenizer that holds it speaks the block format.
-pub fn is(text: anytype) bool {
-    return text.vtable.token_id(text.ctx, split.markers.end_sampling) != null and text.vtable.token_id(text.ctx, split.markers.model) != null;
-}
-
 /// The reply so far (ids past the prompt, specials spelled out) split as vLLM's Inkling parser splits it.
 pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Error!Result {
     const raw = try g.srv.text.decode(g.a, ids);

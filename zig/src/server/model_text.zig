@@ -150,8 +150,11 @@ pub const Text = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
+    /// How replies read: a chat template's markup, Kimi's XTML, or Inkling 2's blocks (chat_inkling.zig).
+    pub const Format = enum { template, kimi, inkling };
+
     pub const VTable = struct {
-        format: enum { template, kimi } = .template,
+        format: Format = .template,
         /// Ids of ``text``, special-token text included as its token; ``add_special`` adds what the tokenizer prepends.
         encode: *const fn (ctx: *anyopaque, a: Allocator, text: []const u8, add_special: bool) Error![]u32,
         /// UTF-8 of ``ids`` with special tokens; bytes ending mid-character decode as U+FFFD, as Python's replace does.

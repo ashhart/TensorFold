@@ -15,10 +15,10 @@ const t = std.testing;
 /// Ids 256.. in this order; below 256 an id is its byte.
 const specials = [_][]const u8{ markers.model, markers.text, markers.thinking, markers.end, markers.end_sampling, markers.tool_json };
 
-/// Bytes as tokens plus Inkling 2's markers as whole tokens, so ``chat_inkling.is`` holds.
+/// Bytes as tokens plus Inkling 2's markers as whole tokens, read as the .inkling format.
 const Text = struct {
     fn text(x: *Text) model_text.Text {
-        return .{ .ctx = x, .vtable = &.{ .encode = preflight.TestText.encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
+        return .{ .ctx = x, .vtable = &.{ .format = .inkling, .encode = preflight.TestText.encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
     fn decode(_: *anyopaque, a: A, ids: []const u32) A.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;

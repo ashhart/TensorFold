@@ -14,6 +14,11 @@ pub const markers = struct {
     pub const tool_error = "<|content_tool_error|>";
 };
 
+/// Inkling 2's replies end their sampling with this marker; a tokenizer that holds it speaks the block format.
+pub fn speaks(text: anytype) bool {
+    return text.vtable.token_id(text.ctx, markers.end_sampling) != null and text.vtable.token_id(text.ctx, markers.model) != null;
+}
+
 const Marker = enum { model, text, thinking, end, end_sampling, tool_json, tool_text, tool_error };
 const State = enum { header, content, reasoning, tool };
 

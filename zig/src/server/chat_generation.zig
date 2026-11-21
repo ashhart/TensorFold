@@ -150,7 +150,7 @@ pub const Generation = struct {
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.tokens);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
-        if (@import("chat_inkling.zig").is(g.srv.text)) return @import("chat_inkling.zig").stream(g, sink);
+        if (g.srv.text.vtable.format == .inkling) return @import("chat_inkling.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
@@ -309,7 +309,7 @@ pub const Generation = struct {
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
-        const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else if (@import("chat_inkling.zig").is(g.srv.text)) try @import("chat_inkling.zig").read(g, content_tokens, true) else null;
+        const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else if (g.srv.text.vtable.format == .inkling) try @import("chat_inkling.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
         const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
         const close_at: ?reply_text.Close = if (native == null and g.thinking)
