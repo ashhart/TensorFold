@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Host draw: greedy and masked rows scan 64-logit blocks and skip blocks whose mask word allows nothing, on both the row draw and the bounded top-k path; a `test-host-draw-timing` step times a row outside `test` and CI (#2846).
+
 - MOSS-Image on CUDA: the checkpoint's Qwen3.5 prompt encoder and VAE decoder run beside the transformer, so the native server serves pictures through `POST /v1/images/generations`, the same request twice giving the same bytes (#2281, part of #1573). Thanks to @devopsfortunato.
 
 - MOSS-Image and Step-5: the vision encoders take their RoPE frequencies from the shared exact helper; MOSS-Image's bf16 cos and sin tables change only from row 565, so shorter prompts read the same tables, Step-5's bf16 tables are unchanged, and `zig build test-moss-image-rotary-host` checks the MOSS-Image tables without a device (#1998, part of #1852).
