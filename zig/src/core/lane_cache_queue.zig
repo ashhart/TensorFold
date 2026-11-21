@@ -100,6 +100,9 @@ fn keepAt(h: *LaneHost, job: *Job, stream: *anyopaque, at: u32, cancelled: bool,
     const before = store.reservation_guard;
     store.reservation_guard = snapshot.guard();
     defer store.reservation_guard = before;
+    const keep_others = store.keep_others;
+    store.keep_others = keep_others or handoff;
+    defer store.keep_others = keep_others;
     const planned = cancelled or handoff or std.mem.indexOfScalar(u32, job.marks, at) != null;
     if (cancelled) {
         const bytes = store.family.vtable.bytes(store.family.ptr, at);
