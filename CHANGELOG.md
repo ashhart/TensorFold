@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM3 on Metal: in a shared round, every stream's qk now runs in one dispatch instead of once per stream per attention layer, with the same arithmetic per row, so replies are unchanged (#3079).
 
 
+- Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
 
 - Prompt cache: save states displaced by backend expiry to the eviction-only disk tier, avoiding stale resumptions (fixes #2669).
 
