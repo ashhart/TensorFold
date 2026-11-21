@@ -331,6 +331,12 @@ pub fn copyBytes(c: image_rows.Cut, lo: usize, hidden: u32) [3]u64 {
     return .{ (c.at - lo) * row, c.row * row, c.n * row };
 }
 
+/// A copy's bytes for bf16 rows `hidden` wide: the offset into the pass, the offset into the image rows, the length.
+pub fn copyBytes(c: Copy, hidden: u32) [3]u64 {
+    const row: u64 = @as(u64, hidden) * 2;
+    return .{ c.dst * row, c.src * row, c.n * row };
+}
+
 /// After the normed embedding, a pass's rows at positions [lo, hi) (bf16 at `x`) take their image rows (at `rows`).
 pub fn splice(d: *const cuda.Driver, s: cuda.Stream, hidden: u32, rows: u64, list: []const Span, lo: usize, hi: usize, x: u64) !void {
     for (list) |sp| {
@@ -414,4 +420,18 @@ test "encode refuses a picture with more tokens than the tower's scratch covers"
 test "a tower with scratch for no image tokens is refused before any device work" {
     const got = Tower.load(std.testing.allocator, std.testing.io, undefined, "", testVision(4608), 0);
     try std.testing.expectError(error.ImageTokens, got);
+}
+
+test "the splice copies rows as wide as the config's decoder, Small's 4608 and Mini's 2304" {
+    const sp: Span = .{ .at = 3, .n = 5, .row = 7 };
+    for ([_]u32{ 4608, 2304 }) |h| {
+        const v = testVision(h);
+        const b = copyBytes(cut(sp, 4, 6).?, v.text_hidden);
+        try std.testing.expectEqual([3]u64{ 0, 8 * @as(u64, h) * 2, 2 * @as(u64, h) * 2 }, b);
+    }
+    // the projector's scratch row is projection_hidden_dim wide (4096 in both releases)
+    var v = testVision(2304);
+    const wide = scratchBytes(v, 16);
+    v.proj_hidden = 2048;
+    try std.testing.expectEqual(@as(u64, 16 * 2048 * 2), wide - scratchBytes(v, 16));
 }
