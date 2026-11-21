@@ -254,9 +254,9 @@ pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryU
     return card;
 }
 
-/// The pool's free: on unified Linux at most CUDA's, as MemAvailable counts page cache CUDA can't allocate (#1857).
-pub fn boundFree(host_counts: bool, counted: u64, card_free: u64) u64 {
-    return if (host_counts) @min(counted, card_free) else counted;
+/// Unified Linux free: CUDA's plus the checkpoint's clean cached bytes, capped by MemAvailable; stable and #1857-safe.
+pub fn boundFree(host_counts: bool, counted: u64, card_free: u64, cached: u64) u64 {
+    return if (host_counts) @min(counted, card_free +| cached) else counted;
 }
 
 test "the memory plan: reserve, cap, and admission that fails closed" {
@@ -386,7 +386,7 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         return null;
     };
     const available = counting(measured, zones);
-    const free = boundFree(host_counts, available.available, card.free);
+    const free = boundFree(host_counts, available.available, card.free, 0);
     const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
     const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
     const reserve = reserveBytes(reserve_text, available.total, unified) catch {
@@ -472,11 +472,12 @@ test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay 
     try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
 }
 
-test "CUDA's free bounds a unified Linux pool only: Windows and discrete cards keep their counts" {
+test "CUDA's free plus the checkpoint's cached bytes bounds a unified Linux pool only" {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(60 * g, boundFree(true, 115 * g, 60 * g)); // MemAvailable held the page cache
-    try std.testing.expectEqual(96 * g, boundFree(true, 96 * g, 128 * g));
-    try std.testing.expectEqual(40 * g, boundFree(false, 40 * g, 30 * g)); // `counted` is already the card's own
+    try std.testing.expectEqual(115 * g, boundFree(true, 115 * g, 60 * g, 60 * g)); // 6 Nov: 1.3.2's grant, no drop
+    try std.testing.expectEqual(70 * g, boundFree(true, 115 * g, 60 * g, 10 * g)); // other memory still bounds
+    try std.testing.expectEqual(96 * g, boundFree(true, 96 * g, 128 * g, 0)); // card above the host: host stands
+    try std.testing.expectEqual(40 * g, boundFree(false, 40 * g, 30 * g, 99 * g)); // discrete: own counts
 }
 
 test "CUDA cache default counts streams before taking half the unified room" {

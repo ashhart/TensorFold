@@ -280,15 +280,16 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         io: std.Io,
         ctx: *const cuda.Context,
         held: u64,
+        weights: u64,
         problem: *[]const u8,
         fn read(p: *anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(p));
-            const now = (pool(self.a, self.io, self.ctx, self.problem) catch return null) orelse return null;
+            const now = (family_memory.poolCached(self.a, self.io, self.ctx, self.weights, self.problem) catch return null) orelse return null;
             family_memory.noteParked(now, "the room this rank reports");
             return now.room(cuda.usage(false).device - self.held);
         }
     };
-    var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
+    var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .weights = weights, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
     if (!family_options.set(F, o, &opts, problem)) return null;
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
@@ -353,7 +354,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     var served = try drafted.wrap(F, a, gpa, io, loaded, o, problem) orelse return null;
     defer if (!opened) served.close(gpa);
     const model = cuda.usage(false).device - held0;
-    const after = try pool(a, io, &g.ctx, problem) orelse return null;
+    const after = try family_memory.poolCached(a, io, &g.ctx, weights, problem) orelse return null;
     family_memory.noteParked(after, "the CUDA memory budget");
     const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
     const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
