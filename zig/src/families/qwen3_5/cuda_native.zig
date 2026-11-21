@@ -74,7 +74,6 @@ pub const request_starts_switch = starts.switch_name;
 pub const requestStartsOn = starts.on;
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
-
 /// The server's reading of the room left now; null if unreadable.
 pub const Room = @import("cuda_mtp.zig").Room;
 /// `room` and `drafter` size an EXL3 checkpoint's load: its embedding rows go to host memory when the card is short.
