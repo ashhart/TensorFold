@@ -1,4 +1,4 @@
-//! Inkling 2's DSpark SiLU and the ranks' pick under the contract: act_rows' tf_swiglu_rows_expf and tf_ink2_dsp_pick.
+//! The DSpark SiLU, core's tf_swiglu_rows_expf, and the ranks' pick, tf_ink2_dsp_pick, under the contract.
 const std = @import("std");
 const core = @import("core");
 const dk = @import("inkling2").dspark_ops;
