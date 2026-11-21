@@ -226,8 +226,8 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
                 if (c != .array) return cx.refuse("reasoning content must be an array of text parts");
                 for (c.array) |p| {
                     if (p != .object) return cx.refuse("each reasoning content part must be an object");
-                    const kind = p.get("type");
-                    if (kind != null and (kind.? != .string or !(std.mem.eql(u8, kind.?.string, "text") or std.mem.eql(u8, kind.?.string, "reasoning_text"))))
+                    const part_kind = p.get("type");
+                    if (part_kind != null and (part_kind.? != .string or !(std.mem.eql(u8, part_kind.?.string, "text") or std.mem.eql(u8, part_kind.?.string, "reasoning_text"))))
                         return cx.refuse("reasoning content parts must be text or reasoning_text");
                     const text = p.get("text") orelse return cx.refuse("each reasoning content part needs text");
                     if (text != .string) return cx.refuse("reasoning content text must be a string");
