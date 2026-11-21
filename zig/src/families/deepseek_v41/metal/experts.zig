@@ -15,9 +15,9 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 
 /// An expert's six checkpoint tensors by GPU address (Kimi's layout: w1, w3 [width, hidden], w2 [hidden, width]).
 pub const ExpertPtrs = extern struct { w1p: u64, w1s: u64, w3p: u64, w3s: u64, w2p: u64, w2s: u64 };
-const PlanArgs = extern struct { pairs: u32, experts: u32, first: u32, last: u32 };
-const XpArgs = extern struct { K: u32, N: u32, topk: u32, rows_max: u32, beta: f32 = 0, lin: f32 = 0 };
-const UpArgs = extern struct { K: u32, N: u32, topk: u32, rows_max: u32, limit: f32 };
+pub const PlanArgs = extern struct { pairs: u32, experts: u32, first: u32, last: u32 };
+pub const XpArgs = extern struct { K: u32, N: u32, topk: u32, rows_max: u32, beta: f32 = 0, lin: f32 = 0 };
+pub const UpArgs = extern struct { K: u32, N: u32, topk: u32, rows_max: u32, limit: f32 };
 
 /// The V4.1 kernels' source: `head` before it (a TF_CTL define), `edits` applied to the copy's text (planted controls).
 pub fn source(a: std.mem.Allocator, head: []const u8, edits: []const [2][]const u8) ![]u8 {

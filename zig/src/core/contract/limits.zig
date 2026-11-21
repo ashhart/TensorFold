@@ -17,6 +17,8 @@ pub const MetalLaunch = struct {
     name: []const u8,
     threads: u32,
     tg_memory: u32,
+    /// The first Apple GPU generation on which the engine can select this launch.
+    min_gen: u32 = 13,
     /// Threadgroup bytes the encoder adds to the source's own (setThreadgroupMemory).
     dynamic: u32 = 0,
     reserved: u32 = 0,
@@ -74,6 +76,7 @@ pub const Nvcc = struct { major: u32, minor: u32 };
 
 /// Every problem one Metal launch has on one family, written to `out`; returns how many.
 pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
+    if (f.gen < l.min_gen) return 0;
     var n: usize = 0;
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
     const tg = l.tg_memory + l.dynamic;
@@ -272,6 +275,22 @@ test "a launch inside every family passes; each planted excess is named" {
     for (apple[0..2]) |f| try std.testing.expectEqual(@as(usize, 0), try metal(wide_unmeasured, f, &out, a));
     wide_unmeasured.threads = 2048; // still held to the family's absolute limit
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_unmeasured, apple[0], &out, a));
+}
+
+test "Metal generation admission skips unsupported chips but checks the first served generation" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    var launch = MetalLaunch{ .name = "tensor-only", .threads = 512, .tg_memory = 0, .min_gen = 17, .offline = false };
+    for (apple[0..4]) |f| try std.testing.expectEqual(@as(usize, 0), try metal(launch, f, &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try metal(launch, apple[4], &out, a));
+    launch.threads = 2048;
+    try std.testing.expectEqual(@as(usize, 0), try metal(launch, apple[3], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try metal(launch, apple[4], &out, a));
+    launch.min_gen = 14;
+    launch.threads = 512;
+    try std.testing.expectEqual(@as(usize, 0), try metal(launch, apple[0], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try metal(launch, apple[1], &out, a));
 }
 
 /// The limit row for `sm`, including targets without pinned usage records.

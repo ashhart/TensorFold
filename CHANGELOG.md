@@ -46,6 +46,24 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Idol's FLUX.2 VAE image encoder runs natively on Metal in fp32: one 1,024 x 1,024 picture to the denoiser's 4,101 condition rows, with the posterior's noise as an input. It is 0.185 s an encode on an M5 Ultra against 0.095 s for the SDK's bf16 encoder on torch MPS, and lies far closer to a float64 run: worst row 5.1e-5 against the SDK's 2.7e-2. `tf-idol-vae` gates it from a case `tools/zig/idol_case.py vae` records, with the ungated FLUX.2-klein-4B weights (#1774, after #1766, for #1757). Thanks to @jayleaton.
 
+- DeepSeek-V4.1 EXL3 on Metal: the indexer row scorer runs on 32-row threadgroups with all four simdgroups live, 1024 rows x 32k keys in 2.64 ms instead of 2.98 ms on an M5 Ultra, with bit-identical scores (#3736).
+- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention (#3382),
+  per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
+  Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.
+  Small dense, filtered and indexed projections retain matching reduction orders and logical output bounds.
+  Attention tiles stop at their split boundary instead of counting some keys twice, and packed NaNs survive BF16 decoding.
+  Draft embedding IDs grow without replacing Markov picks; unload releases host state, Markov IDs and drafter scratch.
+  MTP-only configurations no longer depend on lookup drafting; proposal depth is capped at the four-ID capacity.
+  Adaptive trained depth remains available with lookup disabled; suffix lookup reads the committed stream context.
+  Matching suffix proposals take precedence over paid trained proposals.
+  The diagnostic runner honors an explicit prefill-workspace setting without changing its unset default.
+  GPU profiling starts deferred mHC spans only when work is encoded, avoiding empty counter samples.
+  Last-row logits expand the selected final stream row rather than row zero of a multi-row window.
+  Fused mHC Sinkhorn uses the unfused split's FP32 row and column reduction order.
+  Stacked on #2373; whole-model qualification is still incomplete.
+  See [scope and qualification limits](docs/deepseek-v41.md#exl3-optimization-follow-up)
+  and [full-window fidelity](docs/receipts/dsv41-exl3-metal/fidelity-128.json).
+
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
 
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.

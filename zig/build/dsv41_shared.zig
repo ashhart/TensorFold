@@ -9,7 +9,10 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     core.addImport("tokenizer", tok);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const canon = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon.zig"), .target = target, .optimize = optimize });
-    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "canon", .module = canon } } });
+    const m = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "canon", .module = canon } } });
+    // The hash tables' module, named so every family file reaches them without a path outside its module.
+    m.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
+    return m;
 }
 pub fn steps(b: *std.Build) void {
     const env_tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, "env_validate.zig") }));

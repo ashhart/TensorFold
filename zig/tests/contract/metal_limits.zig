@@ -11,7 +11,13 @@ const limits = contract.limits;
 const registry = contract.registry;
 
 /// A registered pipeline's declaration, function, source here and pre-M5 source (empty: the loader has none).
-pub const Launch = struct { decl: limits.MetalLaunch, function: []const u8, here: []const u8, pre_m5: []const u8 };
+pub const Launch = struct {
+    decl: limits.MetalLaunch,
+    function: []const u8,
+    here: []const u8,
+    pre_m5: []const u8,
+    precise: bool = false,
+};
 
 /// The pre-M5 text of a source that includes nax.h (frags.source's branch for GPUs without tensor units).
 fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
@@ -197,6 +203,21 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-boundary ")) {
+        if (!assemble) return undefined;
+        const body = sources.deepseek_v41_hc_boundary;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-rows ")) {
+        if (!assemble) return undefined;
+        const body = if (std.mem.eql(u8, fun, "dsv41_rope_rows")) sources.deepseek_v41_rope else if (std.mem.eql(u8, fun, "dsv41_kv_glue_rows")) sources.deepseek_v41_kv_glue else if (std.mem.eql(u8, fun, "dsv41_publish_rows")) sources.deepseek_v41_kv else return error.UnknownLaunch;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-attention ")) {
+        if (!assemble) return undefined;
+        const body = try @import("dsv41_attention_rows_source.zig").text(tf.frags, device, a, .dense, null);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
     if (try @import("metal_glm_launch.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
     if (std.mem.startsWith(u8, d.name, "hy4 ")) {
@@ -208,6 +229,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (try @import("metal_exl3_projection_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "exl3-chain ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.core_exl3_projection, .pre_m5 = sources.core_exl3_projection, .precise = true };
     }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;
@@ -271,6 +297,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
         } else return error.UnknownLaunch;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "dsv41 gate gemm ")) {
+        // The router gate's own prefill block, including the fp32-destination twins the pack needs.
+        if (!assemble) return undefined;
+        text = sources.deepseek_v41_gate_gemm;
+        frags = true;
     } else if (std.mem.startsWith(u8, d.name, "flashnext prompt attention ")) {
         if (!assemble) return undefined;
         text = if (std.mem.eql(u8, fun, "tf_sattn_nax")) sources.flashnext_attn else sources.flashnext_qmm6;
@@ -278,7 +309,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;
-    } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ")) {
+    } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ") or
+        std.mem.startsWith(u8, d.name, "glm moe rows "))
+    {
         if (!assemble) return undefined;
         text = tf.glm.wide.gather_source;
     } else if (std.mem.startsWith(u8, d.name, "nemotron experts ")) {
@@ -440,13 +473,25 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
+fn pipeline(device: mtl.Device, l: Launch) !mtl.Pipeline {
+    var options = mtl.CompileOptions.mlx();
+    if (l.precise) options.math_functions = .precise;
+    const lib = try mtl.Library.fromSource(device, l.here, options);
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, l.function, false);
+}
+
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
+    if (device.generation() < l.decl.min_gen) {
+        std.debug.print("SKIP limits here {s}: engine selects this launch only from GPU generation {d}\n", .{ l.decl.name, l.decl.min_gen });
+        return 0;
+    }
     if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
     }
-    const p = rig_.pipeline(device, l.here, l.function) catch |err| {
+    const p = pipeline(device, l) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;
     };
@@ -474,8 +519,15 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
         try list.append(a, d);
     }
     var n = try registry.checkMetal(a, list.items, false);
-    std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
-    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    std.debug.print("{s} limits: {d} selected Metal launches on their declared device generations, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
+    for (list.items) |d| {
+        const l = launchOf(a, device, d) catch |err| {
+            std.debug.print("FAIL limits here {s}: no source for it here ({t})\n", .{ d.name, err });
+            n += 1;
+            continue;
+        };
+        n += try onThisGpu(a, device, l, false);
+    }
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;

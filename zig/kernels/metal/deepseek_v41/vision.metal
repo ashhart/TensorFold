@@ -46,6 +46,7 @@ inline float tf_vis_erf(float x) {
 struct TfVisEpiArgs {
   uint rows, n, gelu, has_bias, has_res;
 };
+static_assert(sizeof(TfVisEpiArgs) == 20, "TfVisEpiArgs must mirror metal/vision.zig's epi arguments");
 
 // A linear's fp32 sums to bf16: + bias, one rounding; then GELU (rounded) and the residual add (rounded) when asked.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_epi(const device float* ACC [[buffer(0)]], const device bfloat* BIAS [[buffer(1)]],
@@ -64,6 +65,7 @@ struct TfVisEpiArgs {
 struct TfVisQkvArgs {
   uint rows, heads, hd;
 };
+static_assert(sizeof(TfVisQkvArgs) == 12, "TfVisQkvArgs must mirror metal/vision.zig's qkv arguments");
 
 // The qkv linear's sums [rows][3][heads][hd] to bf16 with the bias, q and k rotated by their patch's (cos, sin) pairs.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_qkv(const device float* ACC [[buffer(0)]], const device bfloat* BIAS [[buffer(1)]],
@@ -93,6 +95,7 @@ struct TfVisAttnArgs {
   uint n, heads;
   float scale;
 };
+static_assert(sizeof(TfVisAttnArgs) == 12, "TfVisAttnArgs must mirror metal/vision.zig's attention arguments");
 
 // One simdgroup a (query, head): 32 keys a step, online softmax in fp32, values by the shuffled weights.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_attn(
@@ -136,6 +139,7 @@ struct TfVisAttnArgs {
 struct TfVisSwiArgs {
   uint rows, inter;
 };
+static_assert(sizeof(TfVisSwiArgs) == 8, "TfVisSwiArgs must mirror metal/vision.zig's swiglu arguments");
 
 // The MLP's w1 sums [rows][2][inter] (gate, then up), each rounded to bf16: silu(gate) rounded, times up, rounded.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_swiglu(const device float* ACC [[buffer(0)]], device bfloat* Y [[buffer(1)]],
@@ -151,6 +155,7 @@ struct TfVisSwiArgs {
 struct TfVisUnshufArgs {
   uint nh, nw, lh, lw, dim, r;
 };
+static_assert(sizeof(TfVisUnshufArgs) == 24, "TfVisUnshufArgs must mirror metal/vision.zig's unshuffle arguments");
 
 // The aligner's F.unfold of the zero-padded patch grid: out [lh * lw][dim * r * r], column c * r * r + ky * r + kx.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_unshuffle(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],
@@ -167,6 +172,7 @@ struct TfVisUnshufArgs {
 struct TfVisMergeArgs {
   uint dim, rows;
 };
+static_assert(sizeof(TfVisMergeArgs) == 8, "TfVisMergeArgs must mirror metal/vision.zig's merge arguments");
 
 // Stream rows [rows][4][dim] take an aligner row (SRC >= 0) or a delimiter (-1 start, -2 end, -3 newline).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_vis_merge(const device bfloat* FEAT [[buffer(0)]], const device bfloat* DELIM [[buffer(1)]],

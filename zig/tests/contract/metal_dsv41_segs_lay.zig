@@ -44,7 +44,7 @@ pub const Pipes = struct {
     fused: fu.Pipelines,
     compress: cp.Pipelines,
     attn: at.Pipelines,
-    glue: dm.glue_tmp.Pipelines,
+    glue: dm.glue_rows.Pipelines,
 
     pub fn load(a: std.mem.Allocator, device: mtl.Device, ctl: u8) !Pipes {
         var p: Pipes = undefined;
@@ -60,7 +60,7 @@ pub const Pipes = struct {
         defer a.free(att);
         p.attn = try at.Pipelines.loadSource(device, att);
         errdefer p.attn.deinit();
-        p.glue = try dm.glue_tmp.Pipelines.load(device, sources.dsv41.glue_tmp);
+        p.glue = try dm.glue_rows.Pipelines.load(device, sources.dsv41.glue_rows);
         return p;
     }
 

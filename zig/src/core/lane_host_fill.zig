@@ -293,13 +293,13 @@ fn short(j: *const LaneHost.Job) bool {
     return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
 }
 
-/// Fill chunks' cap: the flag or a default past the threshold, a chunk-invariant family and live decoders; else 0.
+/// Fill chunks' cap: 512 with the flag past the default threshold, else the family's `decoding_rows`; 0: none.
 pub fn capRows(h: *const LaneHost, rows: u64) u32 {
     if (h.share.policy != .stock and h.share.call_rows > 0) return h.share.call_rows; // policyRun's hint for the call in flight
-    if (!h.decode_cap or !h.core.backend.chunk_invariant) return 0;
-    if (h.share.defaulted and rows < Share.default_arm_rows) return 0; // the engine's default arms only past the threshold
-    if (h.share.p >= 1) return 0;
-    return if (runnable(h) > 0) decode_cap_rows else 0;
+    if (runnable(h) == 0) return 0; // nothing decoding: the engine's own cut
+    if (h.decode_cap and h.core.backend.chunk_invariant and h.share.p < 1 and
+        !(h.share.defaulted and rows < Share.default_arm_rows)) return decode_cap_rows;
+    return h.core.backend.decoding_rows; // the family's own decode-row cut, with no flag
 }
 
 /// A long prompt's step runs now: none owed, or nothing decoding.

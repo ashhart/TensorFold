@@ -132,8 +132,8 @@ pub const Probe = struct {
                     cp.pool2(&pl.compress, e, L.plus(in[0], r0 * D * 4), L.plus(in[1], r0 * D * 4), L.whole(st[0]), L.plus(in[lay.pos], r0 * 4), L.plus(outs[0].ref, r0 * D * 2), n, D);
                     const gl = &pl.glue;
                     const iota = L.plus(in[lay.iota], r0 * 4);
-                    dm.glue_tmp.scatter(gl, e, L.plus(in[0], r0 * D * 4), L.whole(st[1]), iota, n, D * 4, 1);
-                    dm.glue_tmp.scatter(gl, e, L.plus(in[1], r0 * D * 4), L.plus(st[1], lay.keep * D * 4), iota, n, D * 4, 1);
+                    dm.glue_rows.scatter(gl, e, L.plus(in[0], r0 * D * 4), L.whole(st[1]), iota, n, D * 4, 1);
+                    dm.glue_rows.scatter(gl, e, L.plus(in[1], r0 * D * 4), L.plus(st[1], lay.keep * D * 4), iota, n, D * 4, 1);
                 },
                 .rt => cp.fp4rt(&pl.compress, e, L.plus(in[0], r0 * D * 2), L.whole(L.state(outs, j)[0]), L.plus(in[lay.dest], r0 * 4), n, D),
                 .pack => {
