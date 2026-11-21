@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8 Flash Next on Metal: a request cancelled while its prompt is still filling keeps the prompt state it had already landed at a resumable cut, so a follow-up with the same prefix resumes from there instead of starting over (#3657, refs #3618).
+
 - GLM-5.3-Flash on Metal can draft with a published DFlash2 checkpoint behind `--drafter DIR` (and `--drafter-bits`); drafted replies equal plain ones, and the default stays MTP (#3920). Thanks to @gilby.
 
 - Qwen3.5-2B on Metal: a new stream's prompt runs one chunk a call at the same cuts as before, so other streams' decode rounds run between its chunks instead of waiting for the whole prompt; a cancel between chunks keeps the state at the last chunk's end (#3090, refs #3021).
