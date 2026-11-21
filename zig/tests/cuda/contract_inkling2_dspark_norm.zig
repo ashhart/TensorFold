@@ -226,7 +226,7 @@ pub const AddNorm = struct {
     }
 
     pub fn run(self: *AddNorm, rig: *rig_.Rig) !void {
-        try ref.restore(rig, self.resid, std.mem.sliceAsBytes(self.x)); // read and written in place: every run the same pass
+        try ref.restore(rig, self.resid, std.mem.sliceAsBytes(self.x)); // updated in place: every run starts the same
         const parts = self.shape.k - @intFromBool(self.short and self.shape.k > 0);
         try dk.addNorm(self.kern, rig.s, self.resid, self.in[0], parts, self.shape.rows * self.shape.n, self.in[1], self.out, self.shape.rows, self.shape.n, eps);
     }

@@ -253,7 +253,7 @@ pub const Rnn = struct {
     }
 
     pub fn run(self: *Rnn, rig: *rig_.Rig) !void {
-        try ref.restore(rig, self.st, std.mem.sliceAsBytes(self.state)); // read and written in place: every run the same pass
+        try ref.restore(rig, self.st, std.mem.sliceAsBytes(self.state)); // updated in place: every run starts the same
         const walk = self.in[3] + @as(u64, @intFromBool(self.late)) * 4;
         for (0..self.shape.rows) |j| try dk.rnn(self.kern, rig.s, self.in[0] + j * 3 * R * 4, self.in[1], self.in[2], walk, j, self.st, self.out + j * R * 2, R, hidden);
     }
@@ -357,7 +357,8 @@ pub const Vocab = struct {
                 self.latent[j * R + R / 2 + (k + 1) % (R / 2)] = c.toBf16(-v + @as(f32, if (k == 0) 1 else 0));
             };
             for (0..n) |v| for (0..R / 2) |k| {
-                const x = if (k == 0) ref.int(rng, 1, 4) else ref.int(rng, 1, 64); // the dot fold[v][0]: below the cap's knee
+                // the dot is fold[v][0]: below the cap's knee
+                const x = if (k == 0) ref.int(rng, 1, 4) else ref.int(rng, 1, 64);
                 self.fold[v * R + k] = c.toBf16(x);
                 self.fold[v * R + R / 2 + (k + 1) % (R / 2)] = c.toBf16(x);
             };
