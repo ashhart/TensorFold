@@ -33,8 +33,7 @@ inline void gemm_out(const device T* A, const device T* B, device O* D, const de
 
 }  // namespace tfp
 
-// Score products stay a full fp32 dot. The tensor-unit op keeps 10 mantissa bits of an fp32 operand, so an M5
-// would not match the product this tower was measured against.
+// Score products stay a full fp32 dot so an M5 does not cut an fp32 operand to 10 mantissa bits.
 template <bool NT>
 inline void ik2_f32_dot(const device float* A, const device float* B, const device int* P, device float* D, uint3 tid) {
   const int col = int(tid.x), row = int(tid.y), b = int(tid.z);
