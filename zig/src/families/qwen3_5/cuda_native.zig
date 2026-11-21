@@ -543,7 +543,6 @@ pub const Lanes = struct {
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         return @call(.always_inline, @import("cuda_native_keep.zig").keep, .{ cast(ptr), windows, paths });
     }
-
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.QwenCheckpointHasNoDraftHead;
     }
