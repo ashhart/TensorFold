@@ -210,12 +210,13 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
     };
 }
 
-/// One run's kernel: 4/64 keeps today's choice; other widths take the non-reg lane kernel or the row kernel.
+/// One run's kernel: 4-, 5-, and 6-bit g64 take reg lanes; other widths take non-reg lanes or row kernels.
 fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     _ = try @import("projection.zig").split(n, k);
     // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
     if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
-    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
+    const reg = (w.bits == 4 or w.bits == 5 or w.bits == 6) and w.group == 64;
+    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = reg or (w.bits == 8 and w.group == 64), .reg = reg }).validate();
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
     return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
