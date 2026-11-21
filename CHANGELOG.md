@@ -4,17 +4,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
+
 - Cluster: bring-up reports the leader, epoch and view it agreed on and counts only acknowledgments for that view, so a rank that finishes after a peer says goodbye no longer reports a smaller view on slow runners (#4135, fixes #4123). Thanks to @AIFlowML.
-
-
-
-
 
 - GLM-5.3-Flash on CUDA: drafted decode after a 1,040,384-token prompt takes its DSA index scores from `tf_glm_index_scores`, 13.8% faster at TP=4 (172.39 against 151.51 tok/s median) with byte-identical scores and the same tokens; shorter windows keep `tf_glm_scores` (#3689). Thanks to @Bizuayeu.
 
 - GLM-5.3-Flash on CUDA: `TF_GLM_DRAFT_SPLIT=1` splits the DFlash2 drafter's MLP across three ranks or more where each share is 256-aligned, without `TF_ROCE=1`; the ranks must set it alike, two ranks split as before, and unset changes nothing. On three GB10s whose gathers stay on NCCL, decode with `--drafter` is about 5% faster at one stream (four streams within their start-to-start spread), with the same replies and the same tokens a round on the measured prompts. As with `TF_ROCE=1`, the split drafter adds its down projection's rank shares in another order, so its proposals can differ at near-ties (#3616, for #3581).
-
-
 
 - Flash Next on HIP: on an integrated GPU that shares the host's pages (no firmware carve-out), the default kept-prompt cache takes no more than the memory the streams leave, at most 16 GiB and none when nothing is left; an explicit `--prompt-cache-gib` still sets it (#3645).
 
@@ -169,7 +165,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA lanes: a one-stream reply keeps the draft depth it priced until another depth wins by 5% on the expected tokens a millisecond, and a probe one draft deeper is verified instead of being trimmed by the lone window's own prices; one noisy round no longer leaves a reply at one draft for the rest of it (#3468).
 - Core: Drama 3's `torch.save` reader moves to `core/torch_pth.zig` (its zip container to `core/torch_zip.zig`) and its WAV code to `core/wav.zig`; the reader also opens a root of nested state dicts, naming tensors by their keys joined with `/` (`openNested`), and returns a tensor's stored bytes at a given dtype and shape (`readRaw`), with host tests; Drama 3's generated and served audio stays byte-identical on Metal (#3719, for #3615). Thanks to @BobClawblaw.
-- Nemotron 3.5 Lightning on HIP: `--mtp-drafts` up to `15` at `--tp 1` widens a lone stream's verify window up to sixteen rows while keeping the four-row default and capping shared rounds at three head drafts a stream; on `gfx1151`, `L=1` edit prompts rise from `149.0` to `229.1` tok/s on `Lightning-30B-A3B-MLX-4bit` (`134.3` to `204.7` greedy on `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP`), `gpu-chat` greedy runs at `94.5` vs `98.8` tok/s (full table in `docs/recipes/nemotron-3.5.md`), with identical tokens (#3613, part of #3394).
 
 - Desktop: a new conversation on the built-in engine asks for its title after the first run settles, not beside it, so the title no longer competes with that run; cancelling or renaming during the run skips it (#4072, refs #3606). Thanks to @AIFlowML.
 
