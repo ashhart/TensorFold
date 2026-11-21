@@ -40,10 +40,16 @@ pub const no_vision = "OCR needs image input; start the server with --vision";
 /// The decoded-pixel limit of one page: GLM-OCR's processor input limit, the larger of the two reader families'.
 pub const max_page_pixels = 32 << 20;
 
+/// The gate's message when the engine has no OCR reader or the server reads no images, else null.
+pub fn gateRefusal(srv: *const Server) ?[]const u8 {
+    if (srv.info.ocr == null) return no_reader;
+    if (srv.info.vision == null) return no_vision;
+    return null;
+}
+
 /// Refuses as bad input unless the engine has an OCR reader and the server reads images.
 pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
-    if (srv.info.ocr == null) return fault.fail(a, .bad_input, "{s}", .{no_reader});
-    if (srv.info.vision == null) return fault.fail(a, .bad_input, "{s}", .{no_vision});
+    if (gateRefusal(srv)) |m| return fault.fail(a, .bad_input, "{s}", .{m});
 }
 
 /// Where a page's encoded image comes from: an image source's bytes, or a measured PDF page rendered just before use.

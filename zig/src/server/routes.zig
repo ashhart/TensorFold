@@ -155,7 +155,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = @import("score_routes.zig").route(route);
-    const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
+    const is_ocr = std.mem.eql(u8, route, "/ocr") or std.mem.eql(u8, route, "/v1/ocr");
     const is_ollama_chat = std.mem.eql(u8, route, "/api/chat");
     const is_ollama_generate = std.mem.eql(u8, route, "/api/generate");
     const is_ollama_embed = std.mem.eql(u8, route, "/api/embed");
@@ -187,7 +187,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
     if (is_responses) return responses.postGated(srv, conn, a, &entered.held);
-    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a, route);
     openai.post(srv, conn, a, is_chat);
 }
 
