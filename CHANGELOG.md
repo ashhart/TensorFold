@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: a bf16 language head's draft rows load as 4-bit affine groups of 32 by default, and `TF_FLASHNEXT_DRAFT_HEAD=bf16` keeps them as stored; a malformed value stops the start by name, and replies are unchanged because drafts are verified (#3477, refs #1870). Thanks to @BadAd84.
+
 - Server: opt-in --tool-think-close bounds thinking for required or named tool calls so the call has room in max_tokens; the flag defaults off and keeps smaller thinking budgets (#4157). Thanks to @jayleaton.
 
 - CUDA: Drama 3 loads compact NVFP4 checkpoints as stored, stages held experts in slot order, and masks routing to their original ids (#4144). Thanks to @plotarmordev.
