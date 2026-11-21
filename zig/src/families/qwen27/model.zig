@@ -146,7 +146,8 @@ pub const Model = struct {
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| {
             if (shard.local.looped) {
-                try m.checkpoint.addFileSplitPrefixes(m.device, file, "", &sn_prefixes, @import("loop.zig").repackedSenseNova);
+                const repacked: *const fn ([]const u8, usize) bool = if (ws.head.kind == .affine) @import("loop_affine.zig").repackedAffine else @import("loop.zig").repackedSenseNova;
+                try m.checkpoint.addFileSplitPrefixes(m.device, file, "", &sn_prefixes, repacked);
             } else {
                 try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
             }
@@ -157,7 +158,7 @@ pub const Model = struct {
         errdefer m.weights.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
         errdefer m.kernels.deinit();
         if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
         m.glue = try glue.Kernels.init(m.device);
