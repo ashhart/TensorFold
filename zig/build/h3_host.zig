@@ -107,4 +107,7 @@ pub fn metalTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         const exe = b.addExecutable(.{ .name = tool.name, .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/{s}", .{tool.file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3", .module = model }, .{ .name = "core", .module = core } } }) });
         b.step(tool.name, tool.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
+    @import("h3_image_encoder.zig").tool(b, target, optimize, metal);
+    @import("h3_image_prompt.zig").install(b, target, optimize, metal);
+    @import("h3_image_decoder.zig").tool(b, target, optimize, metal);
 }
