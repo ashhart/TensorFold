@@ -17,6 +17,7 @@ const vw = @import("vision_weights.zig");
 const vt = @import("vision_tower.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
+const pick = @import("pick.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -75,6 +76,9 @@ pub const Target = struct {
     tree: tree_.Tree = .{},
     /// the ViT and aligner, when the environment has a tower
     tower: ?vt.Tower = null,
+    /// a sampled pick's float64 logits and its ids 0 .. vocab - 1, kept between picks
+    pick_vals: []f64 = &.{},
+    pick_ids: []u64 = &.{},
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -87,6 +91,11 @@ pub const Target = struct {
         errdefer t.b.deinit();
         t.pr = try prompt.Prompt.init(env.device, c, opt.prompt, opt.limit);
         errdefer t.pr.deinit();
+        t.pick_vals = try a.alloc(f64, c.vocab);
+        errdefer a.free(t.pick_vals);
+        t.pick_ids = try a.alloc(u64, c.vocab);
+        errdefer a.free(t.pick_ids);
+        for (t.pick_ids, 0..) |*id, i| id.* = i;
         const slots = try a.alloc(Slot, opt.slots);
         errdefer a.free(slots);
         var made: usize = 0;
@@ -161,6 +170,8 @@ pub const Target = struct {
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
+        t.a.free(t.pick_vals);
+        t.a.free(t.pick_ids);
         t.a.destroy(t);
     }
 
@@ -276,7 +287,7 @@ pub const Target = struct {
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
         if (images.len > 0) {
-            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, ids.len, t.opt.prompt.chunk, at);
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, @intCast(ids.len), t.opt.prompt.chunk, at);
             t.pr.images = if (s.image_rows) |*r| r else null;
         }
         s.resumed = at;
@@ -317,7 +328,7 @@ pub const Target = struct {
             t.ringTaps(s, n);
         }
         t.promptTaps(s, n);
-        const choice = try t.choose(logits, draw, smp);
+        const choice = try pick.choose(t, logits, draw, smp);
         s.base = n;
         s.live = true;
         s.whole = true;
@@ -364,29 +375,6 @@ pub const Target = struct {
             const pos = n - s.ptaps_rows + i;
             @memcpy(out[i * w ..][0..w], s.ring[(pos % ringRows(c)) * w ..][0..w]);
         }
-    }
-
-    /// The keyed choice of a logits row over the whole vocabulary (greedy: the first maximum, ties to the lower id).
-    pub fn choose(t: *const Target, row: []const f32, draw: u64, smp: ?lanes.Sampling) !u32 {
-        const s = smp orelse return argmax(row);
-        if (s.temperature <= 0) return argmax(row);
-        const vals = try t.a.alloc(f64, row.len);
-        defer t.a.free(vals);
-        const ids = try t.a.alloc(u64, row.len);
-        defer t.a.free(ids);
-        for (vals, ids, row, 0..) |*v, *id, x, i| {
-            v.* = x;
-            id.* = i;
-        }
-        return @intCast(try lanes.sampling.choose(t.a, vals, ids, draw, s));
-    }
-
-    fn argmax(row: []const f32) u32 {
-        var best: usize = 0;
-        for (row, 0..) |x, i| if (x > row[best]) {
-            best = i;
-        };
-        return @intCast(best);
     }
 
     pub fn fail(t: *Target, e: anyerror) anyerror {
@@ -457,7 +445,7 @@ pub const Target = struct {
         for (group, choices) |g, out| {
             const s = &t.slots[g.slot];
             const n = g.tokens.len;
-            for (0..n) |r| out[r] = try t.choose(lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            for (0..n) |r| out[r] = try pick.choose(t, lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
             s.base = g.start;
             s.rows = @intCast(n);
             s.open = true;
@@ -592,3 +580,19 @@ pub const Target = struct {
         return out.toOwnedSlice(t.a);
     }
 };
+
+test "argmax: the first maximum, NaN rows as the scalar scan" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    const row = try a.alloc(f32, 129280);
+    defer a.free(row);
+    for (0..200) |k| {
+        for (row) |*x| x.* = rnd.floatNorm(f32);
+        if (k % 5 == 1) row[rnd.uintLessThan(usize, row.len)] = 9.0;
+        if (k % 5 == 2) row[rnd.uintLessThan(usize, row.len)] = std.math.nan(f32);
+        if (k % 5 == 3) @memset(row, -std.math.inf(f32));
+        if (k % 5 == 4) row[rnd.uintLessThan(usize, 7)] = std.math.nan(f32);
+        try std.testing.expectEqual(pick.scan(row), pick.argmax(row));
+    }
+}
