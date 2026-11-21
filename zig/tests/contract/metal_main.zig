@@ -188,6 +188,9 @@ pub fn main(init: std.process.Init) !u8 {
     var lfm3_suite: @import("metal_lfm3_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm3_suite.deinit();
     try lfm3_suite.collect(o.only);
+    var inkling2 = @import("metal_inkling2_main.zig").Suites.init(a, device, queue, &kernels);
+    defer inkling2.deinit();
+    try inkling2.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;

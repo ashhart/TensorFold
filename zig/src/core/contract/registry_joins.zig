@@ -88,6 +88,10 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("idol_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++
     @import("minimax_records.zig").records ++
+    @import("inkling2_metal_ops_records.zig").records ++
+    @import("inkling2_loop_records.zig").records ++
+    @import("inkling2_expert_records.zig").records ++
+    @import("inkling2_media_records.zig").records ++
     @import("ling_route_records.zig").records ++
     @import("ling_mla_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++

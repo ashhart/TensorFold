@@ -1,4 +1,4 @@
-//! Inkling 2 Small's weight map: each tensor the config implies, with dtype and shape, checked against headers.
+//! Inkling 2's weight map (Small and looped Mini): config-implied tensors, dtype and shape, checked against headers.
 const std = @import("std");
 const st = @import("safetensors");
 const config = @import("config.zig");
@@ -77,6 +77,21 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
     }
 }
 
+/// A looped model's extras: per core layer four message gates (rank-r down, two [H,r] matrices) and cross-pass queries.
+fn loopTensors(c: *const Text, l: config.Loop, sink: anytype) !void {
+    const h: u64 = c.hidden;
+    const r: u64 = l.rank;
+    const rows: u64 = 2 * @as(u64, l.end - l.start);
+    try put(sink, "model.llm.middle_cycle_cross_pass_queries", .{}, .f32, &.{ rows, h });
+    try put(sink, "model.llm.middle_cycle_cross_pass_kv_queries", .{}, .f32, &.{ rows, h });
+    for (l.start..l.end) |i| inline for (.{ "attn", "k", "v", "mlp" }) |gate| {
+        const base = "model.llm.layers.{d}.controllers." ++ gate;
+        try put(sink, base ++ ".down_weight", .{i}, .bf16, &.{ r, 2 * h });
+        try put(sink, base ++ ".forget_weight", .{i}, .bf16, &.{ h, r });
+        try put(sink, base ++ ".gain_weight", .{i}, .bf16, &.{ h, r });
+    };
+}
+
 fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
     const h: u64 = c.hidden;
     try put(sink, "model.llm.embed.weight", .{}, .bf16, &.{ c.vocab, h });
@@ -98,6 +113,7 @@ fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
         try put(sink, "model.llm.layers.{d}.mlp_sconv.weight", .{i}, .bf16, &.{ h, 1, config.conv_taps });
         try experts(c, i, prec[i], sink);
     }
+    if (c.loop) |l| try loopTensors(c, l, sink);
 }
 
 fn vision(v: config.Vision, sink: anytype) !void {
