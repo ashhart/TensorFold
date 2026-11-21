@@ -1,7 +1,7 @@
 //! Host-only proof of Mini's loop formulas, launch ABI, source inventory and rounding.
 const std = @import("std");
 const p = @import("inkling2_loop_plan");
-const records = @import("../../../core/contract/inkling2_loop_metal_records.zig").records;
+const records = @import("core").contract.inkling2_loop_metal_records.records;
 const shader = @import("inkling2_metal").loop;
 const t = std.testing;
 

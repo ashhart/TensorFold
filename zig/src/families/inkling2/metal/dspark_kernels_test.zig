@@ -1,7 +1,7 @@
 //! Host-only FP64 witnesses for Mini DSpark rounding, pairing, reach and launch contracts.
 const std = @import("std");
 const k = @import("dspark_kernels.zig");
-const records = @import("../../../core/contract/inkling2_dspark_metal_records.zig").records;
+const records = @import("core").contract.inkling2_dspark_metal_records.records;
 const shader = @import("inkling2_metal").inkling2_dspark;
 const t = std.testing;
 

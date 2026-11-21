@@ -2,8 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
-const st = @import("safetensors.zig");
-const file_cache = @import("checkpoint_file_cache.zig");
+const st = @import("core").safetensors;
+const file_cache = @import("core").checkpoint_file_cache;
 
 pub const DType = st.DType;
 

@@ -2,7 +2,7 @@
 const std = @import("std");
 const p = @import("runtime_plan.zig");
 const model = @import("model.zig");
-const records = @import("../../../core/contract/inkling2_runtime_metal_records.zig").records;
+const records = @import("core").contract.inkling2_runtime_metal_records.records;
 const shader = @import("inkling2_metal").runtime;
 const t = std.testing;
 

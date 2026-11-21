@@ -1,9 +1,9 @@
 //! Host-only proof of Mini's glue formulas, source inventory and shape admission.
 const std = @import("std");
 const p = @import("inkling2_glue_plan");
-const records = @import("../../../core/contract/inkling2_glue_metal_records.zig").records;
+const records = @import("core").contract.inkling2_glue_metal_records.records;
 const shader = @import("inkling2_metal").glue;
-const c = @import("../../../core/contract/contract.zig");
+const c = @import("core").contract.spec;
 const t = std.testing;
 
 fn near(want: f64, got: f64) !void {

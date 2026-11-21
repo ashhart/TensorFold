@@ -1,8 +1,8 @@
 {
   "_fixture_provenance": {
     "release": "thinkingmachines/Inkling-2-Mini",
-    "revision": null,
-    "revision_status": "full commit SHA absent from the supplied published metadata",
+    "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+    "revision_status": "full revision supplied separately; every checkpoint config field matches",
     "published": "2026-11-20",
     "license": "apache-2.0"
   },

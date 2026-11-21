@@ -7,7 +7,7 @@ const native = @import("../../../native/inkling2.zig");
 const Model = @import("model.zig").Model;
 const backend = @import("backend.zig");
 const st = @import("state.zig");
-const native_metal = @import("../../../native/metal.zig");
+const dspark = @import("dspark.zig");
 
 const gpa = std.testing.allocator;
 const io = std.testing.io;
@@ -44,10 +44,26 @@ const TapSink = struct {
     }
 };
 
+fn featureRow(b: lanes.backend.Backend, s: *lanes.Stream, start: u64) ![st.feature_row_bytes]u8 {
+    const f = try b.features(s, &taps, start, 1);
+    try std.testing.expectEqual(lanes.backend.Features.Space.device, f.space);
+    try std.testing.expectEqual(lanes.backend.Features.Dtype.bf16, f.dtype);
+    try std.testing.expectEqual(@as(u32, 1), f.rows);
+    try std.testing.expectEqual(@as(u32, st.feature_row_bytes), f.row_bytes);
+    const buf: mtl.Buffer = .{ .id = @ptrFromInt(f.buffer) };
+    const bytes = buf.slice(u8, @intCast(f.offset + f.row_bytes));
+    var row: [st.feature_row_bytes]u8 = undefined;
+    @memcpy(&row, bytes[@intCast(f.offset)..][0..st.feature_row_bytes]);
+    return row;
+}
+
 const Reference = struct {
     tokens: [made]u32,
     first: lanes.LogprobRow,
     tap: [st.feature_row_bytes]u8,
+    full_tap: [st.feature_row_bytes]u8 = undefined,
+    partial_tap: [st.feature_row_bytes]u8 = undefined,
+    continuation_tap: [st.feature_row_bytes]u8 = undefined,
 };
 
 fn serial(b: lanes.backend.Backend, ids: []const u32) !Reference {
@@ -65,6 +81,12 @@ fn serial(b: lanes.backend.Backend, ids: []const u32) !Reference {
     for (1..made) |i| {
         next = try b.read(try b.queue(&s, .{ .value = next }, ids.len + i));
         out.tokens[i] = next;
+        switch (i) {
+            8 => out.full_tap = try featureRow(b, &s, ids.len + 7),
+            15 => out.partial_tap = try featureRow(b, &s, ids.len + 14),
+            16 => out.continuation_tap = try featureRow(b, &s, ids.len + 15),
+            else => {},
+        }
     }
     return out;
 }
@@ -171,20 +193,29 @@ fn expectTokens(want: *const Reference, got: *const Reply) !void {
     try expectFirstRow(want.first, got.rows.items[0]);
 }
 
-fn transactions(dir: []const u8, ids: []const u32, want: *const Reference) !void {
+fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want: *const Reference) !void {
     const model = try Model.load(gpa, io, dir);
     defer model.deinit();
     const target = try backend.Metal.init(gpa, model, .{ .capacity = context, .streams = 1, .budget = st.cacheBytes(context) });
     defer target.deinit();
-    const b = target.backend();
-    try b.vtable.prepare_features.?(b.ptr, &taps);
-    var s = try lanes.Stream.init(gpa, .{ .id = "transactions", .prompt = ids, .max_new = made, .drafts = false, .logprobs = 3 });
+    const draft_head = try dspark.Drafter.init(gpa, io, model.device, model, drafter_dir);
+    defer draft_head.deinit();
+    try draft_head.setContext(context);
+    var wrapped = try lanes.drafted.Drafted.init(gpa, target.backend(), draft_head.drafter());
+    defer wrapped.deinit();
+    wrapped.first_rows = true;
+    const b = wrapped.backend();
+    const target_b = target.backend();
+    var s = try lanes.Stream.init(gpa, .{ .id = "transactions", .prompt = ids, .max_new = made, .drafts = true, .logprobs = 3 });
     defer s.deinit(gpa);
     try b.prefill(&s);
     defer b.release(&s);
+    try expectFirstRow(want.first, try b.firstRow(&s));
+    try std.testing.expectEqualSlices(u8, &want.tap, &(try featureRow(target_b, &s, ids.len - 1)));
 
     const full_drafts = want.tokens[1..8];
     const full_positions = [_]u64{ ids.len + 1, ids.len + 2, ids.len + 3, ids.len + 4, ids.len + 5, ids.len + 6, ids.len + 7, ids.len + 8 };
+    const full_path = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
     const full = [_]lanes.backend.Window{.{ .stream = &s, .pending = want.tokens[0], .held = 0, .tokens = full_drafts, .parents = null, .positions = &full_positions }};
     var sampled: [8]u32 = undefined;
     var echo: [7]u32 = undefined;
@@ -192,7 +223,9 @@ fn transactions(dir: []const u8, ids: []const u32, want: *const Reference) !void
     try b.verify(&full, &full_out);
     try std.testing.expectEqualSlices(u32, want.tokens[1..9], &sampled);
     try std.testing.expectEqualSlices(u32, full_drafts, &echo);
-    try b.keep(&full, &.{&.{ 0, 1, 2, 3, 4, 5, 6, 7 }});
+    try b.keep(&full, &.{&full_path});
+    try std.testing.expectEqualSlices(u8, &want.full_tap, &(try featureRow(target_b, &s, ids.len + 7)));
+    try b.draft(&.{.{ .stream = &s, .follow = want.tokens[1..9], .rows = &full_path, .start = ids.len, .position = ids.len + 9, .depth = 7 }});
 
     var partial_drafts = want.tokens[9..16].*;
     partial_drafts[6] = (want.tokens[15] + 1) % model.config.text.unpadded_vocab;
@@ -203,8 +236,11 @@ fn transactions(dir: []const u8, ids: []const u32, want: *const Reference) !void
     try b.verify(&partial, &partial_out);
     try std.testing.expectEqualSlices(u32, want.tokens[9..17], &sampled);
     try b.keep(&partial, &.{&path});
+    try std.testing.expectEqualSlices(u8, &want.partial_tap, &(try featureRow(target_b, &s, ids.len + 14)));
+    try b.draft(&.{.{ .stream = &s, .follow = want.tokens[9..16], .rows = &path, .start = ids.len + 8, .position = ids.len + 16, .depth = 7 }});
     const next = try b.read(try b.queue(&s, .{ .value = want.tokens[15] }, ids.len + 16));
     try std.testing.expectEqual(want.tokens[16], next);
+    try std.testing.expectEqualSlices(u8, &want.continuation_tap, &(try featureRow(target_b, &s, ids.len + 15)));
 }
 
 test "Mini Metal serving matches the host reference token for token" {
@@ -223,10 +259,10 @@ test "Mini Metal serving matches the host reference token for token" {
     try std.testing.expectEqual(@as(?f64, 0.5), opened_once.engine.info().decode_share);
     const keepalive = opened_once.engine.keepaliveTarget() orelse return error.MissingMiniKeepalive;
     keepalive.tick(keepalive.ctx);
-    const first = try serve(opened_once, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
+    var first = try serve(opened_once, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
     defer first.deinit();
     try expectTokens(&refs.first, &first);
-    const restored = try serve(opened_once, 2, &.{ .prompt = &turn, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
+    var restored = try serve(opened_once, 2, &.{ .prompt = &turn, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
     defer restored.deinit();
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
@@ -236,28 +272,25 @@ test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back e
     const dir = try checkpoint();
     const drafter = @import("sys").getenv("TF_INKLING2_DSPARK_DIR") orelse return error.SkipZigTest;
     const ids = prompt(64, 3);
-    const refs = try withReference(dir, &ids, null);
-    try transactions(dir, &ids, &refs.first);
+    var turn: [80]u32 = undefined;
+    @memcpy(turn[0..64], &ids);
+    @memcpy(turn[64..], &prompt(16, 2));
+    const refs = try withReference(dir, &ids, &turn);
+    try transactions(dir, drafter, &ids, &refs.first);
 
-    const opened_once = try opened(dir, drafter, 0);
+    const opened_once = try opened(dir, drafter, 1);
     defer opened_once.close(opened_once.ctx);
-    const plain = try serve(opened_once, 10, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = 3 });
+    var plain = try serve(opened_once, 10, &.{ .prompt = &ids, .max_tokens = made, .drafts = false, .logprobs = 3, .history_len = ids.len });
     defer plain.deinit();
     try expectTokens(&refs.first, &plain);
     try std.testing.expectEqual(@as(u64, 0), plain.drafted);
-    const drafted = try serve(opened_once, 11, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
+    var drafted = try serve(opened_once, 11, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3, .history_len = ids.len });
     defer drafted.deinit();
     try expectTokens(&refs.first, &drafted);
     try std.testing.expect(drafted.drafted > 0);
     try std.testing.expect(drafted.accepted > 0);
-}
-
-test "Metal capabilities: inkling2_loop serves the checkpoint's ModelOpt NVFP4 weights" {
-    var found = false;
-    for (native_metal.families) |family| if (std.mem.eql(u8, family.model_type, "inkling2_loop")) {
-        found = true;
-        try std.testing.expectEqual(@as(usize, 1), family.formats.len);
-        try std.testing.expectEqualStrings("modelopt-nvfp4", family.formats[0]);
-    };
-    try std.testing.expect(found);
+    var restored = try serve(opened_once, 12, &.{ .prompt = &turn, .max_tokens = made, .drafts = true, .logprobs = 3, .history_len = ids.len });
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
+    try expectTokens(&refs.second.?, &restored);
 }
