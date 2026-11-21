@@ -1,4 +1,4 @@
-//! Mini's packed NVFP4/MXFP8 expert pipeline on BF16 activations, against a sampled full-width host reference.
+//! Mini's packed NVFP4/MXFP8 expert pipeline on BF16 activations, with bit-exact and float64 references.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -92,9 +92,9 @@ fn mxfp8Weight(code: u8, scale: u8) u16 {
     return c.toBf16(e4m3(code) * ue8m0(scale));
 }
 
-const Fault = enum { none, wrong_combine, wrong_plan, wrong_up, wrong_act };
-
-fn rawSpec(format: mo.Format, fault: Fault) c.Spec {
+const Phase = enum { decode, prompt };
+const Fault = enum { none, wrong_combine, wrong_plan, wrong_up, wrong_prompt_up, wrong_act };
+fn rawSpec(format: mo.Format, phase: Phase, fault: Fault) c.Spec {
     const served = &[_]c.Shape{
         .{ .rows = 1, .n = 2304, .k = 1152 },
         .{ .rows = 16, .n = 2304, .k = 1152 },
@@ -103,32 +103,44 @@ fn rawSpec(format: mo.Format, fault: Fault) c.Spec {
         .{ .rows = 2048, .n = 2304, .k = 1152 },
     };
     const name = switch (fault) {
-        .none => if (format == .nvfp4) "inkling2 Mini NVFP4 w13/w2 tensor-core experts" else "inkling2 Mini MXFP8 w13/w2 tensor-core experts",
+        .none => if (format == .nvfp4)
+            (if (phase == .decode) "inkling2 Mini NVFP4 decode w13/w2 tensor-core experts" else "inkling2 Mini NVFP4 prompt w13/w2 tensor-core experts")
+        else
+            (if (phase == .decode) "inkling2 Mini MXFP8 decode w13/w2 tensor-core experts" else "inkling2 Mini MXFP8 prompt w13/w2 tensor-core experts"),
         .wrong_combine => if (format == .nvfp4) "control: inkling2 Mini NVFP4 int32 route IDs reinterpreted as FP32 weights" else "control: inkling2 Mini MXFP8 int32 route IDs reinterpreted as FP32 weights",
         .wrong_plan => "control: inkling2 Mini MXFP8 plan routes to the next expert IDs",
-        .wrong_up => "control: inkling2 Mini MXFP8 up projection clears the planted up-row code",
+        .wrong_up => "control: inkling2 Mini MXFP8 decode up projection clears the planted up-row code",
+        .wrong_prompt_up => if (format == .nvfp4) "control: inkling2 Mini NVFP4 prompt up projection clears the planted up-row code" else "control: inkling2 Mini MXFP8 prompt up projection clears the planted up-row code",
         .wrong_act => "control: inkling2 Mini MXFP8 activation uses gate cap eight",
     };
+    const shapes = if (fault == .wrong_prompt_up or (fault == .none and phase == .prompt))
+        served[3..]
+    else if (fault == .none)
+        served[0..3]
+    else
+        served[0..2];
     return .{
         .name = name,
-        .accum = .none,
-        .depth = noSums,
-        .out = .raw,
+        .accum = .f32,
+        .depth = depth,
+        .ops = 8,
+        .mids = 4,
+        .out = .bf16,
         .replaces = "host-dequantized BF16 tensor projections, softcapped SwiGLU, ascending FP32 routing",
         .nan = .{ .stated = "a non-finite BF16 input row propagates through its selected experts" },
         .tiles = .{ .{ .size = 16 }, .{ .size = 32 }, .{ .size = 32 } },
-        .served = if (fault == .none) served else served[0..2],
+        .served = shapes,
+        .sums = .{ .f16 = 30, .bf16 = 30 },
     };
 }
-
-fn noSums(_: c.Shape) usize {
-    return 0;
+fn depth(s: c.Shape) usize {
+    return s.n + s.k + 2 * core.attention_range.mma_step + slots;
 }
-
 pub const ModelOpt = struct {
     rig: rig_.Rig,
     k: *const mo.Kernels,
     format: mo.Format,
+    phase: Phase,
     shape: c.Shape = undefined,
     fault: Fault = .none,
     arena: ?std.heap.ArenaAllocator = null,
@@ -140,6 +152,7 @@ pub const ModelOpt = struct {
     pick: u64 = 0,
     weights: u64 = 0,
     out: u64 = 0,
+    stress: bool = false,
     scratch: u64 = 0,
     base_pick: u64 = 0,
     base_w13: u64 = 0,
@@ -151,10 +164,9 @@ pub const ModelOpt = struct {
     base_down: u64 = 0,
     base_out: u64 = 0,
     baseline: ?Baseline = null,
-    msg: [200]u8 = undefined,
 
     pub fn kernel(self: *ModelOpt) g.Kernel {
-        return .{ .spec = rawSpec(self.format, self.fault), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
+        return .{ .spec = rawSpec(self.format, self.phase, self.fault), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
     }
 
     const vt = g.hooks(ModelOpt);
@@ -175,19 +187,36 @@ pub const ModelOpt = struct {
         self.rig.reset();
     }
 
-    fn projectionRef(a: std.mem.Allocator, format: mo.Format, nexperts: usize, n: usize, k: usize, gate_up: bool) !struct { codes: []u8, scales: []u8, amax: []f32, den: [1]f32, ref: []u16 } {
+    fn projectionRef(a: std.mem.Allocator, format: mo.Format, nexperts: usize, n: usize, k: usize, gate_up: bool, fill: g.Fill) !struct { codes: []u8, scales: []u8, amax: []f32, den: [1]f32, ref: []u16 } {
         const values = nexperts * n * k;
         const raw = try a.alloc(u8, if (format == .nvfp4) values / 2 else values);
         const ref = try a.alloc(u16, values);
         const group: usize = if (format == .nvfp4) 16 else 32;
         const scales = try a.alloc(u8, values / group);
         const amax = try a.alloc(f32, if (format == .nvfp4) nexperts else 0);
-        if (format == .nvfp4) @memset(amax, test_amax);
+        if (format == .nvfp4) @memset(amax, if (fill == .stress) bf(test_den) else test_amax);
         const codes = [16]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
         const fp8 = [16]u8{ 0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x80, 0x88, 0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8 };
         const nv_scales = [4]u8{ 0x38, 0x30, 0x40, 0x34 };
         // General controls stay finite; the dedicated scale-255 test covers +inf without masking faults as shared NaNs.
         const mx_scales = [4]u8{ 127, 128, 126, 129 };
+        if (fill == .stress) {
+            for (0..nexperts) |e| for (0..n) |row| {
+                const base = (e * n + row) * k;
+                const scale_base = (e * n + row) * (k / group);
+                @memset(scales[scale_base..][0 .. k / group], if (format == .nvfp4) 0x38 else 127);
+                for (0..k) |col| {
+                    // Mirrored +/-1 terms cancel to small integers; eight up rows retain a down-projection nudge.
+                    const zero = gate_up and (row & 1) == 1 and row / 2 < 8 and col == k / 2 + 8;
+                    const code: u8 = if (zero) 0 else if (format == .nvfp4) (if (col < k / 2) 2 else 10) else (if (col < k / 2) 0x38 else 0xb8);
+                    if (format == .nvfp4) {
+                        if ((col & 1) == 0) raw[base / 2 + col / 2] = code else raw[base / 2 + col / 2] |= code << 4;
+                    } else raw[base + col] = code;
+                    ref[base + col] = c.toBf16(if (zero) 0 else if (col < k / 2) 1 else -1);
+                }
+            };
+            return .{ .codes = raw, .scales = scales, .amax = amax, .den = .{test_den}, .ref = ref };
+        }
         for (0..nexperts) |e| for (0..n) |row| {
             const base = (e * n + row) * k;
             const scale_base = (e * n + row) * (k / group);
@@ -220,9 +249,11 @@ pub const ModelOpt = struct {
 
     pub fn prepare(self: *ModelOpt, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         _ = seed;
+        if (self.phase == .prompt and shape.rows < 32 and fill != .stress) return false;
         if (shape.n != 2304 or shape.k != 1152 or shape.rows == 0 or shape.rows > 2048) return false;
         self.drop();
         self.shape = shape;
+        self.stress = fill == .stress;
         self.arena = std.heap.ArenaAllocator.init(self.rig.gpu.gpa);
         const a = self.arena.?.allocator();
         const h = shape.n;
@@ -236,13 +267,17 @@ pub const ModelOpt = struct {
         @memset(x[0..h], 0);
         x[0] = c.toBf16(1); // One gate/up activation and one down product make token zero a decode probe.
         if (fill == .nonfinite) x[0] = 0x7fc0;
+        if (fill == .stress) for (0..shape.rows) |row| for (0..h) |col| {
+            const v: f32 = 4 * @as(f32, @floatFromInt(1 + col % 64));
+            x[row * h + col] = c.toBf16(v + (if (col >= h / 2 and col < h / 2 + 8) 4 else 0));
+        };
         self.x = x;
-        const p13 = try projectionRef(a, self.format, experts, 2 * m, h, true);
-        const p2 = try projectionRef(a, self.format, experts, h, m, false);
+        const p13 = try projectionRef(a, self.format, experts, 2 * m, h, true, fill);
+        const p2 = try projectionRef(a, self.format, experts, h, m, false, fill);
         self.w13 = p13.ref;
         self.w2 = p2.ref;
         self.dev_x = try self.rig.input(std.mem.sliceAsBytes(x));
-        const dev13 = if (self.fault == .wrong_up) blk: {
+        const dev13 = if (self.fault == .wrong_up or self.fault == .wrong_prompt_up) blk: {
             const wrong = try a.dupe(u8, p13.codes);
             for (0..experts) |e| {
                 const code_stride: usize = if (self.format == .nvfp4) 2 else 1;
@@ -299,6 +334,7 @@ pub const ModelOpt = struct {
     pub fn run(self: *ModelOpt) !void {
         const route_weights = if (self.fault == .wrong_combine) self.pick else self.weights;
         const caps = if (self.fault == .wrong_act) ink.experts.Caps{ .gate = 8, .up = 25 } else ink.experts.Caps{ .gate = 4, .up = 25 };
+        if (self.stress and self.phase == .prompt and self.shape.rows < 32) return self.runPrompt(caps);
         try mo.run(self.k, self.rig.s, self.l, caps, self.dev_x, self.shape.n, self.pick, route_weights, self.shape.rows, slots, self.out, self.scratch);
     }
 
@@ -369,65 +405,166 @@ pub const ModelOpt = struct {
         ca.add(CombineArgs{ .experts = self.base_down, .pick = self.base_pick, .weights = self.weights, .out = self.base_out, .rows = @intCast(self.shape.rows), .h = @intCast(h), .slots = slots });
         const outputs = self.shape.rows * h;
         try cuda.launch.launch(b.combine, .{ .grid = .{ .x = @intCast((outputs + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, self.rig.s, &ca);
-        return self.rig.bytes(self.base_out, self.count());
+        return self.rig.bytes(self.base_out, 2 * self.count());
     }
 
-    fn dot(x: []const u16, w: []const u16) f32 {
-        var sum: f32 = 0;
-        for (x, w) |xv, wv| sum += c.fromBf16(xv) * c.fromBf16(wv);
-        return sum;
+    fn promptProjection(self: *ModelOpt, x: u64, stride: usize, pair_slots: usize, p: mo.Projection, row0: i32, step: i32, plan: mo.Layout, out: u64, bound: usize) !void {
+        const outputs: usize = @intCast(if (step == 2) p.n / 2 else p.n);
+        var a: cuda.Args = .{};
+        a.add(x);
+        a.add(@as(i32, @intCast(stride)));
+        a.add(@as(i32, @intCast(pair_slots)));
+        a.add(p.codes);
+        a.add(p.scales);
+        a.add(p.amax);
+        a.add(p.denominator);
+        a.add(@as(i64, experts));
+        a.add(@as(i64, p.n));
+        a.add(@as(i64, p.k));
+        a.add(@as(i32, if (self.format == .nvfp4) 16 else 32));
+        a.add(@as(i32, @backingInt(self.format)));
+        a.add(row0);
+        a.add(step);
+        a.add(@as(i32, @intCast(p.k / 32)));
+        a.add(@as(i32, @intCast(outputs / 32)));
+        for ([_]u64{ plan.items, plan.item_count, plan.members, out }) |v| a.add(v);
+        a.add(@as(i32, @intCast(outputs)));
+        a.add(@as(i32, -1));
+        const grid = (bound * outputs / 32 + 3) / 4;
+        try cuda.launch.launch(self.k.prompt, .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 } }, self.rig.s, &a);
     }
 
-    fn one(self: *const ModelOpt, a: std.mem.Allocator, token: usize, col: usize) !f32 {
-        const h = self.shape.n;
-        const m = self.shape.k;
-        const x = self.x[token * h ..][0..h];
-        const act = try a.alloc(u16, m);
-        defer a.free(act);
-        var total: f32 = 0;
-        for (0..experts) |e| {
-            for (0..slots) |slot| {
-                if (route(slot) != e) continue;
-                for (0..m) |j| {
-                    const x13 = self.w13[e * 2 * m * h ..];
-                    const gate = bf(dot(x, x13[(2 * j) * h ..][0..h]));
-                    const up = bf(dot(x, x13[(2 * j + 1) * h ..][0..h]));
-                    const gc = 4 * @as(f32, @floatCast(std.math.tanh(gate / 4)));
-                    const uc = 25 * @as(f32, @floatCast(std.math.tanh(up / 25)));
-                    const sigmoid: f32 = 1 / (1 + @exp(-gate));
-                    act[j] = c.toBf16(gc * sigmoid * uc);
-                }
-                const x2 = self.w2[e * h * m + col * m ..][0..m];
-                total += routeWeight(token, slot) * bf(dot(act, x2));
-            }
-        }
-        return bf(total);
-    }
-
-    pub fn check(self: *ModelOpt, _: g.Gate) !?[]const u8 {
-        const a = self.rig.gpu.gpa;
-        const samples = [2][2]usize{ .{ 0, 0 }, .{ self.shape.rows - 1, self.shape.n - 1 } };
-        for (samples) |at| {
-            const got_bytes = try self.rig.bytes(self.out + 2 * (at[0] * self.shape.n + at[1]), 2);
-            const got = c.fromBf16(std.mem.readInt(u16, got_bytes[0..2], .little));
-            const want = try self.one(a, at[0], at[1]);
-            if (got == want or (std.math.isNan(want) and std.math.isNan(got))) continue;
-            // The token-zero one-product probe separates A2's roughly 1.4% error from reduction noise.
-            const tolerance = if (at[0] == 0) @abs(want) * 0.001 else @max(@as(f32, 0.02), @abs(want) * 0.02);
-            if (!std.math.isFinite(got) or @abs(got - want) > tolerance) {
-                return try std.fmt.bufPrint(&self.msg, "row {d} col {d}: got {d}, full-width host reference {d} (allowance {d})", .{ at[0], at[1], got, want, tolerance });
-            }
-        }
-        return null;
+    fn runPrompt(self: *ModelOpt, caps: ink.experts.Caps) !void {
+        const pairs = self.shape.rows * slots;
+        const b = mo.layout(self.scratch, self.shape.rows, slots, self.shape.n, self.shape.k);
+        const bound = (pairs + 63) / 64 + @min(pairs, experts);
+        var plan_args: cuda.Args = .{};
+        for ([_]u64{ self.pick, b.items, b.members, b.item_count }) |v| plan_args.add(v);
+        for ([_]i32{ @intCast(self.shape.rows), slots, experts, 64 }) |v| plan_args.add(v);
+        try cuda.launch.launch(self.k.plan, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 32 } }, self.rig.s, &plan_args);
+        try self.promptProjection(self.dev_x, self.shape.n, slots, self.l.w13, 0, 2, b, b.gate, bound);
+        try self.promptProjection(self.dev_x, self.shape.n, slots, self.l.w13, 1, 2, b, b.up, bound);
+        var aa: cuda.Args = .{};
+        for ([_]u64{ b.gate, b.up, b.act }) |v| aa.add(v);
+        aa.add(@as(i32, @intCast(pairs * self.shape.k)));
+        aa.add(caps.gate);
+        aa.add(caps.up);
+        try cuda.launch.launch(self.k.act, .{ .grid = .{ .x = @intCast((pairs * self.shape.k + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, self.rig.s, &aa);
+        try self.promptProjection(b.act, self.shape.k, 0, self.l.w2, 0, 1, b, b.down, bound);
+        var ca: cuda.Args = .{};
+        for ([_]u64{ self.pick, self.weights, b.down, self.out }) |v| ca.add(v);
+        for ([_]i32{ @intCast(self.shape.rows), @intCast(self.shape.n), slots, experts }) |v| ca.add(v);
+        const output_count = self.shape.rows * self.shape.n;
+        try cuda.launch.launch(self.k.combine, .{ .grid = .{ .x = @intCast((output_count + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, self.rig.s, &ca);
     }
 
     pub fn count(self: *const ModelOpt) usize {
-        return self.shape.rows * self.shape.n * 2;
+        return self.shape.rows * self.shape.n;
     }
 
-    pub fn reference(_: *ModelOpt, want: []f64, mag: []f64) !void {
-        @memset(want, 0);
-        @memset(mag, 0);
+    fn roundTo(acc: c.Accum, v: f64) f64 {
+        return switch (acc) {
+            .f32 => @as(f32, @floatCast(v)),
+            .f16 => @as(f16, @floatCast(v)),
+            .bf16 => c.fromBf16(c.toBf16(@floatCast(v))),
+            .none => v,
+        };
+    }
+    fn rounded(v: f64) f64 {
+        return c.fromBf16(c.toBf16(@floatCast(v)));
+    }
+    fn activate(gate: f64, up: f64) f64 {
+        const gate_f32: f32 = @floatCast(gate);
+        const up_f32: f32 = @floatCast(up);
+        const gc = 4 * @as(f32, @floatCast(std.math.tanh(gate_f32 / 4)));
+        const uc = 25 * @as(f32, @floatCast(std.math.tanh(up_f32 / 25)));
+        const sigmoid: f32 = 1 / (1 + @exp(-gate_f32));
+        return rounded(gc * sigmoid * uc);
+    }
+
+    fn evaluate(self: *const ModelOpt, acc: c.Accum, order: g.Order, out: []f64, mag: ?[]f64) !void {
+        const a = self.rig.gpu.gpa;
+        const pairs = self.shape.rows * slots;
+        const h = self.shape.n;
+        const m = self.shape.k;
+        const t = try a.alloc(f64, h);
+        defer a.free(t);
+        const act = try a.alloc(f64, pairs * m);
+        defer a.free(act);
+        const upstream = try a.alloc(f64, pairs * m);
+        defer a.free(upstream);
+        const down = try a.alloc(f64, pairs * h);
+        defer a.free(down);
+        const down_mag = try a.alloc(f64, pairs * h);
+        defer a.free(down_mag);
+        for (0..if (self.stress) 1 else pairs) |p| {
+            const token = p / slots;
+            const e = route(p % slots);
+            const x = self.x[token * h ..][0..h];
+            const w = self.w13[e * 2 * m * h ..];
+            for (0..m) |j| {
+                var gabs: f64 = 0;
+                var uabs: f64 = 0;
+                for (0..h) |i| {
+                    const xv = c.fromBf16(x[i]);
+                    t[i] = xv * c.fromBf16(w[(2 * j) * h + i]);
+                    gabs += @abs(t[i]);
+                }
+                const gate = rounded(core.contract.rows.sumIn(acc, order, t));
+                for (0..h) |i| {
+                    t[i] = c.fromBf16(x[i]) * c.fromBf16(w[(2 * j + 1) * h + i]);
+                    uabs += @abs(t[i]);
+                }
+                const up = rounded(core.contract.rows.sumIn(acc, order, t));
+                act[p * m + j] = activate(gate, up);
+                upstream[p * m + j] = 32 * gabs + 8 * uabs;
+            }
+        }
+        if (self.stress) for (1..pairs) |p| {
+            @memcpy(act[p * m ..][0..m], act[0..m]);
+            @memcpy(upstream[p * m ..][0..m], upstream[0..m]);
+        };
+        for (0..if (self.stress) 1 else pairs) |p| for (0..if (self.stress) 1 else h) |col| {
+            const w = self.w2[route(p % slots) * h * m + col * m ..][0..m];
+            var abs: f64 = 0;
+            for (0..m) |j| {
+                t[j] = act[p * m + j] * c.fromBf16(w[j]);
+                abs += @abs(t[j]) + @abs(c.fromBf16(w[j])) * upstream[p * m + j];
+            }
+            down[p * h + col] = rounded(core.contract.rows.sumIn(acc, order, t[0..m]));
+            down_mag[p * h + col] = abs;
+        };
+        if (self.stress) {
+            @memset(down, down[0]);
+            @memset(down_mag, down_mag[0]);
+        }
+        for (0..self.shape.rows) |token| for (0..h) |col| {
+            var total: f64 = 0;
+            var abs: f64 = 0;
+            for (0..experts) |e| for (0..slots) |slot| {
+                if (route(slot) != e) continue;
+                const p = token * slots + slot;
+                const weight = routeWeight(token, slot);
+                total = roundTo(acc, total + roundTo(acc, weight * down[p * h + col]));
+                abs += @abs(weight) * down_mag[p * h + col];
+            };
+            out[token * h + col] = rounded(total);
+            if (mag) |v| v[token * h + col] = abs;
+        };
+    }
+
+    pub fn reference(self: *ModelOpt, want: []f64, mag: []f64) !void {
+        if (self.x[0] == 0x7fc0) {
+            @memset(want, 0);
+            @memset(mag, 0);
+            @memset(want[0..self.shape.n], std.math.nan(f64));
+            return;
+        }
+        return self.evaluate(.none, .sequential, want, mag);
+    }
+
+    pub fn simulate(self: *ModelOpt, acc: c.Accum, order: g.Order, out: []f64) !void {
+        return self.evaluate(acc, order, out, null);
     }
 };
 
