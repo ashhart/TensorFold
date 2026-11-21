@@ -79,8 +79,8 @@ pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Arr
         n = try std.math.add(usize, n, rows);
     }
     if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices, gn);
+    if (group == 64 and (bits == 4 or bits == 5 or bits == 6)) slices = key.m5 orelse slices;
     if (bits != 4 or group != 64) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices, gn);
-    slices = key.m5 orelse slices;
     const w = try device.buffer(n * k / 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(allocator, w) catch |err| {
         w.deinit();

@@ -7,6 +7,10 @@ pub const m5 = [_]Reg{
     .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .sk = 2 }, .name = "metal lane projection q4 g64 sk2" },
     .{ .v = .{ .kind = .lane, .bits = 4, .group = 64, .coop = true }, .name = "metal lane projection q4 g64 cooperative" },
     .{ .v = .{ .kind = .lane_reg, .bits = 4, .group = 64 }, .name = "metal lane projection q4 g64 reg" },
+    .{ .v = .{ .kind = .lane_reg, .bits = 5, .group = 64 }, .name = "metal lane projection q5 g64 reg" },
+    .{ .v = .{ .kind = .lane_reg, .bits = 5, .group = 64, .control = true }, .name = "control: metal lane projection q5 g64 reg, unreordered tiles" },
+    .{ .v = .{ .kind = .lane_reg, .bits = 6, .group = 64 }, .name = "metal lane projection q6 g64 reg" },
+    .{ .v = .{ .kind = .lane_reg, .bits = 6, .group = 64, .control = true }, .name = "control: metal lane projection q6 g64 reg, unreordered tiles" },
     .{ .v = .{ .kind = .lane, .bits = 8, .group = 128, .sk = 4 }, .name = "metal lane projection q8 g128 sk4" },
 } ++ q8 ++ hy4;
 
