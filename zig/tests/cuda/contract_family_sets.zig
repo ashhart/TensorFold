@@ -100,9 +100,9 @@ pub const Sets = struct {
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
         sets.idol.deinit();
-        sets.glm_moe.deinit();
         sets.joint_schema.deinit();
         sets.muse.destroy(sets.a);
         sets.prompt.deinit();
