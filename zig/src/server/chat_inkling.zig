@@ -34,7 +34,7 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Erro
         .content = g.stops.visible(r.content, !finished),
         .reasoning = g.stops.visible(r.reasoning, !finished),
         .calls = calls,
-        .reasoning_tokens = 0,
+        .reasoning_tokens = split.thinkingTokens(g.srv.text, ids),
     };
 }
 

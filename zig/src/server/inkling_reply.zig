@@ -87,6 +87,23 @@ pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool) !Reply {
     return out;
 }
 
+/// How many of `ids` lie inside thinking blocks, reading the markers' token ids as `split` reads their text.
+pub fn thinkingTokens(text: anytype, ids: []const u32) usize {
+    const all = comptime std.enums.values(Marker);
+    var marker_ids: [all.len]u32 = undefined;
+    inline for (all, 0..) |m, k| marker_ids[k] = text.tokenId(@field(markers, @tagName(m))) orelse std.math.maxInt(u32);
+    var state: State = .header;
+    var n: usize = 0;
+    for (ids) |id| {
+        if (std.mem.indexOfScalar(u32, &marker_ids, id)) |k| if (next(state, all[k])) |to| {
+            state = to;
+            continue;
+        };
+        if (state == .reasoning) n += 1;
+    }
+    return n;
+}
+
 /// A finished tool block: `{"name": ..., "args": {...}}`; the arguments are the args member as written, or {}.
 fn call(a: std.mem.Allocator, payload: []const u8) !Call {
     var doc = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch return .{ .name = "", .arguments = "{}" };
@@ -183,4 +200,15 @@ test "inkling2 reply: a stream holds back a header until its block says what it 
     try t.expectEqualStrings("", named.content);
     try t.expectEqualStrings("run_shell_command", named.calls[0].name);
     try t.expectEqualStrings("Hi", (try split(a, "<|message_model|>Hi", true)).content);
+}
+
+test "inkling2 reply: thinking tokens are the ids inside thinking blocks" {
+    const Ids = struct {
+        fn tokenId(_: @This(), piece: []const u8) ?u32 {
+            for ([_][]const u8{ markers.model, markers.thinking, markers.end }, 1..) |m, id| if (std.mem.eql(u8, m, piece)) return @intCast(id);
+            return null;
+        }
+    };
+    try t.expectEqual(@as(usize, 3), thinkingTokens(Ids{}, &.{ 1, 2, 70, 71, 72, 3, 1, 80 }));
+    try t.expectEqual(@as(usize, 0), thinkingTokens(Ids{}, &.{ 1, 80, 81 }));
 }
