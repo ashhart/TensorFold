@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ling-3.1-flash on CUDA: `bailing_moe_v3` EXL3 packs serve on one GB10 or across two at TP=2, within the model's native 262,144-token window, with copy drafts from the prompt and kept prompt states; setups not tested, including longer contexts, are refused by name (#2340, refs #850). Thanks to @ajensenwaud.
+
 - Tests: the idle-unload host tests wait on the ticker's event and the manager's condition instead of a 2-second real-clock bound, so a loaded CI host no longer fails them (#4352).
 
 - Tests: three host tests (Qwen3.5 CUDA kept-state read-back, the grammar compile deadline, the chats resume store) wait on events instead of real-clock bounds, so a loaded CI host no longer fails them (#4358).
