@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: SenseNova-Loop-9B is served natively through the qwen27 lane backend in BF16 and AWQ 4-bit (group size 128), with its looped 56-step schedule, two-stream mHC, 512K YaRN context and vision (#3859, refs #3781). Thanks to @gilby.
+
 - Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states, so it drafts beside an oQ checkpoint of any width, and a head at a width the launches do not read is refused by name (#3251, part of #3061). Thanks to @gilby.
 
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
