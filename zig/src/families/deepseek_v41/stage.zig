@@ -24,12 +24,12 @@ pub fn group(gpa: std.mem.Allocator, io: Io, pack: *const Pack, g: plan.GroupPla
     var out: GroupImage = .{ .trellis = &.{}, .suh = &.{}, .svh = &.{} };
     errdefer out.deinit(gpa);
     var buf: [256]u8 = undefined;
-    out.trellis = try gpa.alloc(u8, @intCast(g.part.trellis.bytes()));
-    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.trellis", .{g.prefix})), g.part.trellis, out.trellis);
-    out.suh = try gpa.alloc(u8, @intCast(g.part.suh.bytes()));
-    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.suh", .{g.prefix})), g.part.suh, out.suh);
-    out.svh = try gpa.alloc(u8, @intCast(g.part.svh.bytes()));
-    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.svh", .{g.prefix})), g.part.svh, out.svh);
+    out.trellis = try gpa.alloc(u8, @intCast(g.form.exl3.part.trellis.bytes()));
+    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.trellis", .{g.prefix})), g.form.exl3.part.trellis, out.trellis);
+    out.suh = try gpa.alloc(u8, @intCast(g.form.exl3.part.suh.bytes()));
+    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.suh", .{g.prefix})), g.form.exl3.part.suh, out.suh);
+    out.svh = try gpa.alloc(u8, @intCast(g.form.exl3.part.svh.bytes()));
+    try pack.read(io, try pack.need(try std.fmt.bufPrint(&buf, "{s}.svh", .{g.prefix})), g.form.exl3.part.svh, out.svh);
     return out;
 }
 
@@ -54,19 +54,19 @@ pub const ExpertsImage = struct {
 };
 
 pub fn experts(gpa: std.mem.Allocator, io: Io, pack: *const Pack, x: *const plan.ExpertsPlan) !ExpertsImage {
-    const n = x.layout.count();
-    const kpart = 2 * @as(u64, x.layout.k_tiles) * 16;
-    const npart = 2 * @as(u64, x.layout.n_tiles) * 16;
+    const n = x.form.exl3.layout.count();
+    const kpart = 2 * @as(u64, x.form.exl3.layout.k_tiles) * 16;
+    const npart = 2 * @as(u64, x.form.exl3.layout.n_tiles) * 16;
     var out: ExpertsImage = .{ .trellis = &.{}, .suh = &.{}, .svh = &.{}, .k2 = &.{}, .offsets = &.{} };
     errdefer out.deinit(gpa);
-    out.trellis = try gpa.alignedAlloc(u8, .@"16", @intCast(x.layout.trellisBytes()));
+    out.trellis = try gpa.alignedAlloc(u8, .@"16", @intCast(x.form.exl3.layout.trellisBytes()));
     out.suh = try gpa.alloc(u8, @intCast(n * kpart));
     out.svh = try gpa.alloc(u8, @intCast(n * npart));
     out.k2 = try gpa.alloc(i32, n);
     out.offsets = try gpa.alloc(u64, n);
     var buf: [256]u8 = undefined;
-    for (x.parts, x.prefixes, 0..) |p, pre, e| {
-        const at = x.layout.byteOffset(e);
+    for (x.form.exl3.parts, x.form.exl3.prefixes, 0..) |p, pre, e| {
+        const at = x.form.exl3.layout.byteOffset(e);
         out.offsets[e] = at;
         out.k2[e] = @intCast(p.group.k2());
         const t = out.trellis[@intCast(at)..][0..@intCast(p.trellis.bytes())];
@@ -125,7 +125,7 @@ test "staged images: a column part's runs, ragged experts back to back, stacked 
         prefixes[e] = try std.fmt.bufPrint(&nb[e], "layers.0.ffn.experts.{d}.w1", .{e});
         parts[e] = try (try pack.group(prefixes[e], &buf)).part(.col, 1, 2);
     }
-    const x: plan.ExpertsPlan = .{ .proj = .w1, .parts = &parts, .prefixes = &prefixes, .layout = try exl3.Layout.of(arena.allocator(), &parts) };
+    const x: plan.ExpertsPlan = .{ .proj = .w1, .form = .{ .exl3 = .{ .parts = &parts, .prefixes = &prefixes, .layout = try exl3.Layout.of(arena.allocator(), &parts) } } };
     var img = try experts(a, io, &pack, &x);
     defer img.deinit(a);
     try testing.expectEqualSlices(i32, &.{ 4, 6, 4 }, img.k2);
@@ -141,7 +141,7 @@ test "staged images: a column part's runs, ragged experts back to back, stacked 
     try testing.expectEqual(@as(u8, 128), img.svh[256 + 0]);
     try testing.expectEqual(@as(usize, 3 * 256), img.svh.len);
     var buf: [128]u8 = undefined;
-    const gp: plan.GroupPlan = .{ .proj = .wq_a, .prefix = prefixes[1], .split = .row, .full = try pack.group(prefixes[1], &buf), .part = try (try pack.group(prefixes[1], &buf)).part(.whole, 0, 2), .marker = null };
+    const gp: plan.GroupPlan = .{ .proj = .wq_a, .prefix = prefixes[1], .split = .row, .form = .{ .exl3 = .{ .full = try pack.group(prefixes[1], &buf), .part = try (try pack.group(prefixes[1], &buf)).part(.whole, 0, 2), .marker = null } } };
     var gi = try group(a, io, &pack, gp);
     defer gi.deinit(a);
     try testing.expectEqual(@as(u8, 64 + 16 + 15), gi.trellis[(16 + 15) * 96]);

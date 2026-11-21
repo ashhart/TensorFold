@@ -67,7 +67,7 @@ fn buildArena(a: std.mem.Allocator, s: *const Source, role: []const u8) !?[]cons
     const lp = for (s.plan.layers) |*l| {
         if (l.index == L) break l;
     } else return error.LayerNotPlanned;
-    const lay = &lp.experts[proj].layout;
+    const lay = &lp.experts[proj].form.exl3.layout;
     const E = lay.words.len;
     const shared = try std.fmt.allocPrint(a, "{s}.moe.shared.0.{s}", .{ layer, w });
     if (std.mem.startsWith(u8, what, "k2")) {

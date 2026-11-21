@@ -3,12 +3,31 @@ const exl3 = @import("core").exl3_layout;
 
 pub const Share = struct { lo: u32, len: u32 };
 
+/// A rank's whole 128-column blocks of `width`, the remainder to the low ranks.
 pub fn share(width: u32, rank: usize, world: usize) !Share {
-    if (world == 0 or rank >= world or width % 128 != 0 or width / 128 < world) return error.SplitNotOnBlocks;
-    const blocks: usize = width / 128;
+    return shareOn(width, 128, rank, world);
+}
+
+/// A rank's whole `unit`-column blocks of `width`, the remainder to the low ranks.
+pub fn shareOn(width: u32, unit: u32, rank: usize, world: usize) !Share {
+    if (world == 0 or unit == 0 or rank >= world or width % unit != 0 or width / unit < world) return error.SplitNotOnBlocks;
+    const blocks: usize = width / unit;
     const base = blocks / world;
     const extra = blocks % world;
-    return .{ .lo = @intCast((rank * base + @min(rank, extra)) * 128), .len = @intCast((base + @intFromBool(rank < extra)) * 128) };
+    return .{ .lo = @intCast((rank * base + @min(rank, extra)) * unit), .len = @intCast((base + @intFromBool(rank < extra)) * unit) };
+}
+
+/// The expert-width block a format's kernels split on: EXL3 tiles are 128 wide, the release's MMA blocks 64.
+pub fn expertUnit(format: @import("config.zig").Format) u32 {
+    return switch (format) {
+        .exl3 => 128,
+        .release_fp8 => 64,
+    };
+}
+
+/// A rank's share of the routed and shared experts' width for the checkpoint's format.
+pub fn expertShare(c: *const @import("config.zig").Config, rank: usize, world: usize) !Share {
+    return shareOn(c.expert_width, expertUnit(c.format), rank, world);
 }
 
 /// A rank's whole output groups by canon's rule: heads, `wq_b` columns and `wo_b` rows all follow them.
