@@ -11,7 +11,8 @@ const repackQ6KInto = repack8.repackQ6KInto;
 
 pub const Cache = struct {
     const magic = "TFRP8V05";
-    const Header = extern struct {
+    pub const file_suffix = ".tf_repack8.v5";
+    pub const Header = extern struct {
         magic: [8]u8,
         source_size: u64,
         source_inode: u64,
@@ -19,10 +20,18 @@ pub const Cache = struct {
         source_mtime: i128,
         source_ctime: i128,
         source_hash: [32]u8,
+        payload_hash: [32]u8,
         entry_count: u64,
         data_offset: u64,
         total_bytes: u64,
-        reserved: [24]u8 = @splat(0),
+        reserved: [8]u8 = @splat(0),
+    };
+    comptime {
+        std.debug.assert(@sizeOf(Header) == 160);
+    }
+    pub const OpenOutcome = struct {
+        cache: Cache,
+        hit: bool,
     };
     pub const Entry = extern struct {
         src_offset: u64,
@@ -69,11 +78,17 @@ pub const Cache = struct {
         return digest;
     }
 
+    fn payloadHash(bytes: []const u8) [32]u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        return digest;
+    }
+
     fn alignUp16(v: u64) u64 {
         return (v + 15) & ~@as(u64, 15);
     }
 
-    fn tryOpenExisting(io: std.Io, cache_path: []const u8, identity: SourceIdentity) ?Cache {
+    fn tryOpenExisting(io: std.Io, cache_path: []const u8, identity: SourceIdentity, source_hash: [32]u8) ?Cache {
         const file = std.Io.Dir.cwd().openFile(io, cache_path, .{}) catch return null;
         var keep = false;
         defer if (!keep) file.close(io);
@@ -84,40 +99,50 @@ pub const Cache = struct {
         const hdr: *align(1) const Header = @ptrCast(map.memory.ptr);
         if (!std.mem.eql(u8, &hdr.magic, magic)) return null;
         if (!identity.matches(hdr) or hdr.total_bytes != len) return null;
+        if (!std.mem.eql(u8, &hdr.source_hash, &source_hash)) return null;
         const table_bytes = std.math.mul(u64, hdr.entry_count, @sizeOf(Entry)) catch return null;
         const table_end = std.math.add(u64, @sizeOf(Header), table_bytes) catch return null;
         if (hdr.data_offset < table_end or hdr.data_offset > len or (hdr.data_offset & 15) != 0) return null;
         const entries: []const Entry = @as([*]const Entry, @ptrCast(@alignCast(map.memory.ptr + @sizeOf(Header))))[0..@intCast(hdr.entry_count)];
         var prev_src: u64 = 0;
+        var prev_dst_end: u64 = hdr.data_offset;
         for (entries, 0..) |e, i| {
             if (i > 0 and e.src_offset <= prev_src) return null;
             prev_src = e.src_offset;
-            if ((e.dst_offset & 15) != 0 or e.dst_offset < hdr.data_offset or e.dst_offset > len or e.dst_len > len - e.dst_offset) return null;
+            if (e.groups == 0 or e.blocks_per_row == 0) return null;
+            if (e.src_offset > identity.size or e.src_len > identity.size - e.src_offset) return null;
+            if ((e.dst_offset & 15) != 0 or e.dst_offset < prev_dst_end or e.dst_offset > len or e.dst_len > len - e.dst_offset) return null;
             const elem_size: u64 = if (e.kind == @backingInt(g.TensorKind.q4_k)) @sizeOf(BlockQ4Kx8) else if (e.kind == @backingInt(g.TensorKind.q6_k)) @sizeOf(BlockQ6Kx8) else return null;
             const expected_len = std.math.mul(u64, std.math.mul(u64, e.groups, e.blocks_per_row) catch return null, elem_size) catch return null;
             if (e.dst_len != expected_len) return null;
+            prev_dst_end = e.dst_offset + e.dst_len;
         }
+        const actual_payload = payloadHash(map.memory[@sizeOf(Header)..len]);
+        if (!std.mem.eql(u8, &hdr.payload_hash, &actual_payload)) return null;
         keep = true;
         return .{ .file = file, .map = map, .entries = entries };
     }
 
     pub fn openOrBuild(a: std.mem.Allocator, io: std.Io, model_path: []const u8, source: *const g.File) !Cache {
+        return (try openOrBuildChecked(a, io, model_path, source)).cache;
+    }
+
+    pub fn openOrBuildChecked(a: std.mem.Allocator, io: std.Io, model_path: []const u8, source: *const g.File) !OpenOutcome {
         const src_mem = source.map.memory;
         const identity = try SourceIdentity.read(io, source);
-        const cache_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v5", .{model_path});
+        const source_hash = contentHash(src_mem);
+        if (!std.meta.eql(identity, try SourceIdentity.read(io, source))) return error.GgufFileChanged;
+        const cache_path = try std.fmt.allocPrint(a, "{s}" ++ file_suffix, .{model_path});
         defer a.free(cache_path);
 
-        if (tryOpenExisting(io, cache_path, identity)) |existing_value| {
+        if (tryOpenExisting(io, cache_path, identity, source_hash)) |existing_value| {
             var existing = existing_value;
             errdefer existing.close(io);
             if (!std.meta.eql(identity, try SourceIdentity.read(io, source))) {
                 return error.GgufFileChanged;
             }
-            return existing;
+            return .{ .cache = existing, .hit = true };
         }
-
-        const source_hash = contentHash(src_mem);
-        if (!std.meta.eql(identity, try SourceIdentity.read(io, source))) return error.GgufFileChanged;
         const src_base = @intFromPtr(src_mem.ptr);
         var list: std.ArrayList(Entry) = .empty;
         defer list.deinit(a);
@@ -166,19 +191,20 @@ pub const Cache = struct {
             if (e.kind == @backingInt(g.TensorKind.q4_k)) max_q4_blocks = @max(max_q4_blocks, blocks) else max_q6_blocks = @max(max_q6_blocks, blocks);
         }
 
-        const hdr = Header{
+        var hdr = Header{
             .magic = magic.*,
             .source_size = identity.size,
             .source_inode = identity.inode,
             .source_mtime = identity.mtime,
             .source_ctime = identity.ctime,
             .source_hash = source_hash,
+            .payload_hash = @splat(0),
             .entry_count = list.items.len,
             .data_offset = data_offset,
             .total_bytes = cursor,
         };
 
-        const tmp_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v5.tmp", .{model_path});
+        const tmp_path = try std.fmt.allocPrint(a, "{s}" ++ file_suffix ++ ".tmp", .{model_path});
         defer a.free(tmp_path);
         const out_file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
         var output_open = true;
@@ -188,11 +214,16 @@ pub const Cache = struct {
         }
 
         try out_file.writeStreamingAll(io, std.mem.asBytes(&hdr));
-        try out_file.writeStreamingAll(io, std.mem.sliceAsBytes(list.items));
+        var payload_sha = std.crypto.hash.sha2.Sha256.init(.{});
+        const table_bytes = std.mem.sliceAsBytes(list.items);
+        payload_sha.update(table_bytes);
+        try out_file.writeStreamingAll(io, table_bytes);
         const pad_len = data_offset - (@sizeOf(Header) + @as(u64, list.items.len) * @sizeOf(Entry));
         if (pad_len > 0) {
             const zeros: [16]u8 = @splat(0);
-            try out_file.writeStreamingAll(io, zeros[0..@intCast(pad_len)]);
+            const pad = zeros[0..@intCast(pad_len)];
+            payload_sha.update(pad);
+            try out_file.writeStreamingAll(io, pad);
         }
 
         const q4_scratch = try a.alloc(BlockQ4Kx8, max_q4_blocks);
@@ -208,24 +239,33 @@ pub const Cache = struct {
             const blocks: usize = @as(usize, e.groups) * @as(usize, e.blocks_per_row);
             const width: usize = @as(usize, e.blocks_per_row) * 256;
             const n: usize = @as(usize, e.groups) * 8;
-            if (kind == .q4_k) {
+            const out_bytes = if (kind == .q4_k) blk: {
                 repackQ4KInto(slice, width, n, q4_scratch[0..blocks]);
-                try out_file.writeStreamingAll(io, std.mem.sliceAsBytes(q4_scratch[0..blocks]));
-            } else {
+                break :blk std.mem.sliceAsBytes(q4_scratch[0..blocks]);
+            } else blk: {
                 repackQ6KInto(slice, width, n, q6_scratch[0..blocks]);
-                try out_file.writeStreamingAll(io, std.mem.sliceAsBytes(q6_scratch[0..blocks]));
-            }
+                break :blk std.mem.sliceAsBytes(q6_scratch[0..blocks]);
+            };
+            payload_sha.update(out_bytes);
+            try out_file.writeStreamingAll(io, out_bytes);
             const next_pad = alignUp16(e.dst_offset + e.dst_len) - (e.dst_offset + e.dst_len);
-            if (next_pad > 0) try out_file.writeStreamingAll(io, zeros[0..@intCast(next_pad)]);
+            if (next_pad > 0) {
+                const pad = zeros[0..@intCast(next_pad)];
+                payload_sha.update(pad);
+                try out_file.writeStreamingAll(io, pad);
+            }
             // Release original source pages immediately so cold build RSS stays small.
             releaseSourcePages(slice);
         }
 
+        payload_sha.final(&hdr.payload_hash);
+        try out_file.writePositionalAll(io, std.mem.asBytes(&hdr), 0);
         out_file.close(io);
         output_open = false;
         if (!std.meta.eql(identity, try SourceIdentity.read(io, source))) return error.GgufFileChanged;
         try std.Io.Dir.cwd().rename(tmp_path, std.Io.Dir.cwd(), cache_path, io);
-        return tryOpenExisting(io, cache_path, identity) orelse error.RepackCacheCorrupt;
+        const built = tryOpenExisting(io, cache_path, identity, source_hash) orelse return error.RepackCacheCorrupt;
+        return .{ .cache = built, .hit = false };
     }
 
     pub fn lookup(self: *const Cache, src_offset: u64, src_len: u64, kind: g.TensorKind) ?Repacked {
