@@ -24,6 +24,7 @@ test {
     _ = @import("cpu_gguf_repack8.zig");
     _ = @import("cpu_gguf_repack8_batch.zig");
     _ = @import("cpu_gguf_repack_cache.zig");
+    _ = @import("cpu_gguf_repack_cache_test.zig");
     _ = @import("cpu_mla.zig");
     _ = @import("kda_fast.zig");
     _ = @import("kda_fast_pool_test.zig");
