@@ -82,3 +82,49 @@ test "Responses strict off: per-request custom tools preserve exact replay input
     const call = request.added[0].get("tool_calls").?.array[0];
     try t.expectEqualStrings(" raw {", call.get("custom").?.get("input").?.string);
 }
+
+const Busy = struct {
+    fn engine(self: *Busy) @import("engine_api").Engine {
+        return .{ .ctx = self, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+    }
+    fn info(_: *anyopaque) @import("engine_api").Info {
+        return .{ .context_window = 4096 };
+    }
+    fn submit(_: *anyopaque, _: @import("engine_api").Id, _: *const @import("engine_api").Request, _: @import("engine_api").Sink) @import("engine_api").SubmitError!void {
+        return error.Busy;
+    }
+    fn cancel(_: *anyopaque, _: @import("engine_api").Id) void {}
+    fn status(_: *anyopaque, out: *@import("engine_api").Status, _: []u32) void {
+        out.* = .{};
+    }
+    fn memory(_: *anyopaque, _: bool) ?@import("engine_api").Memory {
+        return null;
+    }
+};
+const Wire = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    a: std.mem.Allocator,
+    fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+        const self: *Wire = @ptrCast(@alignCast(ctx));
+        self.bytes.appendSlice(self.a, bytes) catch return error.Closed;
+    }
+};
+test "Responses strict flag reaches the real HTTP handler from Server.Config" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var backend: Busy = .{};
+    var text: @import("stream_preflight_test.zig").TestText = .{};
+    const body = "{\"input\":\"x\",\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[{\"type\":\"function\",\"name\":\"missing\"}]}}";
+    inline for (.{ false, true }) |strict| {
+        const srv = try @import("server.zig").Server.init(t.allocator, t.io, backend.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .responses_strict = strict, .enable_thinking = false, .use_drafts = false }, null);
+        defer srv.deinit();
+        var wire: Wire = .{ .a = a };
+        var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
+        var conn: @import("http_conn.zig").Conn = .{ .fd = -1, .peer = "127.0.0.1", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = "/v1/responses", .headers = &headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
+        @import("routes.zig").dispatch(srv, &conn, a);
+        const want = if (strict) "HTTP/1.1 400" else "HTTP/1.1 503";
+        try t.expect(std.mem.startsWith(u8, wire.bytes.items, want));
+        if (strict) try t.expect(std.mem.indexOf(u8, wire.bytes.items, "unknown function tool") != null);
+    }
+}
