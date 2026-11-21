@@ -12,6 +12,18 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     core.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("core", core);
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    m.addImport("bf16_round", b.createModule(.{ .root_source_file = b.path(dir ++ "bf16_round.zig"), .target = target, .optimize = optimize }));
+    m.addImport("inkling2_metal", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig"), .target = target, .optimize = optimize }));
+    m.addImport("metal", b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .optimize = optimize }));
+    m.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = target, .optimize = optimize }));
+    const inkling2_metal_ref = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/ref.zig"), .target = target, .optimize = optimize });
+    inkling2_metal_ref.addImport("metal", m.import_table.get("metal").?);
+    m.addImport("inkling2_metal_ref", inkling2_metal_ref);
+    m.addImport("inkling2_glue_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig"), .target = target, .optimize = optimize }));
+    m.addImport("inkling2_loop_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig"), .target = target, .optimize = optimize }));
+    const lanes = b.createModule(.{ .root_source_file = b.path(dir ++ "lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("lanes", lanes);
+    m.addImport("engine_api", b.createModule(.{ .root_source_file = b.path(dir ++ "engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} }));
     return m;
 }
 
@@ -19,4 +31,12 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/families/inkling2/host_test.zig") }));
     b.step("test-inkling2-host", "Inkling 2 family package: config, weight map, layer plan, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
+
+    const metal_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_metal_host_test.zig") }));
+    b.step("test-inkling2-metal-host", "Inkling 2 Mini Metal launch plans and arithmetic references").dependOn(&metal_run.step);
+    test_step.dependOn(&metal_run.step);
+    const native = b.addObject(.{ .name = "inkling2-native", .root_module = module(b, target, .Debug, "zig/inkling2_native_compile.zig") });
+    _ = native.getEmittedBin();
+    b.step("compile-inkling2-native-host", "Analyze the actual Inkling 2 Mini native opener without shaders or devices").dependOn(&native.step);
+    test_step.dependOn(&native.step);
 }
