@@ -178,7 +178,8 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        // Clear and failed restores must not publish invalid state; backend expiry is still spillable.
+        if (s.disk) |r| if (!e.expired or e.removed_as == .expired) rows.write.evicted(r, e);
         s.free(e);
     }
 

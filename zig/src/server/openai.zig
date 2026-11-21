@@ -115,6 +115,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
+    input.messages = try @import("deferred_tools.zig").resolve(cx, input.messages, body.get("tools"), srv.text.deferred_native);
     const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
     if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
@@ -129,7 +130,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
     };
     const sampling = try json.newObject(cx.a);
-    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "priority", "model", "draft", "thinking_budget", "ignore_eos", "return_token_ids", "stop", "grammar_budget" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "priority", "model", "draft", "thinking_budget", "ignore_eos", "return_token_ids", "stop", "grammar_budget", "deadline_s" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     if (body.field("parallel_tool_calls")) |p| if (p == .bool and !p.bool) try sampling.put(cx.a, "tool_call_single", .{ .bool = true });

@@ -15,6 +15,7 @@ pub const Shape = struct {
     paged: bool = false,
     mt2: bool = false,
     join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
+    unread: bool = false, // a prompt chunk nothing reads: its last layer stops at the state writes
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
     part: @import("cuda_stage_forward.zig").Part = .whole,
 

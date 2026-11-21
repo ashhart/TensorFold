@@ -4,10 +4,9 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
-
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
@@ -46,6 +45,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
+    .{ .name = "TENSORFOLD_PARALLEL", .scope = .common, .kind = .parallel, .trim = " \t", .min = 1, .max = 4096, .forms = "a whole number from 1 to 4096, or auto (up to 8 lanes; the --parallel flag wins when present)" },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .scope = .common, .kind = .percent, .trim = " \t", .forms = "a whole percentage from 0 to 100" },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "whole milliseconds from 0 to 4294967295 (0 disables waiting)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
@@ -138,8 +138,9 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DSEL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_DSCORES", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_DFLASH2_LOG", .scope = .glm, .kind = .u64, .forms = "a whole unsigned 64-bit round count (0 logs no drafts)" },
-    .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7)" },
+    .{ .name = "TF_GLM_DRAFT_CONFIDENCE", .scope = .glm, .kind = .real, .max = 1, .forms = "a finite chain-chance cut from 0 to 1 (default 0.7 on CUDA, 0.5 on Metal)" },
     // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
     .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
     .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
@@ -180,6 +181,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_R1", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_PREFETCH_AHEAD", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_KV_NORM_STORE", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_FLOAT_LINEAR", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ROUTER_GROUP_ROT", .scope = .dsv41, .kind = .flag, .trim = " ", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_TOOL_GRAMMAR", .scope = .dsv41, .kind = .flag, .trim = " ", .alias_of = "TENSORFOLD_TOOL_GRAMMAR", .forms = "0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)" },
@@ -300,6 +302,13 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .word) {
         for (r.words, 0..) |v, i| if (std.mem.eql(u8, text, v)) return i;
         return error.InvalidEnvironment;
+    }
+    // "auto" travels as 0: the caller reads it back through `parallel`, never the raw number
+    if (r.kind == .parallel) {
+        if (std.ascii.eqlIgnoreCase(text, "auto")) return 0;
+        const n = std.fmt.parseInt(u64, text, 10) catch return error.InvalidEnvironment;
+        if (n < r.min or n > r.max) return error.InvalidEnvironment;
+        return n;
     }
     if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
     // a path travels as 0, its text read by `path`; the file itself is its reader's to check
@@ -434,6 +443,14 @@ pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
 }
 
+/// TENSORFOLD_PARALLEL's text: the flag wins, else the trimmed setting, else null; bad values are refused by name.
+pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
+    if (flag) |f| return f;
+    _ = try checked("TENSORFOLD_PARALLEL", raw);
+    const text = std.mem.trim(u8, raw orelse return null, rule("TENSORFOLD_PARALLEL").trim);
+    return if (text.len == 0) null else text;
+}
+
 pub const Flags = struct {
     cuda: bool = false,
     metal: bool = false,
@@ -452,6 +469,8 @@ pub const Flags = struct {
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
+    /// --parallel named: TENSORFOLD_PARALLEL then stays out of the way, as a flag-named device does.
+    parallel_named: bool = false,
 
     fn includes(f: Flags, scope: Scope) bool {
         return switch (scope) {
@@ -480,6 +499,7 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
         if (!flags.includes(r.scope) or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
+        if (std.mem.eql(u8, r.name, "TENSORFOLD_PARALLEL") and flags.parallel_named) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT") and flags.carveout) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_MIB") and !flags.carveout and
             !std.mem.eql(u8, environment.get("TF_CUDA_CARVEOUT") orelse "0", "1")) continue;

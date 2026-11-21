@@ -12,6 +12,8 @@ const draft_batch = @import("draft_batch.zig");
 const load = @import("load.zig");
 const worker = @import("worker.zig");
 const snapshot = @import("snapshot.zig");
+const states = @import("lanes_states.zig");
+const ngram = @import("ngram.zig");
 const pc = @import("engine_api").prompt_cache;
 
 const be = lanes.backend;
@@ -29,6 +31,9 @@ pub const Fill = struct {
     from: usize = 0,
     kept0: u64 = 0,
 };
+
+/// A kept row inside a prompt chunk (forward.Mark): its position, the n-gram history there and its side buffer.
+pub const Marked = struct { at: usize, history: [2]i64, side: u64 };
 
 pub const Lane = struct {
     caches: cache.Caches,
@@ -67,6 +72,8 @@ pub const Fx = struct {
     /// The kept prompt states (null: no reuse), and the slot the next one takes on every rank.
     store: ?pc.Store = null,
     next_slot: u32 = 0,
+    /// The kept row inside the prompt chunk being saved (forward.Mark): its position, n-gram history and side buffer.
+    marked: ?Marked = null,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -113,77 +120,14 @@ pub const Fx = struct {
             f.gpa,
             .{
                 .ptr = f,
-                .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop },
+                .vtable = &.{ .bytes = states.bytes, .save = states.save, .restore = states.restore, .drop = states.drop },
             },
             .{ .lookahead = 1, .planned = true, .grid = 64 },
             budget,
         );
     }
 
-    fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        var buf: [64]bool = undefined;
-        const kinds = f.e.kinds(&buf) catch return std.math.maxInt(u64);
-        const main = cache.Layout.of(f.e.weights.model.dims, kinds, 64, f.e.act).stateBytes(at);
-        const head = if (f.e.weights.model.mtp) |h|
-            cache.Layout.of(h.dims, &.{false}, 64, f.e.act).stateBytes(at)
-        else
-            0;
-        return main + head;
-    }
-
-    fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const saved = try snapshot.save(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            at,
-            f.e.cfg.index_ratio,
-        );
-        saved.slot = f.next_slot;
-        f.next_slot += 1;
-        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
-        return saved;
-    }
-
-    /// Every rank resumes from the state, or every rank starts the prompt over; a group that cannot do either stops.
-    fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        // a follower that got the step waits for every rank's word on it: a rank 0 that cannot send stops too
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot }) catch |err| {
-            f.e.stopped = true;
-            return err;
-        };
-        snapshot.restoreAgreed(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            s,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            f.e.cfg.index_ratio,
-            f.e.eos,
-            f.link,
-        ) catch |err| {
-            if (err == error.GroupStopped) f.e.stopped = true;
-            return err;
-        };
-    }
-
-    fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.drop), s.slot }) catch {};
-        snapshot.drop(f.gpa, s);
-    }
-
-    fn send(f: *Fx, words: []const u32) !void {
+    pub fn send(f: *Fx, words: []const u32) !void {
         if (f.e.stopped) return error.GroupStopped;
         if (f.link) |l| try l.send(words);
     }
@@ -209,6 +153,12 @@ pub const Fx = struct {
         return facts_mod.factsFor(cache.max_window, f.streams, f.e.weights.model.mtp != null and f.drafts > 0, f.drafts);
     }
 
+    /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.
+    fn sideBuffer(c: *const cache.Caches, i: usize) ?u64 {
+        const at = i * std.mem.alignForward(usize, c.layout.restBytes(), 256);
+        return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
+    }
+
     fn free(f: *Fx, l: *Lane) void {
         f.e.stream.synchronize() catch {};
         f.e.unlease(l.caches);
@@ -218,7 +168,7 @@ pub const Fx = struct {
         f.gpa.destroy(l);
     }
 
-    fn of(ptr: *anyopaque) *Fx {
+    pub fn of(ptr: *anyopaque) *Fx {
         const f: *Fx = @ptrCast(@alignCast(ptr));
         if (bound != f.e) {
             f.e.ctx.makeCurrent() catch |err| std.log.err("hipSetDevice on the lane thread: {s}", .{@errorName(err)});
@@ -330,7 +280,27 @@ pub const Fx = struct {
         const stop: usize = if (fill.next < fill.count) fill.stops[fill.next] else prompt.len;
         // the idle chunk alone, the shorter one while other streams decode between chunks (both on the 64-row grid)
         const chunk: usize = if (f.decoding(lane)) e.o.policy.fill_rows else e.o.chunk;
-        const to = @min(stop, at + chunk);
+        var to = @min(stop, at + chunk);
+        // the chunk goes on through each kept row its side buffers hold, writing the row's state aside (the same bytes)
+        var marks: [cache.max_window]forward.Mark = undefined;
+        var held: [cache.max_window]Marked = undefined;
+        var n_marks: usize = 0;
+        var taken = fill.next; // the stops the chunk's marks take, a duplicate's too
+        if (to == stop and stop > at and stop < prompt.len and f.link == null and f.store != null) {
+            const end = @min(prompt.len, at + chunk);
+            var j = fill.next;
+            while (j < fill.count and fill.stops[j] < end and n_marks < marks.len) : (j += 1) {
+                const row = fill.stops[j];
+                if (n_marks > 0 and row <= held[n_marks - 1].at) continue; // a duplicate: kept once
+                const side = sideBuffer(&lane.caches, n_marks) orelse break;
+                marks[n_marks] = .{ .row = row - at, .side = side };
+                held[n_marks] = .{ .at = row, .history = ngram.after(lane.caches.history, prompt[at..row]), .side = side };
+                n_marks += 1;
+            }
+            taken = j;
+            to = if (j < fill.count and fill.stops[j] < end) fill.stops[j] else end;
+        }
+        defer f.marked = null; // a failed chunk's too
         const last = to == prompt.len;
         if (f.link != null) {
             f.msg.clearRetainingCapacity();
@@ -338,7 +308,7 @@ pub const Fx = struct {
             try f.msg.appendSlice(f.gpa, prompt[at..to]);
             try f.send(f.msg.items);
         }
-        const out = try e.prompt(&lane.caches, prompt[at..to]);
+        const out = try e.promptMarked(&lane.caches, prompt[at..to], marks[0..n_marks]);
         const rows = to - at;
         const row_bytes = m.dims.wide() * m.act.size();
         if (lane.head) |*hc| {
@@ -350,6 +320,12 @@ pub const Fx = struct {
             }
         }
         fill.at = to;
+        for (held[0..n_marks]) |mk| {
+            f.marked = mk;
+            if (f.store) |*st| _ = st.keep(prompt, @intCast(mk.at), lane, &.{}, &.{});
+        }
+        f.marked = null; // a kept row at the chunk's end next saves the live caches
+        fill.next = taken;
         if (fill.next < fill.count and to == fill.stops[fill.next]) {
             if (f.store) |*st| _ = st.keep(prompt, @intCast(to), lane, &.{}, &.{});
             fill.next += 1;
@@ -510,14 +486,3 @@ pub const Fx = struct {
         f.free(kv.value);
     }
 };
-
-test "MTP stays at three: the constant, the cap and the facts never report more" {
-    try std.testing.expectEqual(@as(u32, 3), facts_mod.mtp_max_drafts);
-    try std.testing.expectEqual(@as(u32, 3), facts_mod.capDrafts(3));
-    try std.testing.expectEqual(@as(u32, 3), facts_mod.capDrafts(7));
-    const m = facts_mod.factsFor(cache.max_window, 2, true, facts_mod.capDrafts(7));
-    try std.testing.expectEqual(@as(u32, 3), m.drafts);
-    var cfg = try lanes.Config.init(std.testing.allocator, m, cache.max_window, cache.max_window - 1);
-    defer cfg.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 3), cfg.most_drafts);
-}

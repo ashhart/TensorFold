@@ -563,3 +563,12 @@ model and states no licence; no weights are included. `tools/zig/inkling2_fixtur
 from `Inkling2L2Clip` and `Inkling2ScaledL2Clip`, the relative-position logits from `Inkling2RelativeLogits`, and the
 sinks and sigmoid output gate from `Inkling2SlidingAttention` and `Inkling2FullAttention`. The kernels, their chunked
 layout and their rounding points are TensorFold's own.
+
+## Inkling 2 glue kernels
+
+`zig/kernels/cuda/inkling2/ops.cu`, `zig/kernels/cuda/inkling2/rows.cu` and `zig/src/families/inkling2/ops.zig` compute
+these layers of Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit
+`109a7d19bf66` ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0):
+`Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
+`Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
+are TensorFold's own.

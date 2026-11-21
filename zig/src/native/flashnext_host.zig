@@ -410,6 +410,7 @@ pub const Host = struct {
             fin.message = @errorName(e);
             return;
         };
+        if (res.reason == .cancelled and h.eng.r.tp == null) @import("flashnext_cancel.zig").keep(h.gpa, job.prefilled == null, @intCast(h.eng.m.pos), job.cached, r.prompt.len, &c, Ctx.marked);
         if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
         fin.reason = switch (res.reason) {
             .stop => .stop,

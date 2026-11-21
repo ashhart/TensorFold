@@ -1,13 +1,16 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { approvalPolicyScope, isReadOnlyShellCommand } from './approval-policy'
 import { commandShell, commandShellArgs } from './cli-path'
+import { LinuxSandboxError, canUseLinuxSandbox, linuxSandboxArgv, linuxSandboxBinary } from './linux-sandbox'
 import { commandApprovalReason } from './command-policy'
-import { hostGitEnv } from './host-git-env'
+import { MAX_HASH_BYTES, captureWorkspaceSnapshot, changedWorkspacePaths } from './sandbox-workspace'
+import type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
+export type { SandboxWorkspaceSnapshot } from './sandbox-workspace'
 import { redactCommandStreams } from './command-output-redaction'
 import { SECRET_MASK } from './security'
 import { redactSecretValues } from './secret-detection'
@@ -48,18 +51,13 @@ export interface SandboxArtifactBaseline {
   workspaceSnapshot?: SandboxWorkspaceSnapshot
 }
 
-export interface SandboxWorkspaceSnapshot {
-  root: string
-  files: Array<{ path: string; fingerprint: string }>
-}
-
 export interface SandboxArtifactBundle {
   schema: typeof SANDBOX_ARTIFACT_SCHEMA
   id: string
   command: string
   cwd: string
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
   inputSnapshot: SandboxFileArtifact[]
   outputFiles: SandboxFileArtifact[]
   screenshots: SandboxFileArtifact[]
@@ -75,7 +73,7 @@ export interface SandboxedCommandResult {
   stderr: string
   sandboxed: boolean
   profile: SandboxProfileId | 'unsandboxed'
-  implementation: 'macos-sandbox-exec' | 'unsandboxed'
+  implementation: 'macos-sandbox-exec' | 'linux-bwrap' | 'unsandboxed'
   /** Number of value-level secrets removed from stdout/stderr before this result left the sandbox. */
   redactionCount?: number
   artifacts?: SandboxArtifactBundle
@@ -129,7 +127,6 @@ const PACKAGE_INSTALL_INPUT_PATHS = [
 ]
 const ARTIFACT_SKIP_DIRS = new Set(['.git', 'node_modules'])
 const MAX_ARTIFACT_FILES = 120
-const MAX_HASH_BYTES = 10 * 1024 * 1024
 const SCREENSHOT_RE = /\.(?:png|jpe?g|webp|gif)$/i
 
 export function commandNeedsNetwork(command: string): boolean {
@@ -221,9 +218,7 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
   const profile = options.profile ?? sandboxProfileForCommand(command)
   const allowNetwork = sandboxProfileAllowsNetwork(profile, options.allowNetwork)
   const cwd = prepareSandboxExecutionCwd(hostCwd, profile)
-  // package-install runs in a throwaway temp dir; remove it once artifacts are captured so we
-  // don't orphan a (potentially node_modules-sized) directory per install. The host cwd is never
-  // deleted — only a sandbox-owned scratch dir that differs from it.
+  // Only sandbox-owned package-install scratch is removed after artifact capture.
   const ephemeralCwd = cwd === hostCwd ? null : cwd
   try {
     const baseline = captureSandboxArtifactBaseline(cwd, Date.now(), SANDBOX_PROFILES[profile].allowCwdWrite)
@@ -235,6 +230,34 @@ export async function runSandboxedCommand(command: string, options: SandboxedCom
         sandboxed: true,
         profile,
         implementation: 'macos-sandbox-exec',
+        signal: options.signal,
+      })
+      return attachSandboxArtifacts(command, cwd, result, baseline)
+    }
+    if (canUseLinuxSandbox()) {
+      const definition = SANDBOX_PROFILES[profile]
+      let bwrapArgv: string[]
+      try {
+        bwrapArgv = linuxSandboxArgv(cwd, { allowCwdWrite: definition.allowCwdWrite, allowNetwork })
+      } catch (error) {
+        // A workspace whose git metadata the profile cannot protect keeps commands refused.
+        if (!(error instanceof LinuxSandboxError)) throw error
+        return attachSandboxArtifacts(command, cwd, {
+          code: 126,
+          stdout: '',
+          stderr: `${error.message}\n`,
+          sandboxed: false,
+          profile,
+          implementation: 'unsandboxed',
+        }, baseline)
+      }
+      const result = await runShell([linuxSandboxBinary()!, ...bwrapArgv, commandShell(), ...commandShellArgs(), command], {
+        cwd,
+        timeoutMs: options.timeoutMs,
+        maxBuffer: options.maxBuffer,
+        sandboxed: true,
+        profile,
+        implementation: 'linux-bwrap',
         signal: options.signal,
       })
       return attachSandboxArtifacts(command, cwd, result, baseline)
@@ -330,8 +353,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
     }
     opts.signal?.addEventListener('abort', onAbort, { once: true })
     if (opts.signal?.aborted) onAbort()
-    // Per-stream decoders buffer partial multi-byte sequences across chunk boundaries, so emoji/CJK
-    // split across two 'data' events don't decode to U+FFFD replacement chars.
+    // Streaming decoders preserve UTF-8 characters split across data events.
     const outDecoder = new StringDecoder('utf8')
     const errDecoder = new StringDecoder('utf8')
     const append = (kind: 'stdout' | 'stderr', chunk: Buffer) => {
@@ -340,12 +362,7 @@ function runShell(argv: string[], opts: { cwd: string; timeoutMs?: number; maxBu
       else stderr = (stderr + text).slice(0, maxBuffer)
       if (stdout.length + stderr.length >= maxBuffer && !overflowed) {
         overflowed = true
-        // Cancel the unrelated timeout timer so it doesn't double-fire later, then run the same
-        // SIGTERM-now/SIGKILL-after-grace-period escalation the timeout path uses, so a child that
-        // traps/ignores SIGTERM doesn't linger until the original (possibly much longer) timeout.
-        // Note: `child.killed` reflects whether a signal was *sent*, not whether the process has
-        // actually exited yet — checking `exitCode`/`signalCode` (only set once 'exit' fires) is
-        // what correctly detects a child that is still alive after ignoring SIGTERM.
+        // A sent signal is not an exit; escalate after the grace period while the child is alive.
         clearTimeout(timer)
         terminate()
       }
@@ -385,68 +402,6 @@ function attachSandboxArtifacts(command: string, cwd: string, result: SandboxedC
     artifacts: buildSandboxArtifactBundle({ cwd, command, result: sanitized, baseline }),
     changedPaths: changedWorkspacePaths(cwd, baseline.workspaceSnapshot),
   }
-}
-
-function gitOutput(args: string[], cwd: string): Buffer | null {
-  const result = spawnSync('git', args, {
-    cwd,
-    encoding: 'buffer',
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: 20_000,
-    env: hostGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }),
-  })
-  return result.status === 0 && Buffer.isBuffer(result.stdout) ? result.stdout : null
-}
-
-function captureWorkspaceSnapshot(cwd: string): SandboxWorkspaceSnapshot | null {
-  const rootRaw = gitOutput(['rev-parse', '--show-toplevel'], cwd)
-  if (!rootRaw) return null
-  const rootText = rootRaw.toString('utf8').trim()
-  if (!rootText) return null
-  let root: string
-  try { root = realpathSync(rootText) } catch { return null }
-  const listed = gitOutput(['ls-files', '-c', '-o', '--exclude-standard', '-z'], root)
-  if (!listed) return null
-  const files: Array<{ path: string; fingerprint: string }> = []
-  for (const rel of listed.toString('utf8').split('\0').filter(Boolean)) {
-    if (rel.startsWith('/') || rel.split('/').includes('..')) continue
-    const full = path.join(root, ...rel.split('/'))
-    let stat
-    try { stat = lstatSync(full) } catch { continue }
-    let fingerprint: string
-    if (stat.isSymbolicLink()) {
-      try { fingerprint = `link:${workspaceContentFingerprint(readlinkSync(full))}` } catch { continue }
-    } else if (stat.isFile()) {
-      try {
-        fingerprint = stat.size <= MAX_HASH_BYTES
-          ? `file:${workspaceContentFingerprint(readFileSync(full))}`
-          : `large:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
-      } catch { continue }
-    } else {
-      continue
-    }
-    files.push({ path: rel.replace(/\\/g, '/'), fingerprint })
-  }
-  return { root, files: files.sort((a, b) => a.path.localeCompare(b.path)) }
-}
-
-function workspaceContentFingerprint(content: string | Buffer): string {
-  return createHash('sha256').update(content).digest('hex')
-}
-
-function changedWorkspacePaths(cwd: string, before: SandboxWorkspaceSnapshot | undefined): string[] {
-  if (!before) return []
-  const after = captureWorkspaceSnapshot(before.root)
-  if (!after || after.root !== before.root) return []
-  const previous = new Map(before.files.map((file) => [file.path, file.fingerprint]))
-  const current = new Map(after.files.map((file) => [file.path, file.fingerprint]))
-  const changed = new Set<string>()
-  for (const [file, fingerprint] of current) if (previous.get(file) !== fingerprint) changed.add(file)
-  for (const file of previous.keys()) if (!current.has(file)) changed.add(file)
-  return [...changed].sort().map((repoPath) => {
-    const relative = path.relative(cwd, path.join(before.root, ...repoPath.split('/')))
-    return relative.split(path.sep).join('/') || '.'
-  })
 }
 
 function collectArtifactFiles(cwd: string, roots: string[]): SandboxFileArtifact[] {

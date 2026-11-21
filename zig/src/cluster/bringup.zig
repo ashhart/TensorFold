@@ -113,11 +113,18 @@ pub const Live = struct {
     opts: Options,
     /// This node's beat counter when it set its plan; a mismatch is reported once a later beat carried the plan.
     plan_beat: ?u64 = null,
-    /// This node's beat counter when it marked itself planned; up once a later beat carried the mark.
-    planned_beat: ?u64 = null,
+    /// The agreed view when this node marked itself planned, before a goodbye can change membership.
+    planned: ?Planned = null,
     /// Membership events already read.
     seen: usize = 0,
     culprit: Culprit = .{},
+
+    const Planned = struct {
+        beat: u64,
+        leader: node.NodeId,
+        epoch: u64,
+        view: u64,
+    };
 
     /// `inv.name` is this node's name in the file; its id is the name's, so each node checks the others by `names`.
     pub fn init(gpa: Allocator, inv: node.Inventory, t: transport.Transport, names: []const []const u8, plan: u64, opts: Options) Live {
@@ -154,12 +161,12 @@ pub const Live = struct {
             }
             if (l.m.me.plan == l.plan) {
                 try l.checkPlans();
-                if (l.planned_beat == null and l.m.ids.items.len == n and l.m.agreed(l.plan)) {
+                if (l.planned == null and l.m.ids.items.len == n and l.m.agreed(l.plan)) {
                     l.m.setProgress(.planned, 0);
-                    l.planned_beat = l.m.me.counter;
+                    l.planned = .{ .beat = l.m.me.counter, .leader = l.m.leader, .epoch = l.m.me.epoch, .view = l.m.me.digest };
                 }
-                if (l.planned_beat) |c| if (l.m.me.counter > c and l.allPlanned()) {
-                    return .{ .nodes = @intCast(n), .leader = l.m.leader, .epoch = l.m.me.epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = l.m.me.digest };
+                if (l.planned) |planned| if (l.m.me.counter > planned.beat and l.allPlanned(planned)) {
+                    return .{ .nodes = @intCast(n), .leader = planned.leader, .epoch = planned.epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = planned.view };
                 };
             }
             if (l.nextLost()) |x| {
@@ -226,12 +233,13 @@ pub const Live = struct {
         }
     }
 
-    /// Every node marked planned with this plan; one that has since said goodbye counts (it agreed before leaving).
-    fn allPlanned(l: *Live) bool {
+    /// Count planned acknowledgments for this view, including peers that said goodbye after agreeing.
+    fn allPlanned(l: *Live, planned: Planned) bool {
         if (l.m.me.phase != .planned) return false;
         var k: usize = 1;
         for (l.m.members.items) |x| {
             const e = x.entry;
+            if (e.epoch != planned.epoch or e.digest != planned.view) continue;
             if (e.plan == l.plan and e.phase == .planned and (e.state == .alive or e.state == .suspect or e.state == .left)) k += 1;
         }
         return k >= l.names.len;

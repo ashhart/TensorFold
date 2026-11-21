@@ -17,6 +17,8 @@ pub const Set = struct {
     copy_rows: ?cuda.Function = null,
     /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
     dsel: bool = false,
+    /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
+    dscore: ?*const index_mod.Kernels = null,
 };
 
 /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.

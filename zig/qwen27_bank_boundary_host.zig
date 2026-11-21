@@ -8,6 +8,9 @@ test "qwen27 bank boundary: a pending keep rejects resizing and trimming" {
     runner.active = @splat(0x17);
     runner.gdn.before = null;
     runner.gdn.before_slots = 7;
+    runner.gdn.scratch = @TypeOf(runner.gdn).emptyScratch(std.testing.allocator);
+    runner.gdn.lease = null;
+    defer runner.gdn.deinitScratch();
     const round: q.round_plan.Round = undefined;
     try std.testing.expectError(error.RoundNotReady, runner.verify(&round));
     try std.testing.expectError(error.RoundNotReady, runner.advance(&round, .all));

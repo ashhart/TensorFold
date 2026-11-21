@@ -534,6 +534,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
         const L = &x.w.layers[li];
         const hcs = L.hc.?;
         if (s & Class.hc == 0) fwd.boundary(x, e, M, pending, hcs[0], L.in_norm);
+        if (x.taps) |t| if (li > 0) t.after(x, e, li - 1, M, pos);
         fwd.snap(x, e, ss.normed, plane);
         switch (L.attn) {
             .kda => |*a| {

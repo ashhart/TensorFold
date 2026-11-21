@@ -38,6 +38,12 @@ pub const Mode = enum {
     }
 };
 
+/// A decode window's 64-pool tiles a CTA by its rows and blocks, fit to a sweep on GB10 (speed only).
+pub fn decodeLoop(rows: usize, nb: usize) usize {
+    const want: usize = if (rows <= 4) 1 else if (rows <= 8) 2 else rows / 4 * ((nb + 1023) / 1024);
+    return @max(1, @min(@min(score_tiles, want), @max(1, nb / 32)));
+}
+
 /// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of score_tiles.
 pub fn scoresGrid(rows: usize, nb: usize) [2]u32 {
     return .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, score_tiles))) };
@@ -77,11 +83,23 @@ pub const Kernels = struct {
         return rows >= rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
     }
 
+    /// Whether a decode window takes the scores kernel: under rows_from rows, 8 from 64 blocks (4 from 2,048), aligned.
+    pub fn takesDecode(k: *const Kernels, rows: usize, np: usize, nb: usize, pk: u64, ps: u64) bool {
+        _ = k;
+        const wide = (rows >= 8 and nb >= 64) or (rows >= 4 and nb >= 2048);
+        return wide and rows < rows_from and np >= topk and pk % 16 == 0 and ps % 16 == 0;
+    }
+
     /// tf_glm_scores' launch for `rows` rows at `at` into out [rows][np]; the first `nb` 64-pool blocks are written.
     pub fn scores(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64) !void {
-        const g = scoresGrid(rows, nb);
+        return k.scoresTiles(s, qi, wts, w_stride, pk, out, at, rows, np, nb, scale, wscale, heads, pt, ps, score_tiles);
+    }
+
+    /// As scores, `loop` 64-pool tiles a CTA (speed only: every tiling writes the same scores).
+    pub fn scoresTiles(k: *const Kernels, s: cuda.Stream, qi: u64, wts: u64, w_stride: usize, pk: u64, out: u64, at: u64, rows: usize, np: usize, nb: usize, scale: f32, wscale: f32, heads: usize, pt: u64, ps: u64, loop: usize) !void {
+        const g: [2]u32 = .{ @intCast(cdiv(rows, score_rows)), @intCast(@max(1, cdiv(nb, loop))) };
         var a: cuda.Args = .{};
-        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, score_tiles), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
+        inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, @intCast(loop)), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
         try cuda_pdl.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
     }
 
@@ -123,6 +141,32 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
     try std.testing.expectEqual(Tile{ .cap = 2048, .target = 1024 }, tile(32768));
     try std.testing.expectEqual(Tile{ .cap = 4096, .target = 2048 }, tile(32769));
     try std.testing.expect(tile(1 << 30).cap <= cap_max);
+}
+
+test "GLM index: a decode window's tiles a CTA follow its rows and blocks" {
+    try std.testing.expectEqual(@as(usize, 1), decodeLoop(4, 4064)); // 4 rows at 1M: a tile a CTA
+    try std.testing.expectEqual(@as(usize, 2), decodeLoop(8, 4064));
+    try std.testing.expectEqual(@as(usize, 16), decodeLoop(16, 4064)); // 1M: 1,024 blocks round up
+    try std.testing.expectEqual(@as(usize, 8), decodeLoop(16, 2048)); // 512K
+    try std.testing.expectEqual(@as(usize, score_tiles), decodeLoop(32, 4064));
+    try std.testing.expectEqual(@as(usize, 4), decodeLoop(16, 1024)); // 256K
+    try std.testing.expectEqual(@as(usize, 2), decodeLoop(32, 64)); // 16K: nb / 32 keeps the CTAs
+    try std.testing.expectEqual(@as(usize, 1), decodeLoop(8, 8));
+    try std.testing.expectEqual(@as(usize, score_tiles), decodeLoop(48, 1 << 20));
+}
+
+test "GLM index: decode windows on aligned key caches take the scores kernel" {
+    const k: Kernels = undefined;
+    try std.testing.expect(k.takesDecode(8, 4096, 64, 0x1000, 32768)); // 16K: the contract's 8 rows over 4,096 pools
+    try std.testing.expect(!k.takesDecode(8, 4096, 63, 0x1000, 32768)); // under 64: tf_glm_scores, no slower on GB10
+    try std.testing.expect(!k.takesDecode(rows_from - 1, 4096, 63, 0x1000, 32768));
+    try std.testing.expect(k.takesDecode(rows_from - 1, 216080, 3376, 0x1000, 32768));
+    try std.testing.expect(k.takesDecode(4, 216080, 2048, 0x1000, 32768)); // 4 rows from ~512K
+    try std.testing.expect(!k.takesDecode(4, 65536, 800, 0x1000, 32768));
+    try std.testing.expect(!k.takesDecode(1, 216080, 3376, 0x1000, 32768)); // one row: tf_glm_scores
+    try std.testing.expect(!k.takesDecode(rows_from, 4096, 64, 0x1000, 32768)); // prompt-sized: Kernels.takes
+    try std.testing.expect(!k.takesDecode(16, 4096, 64, 0x1008, 32768));
+    try std.testing.expect(!k.takesDecode(16, topk - 1, 64, 0x1000, 32768));
 }
 
 test "GLM index: only prompt-sized launches on aligned key caches take the kernels" {

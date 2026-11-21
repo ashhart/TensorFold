@@ -52,9 +52,11 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var ai: c_int = 0;
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
     const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
-    const tail_at: ?usize = if (prompt and ends) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
+    const unread = prompt and ends and shape.unread; // nothing reads this chunk: its last layer stops after its keys and values
+    const tail_at: ?usize = if (prompt and ends and !unread) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
     for (e.layers, 0..) |l, i| {
-        const tail = tail_at != null and i + 1 == e.layers.len;
+        const last_layer = i + 1 == e.layers.len;
+        const tail = last_layer and tail_at != null;
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
         try e.norm(g.first + i != 0, l.input_norm, total);
@@ -74,18 +76,19 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .attention => |m| {
                 const aw = g.attnWidth();
-                if (tail) {
+                if (tail or (unread and last_layer)) {
                     try e.projManyPrompt(&.{ m.k, m.v }, e.x, &.{ e.kraw, e.vraw }, total, prompt);
-                    try e.projAgain(m.q, e.x + t0 * g.hidden * 2, e.qraw + t0 * 2 * aw * 2, rows, prompt);
+                    if (tail) try e.projAgain(m.q, e.x + t0 * g.hidden * 2, e.qraw + t0 * 2 * aw * 2, rows, prompt);
                 } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 const head_norm = if (g.bf16) e.fns.head_norm_shift else e.fns.head_norm;
                 try e.run(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                 try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
+                if (unread and last_layer) return; // the keys, values and their rotary rows are all this chunk keeps
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
-                    try @import("cuda_prompt.zig").runFrom(e, @intCast(ai), t0, total);
+                    try e.promptAttention(@intCast(ai), t0, total);
                 } else {
                     const args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po };
                     const tile_rows: usize = if (shape.mt2) 32 / group else 64 / group;
@@ -197,4 +200,20 @@ test "prompt MoE precision: every prompt piece through 128 and admitted verify w
     const std = @import("std");
     for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
     for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
+}
+
+/// The same scan selected by body, exposed for host launch-contract fixtures.
+pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+    const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
+        1 => e.fns.gdn_slots_1,
+        2 => e.fns.gdn_slots_2,
+        4 => e.fns.gdn_slots_4,
+        8 => e.fns.gdn_slots_8,
+        16 => e.fns.gdn_slots_16,
+        else => return error.InvalidGdnSlots,
+    };
+    const input = e.tables.ptr + @as(usize, if (record) @import("cuda_round.zig").steps_at else rowpar_at);
+    // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
+    const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
+    try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
 }

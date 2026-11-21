@@ -303,18 +303,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     glm_checks.sampler(b, target, optimize, metal, lanes, sources);
 
-    // MiniMax H3 / FastH3's transformer: the packed rows' denoising forwards against a case file (M5 tensor units).
-    const h3_kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
-    const h3_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const h3_mod = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = h3_core }, .{ .name = "h3_kernels", .module = h3_kernels }, .{ .name = "kernel_sources", .module = sources } } });
-    const h3_dit = b.addExecutable(.{ .name = "tf-h3-dit", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/h3_dit.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3", .module = h3_mod } },
-    }) });
-    b.step("tf-h3-dit", "FastH3's Metal transformer against a case file: velocities, every step, timings").dependOn(&b.addInstallArtifact(h3_dit, .{}).step);
+    @import("h3_host.zig").metalTools(b, target, optimize, metal, sources);
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     const row_check = b.addExecutable(.{ .name = "tf-row-check", .root_module = b.createModule(.{
@@ -349,7 +338,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
     core_checks.targets(b, target, optimize, metal, engine);
     contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
-    glm_checks.targets(b, target, optimize, metal, engine, sources);
+    glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);
     flashnext_checks.targets(b, target, optimize, metal, engine);
 
     _ = metal_server.nativeServer(b, target, optimize, metal, engine, mods.living, api, engines, build_options, test_step, no_compiler);

@@ -97,8 +97,10 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
+        // the layers' linears stay in their files, read once into the packs: the shards keep the embed and norms alone
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", weights.later);
         m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config.geo, &m.config.widths);
+        m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
         errdefer m.kernels.deinit();
@@ -146,6 +148,11 @@ pub const Model = struct {
             made += 1;
         }
         m.mm[i] = ps;
+    }
+
+    /// Bytes a whole-span load held that this one does not: the linears' shard span, and the row path's copies.
+    pub fn released(m: *const Model) u64 {
+        return (m.checkpoint.selected_bytes -| m.checkpoint.residentBytes()) + m.weights.aliased;
     }
 
     /// affine_mm's pipelines for a linear of `bits`.

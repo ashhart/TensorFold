@@ -32,7 +32,7 @@ const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HO
     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
-    " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--loop-guard-stop] [--no-drafts]" ++
+    " [--thinking-budget THINKING_BUDGET] [--thinking-reserve THINKING_RESERVE] [--loop-guard] [--loop-guard-stop] [--tool-think-close] [--no-drafts]" ++
     " [--drafter DRAFTER]" ++
     " [--glp FILE] [--glp-alpha ALPHA]" ++
     " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--idle-unload SECONDS]" ++
@@ -139,6 +139,8 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
     if (try engines.environment(a, args)) |why| return fail(why);
+    // TENSORFOLD_PARALLEL names the default lanes once the environment check passed; the flag wins.
+    if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").environment.Process.get(.{}, "TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
     const receipt = @import("core").startup_receipt;
     receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
     defer receipt.disable();

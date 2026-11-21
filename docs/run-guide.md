@@ -123,6 +123,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--thinking-reserve N` | With thinking on, let reasoning use up to N tokens beyond a request's `max_tokens`, which then limits the answer (lane engines). |
 | `--loop-guard` | Close reasoning that repeats itself verbatim (a short cycle, or a long passage) where the engine supports it. |
+| `--tool-think-close` | With thinking on, a required or named tool call closes its think block at `max_tokens - max(256, max_tokens / 4)` (or a smaller request `thinking_budget`), so the call fits instead of ending as `length`. Off by default ([API](api.md)). |
 | `--loop-guard-stop` | As `--loop-guard`, but end the reply where the guard fires: the reasoning so far, no answer or tool calls, `finish_reason` `content_filter` and a `reasoning_loop` error ([API](api.md)). |
 | `--no-drafts` | Produce the plain reference through the same engine. |
 | `--drafter DRAFTER` | An external drafter, as a directory or a repo id in the Hugging Face cache, for models that take one (Gemma 4 31B's recipe names its drafter); `none` serves without one. Without the flag, Qwen3.8-27B pairs DFlash2 when the cache holds it (never downloaded, not on HIP): one line names it, and serve runs without it if it does not open. |

@@ -82,12 +82,16 @@ pub fn backboneLayer(e: *Engine, ln: Lane, li: usize, t: usize, start: usize) !v
     try moe(e, s, L, t);
 }
 
-/// The MoE block: router, gated shared expert and the routed FP8 experts, added to the residual stream.
+/// The MoE block: router (held experts only when compact), gated shared expert and routed FP8 or NVFP4 experts.
 fn moe(e: *Engine, s: cuda.Stream, L: *const wts.Layer, t: usize) !void {
     const k = &e.k;
     const mp = cfg.moe_proj;
     try k.linear(s, L.moe_in, e.xn, H, H, mp, e.sp, mp, t);
-    try k.router(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t);
+    if (L.slots != 0) {
+        try k.routerCompact(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, L.slots, t);
+    } else {
+        try k.router(s, e.sp, mp, 2 * cfg.shared_width, e.picks, e.rw, t);
+    }
     try k.swiglu(s, e.sp, mp, 0, cfg.shared_width, cfg.shared_width, e.sact, t);
     try k.linear(s, L.shared_down, e.sact, cfg.shared_width, cfg.shared_width, H, e.shout, H, t);
     const pairs = t * cfg.top_k;
@@ -95,11 +99,15 @@ fn moe(e: *Engine, s: cuda.Stream, L: *const wts.Layer, t: usize) !void {
     const tile: usize = if (prompt) cuda.experts.promptTile(.fp8g) else 16;
     try k.plan.route(s, e.picks, pairs, cfg.experts, tile, e.plan);
     const items = cuda.grouped.maxItems(pairs, cfg.experts, tile);
-    // activations to FP8 per row and 128 inputs before each expert projection, as the reference serves them
-    try k.actQuant(s, e.xn, H, e.xq, H, e.xsc, t, H);
-    try k.experts(s, true, prompt, e.xq, H, cfg.top_k, e.xsc, L.experts, e.plan, e.gu, items);
-    try k.actQuant(s, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
-    try k.experts(s, false, prompt, e.gq, cfg.expert_width, 0, e.gsc, L.experts, e.plan, e.down, items);
+    if (L.experts.format == .nvfp4) {
+        try k.nvfp4Experts(s, prompt, e.xn, cfg.top_k, L.experts, e.plan, e.gu, e.down, items);
+    } else {
+        // activations to FP8 per row and 128 inputs before each expert projection, as the reference serves them
+        try k.actQuant(s, e.xn, H, e.xq, H, e.xsc, t, H);
+        try k.experts(s, true, prompt, e.xq, H, cfg.top_k, e.xsc, L.experts, e.plan, e.gu, items);
+        try k.actQuant(s, e.gu, cfg.expert_width, e.gq, cfg.expert_width, e.gsc, pairs, cfg.expert_width);
+        try k.experts(s, false, prompt, e.gq, cfg.expert_width, 0, e.gsc, L.experts, e.plan, e.down, items);
+    }
     try k.moeCombine(s, e.x, e.down, e.rw, e.shout, e.sp, mp, 2 * cfg.shared_width + cfg.experts, H, t);
 }
 

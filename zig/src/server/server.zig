@@ -58,6 +58,7 @@ pub const Config = struct {
     loop_guard: bool = false,
     /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
     loop_stop: bool = false,
+    tool_think_close: bool = false, // --tool-think-close: a required or named call closes thinking in time
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
@@ -124,7 +125,6 @@ pub fn namedBackground(config: Config, f: Value) bool {
     for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
     return false;
 }
-
 /// Name the compiled structure with the client's own field when its route carried one (a borrowed static literal).
 pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
     const name = format orelse return;

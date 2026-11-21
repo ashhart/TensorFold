@@ -426,8 +426,9 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
-`tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
-over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
+`tf_glm_select_rows`, its decode windows' scores (`tf_glm_index_scores` at the decode tiling) to `tf_glm_scores`,
+and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans over many blocks
+(`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
 rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.
 CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
 marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
@@ -473,6 +474,7 @@ both gather heights, with a partial last column group in the dense entry. Gate 1
 requires the predecessor's bytes, NaN payloads included; these
 entries compare and keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source
 fault red at `shapes`, and its launches are in `glm_launch_records.zig`.
+GLM's Metal DFlash2 drafter also registers its ring-buffer block attention (`glm_draft_attend`, `glm_draft_attend_merge`), top-k selector (`glm_draft_topk`), candidate-subset gather head (`glm dflash2 head`, q4/q8 affine gather and row paths), same-buffer GPU accept (`glm_draft_accept`) and GPU follow (`glm_draft_follow`), with planted controls for ring overrun, masked-key leakage, stream-0 ring aliasing, candidate-score tie/drop faults, wrong accepted token, and oversized sliding window.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
 3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
 replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
@@ -490,7 +492,9 @@ the fp32 down launched one 32-input group short, and a down summing in bf16). nv
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks GLM's NVFP4_NZ5 block 32 experts (`tf_nvfp4_nz5_*`), each bit-equal to the block 16 instance it
 replaces on the same values: a planted +5 is a 4 there under its scale two e4m3 steps up (x1.25), and the E2M1
-entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control.
+entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control. Gate 4's stress fill holds +5s among its 4s
+and 6s, two on equal inputs mirrored by a -4 and a -6 (NVFP4_NZ5 has no -5), with the float64 reference reading
+0b1000 as 5; the same E2M1 entry on that fill is a second control, red at gate 4.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's

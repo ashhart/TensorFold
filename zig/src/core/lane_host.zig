@@ -78,6 +78,7 @@ pub const LaneHost = struct {
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
     warm_quiet: u64 = 0, // ns a warm pass waits for other work before its first chunk (0: none), set by its family
     disk: rows_host.Disk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
+    unread_limits: @import("lane_host_backlog.zig").Limits = .{}, // how far a streamed reply's reader may fall behind
     scores: scoring.Queue = .{}, // decisions' label scores waiting for the engine thread (lane_host_score.zig)
     /// Runs first on the engine thread: a backend whose API state is per thread (a CUDA context) binds it there.
     on_thread: ?ThreadInit = null,
@@ -519,6 +520,7 @@ pub const LaneHost = struct {
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
+            @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
             var activity = @import("lane_activity.zig").Activity.enter(h.activity);
             defer activity.end();
             ends.takeCancels(h);
@@ -591,8 +593,6 @@ test {
     _ = @import("lane_host_decode_share_test.zig");
     _ = @import("lane_host_srpt.zig");
     _ = @import("lane_host_env.zig");
-}
-test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
     _ = @import("lane_host_fetch.zig");

@@ -63,6 +63,11 @@ pub const Layout = struct {
         return l.conv_bytes + l.state_bytes;
     }
 
+    /// Device bytes of the caches past the sparse layers (linear, then the n-gram tail); also a side buffer's size.
+    pub fn restBytes(l: Layout) usize {
+        return l.linear * l.linearBytes() + l.tail_bytes;
+    }
+
     /// Device bytes of a stream's caches at `cap` positions.
     pub fn bytes(l: Layout) usize {
         return l.sparse * l.sparseBytes() + l.linear * l.linearBytes() + l.tail_bytes;
@@ -175,6 +180,19 @@ pub const Caches = struct {
         return .{ .conv = at, .state = at + l.conv_bytes };
     }
 
+    /// Linear layer `layer`'s conv and state in a side buffer at `side` laid out as the caches past the sparse layers.
+    pub fn sideLinear(c: *const Caches, side: u64, layer: usize) LinearView {
+        const l = c.layout;
+        const at = side + c.slot[layer] * l.linearBytes();
+        return .{ .conv = at, .state = at + l.conv_bytes };
+    }
+
+    /// The n-gram tail in such a side buffer.
+    pub fn sideTail(c: *const Caches, side: u64) u64 {
+        const l = c.layout;
+        return side + l.linear * l.linearBytes();
+    }
+
     /// The n-gram conv's tail rows (act dtype, (tail_rows, W)).
     pub fn tail(c: *const Caches) u64 {
         const l = c.layout;
@@ -206,19 +224,24 @@ pub const Pool = struct {
         cap: usize,
         maker: anytype,
     ) !Caches {
-        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
-        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        try p.make(gpa, slot, cap, maker);
         const held = &p.slots.items[slot];
-        if (held.* == null) {
-            held.* = try maker.caches(cap);
-            held.*.?.id = slot;
-            p.made.items[slot] = buffersOf(&held.*.?);
-        }
         try s.synchronize();
         try held.*.?.reset(eos);
         const c = held.*.?;
         held.* = null;
         return c;
+    }
+
+    /// Slot `slot`'s caches made if not yet: by its first lease, or ahead of it (at load).
+    pub fn make(p: *Pool, gpa: std.mem.Allocator, slot: u32, cap: usize, maker: anytype) !void {
+        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
+        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        const held = &p.slots.items[slot];
+        if (held.* != null) return;
+        held.* = try maker.caches(cap);
+        held.*.?.id = slot;
+        p.made.items[slot] = buffersOf(&held.*.?);
     }
 
     /// A finished stream's caches back to their slot.

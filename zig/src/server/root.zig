@@ -39,8 +39,11 @@ test {
     _ = @import("http_limits_test.zig");
     _ = @import("env_defaults_test.zig");
     _ = @import("done_times_test.zig");
+    _ = @import("unread_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
+    _ = @import("request_deadline_test.zig");
+    _ = @import("request_deadline_http_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
@@ -72,9 +75,11 @@ test {
     _ = @import("tool_grammar_lfm2.zig");
     _ = @import("tool_grammar_lfm2_test.zig");
     _ = @import("tool_required_test.zig");
+    _ = @import("tool_think_test.zig");
     _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
     _ = @import("grammar_compile_test.zig");
+    _ = @import("structural_tag.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
     _ = @import("load_metrics.zig");
@@ -126,6 +131,8 @@ test {
     _ = @import("request_log.zig");
     _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
+    _ = @import("deferred_tools.zig");
+    _ = @import("deferred_tools_test.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
     _ = @import("pdf_measure_test.zig");

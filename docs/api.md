@@ -460,13 +460,14 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
-| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
+| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match; on the native server also `structural_tag`, JSON regions inside free text | Both |
 | `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
+| `deadline_s` | Seconds, more than 0 and at most 1,000,000, on chat and legacy completions: at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave, usage and token ids. A reply that ends first, or a [cancel](#cancel-a-request) that came first, keeps its own ending; without the field nothing changes | Native |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
@@ -669,6 +670,14 @@ asks for it and sends no `priority` of its own is treated as `priority: "backgro
 field always wins over the default. This lets one server answer to several ids at their usual priority while a
 background-only client (a batch extractor, say) gets one id that always yields, without sending the field itself.
 
+A streamed reply whose client stops reading does not keep its lane decoding. On an engine on the shared lane host, once
+1,024 of a stream's tokens are waiting in the server for its client, the stream sits out rounds; it runs again once the
+client has taken all but 512 of them. Other streams keep their pace, and the text the client receives is the same,
+byte for byte, as a fast client's. A stream that sits out 60 seconds while its client reads nothing is cancelled as a
+disconnect is: the reply ends with `finish_reason: "cancelled"` and its lane goes to the next request. A client that
+reads as the reply arrives never pauses, and whole (non-streamed) replies are not affected. Engines served outside the
+shared lane host, such as Flash Next's one-reply-at-a-time host, do not pause.
+
 The native CUDA build serves Nemotron, and its concurrent requests share each round. The rest of this paragraph
 describes the Python 0.6.6 engine's CUDA families.
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
@@ -769,6 +778,23 @@ back to the host before each verify, the grammar cuts the ones it rejects and dr
 closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies
 are the same.
 
+The native server also takes `response_format: {"type": "structural_tag", "structures": [...], "triggers": [...]}` on
+`/v1/chat/completions` and `/v1/completions`. The reply is free text, and each structure's `begin` string opens a region
+that must be JSON matching its `schema` and close with its `end` string. Each structure is
+`{"begin": "<weather>", "schema": {...}, "end": "</weather>"}`: `begin` and `end` are non-empty strings of at most 256
+bytes, and `schema` is a JSON schema object (or its JSON text, or `true`). `triggers` are the strings that open a
+region: each must start at least one structure's `begin`, and every `begin` must start with exactly one of them.
+Without `triggers`, each distinct `begin` that no shorter `begin` starts is a trigger. A trigger can't appear in the
+free text except as the start of a region, so with `"triggers": ["<"]` every `<` opens a structure. Outside regions the
+text is unconstrained; inside one, its JSON allows at most 32 blank characters between two tokens, as `json_schema`
+does. A reply may hold any number of regions, including none, and can't end inside one. A request takes up to 64
+structures and 64 triggers, compiling to at most 512 KiB of grammar; a malformed list returns HTTP 400 before any stream
+starts, naming the structure and field. xgrammar's own `{"type": "structural_tag", "format": {...}}` form is refused.
+The server compiles the request onto the same grammar engine as the other formats (xgrammar's `triggered_tags`), so
+the backends, drafting and thinking work as described above, and `grammar_budget` as described below. As with the
+other formats, it takes the place of the strict-tool grammar under `tool_choice: "auto"` and is refused beside
+`tool_choice: "required"` or a named function. Requests without it are unchanged.
+
 On the native server, `/v1/chat/completions` and `/v1/responses` enforce `tool_choice: "required"` and a named
 function with the engine's token grammar. Chat uses `{"type":"function","function":{"name":"lookup"}}`;
 Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are allowed; an unknown name or a required
@@ -781,6 +807,10 @@ Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
 uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
 whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
 starts after the think-end token. A reply cut short by `max_tokens` can remain incomplete and ends as `length`.
+With `--tool-think-close` (off by default), a required or named call on an engine that takes `thinking_budget` gets a
+think budget of `max_tokens - max(256, max_tokens / 4)`, or the request's own `thinking_budget` when that is smaller,
+so the think block closes with room left for the call instead of ending as `length`. It changes the reply of any such
+call whose thinking would have run past that point. `"auto"`, `"none"` and requests without tools are unchanged.
 Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
@@ -1001,11 +1031,12 @@ A startup capacity estimate is not a measured release capacity.
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
 model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
-`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
-model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
-the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
-once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
-with a smaller `--context` or `--parallel`.
+`MemAvailable`, at most the free memory CUDA reports, less a reserve (a tenth of RAM, at least 4 GiB). CUDA does not
+count the page cache as free, so before loading, the server drops the checkpoint's own shards from it. On native CUDA
+a stream's window is `--context`, the model's own window at `--context 0`, or, when it is unset, the family's default
+capped at the model's own window; on the paged families the streams and pages then fill the budget up to the streams'
+windows plus the cache's pages, so once those exceed it, the free memory after load is the reserve. To leave room for
+other containers, start the server with a smaller `--context` or `--parallel`.
 `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
 one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
 workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
