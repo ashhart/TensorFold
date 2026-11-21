@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the optimization ledger adds rows 34 to 37 (FP8 KV prefill waits, Qwen normalization and head, text metadata uploads and greedy readback), each `failed` on one GB10 against the 3% served-speed bar with equal tokens, and the SM120 follow-up as inconclusive (#4054, fixes #3741). Thanks to @devopsfortunato.
+
 - CUDA: with `TF_ROCE=1`, the RoCE all-gather pairs each peer's stripes with the HCA on that peer's IPv4 /24 (the rule `fabric/tp` uses, now one copy for both) when every rank's plan holds, so three GB10s cabled as a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL; a switch or two ranks keep the same-numbered pairs, and a `TF_ROCE_HCA` of more than two names is refused by name instead of cut to two (#3518, fixes #3411). Thanks to @ultradaoto.
 
 - DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build): structured output runs on the lane core's token grammars with drafts on: `response_format`, the `guided_*` fields, `tool_choice: "required"` or a named function, and strict tools under `tool_choice: "auto"`; a grammar's stop token ends the reply with `finish_reason` `stop` even with `ignore_eos` (#3026, closes #1664, from #1665). Thanks to @nuk3s.
