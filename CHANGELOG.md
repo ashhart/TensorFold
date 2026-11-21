@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MOSS-Image on CUDA: the checkpoint's Qwen3.5 prompt encoder and VAE decoder run beside the transformer, so the native server serves pictures through `POST /v1/images/generations`, the same request twice giving the same bytes (#2281, part of #1573). Thanks to @devopsfortunato.
+
 - MOSS-Image and Step-5: the vision encoders take their RoPE frequencies from the shared exact helper; MOSS-Image's bf16 cos and sin tables change only from row 565, so shorter prompts read the same tables, Step-5's bf16 tables are unchanged, and `zig build test-moss-image-rotary-host` checks the MOSS-Image tables without a device (#1998, part of #1852).
 
 - Server: every image takes a fixed share of the visual-token budget, `--vision-image-tokens / --vision-max-images` (1,024 tokens at the defaults), whatever the request's image count, so a turn that adds an image no longer re-sizes earlier ones and the prompt cache can resume from the first image; a lone image gets that share, not the whole budget, and a budget that leaves no share is refused by name, naming the image and both flags (#2717, fixes #2510). Thanks to @devopsfortunato.
