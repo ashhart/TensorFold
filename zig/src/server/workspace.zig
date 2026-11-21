@@ -61,10 +61,6 @@ fn privateState(io: std.Io, path: []const u8) !void {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    const dir = try cwd.openDir(io, path, .{ .follow_symlinks = false });
-    defer dir.close(io);
-    const stat = try dir.stat(io);
-    if (stat.kind != .directory or stat.permissions.toMode() & 0o077 != 0) return error.InsecureWorkspaceState;
 }
 
 fn templateIdentity(text: model_text.Text) [32]u8 {
@@ -76,20 +72,26 @@ fn templateIdentity(text: model_text.Text) [32]u8 {
 
 pub fn modelIdentity(a: Allocator, io: std.Io, dir: []const u8, checkpoint: [32]u8, tokenizer: [32]u8) ![32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update("TensorFold workspace model v2");
+    hash.update("TensorFold workspace model v3");
     hash.update(&checkpoint);
     hash.update(&tokenizer);
-    const path = try std.fs.path.join(a, &.{ dir, "tokenizer.json" });
+    for ([_][]const u8{ "tokenizer.json", "tokenizer_config.json" }) |name| try hashModelAsset(a, io, dir, name, &hash);
+    return hash.finalResult();
+}
+
+fn hashModelAsset(a: Allocator, io: std.Io, dir: []const u8, name: []const u8, hash: *std.crypto.hash.sha2.Sha256) !void {
+    hash.update(name);
+    const path = try std.fs.path.join(a, &.{ dir, name });
     defer a.free(path);
     const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            hash.update("semantic assets only");
-            return hash.finalResult();
+            hash.update("missing");
+            return;
         },
         else => return err,
     };
     defer file.close(io);
-    hash.update("tokenizer.json bytes");
+    hash.update("present");
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
         const count = file.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
@@ -99,7 +101,6 @@ pub fn modelIdentity(a: Allocator, io: std.Io, dir: []const u8, checkpoint: [32]
         if (count == 0) break;
         hash.update(buffer[0..count]);
     }
-    return hash.finalResult();
 }
 
 fn cacheIdentity(info: api.Info, args: cli.Args) [32]u8 {
@@ -136,11 +137,16 @@ pub fn parse(cx: *Cx, raw: json.Value, is_chat: bool, enabled: bool) errors.Refu
     const array = if (sources_value) |sources| if (sources == .array) sources.array else return cx.refuse("workspace.sources must be an array of relative paths") else return cx.refuse("workspace.sources must be an array of relative paths");
     if (array.len == 0 or array.len > 4096) return cx.refuse("workspace.sources must name 1 through 4096 files");
     const sources = try cx.a.alloc([]const u8, array.len);
-    for (array, sources, 0..) |item, *source, i| {
+    for (array, sources) |item, *source| {
         if (item != .string) return cx.refuse("workspace.sources must contain only relative path strings");
         source.* = item.string;
-        for (sources[0..i]) |prior| if (std.mem.eql(u8, prior, source.*)) return cx.refuse("workspace.sources must not repeat a path");
     }
+    std.mem.sortUnstable([]const u8, sources, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    for (sources[1..], sources[0 .. sources.len - 1]) |source, prior| if (std.mem.eql(u8, prior, source)) return cx.refuse("workspace.sources must not repeat a path");
     return .{ .op = op, .sources = sources };
 }
 
@@ -152,6 +158,14 @@ fn stopped(gone: anytype) wm.Stop {
         }
     };
     return .{ .ptr = @ptrCast(@constCast(&gone)), .check = Adapter.check };
+}
+
+fn tokenRefusal(srv: anytype, cx: *Cx, actual: usize) errors.Refused {
+    if (srv.info.context_window > 0 and actual >= srv.info.context_window) {
+        const window: i64 = srv.info.context_window;
+        return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.capability(.context_fitted)) ", the most this server's memory budget fits" else "", actual });
+    }
+    return cx.refuse("the workspace prompt exceeds the model context or manifest token limit");
 }
 
 fn refusal(cx: *Cx, err: anyerror) error{ Refused, Cancelled, OutOfMemory } {
@@ -187,14 +201,21 @@ pub fn resolve(srv: anytype, cx: *Cx, call: Request, base_text: []const u8, gone
             error.OutOfMemory => error.OutOfMemory,
             error.Template => cx.refuse("the workspace prompt could not be tokenized"),
         };
+        const token_limit = if (srv.info.context_window > 0) @min(wm.max_prompt_tokens, @as(usize, @intCast(srv.info.context_window - 1))) else wm.max_prompt_tokens;
+        if (base.len > token_limit) return tokenRefusal(srv, cx, base.len);
+        var token_count = base.len;
+        var byte_count: u64 = 0;
         sources = try cx.a.alloc(wm.Source, call.sources.len);
         for (call.sources, sources) |path, *source| {
-            const text = service.store.readSource(cx.a, path, stop) catch |err| return refusal(cx, err);
+            const text = service.store.readSourceBudget(cx.a, path, wm.max_source_bytes - byte_count, stop) catch |err| return refusal(cx, err);
+            byte_count += @intCast(text.bytes.len);
             if (!std.unicode.utf8ValidateSlice(text.bytes)) return cx.refuse("workspace sources must contain valid UTF-8");
             const tokens = srv.text.encode(cx.a, text.bytes, false) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Template => cx.refuse("a workspace source could not be tokenized"),
             };
+            if (tokens.len > token_limit - token_count) return tokenRefusal(srv, cx, token_count +| tokens.len);
+            token_count += tokens.len;
             source.* = .{ .path = path, .tokens = tokens, .size = @intCast(text.bytes.len), .sha256 = text.sha256 };
         }
     }

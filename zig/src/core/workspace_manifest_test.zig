@@ -15,6 +15,7 @@ const Fixture = struct {
         errdefer tmp.cleanup();
         try tmp.dir.createDirPath(io, "repo");
         try tmp.dir.createDirPath(io, "state");
+        try tmp.dir.setFilePermissions(io, "state", .fromMode(0o700), .{});
         const root = try tmp.dir.realPathFileAlloc(io, ".", a);
         defer a.free(root);
         const repo = try std.fs.path.join(a, &.{ root, "repo" });
@@ -191,6 +192,7 @@ test "workspace manifest provenance depends on content and identity not state lo
     const root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
     defer a.free(root);
     const second_state = try std.fs.path.join(a, &.{ root, "second-state" });
+    try f.tmp.dir.setFilePermissions(io, "second-state", .fromMode(0o700), .{});
     defer a.free(second_state);
     var second_store = try wm.Store.init(a, io, f.store.workspace, second_state);
     defer second_store.deinit();
@@ -313,6 +315,7 @@ test "workspace manifest stays bound across ancestor substitution" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try f.tmp.dir.createDirPath(io, "container/repo");
     try f.tmp.dir.createDirPath(io, "container/state");
+    try f.tmp.dir.setFilePermissions(io, "container/state", .fromMode(0o700), .{});
     try f.tmp.dir.createDirPath(io, "outside/repo");
     try f.tmp.dir.createDirPath(io, "outside/state");
     try f.tmp.dir.writeFile(io, .{ .sub_path = "container/repo/secret.txt", .data = "original-secret" });
@@ -339,3 +342,103 @@ test "workspace manifest stays bound across ancestor substitution" {
     defer outside.close(io);
     try std.testing.expectError(error.FileNotFound, outside.statFile(io, wm.manifest_name, .{}));
 }
+
+test "workspace manifest aggregate source bytes refuse before reading or publication" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    try f.write("b.txt", "bravo");
+    var sources = [_]wm.Source{ source("a.txt", &.{2}, "alpha"), source("b.txt", &.{3}, "bravo") };
+    sources[0].size = wm.max_source_bytes;
+    sources[1].size = 1;
+    try std.testing.expectError(error.ManifestTooLarge, f.store.cold(id, &.{1}, &sources, null));
+    try expectStateEmpty(&f);
+    sources[0].size = 5;
+    sources[1].size = 5;
+    var cold = try f.store.cold(id, &.{1}, &sources, null);
+    defer cold.deinit();
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, cold.manifest.prompt);
+    var state = try f.tmp.dir.openDir(io, "state", .{});
+    defer state.close(io);
+    const published = try state.statFile(io, wm.manifest_name, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(u32, 0), published.permissions.toMode() & 0o077);
+}
+
+test "workspace manifest empty UTF-8 sources retain lexical order and warm IDs" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "");
+    try f.write("b.txt", "alpha");
+    try f.write("c.txt", "");
+    const sources = [_]wm.Source{ source("c.txt", &.{}, ""), source("b.txt", &.{ 2, 3 }, "alpha"), source("a.txt", &.{}, "") };
+    var cold = try f.store.cold(id, &.{1}, &sources, null);
+    defer cold.deinit();
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, cold.manifest.prompt);
+    try std.testing.expectEqualStrings("a.txt", cold.manifest.files[0].path);
+    try std.testing.expectEqualStrings("b.txt", cold.manifest.files[1].path);
+    try std.testing.expectEqualStrings("c.txt", cold.manifest.files[2].path);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 3 }, &.{ cold.manifest.files[0].prompt_end, cold.manifest.files[1].prompt_end, cold.manifest.files[2].prompt_end });
+    var warm = try f.store.warm(id, null);
+    defer warm.deinit();
+    try std.testing.expectEqualSlices(u32, cold.manifest.prompt, warm.manifest.prompt);
+    try f.write("b.txt", "bravo");
+    const edited_sources = [_]wm.Source{ source("a.txt", &.{}, ""), source("b.txt", &.{4}, "bravo"), source("c.txt", &.{}, "") };
+    var edited = try f.store.edit(id, &.{1}, &edited_sources, null);
+    defer edited.deinit();
+    try std.testing.expectEqualSlices(u32, &.{ 1, 4 }, edited.manifest.prompt);
+    try std.testing.expectEqual(@as(u32, 1), edited.reused_tokens);
+    try std.testing.expectEqual(@as(u32, 1), edited.changed_files);
+    try std.testing.expectError(error.EmptySourcePrompt, f.store.cold(id, &.{}, &.{source("a.txt", &.{}, "")}, null));
+}
+
+test "workspace manifest FIFO sources and state refuse without an open wait" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    const root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const fifo = try std.fs.path.join(a, &.{ root, "repo/fifo" });
+    defer a.free(fifo);
+    const fifo_z = try a.dupeSentinel(u8, fifo, 0);
+    defer a.free(fifo_z);
+    try std.testing.expectEqual(@as(c_int, 0), mkfifo(fifo_z, 0o600));
+    try std.testing.expectError(error.WorkspaceFileNotRegular, f.store.readSource(a, "fifo", null));
+    try f.write("a.txt", "alpha");
+    var cold = try f.store.cold(id, &.{1}, &.{source("a.txt", &.{2}, "alpha")}, null);
+    defer cold.deinit();
+    try f.tmp.dir.deleteFile(io, "state/workspace-manifest.bin");
+    const state_fifo = try std.fs.path.join(a, &.{ root, "state/workspace-manifest.bin" });
+    defer a.free(state_fifo);
+    const state_fifo_z = try a.dupeSentinel(u8, state_fifo, 0);
+    defer a.free(state_fifo_z);
+    try std.testing.expectEqual(@as(c_int, 0), mkfifo(state_fifo_z, 0o600));
+    try std.testing.expectError(error.ManifestRefused, f.store.warm(id, null));
+}
+
+test "workspace manifest private state is revalidated before load and atomic replacement" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.write("a.txt", "alpha");
+    var cold = try f.store.cold(id, &.{1}, &.{source("a.txt", &.{2}, "alpha")}, null);
+    defer cold.deinit();
+    try f.write("a.txt", "bravo");
+    var next = try disk.capture(a, io, f.store.workspace, f.store.workspace_dir, id, &.{1}, &.{source("a.txt", &.{3}, "bravo")}, null);
+    defer next.deinit();
+    try f.tmp.dir.setFilePermissions(io, "state", .fromMode(0o755), .{});
+    defer f.tmp.dir.setFilePermissions(io, "state", .fromMode(0o700), .{}) catch {};
+    try std.testing.expectError(error.InsecureWorkspaceState, f.store.warm(id, null));
+    try std.testing.expectError(error.InsecureWorkspaceState, f.store.commit(&next, true, null));
+    try f.tmp.dir.setFilePermissions(io, "state", .fromMode(0o700), .{});
+    try f.write("a.txt", "alpha");
+    var warm = try f.store.warm(id, null);
+    defer warm.deinit();
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, warm.manifest.prompt);
+    var state = try f.tmp.dir.openDir(io, "state", .{ .iterate = true });
+    defer state.close(io);
+    var entries = state.iterate();
+    try std.testing.expectEqualStrings(wm.manifest_name, (try entries.next(io)).?.name);
+    try std.testing.expect((try entries.next(io)) == null);
+}
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.posix.mode_t) c_int;

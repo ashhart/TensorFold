@@ -130,3 +130,101 @@ test "Responses custom calls keep IDs and indices, and a partial second call end
     try t.expect(std.mem.startsWith(u8, output[1].get("id").?.string, "ctc_"));
     for (capture.events.items, 0..) |event, i| try t.expectEqual(@as(i64, @intCast(i)), event.payload.get("sequence_number").?.int64() orelse 0);
 }
+
+test "Responses interleaved same-name calls finish after their last deltas and in call order" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var srv: Server = undefined;
+    var capture: Capture = .{};
+    defer capture.deinit();
+    var cx: errors.Cx = .{ .a = a };
+    var r = try blankReply(a, &cx, &srv, true, capture.sink(), .null);
+    for ([_][]const u8{
+        \\{"tool_calls":[{"index":0,"id":"custom-id","custom":{"name":"shared","input":"raw "}}]}
+        ,
+        \\{"tool_calls":[{"index":1,"id":"function-id","function":{"name":"shared","arguments":"{\"x\":"}}]}
+        ,
+        \\{"tool_calls":[{"index":0,"custom":{"input":"+ tail"}}]}
+        ,
+        \\{"tool_calls":[{"index":1,"function":{"arguments":"1}"}}]}
+        ,
+    }) |text| try r.delta((try json.parse(a, text)).ok, null);
+    const final = try r.finish("stop", null, null);
+    const output = final.get("output").?.array;
+    try t.expectEqual(@as(usize, 2), output.len);
+    try t.expectEqualStrings("custom_tool_call", output[0].strField("type").?);
+    try t.expectEqualStrings("raw + tail", output[0].strField("input").?);
+    try t.expectEqualStrings("function_call", output[1].strField("type").?);
+    try t.expectEqualStrings("{\"x\":1}", output[1].strField("arguments").?);
+    var custom_done = false;
+    var function_done = false;
+    var added: usize = 0;
+    var closed: usize = 0;
+    for (capture.events.items) |one| {
+        if (std.mem.eql(u8, one.kind, "response.custom_tool_call_input.delta")) try t.expect(!custom_done);
+        if (std.mem.eql(u8, one.kind, "response.function_call_arguments.delta")) try t.expect(!function_done);
+        if (std.mem.eql(u8, one.kind, "response.custom_tool_call_input.done")) custom_done = true;
+        if (std.mem.eql(u8, one.kind, "response.function_call_arguments.done")) function_done = true;
+        if (std.mem.eql(u8, one.kind, "response.output_item.added")) {
+            try t.expectEqual(@as(i64, @intCast(added)), one.payload.get("output_index").?.int64().?);
+            added += 1;
+        }
+        if (std.mem.eql(u8, one.kind, "response.output_item.done")) {
+            try t.expectEqual(@as(i64, @intCast(closed)), one.payload.get("output_index").?.int64().?);
+            closed += 1;
+        }
+    }
+    try t.expect(custom_done and function_done);
+    try t.expectEqual(@as(usize, 1), capture.count("response.custom_tool_call_input.done"));
+    try t.expectEqual(@as(usize, 1), capture.count("response.function_call_arguments.done"));
+    try t.expectEqual(@as(usize, 2), added);
+    try t.expectEqual(@as(usize, 2), closed);
+}
+
+test "Responses foreground streamed failures persist exactly when store is true" {
+    const Engine = struct {
+        fn engine(self: *const @This()) @import("engine_api").Engine {
+            return .{ .ctx = @constCast(self), .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        }
+        fn info(_: *anyopaque) @import("engine_api").Info {
+            return .{ .context_window = 1 };
+        }
+        fn submit(_: *anyopaque, _: @import("engine_api").Id, _: *const @import("engine_api").Request, _: @import("engine_api").Sink) @import("engine_api").SubmitError!void {
+            return error.Busy;
+        }
+        fn cancel(_: *anyopaque, _: @import("engine_api").Id) void {}
+        fn status(_: *anyopaque, out: *@import("engine_api").Status, _: []u32) void {
+            out.* = .{};
+        }
+        fn memory(_: *anyopaque, _: bool) ?@import("engine_api").Memory {
+            return null;
+        }
+    };
+    const History = struct {
+        fn conversation(_: @This(), _: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
+            return &.{};
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture: Engine = .{};
+    var text: @import("stream_preflight_test.zig").TestText = .{};
+    const srv = try Server.init(t.allocator, t.io, fixture.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    var cx: errors.Cx = .{ .a = a };
+    var conn: @import("http_conn.zig").Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
+    var capture: Capture = .{};
+    defer capture.deinit();
+    for ([_]bool{ true, false }) |keep| {
+        const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"input\":\"too long\",\"stream\":true,\"store\":{}}}", .{keep}))).ok;
+        const request = try @import("responses_translate.zig").translate(&cx, body, History{});
+        const outcome = responses.turn(srv, a, &conn, &cx, body, request, capture.sink(), .{});
+        const final = outcome.streamed.?;
+        try t.expectEqualStrings("failed", final.strField("status").?);
+        const kept = try srv.store.get(t.io, a, final.strField("id").?, null);
+        if (keep) try t.expect(json.equal(final, kept.?)) else try t.expect(kept == null);
+    }
+    try t.expectEqual(@as(usize, 2), capture.count("response.failed"));
+}

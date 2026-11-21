@@ -48,7 +48,7 @@ pub fn choiceDisables(choice: ?Value) bool {
     return false;
 }
 
-/// OpenAI's "required" or a named function: the reply must call a tool.
+/// OpenAI's "required" or a named function/custom tool: the reply must call a tool.
 pub fn choiceRequiresCall(a: Allocator, choice: ?Value) Allocator.Error!bool {
     const c = choice orelse return false;
     if (c == .string) return lowerEq(c.string, "required");
@@ -56,19 +56,23 @@ pub fn choiceRequiresCall(a: Allocator, choice: ?Value) Allocator.Error!bool {
         const value = if (c.firstTruthy(&.{ "type", "mode" })) |v| try pyStr(a, v) else "";
         if (lowerEq(value, "required")) return true;
         const function = c.get("function");
-        return lowerEq(value, "function") and function != null and function.? == .object;
+        if (lowerEq(value, "function")) return function != null and function.? == .object;
+        return lowerEq(value, "custom") and c.get("name") != null;
     }
     return false;
 }
 
-fn isFunctionChoice(a: Allocator, c: Value) Allocator.Error!bool {
-    if (c != .object) return false;
-    const t = c.get("type") orelse return false;
-    if (!t.truthy()) return false;
-    return std.ascii.eqlIgnoreCase(try pyStr(a, t), "function");
+fn namedKind(a: Allocator, c: Value) Allocator.Error![]const u8 {
+    if (c != .object) return "";
+    const t = c.get("type") orelse return "";
+    if (!t.truthy()) return "";
+    const kind = try pyStr(a, t);
+    if (std.ascii.eqlIgnoreCase(kind, "function")) return "function";
+    if (std.ascii.eqlIgnoreCase(kind, "custom")) return "custom";
+    return "";
 }
 
-/// The tools the template offers: none for "none", only the named one for a named function.
+/// The tools the template offers: none for "none", only the same-namespace named one for a named tool.
 pub fn active(cx: *Cx, tools: ?Value, choice: ?Value) errors.Refused![]Value {
     var specs: []Value = &.{};
     if (tools) |t| if (t != .null) {
@@ -85,13 +89,26 @@ pub fn active(cx: *Cx, tools: ?Value, choice: ?Value) errors.Refused![]Value {
         return &.{};
     }
     const c = choice orelse return specs;
-    if (!try isFunctionChoice(cx.a, c)) return specs;
-    const function = c.get("function") orelse return cx.other("tool_choice function must include a function object");
-    if (function != .object) return cx.other("tool_choice function must include a function object");
-    const requested = try nameText(cx.a, function.get("name"));
-    if (requested.len == 0) return cx.other("tool_choice function must include a name");
+    const selected_kind = try namedKind(cx.a, c);
+    if (selected_kind.len == 0) return specs;
+    var requested: []const u8 = "";
+    if (std.mem.eql(u8, selected_kind, "custom")) {
+        requested = try nameText(cx.a, c.get("name"));
+    } else {
+        const function = c.get("function") orelse return cx.other("tool_choice function must include a function object");
+        if (function != .object) return cx.other("tool_choice function must include a function object");
+        requested = try nameText(cx.a, function.get("name"));
+    }
+    if (requested.len == 0) return cx.other("tool_choice must include a selected tool name");
     var named: std.ArrayList(Value) = .empty;
-    for (specs) |tool| if (std.mem.eql(u8, try toolName(cx.a, tool), requested)) try named.append(cx.a, tool);
+    for (specs) |tool| {
+        const actual = tool.get("type");
+        const namespace = if (std.mem.eql(u8, selected_kind, "function"))
+            actual == null or (actual.? == .string and std.mem.eql(u8, actual.?.string, "function"))
+        else
+            actual != null and actual.? == .string and std.mem.eql(u8, actual.?.string, "custom");
+        if (namespace and std.mem.eql(u8, try toolName(cx.a, tool), requested)) try named.append(cx.a, tool);
+    }
     if (named.items.len == 0) return cx.fail(.other, "tool_choice requested unknown tool '{s}'", .{requested});
     return named.items;
 }

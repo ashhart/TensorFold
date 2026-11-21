@@ -166,6 +166,16 @@ pub fn writeCallName(a: Allocator, item: *json.Object, declared: ?Value, name: [
     } else try item.put(a, "name", .{ .string = name });
 }
 
+fn flushThought(a: Allocator, out: *std.ArrayList(*json.Object), thought: *?[]const u8) Allocator.Error!void {
+    const text = thought.* orelse return;
+    const m = try json.newObject(a);
+    try m.put(a, "role", .{ .string = "assistant" });
+    try m.put(a, "content", .{ .string = "" });
+    try m.put(a, "reasoning_content", .{ .string = text });
+    try out.append(a, m);
+    thought.* = null;
+}
+
 /// Input items (output items too) as chat messages: a turn's reasoning, text and calls are one assistant message.
 pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
     const a = cx.a;
@@ -182,6 +192,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
                 if (std.mem.eql(u8, r, role)) break true;
             } else false;
             if (!ok or item.get("role").? != .string) return cx.refuse("a message's role must be user, assistant, system or developer");
+            if (!std.mem.eql(u8, role, "assistant")) try flushThought(a, &out, &thought);
             const m = try json.newObject(a);
             try m.put(a, "role", .{ .string = role });
             try m.put(a, "content", try content(cx, item.get("content")));
@@ -232,6 +243,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             try m.put(a, "role", .{ .string = "tool" });
             try m.put(a, "tool_call_id", .{ .string = call_id });
             try m.put(a, "content", try output(cx, item.get("output")));
+            try flushThought(a, &out, &thought);
             try out.append(a, m);
         } else if (std.mem.eql(u8, k, "reasoning")) {
             var texts: std.ArrayList(u8) = .empty;
@@ -248,6 +260,7 @@ pub fn messages(cx: *Cx, items: []const Value) errors.Refused![]Value {
             return cx.refuse("an item_reference requires its original response history; missing history cannot be reconstructed");
         } else return cx.fail(.request, "input items of type {s} are not supported: send messages, function_call, custom_tool_call, tool outputs and reasoning items", .{try pyrepr.repr(a, kind)});
     }
+    try flushThought(a, &out, &thought);
     const result = try a.alloc(Value, out.items.len);
     for (out.items, result) |m, *slot| slot.* = .{ .object = m };
     return result;
@@ -411,6 +424,20 @@ test "input_file refuses remote file_url" {
     )).ok.array;
     try std.testing.expectError(error.Refused, messages(&cx, items));
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
+}
+
+test "background Responses: pending reasoning stays ahead of following user and tool items" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const items = (try json.parse(cx.a,
+        \\[{"type":"reasoning","content":[{"text":"first"}]},{"role":"user","content":"next"},{"type":"reasoning","content":[{"text":"second"}]},{"type":"function_call_output","call_id":"call_1","output":"done"}]
+    )).ok.array;
+    const got = try messages(&cx, items);
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    for ([_][]const u8{ "assistant", "user", "assistant", "tool" }, got) |role, m| try std.testing.expectEqualStrings(role, m.strField("role").?);
+    try std.testing.expectEqualStrings("first", got[0].strField("reasoning_content").?);
+    try std.testing.expectEqualStrings("second", got[2].strField("reasoning_content").?);
 }
 
 test {

@@ -128,14 +128,25 @@ fn cutCall(a: Allocator, written: []const u8, tools: []const Value) Allocator.Er
         .ok => |v| if (v == .string) (try offered(a, v.string, tools)) orelse return null else return null,
         .err => return null,
     };
+    const custom = try @import("tool_custom.zig").names(a, tools);
+    const functions = try @import("tool_custom.zig").functions(a, tools);
+    const custom_name = @import("tool_custom.zig").isCustom(custom, name);
+    if (custom_name and args.value[0] != '"' and !@import("tool_custom.zig").isCustom(functions, name)) return null;
+    const is_custom = custom_name and args.value[0] == '"';
     const function = try json.newObject(a);
     try function.put(a, "name", .{ .string = name });
     const written_args = if (args.value[0] == '"') try cutString(a, args.value) else args.value;
     try function.put(a, "arguments", .{ .string = written_args });
     const call = try json.newObject(a);
     try call.put(a, "id", .{ .string = try ids.make(a, "call_", 24) });
-    try call.put(a, "type", .{ .string = "function" });
+    try call.put(a, "type", .{ .string = if (is_custom) "custom" else "function" });
     try call.put(a, "function", .{ .object = function });
+    if (is_custom) {
+        const payload = try json.newObject(a);
+        try payload.put(a, "name", .{ .string = name });
+        try payload.put(a, "input", .{ .string = written_args });
+        try call.put(a, "custom", .{ .object = payload });
+    }
     return .{ .object = call };
 }
 
@@ -210,4 +221,18 @@ test "a cut JSON call reads the keys a closed one does, and whole arguments spel
 
 fn expectArguments(a: Allocator, want: []const u8, payload: []const u8) !void {
     try std.testing.expectEqualStrings(want, (try cutArguments(a, payload)) orelse return error.NoCall);
+}
+
+test "a custom call cut inside raw input stays custom, unlike a same-name function object" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parseText(a, "[{\"type\":\"function\",\"function\":{\"name\":\"shared\"}},{\"type\":\"custom\",\"name\":\"shared\"},{\"type\":\"custom\",\"name\":\"freeform\"}]")).ok.array;
+    const calls = (try cutCalls(a, "<tool_call>{\"name\":\"shared\",\"arguments\":\" raw\\n{", tools)).?;
+    try std.testing.expectEqual(@as(usize, 1), calls.len);
+    try std.testing.expectEqualStrings("custom", calls[0].strField("type").?);
+    try std.testing.expectEqualStrings(" raw\n{", calls[0].get("custom").?.strField("input").?);
+    const function = (try cutCalls(a, "<tool_call>{\"name\":\"shared\",\"arguments\":{\"x\":1}}", tools)).?;
+    try std.testing.expectEqualStrings("function", function[0].strField("type").?);
+    try std.testing.expect(try cutCalls(a, "<tool_call>{\"name\":\"freeform\",\"arguments\":{\"x\":", tools) == null);
 }

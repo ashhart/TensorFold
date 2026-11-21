@@ -20,16 +20,26 @@ pub fn names(a: Allocator, tools: []const Value) Allocator.Error![]const []const
     return out.items;
 }
 
+pub fn functions(a: Allocator, tools: []const Value) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (tools) |tool| {
+        const kind = tool.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "function")) continue;
+        try out.append(a, try tool_specs.toolName(a, tool));
+    }
+    return out.items;
+}
+
 pub fn isCustom(offered: []const []const u8, name: []const u8) bool {
     for (offered) |candidate| if (std.ascii.eqlIgnoreCase(candidate, name)) return true;
     return false;
 }
 
 /// Ordinary functions retain the JSON-object contract; custom tools preserve their one input string exactly.
-pub fn arguments(a: Allocator, name: []const u8, args: Value, custom: []const []const u8, complete: bool) Error!Value {
+pub fn arguments(a: Allocator, name: []const u8, args: Value, custom: []const []const u8, function_names: []const []const u8, complete: bool) Error!Value {
     if (isCustom(custom, name)) {
-        if (args != .string) return error.Invalid;
-        return args;
+        if (args == .string) return args;
+        if (!isCustom(function_names, name)) return error.Invalid;
     }
     const object = try jsonObject(a, args);
     if (complete and !tool_params.finite(object)) return error.Invalid;
@@ -52,7 +62,7 @@ pub fn jsonObject(a: Allocator, v: Value) Error!Value {
 
 /// A custom call carries both the native chat function view and its Responses custom input view.
 pub fn openaiCall(a: Allocator, name: []const u8, args: Value, custom: []const []const u8) Allocator.Error!Value {
-    const is_custom = isCustom(custom, name);
+    const is_custom = isCustom(custom, name) and args == .string;
     const text = if (is_custom) args.string else try json.stringify(a, args, .{ .ascii = false, .compact = true });
     const function = try json.newObject(a);
     try function.put(a, "name", .{ .string = name });

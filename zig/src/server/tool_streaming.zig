@@ -21,6 +21,12 @@ pub fn deltas(a: Allocator, calls: []const Value) Allocator.Error![]Value {
         const kind = call.get("type");
         try head.put(a, "type", .{ .string = if (kind != null and kind.?.truthy()) try tool_specs.pyStr(a, kind.?) else "function" });
         try head.put(a, "function", .{ .object = head_fn });
+        if (call.get("custom")) |custom| if (custom == .object) {
+            const head_custom = try json.newObject(a);
+            try head_custom.put(a, "name", head_fn.get("name").?);
+            try head_custom.put(a, "input", .{ .string = "" });
+            try head.put(a, "custom", .{ .object = head_custom });
+        };
         try out.append(a, try wrapCalls(a, .{ .object = head }));
         const args = function.get("arguments");
         const text = if (args != null and args.?.truthy()) try tool_specs.pyStr(a, args.?) else "";
@@ -30,6 +36,11 @@ pub fn deltas(a: Allocator, calls: []const Value) Allocator.Error![]Value {
             const more = try json.newObject(a);
             try more.put(a, "index", try json.intValue(a, index));
             try more.put(a, "function", .{ .object = arg_fn });
+            if (call.get("custom")) |custom| if (custom == .object) {
+                const input = try json.newObject(a);
+                try input.put(a, "input", .{ .string = text });
+                try more.put(a, "custom", .{ .object = input });
+            };
             try out.append(a, try wrapCalls(a, .{ .object = more }));
         }
     }

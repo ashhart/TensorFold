@@ -289,6 +289,15 @@ test "workspace tokenizer bytes bind preprocessing identities" {
     const other = try workspace.modelIdentity(t.allocator, t.io, files.root, checkpoint, tokenizer);
     try t.expect(!std.mem.eql(u8, &first, &other));
     try t.expect(!std.mem.eql(u8, &missing, &first));
+    try files.write("joint_head_config.json", "{}");
+    try files.write("tokenizer_config.json", "{\"pretokenize_regex\":\"\\\\p{L}+\"}");
+    const clef = try workspace.modelIdentity(t.allocator, t.io, files.root, checkpoint, tokenizer);
+    try files.write("tokenizer_config.json", "{\"pretokenize_regex\":\"[\\\\p{L}\\\\p{M}]+\"}");
+    const changed_clef = try workspace.modelIdentity(t.allocator, t.io, files.root, checkpoint, tokenizer);
+    try t.expect(!std.mem.eql(u8, &clef, &changed_clef));
+    try files.write("tokenizer_config.json", "{\"pretokenize_regex\":\"\\\\p{L}+\"}");
+    const repeated_clef = try workspace.modelIdentity(t.allocator, t.io, files.root, checkpoint, tokenizer);
+    try t.expectEqualSlices(u8, &clef, &repeated_clef);
 }
 
 test "workspace compaction refuses before manifest publication or submission" {
@@ -329,4 +338,92 @@ test "workspace source refused edit preserves the last good revision" {
     try files.write("a.txt", "alpha");
     _ = try h.run(a, .{ .op = .warm }, "");
     try t.expectEqualSlices(u32, &byteIds("Ralpha"), h.prompt);
+}
+
+test "workspace source aggregate tokens refuse during resolve before admission" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var files = try Files.init();
+    defer files.deinit();
+    try files.write("a.txt", "aa");
+    try files.write("b.txt", "bbb");
+    var h: Harness = undefined;
+    try h.init(t.allocator, &files);
+    defer h.deinit();
+    h.srv.info.context_window = 6;
+    var cx: errors.Cx = .{ .a = a };
+    const sources = [_][]const u8{ "a.txt", "b.txt" };
+    if (workspace.resolve(h.srv, &cx, .{ .op = .cold, .sources = &sources }, "R", Gone{})) |value| {
+        var pending = value;
+        pending.revision.deinit();
+        pending.deinit();
+        return error.TestExpectedError;
+    } else |err| try t.expectEqual(error.Refused, err);
+    try t.expectEqual(@as(usize, 0), h.submits);
+    var state = try files.tmp.dir.openDir(t.io, "state", .{ .iterate = true });
+    defer state.close(t.io);
+    var entries = state.iterate();
+    try t.expect((try entries.next(t.io)) == null);
+    h.srv.info.context_window = 7;
+    _ = try h.run(a, .{ .op = .cold, .sources = &sources }, "R");
+    try t.expectEqualSlices(u32, &byteIds("Raabbb"), h.prompt);
+    try t.expectEqual(@as(usize, 1), h.submits);
+}
+
+test "workspace source duplicate checks sort long names and preserve exact membership" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = "workspace-source-with-a-long-common-prefix-_____________________________";
+    for ([_]bool{ true, false }) |duplicate| {
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(a);
+        try body.appendSlice(a, "{\"prompt\":\"R\",\"workspace\":{\"op\":\"cold\",\"sources\":[");
+        for (0..4096) |i| {
+            const index = if (duplicate and i == 4095) 0 else i;
+            try body.print(a, "{s}\"{s}{d:0>4}\"", .{ if (i == 0) "" else ",", prefix, index });
+        }
+        try body.appendSlice(a, "]}}");
+        var cx: errors.Cx = .{ .a = a };
+        const raw = (try json.parse(a, body.items)).ok;
+        if (duplicate) {
+            try t.expectError(error.Refused, workspace.parse(&cx, raw, false, true));
+        } else {
+            const request = (try workspace.parse(&cx, raw, false, true)).?;
+            try t.expectEqual(@as(usize, 4096), request.sources.len);
+            const first = try std.fmt.allocPrint(a, "{s}0000", .{prefix});
+            const last = try std.fmt.allocPrint(a, "{s}4095", .{prefix});
+            try t.expectEqualStrings(first, request.sources[0]);
+            try t.expectEqualStrings(last, request.sources[4095]);
+        }
+    }
+}
+
+test "workspace source empty files survive cold warm edit but not an empty whole prompt" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var files = try Files.init();
+    defer files.deinit();
+    try files.write("a.txt", "");
+    try files.write("b.txt", "alpha");
+    try files.write("c.txt", "");
+    var h: Harness = undefined;
+    try h.init(t.allocator, &files);
+    defer h.deinit();
+    const sources = [_][]const u8{ "c.txt", "a.txt", "b.txt" };
+    _ = try h.run(a, .{ .op = .cold, .sources = &sources }, "R");
+    try t.expectEqualSlices(u32, &byteIds("Ralpha"), h.prompt);
+    try t.expectEqualSlices(u32, &.{ 1, 1, 6, 6 }, h.cuts);
+    _ = try h.run(a, .{ .op = .warm }, "");
+    try t.expectEqualSlices(u32, &byteIds("Ralpha"), h.prompt);
+    const submissions = h.submits;
+    try t.expectError(error.Refused, h.run(a, .{ .op = .cold, .sources = &.{"a.txt"} }, ""));
+    try t.expectEqual(submissions, h.submits);
+    _ = try h.run(a, .{ .op = .warm }, "");
+    try t.expectEqualSlices(u32, &byteIds("Ralpha"), h.prompt);
+    try files.write("b.txt", "bravo");
+    _ = try h.run(a, .{ .op = .edit, .sources = &sources }, "R");
+    try t.expectEqualSlices(u32, &byteIds("Rbravo"), h.prompt);
 }

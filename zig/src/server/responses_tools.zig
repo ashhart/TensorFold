@@ -106,14 +106,15 @@ pub fn toolChoice(cx: *Cx, raw: ?Value, offered: ?[]Value) errors.Refused!Choice
             try unknown(cx, choice);
             unreachable;
         }
-        var active: std.ArrayList(Value) = .empty;
-        for (offered orelse &.{}) |tool| if (!deferred(tool) or (std.mem.eql(u8, kind(tool), k) and std.mem.eql(u8, name(tool), choice_name))) try active.append(cx.a, tool);
+        const active = try cx.a.alloc(Value, 1);
+        active[0] = selected.?;
+        if (std.mem.eql(u8, k, "custom")) return .{ .choice = choice, .offered = active };
         const function = try json.newObject(cx.a);
         try function.put(cx.a, "name", .{ .string = choice_name });
         const c = try json.newObject(cx.a);
         try c.put(cx.a, "type", .{ .string = "function" });
         try c.put(cx.a, "function", .{ .object = function });
-        return .{ .choice = .{ .object = c }, .offered = active.items };
+        return .{ .choice = .{ .object = c }, .offered = active };
     }
     const mode: Value = choice.get("mode") orelse .{ .string = "auto" };
     const mode_ok = mode == .string and (std.mem.eql(u8, mode.string, "auto") or std.mem.eql(u8, mode.string, "required"));

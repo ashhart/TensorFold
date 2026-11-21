@@ -225,6 +225,7 @@ const Job = struct {
     charge: usize = 0,
     state: State = .queued, // state, cancelled and deleted change under the manager's mutex
     cancelled: bool = false, // a cancel was answered: the end is kept as "cancelled"
+    terminal: ?Value = null, // the first journaled terminal response; cancellation cannot rewrite it
     deleted: bool = false,
     emit_prefill: bool = true,
     dropped: std.atomic.Value(bool) = .init(false), // the gone hook: the turn stops and keeps nothing
@@ -252,16 +253,21 @@ const Job = struct {
         gpa.destroy(j);
     }
 
-    /// The response as a poll shows it: as created, with the status it has now.
-    fn snapshot(j: *const Job, a: Allocator) !Value {
+    /// The response as a poll shows it: its terminal snapshot, reconstructed cancel output, or current state.
+    fn snapshot(j: *Job, a: Allocator) !Value {
+        if (j.terminal) |v| return json.deepCopy(a, v);
+        if (j.cancelled) {
+            const partial = try j.log.response(a, j.base);
+            return j.ending(a, partial) orelse error.OutOfMemory;
+        }
         const v = try json.deepCopy(a, .{ .object = j.base });
-        try v.object.put(a, "status", .{ .string = if (j.cancelled) "cancelled" else @tagName(j.state) });
+        try v.object.put(a, "status", .{ .string = @tagName(j.state) });
         return v;
     }
 
     /// A cancel: a running turn ends "cancelled" with its text so far (cancel_ids.zig); before it, nothing runs.
     fn stop(j: *Job) void {
-        if (j.cancelled) return;
+        if (j.cancelled or j.terminal != null) return;
         j.cancelled = true;
         if (!cancel_ids.registry.cancel(j.srv.io, j.id, j.key)) j.dropped.store(true, .release);
     }
@@ -297,8 +303,9 @@ const Job = struct {
         };
     }
 
-    /// The end as kept: the turn's response, or a failure; once a cancel was answered, "cancelled".
+    /// The journaled terminal response wins; otherwise a cancellation keeps the partial turn as cancelled.
     fn ending(j: *Job, a: Allocator, got: ?Value) ?Value {
+        if (j.terminal) |v| return json.deepCopy(a, v) catch null;
         if (!j.cancelled) return got orelse failed(a, j.base, .null) catch null;
         const o = json.copyObject(a, if (got) |v| v.object else j.base) catch return null;
         _ = o.orderedRemove("completed_at");
@@ -309,26 +316,38 @@ const Job = struct {
     }
 
     fn synthetic(j: *Job, a: Allocator, final: Value) void {
-        for ([_]struct { sequence: u64, kind: []const u8, response: *json.Object }{
-            .{ .sequence = 0, .kind = "response.created", .response = j.base },
-            .{ .sequence = 1, .kind = if (std.mem.eql(u8, json.strOr(final.get("status")), "cancelled")) "response.incomplete" else "response.failed", .response = final.object },
+        const terminal_kind = if (std.mem.eql(u8, json.strOr(final.get("status")), "cancelled")) "response.incomplete" else "response.failed";
+        var sequence: u64 = 0;
+        for ([_]struct { kind: ?[]const u8, status: ?[]const u8, response: *json.Object }{
+            .{ .kind = "response.created", .status = "queued", .response = j.base },
+            .{ .kind = if (j.state == .in_progress) "response.in_progress" else null, .status = "in_progress", .response = j.base },
+            .{ .kind = terminal_kind, .status = null, .response = final.object },
         }) |one| {
+            const kind = one.kind orelse continue;
             const payload = json.newObject(a) catch {
                 j.log.truncated = true;
                 return;
             };
-            payload.put(a, "type", .{ .string = one.kind }) catch {
+            payload.put(a, "type", .{ .string = kind }) catch {
                 j.log.truncated = true;
                 return;
             };
-            payload.put(a, "sequence_number", json.intValue(a, one.sequence) catch {
+            payload.put(a, "sequence_number", json.intValue(a, sequence) catch {
                 j.log.truncated = true;
                 return;
             }) catch {
                 j.log.truncated = true;
                 return;
             };
-            payload.put(a, "response", .{ .object = one.response }) catch {
+            const response = json.copyObject(a, one.response) catch {
+                j.log.truncated = true;
+                return;
+            };
+            if (one.status) |status| response.put(a, "status", .{ .string = status }) catch {
+                j.log.truncated = true;
+                return;
+            };
+            payload.put(a, "response", .{ .object = response }) catch {
                 j.log.truncated = true;
                 return;
             };
@@ -336,6 +355,7 @@ const Job = struct {
                 j.log.truncated = true;
                 return;
             };
+            sequence += 1;
         }
     }
 
@@ -374,6 +394,7 @@ const Job = struct {
             j.log.truncated = true;
             return error.Closed;
         };
+        if (std.mem.eql(u8, kind, "response.completed") or std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "response.incomplete")) j.terminal = payload.get("response");
     }
 };
 
@@ -495,4 +516,83 @@ test "the cancel route names one response id, and only stream=true asks for a st
     try std.testing.expectEqual(@as(?u64, 3), try startingAfter("/v1/responses/r?stream=true&starting_after=3"));
     for ([_][]const u8{ "/v1/responses/r?starting_after=", "/v1/responses/r?starting_after=-1", "/v1/responses/r?starting_after=1x", "/v1/responses/r?starting_after=18446744073709551616", "/v1/responses/r?starting_after=1&starting_after=2" }) |p|
         try std.testing.expectError(error.InvalidCursor, startingAfter(p));
+}
+
+test "background Responses: cancellation cannot rewrite a journaled terminal response" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var srv: Server = undefined;
+    srv.io = std.testing.io;
+    srv.background_jobs = .{};
+    for ([_][2][]const u8{ .{ "response.completed", "completed" }, .{ "response.failed", "failed" }, .{ "response.incomplete", "incomplete" } }) |one| {
+        var j: Job = .{ .srv = &srv, .arena = .init(std.testing.allocator), .log = .init(std.testing.allocator), .key = null, .t = undefined, .base = try json.newObject(a) };
+        defer j.log.deinit();
+        defer j.arena.deinit();
+        const got = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"id\":\"resp_terminal\",\"status\":\"{s}\",\"output\":[]}}", .{one[1]}))).ok.object;
+        const payload = try json.newObject(a);
+        try payload.put(a, "sequence_number", try json.intValue(a, 0));
+        try payload.put(a, "response", .{ .object = got });
+        try Job.heard(&j, a, one[0], payload);
+        j.stop();
+        try std.testing.expect(!j.cancelled);
+        try std.testing.expect(json.equal(.{ .object = got }, (try j.snapshot(a))));
+        try std.testing.expect(json.equal(.{ .object = got }, j.ending(a, .{ .object = got }).?));
+    }
+}
+
+test "background Responses: synthetic replay preserves state and omits progress when work never began" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var srv: Server = undefined;
+    var j: Job = .{ .srv = &srv, .arena = .init(std.testing.allocator), .log = .init(std.testing.allocator), .key = null, .t = undefined, .base = try json.newObject(a), .state = .in_progress };
+    defer j.log.deinit();
+    defer j.arena.deinit();
+    const final = (try json.parse(a, "{\"id\":\"resp_failed\",\"status\":\"failed\",\"output\":[]}")).ok;
+    j.synthetic(a, final);
+    try std.testing.expectEqual(@as(usize, 3), j.log.events.items.len);
+    for ([_][2][]const u8{ .{ "response.created", "queued" }, .{ "response.in_progress", "in_progress" }, .{ "response.failed", "failed" } }, j.log.events.items, 0..) |one, payload, i| {
+        try std.testing.expectEqualStrings(one[0], (json.Value{ .object = payload }).strField("type").?);
+        try std.testing.expectEqualStrings(one[1], payload.get("response").?.strField("status").?);
+        try std.testing.expectEqual(@as(i64, @intCast(i)), payload.get("sequence_number").?.int64().?);
+    }
+    const suffix = try j.log.copyAfter(a, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), suffix.len);
+    try std.testing.expectEqualStrings("response.failed", (json.Value{ .object = suffix[0] }).strField("type").?);
+
+    var queued: Job = .{ .srv = &srv, .arena = .init(std.testing.allocator), .log = .init(std.testing.allocator), .key = null, .t = undefined, .base = try json.newObject(a), .cancelled = true };
+    defer queued.log.deinit();
+    defer queued.arena.deinit();
+    queued.synthetic(a, (try json.parse(a, "{\"id\":\"resp_cancel\",\"status\":\"cancelled\",\"output\":[]}")).ok);
+    try std.testing.expectEqual(@as(usize, 2), queued.log.events.items.len);
+    for ([_][2][]const u8{ .{ "response.created", "queued" }, .{ "response.incomplete", "cancelled" } }, queued.log.events.items, 0..) |one, payload, i| {
+        try std.testing.expectEqualStrings(one[0], (json.Value{ .object = payload }).strField("type").?);
+        try std.testing.expectEqualStrings(one[1], payload.get("response").?.strField("status").?);
+        try std.testing.expectEqual(@as(i64, @intCast(i)), payload.get("sequence_number").?.int64().?);
+    }
+}
+
+test "background Responses: cancellation acknowledgement and storage expose the same partial output" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var srv: Server = undefined;
+    srv.io = std.testing.io;
+    srv.background_jobs = .{};
+    var j: Job = .{ .srv = &srv, .arena = .init(std.testing.allocator), .log = .init(std.testing.allocator), .key = null, .t = undefined, .base = (try json.parse(a, "{\"id\":\"resp_cancel\",\"status\":\"in_progress\",\"output\":[]}")).ok.object, .cancelled = true };
+    defer j.log.deinit();
+    defer j.arena.deinit();
+    const heard = (try json.parse(a,
+        \\[{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","content":[]}},
+        \\{"type":"response.content_part.added","sequence_number":1,"output_index":0,"part":{"type":"output_text","text":""}},
+        \\{"type":"response.output_text.delta","sequence_number":2,"output_index":0,"delta":"partial"}]
+    )).ok.array;
+    for (heard) |payload| try j.log.record(payload.object);
+    const acknowledged = try j.snapshot(a);
+    const part = acknowledged.get("output").?.array[0].get("content").?.array[0];
+    try std.testing.expectEqualStrings("partial", part.strField("text").?);
+    try std.testing.expectEqualStrings("cancelled", acknowledged.strField("status").?);
+    const stored = j.ending(a, acknowledged).?;
+    try std.testing.expect(json.equal(acknowledged, stored));
 }

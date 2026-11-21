@@ -251,3 +251,35 @@ test "a malformed DSML block's header stands: its nested XML is argument text an
         try std.testing.expectEqualStrings("{\"q\":\"<tool_call><function=lookup></function></tool_call>\"{}", try sentArguments(a, out.items));
     }
 }
+
+test "same-name functions and customs keep object arguments and raw input in streamed deltas" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"shared\"}},{\"type\":\"custom\",\"name\":\"shared\"},{\"type\":\"custom\",\"name\":\"freeform\"}]")).ok.array;
+    const text = "<tool_call>{\"name\":\"shared\",\"arguments\":{\"x\":1}}</tool_call><tool_call>{\"name\":\"shared\",\"arguments\":\" raw\\n{\"}</tool_call>";
+    const parsed = try tool_parse.parse(a, text, tools, null);
+    try std.testing.expectEqual(@as(usize, 2), parsed.calls.?.len);
+    try std.testing.expectEqualStrings("function", parsed.calls.?[0].strField("type").?);
+    try std.testing.expectEqualStrings("custom", parsed.calls.?[1].strField("type").?);
+    try std.testing.expectEqualStrings(" raw\n{", parsed.calls.?[1].get("custom").?.strField("input").?);
+    const batch = try tool_parse.deltas(a, parsed.calls.?);
+    try std.testing.expectEqual(@as(usize, 4), batch.len);
+    for ([_]usize{ 0, 2 }, 0..) |at, index| {
+        const head = batch[at].get("tool_calls").?.array[0];
+        try std.testing.expectEqual(@as(i64, @intCast(index)), head.get("index").?.int64().?);
+        const piece = batch[at + 1].get("tool_calls").?.array[0];
+        if (index == 0) {
+            try std.testing.expectEqualStrings("function", head.strField("type").?);
+            try std.testing.expect(head.get("custom") == null);
+            try std.testing.expectEqualStrings("{\"x\":1}", piece.get("function").?.strField("arguments").?);
+        } else {
+            try std.testing.expectEqualStrings("custom", head.strField("type").?);
+            try std.testing.expectEqualStrings("", head.get("custom").?.strField("input").?);
+            try std.testing.expectEqualStrings(" raw\n{", piece.get("custom").?.strField("input").?);
+        }
+    }
+    const malformed = try tool_parse.parse(a, "<tool_call>{\"name\":\"freeform\",\"arguments\":{\"not\":\"raw\"}}</tool_call>", tools, null);
+    try std.testing.expect(malformed.calls == null);
+    try std.testing.expectEqual(@as(usize, 1), malformed.kept_malformed);
+}

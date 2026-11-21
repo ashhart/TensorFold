@@ -10,6 +10,8 @@ pub const Revision = types.Revision;
 pub const Source = types.Source;
 pub const Stop = types.Stop;
 pub const manifest_name = types.manifest_name;
+pub const max_prompt_tokens = types.max_prompt_tokens;
+pub const max_source_bytes = types.max_source_bytes;
 pub const SourceText = disk.SourceText;
 
 pub const Store = struct {
@@ -25,6 +27,7 @@ pub const Store = struct {
         errdefer pinned_workspace.deinit(gpa, io);
         var pinned_state = try pinnedDirectory(gpa, io, state, error.InvalidStateRoot);
         errdefer pinned_state.deinit(gpa, io);
+        try validateState(io, pinned_state.dir);
         return .{
             .gpa = gpa,
             .io = io,
@@ -46,6 +49,9 @@ pub const Store = struct {
     pub fn readSource(s: *Store, gpa: std.mem.Allocator, path: []const u8, stop: ?Stop) !SourceText {
         return disk.readSource(gpa, s.io, s.workspace_dir, path, stop);
     }
+    pub fn readSourceBudget(s: *Store, gpa: std.mem.Allocator, path: []const u8, remaining_bytes: u64, stop: ?Stop) !SourceText {
+        return disk.readSourceBudget(gpa, s.io, s.workspace_dir, path, remaining_bytes, stop);
+    }
     pub fn cold(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
         var revision = try s.prepareCold(id, base_prompt, sources, stop);
         errdefer revision.deinit();
@@ -60,6 +66,7 @@ pub const Store = struct {
     }
 
     pub fn warm(s: *Store, id: Identity, stop: ?Stop) !Revision {
+        try validateState(s.io, s.state_dir);
         var m = try disk.load(s.gpa, s.io, s.state_dir);
         errdefer m.deinit();
         if (!m.identityMatches(s.workspace, id)) return error.NamespaceMismatch;
@@ -74,6 +81,7 @@ pub const Store = struct {
         return revision;
     }
     pub fn prepareEdit(s: *Store, id: Identity, base_prompt: []const u32, sources: []const Source, stop: ?Stop) !Revision {
+        try validateState(s.io, s.state_dir);
         var old = try disk.load(s.gpa, s.io, s.state_dir);
         defer old.deinit();
         if (!old.identityMatches(s.workspace, id)) return error.NamespaceMismatch;
@@ -86,6 +94,7 @@ pub const Store = struct {
     }
 
     pub fn commit(s: *Store, m: *Manifest, replace_existing: bool, stop: ?Stop) !void {
+        try validateState(s.io, s.state_dir);
         return disk.publish(s.gpa, s.io, s.state_dir, m, replace_existing, stop);
     }
 };
@@ -99,6 +108,11 @@ const PinnedDirectory = struct {
         gpa.free(p.path);
     }
 };
+
+fn validateState(io: std.Io, dir: std.Io.Dir) !void {
+    const stat = try dir.stat(io);
+    if (stat.kind != .directory or stat.permissions.toMode() & 0o077 != 0) return error.InsecureWorkspaceState;
+}
 
 fn pinnedDirectory(gpa: std.mem.Allocator, io: std.Io, path: []const u8, comptime failure: anyerror) !PinnedDirectory {
     const canonical = std.Io.Dir.cwd().realPathFileAlloc(io, path, gpa) catch return failure;

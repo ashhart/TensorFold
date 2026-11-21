@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const codec = @import("workspace_manifest_codec.zig");
 const types = @import("workspace_manifest_types.zig");
 
@@ -9,6 +10,29 @@ pub const SourceText = struct {
     bytes: []u8,
     sha256: types.Digest,
 };
+
+fn openRegular(io: Io, root: Io.Dir, name: []const u8) !Io.File {
+    const stat = root.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return error.WorkspaceFileMissing,
+        error.Canceled => return error.Canceled,
+        else => return error.WorkspacePathRefused,
+    };
+    if (stat.kind == .sym_link) return error.WorkspacePathRefused;
+    if (stat.kind != .file) return error.WorkspaceFileNotRegular;
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return root.openFile(io, name, .{ .allow_directory = false, .follow_symlinks = false, .resolve_beneath = true }) catch |err| switch (err) {
+        error.FileNotFound => error.WorkspaceFileMissing,
+        error.Canceled => error.Canceled,
+        else => error.WorkspacePathRefused,
+    };
+    var flags: std.posix.O = .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true };
+    if (@hasField(std.posix.O, "CLOEXEC")) flags.CLOEXEC = true;
+    if (@hasField(std.posix.O, "RESOLVE_BENEATH")) flags.RESOLVE_BENEATH = true;
+    const fd = std.posix.openat(root.handle, name, flags, 0) catch |err| switch (err) {
+        error.FileNotFound => return error.WorkspaceFileMissing,
+        else => return error.WorkspacePathRefused,
+    };
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+}
 
 fn openRelative(io: Io, root: Io.Dir, path: []const u8) !Io.File {
     try types.validateRelativePath(path);
@@ -30,11 +54,7 @@ fn openRelative(io: Io, root: Io.Dir, path: []const u8) !Io.File {
         }
     }
     const name = if (slash) |at| path[at + 1 ..] else path;
-    return current.openFile(io, name, .{ .follow_symlinks = false, .resolve_beneath = true }) catch |err| switch (err) {
-        error.FileNotFound => error.WorkspaceFileMissing,
-        error.Canceled => error.Canceled,
-        else => error.WorkspacePathRefused,
-    };
+    return openRegular(io, current, name);
 }
 
 fn sameVersion(a: Io.File.Stat, b: Io.File.Stat) bool {
@@ -49,6 +69,7 @@ fn readFile(
     root: Io.Dir,
     relative: []const u8,
     expected: ?*const types.File,
+    byte_limit: u64,
     out: *types.File,
     stop: ?types.Stop,
 ) !?[]u8 {
@@ -57,7 +78,7 @@ fn readFile(
     defer file.close(io);
     const before = try file.stat(io);
     if (before.kind != .file) return error.WorkspaceFileNotRegular;
-    if (before.size > types.max_file_bytes) return error.WorkspaceFileTooLarge;
+    if (before.size > @min(types.max_file_bytes, byte_limit)) return error.WorkspaceFileTooLarge;
     if (expected) |old| if (old.size != before.size) return error.WorkspaceFileChanged;
     const bytes = if (gpa) |allocator| try allocator.alloc(u8, @intCast(before.size)) else null;
     errdefer if (bytes) |value| gpa.?.free(value);
@@ -88,12 +109,18 @@ fn readFile(
 }
 
 fn digestFile(io: Io, root: Io.Dir, relative: []const u8, expected: ?*const types.File, out: *types.File, stop: ?types.Stop) !void {
-    _ = try readFile(null, io, root, relative, expected, out, stop);
+    _ = try readFile(null, io, root, relative, expected, types.max_file_bytes, out, stop);
 }
 
 pub fn readSource(gpa: std.mem.Allocator, io: Io, root: Io.Dir, relative: []const u8, stop: ?types.Stop) !SourceText {
     var file: types.File = undefined;
-    const bytes = (try readFile(gpa, io, root, relative, null, &file, stop)).?;
+    const bytes = (try readFile(gpa, io, root, relative, null, types.max_file_bytes, &file, stop)).?;
+    return .{ .bytes = bytes, .sha256 = file.sha256 };
+}
+
+pub fn readSourceBudget(gpa: std.mem.Allocator, io: Io, root: Io.Dir, relative: []const u8, remaining_bytes: u64, stop: ?types.Stop) !SourceText {
+    var file: types.File = undefined;
+    const bytes = (try readFile(gpa, io, root, relative, null, remaining_bytes, &file, stop)).?;
     return .{ .bytes = bytes, .sha256 = file.sha256 };
 }
 
@@ -126,13 +153,16 @@ pub fn capture(
         }
     }.less);
     var token_count = base_prompt.len;
+    var byte_count: u64 = 0;
     for (ordered, 0..) |source, i| {
         try types.validateRelativePath(source.path);
         if (i > 0 and std.mem.eql(u8, ordered[i - 1].path, source.path)) return error.DuplicateWorkspaceFile;
-        if (source.tokens.len == 0) return error.EmptySourcePrompt;
+        byte_count = std.math.add(u64, byte_count, source.size) catch return error.ManifestTooLarge;
+        if (byte_count > types.max_source_bytes) return error.ManifestTooLarge;
         token_count = std.math.add(usize, token_count, source.tokens.len) catch return error.ManifestTooLarge;
         if (token_count > types.max_prompt_tokens) return error.ManifestTooLarge;
     }
+    if (token_count == 0) return error.EmptySourcePrompt;
     const owned_workspace = try gpa.dupeSentinel(u8, workspace, 0);
     errdefer gpa.free(owned_workspace);
     const model = try gpa.dupe(u8, id.model);
@@ -175,8 +205,8 @@ pub fn capture(
 }
 
 pub fn load(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !types.Manifest {
-    const file = dir.openFile(io, types.manifest_name, .{ .follow_symlinks = false, .resolve_beneath = true }) catch |err| switch (err) {
-        error.FileNotFound => return error.ManifestMissing,
+    const file = openRegular(io, dir, types.manifest_name) catch |err| switch (err) {
+        error.WorkspaceFileMissing => return error.ManifestMissing,
         else => return error.ManifestRefused,
     };
     defer file.close(io);
@@ -197,7 +227,7 @@ pub fn publish(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, m: *types.Manifest, 
     const bytes = try codec.encode(m);
     defer gpa.free(bytes);
     m.provenance = bytes[bytes.len - 32 ..][0..32].*;
-    var atomic = try dir.createFileAtomic(io, types.manifest_name, .{ .replace = replace_existing });
+    var atomic = try dir.createFileAtomic(io, types.manifest_name, .{ .replace = replace_existing, .permissions = .fromMode(0o600) });
     defer atomic.deinit(io);
     try atomic.file.writePositionalAll(io, bytes, 0);
     try atomic.file.sync(io);

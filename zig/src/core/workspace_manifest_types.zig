@@ -8,6 +8,7 @@ pub const max_prompt_tokens = 1 << 24;
 pub const max_identity_bytes = 4096;
 pub const max_relative_path_bytes = 4096;
 pub const max_manifest_bytes = 256 << 20;
+pub const max_source_bytes = max_manifest_bytes;
 
 pub const Stop = struct {
     ptr: *anyopaque,
@@ -105,13 +106,13 @@ pub fn validateStructure(m: *const Manifest) !void {
     if (!std.fs.path.isAbsolute(m.workspace) or std.mem.indexOfScalar(u8, m.workspace, 0) != null) return error.InvalidWorkspace;
     try validateIdentity(.{ .model = m.model, .template = m.template, .cache = m.cache });
     if (m.files.len == 0 or m.files.len > max_files or m.prompt.len == 0 or m.prompt.len > max_prompt_tokens) return error.InvalidManifest;
-    if (m.base_prefix_end >= m.prompt.len) return error.InvalidPromptPrefixes;
+    if (m.base_prefix_end > m.prompt.len) return error.InvalidPromptPrefixes;
     var previous_path: []const u8 = "";
     var previous_end = m.base_prefix_end;
     for (m.files, 0..) |f, i| {
         try validateRelativePath(f.path);
         if (i > 0 and std.mem.order(u8, previous_path, f.path) != .lt) return error.UnorderedWorkspaceFiles;
-        if (f.size > max_file_bytes or f.prompt_end <= previous_end or f.prompt_end > m.prompt.len) return error.InvalidManifest;
+        if (f.size > max_file_bytes or f.prompt_end < previous_end or f.prompt_end > m.prompt.len) return error.InvalidManifest;
         previous_path = f.path;
         previous_end = f.prompt_end;
     }

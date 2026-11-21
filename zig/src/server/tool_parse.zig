@@ -110,7 +110,8 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         try known.put(a, try std.ascii.allocLowerString(a, name), name);
     }
     const custom = try tool_custom.names(a, tools);
-    if (try bareCalls(a, text, &known, max_calls, custom)) |calls| return .{ .content = "", .calls = calls };
+    const functions = try tool_custom.functions(a, tools);
+    if (try bareCalls(a, text, &known, max_calls, custom, functions)) |calls| return .{ .content = "", .calls = calls };
     const schemas = try tool_params.schemas(a, tools);
     const envs = try envelopes(a, text);
     if (envs.len == 0) return .{ .content = text, .calls = null };
@@ -136,7 +137,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
                     error.Invalid => null,
                 };
             }
-            const one = payload(a, env.payload, &schemas, max_calls != null, custom) catch |e| switch (e) {
+            const one = payload(a, env.payload, &schemas, max_calls != null, custom, functions) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :blk null,
             };
@@ -157,7 +158,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
                 if (offered == null) {
                     unoffered = true;
                     try keepName(a, &kept_names, strip(c.name));
-                } else if (tool_custom.isCustom(custom, offered.?) and c.arguments != .string) malformed_custom = true;
+                } else if (tool_custom.isCustom(custom, offered.?) and c.arguments != .string and !tool_custom.isCustom(functions, offered.?)) malformed_custom = true;
             }
             break :blk if (malformed_custom) .malformed else if (unoffered) .unoffered else .none;
         };
@@ -247,7 +248,7 @@ fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
-fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize, custom: []const []const u8) Allocator.Error!?[]Value {
+fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize, custom: []const []const u8, functions: []const []const u8) Allocator.Error!?[]Value {
     const stripped = stripFence(strip(text));
     if (stripped.len == 0 or (stripped[0] != '[' and stripped[0] != '{')) return null;
     const value = switch (try json.parseText(a, stripped)) {
@@ -260,7 +261,7 @@ fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMa
         if (max_calls) |m| if (calls.items.len >= m) break;
         if (item != .object) return null;
         const doc = try json.stringify(a, item, .{ .ascii = false });
-        const parsed = payload(a, doc, null, max_calls != null, custom) catch |e| switch (e) {
+        const parsed = payload(a, doc, null, max_calls != null, custom, functions) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Invalid => {
                 if (max_calls == null) return null; // JSON that is not a call (a structured answer) is the reply's content
@@ -290,7 +291,7 @@ fn stripFence(text: []const u8) []const u8 {
 }
 
 /// ``_parse_tool_call_payload``: one call from a block; null when it is not one, Invalid where Python raises.
-fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool, custom: []const []const u8) Error!?Call {
+fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas, complete: bool, custom: []const []const u8, functions: []const []const u8) Error!?Call {
     if (std.mem.startsWith(u8, block, "call:") or std.mem.startsWith(u8, block, ":")) {
         if (try gemmaCall(a, block)) |c| return c;
     }
@@ -301,7 +302,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
     if (decoded) |v| {
         if (v == .array) {
             for (v.array) |item| {
-                if (try payload(a, try json.stringify(a, item, .{ .ascii = false }), null, complete, custom)) |c| return c;
+                if (try payload(a, try json.stringify(a, item, .{ .ascii = false }), null, complete, custom, functions)) |c| return c;
             }
             return null;
         }
@@ -326,7 +327,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
                 break :blk Value{ .object = loose };
             };
             if (name.len == 0) return error.Invalid;
-            const object = try tool_custom.arguments(a, name, args, custom, complete);
+            const object = try tool_custom.arguments(a, name, args, custom, functions, complete);
             return .{ .name = name, .arguments = object };
         }
     }

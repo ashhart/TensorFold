@@ -40,6 +40,46 @@ pub const Log = struct {
         log.events = .empty;
     }
 
+    /// The latest full terminal response, or the base response with every journaled output change applied.
+    pub fn response(log: *const Log, a: Allocator, base: *json.Object) !json.Value {
+        const out = try json.copyObject(a, base);
+        var items: std.ArrayList(json.Value) = .empty;
+        for (log.events.items) |one| {
+            const kind = (json.Value{ .object = one }).strField("type") orelse continue;
+            if (std.mem.eql(u8, kind, "response.completed") or std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "response.incomplete")) {
+                return json.deepCopy(a, one.get("response") orelse continue);
+            }
+            const at = std.math.cast(usize, (one.get("output_index") orelse continue).int64() orelse continue) orelse continue;
+            if (std.mem.eql(u8, kind, "response.output_item.added") or std.mem.eql(u8, kind, "response.output_item.done")) {
+                while (items.items.len <= at) try items.append(a, .null);
+                items.items[at] = try json.deepCopy(a, one.get("item") orelse continue);
+                continue;
+            }
+            if (at >= items.items.len or items.items[at] != .object) continue;
+            const item = items.items[at].object;
+            if (std.mem.eql(u8, kind, "response.content_part.added")) {
+                const parts = try a.alloc(json.Value, 1);
+                parts[0] = try json.deepCopy(a, one.get("part") orelse continue);
+                try item.put(a, "content", .{ .array = parts });
+                continue;
+            }
+            const delta = (json.Value{ .object = one }).strField("delta") orelse continue;
+            if (std.mem.eql(u8, kind, "response.output_text.delta") or std.mem.eql(u8, kind, "response.reasoning_text.delta")) {
+                const parts = item.get("content") orelse continue;
+                if (parts != .array or parts.array.len == 0) continue;
+                const part = parts.array[0].object;
+                const old = (json.Value{ .object = part }).strField("text") orelse "";
+                try part.put(a, "text", .{ .string = try std.mem.concat(a, u8, &.{ old, delta }) });
+            } else if (std.mem.eql(u8, kind, "response.function_call_arguments.delta") or std.mem.eql(u8, kind, "response.custom_tool_call_input.delta")) {
+                const field = if (std.mem.eql(u8, kind, "response.function_call_arguments.delta")) "arguments" else "input";
+                const old = (json.Value{ .object = item }).strField(field) orelse "";
+                try item.put(a, field, .{ .string = try std.mem.concat(a, u8, &.{ old, delta }) });
+            }
+        }
+        try out.put(a, "output", .{ .array = try items.toOwnedSlice(a) });
+        return .{ .object = out };
+    }
+
     pub fn copyAfter(log: *const Log, a: Allocator, after: ?u64, queued_base: ?*json.Object) ![]*json.Object {
         if (log.truncated) return error.StaleCursor;
         const last = log.last orelse if (queued_base != null) 0 else return error.StaleCursor;

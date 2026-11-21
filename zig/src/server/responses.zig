@@ -225,6 +225,7 @@ pub const Reply = struct {
     items: std.ArrayList(*json.Object) = .empty,
     current: ?*json.Object = null,
     buffers: std.ArrayList(std.ArrayList(u8)) = .empty,
+    done: std.ArrayList(bool) = .empty,
     calls: std.AutoArrayHashMapUnmanaged(i64, *json.Object) = .empty,
     seq: u64 = 0,
     final: ?Value = null,
@@ -272,7 +273,8 @@ pub const Reply = struct {
     }
 
     fn open(r: *Reply, kind: []const u8, call_id: []const u8, name: []const u8) E!*json.Object {
-        try r.close("completed");
+        const current_call = if (r.current) |c| std.mem.eql(u8, c.get("type").?.string, "function_call") or std.mem.eql(u8, c.get("type").?.string, "custom_tool_call") else false;
+        if (!current_call) try r.close("completed");
         const item = try r.obj();
         var part: ?*json.Object = null;
         if (std.mem.eql(u8, kind, "message")) {
@@ -306,6 +308,7 @@ pub const Reply = struct {
         }
         r.items.append(r.a, item) catch return error.Closed;
         r.buffers.append(r.a, .empty) catch return error.Closed;
+        r.done.append(r.a, false) catch return error.Closed;
         r.current = item;
         try r.event("response.output_item.added", &.{ .{ "output_index", try r.int(r.items.items.len - 1) }, .{ "item", .{ .object = item } } });
         if (part) |p| {
@@ -320,10 +323,12 @@ pub const Reply = struct {
     pub fn close(r: *Reply, status: []const u8) E!void {
         const item = r.current orelse return;
         r.current = null;
+        const at = r.index(item);
+        if (r.done.items[at]) return;
         try r.put(item, "status", .{ .string = status });
         if (r.late_rows and !r.finishing) return;
         const where_id = item.get("id").?;
-        const where_index = try r.int(r.index(item));
+        const where_index = try r.int(at);
         if (std.mem.eql(u8, item.get("type").?.string, "function_call")) {
             try r.event("response.function_call_arguments.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "name", item.get("name").? }, .{ "arguments", item.get("arguments").? } });
         } else if (std.mem.eql(u8, item.get("type").?.string, "custom_tool_call")) {
@@ -338,17 +343,22 @@ pub const Reply = struct {
             try r.event("response.content_part.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "part", .{ .object = part } } });
         }
         try r.event("response.output_item.done", &.{ .{ "output_index", where_index }, .{ "item", .{ .object = item } } });
+        r.done.items[at] = true;
     }
 
-    /// The open item ends with `status`; with late rows every item sends its deferred done events now, in order.
+    /// Every unfinished item closes once at finish; calls retain input order even when their deltas interleave.
     fn closeAll(r: *Reply, status: []const u8) E!void {
-        if (!r.late_rows) return r.close(status);
         r.finishing = true;
         const current = r.current;
         for (r.items.items) |item| {
+            const at = r.index(item);
+            if (r.done.items[at]) continue;
+            const old = item.get("status").?.string;
+            const next = if (item == current) status else if (std.mem.eql(u8, old, "in_progress")) "completed" else old;
             r.current = item;
-            try r.close(if (item == current) status else item.get("status").?.string);
+            try r.close(next);
         }
+        r.current = null;
     }
 
     /// Each item's text or arguments grows in one buffer, including calls whose deltas interleave.
@@ -524,6 +534,7 @@ pub const Reply = struct {
         try r.put(final, "output", try r.itemsValue());
         try r.put(final, "error", .{ .object = e });
         r.final = .{ .object = final };
+        if (r.keep) r.store(.{ .object = final });
         try r.event("response.failed", &.{.{ "response", .{ .object = final } }});
     }
 
