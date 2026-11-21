@@ -97,6 +97,7 @@ pub fn refusal(w: *Writer, err: anyerror) Writer.Error!void {
 
 /// NO_PROXY sends `host:port` direct on "*", an exact host, a suffix (.x.org, *.x.org, x.org) or any with :port.
 pub fn bypass(list: []const u8, host: []const u8, port: u16) bool {
+    const candidate = if (std.mem.endsWith(u8, host, ".")) host[0 .. host.len - 1] else host;
     var it = std.mem.tokenizeAny(u8, list, ", \t");
     while (it.next()) |raw| {
         if (std.mem.eql(u8, raw, "*")) return true;
@@ -112,13 +113,14 @@ pub fn bypass(list: []const u8, host: []const u8, port: u16) bool {
         if (e.len > 1 and e[0] == '[' and e[e.len - 1] == ']') e = e[1 .. e.len - 1];
         if (want) |p| if (p != port) continue;
         if (std.mem.startsWith(u8, e, "*.")) e = e[1..];
+        if (std.mem.endsWith(u8, e, ".")) e = e[0 .. e.len - 1];
         if (e.len == 0) continue;
         if (e[0] == '.') {
-            if (std.ascii.endsWithIgnoreCase(host, e) or std.ascii.eqlIgnoreCase(host, e[1..])) return true;
+            if (std.ascii.endsWithIgnoreCase(candidate, e) or std.ascii.eqlIgnoreCase(candidate, e[1..])) return true;
             continue;
         }
-        if (std.ascii.eqlIgnoreCase(host, e)) return true;
-        if (host.len > e.len and std.ascii.endsWithIgnoreCase(host, e) and host[host.len - e.len - 1] == '.') return true;
+        if (std.ascii.eqlIgnoreCase(candidate, e)) return true;
+        if (candidate.len > e.len and std.ascii.endsWithIgnoreCase(candidate, e) and candidate[candidate.len - e.len - 1] == '.') return true;
     }
     return false;
 }
@@ -129,8 +131,14 @@ pub fn pick(s: Settings, tls: bool, host: []const u8, port: u16) ?Proxy {
     return if (bypass(s.no_proxy, host, port)) null else p;
 }
 
-/// One host a pull request named: lookups of its name return a stand-in address the connector tunnels for.
-const Route = struct { host: [std.Io.net.HostName.max_len]u8 = undefined, len: usize = 0, port: u16 = 0, proxy: ?Proxy = null };
+/// One host's route and the absolute deadline shared by its lookup and every TCP attempt.
+const Route = struct {
+    host: [std.Io.net.HostName.max_len]u8 = undefined,
+    len: usize = 0,
+    port: u16 = 0,
+    proxy: ?Proxy = null,
+    deadline: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake },
+};
 
 var routes: [64]Route = @splat(.{});
 var count: usize = 0;
@@ -143,10 +151,10 @@ pub fn note(io: std.Io, uri: std.Uri) !void {
     const host = (std.Io.net.HostName.fromUri(uri, &host_buf) catch return).bytes;
     const port = uri.port orelse @as(u16, if (tls) 443 else 80);
     const proxy = pick(settings, tls, host, port);
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .raw = .fromSeconds(settings.connect_s), .clock = .awake });
     lock.lockUncancelable(io);
     defer lock.unlock(io);
     const i = find(host, port) orelse blk: {
-        if (proxy == null) return; // never proxied: the name resolves as usual
         if (count == routes.len) return error.TooManyHosts;
         @memcpy(routes[count].host[0..host.len], host);
         routes[count].len = host.len;
@@ -155,11 +163,19 @@ pub fn note(io: std.Io, uri: std.Uri) !void {
         break :blk count - 1;
     };
     routes[i].proxy = proxy;
+    routes[i].deadline = deadline;
 }
 
 fn find(host: []const u8, port: u16) ?usize {
     for (routes[0..count], 0..) |*r, i| if (r.port == port and std.ascii.eqlIgnoreCase(r.host[0..r.len], host)) return i;
     return null;
+}
+
+pub fn hostDeadline(io: std.Io, host: []const u8, port: u16) ?std.Io.Clock.Timestamp {
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+    const i = find(host, port) orelse return null;
+    return routes[i].deadline;
 }
 
 /// 100::/64 is a discard-only prefix (RFC 6666): no real host has these addresses.
@@ -177,7 +193,7 @@ pub fn standIn(io: std.Io, host: []const u8, port: u16) ?std.Io.net.IpAddress {
     return .{ .ip6 = .{ .port = port, .bytes = bytes } };
 }
 
-pub const Tunnel = struct { host: [std.Io.net.HostName.max_len]u8, len: usize, port: u16, proxy: Proxy };
+pub const Tunnel = struct { host: [std.Io.net.HostName.max_len]u8, len: usize, port: u16, proxy: Proxy, deadline: std.Io.Clock.Timestamp };
 
 /// The tunnel a stand-in address stands for.
 pub fn tunnelOf(io: std.Io, address: *const std.Io.net.IpAddress) ?Tunnel {
@@ -187,7 +203,31 @@ pub fn tunnelOf(io: std.Io, address: *const std.Io.net.IpAddress) ?Tunnel {
     defer lock.unlock(io);
     if (i >= count) return null;
     const r = routes[i];
-    return .{ .host = r.host, .len = r.len, .port = r.port, .proxy = r.proxy orelse return null };
+    return .{ .host = r.host, .len = r.len, .port = r.port, .proxy = r.proxy orelse return null, .deadline = r.deadline };
+}
+
+const AddressDeadline = struct { address: std.Io.net.IpAddress = undefined, deadline: std.Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake } };
+var addresses: [64]AddressDeadline = @splat(.{});
+var address_count: usize = 0;
+
+/// Carries a name's original deadline to each address the resolver returned.
+pub fn rememberAddress(io: std.Io, address: std.Io.net.IpAddress, deadline: std.Io.Clock.Timestamp) !void {
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+    for (addresses[0..address_count]) |*a| if (a.address.eql(&address)) {
+        a.deadline = deadline;
+        return;
+    };
+    if (address_count == addresses.len) return error.TooManyHosts;
+    addresses[address_count] = .{ .address = address, .deadline = deadline };
+    address_count += 1;
+}
+
+pub fn addressDeadline(io: std.Io, address: *const std.Io.net.IpAddress) ?std.Io.Clock.Timestamp {
+    lock.lockUncancelable(io);
+    defer lock.unlock(io);
+    for (addresses[0..address_count]) |a| if (a.address.eql(address)) return a.deadline;
+    return null;
 }
 
 var stall_count: std.atomic.Value(u64) = .init(0);

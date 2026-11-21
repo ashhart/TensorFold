@@ -219,3 +219,62 @@ test "pull connect: a connect that never completes gives up at its limit with er
     try std.testing.expect(ms >= 200 and ms < 5000);
     try std.testing.expectEqual(@as(usize, 1), Never.closes);
 }
+const BlockedLookup = struct {
+    var release: Io.Event = .unset;
+    var finished: bool = false;
+    var active_io: Io = undefined;
+
+    fn reset(io: Io) void {
+        release = .unset;
+        finished = false;
+        active_io = io;
+    }
+
+    fn lookup(_: ?*anyopaque, _: net.HostName, results: *Io.Queue(net.HostName.LookupResult), options: net.HostName.LookupOptions) net.HostName.LookupError!void {
+        defer results.close(active_io);
+        release.wait(active_io) catch |err| {
+            if (options.canonical_name_buffer) |buf| buf[0] = 'D';
+            finished = true;
+            return err;
+        };
+        finished = true;
+    }
+};
+
+test "pull connect: a blocked direct lookup is canceled and drained before timeout return" {
+    var client: @import("pull_test_client.zig").Client = undefined;
+    client.init();
+    defer client.deinit();
+    const io = client.io();
+    BlockedLookup.reset(io);
+    var canonical: [net.HostName.max_len]u8 = undefined;
+    var buf: [16]net.HostName.LookupResult = undefined;
+    var results: Io.Queue(net.HostName.LookupResult) = .init(&buf);
+    const deadline: Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    try std.testing.expectError(error.Timeout, http.lookupTimed(BlockedLookup.lookup, null, io, try net.HostName.init("blocked.test"), &results, .{ .port = 80, .canonical_name_buffer = &canonical }, deadline));
+    try std.testing.expect(BlockedLookup.finished);
+    try std.testing.expectEqual(@as(u8, 'D'), canonical[0]);
+}
+
+test "pull connect: a blocked proxy lookup is canceled and drained before timeout return" {
+    var client: @import("pull_test_client.zig").Client = undefined;
+    client.init();
+    defer client.deinit();
+    const io = client.io();
+    BlockedLookup.reset(io);
+    const proxy: @import("pull_route.zig").Proxy = .{ .host = "blocked-proxy.test", .port = 8080, .from = "HTTPS_PROXY" };
+    const deadline: Io.Clock.Timestamp = .{ .raw = .zero, .clock = .awake };
+    try std.testing.expectError(error.Timeout, @import("pull_tunnel.zig").reachWith(BlockedLookup.lookup, null, io, proxy, deadline));
+    try std.testing.expect(BlockedLookup.finished);
+}
+
+test "pull connect: DNS elapsed time is deducted once from every TCP attempt" {
+    const io = std.testing.io;
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    const deadline = start.addDuration(.{ .raw = .fromMilliseconds(1000), .clock = .awake });
+    const during_tcp = start.addDuration(.{ .raw = .fromMilliseconds(250), .clock = .awake });
+    try std.testing.expectEqual(@as(?u64, 750), http.remainingMsAt(deadline, during_tcp));
+    try std.testing.expectEqual(@as(?u64, null), http.remainingMsAt(deadline, deadline));
+    const expired = start.subDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake });
+    try std.testing.expectError(error.Timeout, http.timed(io, &address, null, expired));
+}
