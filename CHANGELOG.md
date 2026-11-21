@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: each finished request's done line names why its prompt resumed no further (`cache=<reason>` of 18, with `at=<N> lost=<L>`), and /metrics adds `tensorfold:prompt_cache_lookups_total{reason}` and `tensorfold:prompt_cache_lost_tokens_total{reason}`; opt-in `TF_CACHE_WHY=1` also adds `tensorfold.prompt_cache` to each reply, off by default because the reason is measured against every client's kept prompts, so it suits a single-user server. The paged radix store and DeepSeek-V4.1's session store follow in step 2 (#3703, for #3686).
+
 - Ripple-65B-Preview on two GB10s: `--tp 2` on CUDA serves it from the measured 5.0 bpw ExLlamaV3 pack (`ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw`), each rank holding half of every projection, the full layers running to a 1,048,576-token context, and rank 0 serving with kept prompt states while rank 1 follows; another pack, a GPU other than sm_121 or any world but two ranks is refused by name, and every `/v1/models` entry's capabilities gain `reasoning_optional` (#2522). Thanks to @ajensenwaud.
 
 - TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
