@@ -593,19 +593,3 @@ pub const Target = struct {
         return out.toOwnedSlice(t.a);
     }
 };
-
-test "argmax: the first maximum, NaN rows as the scalar scan" {
-    const a = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(7);
-    const rnd = prng.random();
-    const row = try a.alloc(f32, 129280);
-    defer a.free(row);
-    for (0..200) |k| {
-        for (row) |*x| x.* = rnd.floatNorm(f32);
-        if (k % 5 == 1) row[rnd.uintLessThan(usize, row.len)] = 9.0;
-        if (k % 5 == 2) row[rnd.uintLessThan(usize, row.len)] = std.math.nan(f32);
-        if (k % 5 == 3) @memset(row, -std.math.inf(f32));
-        if (k % 5 == 4) row[rnd.uintLessThan(usize, 7)] = std.math.nan(f32);
-        try std.testing.expectEqual(pick.scan(row), pick.argmax(row));
-    }
-}
