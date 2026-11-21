@@ -23,6 +23,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
 
 - CI: the Zig format workflow runs again on pushes and pull requests; two concurrency settings had left its file with a duplicate key, which GitHub refused (#4339).
+- Load prefetch: DeepSeek's checkpoint reader makes the same number of allocations on every run, so the allocation-failure host test passes on macOS.
 
 - Server: `POST /v1/prompt_cache/flush` drops the prompt states the server keeps for resuming conversations, in RAM and on disk when it keeps them there (`--prompt-cache-disk`, `--learn-conversations` or `--spill-gib`), once no request is running, so replies in flight are unchanged; it needs a full or `[admin]` key when API keys are on (a loopback caller without keys), answers 503 if requests have not ended within 10 minutes and 501 on an engine without the prompt cache, and leaves `--learn`'s shared-prefix states on disk (#3210, fixes #3183).
 
