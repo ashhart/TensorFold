@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `serve --execution-witness` (off by default) adds `GET /v1/execution/witness` under the `read` key scope: a snapshot naming the running binary, the checkpoint's text files, the serve defaults and `TF_*` settings, the engine's epoch and a per-process instance, or `unknown` with its reason; it needs an API key or `--unix-socket` and hashes only after the server is ready (#2901, refs #2741). Thanks to @kotevcode.
+
 - GLM on Metal: DFlash2 decoding skips inactive draft rows and their tap capture, and the tap mean writes into its ring in place, cutting sampling overhead without changing verified tokens (#4257). Thanks to @gilby.
 
 - MOSS-Image on CUDA: the checkpoint's Qwen3.5 prompt encoder and VAE decoder run beside the transformer, so the native server serves pictures through `POST /v1/images/generations`, the same request twice giving the same bytes (#2281, part of #1573). Thanks to @devopsfortunato.
