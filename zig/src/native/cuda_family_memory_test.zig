@@ -1,6 +1,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const poolFor = @import("cuda_family_memory.zig").poolFor;
+const poolForCached = @import("cuda_family_memory.zig").poolForCached;
 const toGib = @import("cuda_family_memory.zig").toGib;
 const t = std.testing;
 const Fake = struct {
@@ -183,6 +184,28 @@ test "a GB10 after a 60 GB checkpoint read (6 Nov): CUDA's free bounds the pool,
     try t.expectApproxEqAbs(43.27, toGib(host - p.reserve - p.free), 0.005); // above CUDA's free
     try t.expectEqual(p.free - p.reserve, p.room(0)); // now CUDA's free less the reserve: 47.76 GiB
     try t.expectApproxEqAbs(47.76, toGib(p.room(0)), 0.005);
+}
+
+test "a just-read 60 GB checkpoint keeps 1.3.2's budget without a pre-load page drop" {
+    var driver: cuda.Driver = undefined;
+    const ctx = unifiedCtx(&driver);
+    var problem: []const u8 = "";
+    const g: u64 = 1 << 30;
+    Fake.missing = false;
+    Fake.integrated = 1;
+    Fake.zones = null;
+    defer Fake.card_free = 40 << 30;
+    defer Fake.reserve = null;
+    Fake.text = "MemTotal: 127535276 kB\nMemAvailable: 121477530 kB\n"; // the 6 Nov GB10
+    Fake.card_free = 6017 * g / 100; // CUDA's 60.17 GiB before the kernel reclaims the checkpoint's pages
+    Fake.reserve = "12.41";
+    const weights = 60 * g;
+    const p = (try poolForCached(false, Fake, t.allocator, t.io, &ctx, weights, &problem)).?;
+    const host: u64 = 121477530 * 1024;
+    try t.expect(p.unified);
+    try t.expectEqual(host, p.free); // the checkpoint's cached bytes are added back, not dropped
+    try t.expectApproxEqAbs(103.44, toGib(p.room(0)), 0.005); // 1.3.2's grant; the weights fit
+    try t.expect(p.room(0) > weights);
 }
 
 test "a discrete card keeps its own counts: /proc is not read and its free is taken as reported" {
