@@ -100,7 +100,7 @@ pub const Attend = struct {
         };
         if (fill == .nonfinite) {
             self.q[3] = c.toBf16(ref.nan); // row 0, head 0
-            self.keys[((self.win.lo + 2) % self.win.ring * hk + 1) * D + 5] = c.toBf16(ref.inf); // key head 1's third key
+            self.keys[((self.win.lo + 2) % self.win.ring * hk + 1) * D + 5] = c.toBf16(ref.inf); // key head 1, key 3
         }
         self.in = .{ try self.rig.input(std.mem.sliceAsBytes(self.q)), try self.rig.input(std.mem.sliceAsBytes(self.keys)), try self.rig.input(std.mem.sliceAsBytes(self.values)) };
         const n = dk.chunks(self.win.lo, self.win.hi);

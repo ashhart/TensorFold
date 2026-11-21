@@ -145,7 +145,7 @@ pub const Pick = struct {
                 self.vals[2 * r] = p[0];
                 self.vals[2 * r + 1] = p[1];
             };
-            if (shape.rows > 1) self.ids[2] = share + 9; // draft 1: both +Inf, rank 0's id the higher, so the lower is rank 1's
+            if (shape.rows > 1) self.ids[2] = share + 9; // draft 1: both +Inf, rank 1's id the lower
             if (shape.rows > 1) self.ids[3] = 7;
         }
         const bytes = try a.alloc(u8, m * stride);
