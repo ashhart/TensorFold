@@ -98,6 +98,34 @@ checks its device limits; the five release SMs retain their pinned `RECORD` entr
 Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
 For a mixed release and sm_110 set, each planted control must go red on each target separately.
 
+`tf-cuda-test kernel-contract` alone is the full serial run in one process. Two opt-in modes change that, each apart
+from the other, and they compose:
+
+- Filter: `tf-cuda-test kernel-contract WORD...` runs the kernels, controls and launches whose name holds a WORD. It
+  skips the standalone suites and the offline limits audit, and marks its `SUMMARY` `(filtered)`.
+- Parallel: `tf-cuda-test kernel-contract --jobs N` (N from 1 to 16) starts N child processes of the same binary,
+  each a shard `K/N`: every N-th kernel, control, standalone suite and launch record, on the visible GPUs in turn.
+  The shares are equal in count; a kernel's cost is not known when they are cut, so one shard can finish before
+  another. It prints the children's logs and one merged `SUMMARY`, and exits 1 if any child crashed or printed no
+  `TALLY` line, or the merged counts show a problem. N never rises by itself.
+  A process is planned for 28 GiB of host memory for a full run and 8 GiB when WORDs filter it, and 7 GiB of GPU
+  memory. The run is refused when N processes do not fit the host's available memory (`MemAvailable` in
+  `/proc/meminfo`, so Linux only), or when `ceil(N / GPUs)` processes do not fit the smallest GPU's total memory
+  (not its free memory); several processes share a GPU only when they fit. On an integrated GPU, which shares the
+  host's memory, N times both plans must fit the host's available memory and no GPU total is checked. GPUs that
+  differ in compute capability, multiprocessor count or name are refused, since registration reads those to pick
+  kernel configurations and their shards would not list the same kernels.
+  A shard stops when the process that started it does (`PR_SET_PDEATHSIG`), SIGINT and SIGTERM sent to that process
+  are forwarded to its shards, and once one shard fails to finish the others are stopped.
+  `--shard K/N [--device D]` runs one shard alone and prints its `TALLY` line (the machine-readable counts the
+  parent merges) in place of a `SUMMARY`; `--device` goes with `--shard` only, and so does `--parent PID`, which
+  the `--jobs` process passes so that a shard refuses to run once that process is gone.
+  With words the filter applies first and each shard takes its share of what is left.
+  `kernel-contract --help` prints these options.
+  The standalone suites of a full run are the entries of `list` in `contract_back_suites.zig` and of `served` in
+  `contract_after.zig`; the serial run and every shard read that one table, so a new suite is listed in one of them
+  and a suite called from anywhere else runs in neither.
+
 On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each

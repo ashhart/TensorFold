@@ -225,6 +225,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
 
+- Tests: the CUDA kernel-contract runner gains opt-in isolated workers (`--jobs N`) and deterministic slices (`--shard K/N`); serial execution stays the default (#3093). Thanks to @BlivionIaG.
+
 
 ## 1.3.2
 
