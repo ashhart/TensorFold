@@ -10,6 +10,7 @@ const Engine = @import("engine.zig").Engine;
 const cache = @import("cache.zig");
 const lanes_mod = @import("lanes.zig");
 const worker = @import("worker.zig");
+const serve = @import("hip_serve");
 
 pub const model_type = "qwen4_exp";
 /// Most MTP drafts `--mtp-drafts` may ask of the head.
@@ -34,6 +35,7 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     streams: usize,
     startup: []const u8,
+    offer: serve.Offer = .{},
 };
 
 pub const Refused = error{Refused};
@@ -310,6 +312,7 @@ pub fn open(
         .deinit = Owned.release,
         .streams = streams,
         .startup = own.startup,
+        .offer = .{ .cache = own.fx.promptCache() },
     };
 }
 

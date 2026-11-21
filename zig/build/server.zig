@@ -104,12 +104,16 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
+    const media_jobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"media jobs:"} }));
+    b.step("test-media-jobs-host", "Durable media admission, ownership, cancellation, recovery and retention without devices").dependOn(&media_jobs.step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
     const background = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"background Responses:"} }));
     b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
+    const workspace = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "workspace completions", "workspace warm", "workspace source", "workspace CLI", "workspace tokenizer", "workspace compaction" } }));
+    b.step("test-workspace-server-host", "Exact workspace prompt IDs, cache reuse, restart and source refusals").dependOn(&workspace.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));

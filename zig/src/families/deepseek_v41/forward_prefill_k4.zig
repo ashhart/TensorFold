@@ -59,7 +59,11 @@ pub fn planWorkspace(f: *Forward, wp: *buffers.Plan, rows: u32, layers: []const 
     if (replay and f.opts.pf_tbo and rows >= 2 * block_prefill.tbo_min) {
         const enc = try encoderLayers(f, layers);
         const k4 = pf.state(f).k4;
-        const op = if (k4) k4Options(image_opts.planOptions(f)) else image_opts.planOptions(f);
+        var op = if (k4) k4Options(image_opts.planOptions(f)) else image_opts.planOptions(f);
+        if (op.image_rows != 0) {
+            op.image_rows = 0;
+            op.image_keep = false;
+        }
         const seg: u32 = if (k4) K4.rows else rows;
         const top = @max(0, try lastStartWith(f, op, enc, seg, .encoder) - seg); // B at the last start a segment takes
         for ([_]i64{ 0, top }) |start| {

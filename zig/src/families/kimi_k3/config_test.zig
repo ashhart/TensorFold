@@ -18,6 +18,14 @@ test "K3 release config retains every previous default" {
     try std.testing.expectEqual(@as(u32, 2048), k31.dsa.?.topk);
 }
 
+test "K3 rejects full attention layer indices outside its configured depth" {
+    inline for (.{ "0", "94" }) |bad| {
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, @embedFile("fixtures/k3-config.json"), "\"full_attn_layers\": [\n        4,", "\"full_attn_layers\": [\n        " ++ bad ++ ",");
+        defer std.testing.allocator.free(changed);
+        try std.testing.expectError(error.BadConfig, config.parse(std.testing.allocator, changed));
+    }
+}
+
 test "K3.1 refuses unsupported index geometry and cadence instead of ignoring them" {
     const cases = .{
         .{ "\"index_topk\": 2048", "\"index_topk\": 2047" },

@@ -8,7 +8,8 @@ tensorfold info ./model-8bit
 tensorfold serve ./model-8bit
 ```
 
-This build extends the Qwen3.5/3.8 dense family to MLX affine weights at 2, 3, 4, 5, 6 and 8 bits, with group sizes 32, 64 and 128.
+The Qwen3.5/3.8 dense family's MLX affine conversion supports 2, 3, 4, 5, 6 and 8 bits, with group sizes 32, 64 and 128;
+backend admission is narrower where the table below says so.
 It keeps packed words, scales and biases at their stored precision, including mixed layer formats.
 It does not convert a checkpoint during loading.
 Choose an 8-bit checkpoint made from the original model when you want its 8-bit quality.
@@ -28,7 +29,7 @@ For Nemotron's MLX affine checkpoints, its CUDA and Intel GPU engines read 4-bit
 | --- | --- |
 | Qwen dense, M5 native lane kernels | Affine 2/3/4/5/6/8-bit, group 64; affine 4-bit also group 32 |
 | Qwen dense, packed row kernels on Apple Silicon | Affine 2/3/4/5/6/8-bit, groups 32/64/128 |
-| Qwen dense, CUDA | Affine 2/3/4/5/6/8-bit, groups 32/64/128 |
+| Qwen dense, CUDA | Affine 2/3/4/5/6/8-bit, group 64 |
 | Nemotron | Existing affine 4-bit recipe; broader expert formats are not enabled here |
 | Flash Next | Existing uniform affine 4-bit/group-32 recipe |
 | GLM and EXL3 | Existing family recipes and separate EXL3 integration |

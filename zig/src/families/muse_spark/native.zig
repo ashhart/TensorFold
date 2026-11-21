@@ -198,7 +198,7 @@ pub const Lanes = struct {
             defer l.gpa.free(toks);
             var at: usize = from;
             while (at < ids.len) {
-                if (s.isCancelled()) return error.Cancelled;
+                try cancelledPrefix(s, at);
                 if (l.pins != null and s.yields()) return error.Yielded; // a warm pass steps aside, keeping its marks
                 const n = kept.chunkRows(at, ids.len, pr.cap, marks);
                 for (0..n) |j| toks[j] = ids[at + j];
@@ -213,7 +213,7 @@ pub const Lanes = struct {
         var rows: [fwd.DECODE_ROWS]fwd.Row = undefined;
         var at: usize = from;
         while (at < ids.len) {
-            if (s.isCancelled()) return error.Cancelled;
+            try cancelledPrefix(s, at);
             if (l.pins != null and s.yields()) return error.Yielded;
             const n = kept.chunkRows(at, ids.len, fwd.DECODE_ROWS, marks);
             for (0..n) |j| rows[j] = .{ .slot = slot, .pos = @intCast(at + j), .token = ids[at + j] };
@@ -223,6 +223,12 @@ pub const Lanes = struct {
             at += n;
             l.filledTo(s, at, marks);
         }
+    }
+
+    fn cancelledPrefix(s: *lanes.Stream, at: usize) !void {
+        if (!s.isCancelled()) return;
+        s.keepInterruptedPrefill(@intCast(at));
+        return error.Cancelled;
     }
 
     fn bit(slot: u32) u32 {
@@ -558,4 +564,22 @@ test "a bad TF_TP_* refuses the weight share; one rank is refused by name" {
 test "Windows refuses Muse Spark's two ranks by name, before any TP session opens" {
     const why = explain(null, error.MuseSparkTpPlatform).?;
     try std.testing.expect(std.mem.indexOf(u8, why, "runs on Linux only") != null);
+}
+
+test "muse prefill: cancellation keeps a completed prefix for exact resume" {
+    const Kept = struct {
+        at: u32 = 0,
+        fn interrupted(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ctx));
+            k.at = at;
+        }
+        fn cancelled(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    var snap: Kept = .{};
+    var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "stopped", .prompt = &.{ 3, 1, 4, 1, 5, 9 }, .max_new = 1, .reuse = .{ .hook = .{ .ptr = &snap, .at = Kept.interrupted, .interrupted = Kept.interrupted } }, .cancel_check = .{ .ptr = &snap, .check = Kept.cancelled } });
+    defer s.deinit(std.testing.allocator);
+    try std.testing.expectError(error.Cancelled, Lanes.cancelledPrefix(&s, 2));
+    try std.testing.expectEqual(@as(u32, 2), snap.at);
 }

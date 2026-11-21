@@ -36,7 +36,7 @@ const default_seed: u64 = 42;
 const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance", "stream", "preview_interval" };
 
 /// One checked request: exactly what the engine's image host needs.
-const Plan = struct {
+pub const Plan = struct {
     prompt: []const u32,
     negative: []const u32,
     width: u16,
@@ -130,7 +130,7 @@ fn encode(cx: *Cx, srv: *Server, text: []const u8) errors.Refused![]const u32 {
 }
 
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
-fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused!Plan {
+pub fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("images request body must be a JSON object");
     try checkFields(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
@@ -170,12 +170,12 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
             return cx.refuse("seed plus n - 1 must fit in an unsigned 64-bit integer");
     }
     var steps: u32 = default_steps;
+    const steps_most = @min(max_steps, cap.max_steps);
     if (raw.get("steps")) |v| {
         const given = v.int64() orelse return cx.refuse("steps must be an integer");
-        const steps_most = @min(max_steps, cap.max_steps);
         if (given < 1 or given > steps_most) return cx.fail(.request, "steps must be from 1 to {d}", .{steps_most});
         steps = @intCast(given);
-    }
+    } else if (default_steps > steps_most) return cx.fail(.request, "the default steps {d} exceeds this model's limit of {d}: send steps explicitly", .{ default_steps, steps_most });
     var stream = false;
     if (raw.get("stream")) |v| {
         if (v != .bool) return cx.refuse("stream must be a boolean");
@@ -234,11 +234,16 @@ fn imageRequest(srv: *Server, plan: Plan, seed: u64, result: *api.ImageResult, p
 
 /// Submits once and waits for ``finished``; nothing has been written to the connection when it returns.
 fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
+    const engine_id = srv.next_id.fetchAdd(1, .monotonic);
+    return generateSubmitted(srv, c, cx, plan, seed, engine_id, result, png);
+}
+
+/// Runs one already-numbered picture; background cancellation addresses that same engine id.
+pub fn generateSubmitted(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, engine_id: api.Id, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
     if (c.peerGone()) return cx.fail(.capacity, "the client left before the picture was ready", .{});
     const request = imageRequest(srv, plan, seed, result, png);
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
-    const engine_id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin();
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submitImage(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return progress.submitRefused(srv, cx, e);

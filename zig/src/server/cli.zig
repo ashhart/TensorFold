@@ -33,7 +33,6 @@ fn servedBy(list: []const []const u8, name: []const u8) bool {
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
 const cuda_build = builtin.os.tag == .linux;
-
 /// Python serve flags plus this binary's native-only flags; supported flags are marked native.
 pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
@@ -104,6 +103,9 @@ pub const flags = [_]Flag{
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
     .{ .name = "--compact-memory", .path = true, .native = true },
+    .{ .name = "--media-jobs-dir", .path = true, .native = true },
+    .{ .name = "--workspace", .path = true, .native = true },
+    .{ .name = "--workspace-state", .path = true, .native = true },
     .{ .name = "--slide", .kind = .store_true, .native = true },
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
     .{ .name = "--slide-graph", .path = true, .native = true },
@@ -164,7 +166,6 @@ pub const flags = [_]Flag{
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
     .{ .name = "--execution-witness", .kind = .store_true, .native = true }, // GET /v1/execution/witness (witness.zig)
 };
-
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "TENSORFOLD_DEVICE_CHECK", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
@@ -236,6 +237,9 @@ pub const Args = struct {
     compact_fraction: ?f64 = null,
     compact_keep: ?u32 = null,
     compact_memory: ?[]const u8 = null,
+    media_jobs_dir: ?[]const u8 = null,
+    workspace: ?[]const u8 = null,
+    workspace_state: ?[]const u8 = null,
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null, // retained before hub resolution for the engine's serving line
     drafter_bits: u8 = 4,
@@ -278,17 +282,14 @@ pub const Args = struct {
 };
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
-
 pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
 }
-
 pub fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{ Usage, OutOfMemory } {
     u.message = try std.fmt.allocPrint(a, fmt, args);
     return error.Usage;
 }
-
 /// ``serve`` arguments as the switch passes them: the model and full flag names.
 pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, OutOfMemory }!Args {
     var out: Args = .{};
@@ -349,6 +350,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
     var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
     if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
+    if ((out.workspace == null) != (out.workspace_state == null)) return fail(u, a, "--workspace and --workspace-state must be given together", .{});
     try spillWith(u, a, out);
     return out;
 }
@@ -370,7 +372,6 @@ pub fn one(a: Allocator, out: *Args, repeated: *Repeated, flag: Flag, value: ?[]
 fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!void {
     if (spills(out) and out.learn and !out.learn_conversations) return fail(u, a, "--spill-gib writes evicted states to the conversation store, which --learn's shared prefixes do not use: use --prompt-cache-disk DIR without --learn-dir, add --learn-conversations, or serve without --learn", .{});
 }
-
 fn spills(args: Args) bool {
     return (args.spill_gib orelse 0) > 0;
 }
@@ -380,14 +381,12 @@ pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usag
 pub fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     return @import("fields.zig").pyFloat(v) orelse fail(u, a, "argument {s}: invalid float value: '{s}'", .{ name, v });
 }
-
 /// A finite GiB count from 0 (off) to below 2^34, whose bytes fit a u64.
 pub fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     const g = try float(u, a, name, v);
     if (!std.math.isFinite(g) or g < 0 or g >= 1 << 34) return fail(u, a, "argument {s}: expected GiB from 0 (off) to below 2^34: '{s}'", .{ name, v });
     return g;
 }
-
 pub const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty, cors: std.ArrayList([]const u8) = .empty };
 
 fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, repeated: *Repeated) error{ Usage, OutOfMemory }!void {
@@ -454,6 +453,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (try @import("admission_cli.zig").apply(a, &out.admission, name, v, u)) return;
     if (try @import("connection_cli.zig").apply(a, &out.connections, name, v, u)) return;
+    if (is(name, "--workspace") or is(name, "--workspace-state")) {
+        if (is(name, "--workspace")) out.workspace = v else out.workspace_state = v;
+        return;
+    }
     if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
@@ -491,7 +494,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--media-jobs-dir")) out.media_jobs_dir = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-image-share")) out.vision_image_share = if (std.mem.eql(u8, v, "fixed")) .fixed else .request else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -516,7 +519,6 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.redraw.controls = @import("drama_allow.zig").parse(v) catch return fail(u, a, "argument --silence-redraw-controls: expected comma-separated UTF-8 names without square brackets, or an empty list: '{s}'", .{v});
     } else if (is(name, "--register-redraw-st")) out.redraw.register.st = try float(u, a, name, v) else if (is(name, "--register-redraw-high")) out.redraw.register.high = try float(u, a, name, v) else if (is(name, "--register-high-hz")) out.redraw.register.high_hz = try float(u, a, name, v);
 }
-
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
 pub fn parallel(text: []const u8) ?u32 {
     const t = std.mem.trim(u8, text, " ");

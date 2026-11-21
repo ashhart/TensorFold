@@ -167,6 +167,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--compact-at auto\|FRACTION` | Turn on [context compaction](#context-compaction). `auto` compacts when the prompt and reply would pass the window minus a reserve. |
 | `--compact-keep TOKENS` | Recent tokens kept word for word when compacting; the default is 20,000 or a quarter of the window, whichever is smaller. |
 | `--compact-memory DIR` | Also keep each conversation's memory note as a Markdown file in DIR. |
+| `--media-jobs-dir DIR` | Enable durable asynchronous image jobs and store their checksummed receipts and PNG outputs in DIR; image models only. See [Durable image generation jobs](api.md#durable-image-generation-jobs). |
 | `--cortheon` | Cortheon's reasoning program and server-run web research for chat requests; see [Cortheon mode](cortheon.md). |
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |

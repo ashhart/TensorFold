@@ -6,4 +6,8 @@ pub fn host(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, lan
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Gemma shared:"} }));
     b.step("test-gemma4-shared-host", "Gemma paged resumes, shared streams and MTP cache bindings without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    const prefill_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_prefill_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "gemma4", .module = gemma } } });
+    const prefill_run = b.addRunArtifact(b.addTest(.{ .root_module = prefill_root, .filters = &.{"Gemma prefill:"} }));
+    b.step("test-gemma4-prefill-host", "Gemma 4 cancelled-prefill snapshots and exact resumed rows without a GPU").dependOn(&prefill_run.step);
+    all.dependOn(&prefill_run.step);
 }

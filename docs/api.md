@@ -45,8 +45,8 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
-| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/images/jobs` and `/v1/images/jobs/{id}/cancel`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`, `/v1/images/jobs/{id}` and `/v1/images/jobs/{id}/content/{index}`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`, `/v1/images/jobs/{id}` and `/v1/images/jobs/{id}/content/{index}` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
 `/v1/imprint`, adding or deleting voices (`--manage-voices`), `/v1/prompt_cache/flush`, another method, or a suffix
@@ -155,6 +155,29 @@ usage chunk when `stream_options.include_usage` is set (otherwise the last finis
 eight prompts run at once, and one at a time under `--max-inflight` or `--max-inflight-per-key`, where the request
 holds one place. A one-string list, a list of token IDs, a list of token-ID lists and a mixed list keep their
 one-prompt meaning (lists inside are decoded and joined with a newline).
+
+### Workspace completion prefixes
+
+`tensorfold serve MODEL --workspace DIR --workspace-state DIR` enables source-bound raw completions. Both flags are
+required together. The workspace root must exist; the state directory is created mode 0700 when absent, and an existing
+state directory accessible to group or other users is refused. Startup binds the namespace to the full checkpoint and
+tokenizer bytes, the template source and stable cache geometry. The workspace root is the outermost file boundary;
+inference keys share it and the manifest, with no per-key file ACL.
+
+`POST /v1/completions` with `"workspace": {"op":"cold","sources":["src/main.zig","README.md"]}` creates a manifest;
+`op: "edit"` captures another revision, and `op: "warm"` uses the persisted IDs without tokenizing sources again. Cold
+and edit need one string `prompt` and 1–4096 unique relative source paths; warm takes neither `prompt` nor `sources`.
+The base prompt is encoded first, then each source independently with no added special tokens, in lexical path order
+with no invented labels or separators. Paths must stay beneath the root without traversal or symlinks; sources must be
+regular UTF-8 files. Reads bind token IDs to byte length and SHA-256, check file stability, and reverify before atomic
+publication. Workspace is not offered on chat, Responses, prompt lists or token-ID prompts.
+Workspace requests are refused when `--compact-at` is enabled; they never publish a partially compacted manifest.
+
+Base/file token boundaries become shared-prefix marks for the ordinary lane prompt cache. `tensorfold.workspace` in a
+finished reply carries `provenance`, `manifest_reused_tokens` and `changed_files`. `manifest_reused_tokens` is manifest
+bookkeeping only: `usage.prompt_tokens_details.cached_tokens` comes solely from the engine's resumed prompt event. A
+warm request after restart submits the same full IDs but reports zero cached tokens when the new engine has no kept or
+disk-backed state. Without prompt-cache support, workspace requests still compute the exact full prompt.
 
 `/tokenize` takes vLLM's fields: a `prompt` string (`add_special_tokens`, default true), or `messages` with the
 chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
@@ -1135,6 +1158,34 @@ and prompt limits, and URL output is not served. A server whose model does not g
 The reply is written once every picture has finished. A refusal, a failed generation or a cancel stops the sequence
 and returns that error with no pictures. A client that disconnects cancels the current picture, and the later
 pictures are never submitted.
+
+## Durable image generation jobs
+
+`tensorfold serve MODEL --media-jobs-dir DIR` enables durable, asynchronous image generation on an image model. The
+directory holds checksummed JSON job receipts and committed PNG outputs; queued work survives a restart. A recovered
+running job is marked failed because its partial engine state is not replayed as complete, while queued work runs
+again. Startup refuses a non-image model, and the routes stay closed without the flag.
+
+| Operation | Meaning |
+| --- | --- |
+| `POST /v1/images/jobs` | Accept the same `model`, `prompt`, `n`, `seed`, `negative_prompt`, `size`, `steps`, `guidance` and `response_format` fields as image generation; return HTTP 202 with `id`, `status: "queued"` and `created` |
+| `GET /v1/images/jobs/{id}` | Return `id`, `status` (`queued`, `running`, `cancel_requested`, `succeeded`, `failed` or `cancelled`), `created`, and once known `finished`, `model`, `seed`, `n`, `outputs` and `error` |
+| `POST /v1/images/jobs/{id}/cancel` | Request cancellation; wait for terminal state before reading `outputs` or `error` |
+| `GET /v1/images/jobs/{id}/content/{index}` | Read one zero-based, immutable PNG output with content type `image/png` and its `Content-SHA256` digest |
+| `DELETE /v1/images/jobs/{id}` | Delete a terminal job and all its outputs; an active job must be cancelled first |
+
+Job input cannot use `stream` or `preview_interval`: final bytes are the same exact image call as synchronous
+generation, with no preview side channel. A successful result's `outputs` entries carry `index`, `seed` and
+`sha256`. Content indices are bounded by the accepted request, not the number of pictures completed before failure.
+
+Without scoped API keys, callers share the server's ordinary local trust boundary. With scoped keys, each key digest
+owns a separate job namespace: another key cannot inspect, cancel, read or delete its jobs. `inference` submits,
+cancels and inspects jobs; `read` inspects jobs and reads outputs; deletion requires `admin`.
+
+The default limits are 64 stored jobs, 16 per submitting key, 4 concurrent workers, 16 MiB a request (256 MiB total),
+128 PNG results and 1 GiB of outputs. Excess is refused or the oldest terminal jobs are reclaimed under output
+pressure; active work is never evicted. The store is an explicit serving artifact, not model training or prompt
+history.
 
 ## Image generation streams
 

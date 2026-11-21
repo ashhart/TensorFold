@@ -214,3 +214,63 @@ test "queued cache: progress a shared-cut request without history replaces an id
 test "queued cache: growing states do not spend the same sixteen free bytes twice" {
     for ([_]usize{ 2, 4, 8 }) |n| try followupsSized(n, false, false, .{ .min_prompt = 0 }, true);
 }
+
+test "queued cache: decoded namespaces retain their own reusable prefix" {
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(a);
+    var target: lanes.fake.Fake = .{ .gpa = a, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var snapshots: Snapshots = .{ .target = &target };
+    var store = pc.Store.init(a, .{ .ptr = &snapshots, .vtable = &.{ .bytes = Snapshots.bytes, .save = Snapshots.save, .restore = Snapshots.restore, .drop = Snapshots.drop } }, .{ .min_prompt = 0 }, 300);
+    defer store.deinit();
+    var words: [20]u32 = undefined;
+    var idle: [20]u32 = undefined;
+    var cold_words: [20]u32 = undefined;
+    for (&words, &idle, &cold_words, 0..) |*word, *other, *cold_word, i| {
+        word.* = @intCast(1000 + i);
+        other.* = @intCast(2000 + i);
+        cold_word.* = @intCast(3000 + i);
+    }
+    const ordinary = [_][2]u32{.{ 1, 3 }};
+    const changed = [_][2]u32{.{ 5, 7 }};
+    const fresh_spans = [_][2]u32{.{ 13, 17 }};
+    snapshots.seed = &words;
+    try std.testing.expect(store.keepBorn(&words, 4, 4, null, &.{}, &ordinary));
+    snapshots.seed = &idle;
+    try std.testing.expect(store.keepBorn(&idle, 8, 8, null, &.{}, &.{}));
+    snapshots.seed = &words;
+    try std.testing.expect(store.keepBorn(&words, 8, 8, null, &.{}, &changed));
+    const touch = try store.lookup(a, &words, 4, &.{}, &.{}, &ordinary);
+    defer a.free(touch.marks);
+    try std.testing.expectEqual(@as(u32, 4), touch.entry.?.at);
+    store.resumed(touch.entry.?, &words, true);
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 1 });
+    host.cache = &store;
+    host.decoded_rows = true;
+    try host.start();
+    defer host.stop();
+    const engine = host.engine();
+    var cold: Reply = .{};
+    const other: api.Request = .{ .prompt = &cold_words, .max_tokens = 4, .history_len = 12 };
+    try engine.submit(1, &other, .{ .ctx = &cold, .event = Reply.event });
+    try cold.wait();
+    const retained = store.find(&words, &.{}, &ordinary);
+    try std.testing.expect(retained != null);
+    try std.testing.expectEqual(@as(u32, 4), retained.?.at);
+    var resumed: Reply = .{};
+    const hit: api.Request = .{ .prompt = &words, .max_tokens = 4, .history_len = 12, .decode_spans = &ordinary };
+    try engine.submit(2, &hit, .{ .ctx = &resumed, .event = Reply.event });
+    try resumed.wait();
+    try std.testing.expectEqual(@as(?u32, 4), resumed.cached);
+    try std.testing.expectEqual(@as(usize, 4), resumed.count);
+    var fresh: Reply = .{};
+    const cold_hit: api.Request = .{ .prompt = &words, .max_tokens = 4, .history_len = 12, .decode_spans = &fresh_spans };
+    try engine.submit(3, &cold_hit, .{ .ctx = &fresh, .event = Reply.event });
+    try fresh.wait();
+    try std.testing.expectEqual(@as(?u32, 0), fresh.cached);
+    try std.testing.expectEqual(@as(usize, 4), fresh.count);
+    try std.testing.expectEqualSlices(u32, &resumed.tokens, &fresh.tokens);
+}

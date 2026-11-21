@@ -70,25 +70,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const c = &model.config; // the decode window's and the prompt chunk's buffers
     const tower: u64 = if (model.vision) |v| v.bytes() else 0;
     const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows, c.context) + fl.state.scratchBytes(c, fl.state.prompt_rows, c.context) + tower;
-    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
-        model.deinit();
-        problem.* = "MINIMAX_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
-        return null;
-    };
-    const fits = fl.budget.longest(&model.config, budget, model.config.context);
-    const window: i64 = o.context orelse @intCast(fits);
-    if (window < 1 or window > fits) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's MiniMax-M3 caches fit {d} tokens under its load limit (75% of RAM, or MINIMAX_LOAD_LIMIT_GB)", .{ window, fits });
-        model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
-        return null;
-    }
-    std.log.info("minimax_m3: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
-    const h = try gpa.create(Host);
-    errdefer gpa.destroy(h);
-    h.gpa = gpa;
-    h.io = io;
-    h.model = model;
-    h.resident = null;
     const df2 = if (o.drafts and kind == .dflash2) fl.dflash2.Config.read(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's DFlash2 config cannot be read ({s})", .{@errorName(err)});
         model.deinit();
@@ -99,24 +80,55 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         model.deinit();
         return null;
     } else null;
+    const draft2 = if (df2) |dc| try fl.dflash2.Drafter.init(gpa, model, dc) else null;
+    errdefer if (draft2) |d| d.deinit();
+    const draft = if (dspark) |dc| try fl.dspark.Drafter.init(gpa, model, dc) else null;
+    errdefer if (draft) |d| d.deinit();
+    const reserved: ?fl.budget.Draft = if (draft2) |d| .{
+        .fixed = d.fixedBytes(),
+        .stream = d.laneBytes(),
+        .tap_row = @as(u64, df2.?.taps.len) * model.config.hidden * 2,
+    } else if (draft) |d| .{
+        .fixed = d.fixedBytes(),
+        .stream = d.laneBytes(),
+        .tap_row = @as(u64, dspark.?.taps.len) * model.config.hidden * 2,
+    } else null;
+    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, fl.budget.residentBytes(model.checkpoint.residentBytes() + scratch, @max(o.lanes, 1), reserved)) catch {
+        if (draft2) |d| d.deinit();
+        if (draft) |d| d.deinit();
+        model.deinit();
+        problem.* = "MINIMAX_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        return null;
+    };
+    const fits = fl.budget.longest(&model.config, budget, model.config.context);
+    const window: i64 = o.context orelse @intCast(fits);
+    if (window < 1 or window > fits) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's MiniMax-M3 caches fit {d} tokens under its load limit (75% of RAM, or MINIMAX_LOAD_LIMIT_GB)", .{ window, fits });
+        if (draft2) |d| d.deinit();
+        if (draft) |d| d.deinit();
+        model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
+        return null;
+    }
+    std.log.info("minimax_m3: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
+    const h = try gpa.create(Host);
+    errdefer gpa.destroy(h);
+    h.gpa = gpa;
+    h.io = io;
+    h.model = model;
+    h.resident = null;
+    h.draft = draft;
+    h.draft2 = draft2;
     h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget, .drafts = dspark != null or df2 != null });
     errdefer h.metal.deinit();
     try h.metal.warm();
-    h.draft = null;
-    h.draft2 = null;
     h.wrap = null;
-    if (df2) |dc| {
-        try h.metal.measure();
-        h.draft2 = try fl.dflash2.Drafter.init(gpa, model, dc);
-        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft2.?.drafter());
-    } else if (dspark) |dc| {
-        try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
-        h.draft = try fl.dspark.Drafter.init(gpa, model, dc);
-        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft.?.drafter());
+    if (h.draft2 != null or h.draft != null) try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
+    if (h.draft2) |d| {
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+    } else if (h.draft) |d| {
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
     }
     errdefer if (h.wrap) |*w| w.deinit();
-    errdefer if (h.draft) |d| d.deinit();
-    errdefer if (h.draft2) |d| d.deinit();
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, fl.state.window_rows, fl.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
@@ -255,4 +267,12 @@ test "MiniMax capabilities: logprobs match the actual plain or external-draft ba
     try std.testing.expect(drafted.structures and wrapped.vtable.first_masked != null);
     try std.testing.expectEqual(plain.context_window, drafted.context_window);
     try std.testing.expectEqual(plain.prefill_step, drafted.prefill_step);
+}
+
+test "minimax_m3 budget: drafting reserves shared taps and every stream" {
+    const base: u64 = 4096;
+    const draft = fl.budget.Draft{ .fixed = 100, .stream = 200, .tap_row = 8 };
+    try std.testing.expectEqual(base, fl.budget.residentBytes(base, 2, null));
+    const shared = @as(u64, fl.state.batch_rows + fl.state.prompt_rows) * draft.tap_row;
+    try std.testing.expectEqual(base + draft.fixed + shared + 2 * (draft.stream + draft.tap_row), fl.budget.residentBytes(base, 2, draft));
 }

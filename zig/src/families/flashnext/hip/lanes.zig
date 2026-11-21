@@ -30,8 +30,6 @@ pub const Fill = struct {
     stops: [16]u32 = undefined,
     count: usize = 0,
     next: usize = 0,
-    from: usize = 0,
-    kept0: u64 = 0,
 };
 
 /// A kept row inside a prompt chunk (forward.Mark): its position, the n-gram history there and its side buffer.
@@ -134,6 +132,11 @@ pub const Fx = struct {
             .{ .lookahead = 1, .planned = true, .grid = 64 },
             budget,
         );
+    }
+
+    /// The offered store LaneHost uses for cross-request waiting, lookup and reports.
+    pub fn promptCache(f: *Fx) ?*pc.Store {
+        return if (f.store) |*st| st else null;
     }
 
     /// How the kept states are copied: through the bounce buffer when there is one.
@@ -259,23 +262,22 @@ pub const Fx = struct {
         gop.value_ptr.* = lane;
         if (f.link != null) try f.send(&.{ @backingInt(worker.Op.begin), lane.id, slot });
         const fill = &lane.fill.?;
-        if (f.store) |*st| {
-            var arena: std.heap.ArenaAllocator = .init(f.gpa);
-            defer arena.deinit();
-            fill.kept0 = st.counts.kept;
-            const plan = st.begin(
-                arena.allocator(),
-                prompt,
-                s.history_len,
-                s.shared_prefixes,
-                &.{},
-                lane,
-                &.{},
-            ) catch pc.Plan{};
-            fill.at = plan.from;
-            fill.from = plan.from;
-            fill.count = @min(plan.marks.len, fill.stops.len);
-            for (plan.marks[0..fill.count], 0..) |mk, i| fill.stops[i] = mk;
+        fill.count = @min(s.reuse.marks.len, fill.stops.len);
+        for (s.reuse.marks[0..fill.count], 0..) |mk, i| fill.stops[i] = mk;
+        if (s.reuse.saved) |saved| {
+            const kept: *snapshot.Saved = @ptrCast(@alignCast(saved));
+            if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= prompt.len) {
+                s.reuse_failed = true;
+            } else {
+                states.restore(f, s, saved) catch |err| switch (err) {
+                    error.RestoreRefused, error.SnapshotTooLong, error.UnknownSnapshot => {
+                        s.reuse_failed = true;
+                        s.reuse_error = err;
+                    },
+                    else => return err,
+                };
+                if (!s.reuse_failed) fill.at = kept.at;
+            }
         }
         s.cached = @intCast(fill.at);
         return lane;
@@ -338,7 +340,7 @@ pub const Fx = struct {
         fill.next = taken;
         const live = fill.next < fill.count and to == fill.stops[fill.next];
         if (live) fill.next += 1;
-        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks, .live = if (live) to else null, .last = last, .from = fill.from, .kept0 = fill.kept0 };
+        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks, .live = if (live) to else null };
         if (!last or f.link != null) states.settle(f); // the other ranks take each keep in step order
         if (!last) return false;
         try hip.raw.copy(lane.streams, 0, out.streams.ptr + (rows - 1) * row_bytes, row_bytes, e.stream.handle);
@@ -500,3 +502,15 @@ pub const Fx = struct {
         f.free(kv.value);
     }
 };
+
+test "Flash Next HIP offers its real prompt store to LaneHost only when reuse is enabled" {
+    var f: Fx = .{ .gpa = std.testing.allocator, .e = undefined, .streams = 1, .ones = undefined, .draft_ids = &.{}, .drafts = 0 };
+    try std.testing.expect(f.promptCache() == null);
+    f.store = pc.Store.init(f.gpa, .{ .ptr = &f, .vtable = &.{ .bytes = states.bytes, .save = states.save, .restore = states.restore, .drop = states.drop } }, .{ .lookahead = 1, .planned = true, .grid = 64 }, 1 << 20);
+    defer if (f.store) |*st| st.deinit();
+    const offered = f.promptCache().?;
+    if (f.store) |*st| try std.testing.expectEqual(st, offered) else return error.ExpectedPromptStore;
+    var saved: u8 = 0;
+    try std.testing.expectError(error.NoStream, states.save(&f, null, 64));
+    try std.testing.expectError(error.NoStream, states.restore(&f, null, &saved));
+}

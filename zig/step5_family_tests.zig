@@ -3,4 +3,5 @@ test "step5 host: imports" {
     _ = @import("src/families/step5/config.zig");
     _ = @import("src/families/step5/weights.zig");
     _ = @import("src/families/step5/vision.zig");
+    _ = @import("src/families/step5/prefill_steps.zig");
 }

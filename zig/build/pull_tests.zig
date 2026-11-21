@@ -12,6 +12,15 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     }) }));
     b.step("test-rm-host", "Checkpoint removal in a temporary cache: shared blobs, refs, dry runs, refusals and links out").dependOn(&rm.step);
     test_step.dependOn(&rm.step);
+    const artifact = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cli/artifact_transaction.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "native_engines", .module = engines }, .{ .name = "core", .module = core } },
+    }) }));
+    b.step("test-artifact-transaction-host", "Pinned target/drafter resolution and recoverable cache publication").dependOn(&artifact.step);
+    test_step.dependOn(&artifact.step);
     if (target.result.os.tag == .windows) return; // the fake hub listens on a POSIX socket
     const journal_log = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/journal_log.zig"), .target = target, .optimize = optimize }) }));
     b.step("test-journal-log-host", "tensorfold log over a fixture request journal: list, show, --json and follow across a rotation").dependOn(&journal_log.step);

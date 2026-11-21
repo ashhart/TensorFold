@@ -87,6 +87,7 @@ pub const Setup = struct {
     model_dir: []const u8 = "",
     /// The checkpoint's model_type, as `engines.open` read at startup; the idle reload opens with it.
     model_type: []const u8 = "",
+    workspace_model: ?[32]u8 = null,
     /// How the idle unload reopens the engine and its text; null keeps the manager off even with --idle-unload.
     reopen: ?idle_unload.Reopen = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
@@ -258,6 +259,26 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     } else null;
     defer if (srv.witness) |w| w.deinit();
+    if (args.workspace) |root| {
+        if (!srv.info.capability(.text_generation)) {
+            std.debug.print("tensorfold: workspace completions require a text-generation model\n", .{});
+            return 1;
+        }
+        srv.workspace = @import("workspace.zig").Service.init(gpa, io, root, args.workspace_state.?, s.workspace_model.?, s.text, srv.info, args) catch |err| {
+            std.debug.print("tensorfold: workspace state could not be initialized safely: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+    }
+    if (args.media_jobs_dir) |directory| {
+        if (srv.info.image == null) {
+            std.debug.print("tensorfold: --media-jobs-dir requires an image model\n", .{});
+            return 1;
+        }
+        srv.media_jobs.init(srv, directory, .{}) catch |e| {
+            std.debug.print("tensorfold: durable media jobs could not start at {s}: {s}\n", .{ directory, @errorName(e) });
+            return 1;
+        };
+    }
     srv.load.attach(srv.engine);
     srv.recall = s.recall;
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
@@ -473,6 +494,7 @@ test "Failure boundaries: drain and SSE duration settings refuse non-finite or u
 
 fn closeIdle(srv: *server_mod.Server, stop: ?EngineStop) bool {
     if (srv.open_connections.load(.acquire) != 0 or srv.generating.load(.seq_cst) != 0) return false;
+    srv.media_jobs.deinit(); // cancels and joins detached generation before the engine leaves
     srv.stopKeepalive();
     srv.load.detach(false); // the engine stops writing to the ledger before it closes
     if (stop) |st| st.close(st.ctx);
@@ -490,6 +512,7 @@ test "Failure boundaries: engine close waits for handlers and connections to lea
     var server: server_mod.Server = undefined;
     server.open_connections = .init(1);
     server.generating = .init(0);
+    server.media_jobs = .{};
     server.keepalive = null;
     server.load = .init(std.testing.io);
     const stop: EngineStop = .{ .ctx = &count, .close = Count.close };

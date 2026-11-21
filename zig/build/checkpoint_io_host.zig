@@ -15,6 +15,16 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"fp8 block:"} })).step);
         if (mode == .debug) b.step("test-gptq-reader-host", "The shared GPTQ reader on a synthetic checkpoint, against binary64 (core/quant/gptq.zig)")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"gptq:"} })).step);
+        if (mode == .debug) b.step("test-artifact-resolution-host", "Pinned target/proposal tuple resolution before model replacement")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"artifact resolution"} })).step);
+        if (mode == .debug) b.step("test-expert-stripes-host", "Multi-disk expert stripes, exact fallback and restart accounting without a GPU")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"expert stripe"} })).step);
+        if (mode == .debug) b.step("test-deployment-fit-host", "Exact low-memory resident/SSD placement and bounded fit controls")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"deployment fit"} })).step);
+        if (mode == .debug) b.step("test-low-memory-plan-host", "Measured-byte placement, exact fallback and transactional admission without devices")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/low_memory_plan.zig"), .target = target, .optimize = mode }) })).step);
+        if (mode == .debug) b.step("test-workspace-manifest-host", "Exact workspace prompt reuse, provenance, invalidation and symlink refusal")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"workspace manifest"} })).step);
         const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"Qwen shard integrity:"} })).step);
     }

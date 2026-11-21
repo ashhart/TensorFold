@@ -22,6 +22,7 @@ pub const Fill = struct {
     pub fn init(from: usize, marks: []const u32) Fill {
         var f: Fill = .{ .at = from, .count = @min(marks.len, 16) };
         @memcpy(f.stops[0..f.count], marks[0..f.count]);
+        while (f.next < f.count and f.stops[f.next] <= from) f.next += 1;
         return f;
     }
 
@@ -197,6 +198,7 @@ pub fn Backend(comptime F: type) type {
         const vtable: be.Backend.VTable = .{
             .prefill = prefillFn,
             .prefill_step = prefillStepFn,
+            .cancel_prefill = if (@hasField(F, "prefix")) cancelPrefillFn else null,
             .first = firstFn,
             .first_masked = firstMaskedFn,
             .held = heldTokensFn,
@@ -222,6 +224,14 @@ pub fn Backend(comptime F: type) type {
         /// The whole prompt pass, chunk by chunk (a driver of its own, with no rounds between).
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
             while (!try prefillStepFn(ptr, s, 0)) {} // whole prompts: the 512-row cap would cut where this driver never does
+        }
+
+        fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+            const h = of(ptr);
+            const lane = try h.streams.get(s);
+            const f = lane.fill orelse return;
+            if (s.readout != null or f.at <= s.cached) return;
+            try h.keepCut(lane, s.prompt(), f.at);
         }
 
         /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.
@@ -375,6 +385,14 @@ test "a prompt pass stops at its cuts, then the prompt's end" {
     try std.testing.expect(f.cut(128));
     try std.testing.expectEqual(@as(usize, 256), f.limit(1000));
     try std.testing.expect(f.cut(256));
+    try std.testing.expectEqual(@as(usize, 1000), f.limit(1000));
+}
+
+test "a resumed prompt pass skips cuts at and before its restored row" {
+    var f = Fill.init(64, &.{ 32, 64, 128 });
+    try std.testing.expectEqual(@as(usize, 128), f.limit(1000));
+    try std.testing.expect(!f.cut(64));
+    try std.testing.expect(f.cut(128));
     try std.testing.expectEqual(@as(usize, 1000), f.limit(1000));
 }
 

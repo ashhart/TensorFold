@@ -20,6 +20,7 @@ test {
     _ = state;
     _ = budget;
     _ = snapshot;
+    _ = backend;
     _ = drafter;
     _ = @import("drafter_test.zig");
     _ = pricing;

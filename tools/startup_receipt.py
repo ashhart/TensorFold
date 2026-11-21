@@ -224,6 +224,8 @@ def main(argv=None):
             warm = warm_checkpoint(model)
             result = attempt(command, env, args.output / f"run-{index + 1}", args.ready_timeout, args.request_timeout)
             result["prewarm"] = warm
+            if warm_checkpoint(model)["sha256"] != warm["sha256"]:
+                result["status"], result["error"] = "failed", "Checkpoint changed during attempt"
             if file_hash(binary) != summary["binary_sha256"]:
                 result["status"], result["error"] = "failed", "Server binary changed during attempt"
             summary["runs"].append(result)

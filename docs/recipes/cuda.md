@@ -13,7 +13,7 @@ Gemma 4, MiniMax-M3.1-Flash, Kolibri-1, Spark-X2.6 and Dory. LFM2 and Drama have
 Qwen4 is registered as preparation with synthetic gates, without a real-checkpoint qualification.
 A registry entry does not qualify every checkpoint, format, GPU or rank count.
 MiniMax-M3.1-Flash refuses an A100: its CUDA path admits only sm_121 at exactly two ranks.
-DeepSeek requires sm_90 or newer and remains refused by the release server pending whole-model gate #827.
+DeepSeek requires sm_90 or newer for its experimental implementation and is refused by the release CUDA server.
 Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
 GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
 this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
@@ -369,8 +369,8 @@ caches. The CUDA CLI applies `--alias` too; `--name` sets the served model ID. `
 
 ## Multi-GPU P2P startup report
 
-The native CUDA implementation has this report on its ranked paths; DeepSeek's implementation remains behind
-the release server's #827 refusal. With two or more CUDA ranks, each rank logs `p2p:` facts: its GPU and PCI bus id,
+The native CUDA implementation has this report on its ranked paths; DeepSeek's implementation is outside the release CUDA server.
+With two or more CUDA ranks, each rank logs `p2p:` facts: its GPU and PCI bus id,
 the driver, CUDA driver API and NCCL versions, each other GPU's NVML P2P read and write status and PCIe path
 (`nvidia-smi topo -m`'s names), CUDA's peer access when the process sees more than one device, the values of
 `NCCL_P2P_DISABLE`, `NCCL_P2P_LEVEL`, `NCCL_P2P_READ_ENABLE`, `NCCL_SHM_DISABLE`, `NCCL_ALGO`, `NCCL_PROTO` and
