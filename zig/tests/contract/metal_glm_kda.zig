@@ -18,9 +18,10 @@ const eps: f32 = 1e-5;
 /// The window step (all heads, one Mac's 32 heads at TP2), and an Ultra's two groups a head with the norm after.
 pub const Form = enum { window, window_tp, parts };
 
-/// kernels.zig's KDA library: kda_rows' source, then the prompt passes, the window step and the parts appended.
-pub fn text(a: std.mem.Allocator) ![]u8 {
-    return std.mem.concat(a, u8, &.{ comptime kernels.generatedSource("kda_rows"), sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
+/// kernels.zig's KDA library: kda_rows, the pre-M5 define (`m3_fast`), the prompt passes, window step and parts.
+pub fn text(a: std.mem.Allocator, m3_fast: bool) ![]u8 {
+    const m3_def = if (m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
+    return std.mem.concat(a, u8, &.{ comptime kernels.generatedSource("kda_rows"), m3_def, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts });
 }
 
 fn heads(f: Form) usize {
@@ -48,7 +49,7 @@ pub const Case = struct {
 
     pub fn init(s: *bits.Suite, form: Form, control: bool) !Case {
         const loader = try s.production();
-        const own = try text(s.a);
+        const own = try text(s.a, !s.device.tensorUnits());
         defer s.a.free(own);
         _ = try loader.require(own);
         const body = if (!control) try s.a.dupe(u8, own) else if (form == .parts) try bits.edited(s.a, own, "void glm_kda_parts(", "const uint dv0 = part * (uint)DV;", "const uint dv0 = 0u * part;") else try bits.edited(s.a, own, "void glm_kda_window(", "P[(size_t)(r0 + (int)tid) * PS + BO + h]", "P[(size_t)r0 * PS + BO + h]");
@@ -193,7 +194,6 @@ pub fn collect(s: *bits.Suite, only: ?[]const u8) !void {
 
 /// Gate 5's registrations `glm launch kda <function>`: the loader's KDA library.
 pub const prefix = "glm launch kda ";
-pub fn limitsText(a: std.mem.Allocator, _: mtl.Device, _: []const u8) !bits.Texts {
-    const t = try text(a);
-    return .{ .here = t, .pre_m5 = t };
+pub fn limitsText(a: std.mem.Allocator, device: mtl.Device, _: []const u8) !bits.Texts {
+    return .{ .here = try text(a, !device.tensorUnits()), .pre_m5 = try text(a, true) };
 }
