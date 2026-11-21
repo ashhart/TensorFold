@@ -136,12 +136,10 @@ pub const Runner = struct {
         errdefer pool.deinit();
         const pipelines = @import("core").startup_receipt.span(.runtime_pipelines);
         const units = m.device.tensorUnits();
-        // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
-        if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
+        if (!units) try @import("simd_attention.zig").check(m.device, m.queue); // before M5 the tail reads simdgroup-matrix results
         const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads, paged);
         defer a.free(text);
-        // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
-        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
+        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: { // before M5 prompt kernels are optional; a chip that cannot build them keeps decode prompts
             if (units) return err;
             std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
             const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads, paged);
@@ -194,14 +192,12 @@ pub const Runner = struct {
     pub const release = slot_pages.release;
     pub const reset = slot_pages.reset;
 
-    /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
-    fn trimSlot(r: *Runner, slot: u32) void {
+    fn trimSlot(r: *Runner, slot: u32) void { // pages past committed rows go back to the promise; no GPU work reads them
         const k = r.kv orelse return;
         k.pages.trim(slot, r.offsets[slot]);
     }
 
-    /// Slot `slot`'s first `at` rows of each attention layer's keys then values, head by head, page by page.
-    pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void {
+    pub fn kvSpans(r: *const Runner, a: std.mem.Allocator, slot: u32, at: u32, list: *std.ArrayList(KvSpan)) !void { // first `at` rows of K then V, head by head, page by page
         return kv_pages.spans(r, a, slot, at, list);
     }
 
