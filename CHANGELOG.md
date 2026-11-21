@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: at `--tp 2` a Flash Next rank's control-link wait polls with a 50 µs timeout for its first 50 ms and then blocks as before, so drafted rounds pick up the next header sooner; replies are unchanged (#2971). Thanks to @swbiggart.
 
+
+
 - CUDA: `capabilities --json` now advertises `modelopt-mixed` and `modelopt-nvfp4` for the dense Qwen3.5 family, matching the ModelOpt exports its loader serves (#4192). Thanks to @javierbits.
 - CUDA capabilities: the dense Qwen3.8-27B row now advertises the ModelOpt exports its loader reads, `modelopt-mixed` (`nvidia/Qwen3.8-27B-NVFP4`) and `modelopt-nvfp4`, beside `mlx-q4g64` and `exl3`; a client that filters on `capabilities --json` no longer hides a checkpoint the engine serves (#4150). Thanks to @Flyinpiz-dev.
 - HIP: the gfx12 WMMA step pieces move from `tiles/wmma12_gemm.hpp` into a shared header, `tiles/wmma12_step.hpp`, for the coming gfx12 affine tile; it is only a move, so the kernels' bytes do not change (#3862, refs #2401). Thanks to @millaguie.
