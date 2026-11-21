@@ -21,6 +21,7 @@ test {
     _ = @import("rows_refusal_test.zig");
     _ = @import("rows_startup_fault_test.zig");
     _ = @import("rows_drop_test.zig");
+    _ = @import("rows_ask_drop_test.zig");
     _ = @import("rows_restore_burst_test.zig");
     _ = @import("rows_image_note_test.zig");
 }
