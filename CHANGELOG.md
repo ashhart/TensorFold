@@ -131,6 +131,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
+- Flash Next on CUDA: the MTP draft rows' best value, first id and log-sum-exp run over 32 one-warp blocks a row in place of one 1024-thread block, with the same bytes (#4632).
 
 ## 1.3.4
 

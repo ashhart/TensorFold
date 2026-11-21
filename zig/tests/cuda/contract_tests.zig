@@ -293,9 +293,11 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&shifts) |*shift| try kernels.append(a, shift.kernel());
     var mtp = try cuda.Module.load(gpu.d, kk.flashnext_mtp);
     defer mtp.unload();
-    var best = best_k.Best{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best") };
-    defer best.deinit();
-    try kernels.append(a, best.kernel());
+    const best_split = [2]cuda.Function{ try mtp.function("fn_row_best_max"), try mtp.function("fn_row_best_sum") };
+    var bests: [3]best_k.Best = undefined;
+    for (std.enums.values(best_k.Kind), &bests) |kind, *b| b.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best"), .kind = kind, .split = best_split };
+    defer for (&bests) |*b| b.deinit();
+    for (&bests) |*b| try kernels.append(a, b.kernel());
     var selections: [2]qsa_k.Select = undefined;
     for ([_]bool{ false, true }, &selections) |padded, *selection|
         selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
