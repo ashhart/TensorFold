@@ -54,6 +54,8 @@ pub const AttnArgs = extern struct {
 
 pub const Kernels = struct {
     mod: cuda.Module,
+    /// act_rows: the SiLU is core's tf_swiglu_rows in torch's form
+    rows: cuda.Module,
     mix: cuda.Function,
     addnorm: cuda.Function,
     qk: cuda.Function,
@@ -69,14 +71,17 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var mod = try cuda.Module.load(d, cuda.kernels.inkling2_dspark);
         errdefer mod.unload();
+        var rows = try cuda.Module.load(d, cuda.kernels.act_rows);
+        errdefer rows.unload();
         return .{
             .mod = mod,
+            .rows = rows,
             .mix = try mod.function("tf_ink2_dsp_mix"),
             .addnorm = try mod.function("tf_ink2_dsp_addnorm"),
             .qk = try mod.function("tf_ink2_dsp_qk"),
             .attn = try mod.function("tf_ink2_dsp_attn"),
             .merge = try mod.function("tf_ink2_dsp_merge"),
-            .silu = try mod.function("tf_ink2_dsp_silu"),
+            .silu = try rows.function("tf_swiglu_rows_expf"),
             .ctx = try mod.function("tf_ink2_dsp_ctx"),
             .rnn = try mod.function("tf_ink2_dsp_rnn"),
             .vocab = try mod.function("tf_ink2_dsp_vocab"),
@@ -85,6 +90,7 @@ pub const Kernels = struct {
     }
 
     pub fn unload(k: *Kernels) void {
+        k.rows.unload();
         k.mod.unload();
         k.* = undefined;
     }
@@ -155,12 +161,18 @@ pub fn attend(k: *const Kernels, s: cuda.Stream, at: AttnArgs, out: u64) !void {
     try go(k.merge, s, .{ .x = @intCast(at.T * at.hq) }, 128, &m);
 }
 
+/// gu bf16 [rows][2 * inter] (gates, then ups) to bf16(silu(gate) * up) by core's tf_swiglu_rows_expf.
 pub fn silu(k: *const Kernels, s: cuda.Stream, gu: u64, out: u64, rows: usize, inter: usize) !void {
+    if (inter % 64 != 0) return error.Inkling2DraftShape;
     var a: cuda.Args = .{};
     a.add(gu);
+    a.add(@as(i64, @intCast(2 * inter)));
+    a.add(gu + 2 * inter);
+    a.add(@as(i64, @intCast(2 * inter)));
     a.add(out);
+    a.add(@as(u64, 0));
     a.add(int(inter));
-    try go(k.silu, s, .{ .x = @intCast((inter + 255) / 256), .y = @intCast(rows) }, 256, &a);
+    try go(k.silu, s, .{ .x = @intCast(rows), .y = @intCast((inter / 8 + 255) / 256) }, 256, &a);
 }
 
 /// The Markov head's context rows: fp32 [rows][3r] from the hidden rows and f_rnn.
@@ -220,6 +232,7 @@ test "dspark ops: a head, a block or a ring the kernels would run wrong is refus
     try std.testing.expectError(no, checkHead(256, 128, 9));
     const k: Kernels = undefined;
     const s: cuda.Stream = undefined;
+    try std.testing.expectError(no, silu(&k, s, 0, 0, 8, 4600)); // not a multiple of 64 columns
     try std.testing.expectError(no, rnn(&k, s, 0, 0, 0, 0, 0, 0, 0, 512, 4608));
     try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 8, 4608, 128));
     try std.testing.expectError(no, ctx(&k, s, 0, 0, 0, 0, 0, 9, 4608, 256));

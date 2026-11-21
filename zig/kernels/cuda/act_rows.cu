@@ -22,11 +22,19 @@ __device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn
 
 using namespace tf_act;
 
-// out[r, i] = bf16(silu(gate[r * g_ld + i]) * up[r * u_ld + i]) for i < n (n % 64 == 0); xs (or null) out's sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
-                                                                const __nv_bfloat16* __restrict__ up, long long u_ld,
-                                                                __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
-                                                                int n) {
+namespace tf_act {
+
+// silu(g) * u: core's g * sigmoid(g), or with Torch torch's g / (1 + expf(-g)), each step rounded as written.
+template <bool Torch>
+__device__ __forceinline__ float silu_mul(float g, float u) {
+    if (Torch) return __fmul_rn(__fdiv_rn(g, __fadd_rn(1.0f, expf(-g))), u);
+    return __fmul_rn(__fmul_rn(g, sigmoid(g)), u);
+}
+
+template <bool Torch>
+__device__ __forceinline__ void swiglu_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                            const __nv_bfloat16* __restrict__ up, long long u_ld,
+                                            __nv_bfloat16* __restrict__ out, float* __restrict__ xs, int n) {
     const int64_t r = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
     const bool live = 8 * c < n;
@@ -36,13 +44,31 @@ extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloa
         unpack8(*reinterpret_cast<const uint4*>(up + r * u_ld + 8 * c), u);
     }
 #pragma unroll
-    for (int i = 0; i < 8; ++i) o[i] = live ? __fmul_rn(__fmul_rn(g[i], sigmoid(g[i])), u[i]) : 0.f;
+    for (int i = 0; i < 8; ++i) o[i] = live ? silu_mul<Torch>(g[i], u[i]) : 0.f;
     const uint4 op = pack8(o);
     if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = op;
     if (xs != nullptr) {
         const float s = group_sum8(op, live);
         if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
     }
+}
+
+}  // namespace tf_act
+
+// out[r, i] = bf16(silu(gate[r * g_ld + i]) * up[r * u_ld + i]) for i < n (n % 64 == 0); xs (or null) out's sums.
+extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                                                const __nv_bfloat16* __restrict__ up, long long u_ld,
+                                                                __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+                                                                int n) {
+    tf_act::swiglu_rows<false>(gate, g_ld, up, u_ld, out, xs, n);
+}
+
+// tf_swiglu_rows with torch's silu, g / (1 + expf(-g)): Inkling 2's DSpark drafter (expf, not tf_exp, for its bits).
+extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows_expf(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                                                     const __nv_bfloat16* __restrict__ up, long long u_ld,
+                                                                     __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
+                                                                     int n) {
+    tf_act::swiglu_rows<true>(gate, g_ld, up, u_ld, out, xs, n);
 }
 
 // out[r, h * d + e] = bf16(o[r, h * d + e] * sigmoid(g[r * g_ld + h * g_hs + e])) (d % 64 == 0); xs (or null) its sums.

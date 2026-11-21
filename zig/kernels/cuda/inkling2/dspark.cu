@@ -226,16 +226,6 @@ extern "C" __global__ void __launch_bounds__(128) tf_ink2_dsp_merge(const float*
     out[rh * kD + d] = tobf(acc / l);
 }
 
-// silu(gate) * up in fp32, rounded once: torch's g / (1 + expf(-g)), not core's tf_exp. gu bf16 [rows][2I].
-extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_silu(const uint16_t* __restrict__ gu, uint16_t* __restrict__ out, int I) {
-    using namespace ink2d;
-    const size_t row = blockIdx.y;
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= I) return;
-    const float g = bf(gu[row * 2 * I + c]), u = bf(gu[row * 2 * I + I + c]);
-    out[row * I + c] = tobf(g / (1.0f + expf(-g)) * u);
-}
-
 // The Markov head's context: out fp32 [rows][3R] = bias + rnn_proj[:, 2R:] . [hidden_row, f_rnn], a warp an output.
 extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_ctx(const uint16_t* __restrict__ hidden, const uint16_t* __restrict__ frnn,
                                                                   const uint16_t* __restrict__ W, const uint16_t* __restrict__ bias,

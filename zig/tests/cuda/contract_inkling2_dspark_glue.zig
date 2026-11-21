@@ -1,4 +1,4 @@
-//! Inkling 2's DSpark SiLU and the ranks' pick under the contract: tf_ink2_dsp_silu and tf_ink2_dsp_pick.
+//! Inkling 2's DSpark SiLU and the ranks' pick under the contract: act_rows' tf_swiglu_rows_expf and tf_ink2_dsp_pick.
 const std = @import("std");
 const core = @import("core");
 const dk = @import("inkling2").dspark_ops;
@@ -15,7 +15,7 @@ const inter = 9216; // a TP=2 rank's FFN columns (18,432 / 2)
 /// A block's 8 rows x this rank's FFN columns: no sums.
 pub fn siluSpec(swapped: bool) c.Spec {
     const served = &[_]c.Shape{.{ .rows = 8, .n = inter, .k = 1 }};
-    const name = if (swapped) "inkling2 dspark control: SiLU reads up as gate and gate as up" else "inkling2 dspark tf_ink2_dsp_silu (silu(gate) * up in fp32, rounded once)";
+    const name = if (swapped) "inkling2 dspark control: SiLU reads up as gate and gate as up" else "inkling2 dspark act_rows tf_swiglu_rows_expf (silu(gate) * up in fp32, rounded once)";
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .bf16, .served = served };
 }
 
