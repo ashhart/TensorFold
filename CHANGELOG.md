@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: a bf16 language head's draft rows load as 4-bit affine groups of 32 by default, and `TF_FLASHNEXT_DRAFT_HEAD=bf16` keeps them as stored; a malformed value stops the start by name, and replies are unchanged because drafts are verified (#3477, refs #1870). Thanks to @BadAd84.
+
 - Idol's FLUX.2 VAE image encoder runs natively on Metal in fp32: one 1,024 x 1,024 picture to the denoiser's 4,101 condition rows, with the posterior's noise as an input. It is 0.185 s an encode on an M5 Ultra against 0.095 s for the SDK's bf16 encoder on torch MPS, and lies far closer to a float64 run: worst row 5.1e-5 against the SDK's 2.7e-2. `tf-idol-vae` gates it from a case `tools/zig/idol_case.py vae` records, with the ungated FLUX.2-klein-4B weights (#1774, after #1766, for #1757). Thanks to @jayleaton.
 
 
