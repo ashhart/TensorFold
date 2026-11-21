@@ -10,7 +10,7 @@ const repackQ4KInto = repack8.repackQ4KInto;
 const repackQ6KInto = repack8.repackQ6KInto;
 
 pub const Cache = struct {
-    const magic = "TFRP8V04";
+    const magic = "TFRP8V05";
     const Header = extern struct {
         magic: [8]u8,
         source_size: u64,
@@ -104,7 +104,7 @@ pub const Cache = struct {
     pub fn openOrBuild(a: std.mem.Allocator, io: std.Io, model_path: []const u8, source: *const g.File) !Cache {
         const src_mem = source.map.memory;
         const identity = try SourceIdentity.read(io, source);
-        const cache_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v4", .{model_path});
+        const cache_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v5", .{model_path});
         defer a.free(cache_path);
 
         if (tryOpenExisting(io, cache_path, identity)) |existing_value| {
@@ -178,7 +178,7 @@ pub const Cache = struct {
             .total_bytes = cursor,
         };
 
-        const tmp_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v4.tmp", .{model_path});
+        const tmp_path = try std.fmt.allocPrint(a, "{s}.tf_repack8.v5.tmp", .{model_path});
         defer a.free(tmp_path);
         const out_file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
         var output_open = true;

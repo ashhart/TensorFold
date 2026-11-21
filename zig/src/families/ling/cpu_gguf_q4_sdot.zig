@@ -53,7 +53,7 @@ inline fn q6kQuarter16(ql: @Vector(16, u8), qh: @Vector(16, u8), comptime quarte
 }
 
 /// Inner Q4_K block dot product; wrapping add and mul are overflow-free (max |weighted| = 30.7M << 2^31).
-inline fn q4kBlockDot(p: [*]const u8, act: *const Activation256) f32 {
+pub inline fn q4kBlockDot(p: [*]const u8, act: *const Activation256) f32 {
     const mask4: @Vector(16, u8) = @splat(0x0F);
     const shift4: @Vector(16, u8) = @splat(4);
     const scales = p + 4;
@@ -214,7 +214,7 @@ pub fn projectRangeQ4K(bytes: [*]const u8, acts: [*]const Activation256, output:
 }
 
 /// Inner Q6_K block dot product; wrapping add and mul are overflow-free (max |weighted| = 133.2M << 2^31).
-inline fn q6kBlockDot(p: [*]const u8, act: *const Activation256) f32 {
+pub inline fn q6kBlockDot(p: [*]const u8, act: *const Activation256) f32 {
     const d = half(p + 208);
     const xv: [*]align(16) const i8 = &act.values;
     var sum_vec: I = @splat(0);
