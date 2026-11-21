@@ -97,6 +97,7 @@ pub const usage =
     \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
     \\  stored-experts contract | ckpt DIR | bench DIR   Inkling 2 Mini's NVFP4 and MXFP8 experts: gates, checkpoint, speed
     \\  inkling2-mini DIR N TEXT  Inkling 2 Mini at one rank: N greedy tokens, resumed == fresh, concurrent == solo
+    \\  inkling2-mini-xcheck DIR N  Inkling 2 Mini vs #4337's Metal: prompts A (raw ids) and B, top 2 a step, JSON
     \\  inkling2-mini-ref DIR N TEXT  Inkling 2 Mini's N greedy tokens against the float64 reference, teacher-forced
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance

@@ -8,8 +8,8 @@ const names = @import("names.zig");
 const Tensor = core.checkpoint.Tensor;
 const Checkpoint = core.checkpoint.Checkpoint;
 
-/// Each position's top token, its margin over the runner-up and the top logit (soft-capped).
-pub const Pick = struct { id: u32, margin: f64, top: f64 };
+/// Each position's top token, margin over the runner-up, top logit, five best ids and logits (ties: the lower id).
+pub const Pick = struct { id: u32, margin: f64, top: f64, ids: [5]u32 = @splat(0), logits: [5]f64 = @splat(-std.math.inf(f64)) };
 
 const e4m3_table = blk: {
     @setEvalBranchQuota(100000);
@@ -124,6 +124,7 @@ pub const Ref = struct {
     c: config.Config,
     p: plan_.Plan,
     ck: *Checkpoint,
+    plant: bool = false, // a planted control: the cross-pass messages dropped (the check must then go red)
 
     fn get(r: *Ref, comptime fmt: []const u8, args: anytype) !Tensor {
         var buf: [128]u8 = undefined;
@@ -220,16 +221,21 @@ pub const Ref = struct {
             src[nb] = hcur[i];
             mixOne(h, src[0 .. nb + 1], oq.bytes, 0, xf);
             normInto(xf, norm, t.eps);
-            var best: Pick = .{ .id = 0, .margin = 0, .top = -std.math.inf(f64) };
-            var second = -std.math.inf(f64);
+            var best: Pick = .{ .id = 0, .margin = 0, .top = 0 };
             for (0..t.unpadded_vocab) |vid| {
                 const l = t.logit_cap * std.math.tanh(dotBf(unembed.bytes, vid, h, xf) / t.logit_cap);
-                if (l > best.top) {
-                    second = best.top;
-                    best = .{ .id = @intCast(vid), .margin = 0, .top = l };
-                } else if (l > second) second = l;
+                if (l <= best.logits[4]) continue;
+                var at: usize = 4;
+                while (at > 0 and l > best.logits[at - 1]) : (at -= 1) {
+                    best.logits[at] = best.logits[at - 1];
+                    best.ids[at] = best.ids[at - 1];
+                }
+                best.logits[at] = l;
+                best.ids[at] = @intCast(vid);
             }
-            best.margin = best.top - second;
+            best.id = best.ids[0];
+            best.top = best.logits[0];
+            best.margin = best.logits[0] - best.logits[1];
             out[i] = best;
         }
     }
@@ -241,7 +247,7 @@ pub const Ref = struct {
         const spec = p.at(i);
         const h: usize = t.hidden;
         const global = spec.kind == .global;
-        const msgs = p.messages(v);
+        const msgs = p.messages(v) and !r.plant;
         const L = .{i};
         if (p.bank_blocks > 1) return error.Inkling2RefBank; // one banked block (Mini), or none (the tiny checkpoint)
         if (p.restarts(v)) for (0..n) |row| {

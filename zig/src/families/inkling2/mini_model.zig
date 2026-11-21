@@ -99,6 +99,8 @@ pub const Scratch = struct {
     rel: u64,
     gate: u64,
     sink: u64,
+    gys: u64, // fp32 [3][rows, H]: the gates' rows before their norm
+    fused: u64, // a one-row forward's fused projections, Fused.all bf16 columns (q, gate, rel, sink, k, v)
     dyn: [2]u64, // fp32 [R, kv * 4]
     kc: u64,
     vc: u64,
@@ -138,6 +140,9 @@ pub const Model = struct {
     s: Scratch = undefined,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
+    /// Decode forwards of n one-row windows as CUDA graphs, captured at first use ([n]); TF_INKLING2_GRAPHS=0: off.
+    graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
+    graphed: bool = true,
 
     fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
@@ -196,6 +201,10 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        for (&m.graphs) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
         for (m.buffers.items) |*b| b.free();
         m.buffers.deinit(m.gpa);
     }
@@ -228,6 +237,9 @@ pub const Model = struct {
         const stride_full = attn.slotsFor(m.full, m.context);
         const entries = @max(r * heads * @max(attn.slotsFor(m.sliding, m.context), stride_full), attn.split_rows * heads * stride_full * attn.subs);
         var part: usize = 0;
+        for (m.w.layers) |l| for ([_]cuda.qmmf.Weight{ l.attn.qx, l.attn.all }) |w| {
+            part = @max(part, k.lane.partBytes(1, w));
+        };
         for (m.w.layers) |l| for ([_]cuda.qmmf.Weight{ l.attn.wq, l.attn.wk, l.attn.wv, l.attn.wr, l.attn.gate, l.attn.sink, l.attn.wo }) |w| {
             for (1..r + 1) |rows| part = @max(part, k.lane.partBytes(rows, w));
         };
@@ -254,6 +266,8 @@ pub const Model = struct {
             .rel = try m.alloc(r * heads * t.d_rel * 2),
             .gate = try m.alloc(r * q * 2),
             .sink = try m.alloc(r * heads * 2),
+            .gys = try m.alloc(3 * r * h * 4),
+            .fused = try m.alloc(wts.Fused.of(t).all * 2),
             .dyn = .{ try m.alloc(r * t.global.kv * config.conv_taps * 4), try m.alloc(r * t.global.kv * config.conv_taps * 4) },
             .kc = try m.alloc(r * kvw * 2),
             .vc = try m.alloc(r * kvw * 2),
@@ -319,7 +333,28 @@ pub const Model = struct {
         if (chains.len > round_rows or heads > round_rows or head0 + heads > rows) return error.TooManyRows;
         for (chains) |ch| if (ch.p0 == 0) try m.clear(s, ch.slot);
         var r = try visit.Rows.stage(m, s, chains, rows, prompt);
-        try visit.run(m, k, s, &r, head0, heads);
+        // one row a stream, every row's logits: the launches depend on the row count alone (the rest is on the device)
+        if (prompt or !m.graphed or head0 != 0 or heads != rows or r.streams != rows or r.n_tiles != rows)
+            return visit.run(m, k, s, &r, head0, heads);
+        const g = &m.graphs[rows];
+        if (g.* == null) g.* = try m.capture(k, s, &r);
+        try g.*.?.launchOn(s);
+    }
+
+    /// A decode forward of `r.n` one-row windows, captured as a graph.
+    fn capture(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const visit.Rows) !cuda.graph.Exec {
+        try s.synchronize();
+        try cuda.graph.beginCapture(s, .thread_local);
+        visit.run(m, k, s, r, 0, r.n) catch |e| {
+            if (cuda.graph.endCapture(s)) |g| {
+                var gg = g;
+                gg.deinit();
+            } else |_| {}
+            return e;
+        };
+        var g = try cuda.graph.endCapture(s);
+        defer g.deinit();
+        return g.instantiate();
     }
 };
 

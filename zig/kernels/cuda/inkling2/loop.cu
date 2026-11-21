@@ -110,9 +110,10 @@ struct LoopGateArgs {
     long long out_stride;
     int rows, H, rank;
     float eps_unit, eps;  // eps_unit: the unweighted norms of state and message; eps: the gated output's norm
+    float* ys;            // fp32 [gates][rows, H]: the gated rows before their norm
 };
 
-// down[g][row] = bf16(W_down [unit(h) bf16, unit(m) bf16]) for gate blockIdx.y of row blockIdx.x.
+// down[g][row] = bf16(W_down [unit(h), unit(m)]), gate y, row x; block z: rank rows [8z, 8z + 8), a warp each.
 extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2_loop_gate_down(const LoopGateArgs a) {
     extern __shared__ float xs[];  // [2 H]: the normed state, then the normed message, each rounded to bf16
     __shared__ float sh[kWarps];
@@ -133,39 +134,46 @@ extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2_loop_gate_down(co
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    for (int r = w; r < a.rank; r += kWarps) {
-        const uint16_t* wr = a.down_w[g] + static_cast<size_t>(r) * 2 * H;
-        float acc = 0.0f;
-        for (int i = lane; i < 2 * H; i += 32) acc = fmaf(bf(wr[i]), xs[i], acc);
-        acc = warpSum(acc);
-        if (lane == 0) a.down[(static_cast<size_t>(g) * a.rows + row) * a.rank + r] = tobf(acc);
-    }
+    const int r = blockIdx.z * kWarps + w;
+    if (r >= a.rank) return;
+    const uint16_t* wr = a.down_w[g] + static_cast<size_t>(r) * 2 * H;
+    float acc = 0.0f;
+    for (int i = lane; i < 2 * H; i += 32) acc = fmaf(bf(wr[i]), xs[i], acc);
+    acc = warpSum(acc);
+    if (lane == 0) a.down[(static_cast<size_t>(g) * a.rows + row) * a.rank + r] = tobf(acc);
 }
 
-// out[g][row] = norm * rms((1 - tanh(Wf d)) h + tanh(Wg d) m), d the gate's bf16 down row.
-extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2_loop_gate_mix(const LoopGateArgs a) {
-    extern __shared__ float ys[];  // [H]: the gated row before its norm
-    __shared__ float sh[kWarps];
+// ys[g][row][i] = (1 - tanh(Wf d)) h + tanh(Wg d) m, d the gate's bf16 down row: kLin outputs a block (z).
+constexpr int kLin = 128;
+extern "C" __global__ void __launch_bounds__(kLin) tf_ink2_loop_gate_lin(const LoopGateArgs a) {
     __shared__ float dn[kMaxRank];
     const size_t row = blockIdx.x;
     const int g = blockIdx.y, H = a.H, R = a.rank;
+    if (threadIdx.x < R) dn[threadIdx.x] = bf(a.down[(static_cast<size_t>(g) * a.rows + row) * R + threadIdx.x]);
+    if (threadIdx.x + kLin < R) dn[threadIdx.x + kLin] = bf(a.down[(static_cast<size_t>(g) * a.rows + row) * R + threadIdx.x + kLin]);
+    __syncthreads();
+    const int i = blockIdx.z * kLin + threadIdx.x;
+    if (i >= H) return;
+    const uint16_t* wf = a.forget[g] + static_cast<size_t>(i) * R;
+    const uint16_t* wg = a.gain[g] + static_cast<size_t>(i) * R;
+    float f = 0.0f, gn = 0.0f;
+    for (int r = 0; r < R; ++r) {
+        f = fmaf(bf(wf[r]), dn[r], f);
+        gn = fmaf(bf(wg[r]), dn[r], gn);
+    }
     const float* h = a.h[g] + row * H;
     const float* m = a.msg + a.slot[g] * a.msg_stride + row * H;
-    if (threadIdx.x < R) dn[threadIdx.x] = bf(a.down[(static_cast<size_t>(g) * a.rows + row) * R + threadIdx.x]);
-    __syncthreads();
+    a.ys[(static_cast<size_t>(g) * a.rows + row) * H + i] = (1.0f - tanhf(f)) * h[i] + tanhf(gn) * m[i];
+}
+
+// out[g][row] = norm * rms(ys[g][row]): the squares summed in the order a 256-thread block strides them.
+extern "C" __global__ void __launch_bounds__(kThreads) tf_ink2_loop_gate_mix(const LoopGateArgs a) {
+    __shared__ float sh[kWarps];
+    const size_t row = blockIdx.x;
+    const int g = blockIdx.y, H = a.H;
+    const float* ys = a.ys + (static_cast<size_t>(g) * a.rows + row) * H;
     float ss = 0.0f;
-    for (int i = threadIdx.x; i < H; i += kThreads) {
-        const uint16_t* wf = a.forget[g] + static_cast<size_t>(i) * R;
-        const uint16_t* wg = a.gain[g] + static_cast<size_t>(i) * R;
-        float f = 0.0f, gn = 0.0f;
-        for (int r = 0; r < R; ++r) {
-            f = fmaf(bf(wf[r]), dn[r], f);
-            gn = fmaf(bf(wg[r]), dn[r], gn);
-        }
-        const float v = (1.0f - tanhf(f)) * h[i] + tanhf(gn) * m[i];
-        ys[i] = v;
-        ss = fmaf(v, v, ss);
-    }
+    for (int i = threadIdx.x; i < H; i += kThreads) ss = fmaf(ys[i], ys[i], ss);
     const float inv = rsqrtf(blockSum(ss, sh) / static_cast<float>(H) + a.eps);
     uint16_t* dst = a.out + g * a.out_stride + row * H;
     for (int i = threadIdx.x; i < H; i += kThreads) dst[i] = tobf(bf(a.norm[g][i]) * (ys[i] * inv));

@@ -129,7 +129,29 @@ pub fn run(gpu: Gpu, model: []const u8, count_text: []const u8, text: []const u8
         std.debug.print("{s} inkling2 mini prompt in chunks of {d}: last-row logits {s}, {d} greedy tokens {s}\n", .{ if (same and tokens_same) "PASS" else "FAIL", chunk, if (same) "bit-equal" else "differ", resumed.len, if (tokens_same) "equal" else "differ" });
     }
     try check.expect(bad == 0, "inkling2 mini resumed == fresh: {d} chunkings differ", .{bad});
+    try graphs(&rig, ids, first, plain);
     try concurrent(&rig, ids, plain);
+}
+
+/// The decode graphs against direct launches: the first step's logits bit-equal, then 32 greedy tokens equal.
+fn graphs(rig: *Rig, ids: []const u32, first: []const f32, plain: []const u32) !void {
+    const gpa = rig.gpu.gpa;
+    var rows: [2][]f32 = undefined;
+    for ([_]bool{ true, false }, 0..) |on, i| {
+        rig.m.graphed = on;
+        gpa.free(try rig.prompt(2 + i, ids, 0, mm.prompt_rows));
+        rows[i] = try rig.step(&.{.{ .slot = 2 + i, .p0 = ids.len, .tokens = plain[0..1] }});
+    }
+    defer for (rows) |r| gpa.free(r);
+    const same = std.mem.eql(u8, std.mem.sliceAsBytes(rows[0]), std.mem.sliceAsBytes(rows[1]));
+    const direct = try gpa.alloc(u32, @min(plain.len, 32));
+    defer gpa.free(direct);
+    gpa.free(try rig.prompt(3, ids, 0, mm.prompt_rows)); // afresh: the step above moved slot 3's conv states
+    try decode(rig, 3, first, ids.len, direct);
+    rig.m.graphed = true;
+    const tokens_same = std.mem.eql(u32, direct, plain[0..direct.len]);
+    try check.expect(same and tokens_same, "inkling2 mini graphs == direct: logits {s}, tokens {s}", .{ if (same) "equal" else "differ", if (tokens_same) "equal" else "differ" });
+    check.pass("inkling2 mini decode graphs == direct launches: first step's logits bit-equal, {d} greedy tokens equal", .{direct.len});
 }
 
 /// Four streams at once (prompts of different lengths) against each alone: equal tokens; the round's decode speed.
@@ -193,7 +215,9 @@ pub fn reference(gpu: Gpu, model: []const u8, count_text: []const u8, text: []co
     try decode(&rig, 0, first, ids.len, all[ids.len..]);
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, gpu.io, model);
     defer ck.close();
-    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck };
+    // INKLING2_REF_PLANT=1: the reference drops the cross-pass messages; the check must go red
+    const plant = if (std.c.getenv("INKLING2_REF_PLANT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    var r: ink.mini_ref.Ref = .{ .gpa = gpa, .c = rig.w.config, .p = rig.w.plan, .ck = &ck, .plant = plant };
     const picks = try gpa.alloc(ink.mini_ref.Pick, all.len);
     defer gpa.free(picks);
     const t0 = check.now(gpu.io);
@@ -211,6 +235,7 @@ pub fn reference(gpu: Gpu, model: []const u8, count_text: []const u8, text: []co
     }
     const said = try tok.decode(gpa, all[ids.len..], false);
     defer gpa.free(said);
-    std.debug.print("RESULT inkling2 mini vs float64 reference: {d} of {d} greedy tokens differ, smallest reference margin {d:.4}: \"{s}\"\n", .{ differ, count, smallest, said });
+    std.debug.print("RESULT inkling2 mini vs float64 reference{s}: {d} of {d} greedy tokens differ, smallest reference margin {d:.4}: \"{s}\"\n", .{ if (plant) " (PLANTED: no messages)" else "", differ, count, smallest, said });
+    if (plant) return check.expect(differ > 0, "inkling2 mini planted control: the reference without messages still agrees", .{});
     try check.expect(differ == 0, "inkling2 mini greedy == reference: {d} of {d} tokens differ", .{ differ, count });
 }

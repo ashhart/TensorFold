@@ -7,6 +7,7 @@ pub const max_queries = 4;
 pub const max_gates = 3;
 pub const max_rank = 128;
 const threads = 256;
+const lin_threads = 128; // loop.cu kLin
 
 /// loop.cu's LoopMixArgs, field for field.
 pub const MixArgs = extern struct {
@@ -42,12 +43,14 @@ pub const GateArgs = extern struct {
     rank: i32,
     eps_unit: f32,
     eps: f32,
+    ys: u64 = 0, // fp32 [gates][rows, H] scratch: the gated rows before their norm
 };
 
 pub const Kernels = struct {
     mod: cuda.Module,
     mix: cuda.Function,
     gate_down: cuda.Function,
+    gate_lin: cuda.Function,
     gate_mix: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
@@ -58,6 +61,7 @@ pub const Kernels = struct {
             .mod = mod,
             .mix = try mod.function("tf_ink2_loop_mix"),
             .gate_down = try mod.function("tf_ink2_loop_gate_down"),
+            .gate_lin = try mod.function("tf_ink2_loop_gate_lin"),
             .gate_mix = try mod.function("tf_ink2_loop_gate_mix"),
         };
     }
@@ -75,7 +79,7 @@ pub fn mixFits(a: MixArgs) error{Inkling2LoopShape}!void {
 }
 
 pub fn gateFits(a: GateArgs, count: usize) error{Inkling2LoopShape}!void {
-    if (a.rows <= 0 or a.h_dim <= 0 or a.rank <= 0 or a.rank > max_rank or count == 0 or count > max_gates)
+    if (a.rows <= 0 or a.h_dim <= 0 or a.rank <= 0 or a.rank > max_rank or count == 0 or count > max_gates or a.ys == 0)
         return error.Inkling2LoopShape;
 }
 
@@ -94,13 +98,17 @@ pub fn gates(k: *const Kernels, s: cuda.Stream, a: GateArgs, n: usize) !void {
     args.add(a);
     const grid: cuda.Dim3 = .{ .x = @intCast(a.rows), .y = @intCast(n) };
     const h: u32 = @intCast(a.h_dim);
-    try cuda.launch.launch(k.gate_down, .{ .grid = grid, .block = .{ .x = threads }, .shared = 2 * h * 4 }, s, &args);
-    try cuda.launch.launch(k.gate_mix, .{ .grid = grid, .block = .{ .x = threads }, .shared = h * 4 }, s, &args);
+    // spread over the GPU: rank rows 8 a block, outputs 128 a block; the norm a block a row and gate
+    const down: cuda.Dim3 = .{ .x = grid.x, .y = grid.y, .z = @intCast(std.math.divCeil(i32, a.rank, threads / 32) catch unreachable) };
+    try cuda.launch.launch(k.gate_down, .{ .grid = down, .block = .{ .x = threads }, .shared = 2 * h * 4 }, s, &args);
+    const lin: cuda.Dim3 = .{ .x = grid.x, .y = grid.y, .z = std.math.divCeil(u32, h, lin_threads) catch unreachable };
+    try cuda.launch.launch(k.gate_lin, .{ .grid = lin, .block = .{ .x = lin_threads } }, s, &args);
+    try cuda.launch.launch(k.gate_mix, .{ .grid = grid, .block = .{ .x = threads } }, s, &args);
 }
 
 test "loop: the argument structs keep loop.cu's layouts" {
     try std.testing.expectEqual(@as(usize, 8 * 8 + 8 + 4 * 8 + 8 + 8 + 5 * 4 + 2 * 4 + 4), @sizeOf(MixArgs));
-    try std.testing.expectEqual(@as(usize, 3 * 8 + 8 + 8 + 3 * 4 + 4 + 4 * 3 * 8 + 3 * 8 + 3 * 4 + 2 * 4 + 4), @sizeOf(GateArgs));
+    try std.testing.expectEqual(@as(usize, 3 * 8 + 8 + 8 + 3 * 4 + 4 + 4 * 3 * 8 + 3 * 8 + 3 * 4 + 2 * 4 + 4 + 8), @sizeOf(GateArgs));
 }
 
 test "loop: shapes past the kernels' arrays are refused by name" {
@@ -112,7 +120,7 @@ test "loop: shapes past the kernels' arrays are refused by name" {
     bad = ok;
     bad.n_blocks = 9;
     try std.testing.expectError(error.Inkling2LoopShape, mixFits(bad));
-    const g: GateArgs = .{ .msg = 1, .msg_stride = 0, .down = 1, .out = 1, .out_stride = 0, .rows = 1, .h_dim = 2304, .rank = 64, .eps_unit = 1e-6, .eps = 1e-6 };
+    const g: GateArgs = .{ .ys = 1, .msg = 1, .msg_stride = 0, .down = 1, .out = 1, .out_stride = 0, .rows = 1, .h_dim = 2304, .rank = 64, .eps_unit = 1e-6, .eps = 1e-6 };
     try gateFits(g, 3);
     try std.testing.expectError(error.Inkling2LoopShape, gateFits(g, 4));
     var wide = g;

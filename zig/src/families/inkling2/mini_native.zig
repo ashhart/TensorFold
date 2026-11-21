@@ -56,10 +56,9 @@ const Plan = struct {
     }
 };
 
-/// What open refuses before any weight is read: --loops, a drafter, captured kernels.
+/// Refused before any weight is read: --loops and captured kernels; `drafts` (the server default) drafts nothing.
 fn refuse(kernels: ?[]const u8, o: Options) !void {
     if (o.loops != null) return error.Inkling2MiniLoopsFixed;
-    if (o.drafts) return error.NoDraftHead;
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
 }
@@ -148,15 +147,15 @@ fn release(p: *anyopaque) void {
     own.gpa.destroy(own);
 }
 
-test "Inkling 2 Mini open: --loops, a drafter and captured kernels are refused by name before any load" {
+test "Inkling 2 Mini open: --loops and captured kernels are refused by name before any load" {
     const base: Options = .{ .context = 4096, .drafts = false };
     try refuse(null, base);
     var o = base;
     o.loops = 3;
     try std.testing.expectError(error.Inkling2MiniLoopsFixed, refuse(null, o));
     o = base;
-    o.drafts = true;
-    try std.testing.expectError(error.NoDraftHead, refuse(null, o));
+    o.drafts = true; // the server's default: nothing to draft with, not a refusal
+    try refuse(null, o);
     try std.testing.expectError(error.CapturedKernels, refuse("dir", base));
     // open refuses before it allocates: a failing allocator sees no request
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });

@@ -15,7 +15,32 @@ const Tensor = core.checkpoint.Tensor;
 /// NVFP4's outer scale denominator as Mini ships it (scales/RESULTS.md); another value is refused.
 pub const nvfp4_denominator = 2688;
 
+/// One packed buffer a layer [q|gate|rel|sink|k|v], views at one shared K slice: fused rows keep the separate bits.
+pub const Fused = struct {
+    /// Row offsets of the parts in the fused output.
+    q: usize,
+    gate: usize,
+    rel: usize,
+    sink: usize,
+    k: usize,
+    v: usize,
+    /// The q-side rows (q, gate, rel, sink: one input), and every row (q, k and v from one input).
+    qx: usize,
+    all: usize,
+
+    pub fn of(c: *const config.Text) Fused {
+        const qw: usize = @as(usize, c.local.q) * c.local.dim;
+        const kvw: usize = @as(usize, c.local.kv) * c.local.dim;
+        const rel = 2 * qw;
+        const sink = rel + @as(usize, c.local.q) * c.d_rel;
+        const k = sink + std.mem.alignForward(usize, c.local.q, 64);
+        return .{ .q = 0, .gate = qw, .rel = rel, .sink = sink, .k = k, .v = k + kvw, .qx = k, .all = k + 2 * kvw };
+    }
+};
+
 pub const Attn = struct {
+    qx: Lane, // the fused q-side rows (one input: q, gate, rel, sink)
+    all: Lane, // every fused row (q, k and v from one input)
     wq: Lane,
     wk: Lane,
     wv: Lane,
@@ -79,6 +104,37 @@ pub const Weights = struct {
         return b.ptr;
     }
 
+    /// The six input projections packed as Fused orders them; every view pinned to the parts' K slices.
+    fn fused(w: *Weights, d: *const cuda.Driver, parts: [6]Tensor, a: *Attn) !void {
+        const f = Fused.of(&w.config.text);
+        const k = parts[0].dim(1);
+        const offs = [6]usize{ f.q, f.gate, f.rel, f.sink, f.k, f.v };
+        const npad = cuda.modelopt.padded(f.all);
+        const src = try w.gpa.alloc(u16, f.all * k);
+        defer w.gpa.free(src);
+        @memset(src, 0);
+        const ends = [6]usize{ f.gate, f.rel, f.sink, f.k, f.v, f.all };
+        for (parts, offs, ends) |t, o, e| {
+            if (t.dim(1) != k or o + t.dim(0) > e) return error.Inkling2FusedShape;
+            @memcpy(std.mem.sliceAsBytes(src[o * k ..][0 .. t.dim(0) * k]), t.bytes[0 .. t.dim(0) * k * 2]);
+        }
+        const out = try w.gpa.alloc(u16, npad * k);
+        defer w.gpa.free(out);
+        cuda.qmmf.packBf16(out, src, f.all, k);
+        const base = try w.upload(d, std.mem.sliceAsBytes(out));
+        const sk = cuda.qmmf.splitK(parts[0].dim(0), k);
+        for (parts) |t| if (cuda.qmmf.splitK(t.dim(0), k) != sk) return error.Inkling2FusedSlices;
+        const view = struct {
+            fn at(ptr: u64, row: usize, n: usize, kk: usize, slices: u32) !Lane {
+                return cuda.qmmf.pinned(cuda.modelopt.bf16Weight(ptr + row * kk * 2, n, kk), slices);
+            }
+        };
+        a.qx = try view.at(base, 0, f.qx, k, sk);
+        a.all = try view.at(base, 0, f.all, k, sk);
+        const lanes = [_]*Lane{ &a.wq, &a.gate, &a.wr, &a.sink, &a.wk, &a.wv };
+        for (lanes, parts, offs) |l, t, o| l.* = try view.at(base, o, t.dim(0), k, sk);
+    }
+
     /// A bf16 [n, k] projection (its first `rows` rows) in the lane's order, padded to 128 rows.
     fn lane(w: *Weights, d: *const cuda.Driver, t: Tensor, rows: usize) !Lane {
         const k = t.dim(t.rank - 1);
@@ -101,6 +157,20 @@ fn get(ck: *core.checkpoint.Checkpoint, comptime fmt: []const u8, args: anytype)
 
 fn raw(w: *Weights, d: *const cuda.Driver, ck: *core.checkpoint.Checkpoint, comptime fmt: []const u8, args: anytype) !u64 {
     return w.upload(d, (try get(ck, fmt, args)).bytes);
+}
+
+/// rel_logits_proj [d_rel][e] widened to the kernels' [d_rel][1024] with zero columns: no bias past e, as in the model.
+fn relProj(w: *Weights, d: *const cuda.Driver, t: Tensor) !u64 {
+    const ext = @import("kernels.zig").extent;
+    const rows = t.dim(0);
+    const e = t.dim(1);
+    if (e > ext) return error.Inkling2RelExtent;
+    if (e == ext) return w.upload(d, t.bytes);
+    const out = try w.gpa.alloc(u16, rows * ext);
+    defer w.gpa.free(out);
+    @memset(out, 0);
+    for (0..rows) |r| @memcpy(std.mem.sliceAsBytes(out[r * ext ..][0..e]), t.bytes[r * e * 2 ..][0 .. e * 2]);
+    return w.upload(d, std.mem.sliceAsBytes(out));
 }
 
 fn proj(w: *Weights, d: *const cuda.Driver, ck: *core.checkpoint.Checkpoint, comptime fmt: []const u8, args: anytype) !Lane {
@@ -164,20 +234,28 @@ fn layer(w: *Weights, d: *const cuda.Driver, ck: *core.checkpoint.Checkpoint, i:
     const L = .{i};
     const global = config.isGlobal(i);
     var a: Attn = .{
-        .wq = try proj(w, d, ck, "model.llm.layers.{d}.attn.wq_du.weight", L),
-        .wk = try proj(w, d, ck, "model.llm.layers.{d}.attn.wk_dv.weight", L),
-        .wv = try proj(w, d, ck, "model.llm.layers.{d}.attn.wv_dv.weight", L),
-        .wr = try proj(w, d, ck, "model.llm.layers.{d}.attn.wr_du.weight", L),
-        .gate = try proj(w, d, ck, "model.llm.layers.{d}.attn.gate_attn.weight", L),
-        .sink = try proj(w, d, ck, "model.llm.layers.{d}.attn.attn_sink_proj.weight", L),
+        .qx = undefined,
+        .all = undefined,
+        .wq = undefined,
+        .wk = undefined,
+        .wv = undefined,
+        .wr = undefined,
+        .gate = undefined,
+        .sink = undefined,
         .wo = try proj(w, d, ck, "model.llm.layers.{d}.attn.wo_ud.weight", L),
         .q_scale = try raw(w, d, ck, "model.llm.layers.{d}.attn.q_l2_clip.scale", L),
         .rel_scale = try raw(w, d, ck, "model.llm.layers.{d}.attn.rel_l2_clip.scale", L),
-        .rel_proj = try raw(w, d, ck, "model.llm.layers.{d}.attn.rel_logits_proj.proj", L),
+        .rel_proj = try relProj(w, d, try get(ck, "model.llm.layers.{d}.attn.rel_logits_proj.proj", L)),
         .k_conv = undefined,
         .v_conv = undefined,
         .norms = undefined,
     };
+    const pre = "model.llm.layers.{d}.attn.";
+    try w.fused(d, .{
+        try get(ck, pre ++ "wq_du.weight", L), try get(ck, pre ++ "gate_attn.weight", L),
+        try get(ck, pre ++ "wr_du.weight", L), try get(ck, pre ++ "attn_sink_proj.weight", L),
+        try get(ck, pre ++ "wk_dv.weight", L), try get(ck, pre ++ "wv_dv.weight", L),
+    }, &a);
     if (global) {
         a.k_conv = try raw(w, d, ck, "model.llm.layers.{d}.attn.k_sconv.static_w", L);
         a.v_conv = try raw(w, d, ck, "model.llm.layers.{d}.attn.v_sconv.static_w", L);
@@ -280,4 +358,16 @@ fn experts(w: *Weights, d: *const cuda.Driver, ck: *core.checkpoint.Checkpoint, 
         l.down_scale = try w.upload(d, std.mem.sliceAsBytes(f2));
     }
     return l;
+}
+
+test "the fused rows: parts in order, sink padded to 64 rows, every view on a 64-row block edge" {
+    var c: config.Text = undefined;
+    c.local = .{ .q = 24, .kv = 8, .dim = 128 };
+    c.d_rel = 16;
+    const f = Fused.of(&c);
+    try std.testing.expectEqual(Fused{ .q = 0, .gate = 3072, .rel = 6144, .sink = 6528, .k = 6592, .v = 7616, .qx = 6592, .all = 8640 }, f);
+    for ([_]usize{ f.k, f.v, f.qx, f.all }) |r| try std.testing.expect(r % 64 == 0);
+    // Mini's six parts share 4 K slices at K 2304 (the fused views pin them); the tiny checkpoint's share 1 at K 256
+    for ([_]usize{ 3072, 1024, 384, 24 }) |n| try std.testing.expectEqual(@as(u32, 4), cuda.qmmf.splitK(n, 2304));
+    for ([_]usize{ 512, 256, 64, 4 }) |n| try std.testing.expectEqual(@as(u32, 1), cuda.qmmf.splitK(n, 256));
 }

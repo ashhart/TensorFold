@@ -7,6 +7,7 @@ const attn = @import("kernels.zig");
 const ops = @import("ops.zig");
 const loop = @import("loop.zig");
 const mm = @import("mini_model.zig");
+const wts = @import("mini_weights.zig");
 
 const Model = mm.Model;
 const Kernels = mm.Kernels;
@@ -83,6 +84,9 @@ pub fn run(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, head0: 
     try ops.softcap(&k.ops, s, m.s.logits, heads * v, t.logit_cap);
 }
 
+/// The input projections' outputs: the scratch buffers, or a one-row forward's parts of the fused output.
+const Out = struct { q: u64, k: u64, v: u64, rel: u64, gate: u64, sink: u64 };
+
 fn proj(m: *const Model, k: *const Kernels, s: cuda.Stream, w: cuda.qmmf.Weight, x: u64, out: u64, n: usize) !void {
     try k.lane.matmulOut(s, x, w.k, n, w, out, .bf16, m.s.lane_part);
 }
@@ -112,14 +116,14 @@ fn scale(h: usize) f32 {
 }
 
 /// A core input through its gates: the residual mix over blocks and partial, then each gate and its norm into `out`.
-fn gated(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, nb: usize, partial: u64, f32_partial: bool, query: u64, nq: usize, ctl: []const @import("mini_weights.zig").Controller, slots: [3]i32, norms: [3]u64, out: u64) !void {
+fn gated(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, nb: usize, partial: u64, f32_partial: bool, query: u64, nq: usize, ctl: []const wts.Controller, slots: [3]i32, norms: [3]u64, out: u64) !void {
     const h: usize = m.c.hidden;
     const plane = r.n * h;
     var a: loop.MixArgs = .{ .partial = partial, .out = m.s.mixf, .out_stride = @intCast(plane), .n_blocks = @intCast(nb), .partial_f32 = @intFromBool(f32_partial), .nq = @intCast(nq), .rows = @intCast(r.n), .h = @intCast(h), .eps = m.c.eps, .scale = scale(h) };
     for (0..nb) |b| a.blocks[b] = m.s.blocks + b * plane * 2;
     for (0..nq) |q| a.query[q] = query + q * h * 4;
     try loop.mix(&k.loop, s, a);
-    var g: loop.GateArgs = .{ .msg = m.s.msg, .msg_stride = @intCast(plane), .down = m.s.gdown, .out = out, .out_stride = @intCast(plane), .rows = @intCast(r.n), .h_dim = @intCast(h), .rank = @intCast(m.c.loop.?.rank), .eps_unit = m.c.eps, .eps = m.c.eps };
+    var g: loop.GateArgs = .{ .msg = m.s.msg, .msg_stride = @intCast(plane), .down = m.s.gdown, .ys = m.s.gys, .out = out, .out_stride = @intCast(plane), .rows = @intCast(r.n), .h_dim = @intCast(h), .rank = @intCast(m.c.loop.?.rank), .eps_unit = m.c.eps, .eps = m.c.eps };
     for (0..ctl.len) |i| {
         g.h[i] = m.s.mixf + (if (nq == 3) i else 0) * plane * 4;
         g.slot[i] = slots[i];
@@ -169,12 +173,30 @@ fn visitOne(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, v: u32
     const xq = m.s.xin;
     const xk = if (separate) m.s.xin + plane * 2 else xq;
     const xv = if (separate) m.s.xin + 2 * plane * 2 else xq;
-    try proj(m, k, s, a.wq, xq, m.s.q, n);
-    try proj(m, k, s, a.wk, xk, m.s.kraw, n);
-    try proj(m, k, s, a.wv, xv, m.s.vraw, n);
-    try proj(m, k, s, a.wr, xq, m.s.rel, n);
-    try proj(m, k, s, a.gate, xq, m.s.gate, n);
-    try proj(m, k, s, a.sink, xq, m.s.sink, n);
+    // one row: the fused product (q, gate, rel, sink and k, v when they share the input), its parts read in place
+    var o: Out = .{ .q = m.s.q, .k = m.s.kraw, .v = m.s.vraw, .rel = m.s.rel, .gate = m.s.gate, .sink = m.s.sink };
+    if (n == 1) {
+        const f = wts.Fused.of(t);
+        const at = struct {
+            fn col(base: u64, c: usize) u64 {
+                return base + c * 2;
+            }
+        }.col;
+        const fz = m.s.fused;
+        o = .{ .q = at(fz, f.q), .k = at(fz, f.k), .v = at(fz, f.v), .rel = at(fz, f.rel), .gate = at(fz, f.gate), .sink = at(fz, f.sink) };
+        try proj(m, k, s, if (separate) a.qx else a.all, xq, fz, 1);
+        if (separate) {
+            try proj(m, k, s, a.wk, xk, o.k, 1);
+            try proj(m, k, s, a.wv, xv, o.v, 1);
+        }
+    } else {
+        try proj(m, k, s, a.wq, xq, o.q, n);
+        try proj(m, k, s, a.wk, xk, o.k, n);
+        try proj(m, k, s, a.wv, xv, o.v, n);
+        try proj(m, k, s, a.wr, xq, o.rel, n);
+        try proj(m, k, s, a.gate, xq, o.gate, n);
+        try proj(m, k, s, a.sink, xq, o.sink, n);
+    }
     const kvw = kvWidth(m);
     const kvh: usize = t.local.kv;
     const taps = kvh * config.conv_taps;
@@ -182,7 +204,7 @@ fn visitOne(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, v: u32
         // the taps as torch's bf16 linear leaves them: float(bf16(sum)) times 1
         try k.dense.rowsScaled(s, x, h, w, m.w.ones, m.s.dyn[side], taps, n, taps, h);
     };
-    for ([_]Site{ .k, .v }, [_]u64{ m.s.kraw, m.s.vraw }, [_]u64{ m.s.kc, m.s.vc }, [_]u64{ a.k_conv, a.v_conv }, 0..) |site, x, out, w, side| {
+    for ([_]Site{ .k, .v }, [_]u64{ o.k, o.v }, [_]u64{ m.s.kc, m.s.vc }, [_]u64{ a.k_conv, a.v_conv }, 0..) |site, x, out, w, side| {
         try conv(m, k, s, r, v, site, .{ .x = x, .state = 0, .w = w, .dyn = if (global) m.s.dyn[side] else 0, .out = out, .x_bf16 = 1, .heads = @intCast(kvh), .c = @intCast(kvw), .rows = 0, .mode = 0 });
     }
     // q, rel and the caches' new K and V rows, the bias table, then attention through the sink and the output gate
@@ -190,10 +212,10 @@ fn visitOne(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, v: u32
     const rows: attn.Rows = .{ .rows = @intCast(n), .heads = t.local.q, .kv_heads = t.local.kv, .pos = m.s.pos, .seg_of = m.s.seg_of, .segs = m.s.segs[@intFromBool(global)], .tiles = m.s.tiles, .n_tiles = r.n_tiles, .last_pos = r.last_pos, .streams = @intCast(r.streams) };
     const cache: attn.Cache = .{ .k = m.kv[0][v], .v = m.kv[1][v] };
     const prep: attn.Prep = .{ .qk_clip = t.qk_clip, .rel_clip = t.rel_clip, .floor = @floatFromInt(t.log_floor), .alpha = t.log_alpha, .eps = t.eps };
-    try attn.prep(&k.attn, s, rows, l, prep, .{ m.s.q, m.s.kc, m.s.vc, m.s.rel }, .{ a.q_scale, a.rel_scale }, m.s.qp, m.s.relp, cache);
+    try attn.prep(&k.attn, s, rows, l, prep, .{ o.q, m.s.kc, m.s.vc, o.rel }, .{ a.q_scale, a.rel_scale }, m.s.qp, m.s.relp, cache);
     try attn.relTable(&k.attn, s, rows, m.s.relp, a.rel_proj, m.s.tab);
     const stride = attn.slotsFor(l, m.context);
-    try attn.attend(&k.attn, s, rows, l, stride, m.s.entries, m.s.qp, cache, m.s.tab, m.s.part_o, m.s.part_ml, m.s.sink, m.s.gate, m.s.att);
+    try attn.attend(&k.attn, s, rows, l, stride, m.s.entries, m.s.qp, cache, m.s.tab, m.s.part_o, m.s.part_ml, o.sink, o.gate, m.s.att);
     try proj(m, k, s, a.wo, m.s.att, m.s.o, n);
     // the attention conv into the fp32 residual: a block boundary keeps only the attention output as the partial
     try conv(m, k, s, r, v, .attn, .{ .x = m.s.o, .state = 0, .w = L.attn_conv, .base = if (spec.boundary) 0 else hin, .resid = m.s.h32, .x_bf16 = 1, .c = @intCast(h), .rows = 0, .mode = 1 });
@@ -214,7 +236,7 @@ fn visitOne(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, v: u32
 }
 
 /// The router's picks over sigmoid scores, the routed experts as stored (core experts), their weighted sum in bf16.
-fn moe(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, L: *const @import("mini_weights.zig").Layer) !void {
+fn moe(m: *Model, k: *const Kernels, s: cuda.Stream, r: *const Rows, L: *const wts.Layer) !void {
     const t = m.c;
     const h: usize = t.hidden;
     const n = r.n;
