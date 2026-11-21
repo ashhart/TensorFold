@@ -8,6 +8,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, api: *std.Build.Module) *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dylib })).step);
     const shim = b.createModule(.{ .root_source_file = b.path("zig/src/platform/sys_env_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shim })).step);
+    const set = b.createModule(.{ .root_source_file = b.path("zig/src/platform/working_set_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = set })).step);
     const pool = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_family_memory.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api } } });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pool, .filters = &.{"Windows pool:"} })).step);
     const limits = b.createModule(.{
@@ -24,6 +26,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, api: *std.Build.Module) *st
         .link_libc = true,
         .imports = &.{.{ .name = "json", .module = @import("server.zig").json(b, limits.resolved_target.?, .debug) }},
     });
+    _ = @import("product.zig").windowsCompile(b);
     b.step("check-chat-windows-host", "Compile tensorfold chat's --url path for Windows without linking or running").dependOn(&b.addObject(.{ .name = "chat-windows", .root_module = chat }).step);
     return step;
 }

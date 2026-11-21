@@ -20,6 +20,19 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
+/// A Bolt op's source: a norm by its key beside Lightning's, else the engine's prefill op file its label names.
+fn boltSource(name: []const u8) ![]const u8 {
+    const in = std.mem.indexOf;
+    if (in(u8, name, " norm ") != null) {
+        const key = if (in(u8, name, " group norm ") != null) "group_norm_xs_bolt_16" else if (in(u8, name, "add_norm_moe") != null) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
+        for (sources.nemotron.all) |k| if (std.mem.eql(u8, k.key, key)) return k.source;
+        return error.UnknownLaunch;
+    }
+    const file = if (in(u8, name, " gemv ") != null) "gemv_ops" else if (in(u8, name, " combine ") != null) "elementwise" else if (in(u8, name, " route ") != null) "route" else return error.UnknownLaunch;
+    for (sources.prefill) |f| if (std.mem.eql(u8, f.name, file)) return f.text;
+    return error.UnknownLaunch;
+}
+
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
 fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     return resolve(a, device, d, true);
@@ -32,8 +45,11 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
+    if (std.mem.startsWith(u8, d.name, "hy4 units "))
+        return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (@import("metal_dsv41_limits.zig").tensorOnly(d.name))
         return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
@@ -47,6 +63,16 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     if (std.mem.startsWith(u8, d.name, "qwen3 heads ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.qwen3_heads, .pre_m5 = sources.qwen3_heads };
+    }
+    if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) {
+        if (!assemble) return undefined;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null;
+        const paged = std.mem.indexOf(u8, d.name, " paged ") != null;
+        const form = for (@import("contract").q27_prompt.forms) |f| {
+            if (std.mem.indexOf(u8, d.name, f.tag) != null) break f;
+        } else return error.UnknownLaunch;
+        const text_here = try tf.qwen27.simd_attention.grouped(a, units, true, form.group, form.kv_heads, paged);
+        return .{ .decl = d, .function = fun, .here = text_here, .pre_m5 = if (units) "" else text_here };
     }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
@@ -117,7 +143,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "lfm3 ")) {
         if (!assemble) return undefined;
-        const lfm3_head = if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const lfm3_head = if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " qk-stream-bad ")) "#define L3_QK_BAD_STREAM 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
         const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
@@ -173,6 +199,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
     if (try @import("metal_glm_launch.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "hy4 ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_hy4.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "flint ") or std.mem.startsWith(u8, d.name, "moe_route ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
@@ -256,6 +287,18 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "nemotron geometry ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " up ")) tf.nemotron.kernels.geo_up else tf.nemotron.kernels.geo_down;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 accept ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_accept;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 follow ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_follow;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 topk ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_draft_topk;
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 attention ")) {
+        if (!assemble) return undefined;
+        text = try tf.glm.metal_dflash_attention.source(a, .{ .heads = 32, .kv_heads = 8, .dim = 128 });
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         if (!assemble) return undefined;
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];
@@ -281,6 +324,13 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.moss_image;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "idol decoder ")) {
+        if (!assemble) return undefined;
+        text = sources.idol_decoder;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "idol vae ")) {
+        if (!assemble) return undefined;
+        text = sources.idol_vae;
     } else if (std.mem.startsWith(u8, d.name, "idol ")) {
         if (!assemble) return undefined;
         text = sources.idol;
@@ -288,6 +338,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         if (!assemble) return undefined;
         text = sources.core_deltanet;
+    } else if (std.mem.startsWith(u8, d.name, "bolt ")) {
+        if (!assemble) return undefined;
+        // the tree source as kernels.zig compiles it below the M5, where Bolt is refused before load
+        if (has(d.name, " mamba ")) head = "#define TF_SIMD_LAYOUT 1\n";
+        text = if (has(d.name, " mamba ")) sources.nemotron_tree else try boltSource(d.name);
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;

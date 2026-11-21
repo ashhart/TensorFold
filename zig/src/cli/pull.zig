@@ -2,6 +2,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hub = @import("hub.zig");
+const Auth = @import("pull_auth.zig").Auth;
 const ranged = @import("pull_parts.zig");
 const single = @import("pull_file.zig");
 const Entry = single.Entry;
@@ -32,7 +33,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         try err_out.print("{s} is not a Hugging Face repo id (owner/name)\n", .{spec});
         return 2;
     }
-    const endpoint = envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
+    const auth = try Auth.init(a, io, env, err_out) orelse return 1;
     const root = try hub.cacheDir(a, env, override);
     const w = std.Io.Dir.cwd();
     try w.createDirPath(io, root);
@@ -44,8 +45,9 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
 
-    const sha = resolveRevision(a, &client, out, endpoint, repo, revision) catch |e| switch (e) {
+    const sha = resolveRevision(a, &client, out, auth, repo, revision) catch |e| switch (e) {
         error.HubStatus => return 1,
+        error.HubDenied => return auth.refuse(err_out, repo),
         error.BadRevision => {
             try err_out.print("{s}@{s}: not a revision Hugging Face names (a branch, tag or 40-hex commit)\n", .{ repo, revision });
             return 1;
@@ -56,8 +58,9 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         },
     };
 
-    const entries = listTree(a, &client, endpoint, repo, sha) catch |e| switch (e) {
+    const entries = listTree(a, &client, auth, repo, sha) catch |e| switch (e) {
         error.HubStatus, error.NoConfig => return 1,
+        error.HubDenied => return auth.refuse(err_out, repo),
         else => {
             try err_out.print("{s}@{s}: the hub's file tree is unreachable ({t})\n", .{ repo, revision, e });
             return 1;
@@ -74,7 +77,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         try err_out.print("{s}: the hub tree has no config.json; refusing\n", .{repo});
         return 1;
     }
-    const config_bytes = try fetchOne(a, &client, endpoint, repo, sha, "config.json");
+    const config_bytes = fetchOne(a, &client, auth, repo, sha, "config.json") catch |e| switch (e) {
+        error.HubDenied => return auth.refuse(err_out, repo),
+        else => return e,
+    };
     const kind = configKind(a, config_bytes);
     const model_type = kind.model_type;
     if (kind.drafter) {
@@ -109,33 +115,39 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             try linkIntoSnapshot(a, io, snapshot_dir, e.path, blob_name);
             continue;
         }
-        const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ endpoint, repo, sha, e.path });
+        const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, e.path });
         if (e.sha256 != null and e.size >= sizes.threshold) {
             try big.append(a, .{ .entry = e, .blob = blob_name, .file = .{ .url = url, .path = try std.fmt.allocPrint(a, "{s}.ranges", .{blob_path}), .size = e.size } });
             continue;
         }
-        const got = downloadRetrying(a, io, &client, out, url, blobs_dir, e) catch |err| {
+        const got = downloadRetrying(a, io, &client, auth, out, url, blobs_dir, e) catch |err| {
+            if (err == error.HubDenied) return auth.refuse(err_out, repo);
             try err_out.print("  {s}: the download failed ({t})\n", .{ e.path, err });
             return 1;
         };
         try linkIntoSnapshot(a, io, snapshot_dir, e.path, got);
     }
-    if (!try fetchBig(a, io, &client, out, err_out, blobs_dir, snapshot_dir, big.items, sizes.piece)) return 1;
+    const fetched = fetchBig(a, io, &client, auth, out, err_out, blobs_dir, snapshot_dir, big.items, sizes.piece) catch |e| switch (e) {
+        error.HubDenied => return auth.refuse(err_out, repo),
+        else => return e,
+    };
+    if (!fetched) return 1;
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ refs_dir, "main" }), .data = sha });
     try out.print("stored {s}@{s} at {s}\n", .{ repo, sha, snapshot_dir });
     return 0;
 }
 
 /// The large files as pieces on one queue; each matches its sha256 before it becomes a blob, else it comes once more.
-fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, blobs_dir: []const u8, snapshot_dir: []const u8, big: []const Big, piece: u64) !bool {
+fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out: *std.Io.Writer, err_out: *std.Io.Writer, blobs_dir: []const u8, snapshot_dir: []const u8, big: []const Big, piece: u64) !bool {
     if (big.len == 0) return true;
     const files = try a.alloc(ranged.File, big.len);
     for (files, big) |*f, b| f.* = b.file;
-    ranged.fetch(a, io, files, piece, out) catch |err| switch (err) {
+    ranged.fetch(a, io, files, piece, auth, out) catch |err| switch (err) {
         error.RangeUnsupported => {
             for (big) |b| {
                 ranged.discard(a, io, b.file, piece); // the hub sent whole files: one stream each
-                const got = downloadRetrying(a, io, client, out, b.file.url, blobs_dir, b.entry) catch |e| {
+                const got = downloadRetrying(a, io, client, auth, out, b.file.url, blobs_dir, b.entry) catch |e| {
+                    if (e == error.HubDenied) return e;
                     try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, e });
                     return false;
                 };
@@ -143,6 +155,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
             }
             return true;
         },
+        error.HubDenied => return err,
         else => {
             try err_out.print("  the download failed ({t}); pull again to fetch only the missing pieces\n", .{err});
             return false;
@@ -151,7 +164,8 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     for (big) |b| {
         if (!try matches(a, io, b)) {
             ranged.discard(a, io, b.file, piece);
-            ranged.fetch(a, io, &.{b.file}, piece, out) catch |err| {
+            ranged.fetch(a, io, &.{b.file}, piece, auth, out) catch |err| {
+                if (err == error.HubDenied) return err;
                 try err_out.print("  {s}: the download failed ({t})\n", .{ b.entry.path, err });
                 return false;
             };
@@ -172,15 +186,11 @@ fn matches(a: Allocator, io: std.Io, b: Big) !bool {
     return std.mem.eql(u8, &(try ranged.digest(a, io, b.file.path, b.file.size)), &b.entry.sha256.?);
 }
 
-pub fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
-    return if (env) |m| m.get(key) else null;
-}
-
 /// The commit the hub serves for ``repo@revision``.
-pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, revision: []const u8) ![]const u8 {
+pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, auth: Auth, repo: []const u8, revision: []const u8) ![]const u8 {
     if (!revisionOk(revision)) return error.BadRevision;
-    const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/revision/{s}", .{ endpoint, repo, revision });
-    const body = try getJson(a, client, url);
+    const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/revision/{s}", .{ auth.endpoint, repo, revision });
+    const body = try getJson(a, client, auth, url);
     try out.print("[tensorfold] downloading {s}@{s} from Hugging Face\n", .{ repo, revision });
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.BadHubJson;
     defer parsed.deinit();
@@ -193,9 +203,9 @@ pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writ
 }
 
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.
-pub fn listTree(a: Allocator, client: *std.http.Client, endpoint: []const u8, repo: []const u8, sha: []const u8) ![]Entry {
-    const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/tree/{s}?recursive=true", .{ endpoint, repo, sha });
-    const body = try getJson(a, client, url);
+pub fn listTree(a: Allocator, client: *std.http.Client, auth: Auth, repo: []const u8, sha: []const u8) ![]Entry {
+    const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/tree/{s}?recursive=true", .{ auth.endpoint, repo, sha });
+    const body = try getJson(a, client, auth, url);
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.BadHubJson;
     defer parsed.deinit();
     if (parsed.value != .array) return error.BadHubJson;
@@ -250,18 +260,23 @@ fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {
 }
 
 /// One small file fetched whole into memory.
-fn fetchOne(a: Allocator, client: *std.http.Client, endpoint: []const u8, repo: []const u8, sha: []const u8, path: []const u8) ![]u8 {
-    const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ endpoint, repo, sha, path });
-    var body: std.Io.Writer.Allocating = .init(a);
-    const result = client.fetch(.{ .location = .{ .url = url }, .response_writer = &body.writer }) catch return error.HubUnreachable;
-    if (result.status != .ok) return error.HubStatus;
-    return body.toOwnedSlice();
+fn fetchOne(a: Allocator, client: *std.http.Client, auth: Auth, repo: []const u8, sha: []const u8, path: []const u8) ![]u8 {
+    return getJson(a, client, auth, try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, path }));
 }
 
-fn getJson(a: Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
+/// A hub answer's whole body, decompressed as a fetch would; error.HubDenied when the hub refused the request.
+fn getJson(a: Allocator, client: *std.http.Client, auth: Auth, url: []const u8) ![]u8 {
+    const uri = std.Uri.parse(url) catch return error.HubUnreachable;
+    var req: std.http.Client.Request = undefined;
+    var redirect_buf: [8 << 10]u8 = undefined;
+    var response = auth.send(client, &req, .GET, uri, .{}, &redirect_buf) catch |e| return if (e == error.HubDenied) e else error.HubUnreachable;
+    defer req.deinit();
+    if (response.head.status != .ok) return error.HubStatus;
+    const window: []u8 = if (response.head.content_encoding == .identity) &.{} else try a.alloc(u8, std.compress.flate.max_window_len);
+    var transfer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
     var body: std.Io.Writer.Allocating = .init(a);
-    const result = client.fetch(.{ .location = .{ .url = url }, .response_writer = &body.writer }) catch return error.HubUnreachable;
-    if (result.status != .ok) return error.HubStatus;
+    _ = response.readerDecompressing(&transfer, &decompress, window).streamRemaining(&body.writer) catch return error.HubUnreachable;
     return body.toOwnedSlice();
 }
 

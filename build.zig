@@ -61,6 +61,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
+    @import("zig/build/test_allocator.zig").checks(b);
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
     if (@import("zig/build/product.zig").requested(b)) |gpu| {
         @import("zig/build/product.zig").build(b, gpu);
@@ -186,6 +187,7 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
     @import("zig/build/gemma4_backward.zig").tests(b, test_step);
+    @import("zig/build/hy4_flash.zig").tests(b, test_step);
     const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
     gemma4_host_sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-host-empty.metallib", "") });
     const gemma4_contract_host = @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
@@ -213,6 +215,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
+    @import("zig/build/no_backend_host.zig").steps(b, test_step);
     if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
@@ -277,11 +280,12 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
     @import("zig/build/host_ci.zig").steps(b);
-    @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
+    @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
+    @import("zig/build/test_allocator.zig").wire(b);
 }
 
-/// The native Metal server build is owned by the shared Metal target module.
-const nativeServer = metal_build.nativeServer;
+/// The native Metal server build is owned by its own module, like cuda.zig's.
+const nativeServer = @import("zig/build/metal_server.zig").nativeServer;
 
 /// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.
 const metalTargets = metal_build.metalTargets;

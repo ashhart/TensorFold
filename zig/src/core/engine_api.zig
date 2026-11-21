@@ -91,6 +91,8 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
+    unread: ?*const std.atomic.Value(u32) = null,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -222,6 +224,8 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// --decode-share: the reply's share of a fill step's wall time beside live decoders; null: the engine's default.
     decode_share: ?f64 = null,
+    /// engine-level default for --decode-share: long fills only; the flag wins; the env beats it; others pass null.
+    default_decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
     /// The engine is a reranker (it scores through `score`): the server answers POST /v1/rerank only when set.
@@ -273,6 +277,9 @@ pub const Family = struct {
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
+
+/// Which of --tp and --rank the command line named (a CUDA family's rank aliases fill the rest).
+pub const Given = struct { tp: bool = false, rank: bool = false };
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
@@ -342,9 +349,10 @@ pub const Open = struct {
     decode_share: ?f64 = null,
     /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
     keep: ?i64 = null,
-    /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
+    /// Tensor parallelism: `rank` of `tp` (named on the command line when `given` says so); rank 0 listens on `master`.
     tp: u32 = 1,
     rank: u32 = 0,
+    given: Given = .{},
     master: []const u8 = "",
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
@@ -355,19 +363,7 @@ pub const Open = struct {
     loops: ?u32 = null,
 };
 
-/// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
-pub const Decision = struct {
-    trunk: []const u32,
-    at: usize = 0,
-    pictures: []const []const u8 = &.{}, // data URLs, in prompt order
-    branches: []const []const u32 = &.{},
-    counts: []const usize = &.{},
-    labels: []const u32 = &.{},
-    logits: []f64 = &.{},
-    read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
-    problem: []const u8 = "", // out: why the engine refused (error.Refused), in `arena`
-    arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
-};
+pub const Decision = @import("engine_decision.zig").Decision;
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct {
@@ -437,7 +433,7 @@ pub const Engine = struct {
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
         /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
         recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
-        /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
+        /// A kept-state question for the engine thread (valid until `done`, for good once withdrawn); false: refused.
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
@@ -577,6 +573,7 @@ pub const prompt_learn = @import("prompt_learn.zig");
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
+pub const ImprintClaim = @import("rows_ask.zig").Claim;
 pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).

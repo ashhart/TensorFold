@@ -10,6 +10,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CACHE_EVICT` | `main` (default) or `decayed_resume`. The opt-in gives recently resumed RAM snapshots bounded recency credit, within the same cache budget. It changes victim choice, not stored state or token arithmetic. Paged stores keep their own policy. Blank keeps `main`; other values are refused at server startup. |
 | `TENSORFOLD_VIDEO_TOKENS` | Nonnegative whole video-token budget; default 16384; stored as an unsigned 64-bit count |
 | `TENSORFOLD_MAX_PDF_PAGES` | Whole count 1 through 4294967295, capped by `--vision-max-images`; default min(16, image limit) |
+| `TENSORFOLD_PARALLEL` | Whole count 1 through 4096, or `auto` (`auto` = 8); default: what `--parallel` says. Read only when `--parallel` is not on the command line, so the flag wins; blank keeps the default; other values are refused at server startup |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
 | `TENSORFOLD_PREFIX_WAIT_MS` | Whole milliseconds 0 through 4294967295; zero disables waiting; default 60000 |
 | `TENSORFOLD_RESTORE_PREFETCH` | Whole unsigned 64-bit count, capped at 65536; zero disables reading ahead; default 2 |
@@ -51,6 +52,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | Whole nonnegative lookahead count; default 1 |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+| `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
 | `TENSORFOLD_LFM2_KV_PAGES` | Exactly `0` or `1`, checked when the CUDA backend starts; unset leases pool pages ([profiles](profiles.md)) |
@@ -79,10 +81,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
+| `TF_GLM_DSCORES` | Exactly `0` or `1`; default on (a GLM decode window's DSA index scores run on glm_index_scores; 0 keeps tf_glm_scores) |
 | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
-| `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
+| `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 on CUDA, 0.5 on Metal |
 | `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
-| `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use (the same bits either way), also at a load that times nothing; unset or blank races the two when a build first loads with drafts and scratch context and keeps the winner, else classic; read on rank 0, which chooses every rank's form |
+| `TF_GLM_EXPERT_FORM` | `classic` or `factored`: the expert form GLM's CUDA decode windows use at every width (the same bits either way), also at a load that times nothing; unset or blank races the two at each timed width when a build first loads with drafts and scratch context and keeps each width's winner, else classic; read on rank 0, which chooses every rank's forms |
 | `TF_GLM_INDEX_CUDA` | GLM on CUDA: exactly `1` (both DSA indexer kernels), `0` (neither) or `scores` (scores only); unset or blank is `both` |
 | `TF_GLM_KV_HOST_GIB` | GLM on CUDA: a finite GiB amount of at least 0 for the DSA layers' pinned host pages; unset or blank uses one full window and 16 rows a page |
 | `TF_GLM_RANK` | GLM-5.3-Flash on CUDA: a whole rank index from 0 through 4294967295, set with `TF_GLM_WORLD`; unset with it gives one rank |
@@ -139,13 +142,13 @@ An explicit `--device` or `--segments` wins over its environment value, even if 
 The carveout size is checked only when the carveout is enabled, and still rounds to framebuffer rows.
 `TF_NO_TREES` retains precedence over `TF_DRAFT_NODES`.
 Backend-specific settings are checked when that backend starts; slide settings require learning to be enabled.
-The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family.
+The `TF_GLM_*` rows are checked when GLM's CUDA family opens, on every rank, so they never stop another family; on Metal `TF_GLM_DRAFT_CONFIDENCE` is read and validated when GLM loads `--drafter`.
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
 
 ## Flash Next
 
-Flash Next checks these 33 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 35 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -163,6 +166,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_SHARED_DRAFTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_KEEP_LATE` | Exactly `0` or `1`; unset or blank leaves the choice to the loader |
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; default on: two ranks split the BF16 dense projections |
@@ -183,6 +187,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
 | `TF_FLASHNEXT_PROMPT` | Exactly `rows` for the rows path; unset or blank keeps the plain path |
+| `TF_FLASHNEXT_DRAFT_HEAD` | Exactly `bf16` or `affine4`; unset or blank is `affine4`, a bf16 language head's draft rows held as 4-bit affine groups of 32. `bf16` keeps the rows as stored. Drafts only, so replies are unchanged |
 
 An on-by-default switch keeps the same kernels and bits as off; only the launch count changes.
 The two row counts and the two draft counts keep their existing clamps after parsing.

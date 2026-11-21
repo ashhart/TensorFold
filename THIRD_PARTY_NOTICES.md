@@ -446,6 +446,14 @@ common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
+## DeepSeek-V4.1 Metal image preparation
+
+The image preparation (`zig/src/families/deepseek_v41/metal/vision_prep.zig`,
+`zig/src/families/deepseek_v41/metal/vision_prepare.zig`) follows the image budgets and geometry of
+`image_processor.py` in DeepSeek AI's MIT licensed
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+(revision 08c8657f02291e11b6f6b63e0e16014f8e748518), Copyright (c) 2023 DeepSeek.
+
 ## Shared EXL3 resolver setup
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
@@ -545,3 +553,22 @@ those files. `tiny_config.json` and the tensor tables
 `tiny_model_header.txt` and `tiny_mtp_header.txt` describe `tiny-random/inkling-2` at revision
 `0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
 model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
+
+## Inkling 2 attention kernels
+
+`zig/kernels/cuda/inkling2/attention.cu`, `zig/kernels/cuda/inkling2/prompt_attention.cu` and
+`zig/src/families/inkling2/kernels.zig` compute the attention of Hugging Face transformers'
+`src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0). The query and key L2 clips come
+from `Inkling2L2Clip` and `Inkling2ScaledL2Clip`, the relative-position logits from `Inkling2RelativeLogits`, and the
+sinks and sigmoid output gate from `Inkling2SlidingAttention` and `Inkling2FullAttention`. The kernels, their chunked
+layout and their rounding points are TensorFold's own.
+
+## Inkling 2 glue kernels
+
+`zig/kernels/cuda/inkling2/ops.cu`, `zig/kernels/cuda/inkling2/rows.cu` and `zig/src/families/inkling2/ops.zig` compute
+these layers of Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit
+`109a7d19bf66` ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0):
+`Inkling2NormedEmbedding`, `Inkling2BlockAttentionResidual`, `Inkling2ShortConvolution`,
+`Inkling2DynamicShortConvolution`, `Inkling2TopKRouter`, `Inkling2SoftcappedSwiGLU` and `Inkling2Softcap`. The kernels
+are TensorFold's own.

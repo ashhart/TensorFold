@@ -16,6 +16,7 @@ pub const ctx = @import("ctx.zig");
 pub const layer = @import("layer.zig");
 pub const attn = @import("attn.zig");
 pub const indexer = @import("indexer.zig");
+pub const segs = @import("segs.zig");
 pub const moe = @import("moe.zig");
 pub const forward = @import("forward.zig");
 pub const round_prof = @import("round_prof.zig");
@@ -32,6 +33,12 @@ pub const target = @import("target.zig");
 pub const tree = @import("tree.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
+pub const vision = @import("vision.zig");
+pub const vision_weights = @import("vision_weights.zig");
+pub const vision_tower = @import("vision_tower.zig");
+pub const vision_prep = @import("vision_prep.zig");
+pub const vision_rows = @import("vision_rows.zig");
+pub const vision_prepare = @import("vision_prepare.zig");
 pub const boot = @import("boot.zig");
 
 test {
@@ -44,4 +51,8 @@ test {
     _ = dspark_plan;
     _ = pass;
     _ = tree;
+    _ = vision;
+    _ = vision_prep;
+    _ = vision_rows;
+    _ = vision_prepare;
 }

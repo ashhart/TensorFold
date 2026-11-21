@@ -88,11 +88,16 @@ pub fn derive(s: *const pc.Store, prompt: []const u32, starts: []const u32, span
     var request: u32 = 0;
     for (s.by_position.items) |e| { // longest first, as find walks them
         if (e.expired) {
-            if (cause == null) {
-                cause = .expired;
-                n = @min(e.tokens.len, @as(u32, @intCast(prompt.len)));
+            const common = @min(e.tokens.len, prompt.len);
+            if (common == 0) continue;
+            if (std.mem.eql(u32, e.tokens[0..common], prompt[0..common])) {
+                if (cause == null) {
+                    cause = .expired;
+                    n = @intCast(common);
+                }
+                continue;
             }
-            continue;
+            // A divergent expired prefix is a changed prompt or reply, not an exact match that expired.
         }
         if (e.at >= prompt.len and std.mem.startsWith(u32, e.tokens, prompt[0..@min(prompt.len, e.tokens.len)])) {
             // the request ends inside this state, before its resume point

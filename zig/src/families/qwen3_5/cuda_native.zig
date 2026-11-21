@@ -65,7 +65,10 @@ pub const kept_disk = @import("cuda_disk.zig");
 
 /// cuda_prefill cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
 pub const request_starts = true;
-pub const request_starts_switch = "TF_QWEN_REQUEST_STARTS";
+const starts = @import("cuda_request_starts.zig");
+pub const request_starts_default_on = starts.default_on;
+pub const request_starts_switch = starts.switch_name;
+pub const requestStartsOn = starts.on;
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;

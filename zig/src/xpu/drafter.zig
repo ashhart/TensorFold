@@ -71,7 +71,7 @@ const Mlx = struct { w: *anyopaque, s: *anyopaque, b: *anyopaque, n: u32 };
 pub const Drafter = struct {
     r: *q.Runner,
     ckpt: q.Checkpoint = .{}, // the codebooks (pred, succ) are read from its mapping
-    k: struct { dconv: ze.H, dprep: ze.H, dattn: ze.H, rowsums_rows: ze.H, taps_in: ze.H, to_res: ze.H, topk_part: ze.H, quantize4: ze.H },
+    k: struct { dconv: ze.H, dprep: ze.H, dattn: ze.H, rowsums_rows: ze.H, taps_in: ze.H, to_res: ze.H, topk_part: ze.H, quantize4: ze.H, swiglu: ze.H },
     layers: [LAYERS]Layer,
     fc: q.Proj,
     hidden_norm: *anyopaque,
@@ -169,6 +169,7 @@ pub const Drafter = struct {
         const dr = try alloc.create(Drafter);
         errdefer alloc.destroy(dr);
         const m = try d.g.module(&kb.drafter);
+        const mg_tp1 = try d.g.module(&kb.glue);
         const kern = struct {
             fn f(dd: *q.Dev, mm: ze.H, name: [*:0]const u8, local: u32) !ze.H {
                 return dd.kernel(mm, name, local);
@@ -181,7 +182,7 @@ pub const Drafter = struct {
         errdefer alloc.free(pi_host);
         dr.* = .{
             .r = r,
-            .k = .{ .dconv = try kern(d, m, "dconv", 512), .dprep = try kern(d, m, "dprep", 16), .dattn = try kern(d, m, "dattn", 16), .rowsums_rows = try kern(d, m, "rowsums_rows", 256), .taps_in = try kern(d, m, "taps_in", 256), .to_res = try kern(d, m, "to_res", 256), .topk_part = try kern(d, m, "topk_part", 16), .quantize4 = try kern(d, m, "quantize4", 16) },
+            .k = .{ .dconv = try kern(d, m, "dconv", 512), .dprep = try kern(d, m, "dprep", 16), .dattn = try kern(d, m, "dattn", 16), .rowsums_rows = try kern(d, m, "rowsums_rows", 256), .taps_in = try kern(d, m, "taps_in", 256), .to_res = try kern(d, m, "to_res", 256), .topk_part = try kern(d, m, "topk_part", 16), .quantize4 = try kern(d, m, "quantize4", 16), .swiglu = try kern(d, mg_tp1, "swiglu", 256) },
             .layers = undefined,
             .fc = undefined,
             .hidden_norm = undefined,
@@ -530,7 +531,7 @@ pub const Drafter = struct {
             try q.gemm(d, dr.pscr, dr.h, dr.ahi, dr.alo, l.kp_mlp, dr.dyn, R);
             try d.launch(dr.k.dconv, .{ .x = R, .y = D / 512 }, .{ dr.h, dr.dyn, @as(i32, @intCast(l.kp_mlp.n)), l.base_mlp, @as(i32, 0), dr.x, @as(i32, 0), dr.h2, dr.ahi, dr.alo, l32 });
             try q.gemm(d, dr.pscr, dr.h2, dr.ahi, dr.alo, l.gu, dr.p, R);
-            try d.launch(d.k.swiglu, .{ .x = R, .y = 17 }, .{ dr.p, dr.h2, dr.ahi, dr.alo, @as(i32, GS), @as(i32, 0), @as(i32, 0) });
+            try d.launch(dr.k.swiglu, .{ .x = R, .y = 17 }, .{ dr.p, dr.h2, dr.ahi, dr.alo, @as(i32, GS), @as(i32, 0), @as(i32, 0) });
             try q.gemm(d, dr.pscr, dr.h2, dr.ahi, dr.alo, l.down, dr.r16, R);
             try d.launch(dr.k.dconv, .{ .x = R, .y = D / 512 }, .{ dr.r16, dr.dyn, @as(i32, @intCast(l.kp_mlp.n)), l.base_mlp, @as(i32, 1), dr.x, @as(i32, 1), dr.h2, dr.ahi, dr.alo, l32 });
         }
@@ -568,6 +569,7 @@ pub const Drafter = struct {
                     bi[k] = ix;
                 }
                 for (0..TOPK) |j| {
+                    if (bi[j] == std.math.maxInt(i32)) bi[j] = 0;
                     const local: u32 = @intCast(bi[j]);
                     x.cand[depth][j] = if (local < SPAN_LO) local else SPAN_HI0 + (local - SPAN_LO);
                     x.unary[depth][j] = bv[j];

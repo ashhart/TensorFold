@@ -20,45 +20,15 @@ fn key(word: u16) u16 {
     return if (w & 0x8000 != 0) ~w else w | 0x8000;
 }
 
-fn value(word: u16) f64 {
-    return @as(f32, @bitCast(@as(u32, word) << 16));
-}
+const value = lanes.sampling_row.value;
 
-/// qwen3_5/backend.zig's draw without a mask: the unchanged top-k candidates for the keyed sampler.
+/// The unmasked row draw the one-pass `draw` must equal: core's (lanes.sampling_row) under the Qwen error names.
 pub fn reference(gpa: std.mem.Allocator, logits: []const u16, p: lanes.Sampling, position: u64) !u32 {
-    var best: ?usize = null;
-    for (logits, 0..) |word, id| {
-        const x = value(word);
-        if (!std.math.isFinite(x)) return error.NonfiniteQwenLogits;
-        if (best == null or x > value(logits[best.?])) best = id;
-    }
-    if (p.temperature <= 0) return @intCast(best.?);
-    const allowed = logits.len;
-    const k = if (p.top_k == 0) allowed else @min(allowed, p.top_k);
-    const values = try gpa.alloc(f64, k);
-    defer gpa.free(values);
-    const ids = try gpa.alloc(u64, k);
-    defer gpa.free(ids);
-    var filled: usize = 0;
-    for (logits, 0..) |word, id| {
-        const x = value(word);
-        if (k == allowed) {
-            values[filled] = x;
-            ids[filled] = id;
-            filled += 1;
-            continue;
-        }
-        if (filled == k and x <= values[k - 1]) continue;
-        var at = @min(filled, k - 1);
-        while (at > 0 and x > values[at - 1]) : (at -= 1) {
-            values[at] = values[at - 1];
-            ids[at] = ids[at - 1];
-        }
-        values[at] = x;
-        ids[at] = id;
-        filled = @min(filled + 1, k);
-    }
-    return @intCast(try lanes.sampling.choose(gpa, values, ids, position, p));
+    return lanes.sampling_row.draw(gpa, logits, p, position, &.{}) catch |e| switch (e) {
+        error.NonfiniteLogits => error.NonfiniteQwenLogits,
+        error.NoAllowedToken => error.NoAllowedQwenToken,
+        else => e,
+    };
 }
 
 /// Row `row` of a [rows, vocab] bf16 logits buffer whose bytes start at `base`.
@@ -213,4 +183,14 @@ test "wide draw preserves reference when uniform rounds to one" {
     words[0] = 0;
     words[2] = 0x4280;
     try std.testing.expectEqual(try reference(gpa, &words, p, 0), try draw(gpa, &words, p, 0));
+}
+
+test "the reference refuses an empty or nonfinite row under the Qwen error names" {
+    const gpa = std.testing.allocator;
+    var words: [300]u16 = @splat(0x3f80);
+    const p: lanes.Sampling = .{ .seed = 7, .temperature = 0.7, .top_k = 20 };
+    try std.testing.expectError(error.NoAllowedQwenToken, reference(gpa, &.{}, p, 0));
+    words[5] = 0xff80;
+    try std.testing.expectError(error.NonfiniteQwenLogits, reference(gpa, &words, p, 0));
+    try std.testing.expectError(error.NonfiniteQwenLogits, reference(gpa, &words, .{ .seed = 7, .temperature = 0 }, 0));
 }

@@ -37,7 +37,6 @@ const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
 const exl3_tests = @import("exl3_tests.zig");
-const exl3_tp2_tests = @import("exl3_tp2_tests.zig");
 const exl3_plan_bench = @import("exl3_plan_bench.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
@@ -202,20 +201,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         return if (rest.len == 1) heads.runBaseline(gpu, rest[0]) else heads.run(gpu);
     }
     if (std.mem.eql(u8, cmd, "flashnext-tp-heads")) return @import("flashnext_tp_heads_tests.zig").run(gpu, try arg(rest, 0));
-    if (std.mem.eql(u8, cmd, "exl3-kvt-contract")) return @import("contract_flashnext_exl3_kvt.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "exl3-prefill-contract")) return @import("contract_flashnext_exl3_prefill.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "exl3-promptd-contract")) return @import("contract_flashnext_exl3_promptd.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "exl3-tppf-contract")) return @import("contract_flashnext_exl3_tppf.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3")) return @import("flashnext_exl3/model/flashnext_exl3_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-kvtier")) return @import("flashnext_exl3/kv/exl3_kvtier_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-tp")) return @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-engine")) return @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-tpe")) return @import("flashnext_exl3/tp/flashnext_exl3_tp_engine_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-graph")) return @import("flashnext_exl3/graph/flashnext_exl3_graph_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn-lanes")) return @import("contract_fn_attn_lanes.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "flashnext-readout-cut")) return @import("flashnext_readout_cut.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "info")) return runtime_tests.info(gpu);
+    if (std.mem.startsWith(u8, cmd, "flashnext-readout-")) return if (std.mem.eql(u8, cmd, "flashnext-readout-cut")) @import("flashnext_readout_cut.zig").run(gpu) else if (std.mem.eql(u8, cmd, "flashnext-readout-fused")) @import("flashnext_readout_fused.zig").run(gpu) else error.UnknownCommand;
+    if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
     if (std.mem.eql(u8, cmd, "shared-context")) return runtime_tests.sharedContext(gpu);
     if (std.mem.eql(u8, cmd, "graph")) return runtime_tests.graphs(gpu);
@@ -253,7 +242,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
-    if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+    if (std.mem.eql(u8, cmd, "glm-exl3") or std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_tests.runCmd(gpu, cmd);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return @import("glm_mm_bench.zig").run(gpu);
@@ -273,20 +262,14 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);
     if (std.mem.eql(u8, cmd, "exl3")) return exl3_tests.run(gpu, if (rest.len > 0) rest[0] else "none");
-    if (std.mem.eql(u8, cmd, "exl3-pack")) return @import("flashnext_exl3/pack/exl3_pack_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-ple2")) return @import("flashnext_exl3/model/exl3_ple2_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-draft")) return @import("flashnext_exl3/tp/exl3_draft_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-pool")) return @import("flashnext_exl3/offload/exl3_pool_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-prefill")) return @import("flashnext_exl3/prefill/exl3_prefill_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-tpprefill")) return @import("flashnext_exl3/tp/exl3_tpprefill_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "nccl-lat")) return @import("flashnext_exl3/pack/exl3_pack_tests.zig").ncclLatency(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-grouped-tile")) return @import("exl3_grouped_tile_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return @import("exl3_candidate_tests.zig").run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
     if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-contract")) return @import("contract_exl3.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
+    if (std.mem.eql(u8, cmd, "exl3-tp2")) return @import("exl3_tp2_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
+    if (std.mem.eql(u8, cmd, "qwen35-tp-cut")) return @import("qwen35_tp_cut_tests.zig").run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "1");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "nemotron-draws")) return @import("nemotron_draw_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);
@@ -406,6 +389,18 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
+}
+
+fn info(gpu: check.Gpu) !void {
+    var name_buf: [256]u8 = undefined;
+    const name = try gpu.ctx.name(&name_buf);
+    const mem = try gpu.ctx.memInfo();
+    std.debug.print("RESULT driver CUDA {d}, device {s}, sm_{d}, {d} SMs, {d} MiB total, {d} MiB free, kernels embedded {}\n", .{
+        try gpu.d.version(),      name,
+        try gpu.ctx.capability(), try gpu.ctx.attribute(.multiprocessor_count),
+        mem.total >> 20,          mem.free >> 20,
+        cuda.kernels.available,
+    });
 }
 
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {

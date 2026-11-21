@@ -58,10 +58,11 @@ pub const Keep = union(enum) {
     logits,
     hidden,
     rows,
+    none, // a prompt chunk nothing reads: its last layer stops at the state writes
 
-    /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
+    /// Whether the forward is a verify window (recorded, one-row bits); `last`, `rows` and `none` are prompt chunks.
     pub fn verifies(k: Keep) bool {
-        return k != .last and k != .rows;
+        return k != .last and k != .rows and k != .none;
     }
 };
 
@@ -386,10 +387,16 @@ pub const Engine = struct {
     }
 
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
+        if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });
         var a: cuda.Args = .{};
         inline for (args) |v| a.add(v);
         const cfg: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
         try cuda.launch.launch(f, cfg, e.stream, &a);
+    }
+
+    pub fn promptAttention(e: *Engine, layer: usize, from: usize, end: usize) !void {
+        if (@import("cuda_launch_trace.zig").active) |t| return t.note(.attn);
+        return @import("cuda_prompt.zig").runFrom(e, layer, from, end);
     }
 
     /// The projections: the row tiles, the prompt GEMM and the grouped form, in their own file.
@@ -421,6 +428,7 @@ pub const Engine = struct {
     }
 
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
+        if (@import("cuda_launch_trace.zig").active) |t| return t.note(.norm);
         try e.run(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
 
@@ -512,6 +520,7 @@ pub const Engine = struct {
         };
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
+        shape.unread = keep == .none;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         shape.join = shape.paged and caches.anyShares(parts);
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
@@ -552,6 +561,7 @@ pub const Engine = struct {
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
             },
             .rows => {}, // the rows stay in `x` for the readout that runs next on the stream
+            .none => {}, // nothing to copy back
             .logits, .last => {
                 const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
@@ -568,21 +578,7 @@ pub const Engine = struct {
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
 
-    /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
-            else => return error.InvalidGdnSlots,
-        };
-        const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
-        // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
-        const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
-        try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
-    }
+    pub const deltaScan = @import("cuda_forward.zig").deltaScan;
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
     pub const body = @import("cuda_forward.zig").body;

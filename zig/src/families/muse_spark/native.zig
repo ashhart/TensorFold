@@ -441,6 +441,8 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // no captured Triton set: Muse runs its own CUDA kernels
     if (o.lanes == 0 or o.lanes > 32) return error.Slots;
+    // the two ranks meet over fabric/tp, whose sockets are POSIX: Windows refuses before any of it is compiled in
+    if (comptime @import("builtin").os.tag == .windows) return error.MuseSparkTpPlatform;
     const c = (try tpRead()) orelse return error.MuseSparkRequiresTwoRanks;
     try config.admit(try ctx.capability(), c.world);
     if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-muse follow`
@@ -507,6 +509,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.MuseSparkRequiresSm121 => "Muse Spark is served on GB10 (sm_121) only so far, and this GPU is another",
         error.MuseSparkRequiresTwoRanks => "Muse Spark is served at two TP ranks only so far: TF_TP_WORLD=2 and TF_TP_RANK=0 here, `tf-muse follow` on rank 1",
         error.FollowerServes => "TF_TP_RANK is not 0: rank 0 serves, the other ranks run `tf-muse follow`",
+        error.MuseSparkTpPlatform => "Muse Spark is served at two TP ranks, and tensor parallelism across ranks runs on Linux only: serve it from a Linux build",
         else => null,
     };
 }
@@ -550,4 +553,9 @@ test "a bad TF_TP_* refuses the weight share; one rank is refused by name" {
         try std.testing.expectError(error.BadSetting, share(1000, tpFrom(tpEnv(bad[0], bad[1]))));
     }
     try std.testing.expectEqual(@as(u64, 500), try share(1000, tpFrom(tpEnv("2", "1"))));
+}
+
+test "Windows refuses Muse Spark's two ranks by name, before any TP session opens" {
+    const why = explain(null, error.MuseSparkTpPlatform).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "runs on Linux only") != null);
 }

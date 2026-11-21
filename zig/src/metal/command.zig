@@ -273,6 +273,16 @@ pub const ComputeEncoder = struct {
         objc.msg(void, self.id, "useResource:usage:", .{ buffer.id, usage });
     }
 
+    /// Declare several resources in one call (useResources:count:usage:).
+    pub fn useResources(self: ComputeEncoder, ids: []const objc.Id, usage: usize) void {
+        if (ids.len == 0) return;
+        if (self.slot()) |s| {
+            for (ids) |id| _ = s.q.address(id);
+            return;
+        }
+        objc.msg(void, self.id, "useResources:count:usage:", .{ ids.ptr, ids.len, usage });
+    }
+
     pub fn execute(self: ComputeEncoder, icb: IndirectCommandBuffer, first: usize, count: usize) void {
         objc.msg(void, self.id, "executeCommandsInBuffer:withRange:", .{ icb.id, types.Range{ .location = first, .length = count } });
         if (self.slot()) |s| s.dispatched(self.id);

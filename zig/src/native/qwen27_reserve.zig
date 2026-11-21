@@ -32,7 +32,9 @@ pub fn requested(generation: u32, moe: bool) u32 {
 
 /// The prompt rows startup takes: the request when it fits (always when named), never under the window.
 pub fn rows(f: memory.Fit, generation: u32, window: u32) !u32 {
-    return @max(window, try f.choose(requested(generation, f.config.moe()), q.prompt_rows.override(rowsValue()) != null));
+    const geometry = try q.attention_plan.Geometry.fromConfig(f.config, f.shared);
+    const wanted = q.prompt_rows.frameRequested(generation, f.config.moe(), rowsValue(), geometry);
+    return @max(window, try f.choose(wanted, q.prompt_rows.override(rowsValue()) != null));
 }
 
 pub const Budget = struct {
@@ -56,9 +58,11 @@ pub fn budget(a: std.mem.Allocator, io: std.Io, dir: []const u8, weights: u64, c
     defer dev.deinit();
     const units = dev.tensorUnits();
     const window = try @import("qwen27_lanes.zig").windowRows(units);
-    const current = @max(loaded_rows, q.model.promptRows(c, 0));
+    const shared = try q.simd_attention.sharedPrefix(units);
+    const geometry = try q.attention_plan.Geometry.fromConfig(c, shared);
+    const current = @max(loaded_rows, q.model.promptRows(c, 0, geometry));
     const held = @as(usize, @intCast(weights)) + memory.frameBytes(c, current);
-    const f = fit(c, context, window, streams, units, 0, q.taps.layers.len, current, try memory.room(dev.maxWorkingSet(), held, cap()));
+    const f = fit(c, context, window, streams, shared, 0, q.taps.layers.len, current, try memory.room(dev.maxWorkingSet(), held, cap()));
     const r = try rows(f, dev.generation(), window);
     const slots = f.streams(r, fixed) catch |err| if (err == error.TooManyStreams) 0 else return err;
     return .{ .context = context, .streams = streams, .rows = r, .slots = slots, .total = held + try f.cost(r, if (slots == 0) streams else slots), .working_set = try memory.workingSet(dev.maxWorkingSet(), cap()) };

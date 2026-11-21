@@ -29,6 +29,24 @@ pub const Trace = struct {
     sha: Sha256 = .init(.{}),
     kept: std.ArrayList(u8) = .empty,
     token_sha256: ?[]const u8 = null,
+    timing: ?Timing = null,
+
+    /// The finish's measures: several generations sum their counts and keep the last one's timings.
+    pub const Timing = struct { queue_ms: f64, ttft_ms: ?f64, decode_tps: f64, prompt: usize, cached: usize, completion: usize };
+
+    /// A generation's measures, as the done log line reports them; nothing is measured here.
+    pub fn timed(t: *Trace, r: anytype) void {
+        if (t.journal == null) return;
+        const before: Timing = t.timing orelse .{ .queue_ms = 0, .ttft_ms = null, .decode_tps = 0, .prompt = 0, .cached = 0, .completion = 0 };
+        t.timing = .{
+            .queue_ms = r.queued_s * 1000,
+            .ttft_ms = if (r.ttft_s) |s| s * 1000 else null,
+            .decode_tps = r.decode_tps,
+            .prompt = before.prompt + r.prompt_tokens,
+            .cached = before.cached + r.cached_tokens,
+            .completion = before.completion + r.completion_tokens,
+        };
+    }
 
     /// Writes the start before any work; true when this key's same request is quarantined, which the caller refuses.
     pub fn begin(t: *Trace, body: Value, chat: bool, key: []const u8) bool {
@@ -100,12 +118,30 @@ pub const Trace = struct {
         const hex = std.fmt.bytesToHex(t.sha.finalResult(), .lower);
         try o.put(a, "reply_sha256", .{ .string = try a.dupe(u8, &hex) });
         try o.put(a, "token_sha256", if (t.token_sha256) |s| .{ .string = s } else .null);
+        try putTiming(a, o, t.timing);
         if (t.whole) {
             const codec = std.base64.standard.Encoder;
             const encoded = try a.alloc(u8, codec.calcSize(t.kept.items.len));
             try o.put(a, "reply_base64", .{ .string = codec.encode(encoded, t.kept.items) });
         }
         j.append(a, .{ .object = o });
+    }
+
+    fn putTiming(a: Allocator, o: *json.Object, timing: ?Timing) Allocator.Error!void {
+        const m = timing orelse {
+            for ([_][]const u8{ "queue_ms", "ttft_ms", "decode_tps", "prompt_tokens", "cached_tokens", "completion_tokens" }) |k| try o.put(a, k, .null);
+            return;
+        };
+        try o.put(a, "queue_ms", .{ .float = round1(m.queue_ms) });
+        try o.put(a, "ttft_ms", if (m.ttft_ms) |v| .{ .float = round1(v) } else .null);
+        try o.put(a, "decode_tps", .{ .float = round1(m.decode_tps) });
+        try o.put(a, "prompt_tokens", try json.intValue(a, m.prompt));
+        try o.put(a, "cached_tokens", try json.intValue(a, m.cached));
+        try o.put(a, "completion_tokens", try json.intValue(a, m.completion));
+    }
+
+    fn round1(v: f64) f64 {
+        return @round(v * 10) / 10;
     }
 
     /// The quarantine refusal, a 400 a client should not retry, sent and journaled like any other reply.

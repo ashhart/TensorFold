@@ -4,6 +4,7 @@ import { compactThreadJournal } from '../../agent/thread-journal'
 import { assertProviderEndpointResolved } from '../../agent/security'
 import { buildAgentRunReceipt, buildEventReceipt } from '../../agent/run-contract'
 import type { Project, Provider, Thread } from '../../agent/types'
+import { isEngineProvider } from '../../agent/engine/provider'
 import { store } from '../state'
 import { auditModelRetry, auditModelRoute, modelRouteAccountLabel, modelRouteAutoFailoverEnabled, modelRouteFailoverText, modelRouteResetPolicy, modelRouter, rememberProviderModels, runtimeProviderWithFreshModels } from './provider-runtime'
 
@@ -207,6 +208,11 @@ export function settleThreadExecution(pending: Promise<void>, input: ThreadSettl
         void reviewViewedSkills({ provider: review.provider, model: review.model, thread, userText: payload.userText, viewed: [...review.viewedSkillNames], signal: controller.signal, memoryPolicy, memoryRevision })
       }
       if (!failed && !recoveryPaused && !controller.signal.aborted) {
+        // Let the foreground run release the built-in engine before starting its background title.
+        const titleRoute = input.initialRoute
+        if (isEngineProvider(titleRoute.provider) && !localHelpersOnly && !aborters.has(thread.id) && (thread.title === 'New task' || thread.title === 'New chat')) {
+          support.maybeAutoTitle(thread, titleRoute.provider, titleRoute.model, payload.userText)
+        }
         try { proposePostRunMemory(thread, memoryPolicy, memoryRevision, controller.signal) } catch { /* best effort — never disturb the settled run */ }
       }
     })

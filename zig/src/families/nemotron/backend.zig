@@ -86,7 +86,10 @@ pub const Metal = struct {
     kv_pages: ?*kvp.Pages = null, // the core pool over them: a stream leases a lane's pages when it opens
     kv_pipes: ?*kv_pages.Pipelines = null, // the paged twins (the model's kernels point at them)
 
-    pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
+    pub fn init(gpa: std.mem.Allocator, m: *Model, given: Options) !*Metal {
+        var o = given;
+        // nemotron_h_puzzle: prompts take the decode kernels; prefill_mixers is not built for the latent MoE yet
+        if (m.config.bolt) o.chunk = @min(o.chunk, fused_rows);
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
         if (o.batch_rows > st.max_rows) return error.BatchTooWide; // verify and draft hold st.max_rows streams
@@ -164,7 +167,7 @@ pub const Metal = struct {
         };
     }
     pub fn forward(self: *Metal) fwd.Forward {
-        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
+        return .{ .c = self.m.config, .k = &self.m.kernels, .p = &self.m.prefill, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
 
     pub fn cacheOf(self: *Metal, s: *lanes.Stream) !*st.Cache {

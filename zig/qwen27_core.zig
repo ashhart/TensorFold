@@ -42,3 +42,4 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("src/core/tree_slots.zig");
+pub const recurrent_workspace = @import("src/core/recurrent_workspace.zig");

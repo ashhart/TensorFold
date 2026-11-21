@@ -170,6 +170,17 @@ for a row whose tile or block reads a non-finite value at a key masked for that 
 `gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
 float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
 that plants such a value and carries the finding, so its other entries keep a clean gate 1.
+Hy4-flash's `tf_hy4_attend_chunks` and `tf_hy4_attend_scored` give NaN for a row and head whose 512-key chunk starts
+with a -Inf score, where float64 leaves that key out: the running max is still -Inf there, so the first rescale is
+exp(-Inf - -Inf). Its `tf_hy4_attend_nax` gives NaN for a row whose 32-key tile reads a non-finite value at a key it
+masks (0 x Inf inside the P x V mma), and 0 for a row whose every score is NaN, where float64 gives NaN: Metal's `max`
+drops the NaN, so the running max stays -Inf and the kernel's guard weighs every key 0. Each has an entry of its own.
+Hy4-flash's `tf_hy4_route_select_rank` ranks a NaN key 0, since every comparison with it is false, so it races the
+row's best expert for the first pick; the core select it stands beside never picks a NaN key.
+Hy4-flash's `tf_hy4_group_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `max(dot, 0.0f)`.
+Hy4-flash's SwiGLU clip, in `tf_affine_experts_up_4` and `_8` and in affine_mm's `am_swiglu`, gives a finite output for
+a NaN gate or up sum where float64 keeps the NaN: `min(gate, 10)` and `clamp(up, -10, 10)` drop it. Its 4-bit tensor
+gathers carry affine_mm's +128 code offset finding above.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -376,6 +387,12 @@ and the exact sums of gate 4.
 Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
 `id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
 angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
+Its decoders' own kernels (`metal_idol_decoder*.zig`) are checked too: the point embedding, the stem's fp16 cast,
+`to_kv`, the heads' RMS norm, the attention's four forms (P V as fp16 P hi + lo) and its fp32 short form. Each is checked
+at idol-sdk's fp32 and fp16 points, with 15 controls. One drops P's lo half and must go red on heads built so that O is
+P's fp16 remainder alone.
+Its image encoder (`metal_idol_vae*.zig`, FLUX.2's VAE encoder in fp32) registers its convolutions (direct, implicit
+GEMM and Winograd), GroupNorm's passes, the 512-wide attention and the condition rows against float64 (12 controls).
 
 HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
 bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
@@ -418,8 +435,9 @@ CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: t
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
 sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
-`tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
-over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
+`tf_glm_select_rows`, its decode windows' scores (`tf_glm_index_scores` at the decode tiling) to `tf_glm_scores`,
+and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans over many blocks
+(`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
 rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.
 CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
 marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
@@ -465,6 +483,7 @@ both gather heights, with a partial last column group in the dense entry. Gate 1
 requires the predecessor's bytes, NaN payloads included; these
 entries compare and keep sums rather than requalify them, so gate 4 does not apply. Each has a control, a planted source
 fault red at `shapes`, and its launches are in `glm_launch_records.zig`.
+GLM's Metal DFlash2 drafter also registers its ring-buffer block attention (`glm_draft_attend`, `glm_draft_attend_merge`), top-k selector (`glm_draft_topk`), candidate-subset gather head (`glm dflash2 head`, q4/q8 affine gather and row paths), same-buffer GPU accept (`glm_draft_accept`) and GPU follow (`glm_draft_follow`), with planted controls for ring overrun, masked-key leakage, stream-0 ring aliasing, candidate-score tie/drop faults, wrong accepted token, and oversized sliding window.
 CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
 3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
 replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
@@ -486,7 +505,9 @@ the fp32 down launched one 32-input group short, and a down summing in bf16). nv
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks GLM's NVFP4_NZ5 block 32 experts (`tf_nvfp4_nz5_*`), each bit-equal to the block 16 instance it
 replaces on the same values: a planted +5 is a 4 there under its scale two e4m3 steps up (x1.25), and the E2M1
-entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control.
+entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control. Gate 4's stress fill holds +5s among its 4s
+and 6s, two on equal inputs mirrored by a -4 and a -6 (NVFP4_NZ5 has no -5), with the float64 reference reading
+0b1000 as 5; the same E2M1 entry on that fill is a second control, red at gate 4.
 CUDA also checks Flash Next EXL3's canonical expert reduction (`flashnext_batch.cu`): `fn_exl3_leaf_tree` over leaves
 0-31, 32-63 and all 64 (rows 1, 2, 5 and 16 at width 2560) and `fn_exl3_leaf_finish` over the pieces of 2, 3, 5 and 8
 ranks, each output byte-equal to the host reference `exl3_canon.zig` (NaN payloads aside), its class equal to float64's
@@ -544,7 +565,18 @@ device test, `exl3-kvtier`, holds its misses within 5% of the model over 60 drif
 Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode rows (ring or linear windows) and prompt rows
 (16-key tiles at absolute positions), fp32 and bf16 out, against float64's softmax over the window, the selected rows and
 the sink with the inverse RoPE, and a row's bytes equal across chunk splits and between the two launches (four controls,
-each one planted fault, and one on the row bytes).
+each one planted fault, and one on the row bytes). Its slot kernels (`*_segs`: the window key, the ratio-2 pool with
+the inputs it keeps, the FP4 round trip, the key packing and the decode attention) run the rows of several slots in one
+launch over a table of the slots' state, each bit-equal to its per-slot kernel launched a slot at a time at 1 to 4 slots
+and 1 to 17 rows, NaN and infinities included; each but the prefetch attention has a control that reads or writes the
+first slot's state for every row. The indexer's decode scores (`tf_dsv41_ix_scores_dec_segs`) and candidate blocks
+(`tf_cand_segs`) do the same over each slot's keys, position and key count, bit-equal to the per-slot launches at
+ratios 1 and 2, with and without a candidate mask, and a slot with no keys left alone; the top-512 runs unchanged over
+score rows of one stride. Their controls score the first slot's keys and count the first slot's keys for every row.
+The slot table entry `TfDsv41Seg` lives in one header (`segs.h`) the five sources start with; a kernel reads back its
+size and field offsets against segs.zig's `Seg`. After the gates, every per-slot kernel these slot kernels share a body
+with is checked byte-equal to the base's body, kept only in the tests (`dsv41_base`), on the same random and non-finite
+inputs at one stream.
 
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,

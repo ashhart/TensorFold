@@ -13,6 +13,8 @@ const copy_price = @import("copy_price.zig");
 pub const State = struct {
     p: []f64,
     rounds: u64 = 0,
+    last: ?i64 = null, // the depth this rule last chose: another must beat it by depth_margin
+    probe: ?i64 = null, // a probe's depth for the next round (a lone window keeps it)
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
@@ -56,6 +58,7 @@ pub const Rule = struct {
     k: Constants = .{},
     prior: []const f64,
     most_drafts: u32,
+    shared_cap: u32 = 0, // Model.shared_mtp_cap: most a shared round chains a stream; a lone one chains most_drafts (0: off)
     family_costs: *const Table,
     shared_costs: *const Table,
     mtp_step_ms: f64,
@@ -170,21 +173,36 @@ pub const Rule = struct {
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
-            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
+            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else if (r.shared_cap != 0) r.most_drafts else 3;
             return @max(1, @min(most, want));
         }
-        var best = (try r.bestRows(who, p, most, false)).rows;
-        const st = &who.state.*.?;
+        const st = try r.state(who);
+        var best = (try r.bestRows(who, p, most, false, st.last)).rows;
         st.rounds += 1;
-        if (best == 0) return @intFromBool(r.probePlain(st));
+        if (best == 0) {
+            st.last = null; // plain holds no depth: the next drafted depth is chosen fresh
+            st.probe = null;
+            return @intFromBool(r.probePlain(st));
+        }
         st.plain = 0;
         st.wait = r.k.depth_probe_every;
-        if (best < most and st.rounds % r.k.depth_probe_every == 0) best += 1;
+        st.last = best;
+        st.probe = null;
+        if (best < most and st.rounds % r.k.depth_probe_every == 0) {
+            best += 1;
+            st.probe = best;
+        }
         return best;
     }
 
-    /// The rows with the most expected tokens a ms (0: plain) and the best of one or more, from each row's chance.
-    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool) !struct { rows: i64, drafted: i64 } {
+    /// The stream's estimate state, allocated from its prior on first use.
+    fn state(r: *Rule, who: Who) !*State {
+        _ = try r.rates(who);
+        return &who.state.*.?;
+    }
+
+    /// The rows with the most expected tokens a ms (0: plain); `hold` stays unless another beats it by depth_margin.
+    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool, hold: ?i64) !struct { rows: i64, drafted: i64 } {
         var best: i64 = 1;
         var best_rate: f64 = -1.0;
         if (copy or r.plain_guard) {
@@ -197,6 +215,7 @@ pub const Rule = struct {
         }
         var drafted: i64 = 1;
         var drafted_rate: f64 = -1.0;
+        var held_rate: f64 = -1.0;
         var expected: f64 = 1.0;
         var run: f64 = 1.0;
         var d: i64 = 1;
@@ -205,14 +224,20 @@ pub const Rule = struct {
             const at: usize = @intCast(d - 1);
             run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
             expected += run;
-            if (expected / cost > best_rate) {
+            const rate = expected / cost;
+            if (hold != null and d == hold.?) held_rate = rate;
+            if (rate > best_rate) {
                 best = d;
-                best_rate = expected / cost;
+                best_rate = rate;
             }
-            if (expected / cost > drafted_rate) {
+            if (rate > drafted_rate) {
                 drafted = d;
-                drafted_rate = expected / cost;
+                drafted_rate = rate;
             }
+        }
+        // a noisy round must not flip a held depth: another wins it only by depth_margin
+        if (hold) |h| {
+            if (best != 0 and h >= 1 and h <= most and h != best and held_rate >= 0.0 and best_rate < held_rate * r.k.depth_margin) best = h;
         }
         return .{ .rows = best, .drafted = drafted };
     }
@@ -236,7 +261,7 @@ pub const Rule = struct {
     pub fn copyRows(r: *Rule, who: Who, chances: []const f64, rows: i64, take: bool) !i64 {
         if (rows <= 0 or !r.copy_guard or r.family_costs.empty()) return rows;
         if ((try copy_price.plain(r, who)) == null) return rows;
-        const best = try r.bestRows(who, chances, rows, true);
+        const best = try r.bestRows(who, chances, rows, true, null);
         const st = &who.state.*.?;
         if (best.rows > 0) {
             if (take) {
@@ -366,15 +391,15 @@ pub const Rule = struct {
         const streams = if (paired != null) total_streams else whos.len;
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
+        const top: i64 = if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts;
         if (r.confidence_floor != null) {
-            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
+            for (whos, out) |*w, *o| o.* = @min(try r.headDepth(w, null, probe), top);
             return;
         }
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
-                const granted: i64 = if (w.granted) |g| g else r.most_drafts;
-                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
+                const inner = @min(try r.headDepth(w, null, probe), top);
+                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, @as(i64, w.granted orelse r.most_drafts) + r.k.draft_slack), probe);
             }
             if (r.granted_depth) capPass(out, r.batch_rows);
             if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHoldsFor(whos, sampled, out, total_streams);
@@ -388,7 +413,7 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs[0..whos.len]) |w, *m, *p| {
-            m.* = @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
+            m.* = @min(top, @max(1, w.draft_room - 1));
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }

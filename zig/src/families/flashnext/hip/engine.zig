@@ -400,12 +400,17 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
+        return e.promptMarked(c, tokens, &.{});
+    }
+
+    /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
+    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
-        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
         const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
         const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
         c.len += tokens.len;
@@ -483,6 +488,11 @@ pub const Engine = struct {
     /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
     pub fn lease(e: *Engine, slot: u32) !cache.Caches {
         return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
+    }
+
+    /// The first stream's caches made now (at load) rather than by the first prompt; later slots on their first lease.
+    pub fn makeFirstSlot(e: *Engine) !void {
+        try e.pool.make(e.gpa, 0, e.o.capacity, e);
     }
 
     /// A finished stream's caches back to their slot.

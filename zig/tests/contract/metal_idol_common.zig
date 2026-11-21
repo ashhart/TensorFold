@@ -195,51 +195,58 @@ pub const Edit = struct { from: []const u8, to: []const u8 };
 /// A control: the kernel it breaks, the gate that must go red, its source edits and any text it appends.
 pub const Control = struct { kernel: []const u8, what: []const u8, gate: g.Gate = .shapes, edits: []const Edit = &.{}, append: []const u8 = "" };
 
-/// The family's source as the engine compiles it (or a control's copy), its pipelines made as tests ask for them.
-pub const Lib = struct {
-    a: std.mem.Allocator,
-    device: mtl.Device,
-    ctl: ?Control,
-    k: ks.Kernels = undefined,
-    built: bool = false,
-    made: [ks.names.len]bool = @splat(false),
+/// The denoiser's library: idol.metal after gemm_nax.metal, through kernels.zig's launchers.
+pub const Lib = LibOf(ks.Kernels, &ks.names, sources.idol);
 
-    fn text(l: *Lib) ![]u8 {
-        var out = try tf.frags.source(l.device, l.a, sources.idol);
-        const x = l.ctl orelse return out;
-        for (x.edits) |e| {
-            errdefer l.a.free(out);
-            if (std.mem.count(u8, out, e.from) != 1) {
-                std.debug.print("control {s}: text not found once: {s}\n", .{ x.what, e.from });
-                return error.ControlTextNotFoundOnce;
+/// A source as the engine compiles it (or a control's copy), its pipelines made as tests ask for them; K's launchers.
+pub fn LibOf(comptime K: type, comptime names: []const []const u8, comptime source: []const u8) type {
+    return struct {
+        a: std.mem.Allocator,
+        device: mtl.Device,
+        ctl: ?Control,
+        k: K = undefined,
+        built: bool = false,
+        made: [names.len]bool = @splat(false),
+
+        const This = @This();
+
+        fn text(l: *This) ![]u8 {
+            var out = try tf.frags.source(l.device, l.a, source);
+            const x = l.ctl orelse return out;
+            for (x.edits) |e| {
+                errdefer l.a.free(out);
+                if (std.mem.count(u8, out, e.from) != 1) {
+                    std.debug.print("control {s}: text not found once: {s}\n", .{ x.what, e.from });
+                    return error.ControlTextNotFoundOnce;
+                }
+                const next = try std.mem.replaceOwned(u8, l.a, out, e.from, e.to);
+                l.a.free(out);
+                out = next;
             }
-            const next = try std.mem.replaceOwned(u8, l.a, out, e.from, e.to);
-            l.a.free(out);
-            out = next;
+            if (x.append.len == 0) return out;
+            defer l.a.free(out);
+            return std.mem.concat(l.a, u8, &.{ out, "\n", x.append });
         }
-        if (x.append.len == 0) return out;
-        defer l.a.free(out);
-        return std.mem.concat(l.a, u8, &.{ out, "\n", x.append });
-    }
 
-    /// The pipeline `name` made on this library (compiled on first use).
-    pub fn need(l: *Lib, name: []const u8) !void {
-        if (!l.built) {
-            const src = try l.text();
-            defer l.a.free(src);
-            l.k.own = try mtl.Library.fromSource(l.device, src, mtl.CompileOptions.mlx());
-            l.built = true;
+        /// The pipeline `name` made on this library (compiled on first use).
+        pub fn need(l: *This, name: []const u8) !void {
+            if (!l.built) {
+                const src = try l.text();
+                defer l.a.free(src);
+                l.k.own = try mtl.Library.fromSource(l.device, src, mtl.CompileOptions.mlx());
+                l.built = true;
+            }
+            for (names, 0..) |n, i| if (std.mem.eql(u8, n, name)) {
+                if (!l.made[i]) l.k.p[i] = try mtl.Pipeline.init(l.device, l.k.own, n, false);
+                l.made[i] = true;
+                return;
+            };
+            return error.NoSuchPipeline;
         }
-        for (ks.names, 0..) |n, i| if (std.mem.eql(u8, n, name)) {
-            if (!l.made[i]) l.k.p[i] = try mtl.Pipeline.init(l.device, l.k.own, n, false);
-            l.made[i] = true;
-            return;
-        };
-        return error.NoSuchPipeline;
-    }
 
-    pub fn deinit(l: *Lib) void {
-        for (l.k.p, l.made) |p, m| if (m) p.deinit();
-        if (l.built) l.k.own.deinit();
-    }
-};
+        pub fn deinit(l: *This) void {
+            for (l.k.p, l.made) |p, m| if (m) p.deinit();
+            if (l.built) l.k.own.deinit();
+        }
+    };
+}

@@ -49,8 +49,8 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, adding or deleting voices (`--manage-voices`), another method, or a suffix alias such as `/alt/completions`
-that the server answers for a full key. The route
+`/v1/imprint`, adding or deleting voices (`--manage-voices`), `/v1/prompt_cache/flush`, another method, or a suffix
+alias such as `/alt/completions` that the server answers for a full key. The route
 is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
 `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
 or a parked model reloads. The public routes stay public.
@@ -460,13 +460,14 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
-| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
+| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match; on the native server also `structural_tag`, JSON regions inside free text | Both |
 | `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
+| `deadline_s` | Seconds, more than 0 and at most 1,000,000, on chat and legacy completions: at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave, usage and token ids. A reply that ends first, or a [cancel](#cancel-a-request) that came first, keeps its own ending; without the field nothing changes | Native |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
@@ -615,7 +616,7 @@ are the exception: absent both, replies take 0.8 of that time and a filling prom
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--thinking-reserve`, a reply that is still reasoning counts as its answer quota plus the reasoning still expected, from the think blocks this server has seen close; before the first has closed it counts as its limit left (its `max_tokens` plus the reserve, less what it has emitted). With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
 hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
 steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
 Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
@@ -668,6 +669,14 @@ top_k without the penalty.
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
 field always wins over the default. This lets one server answer to several ids at their usual priority while a
 background-only client (a batch extractor, say) gets one id that always yields, without sending the field itself.
+
+A streamed reply whose client stops reading does not keep its lane decoding. On an engine on the shared lane host, once
+1,024 of a stream's tokens are waiting in the server for its client, the stream sits out rounds; it runs again once the
+client has taken all but 512 of them. Other streams keep their pace, and the text the client receives is the same,
+byte for byte, as a fast client's. A stream that sits out 60 seconds while its client reads nothing is cancelled as a
+disconnect is: the reply ends with `finish_reason: "cancelled"` and its lane goes to the next request. A client that
+reads as the reply arrives never pauses, and whole (non-streamed) replies are not affected. Engines served outside the
+shared lane host, such as Flash Next's one-reply-at-a-time host, do not pause.
 
 The native CUDA build serves Nemotron, and its concurrent requests share each round. The rest of this paragraph
 describes the Python 0.6.6 engine's CUDA families.
@@ -769,6 +778,23 @@ back to the host before each verify, the grammar cuts the ones it rejects and dr
 closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies
 are the same.
 
+The native server also takes `response_format: {"type": "structural_tag", "structures": [...], "triggers": [...]}` on
+`/v1/chat/completions` and `/v1/completions`. The reply is free text, and each structure's `begin` string opens a region
+that must be JSON matching its `schema` and close with its `end` string. Each structure is
+`{"begin": "<weather>", "schema": {...}, "end": "</weather>"}`: `begin` and `end` are non-empty strings of at most 256
+bytes, and `schema` is a JSON schema object (or its JSON text, or `true`). `triggers` are the strings that open a
+region: each must start at least one structure's `begin`, and every `begin` must start with exactly one of them.
+Without `triggers`, each distinct `begin` that no shorter `begin` starts is a trigger. A trigger can't appear in the
+free text except as the start of a region, so with `"triggers": ["<"]` every `<` opens a structure. Outside regions the
+text is unconstrained; inside one, its JSON allows at most 32 blank characters between two tokens, as `json_schema`
+does. A reply may hold any number of regions, including none, and can't end inside one. A request takes up to 64
+structures and 64 triggers, compiling to at most 512 KiB of grammar; a malformed list returns HTTP 400 before any stream
+starts, naming the structure and field. xgrammar's own `{"type": "structural_tag", "format": {...}}` form is refused.
+The server compiles the request onto the same grammar engine as the other formats (xgrammar's `triggered_tags`), so
+the backends, drafting and thinking work as described above, and `grammar_budget` as described below. As with the
+other formats, it takes the place of the strict-tool grammar under `tool_choice: "auto"` and is refused beside
+`tool_choice: "required"` or a named function. Requests without it are unchanged.
+
 On the native server, `/v1/chat/completions` and `/v1/responses` enforce `tool_choice: "required"` and a named
 function with the engine's token grammar. Chat uses `{"type":"function","function":{"name":"lookup"}}`;
 Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are allowed; an unknown name or a required
@@ -781,6 +807,10 @@ Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
 uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
 whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
 starts after the think-end token. A reply cut short by `max_tokens` can remain incomplete and ends as `length`.
+With `--tool-think-close` (off by default), a required or named call on an engine that takes `thinking_budget` gets a
+think budget of `max_tokens - max(256, max_tokens / 4)`, or the request's own `thinking_budget` when that is smaller,
+so the think block closes with room left for the call instead of ending as `length`. It changes the reply of any such
+call whose thinking would have run past that point. `"auto"`, `"none"` and requests without tools are unchanged.
 Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
@@ -947,7 +977,7 @@ on those engines; with thinking disabled, the budget is not applied.
 server adds N to the reply's limit, capped by the context window, and the engine ends the reply when the tokens
 after the closing think marker reach the request's `max_tokens` (`finish_reason` `length`). Reasoning shorter than
 N leaves the answer its full `max_tokens`; longer reasoning counts against it. Lane engines apply it; on other
-engines, and with thinking disabled, `max_tokens` limits the whole reply as before.
+engines, and with thinking disabled, `max_tokens` limits the whole reply as before. Beside a long prompt, `TENSORFOLD_PREFILL_ORDER=srpt` counts a reply that is still reasoning as its `max_tokens` plus the reasoning it is still expected to need, from a moving average of the think blocks this server has seen close, and never more than its limit left (its `max_tokens` plus N, less what it has emitted); until the first has closed it counts as that.
 
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
@@ -1001,11 +1031,12 @@ A startup capacity estimate is not a measured release capacity.
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
 model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
-`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
-model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
-the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
-once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
-with a smaller `--context` or `--parallel`.
+`MemAvailable`, at most the free memory CUDA reports, less a reserve (a tenth of RAM, at least 4 GiB). CUDA does not
+count the page cache as free, so before loading, the server drops the checkpoint's own shards from it. On native CUDA
+a stream's window is `--context`, the model's own window at `--context 0`, or, when it is unset, the family's default
+capped at the model's own window; on the paged families the streams and pages then fill the budget up to the streams'
+windows plus the cache's pages, so once those exceed it, the free memory after load is the reserve. To leave room for
+other containers, start the server with a smaller `--context` or `--parallel`.
 `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
 one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
 workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
@@ -1446,7 +1477,8 @@ an engine that keeps no prompt states answers 501.
 - `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
   store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
   its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
-  and the order the stores were last opened in). States in RAM stay until they are evicted.
+  and the order the stores were last opened in). States in RAM stay until they are evicted, or until a
+  [flush](#flush-the-prompt-cache).
 
 What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
 their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
@@ -1517,6 +1549,31 @@ also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded
 `CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
 a proxied server keys.
 
+## Flush the prompt cache
+
+`POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
+for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
+queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
+"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
+cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
+long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
+given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
+keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
+may still resume from one. The body, if any, is ignored.
+
+An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
+answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,
+the flush is withdrawn: nothing is dropped, new requests start again, and the answer is 503 `timeout`. While a flush
+waits, `--idle-unload` does not unload the model; a model it has already unloaded is not loaded for a flush, which
+answers 503 `model_unloaded` (no state is in RAM then, and the states it saved to disk stay until a flush after the next
+request loads it).
+
+Who may flush is decided as for [cancelling a request](#cancel-a-request). With API keys it is an admin route: a full
+or `[admin]` key may flush from any address, a scoped key gets 403 `insufficient_scope` and a missing key 401. Without
+keys only a caller whose socket is on the loopback address (127.0.0.0/8 or ::1) may flush, and only when the request
+carries none of the proxy headers listed there; anyone else gets 403 `loopback_only`.
+
 ## The Responses API
 
 `POST /v1/responses` takes OpenAI's Responses request and runs it as the equivalent chat completion, through the
@@ -1531,7 +1588,9 @@ same handler and engine path. A response has that chat completion's prompt and t
   assistant message's `reasoning_content`. `instructions` becomes the system message and is not carried to a later
   turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
-  `parallel_tool_calls` works as in chat.
+  `parallel_tool_calls` works as in chat. `namespace` groups are accepted too, one level deep: their function children
+  reach the engine flattened as `<namespace>__<tool>`, and their `function_call` items carry the child's `name` plus
+  the group as `namespace`. A child's own name cannot start with its group's `<namespace>__` prefix.
 - `max_output_tokens` counts reasoning tokens too. `temperature`, `top_p`, `top_k`, `min_p` and `seed` sample as in
   chat.
 - `reasoning.effort` follows the chat effort rule: unset is the template's default and `none` turns thinking off.
@@ -1775,7 +1834,11 @@ server on the same journal does not start. Benchmark child servers never inherit
 Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
 the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
 thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
-reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+reply's size and SHA-256, its `token_sha256`, the reply bytes in base64 when they fit 4 MiB, and its measures:
+`queue_ms` waiting for admission, `ttft_ms` from receipt to the first token, `decode_tps`, and `prompt_tokens`,
+`cached_tokens` and `completion_tokens`). The measures are the ones the server's `done` log line reports, taken as it
+already takes them; they are `null` for a request that ended before generating, and for a prompt list, whose prompts run
+apart, the counts are summed and the timings are the last prompt's. Responses and Messages
 requests are journaled in the chat form they are translated to. A raw completion whose `prompt` is a list is not
 replay-exact: its per-prompt prepared records are not written, and its individual drawn seeds are not journaled.
 
@@ -1794,6 +1857,23 @@ refused with a 400 `request_quarantined` before the engine sees it, which ends a
 crash. Other requests, and other keys sending the same body, are served as before; the check is one hash lookup. Without
 API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
 Ctrl-C) quarantines nothing.
+
+`tensorfold log` reads the journal in the terminal. It reads `PATH.3`, `PATH.2`, `PATH.1` and then `PATH`, oldest
+first, and never writes, locks or truncates them, so it works while a server runs; a torn last line is left for the
+next read. `PATH` defaults to `$TENSORFOLD_REQUEST_JOURNAL`.
+
+```sh
+tensorfold log list [PATH] [--last N] [--route chat|completions] [--model M]   # one line a request
+tensorfold log show chatcmpl-example [PATH]   # the request as journaled and its reply, decoded
+tensorfold log follow [PATH]                  # each newly finished request as it lands, across rotations
+```
+
+A `list` line holds the start time (UTC), reply id, route, model, status and outcome, prompt and completion tokens,
+time to first token and decode rate; a request with no `finish` shows as in flight, and one a crash left open as
+quarantined. `show` prints the messages or prompt (image and PDF data stay `<redacted>`), then the reply's text,
+reasoning, tool calls and finish reason, joined from the stream's deltas for a streamed reply, with its tokens and
+timings; a reply too large to keep shows its size and SHA-256. `--json` prints each request's records as journaled, one
+object a line. Ctrl-C ends `follow`.
 
 `tools/replay_request.py` lists, clears and replays journaled requests:
 

@@ -85,6 +85,7 @@ pub const flags = [_]Flag{
     .{ .name = "--thinking-reserve", .native = true },
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
     .{ .name = "--loop-guard-stop", .kind = .store_true, .native = true },
+    .{ .name = "--tool-think-close", .kind = .store_true, .native = true },
     .{ .name = "--no-drafts", .kind = .store_true, .native = true },
     .{ .name = "--keep-warm", .native = true },
     .{ .name = "--silence-floor-dbfs", .native = true },
@@ -134,7 +135,8 @@ pub const flags = [_]Flag{
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
-    .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
+    .{ .name = "--tp", .native = served("--tp") }, // 1 to 64; each family admits its own worlds
+    .{ .name = "--pp", .native = served("--tp") }, // 1 until pipeline stages serve (#2005)
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
@@ -227,6 +229,7 @@ pub const Args = struct {
     thinking_reserve: i64 = 0,
     loop_guard: bool = false,
     loop_guard_stop: bool = false, // the reply ends where the loop guard fires (implies --loop-guard)
+    tool_think_close: bool = false, // a required or named tool call closes thinking in time for the call
     no_drafts: bool = false,
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
     idle_unload: i64 = 0, // seconds of idle past the last request before the engine closes (0: never; the next request reloads)
@@ -245,6 +248,7 @@ pub const Args = struct {
     slide_drift_gate: bool = false,
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
+    parallel_named: bool = false, // --parallel was on the command line: TENSORFOLD_PARALLEL then stays out of the way
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -256,6 +260,8 @@ pub const Args = struct {
     spill_gib: ?f64 = null, // disk for states evicted from the prompt cache, every model together (null or 0: off)
     tp: u32 = 1,
     rank: u32 = 0,
+    tp_given: bool = false, // --tp named on the command line (a family's rank aliases fill it otherwise)
+    rank_given: bool = false,
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
@@ -367,11 +373,9 @@ fn spillWith(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!voi
 fn spills(args: Args) bool {
     return (args.spill_gib orelse 0) > 0;
 }
-
 pub fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
 }
-
 pub fn float(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!f64 {
     return @import("fields.zig").pyFloat(v) orelse fail(u, a, "argument {s}: invalid float value: '{s}'", .{ name, v });
 }
@@ -477,7 +481,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--decode-share")) {
         out.decode_share = try float(u, a, name, v);
         if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
-    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--tool-think-close")) out.tool_think_close = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         out.compact_auto = std.mem.eql(u8, v, "auto"); // each occurrence replaces both fields, so the last one wins
         out.compact_fraction = null;
         if (!out.compact_auto) {
@@ -489,7 +493,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-drift-gate")) out.slide_drift_gate = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel, out.parallel_named = .{ v, true } else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
@@ -527,7 +531,6 @@ pub fn parallel(text: []const u8) ?u32 {
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
 }
-
 /// What a server asks of its engine, from its flags.
 pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
     return @import("drama_cfg.zig").withGuidance(args.cfg, .{
@@ -570,24 +573,21 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .keep = args.checkpoint_slots,
         .tp = args.tp,
         .rank = args.rank,
+        .given = .{ .tp = args.tp_given, .rank = args.rank_given },
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
         .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
     });
 }
-
 /// ``capabilities --json`` (cli_capabilities.zig): the engine side, then the table's native flags and variables.
 pub const Engines = @import("cli_capabilities.zig").Engines;
 pub const capabilities = @import("cli_capabilities.zig").capabilities;
-
 /// The CUDA build's and GPU engine's flag parsers (cli_gpu_flags.zig).
 pub const cudaFlag = @import("cli_gpu_flags.zig").cudaFlag;
 pub const gpuFlag = @import("cli_gpu_flags.zig").gpuFlag;
 pub const ranks = @import("cli_gpu_flags.zig").ranks;
-
 const cli = @This();
-
 /// The private flag helpers cli_test.zig checks.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;
