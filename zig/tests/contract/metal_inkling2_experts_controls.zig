@@ -38,12 +38,9 @@ pub const Mutation = enum {
             .mx_gu_up => .{ .from = "const uint gr = 2u * n, ur = gr + 1u;", .to = "const uint gr = 2u * n, ur = gr;" },
             .nv_down_phi => .{ .from = "const float phi = ink2_phi(amax, denominator, expert);", .to = "const float phi = precise::divide(2.0f * amax[expert], denominator[0]);" },
             .nv_decode_nibble => .{ .from = "W[row * (a.k / 2u) + col / 2u], col,", .to = "W[row * (a.k / 2u) + col / 2u], col + 1u," },
-            .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k));", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k));" },
+            .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k, lane);", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k, lane);" },
             .mx_decode_scale => .{ .from = "S[row * (a.k / 32u) + col / 32u]", .to = "S[row * (a.k / 32u) + col / 16u]" },
-            .combine_slot_order => .{
-                .from = "for (uint expert = 0; expert < a.experts; ++expert)\n      for (uint slot = 0; slot < a.topk; ++slot)\n        if (uint(ids[group * a.topk + slot]) == expert)\n          sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
-                .to = "for (uint slot = 0; slot < a.topk; ++slot)\n      sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
-            },
+            .combine_slot_order => .{ .from = "if (rank == r && uint(id) < a.experts)", .to = "if (slot == r && uint(id) < a.experts)" },
         };
     }
 };
