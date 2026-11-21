@@ -53,6 +53,13 @@ __device__ __forceinline__ float swiglu(float g, float u, float limit) {
   return bf(gv / (1.f + expf(-gv))) * uv;
 }
 
+// Inkling's soft-capped SwiGLU on fp32 sums (tf_ink2_gateup's form): gc tanh(g / gc) sigmoid(g) uc tanh(u / uc).
+// sigmoid from exp(-|g|): a gate far below zero keeps its tiny value instead of 1 / (1 + inf) = 0.
+__device__ __forceinline__ float softcap_swiglu(float g, float u, float gc, float uc) {
+  const float e = expf(-fabsf(g)), sg = g >= 0.f ? 1.f / (1.f + e) : e / (1.f + e);
+  return gc * tanhf(g / gc) * sg * (uc * tanhf(u / uc));
+}
+
 // a < 0 ? 0 : a, not fmaxf, which would make a NaN sum 0.
 __device__ __forceinline__ float relu2(float a) {
   const float b = bf(a), u = b < 0.f ? 0.f : b;
@@ -61,7 +68,7 @@ __device__ __forceinline__ float relu2(float a) {
 
 template <int EPI, int M, int RT>
 __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int r, void* out, int N, int col0, int pr0,
-                                         int pr1, bool v0, bool v1, float limit) {
+                                         int pr1, bool v0, bool v1, float limit, float limit2 = 0.f) {
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     if (!(h ? v1 : v0)) continue;
@@ -80,6 +87,9 @@ __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int 
         } else if constexpr (EPI == 2) {
           o0 = swiglu(a0, acc[M - 1][r][j][2 * h], limit);
           o1 = swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit);
+        } else if constexpr (EPI == 4) {  // limit and limit2: the gate's and the up's caps
+          o0 = softcap_swiglu(a0, acc[M - 1][r][j][2 * h], limit, limit2);
+          o1 = softcap_swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit, limit2);
         } else {
           o0 = a0;
           o1 = a1;

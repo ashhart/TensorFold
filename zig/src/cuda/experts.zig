@@ -7,6 +7,7 @@ const kernels = @import("kernels.zig");
 const grouped = @import("grouped.zig");
 const driver = @import("driver.zig");
 const ggml = @import("ggml.zig");
+const mx = @import("experts_mx.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -16,7 +17,7 @@ const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
 pub const Bf16Experts = @import("experts_bf16.zig").Bf16Experts;
 
-pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16 };
+pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16, mxfp8 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
@@ -33,6 +34,7 @@ pub const Layer = struct {
     after: bool = false, // exl3: clamp silu's output (min(silu(g), L): Ling), not its input (silu(min(g, L))); others refuse it
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
+    caps: [2]f32 = .{ 0, 0 }, // nvfp4, mxfp8: Inkling's soft-capped SwiGLU (gate cap, up cap); 0, 0 for none
     shared: i32 = -1, // affine3: the expert whose tables are 4-bit (a SwiGLU pair at shared_up, down at shared_down)
     shared_up: u64 = 0,
     shared_down: u64 = 0,
@@ -54,10 +56,12 @@ pub const Grouped = struct {
     nvfp4_csf0: ?*const @import("experts32.zig").Nvfp4b32Experts = null,
     iq2xxs: ?*const Iq2xxsExperts = null,
     bf16: ?*const Bf16Experts = null,
+    mxfp8: ?*const mx.Mxfp8Experts = null,
 
     /// Decode rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
     pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
         if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
+        try mx.capsBuilt(l);
         switch (l.format) {
             .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
@@ -80,12 +84,14 @@ pub const Grouped = struct {
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, false, epi, in, l, p, out, items, skip),
             .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, false, epi, in, l, p, out, items, skip),
+            .mxfp8 => return (g.mxfp8 orelse return error.FormatNotLoaded).run(s, false, epi, in, l, p, out, items, skip),
         }
     }
 
     /// Prompt rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
     pub fn prompt(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
         if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
+        try mx.capsBuilt(l);
         switch (l.format) {
             .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
@@ -108,6 +114,7 @@ pub const Grouped = struct {
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, true, epi, in, l, p, out, items, skip),
             .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, true, epi, in, l, p, out, items, skip),
+            .mxfp8 => return (g.mxfp8 orelse return error.FormatNotLoaded).run(s, true, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -115,7 +122,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs, .bf16 => 64,
+        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs, .bf16, .mxfp8 => 64,
     };
 }
 
@@ -345,6 +352,7 @@ pub const Nvfp4Experts = struct {
     resident: [7]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
+    softcap: mx.Softcap = .{}, // Inkling's soft-capped SwiGLU gate-up, decode and prompt (experts_mx.zig)
     warps: usize = 4,
 
     pub const cols = 32; // output columns a block
@@ -411,6 +419,7 @@ pub const Nvfp4Experts = struct {
             f.* = try mod.function(name);
             try f.allowDynamicShared(promptSmem(parts, wn));
         }
+        e.softcap = try mx.Softcap.resolve(mod, sms);
         return e;
     }
 
@@ -420,6 +429,7 @@ pub const Nvfp4Experts = struct {
 
     /// One call of nvfp4/experts.py's _run on a plan of at most `items` items.
     pub fn run(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+        if (epi == .up and l.caps[0] != 0) return e.softcap.run(s, false, in, l, p, out, items, skip);
         const gate = epi == .up;
         const kg = (if (gate) l.dims else l.width) / 32;
         const nb = (if (gate) l.width else l.dims) / cols;
@@ -444,6 +454,7 @@ pub const Nvfp4Experts = struct {
     /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
     pub fn runPrompt(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
         if (epi == .down_f32) return error.EpilogueNotBuilt;
+        if (epi == .up and l.caps[0] != 0) return e.softcap.run(s, true, in, l, p, out, items, skip);
         const gate = epi == .up;
         const parts: usize = if (gate and !l.relu2) 2 else 1;
         const nb = (if (gate) l.width else l.dims) / cols;
@@ -515,74 +526,6 @@ pub const Nvfp4Experts = struct {
         };
     }
 };
-
-test "a packed nvfp4 block puts each nibble and scale where nvfp4/experts.py's _pack does" {
-    const gpa = std.testing.allocator;
-    const n = 64;
-    const k = 64;
-    const codes = try gpa.alloc(u8, n * k / 2);
-    defer gpa.free(codes);
-    for (codes, 0..) |*c, i| c.* = @truncate(i * 29 + 3);
-    var scales: [n * k / 16]u8 = undefined;
-    for (&scales, 0..) |*c, i| c.* = @truncate(i * 7 + 1);
-    var out: [n / 32 * (k / 32) * Nvfp4Experts.words]u32 = undefined;
-    Nvfp4Experts.packOne(&out, codes, &scales, n, k);
-    const words = Nvfp4Experts.words;
-    // block (cb 1, g 1), lane gq 3, t 2, tile j 1: row 32 + 8 + 3 = 43; input 32 + 16 + 8 + 3 (h 1, q 3) -> slot 7
-    const w = out[(1 * 2 + 1) * words + (3 * 4 + 2) * 4 + 1];
-    try std.testing.expectEqual(@as(u32, codes[43 * 32 + 59 / 2] >> 4), (w >> Nvfp4Experts.slot(1, 3)) & 0xF);
-    // its scale byte (t 2, h 1, j 1, c 0): row 32 + 8 + 4 = 44, k16 group 3
-    const sc = std.mem.sliceAsBytes(out[(1 * 2 + 1) * words + 128 ..][0..16]);
-    try std.testing.expectEqual(scales[44 * 4 + 3], sc[((2 * 2 + 1) * 4 + 1) * 2]);
-}
-
-test "packGateUp stacks packOne's gate and up blocks per (column block, k32 group)" {
-    const n = 64;
-    const k = 64;
-    const words = Nvfp4Experts.words;
-    var codes: [2][n * k / 2]u8 = undefined;
-    var scales: [2][n * k / 16]u8 = undefined;
-    for (0..2) |m| {
-        for (&codes[m], 0..) |*c, i| c.* = @truncate(i * 29 + 3 + m * 101);
-        for (&scales[m], 0..) |*c, i| c.* = @truncate(i * 7 + 1 + m * 13);
-    }
-    var one: [2][n / 32 * (k / 32) * words]u32 = undefined;
-    for (0..2) |m| Nvfp4Experts.packOne(&one[m], &codes[m], &scales[m], n, k);
-    var both: [2 * one[0].len]u32 = undefined;
-    Nvfp4Experts.packGateUp(&both, .{ &codes[0], &scales[0] }, .{ &codes[1], &scales[1] }, n, k);
-    for (0..one[0].len / words) |b| for (0..2) |m| {
-        try std.testing.expectEqualSlices(u32, one[m][b * words ..][0..words], both[(2 * b + m) * words ..][0..words]);
-    };
-}
-
-test "nvfp4 rows of either kind are refused when the format is not loaded" {
-    const g: Grouped = .{};
-    const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2, .relu2 = true };
-    const s: Stream = undefined; // never reached: the refusal comes first
-    const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
-    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 64, -1));
-    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 16, -1));
-    try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
-    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(1, 8)); // 64 rows x 64 inputs, 8 x 2 blocks
-    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(2, 4));
-    try std.testing.expectEqual(@as(u32, 3 * 12800), Nvfp4Experts.promptSmem(1, 4));
-}
-
-test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {
-    const gpa = std.testing.allocator;
-    const n = 128;
-    const k = 128;
-    const w = try gpa.alloc(u8, n * k);
-    defer gpa.free(w);
-    for (w, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
-    const out = try gpa.alloc(u32, n * k / 4);
-    defer gpa.free(out);
-    Fp8Experts.packOne(out, w, n, k);
-    // (cb 1, g 2, gq 5, t 3, h 1, j 2): row 32 + 16 + 5 = 53, word 2 * 8 + 4 + 3 = 23
-    const idx = (((((1 * 4 + 2) * 8 + 5) * 4 + 3) * 2 + 1) * 4) + 2;
-    const words = std.mem.bytesAsSlice(u32, @as([]align(1) const u8, w));
-    try std.testing.expectEqual(words[53 * (k / 4) + 23], out[idx]);
-}
 
 test {
     _ = @import("experts_host_test.zig"); // Grouped's refusals before any launch

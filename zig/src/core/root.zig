@@ -57,6 +57,7 @@ pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const nvfp4_csf32 = @import("nvfp4_csf32.zig");
 pub const modelopt = @import("modelopt.zig");
+pub const expert_decode = @import("expert_decode.zig");
 /// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
 pub const picture = @import("picture/picture.zig");
 /// Qwen-VL image input every Qwen3.5-VL checkpoint shares: settings, geometry, M-RoPE positions, the tower's tables.
@@ -86,6 +87,7 @@ test {
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;
+    _ = expert_decode;
     _ = gguf;
     _ = affine4_host;
     _ = rope_yarn;

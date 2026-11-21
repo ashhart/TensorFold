@@ -234,6 +234,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "bf16-experts")) return if (rest.len == 0) @import("bf16_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_bf16.zig").run(gpu) else error.UnknownCommand;
+    if (std.mem.eql(u8, cmd, "stored-experts")) return storedExperts(gpu, rest);
     if (std.mem.eql(u8, cmd, "projection-f32")) return projection_f32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
@@ -407,4 +408,13 @@ fn info(gpu: check.Gpu) !void {
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;
     return false;
+}
+
+/// Inkling 2 Mini's stored experts: `contract`, `ckpt DIR` (layers 0 and 20) or `bench DIR`.
+fn storedExperts(gpu: check.Gpu, rest: []const [:0]const u8) !void {
+    const what = try arg(rest, 0);
+    if (std.mem.eql(u8, what, "contract")) return @import("contract_stored_experts.zig").run(gpu);
+    if (std.mem.eql(u8, what, "ckpt")) return @import("stored_experts_tests.zig").ckpt(gpu, try arg(rest, 1));
+    if (std.mem.eql(u8, what, "bench")) return @import("stored_experts_bench.zig").bench(gpu, try arg(rest, 1));
+    return error.UnknownCommand;
 }
