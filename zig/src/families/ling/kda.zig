@@ -14,6 +14,7 @@ pub const Shape = struct {
     heads: u32,
     lower_bound: f32,
     eps: f32,
+    stored_rate: bool = false,
 
     pub fn of(c: *const config.Config) Shape {
         return .{ .heads = c.kda_heads, .lower_bound = c.lower_bound, .eps = c.eps };
@@ -57,11 +58,13 @@ fn mixAs(
     o_norm: []const f32,
     s: Shape,
     rows: u32,
+    history: ?[][3]T,
 ) void {
     const W = s.width();
     const H = s.heads;
     const window_cap = 3 * max_width;
-    var windows: [window_cap][3]T = @splat(.{ 0, 0, 0 });
+    var local: [window_cap][3]T = @splat(.{ 0, 0, 0 });
+    const windows = history orelse local[0 .. 3 * W];
     const scale: T = if (T == f32) q_scale else 1.0 / @sqrt(@as(T, @floatFromInt(dim)));
     const lower: T = @floatCast(s.lower_bound);
     const eps: T = @floatCast(s.eps);
@@ -72,7 +75,7 @@ fn mixAs(
             var k: [dim]T = undefined;
             var v: [dim]T = undefined;
             var a: [dim]T = undefined;
-            const rate = @exp(@as(T, @floatCast(A_log[h])));
+            const rate = if (s.stored_rate) @as(T, @floatCast(A_log[h])) else @exp(@as(T, @floatCast(A_log[h])));
             for (0..dim) |d| {
                 const ch_base = h * dim + d;
                 inline for (.{ 0, 1, 2 }, .{ &q, &k, &v }, .{ conv_q, conv_k, conv_v }) |part, slot, cw| {
@@ -142,7 +145,30 @@ pub fn mix(
     rows: u32,
 ) error{KdaWidthTooWide}!void {
     if (s.width() > max_width) return error.KdaWidthTooWide;
-    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
+}
+
+/// Incremental KDA carries the exact three preceding projections beside its recurrent matrix.
+pub fn mixState(
+    y: []f32,
+    S: []f32,
+    proj: []const f32,
+    fgate: []const f32,
+    braw: []const f32,
+    g2: []const f32,
+    conv_q: []const f32,
+    conv_k: []const f32,
+    conv_v: []const f32,
+    A_log: []const f32,
+    dt_bias: []const f32,
+    o_norm: []const f32,
+    s: Shape,
+    rows: u32,
+    history: [][3]f32,
+) error{ KdaWidthTooWide, KdaHistoryShape }!void {
+    if (s.width() > max_width) return error.KdaWidthTooWide;
+    if (history.len != 3 * s.width()) return error.KdaHistoryShape;
+    mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, history);
 }
 
 /// Same mixer in float64, no extra rounding: oracle/kda_inner.py (copy of Model.kda, r = identity).
@@ -163,7 +189,7 @@ pub fn mixF64(
     rows: u32,
 ) error{KdaWidthTooWide}!void {
     if (s.width() > max_width) return error.KdaWidthTooWide;
-    mixAs(f64, false, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f64, false, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
 }
 
 test "tiny KDA geometry is the k3_kda kernel's: 16 heads, D=128, 4 taps, lower_bound -5" {
@@ -276,7 +302,7 @@ fn checkOracle(bytes: []const u8) !void {
     const S_math = try a.alloc(f32, H * dim * dim);
     defer a.free(S_math);
     @memset(S_math, 0);
-    mixAs(f32, false, got_math, S_math, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    mixAs(f32, false, got_math, S_math, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows, null);
     try gateMixMath(want, got_math, W, rows, H);
 
     const got32 = try a.alloc(f32, want_n);
@@ -285,6 +311,20 @@ fn checkOracle(bytes: []const u8) !void {
     defer a.free(S32);
     @memset(S32, 0);
     try mix(got32, S32, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    const rates = try a.alloc(f32, H);
+    defer a.free(rates);
+    for (rates, A_log) |*v, log| v.* = @exp(log);
+    const stored_y = try a.alloc(f32, want_n);
+    defer a.free(stored_y);
+    const stored_s = try a.alloc(f32, H * dim * dim);
+    defer a.free(stored_s);
+    @memset(stored_s, 0);
+    var rate_shape = s;
+    rate_shape.stored_rate = true;
+    try mix(stored_y, stored_s, proj, fgate, braw, g2, conv_q, conv_k, conv_v, rates, dt_bias, o_norm, rate_shape, rows);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(got32), std.mem.sliceAsBytes(stored_y));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(S32), std.mem.sliceAsBytes(stored_s));
+
     var row: u32 = 0;
     while (row < rows) : (row += 1) {
         var worst: f64 = 0;
