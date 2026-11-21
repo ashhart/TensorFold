@@ -534,24 +534,8 @@ pub const Lanes = struct {
             st.n = @min(d, b);
             @memcpy(st.held[0..st.n], p.drafts[0..st.n]);
             for (st.conf[0..st.n], p.conf[0..st.n]) |*q, f| q.* = f;
-            if (markov) |m| try x.siblings(a, st, m, p, ask);
+            if (markov) |m| try @import("lanes_siblings.zig").siblings(x.opts, a, st, m, p, ask);
         }
-    }
-
-    /// The siblings after the pending token: the draft distribution's next first tokens and their Markov chains.
-    fn siblings(x: *Lanes, a: Allocator, st: *St, m: dspark.Markov, p: iface.Proposal, ask: iface.Ask) !void {
-        const c = x.opts.shape.candidates;
-        const z0 = try a.alloc(f32, c);
-        dspark.markovZ(m, p.cand.?[0..c], p.base.?[0..c], ask.anchor, z0);
-        const smp = ask.params.sampling();
-        const got = try tree.ranked(a, p.cand.?[0..c], z0, ask.start + 1, smp, st.held[0..1], st.sib[0..x.opts.siblings]);
-        const rows = @min(x.opts.sib_rows, st.n);
-        for (st.sib[0..got], 0..) |sib, j| {
-            st.sib_tokens[j][0] = sib.token;
-            const more = try tree.continuation(a, m, p.cand.?, p.base.?, c, sib.token, rows, ask.params, st.sib_tokens[j][1..]);
-            st.sib_len[j] = @intCast(1 + more);
-        }
-        st.n_sib = @intCast(got);
     }
 
     /// The held drafts as host tokens: the main chain, then each sibling's root and its chain (gpa-owned).

@@ -506,8 +506,13 @@ pub const GpuTarget = struct {
     }
 
     fn chainScored(p: *anyopaque, s: iface.Segment, out: []u32) anyerror!void {
+        const t = self_(p);
+        const masks = try t.chainMasks(s.tokens.len);
+        defer t.f.gpa.free(masks);
+        var chain = s;
+        chain.masks = masks;
         var one = [_][]u32{out};
-        return window(p, &.{s}, &one);
+        return window(p, &.{chain}, &one);
     }
 
     fn chainDrop(p: *anyopaque, slot: u32) anyerror!void {
