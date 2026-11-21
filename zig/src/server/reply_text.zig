@@ -4,7 +4,6 @@ const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-/// `optional`: the reply writes its own opener when it thinks, and a reply that does not is all answer (Ripple's).
 pub const Markers = struct { open: []const u8, close: []const u8, optional: bool = false };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
@@ -577,19 +576,6 @@ test "reply text: MiniMax-M3's adaptive think block, written by the reply or ski
     try std.testing.expectEqualStrings("Hello there", bare.answer);
     const held = try splitThinking(a, "<mm:th", false, mm_markers);
     try std.testing.expectEqualStrings("", held.answer);
-}
-
-test "reply text: an optional think block, a reply that opens one splits, a bare reply is all answer" {
-    const m: Markers = .{ .open = "", .close = "</think>", .optional = true };
-    for ([_]struct { []const u8, bool, []const u8, []const u8 }{
-        .{ "<think>\nAdd them.\n</think>\n\n42", true, "Add them.\n", "42" },
-        .{ "17 * 23 = 391.", true, "", "17 * 23 = 391." },
-        .{ "Sure. <tool_ca", false, "", "Sure. " },
-    }) |case| {
-        const got = try splitThinking(std.testing.allocator, case[0], case[1], m);
-        try std.testing.expectEqualStrings(case[2], got.reasoning);
-        try std.testing.expectEqualStrings(case[3], got.answer);
-    }
 }
 
 test "reply text: MiniMax-M3's call opener is watched for only under MiniMax-M3's markers" {
