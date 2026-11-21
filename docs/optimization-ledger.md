@@ -28,6 +28,9 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
+Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
+CUDA candidate bytes, parity and served/speed qualification are pending.
+
 ## The table
 
 Each cell is one of these:
@@ -53,7 +56,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
-| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
+| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | open C[#3135] | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
@@ -61,7 +64,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562] | done [#1925] | done [#1585]; wide C open [#2257] | done [#1385] | done [#997] |
-| 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
+| 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C open [#2257] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C open [#2257] | done [#1779] | done [#768] |
@@ -73,8 +76,13 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
-| 28. Scale index | ? | open M[#2760] | ? | ? | ? |
+| 28. Scale index | ? | done M[#2760], open M[#2805] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | failed H[#1603] | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
+| 33. Dependent launches | ? | ? | open [#3652] | ? | ? |
+| 34. Rows together | ? | ? (oQ4e dense is 5–8 bits) | no (no HIP) | no (no HIP) | failed H[#3305] |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -85,7 +93,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
 | 7. Host KV tier | yes | yes | yes | yes | yes |
-| 8. Disk cache | yes | yes | yes | yes | done¹ |
+| 8. Disk cache | yes | open [#3135] | open [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
 | 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
@@ -97,7 +105,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
 | 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
-| 20. Solo chunks | yes | yes | yes | yes | yes |
+| 20. Solo chunks | yes | yes | yes | yes | open M[#2950] |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | open [#2449] | open [#2449] | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |
@@ -107,6 +115,11 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
 | 28. Scale index | ? | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -139,6 +152,11 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -177,6 +195,11 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | open M[#2634] | no (scores) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (no HIP) | no (no HIP) | no (no HIP) | no (no HIP) |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -209,6 +232,11 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 27. Profiles | yes | yes | yes |
 | 28. Scale index | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
+| 30. Small-kernel fusion | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? |
+| 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -255,6 +283,11 @@ below; these are estimates for planning a port, not results.
 | 27. Profiles | none | none | none | names the opt-in switches |
 | 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
 | 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
+| 30. Small-kernel fusion | none | low | none | HIP Flash Next: 1.2–2.0 % of a round for the hyper-connection block, 2.4–4.0 % for all four groups |
+| 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
+| 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
+| 33. Dependent launches | none | medium | none | the next kernel starts as one ends; GLM decode +4..+7 % |
+| 34. Rows together | none | low | none | Lightning on HIP: dense launches faster, two greedy streams slower |
 
 ## The optimizations
 
@@ -266,8 +299,8 @@ below; these are estimates for planning a port, not results.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
-   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer | −1.2..−1.6 % TTFT | done [#2229] |
-   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer | −1.3..−2.9 % TTFT (no drafter) | done [#2229] |
+   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer when drafting | −1.2..−1.6 % TTFT; unread chunks [#2941] | done [#2229] |
+   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer when drafting | −1.3..−2.9 % TTFT (no drafter); unread chunks −0.5..−0.6 % (−28..−35 ms) cold 32K, −3 ms 8K [#2941] | done [#2229] |
    | gemma4 | global attention, 42–60 | drafter taps copy every row | ~1.5 % | easy |
    | dory | an MLP sublayer, 72 sublayers | none | ~1.3 % | easy |
    | spark25 | full attention, 36 | fused QKVG GEMM | ~2 % | medium |
@@ -279,7 +312,7 @@ below; these are estimates for planning a port, not results.
    | glm | KDA linear layer, 45 | must write the recurrent state for every row | small | hard |
    | qwen4, lfm2 | | | n/a | |
 
-   The qwen3_5 numbers are measured. The others are estimates (`~`): about 1/layers, minus the k/v share.
+   The qwen3_5 numbers are measured. The 35B-A3B unread-chunk path is a quiet-GB10 A/B: 32K −28.4 ms median per-round and −34.5 ms median adjacent (-0.5..-0.6 %), 8K −3..−4 ms, 2K level, tokens equal ([#2941], @jschmied). The others are estimates (`~`): about 1/layers, minus the k/v share.
 
 2. **KV pages from the core pool.** Streams lease KV pages from one `kv_pool` as their rows grow, instead of each
    reserving a whole `--context` window, so more streams fit and a short request holds little ([#1156], [#781]'s
@@ -325,8 +358,11 @@ below; these are estimates for planning a port, not results.
    what stays in RAM beside it.
 
 9. **FP8 KV cache.** `--kv-cache fp8` stores keys and values as e4m3 with a scale a row, which halves KV memory for
-   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; its quality qualification is
-   pending. DeepSeek-V4.1's compressed attention is FP8 by design.
+   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; it changes tokens against
+   the BF16 cache, so it is not qualified. A diagnostic receipt on FP4-Local at TP=2 measures 6,960 cache bytes a
+   token on each rank against 13,056 (−47%, beside 231 MiB fixed a stream either way), the mean NLL within 0.06%
+   teacher-forced and cold prompts 3 to 5% slower
+   ([receipt](receipts/glm-kv-fp8-3a56d4eb/README.md)). DeepSeek-V4.1's compressed attention is FP8 by design.
 
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
@@ -342,7 +378,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | nemotron | +5.9 % (2 streams), +13.3 % (8 streams) | [#1783] |
     | qwen3_5 (27B, DFlash2) | +3.5..+5.0 % decode | [#1783] |
-    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439] |
+    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439]; large-prompt a/b pair prepared, device gate pending (#2911) |
     | gemma4 (31B), spark25 | level | [#1783] |
 
 12. **Residual add plus norm in one launch.** The residual add and the next RMS norm run as one kernel, which saves a
@@ -410,6 +446,7 @@ below; these are estimates for planning a port, not results.
     | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
     | glm (C), TP=2 | prompts about 2 % sooner at 8K–128K, two chunks a step, replies unchanged | [#1423] |
     | gemma4 (C) | first token 31B −4..−5 %, E4B −9..−10 %, opt-in with `TF_GEMMA4_CHUNK_SOLO` | [#2391] |
+    | deepseek_v41 (M) | a reply's longest pause beside a 131K prompt 203 → 7 s, prompt's first token level (M3 Ultra, opt-in) | [#2950] |
 
     `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
@@ -463,14 +500,56 @@ below; these are estimates for planning a port, not results.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
-    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
-    dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
+    Macs before tensor units ([#2760], plan in [#2751]); its prompt gathers and grouped expert kernels read it too,
+    the routed experts' stored arrays are released and it is the default, `TF_FLASHNEXT_SCALE_INDEX=0` turning it
+    off ([#2805]). The dense rows still read the stored arrays. `?` cells: the same count has not been run on those
+    checkpoints.
 
 29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the
     default. It reuses DFlash2's taps and tap ring and adds a code bridge and an exact-sender table.
     `core/dspine.zig` and the tree walker in `core/lanes/draft_tree.zig` are on main through the CUDA binding
     ([#2633]); the Metal binding ([#2634]) is still open. On a GB10, against DFlash2: agent prompts decode 2–20 %
     faster, chat and code 10–19 % slower. It needs the checkpoint's own DSpine drafter, so other families have none.
+
+30. **Small-kernel fusion.** Launches under 20 µs, fused into one launch where they sit next to each other, to save the
+    gap between dispatches (2.0 µs median) and the per-launch floor (the cheapest kernels run 1.3 µs). Bounded under the
+    bar on Flash Next HIP, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | hyper-connection block 1.2–2.0 % of a round, all four groups together 2.4–4.0 %; estimates from measured gaps and launch counts, not built | [#1603], main `6c5cef894`, gfx1151 |
+
+31. **Prefetched and double-buffered stream tiles.** A separate stream-tile family for the hyper-connection
+    projections that prefetches or double-buffers the weight loads, bit-equal to the plain kernel at 1–8 rows. On
+    Flash Next HIP it gained nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | code 46.01–46.30 tok/s and chat 39.87–40.10 tok/s against main, every token hash equal | [#1603], one Strix Halo iGPU (gfx1151) |
+
+32. **Routed-expert prompt grid sized by filled items.** The prompt launch's grid follows the items actually filled
+    and not the decode tile's capacity, where about 91 % of the blocks exit empty at 4,096 rows. On Flash Next HIP the
+    empty blocks cost almost nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | first-token ratios 0.99–1.01, prompt tok/s at most 1.2 % better, decode and concurrency level | [#1603], one Strix Halo iGPU (gfx1151) |
+
+33. **Dependent launches.** On sm_90 and newer a kernel can launch while the one before it ends, then wait
+    (`griddepcontrol.wait`) only where it reads that kernel's output; a linear can stream its fixed weights in before
+    the wait. GLM ([#3652]) opens every kernel with the wait and its qmmf decode tiles load weights first: decode
+    +6.8 % plain and +4.0 % drafted at TP=2 on GB10, the same tokens. An input a predecessor writes must not be
+    `const __restrict__`, or ptxas may place its non-coherent load above the wait; `zig build check-pdl-loads`
+    checks the SASS.
+34. **Rows together on HIP's stream tile.** In a dense 4-bit product of 3 or 4 rows, every row's dot chains advance
+    one code pair at a time on gfx1151, so the rows' chains hide each other's latency; each output keeps its order of
+    operations, so the bits are unchanged. The launches are faster, but cheaper 3- and 4-row windows make the draft
+    policy draft shallower, and two greedy streams lose more than one stream gains.
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | nemotron (H), Lightning 4-bit | dense launches 3..16 % faster; one stream's decode +3.4..+5.9 %, two greedy streams −3.2 % and −2.3 % (2.98 against 3.08 tokens a chunk), same tokens; not proposed | measured on a Strix Halo, [#3305] |
+    | flashnext (H), Flash Next oQ4e | picks nothing: its dense weights are 5, 6 and 8 bits | measured on a Strix Halo, no PR |
 
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
@@ -516,6 +595,7 @@ below; these are estimates for planning a port, not results.
 [#1394]: https://github.com/ashhart/TensorFold/pull/1394
 [#1411]: https://github.com/ashhart/TensorFold/pull/1411
 [#1413]: https://github.com/ashhart/TensorFold/pull/1413
+[#3135]: https://github.com/ashhart/TensorFold/pull/3135
 [#1423]: https://github.com/ashhart/TensorFold/pull/1423
 [#1426]: https://github.com/ashhart/TensorFold/pull/1426
 [#1434]: https://github.com/ashhart/TensorFold/pull/1434
@@ -619,6 +699,12 @@ below; these are estimates for planning a port, not results.
 [#2375]: https://github.com/ashhart/TensorFold/pull/2375
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
+[#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2950]: https://github.com/ashhart/TensorFold/pull/2950
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#1603]: https://github.com/ashhart/TensorFold/issues/1603
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
+[#2805]: https://github.com/ashhart/TensorFold/pull/2805
+[#3305]: https://github.com/ashhart/TensorFold/issues/3305
+[#2941]: https://github.com/ashhart/TensorFold/issues/2941

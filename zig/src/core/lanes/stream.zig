@@ -12,20 +12,9 @@ const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
 
-pub const Reason = enum {
-    none,
-    stop,
-    length,
-    @"error",
-    cancelled,
-
-    pub fn name(r: Reason) []const u8 {
-        return if (r == .none) "" else @tagName(r);
-    }
-};
+pub const Reason = @import("stream_reason.zig").Reason;
 
 pub const Mode = enum { pipe, drain, verify, exit };
-
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
 pub const loop_warm_in: usize = 64;
@@ -82,19 +71,20 @@ pub const CancelCheck = struct {
 
 /// A kept prompt state to restore before prefill, and destinations for new states.
 pub const Reuse = struct {
-    saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
-    at: u32 = 0,
+    saved: ?*anyopaque = null,
+    at: u32 = 0, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
-    progress: ?MarkHook = null, // a hand-off's: called after each prompt segment the GPU finished, before the cut
-    remote: bool = false, // built on another machine's prefix, pulled or kept (#1594 step 2b): not the engine's own
-    pulled: bool = false, // pulled for this stream just now (a fresh remote prefix), not a kept remote state restored
+    progress: ?MarkHook = null, // the hand-off's: after each prompt segment the GPU finished
+    remote: bool = false,
+    pulled: bool = false, // another machine's prefix (pulled now, or kept then restored); #1594 step 2b
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).
 pub const MarkHook = struct {
     ptr: *anyopaque,
     at: *const fn (ptr: *anyopaque, s: *Stream, at: u32) void,
+    interrupted: ?*const fn (ptr: *anyopaque, s: *Stream, at: u32) void = null,
 };
 
 /// Drafts the backend holds for the stream's next round; a tree keeps its tokens and parents on the host.
@@ -139,6 +129,7 @@ pub const Spec = struct {
     loop_guard: bool = false,
     loop_stop: bool = false, // with loop_guard: finish where it fires instead of forcing the close
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
+    message_starts: []const u32 = &.{}, // where each templated message begins (api.Request.message_starts); not a cut
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
@@ -173,11 +164,13 @@ pub const Stream = struct {
     think_open: bool,
     answer_max: u32,
     answer_from: ?usize = null, // emitted() index after the first `think_end`: the answer starts there
+    think_seen: bool = false, // the think block's length is in srpt's estimate of how long reasoning runs
     loop_guard: bool,
     loop_stop: bool = false,
     loop_period: ?u32 = null,
     long_loop: long_loop.Index = .{}, // the reasoning's runs, for passages repeated verbatim (long_loop.zig)
     chunks: []const u32,
+    message_starts: []const u32,
     history_len: u32,
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
@@ -248,6 +241,7 @@ pub const Stream = struct {
     grant_short: bool = false, // the last grant verified fewer drafts than the stream held
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
+    draft_chances_cut: ?usize = null, // first chance a cut left unknown (null: measured); a chances hook marks it
     copy_width: ?u32 = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
@@ -274,6 +268,7 @@ pub const Stream = struct {
             .loop_guard = spec.loop_guard,
             .loop_stop = spec.loop_stop,
             .chunks = spec.chunks,
+            .message_starts = spec.message_starts,
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
@@ -322,6 +317,7 @@ pub const Stream = struct {
         s.grant_gain = null;
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
+        s.draft_chances_cut = null;
         s.copy_width = null;
         s.proposal_depth = null;
     }
@@ -379,7 +375,7 @@ pub const Stream = struct {
     /// Keep a completed, resumable prompt prefix before cancellation releases the backend's state.
     pub fn keepInterruptedPrefill(s: *Stream, at: u32) void {
         if (at <= s.cached or at >= s.prompt_len) return;
-        if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
+        if (s.reuse.hook) |hook| (hook.interrupted orelse hook.at)(hook.ptr, s, at);
     }
 
     /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.

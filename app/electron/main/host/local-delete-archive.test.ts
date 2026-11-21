@@ -96,8 +96,8 @@ assert.match(archive, /controls\.publish\?\.\('ticket'/, 'archive publishes tick
 assert.match(archive, /Restore the active parent project before restoring linked tickets/, 'ticket restore cannot create an active orphan under archived parents')
 assert.match(archive, /Restore the active linked thread in the same project/, 'ticket restore cannot reactivate against an archived or cross-project linked thread')
 
-const threadRuntime = source('./thread-runtime.ts')
-const threadStart = threadRuntime.slice(threadRuntime.indexOf('async function startThreadRun'), threadRuntime.indexOf('\n  function applyEventToThread'))
+const threadRuntime = source('./thread-run-start.ts')
+const threadStart = threadRuntime.slice(threadRuntime.indexOf('async function startThreadRun'), threadRuntime.indexOf('\n  return startThreadRun'))
 assert.match(threadStart, /thread\.archivedAt/, 'thread start rejects archived records')
 assert.match(threadStart, /project\.archivedAt/, 'thread start rejects an archived parent project')
 assert.ok(threadStart.indexOf('reserveStart') < threadStart.indexOf('aborters.set'), 'thread run lease is acquired before its aborter/start reservation')
@@ -108,9 +108,14 @@ assert.match(ticketWorker, /ticket\.archivedAt/, 'ticket worker rejects archived
 assert.ok(workerStart.lastIndexOf('inspectGitRepository') < workerStart.indexOf('ticket.status ='), 'all Git inspection awaits finish before ticket running state is committed')
 assert.ok(workerStart.indexOf('runLease.addWorkspaceKeys') < workerStart.indexOf('store.threads.unshift'), 'final-key lease conflicts fail before a new thread is persisted')
 
-const roomStart = workspace.slice(workspace.indexOf('async function startRoomRun'), workspace.indexOf("handle('room:cancel'"))
+const roomRuntime = source('./room-run-runtime.ts')
+const roomStartAt = roomRuntime.indexOf('async function startRoomRun')
+assert.ok(roomStartAt >= 0, 'the production Room startup remains discoverable')
+const roomStart = roomRuntime.slice(roomStartAt)
 assert.match(roomStart, /Local room execution does not support SSH workspaces/, 'local room startup fails closed before SSH paths reach local Git')
-assert.ok(roomStart.indexOf('reserveStart') < roomStart.indexOf('ensureRoomWorktree'), 'room startup reserves its workspace before asynchronous worktree setup')
+const reservationAt = roomStart.indexOf('reserveRoomStartup(')
+const worktreeAt = roomStart.indexOf('ensureRoomWorktree(')
+assert.ok(reservationAt >= 0 && worktreeAt > reservationAt, 'room startup reserves its workspace before asynchronous worktree setup')
 assert.match(roomStart, /if \(!startupComplete\)[\s\S]*runLease\.release/, 'room prelaunch failures release the startup reservation')
 
 const instructionWriter = workspace.slice(workspace.indexOf('async function withProjectInstructionLease'), workspace.indexOf("handle('projects:get'"))

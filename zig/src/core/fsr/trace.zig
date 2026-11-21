@@ -1,6 +1,11 @@
 //! Complete actual-route observations. A missing close or a partial window is rejected by the locality tool.
 const std = @import("std");
 pub fn Trace(comptime Sink: type) type {
+    return TraceOf(Sink, 1, null);
+}
+
+pub fn TraceOf(comptime Sink: type, comptime mtp_layers: usize, comptime mtp_experts: ?usize) type {
+    if (mtp_layers == 0 or mtp_experts == 0) @compileError("MTP trace stages and expert counts must be positive");
     return struct {
         const Self = @This();
         sink: Sink,
@@ -13,14 +18,23 @@ pub fn Trace(comptime Sink: type) type {
 
         pub fn init(sink: Sink, layers: usize, experts: usize, stride: usize, checkpoint: u64) !Self {
             if (layers == 0 or experts == 0 or stride == 0) return error.InvalidTraceHeader;
+            const total = std.math.add(usize, layers, mtp_layers) catch return error.InvalidTraceHeader;
             var s: Self = .{ .sink = sink, .layers = layers, .experts = experts };
-            try s.print("{{\"format\":\"tensorfold-fsr-v1\",\"layers\":{d},\"experts\":{d},\"slot_bytes\":{d},\"checkpoint\":\"{x}\",\"workload\":\"native-serving\",\"modes\":{{\"decode\":[", .{ layers + 1, experts, stride, checkpoint });
+            try s.print("{{\"format\":\"tensorfold-fsr-v1\",\"layers\":{d},\"experts\":{d},\"slot_bytes\":{d},\"checkpoint\":\"{x}\",\"workload\":\"native-serving\",\"modes\":{{\"decode\":[", .{ total, experts, stride, checkpoint });
             try s.indices(layers);
             try s.sink.write("],\"prompt\":[");
             try s.indices(layers);
             try s.sink.write("],\"batch\":[");
             try s.indices(layers);
-            try s.print("],\"mtp\":[{d}]}}}}\n", .{layers});
+            if (mtp_layers == 1 and mtp_experts == null) {
+                try s.print("],\"mtp\":[{d}]}}}}\n", .{layers});
+            } else {
+                try s.sink.write("],\"mtp\":[");
+                for (layers..total) |i| try s.print("{s}{d}", .{ if (i == layers) @as([]const u8, "") else ",", i });
+                try s.sink.write("]}");
+                if (mtp_experts) |n| try s.print(",\"mtp_experts\":{d}", .{n});
+                try s.sink.write("}\n");
+            }
             return s;
         }
 
@@ -47,11 +61,13 @@ pub fn Trace(comptime Sink: type) type {
                 try s.print("{{\"event\":\"begin\",\"window\":{d},\"mode\":\"{s}\",\"rows\":{d},\"streams\":{d}}}\n", .{ s.windows, @tagName(mode), rows, streams });
             }
             if (s.mode != mode or s.next.? != layer) return error.InvalidTraceOrder;
-            for (ids) |id| if (id >= s.experts) return error.InvalidExpert;
+            const limit = if (mode == .mtp) mtp_experts orelse s.experts else s.experts;
+            for (ids) |id| if (id >= limit) return error.InvalidExpert;
             try s.print("{{\"event\":\"route\",\"window\":{d},\"layer\":{d},\"ids\":[", .{ s.windows, layer });
             for (ids, 0..) |id, i| try s.print("{s}{d}", .{ if (i == 0) @as([]const u8, "") else ",", id });
             try s.sink.write("]}\n");
-            if (mode == .mtp or layer + 1 == s.layers) {
+            const end = s.layers + if (mode == .mtp) mtp_layers else @as(usize, 0);
+            if (layer + 1 == end) {
                 try s.print("{{\"event\":\"end\",\"window\":{d}}}\n", .{s.windows});
                 s.windows += 1;
                 s.next = null;

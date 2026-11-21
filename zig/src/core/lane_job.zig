@@ -49,9 +49,13 @@ pub const Job = struct {
     remote_looked: bool = false, // queued, it was weighed for a remote fill once
     exported: bool = false, // a handoff request's state went to the exporter (or its failure did)
     cut: [1]u32 = .{0}, // a handoff request's one chunk start: its prompt's last token
+    wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
+    fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
+    backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
 
-    /// Record first admission once, including a family planner and a background pass that later yields.
+    /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
+        job.wait_reason = .engine_busy;
         if (job.admitted_ns == null) job.admitted_ns = std.Io.Clock.awake.now(job.host.io).toNanoseconds();
     }
 
@@ -62,14 +66,23 @@ pub const Job = struct {
 
     /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
     pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, false);
+    }
+
+    pub fn interrupted(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
+        keepAt(ptr, s, at, true);
+    }
+
+    fn keepAt(ptr: *anyopaque, s: *lanes.Stream, at: u32, cancelled: bool) void {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
+        const cache = @import("lane_cache_queue.zig");
         const store = job.host.cache orelse return;
         if (s.reuse.remote and !s.reuse_failed and !job.host.keep_remote) return; // TF_PREFILL_KEEP=0: nothing on a pulled prefix
         store.keep_remote = s.reuse.remote and !s.reuse_failed; // on another machine's prefix (a refused copy prefilled here)
         defer store.keep_remote = false;
-        @import("lane_cache_queue.zig").keep(job.host, job, s, at);
+        if (cancelled) cache.interrupted(job.host, job, s, at) else cache.keep(job.host, job, s, at);
     }
 
     /// The warm pass's keep of `s`'s state at `at`, kept as remote when it stands on a remote prefix.

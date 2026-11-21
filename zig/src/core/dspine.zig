@@ -78,7 +78,8 @@ pub fn parse(root: std.json.Value) !Shape {
     const o = root.object;
     const arch = o.get("architectures") orelse return error.BadDraftConfig;
     if (arch != .array or arch.array.items.len != 1 or arch.array.items[0] != .string) return error.BadDraftConfig;
-    if (!std.mem.eql(u8, arch.array.items[0].string, "DFlashDraftModel")) return error.UnsupportedDraftConfig;
+    const name = arch.array.items[0].string; // Tencent's revs spell the same drafter either way
+    if (!std.mem.eql(u8, name, "DFlashDraftModel") and !std.mem.eql(u8, name, "DSpineDraftModel")) return error.UnsupportedDraftConfig;
     const d = try object(o, "dflash_config");
     const bridge = try object(d, "selected_prefix_code_bridge");
     const second = try object(o, "code_bridge_second_pass");

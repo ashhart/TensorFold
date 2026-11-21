@@ -45,6 +45,12 @@ pub const Leaving = struct {
     }
 };
 
+/// Cancellation may retain landed prompt state, or rewind advanced recurrence to a completed history cut.
+pub fn cancelPoint(at: u32, filled: u32, rewind: u32) u32 {
+    if (at <= filled) return at;
+    return if (rewind > 0 and rewind <= filled) rewind else 0;
+}
+
 /// The tokens slot 0 stands after, their rows' canonical decoded spans, and a rewind point inside them.
 pub const Standing = struct {
     tokens: []u32 = &.{},
@@ -156,22 +162,14 @@ pub fn needsRewind(cache: u64, snapshot: u64) bool {
     return cache < snapshot +| snapshot;
 }
 
-/// Only the actual user-end state gets an optional pin, without taking room from required states or promises.
+/// Only the actual user-end state gets an optional pin, without displacing another state or a promise.
 pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: u32, at: u32) bool {
     if (entry.at != history) return false;
-    var bytes = entry.bytes +| store.family.vtable.bytes(store.family.ptr, at);
-    var slots: usize = 2;
+    var bytes = store.held +| store.family.vtable.bytes(store.family.ptr, at);
+    var slots = store.entries.items.len +| 1;
     if (store.reservation_guard) |g| {
         bytes +|= g.promised.bytes;
         slots +|= g.promised.slots;
-    }
-    for (store.entries.items) |other| {
-        if (other == entry) continue;
-        const protected = if (store.reservation_guard) |g| g.protects(store, other) else false;
-        // With own-only eviction, conservatively leave every other state in place.
-        if (other.borrowers == 0 and !protected and !store.keep_others) continue;
-        bytes +|= other.bytes;
-        slots +|= 1;
     }
     return bytes <= store.budget and slots <= store.most;
 }
@@ -465,6 +463,7 @@ test "qwen27 resume: a client dropping the reasoning, a cold turn or a pass that
 test {
     _ = @import("qwen27_resume_remote_test.zig");
     _ = @import("qwen27_resume_cache_test.zig");
+    _ = @import("qwen27_cancel_test.zig");
 }
 
 test "qwen27 resume: the history rewind is needed until two rounded full-context states fit" {

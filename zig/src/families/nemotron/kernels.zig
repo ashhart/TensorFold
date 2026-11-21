@@ -8,7 +8,7 @@ const row = @import("../../core/row_projection.zig");
 pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_embed_bits", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
 
 /// Tree windows (nemotron_tree.metal): Mamba by parent for every forward, tree attention, compaction, gathers, top-k.
-pub const tree_names = [_][:0]const u8{ "tf_tree_conv", "tf_tree_scan", "tf_tree_tail", "tf_tree_merge", "tf_kv_compact", "tf_gather_rows", "tf_topk_probs", "tf_lane_tokens" };
+pub const tree_names = [_][:0]const u8{ "tf_tree_conv", "tf_tree_scan", "tf_tree_tail", "tf_tree_merge", "tf_kv_compact", "tf_gather_rows", "tf_topk_probs", "tf_lane_tokens", "tf_tree_conv_bolt", "tf_tree_scan_bolt" };
 
 /// A lone stream's GPU-side round (nemotron_round.metal): the verify's arguments, the accept, the stop, a row gather.
 pub const round_names = [_][:0]const u8{ "tf_round_args", "tf_round_accept", "tf_round_gather", "tf_round_root", "tf_round_top1", "tf_round_copy", "tf_round_tail", "tf_round_sib", "tf_round_attsel" };
@@ -88,7 +88,7 @@ pub fn keyOf(i: usize) []const u8 {
 pub fn sourceHash() u64 {
     var h = std.hash.Wyhash.init(0x6e);
     inline for (sources.nemotron.all) |k| h.update(k.source);
-    for ([_][]const u8{ sources.nemotron_glue, sources.nemotron_experts, sources.nemotron_tree, sources.nemotron_round, sources.nemotron_head, sources.nemotron_sample, sources.nax, sources.core_row_projection, sources.packed_metallib }) |s| h.update(s);
+    for ([_][]const u8{ sources.nemotron_glue, sources.nemotron_experts, sources.nemotron_tree, sources.nemotron_round, sources.nemotron_head, sources.nemotron_sample, sources.nax, sources.core_row_projection, sources.core_row_projection_legacy, sources.packed_metallib }) |s| h.update(s);
     for (sources.prefill) |f| h.update(f.text);
     return h.final();
 }
@@ -368,13 +368,13 @@ test "the probe accepts this runtime compiler, or the prebuilt metallib is prese
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     if (tensorInlineOk(device)) return; // the sources compile: no fallback needed here
-    try std.testing.expect(sources.packed_metallib.len > 0); // else load fails with PrebuiltMetallibMissing
+    if (sources.packed_metallib.len == 0) return skipNoPrebuilt();
 }
 
 test "the prebuilt metallib carries every packed kernel function" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
-    if (sources.packed_metallib.len == 0) return error.SkipZigTest;
+    if (sources.packed_metallib.len == 0) return skipNoPrebuilt();
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var lib = try mtl.Library.fromBytes(device, sources.packed_metallib);
@@ -384,6 +384,11 @@ test "the prebuilt metallib carries every packed kernel function" {
         const id = try lib.function(kernel.function);
         mtl.objc.release(id);
     }
+}
+
+fn skipNoPrebuilt() error{SkipZigTest} {
+    std.debug.print("no prebuilt nemotron_packed.metallib (built without Xcode's Metal compiler): packed check skipped\n", .{});
+    return error.SkipZigTest;
 }
 
 test "without tensor units the kernels load when the packed ones cannot link, as on macOS 26.3" {

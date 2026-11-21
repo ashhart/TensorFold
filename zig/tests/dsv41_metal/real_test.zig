@@ -127,6 +127,7 @@ fn timeLaunch(io: std.Io, r: *fixture.Rig, slots: []const pkg.kv.Slot, p0: u32, 
     x.segs = segs[0..slots.len];
     const t0 = std.Io.Clock.awake.now(io);
     const pass = fixture.Pass.begin(r.queue);
+    pkg.segs.declare(&x, pass.e);
     const s = r.streams();
     const pr = r.pres();
     try pkg.layer.encode(&x, pass.e, w, .{ .x = s[0], .pre = pr[0], .x_out = s[1], .pre_out = pr[1] });

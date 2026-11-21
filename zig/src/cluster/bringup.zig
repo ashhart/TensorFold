@@ -63,6 +63,31 @@ pub const Options = struct {
     /// After the goodbye, how long the links keep draining (and the peers' last posts keep landing) before they close.
     linger_ns: u64 = 300 * std.time.ns_per_ms,
     incarnation: u64 = 1,
+    /// Where Live reads the time and waits between steps: the real clock, or a test's.
+    clock: Clock = .{},
+};
+
+/// A time source and its wait; the default is the monotonic clock and a sleep (fabric.words).
+pub const Clock = struct {
+    ctx: ?*anyopaque = null,
+    now_fn: *const fn (?*anyopaque) u64 = realNow,
+    pause_fn: *const fn (?*anyopaque, u64) void = realPause,
+
+    pub fn now(c: Clock) u64 {
+        return c.now_fn(c.ctx);
+    }
+
+    pub fn pause(c: Clock, ns: u64) void {
+        c.pause_fn(c.ctx, ns);
+    }
+
+    fn realNow(_: ?*anyopaque) u64 {
+        return words.nowNs();
+    }
+
+    fn realPause(_: ?*anyopaque, ns: u64) void {
+        words.pause(ns);
+    }
 };
 
 /// A member that left the view: it said goodbye (.left) or fell silent past the dead time (.dead).
@@ -88,11 +113,18 @@ pub const Live = struct {
     opts: Options,
     /// This node's beat counter when it set its plan; a mismatch is reported once a later beat carried the plan.
     plan_beat: ?u64 = null,
-    /// This node's beat counter when it marked itself planned; up once a later beat carried the mark.
-    planned_beat: ?u64 = null,
+    /// The agreed view when this node marked itself planned, before a goodbye can change membership.
+    planned: ?Planned = null,
     /// Membership events already read.
     seen: usize = 0,
     culprit: Culprit = .{},
+
+    const Planned = struct {
+        beat: u64,
+        leader: node.NodeId,
+        epoch: u64,
+        view: u64,
+    };
 
     /// `inv.name` is this node's name in the file; its id is the name's, so each node checks the others by `names`.
     pub fn init(gpa: Allocator, inv: node.Inventory, t: transport.Transport, names: []const []const u8, plan: u64, opts: Options) Live {
@@ -113,10 +145,10 @@ pub const Live = struct {
 
     /// Until all `names` share a settled view and said they computed this plan; none leaves before the others agree.
     pub fn up(l: *Live) (Error || Allocator.Error || error{Corrupt})!Report {
-        const start = words.nowNs();
+        const start = l.opts.clock.now();
         const n = l.names.len;
         while (true) {
-            const now = words.nowNs();
+            const now = l.opts.clock.now();
             l.m.step(now, l.t, null) catch |err| return mapStep(err);
             if (l.m.stranger) |s| {
                 l.culprit = .{ .name = s.name, .expected = if (s.link < n) l.names[s.link] else "" };
@@ -129,12 +161,12 @@ pub const Live = struct {
             }
             if (l.m.me.plan == l.plan) {
                 try l.checkPlans();
-                if (l.planned_beat == null and l.m.ids.items.len == n and l.m.agreed(l.plan)) {
+                if (l.planned == null and l.m.ids.items.len == n and l.m.agreed(l.plan)) {
                     l.m.setProgress(.planned, 0);
-                    l.planned_beat = l.m.me.counter;
+                    l.planned = .{ .beat = l.m.me.counter, .leader = l.m.leader, .epoch = l.m.me.epoch, .view = l.m.me.digest };
                 }
-                if (l.planned_beat) |c| if (l.m.me.counter > c and l.allPlanned()) {
-                    return .{ .nodes = @intCast(n), .leader = l.m.leader, .epoch = l.m.me.epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = l.m.me.digest };
+                if (l.planned) |planned| if (l.m.me.counter > planned.beat and l.allPlanned(planned)) {
+                    return .{ .nodes = @intCast(n), .leader = planned.leader, .epoch = planned.epoch, .plan = l.plan, .agreed_ms = (now - start) / std.time.ns_per_ms, .view = planned.view };
                 };
             }
             if (l.nextLost()) |x| {
@@ -142,28 +174,28 @@ pub const Live = struct {
                 return error.MemberLost;
             }
             if (now - start >= l.opts.settle_ns) return if (l.m.me.plan == l.plan) error.NeverAgreed else error.NeverSettled;
-            words.pause(l.opts.poll_ns);
+            l.opts.clock.pause(l.opts.poll_ns);
         }
     }
 
     /// Keep the view alive for `for_ns` (null: until something happens); the first member lost or gone, else null.
     pub fn watch(l: *Live, for_ns: ?u64) (Allocator.Error || error{Corrupt})!?Lost {
-        const start = words.nowNs();
+        const start = l.opts.clock.now();
         while (true) {
-            l.m.step(words.nowNs(), l.t, null) catch |err| return mapStep(err);
+            l.m.step(l.opts.clock.now(), l.t, null) catch |err| return mapStep(err);
             if (l.nextLost()) |x| return x;
-            if (for_ns) |d| if (words.nowNs() - start >= d) return null;
-            words.pause(l.opts.poll_ns);
+            if (for_ns) |d| if (l.opts.clock.now() - start >= d) return null;
+            l.opts.clock.pause(l.opts.poll_ns);
         }
     }
 
     /// Say goodbye on every link, then keep the links draining for linger_ns so the goodbye lands before they close.
     pub fn leave(l: *Live) void {
         l.m.leave(l.t) catch {};
-        const start = words.nowNs();
-        while (words.nowNs() - start < l.opts.linger_ns) {
+        const start = l.opts.clock.now();
+        while (l.opts.clock.now() - start < l.opts.linger_ns) {
             if (l.m.rx.len > 0) _ = l.t.recv(l.m.rx); // flushes the link's backlog; what arrives now is dropped
-            words.pause(l.opts.poll_ns);
+            l.opts.clock.pause(l.opts.poll_ns);
         }
     }
 
@@ -201,12 +233,13 @@ pub const Live = struct {
         }
     }
 
-    /// Every node marked planned with this plan; one that has since said goodbye counts (it agreed before leaving).
-    fn allPlanned(l: *Live) bool {
+    /// Count planned acknowledgments for this view, including peers that said goodbye after agreeing.
+    fn allPlanned(l: *Live, planned: Planned) bool {
         if (l.m.me.phase != .planned) return false;
         var k: usize = 1;
         for (l.m.members.items) |x| {
             const e = x.entry;
+            if (e.epoch != planned.epoch or e.digest != planned.view) continue;
             if (e.plan == l.plan and e.phase == .planned and (e.state == .alive or e.state == .suspect or e.state == .left)) k += 1;
         }
         return k >= l.names.len;

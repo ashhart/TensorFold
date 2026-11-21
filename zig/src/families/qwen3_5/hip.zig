@@ -60,12 +60,15 @@ test {
     _ = slicing;
     _ = @import("backend/hip/draft/config_test.zig");
     _ = @import("backend/hip/draft/weights_test.zig");
+    _ = @import("backend/hip/forward/prompt_tail.zig");
+    _ = @import("backend/hip/forward/prompt_tail_test.zig");
     _ = draft;
     @import("std").testing.refAllDecls(draft.Draft);
     // the engine and its workers compile on a host with no GPU
     @import("std").testing.refAllDecls(hip_lanes.Hip);
     @import("std").testing.refAllDecls(worker.Worker);
     @import("std").testing.refAllDecls(engine.Engine);
+    _ = engine;
     // the prompt route the lane host actually calls, recorded on the host
     _ = @import("backend/hip/engine/hip_prompt_test.zig");
 }

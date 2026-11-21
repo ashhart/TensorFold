@@ -238,11 +238,12 @@ fn chunk(r: *Rig, layer: u32, a: u32, rows: u32, reps: u32) !void {
     try r.s.writeRows(&r.c, a, rows, rows);
     const saved = try r.a.dupe(u8, if (carry) |cb| cb.contents()[0..cbytes] else &.{});
     defer r.a.free(saved);
-    if (r.class == .reuse or r.class == .r1reuse) {
-        // a source's selection for these rows, as the reuse layer reads it
+    if (r.class == .reuse or r.class == .r1reuse or r.class == .r1masked) {
+        // a source's selection (and candidate mask for r1masked) for these rows, as the downstream layer reads it
         const keep = r.c;
         r.c = r.src_c;
         r.class = if (keep.compressRatio(layer) == 1) .r1 else .source;
+        r.class.apply(&r.c, layer);
         _ = try runTo(r, a, rows, .ix_select);
         r.class = Class.of(env("TF_DSV41_PT_CLASS"));
         r.c = keep;

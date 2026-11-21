@@ -24,6 +24,8 @@ pub const Options = struct {
     slots: u32 = 4, // streams at once
     spec: spec_mod.Settings = .{}, // the speculative pass (TF_DSV41_SPEC_DRAFT / _SPEC_NUCLEUS)
     plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
+    steps: bool = false, // prompts a step at a time between rounds (lane_steps.zig), for a target with pieces
+    step_rows: u32 = 0, // a step's rows when the host sets no cap (the target's prompt chunk)
 };
 
 /// A stream's slot and what the backend holds for it between rounds.
@@ -73,7 +75,7 @@ pub const Lanes = struct {
     by_slot: []?*St,
     retired: [16]bool = @splat(false),
     /// each slot's hand-off export point while its prompt runs in pieces (armed at `begin`, run by the target)
-    cuts: [16]Cut = undefined,
+    cuts: [16]cut.Cut = undefined,
     release_requested: [16]bool = @splat(false),
     pub const init = @import("lane_owner.zig").init;
     pub const deinit = @import("lane_owner.zig").deinit;
@@ -85,6 +87,7 @@ pub const Lanes = struct {
 
     pub fn backend(x: *Lanes) be.Backend {
         const pieces = x.target.pieces();
+        if (pieces and x.opts.steps) return .{ .ptr = x, .vtable = &vtable_steps, .chunk_invariant = true };
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
@@ -98,6 +101,13 @@ pub const Lanes = struct {
         v.join = join;
         v.pieces = roundPieces;
         v.finals = roundFinals;
+        break :blk v;
+    };
+    /// Options.steps: the lane host fills prompts a step at a time over the pieces, other streams' rounds between
+    const vtable_steps: be.Backend.VTable = blk: {
+        var v = vtable_pieces;
+        v.prefill_step = @import("lane_steps.zig").prefillStep;
+        v.reports_fill = true;
         break :blk v;
     };
 
@@ -154,33 +164,7 @@ pub const Lanes = struct {
     }
 
     const ingest = @import("lane_ingest.zig").ingest;
-
-    /// A hand-off's export point: the stream's mark hook, called one token before the prompt's end.
-    pub const Cut = struct {
-        s: *Stream,
-        at: u32,
-
-        fn run(ptr: *anyopaque) void {
-            const c: *Cut = @ptrCast(@alignCast(ptr));
-            const k = c.s.reuse.hook orelse return;
-            k.at(k.ptr, c.s, c.at);
-        }
-
-        fn progress(ptr: *anyopaque, at: u64) void {
-            const c: *Cut = @ptrCast(@alignCast(ptr));
-            const k = c.s.reuse.progress orelse return;
-            k.at(k.ptr, c.s, @intCast(at));
-        }
-    };
-
-    /// A hand-off stream's export point armed on its slot (the stream's marks hold the cut); false: not a hand-off.
-    fn armCut(x: *Lanes, slot: u32, s: *Stream) bool {
-        const ids = s.prompt();
-        if (ids.len < 2 or s.reuse.hook == null or std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(ids.len - 1)) == null) return false;
-        x.cuts[slot] = .{ .s = s, .at = @intCast(ids.len - 1) };
-        x.target.arm(slot, .{ .ptr = &x.cuts[slot], .run = Cut.run, .progress = Cut.progress });
-        return true;
-    }
+    const cut = @import("lane_cut.zig");
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
@@ -203,8 +187,9 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
-        const exporting = x.armCut(slot, s);
+        const exporting = cut.arm(x, slot, s);
         defer if (exporting) x.target.arm(slot, null);
+        if (s.images.len > 0) try x.target.setImages(slot, s.images);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
@@ -219,7 +204,7 @@ pub const Lanes = struct {
     }
 
     /// A prompt in pieces (lane_host.zig `Rounds`): new slot, drafter context and depth reset, target admits/restores.
-    fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
+    pub fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
         const x = self(ptr);
         if (x.streams.get(s) != null) return error.StreamLive;
         @import("lane_retire.zig").recover(x);
@@ -240,7 +225,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         x.target.admit(slot, s.max_new);
         const b = try x.target.begin(slot, s.prompt());
-        _ = x.armCut(slot, s); // the target runs it in `finish` / `tail`, once the replay is in and the last token is not
+        _ = cut.arm(x, slot, s); // the target runs it in `finish` / `tail`, once the replay is in and the last token is not
         try x.streams.put(x.gpa, s, st);
         x.by_slot[slot] = st;
         return .{ .cached = b.at, .damaged = b.damaged };
@@ -300,7 +285,7 @@ pub const Lanes = struct {
         return true;
     }
 
-    fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
+    pub fn finished(x: *Lanes, st: *St, ids: []const u32, first_: u32) !void {
         st.first = first_;
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
@@ -589,7 +574,7 @@ pub const Lanes = struct {
         return st.n > 0;
     }
 
-    fn release(ptr: *anyopaque, s: *Stream) void {
+    pub fn release(ptr: *anyopaque, s: *Stream) void {
         const x = self(ptr);
         const kv = x.streams.fetchRemove(s) orelse return;
         const st = kv.value;

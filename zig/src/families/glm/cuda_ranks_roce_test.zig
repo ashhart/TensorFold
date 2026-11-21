@@ -1,4 +1,4 @@
-//! TF_ROCE: the RoCE gather and the drafter split at three ranks or more, and how ranks agree on it.
+//! TF_ROCE and TF_GLM_DRAFT_SPLIT: the RoCE gather and the drafter split at three ranks or more, and how ranks agree.
 const std = @import("std");
 const cuda = @import("cuda");
 const ranks = @import("cuda_ranks.zig");
@@ -79,4 +79,51 @@ test "RoCE all-gather on this fabric: a mesh of four reaches every rank; a ring 
     // two ranks on one cable are each other's neighbours: the two-rank path as before
     Fabric.world = 2;
     for (0..2) |r| try std.testing.expectEqual(@as(?usize, null), cuda.roce.firstUnreachable(r, 2, {}, &Reach.reaches));
+}
+
+test "TF_GLM_DRAFT_SPLIT: off by default, 1 or 0, refused otherwise" {
+    const Env = struct {
+        var value: ?[]const u8 = null;
+        fn get(name: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, name, "TF_GLM_DRAFT_SPLIT")) value else null;
+        }
+    };
+    var problem: []const u8 = "";
+    for ([_]?[]const u8{ null, "0" }) |v| {
+        Env.value = v;
+        try std.testing.expect(!(try Settings.read(&Env.get, &problem)).draft_split);
+    }
+    Env.value = "1";
+    const on = try Settings.read(&Env.get, &problem);
+    try std.testing.expect(on.draft_split and !on.roce_wide);
+    Env.value = "yes";
+    try std.testing.expectError(error.BadSetting, Settings.read(&Env.get, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_DRAFT_SPLIT: 0 or 1", problem);
+}
+
+test "three ranks or more split the drafter MLP with TF_ROCE=1 or TF_GLM_DRAFT_SPLIT=1, where shares are 256-aligned" {
+    const df = @import("dflash.zig");
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 8 }) |world| {
+        const fits = world >= 2 and df.FF % world == 0 and (df.FF / world) % 256 == 0;
+        try std.testing.expectEqual(world == 2, df.mlpSplit(world, (Settings{}).draftWide()).split);
+        for ([_]Settings{ .{ .draft_split = true }, .{ .roce_wide = true } }) |s| {
+            const m = df.mlpSplit(world, s.draftWide());
+            try std.testing.expectEqual(fits, m.split);
+            try std.testing.expectEqual(if (fits) df.FF / world else df.FF, m.ff);
+        }
+    }
+}
+
+test "TF_GLM_DRAFT_SPLIT=1 is in the ranks' agreement at three ranks or more, and two ranks agree whatever it says" {
+    var all = [_]Fingerprint{
+        Fingerprint.of(3, 0, .{ .draft_split = true }, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        Fingerprint.of(3, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        Fingerprint.of(3, 2, .{ .draft_split = true }, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+    };
+    try std.testing.expectEqual(Mismatch{ .field = .draft_split, .rank = 1 }, mismatch(&all).?);
+    var two = [_]Fingerprint{
+        Fingerprint.of(2, 0, .{ .draft_split = true }, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+    };
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&two));
 }

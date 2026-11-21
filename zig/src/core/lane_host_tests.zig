@@ -34,3 +34,8 @@ test {
     _ = @import("lane_remote_cut_test.zig");
     _ = @import("lane_export_cancel_test.zig");
 }
+
+test {
+    _ = @import("lane_wait_reason_test.zig");
+    _ = @import("wait_reason.zig");
+}

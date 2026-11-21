@@ -76,6 +76,7 @@ fn engine(e: *q.engine.Engine, d: *cuda.Driver) void {
     d.api.cuStreamSynchronize = Driver.sync;
     d.api.cuMemcpyDtoDAsync_v2 = Driver.copy;
     d.api.cuLaunchKernel = Driver.launch;
+    e.scratch_rows = q.engine.grid_rows;
     e.d = d;
     e.stream = .{ .d = d, .handle = @ptrFromInt(17) };
     e.g = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };

@@ -7,6 +7,7 @@ pub const max_reference_samples = 30 * 44100;
 pub fn reference(samples: []const f32, rate: u32) !void {
     if (rate == 0 or rate > 192000 or samples.len == 0 or samples.len > @as(usize, rate) * 30)
         return error.BadReference;
+    if (rate / std.math.gcd(rate, @as(u32, 44100)) > 640) return error.BadReference;
     for (samples) |s| if (!std.math.isFinite(s)) return error.BadReference;
 }
 
@@ -52,4 +53,11 @@ test "typed reference rows are bounded and agree with their semantic code" {
     rows[1][1] = 3;
     try std.testing.expectError(error.BadCode, validate(&rows, ids, 16, 8));
     try std.testing.expectError(error.BadPromptSize, validate(&rows, ids, 2, 1));
+}
+
+test "voice reference: reduced resample width accepts standard rates and refuses pathological rates" {
+    for ([_]u32{ 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000, 176400, 192000 }) |rate|
+        try reference(&.{0}, rate);
+    for ([_]u32{ 44101, 44113, 191999 }) |rate|
+        try std.testing.expectError(error.BadReference, reference(&.{0}, rate));
 }

@@ -1,7 +1,7 @@
 //! One FP32 codec schema for prepared safetensors and the restricted native PTH reader.
 const std = @import("std");
 const core = @import("core");
-const pth = @import("codec_pth.zig");
+const pth = @import("core").torch_pth;
 const mapping = @import("codec_map.zig");
 const schema = @import("codec_schema.zig");
 

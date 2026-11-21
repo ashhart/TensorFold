@@ -484,10 +484,10 @@ test "glm prefill: the flag share keeps every CUDA chunk start on the grid while
     @memset(tokens, 7);
     var s = try Stream.init(a, .{ .id = "grid", .prompt = tokens, .max_new = 4, .chunks = &.{ 2048, 4096 } });
     defer s.deinit(a);
-    var hint: u32 = hostfill.capRows(&host); // the host's prefill_step hint: 0 for a gated-off family
+    var hint: u32 = hostfill.capRows(&host, s.prompt_len -| s.cached); // the host's prefill_step hint: 0 for a gated-off family
     try std.testing.expectEqual(@as(u32, 0), hint);
     while (!try fill.step(&f, &s, hint)) {
-        hint = hostfill.capRows(&host);
+        hint = hostfill.capRows(&host, s.prompt_len -| s.cached);
         try std.testing.expectEqual(@as(u32, 0), hint); // every step arrives uncapped: l.fill rides the grid
     }
     try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048; BadChunk never raised
@@ -507,7 +507,7 @@ test "glm prefill: a family that opts into chunk invariance gets the cap, and GL
     defer dec.deinit(a);
     try core.addStream(&dec);
     defer core.backend.release(&dec);
-    const hint = hostfill.capRows(&host);
+    const hint = hostfill.capRows(&host, dec.prompt_len -| dec.cached);
     try std.testing.expectEqual(hostfill.decode_cap_rows, hint); // opted in: the cap now reaches the driver
     const tokens = try a.alloc(u32, 5000);
     defer a.free(tokens);

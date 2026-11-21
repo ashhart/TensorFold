@@ -56,8 +56,8 @@ fn validLabel(label: []const u8) bool {
     return true;
 }
 
-const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices" };
-const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest" };
+const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices", "/api/tags", "/api/ps", "/api/version" };
+const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest", "/api/show" };
 const inferring = [_][]const u8{
     "/chat/completions",      "/v1/chat/completions", "/completions",           "/v1/completions",
     "/messages",              "/v1/messages",         "/messages/count_tokens", "/v1/messages/count_tokens",
@@ -65,6 +65,9 @@ const inferring = [_][]const u8{
     "/detokenize",            "/v1/detokenize",       "/v1/audio/speech",       "/v1/embeddings",
     "/v1/images/generations", "/decisions",           "/v1/decisions",          "/systemone",
     "/v1/systemone",          "/rerank",              "/v1/rerank",             "/v1/ocr",
+    "/v2/rerank",             "/score",               "/v1/score",              "/api/chat",
+    "/api/generate",          "/api/embed",           "/api/show",              "/apply-template",
+    "/v1/apply-template",
 };
 
 /// A gated request a key may make: the route as the dispatcher reads it, matched exactly, never by suffix.
@@ -75,11 +78,20 @@ pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     const reads_or_releases = std.mem.eql(u8, method, "GET") or std.mem.eql(u8, method, "DELETE");
     if (scopes.inference and reads_or_releases and @import("handoff_param.zig").routeId(route) != null) return true;
     if (std.mem.eql(u8, method, "GET")) {
-        if ((scopes.inference or scopes.read) and oneOf(route, &listing)) return true;
+        if ((scopes.inference or scopes.read) and (oneOf(route, &listing) or modelId(route) != null)) return true;
         return scopes.read and oneOf(route, &reading);
     }
     const put = std.mem.eql(u8, method, "PUT") and putRoute(route);
     return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
+}
+
+/// The id in GET /v1/models/{id} or /models/{id}, still escaped; a path ending in /models stays the listing's alias.
+pub fn modelId(route: []const u8) ?[]const u8 {
+    if (std.mem.endsWith(u8, route, "/models")) return null;
+    for ([_][]const u8{ "/v1/models/", "/models/" }) |head| {
+        if (route.len > head.len and std.mem.startsWith(u8, route, head)) return route[head.len..];
+    }
+    return null;
 }
 
 /// A key that may open a Responses WebSocket: admin, or inference (each create is checked again over the socket).

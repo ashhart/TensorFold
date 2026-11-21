@@ -352,7 +352,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     var mtp_known: usize = mtp0 + 1;
     var queued: u64 = 0; // rounds submitted
     var read: u64 = 0; // rounds whose records the host took
-    const log = platform.c.getenv("TF_ROUND_LOG") != null;
+    const log = (@import("sys").environment.Process{}).get("TF_ROUND_LOG") != null;
     var widths: [32]usize = undefined;
     var window_ms: [32]f64 = undefined;
     for (b.costs.window[0..b.costs.windows], 0..) |w, i| {

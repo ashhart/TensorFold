@@ -177,7 +177,12 @@ test "block scores and selection: relu-summed heads, the best blocks with ties t
     const ratio = 4;
     const top = 32;
     const blocks = 3000;
-    const ends = [_]i32{ 100, 4 * 3000 + 3, 4 * 1500, 4 * 33 + 1, 4 * 2999 + 2 };
+    // thirteen rows span two 8-row blockIdx.y tiles so staged indexing across tiles is exercised
+    const ends = [_]i32{
+        100,      4 * 3000 + 3, 4 * 1500,   4 * 33 + 1, 4 * 2999 + 2,
+        4 * 200,  4 * 500 + 3,  4 * 12 + 2, 4 * 1024,   4 * 64 + 1,
+        4 * 1800, 4 * 2500 + 3, 4 * 77 + 1,
+    };
     const rows = ends.len;
     var complete: [rows]i32 = undefined;
     for (&complete, ends) |*c, e| c.* = @divFloor(e, ratio);
@@ -229,6 +234,28 @@ test "block scores and selection: relu-summed heads, the best blocks with ties t
             "score row {d} block {d}",
             .{ r, b },
         );
+    };
+    // the kernel's own fp32 order, bit for bit: a lane's dims 32 apart, the 32-lane xor tree, then the heads in order
+    for (0..rows) |r| for (0..blocks) |b| {
+        if (!(complete[r] > top and b < complete[r])) continue;
+        var total: f32 = 0;
+        for (0..heads) |h| {
+            var lanes: [32]f32 = @splat(0);
+            for (&lanes, 0..) |*x, l| for (0..dims / 32) |i| {
+                const d = l + 32 * i;
+                x.* += hq[(r * heads + h) * dims + d] * @as(f32, @floatCast(t.value(hp[b * dims + d])));
+            };
+            var mask: usize = 16;
+            while (mask > 0) : (mask >>= 1) {
+                var next: [32]f32 = undefined;
+                for (&next, 0..) |*x, l| x.* = lanes[l] + lanes[l ^ mask];
+                lanes = next;
+            }
+            total += @max(lanes[0], 0);
+        }
+        const want = total / @sqrt(@as(f32, dims));
+        const got = gs[r * blocks + b];
+        try rig.expect(got == want, "score row {d} block {d}: {e} != {e}", .{ r, b, got, want });
     };
     // the selection runs on scores with ties written in: the GPU's, then a few equal to the cut
     for (0..rows) |r| for (0..blocks) |b| if (b % 50 == 5) {

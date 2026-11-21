@@ -28,7 +28,7 @@
   "Removing a folder stops discovery there; it never deletes its models, and a running model stays loaded until you stop the server.": "폴더를 제거하면 그곳의 모델 탐색을 중단합니다. 모델 자체는 삭제하지 않으며 실행 중인 모델은 서버를 중지할 때까지 유지됩니다.",
   "Rename": "이름 변경",
   "Render the plan panel with block progress bars and status glyphs.": "계획 패널을 블록 진행 막대와 상태 기호로 표시합니다.",
-  "Repeatable community-v1 measurements for cached models on this Mac.": "이 Mac의 캐시 모델에 대한 재현 가능한 community-v1 측정입니다.",
+  "Repeatable community-v2 measurements for cached models on this Mac.": "이 Mac의 캐시 모델에 대한 재현 가능한 community-v2 측정입니다.",
   "repeated checks": "회 반복 검사",
   "Replace matching records from the backup": "일치하는 기록을 백업에서 교체",
   "replaces the current instructions": "현재 지시를 교체합니다",

@@ -96,6 +96,12 @@ pub const Pull = struct {
     fn aborted(_: *anyopaque) void {} // the caller drops the blank state
 };
 
+/// What `open` refuses before dispatch: --prefill-from serves the 27B only.
+pub fn modelRefusal(f: Flags, model_type: []const u8) ?[]const u8 {
+    if (!f.on() or std.mem.eql(u8, model_type, "qwen3_5")) return null;
+    return "--prefill-from serves Qwen3.8-27B only (#1594 step 2b): serve this model without it";
+}
+
 /// What serve refuses before loading: one flag without the other, another model, or a drafter (no taps come across).
 pub fn refusal(f: Flags, qwen27: bool, drafter: bool) ?[]const u8 {
     if (!f.on()) return null;

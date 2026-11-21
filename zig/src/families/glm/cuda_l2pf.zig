@@ -100,7 +100,10 @@ fn sources(l: weights.Layer, site: Site) Sources {
             },
         },
         .f => switch (l.ffn) {
-            .moe => |m| s.add(m.router),
+            .moe => |m| {
+                s.add(m.router);
+                s.proj(m.shared_gu); // read after the routed experts, which no table holds (the router picks them)
+            },
             .dense => |m| switch (m.w) {
                 .nvfp4 => |x| {
                     s.lane(x.gate);
@@ -310,10 +313,11 @@ test "the table: each site's sources in its matmuls' order, site n from the next
     d.mixer.mla.q_b = .{ .bf16 = 0x7000_0000 };
     d.ffn = .{ .dense = undefined };
     d.ffn.dense.w = .{ .bf16 = .{ .gu = 0x9000_0000, .down = 0xa000_0000 } };
-    var e: weights.Layer = undefined; // layer 1: KDA on the lane and MoE
+    var e: weights.Layer = undefined; // layer 1: KDA on the lane and MoE, its shared expert block FP8 on the lane
     e.mixer = .{ .kda = k };
     e.ffn = .{ .moe = undefined };
     e.ffn.moe.router = 0x5000_0000;
+    e.ffn.moe.shared_gu = .{ .fp8g = .{ .mode = .fp8g, .codes = 0xb000_0000, .scales = 0x8000_0000, .n = 64, .k = 64, .npad = 64 } };
     const MiB = 1 << 20;
     var bufs = [_]cuda.DeviceBuffer{
         .{ .d = undefined, .ptr = 0x1000_0000, .len = 1 * MiB },
@@ -324,6 +328,8 @@ test "the table: each site's sources in its matmuls' order, site n from the next
         .{ .d = undefined, .ptr = 0x6000_0000, .len = 16 * MiB },
         .{ .d = undefined, .ptr = 0x7000_0000, .len = 17 * MiB },
         .{ .d = undefined, .ptr = 0x9000_0000, .len = 34 * MiB },
+        .{ .d = undefined, .ptr = 0x8000_0000, .len = 1 * MiB },
+        .{ .d = undefined, .ptr = 0xb000_0000, .len = 16 * MiB },
     };
     var rows: std.ArrayList([2]i64) = .empty;
     defer rows.deinit(t.allocator);
@@ -333,8 +339,10 @@ test "the table: each site's sources in its matmuls' order, site n from the next
         .{ 0x1000_0000, 1 * MiB }, // layer 0's n: layer 1's qkv scales whole, then its codes' head
         .{ 0x2000_0000, 11 * MiB },
         .{ 0x9000_0000, 12 * MiB }, // layer 0's f: its gate and up's head
-        .{ 0x5000_0000, 2 * MiB }, // layer 1's f: its router; its n would be the head's, its o is KDA's o
-        .{ 0x4000_0000, 12 * MiB },
+        .{ 0x5000_0000, 2 * MiB }, // layer 1's f: its router, then its shared gate-up's scales and its codes' head
+        .{ 0x8000_0000, 1 * MiB },
+        .{ 0xb000_0000, 9 * MiB },
+        .{ 0x4000_0000, 12 * MiB }, // layer 1's o, KDA's o; its n would be the head's
     };
     try t.expectEqualSlices([2]i64, &want, rows.items);
     try t.expectEqualSlices(Span, &.{
@@ -342,8 +350,8 @@ test "the table: each site's sources in its matmuls' order, site n from the next
         .{ .at = 2, .rows = 1, .bytes = 12 * MiB },
         .{ .at = 3 }, // DSA: no site o
         .{ .at = 3 },
-        .{ .at = 3, .rows = 1, .bytes = 2 * MiB },
-        .{ .at = 4, .rows = 1, .bytes = 12 * MiB },
+        .{ .at = 3, .rows = 3, .bytes = 12 * MiB },
+        .{ .at = 6, .rows = 1, .bytes = 12 * MiB },
     }, &spans);
     rows.clearRetainingCapacity();
     try t.expect(!try table(t.allocator, bufs[1..], &.{ d, e }, 12 * MiB, &rows, &spans));

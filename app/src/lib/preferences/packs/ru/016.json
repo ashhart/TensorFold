@@ -71,7 +71,7 @@
   "The community page could not open; try again in your browser.": "Не удалось открыть страницу сообщества; попробуйте в браузере.",
   "The comparison could not finish.": "Сравнение не завершилось.",
   "The comparison stopped before changing the engine.": "Сравнение остановлено до изменения движка.",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "Полный протокол community-v1 не выполнен; неполные ячейки не являются оценками производительности.",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "Полный протокол community-v2 не выполнен; неполные ячейки не являются оценками производительности.",
   "The conversation could not be renamed.": "Не удалось переименовать разговор.",
   "The document worker is not installed.": "Обработчик документов не установлен.",
   "The download action could not complete. Try again.": "Не удалось выполнить загрузку. Повторите.",

@@ -285,7 +285,11 @@ test "omitted seed, steps, guidance, negative_prompt and size reach the engine a
     defer gpa.free(reply.body);
     try t.expect(std.mem.indexOf(u8, reply.head, " 200 ") != null);
     try t.expectEqual(@as(usize, 1), stub.calls);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const item = (try json.parse(arena.allocator(), reply.body)).ok.get("data").?.array[0];
     try t.expectEqual(@as(u64, 42), stub.seed);
+    try t.expectEqual(stub.seed, try std.fmt.parseInt(u64, item.get("seed").?.int, 10));
     try t.expectEqual(@as(u32, 50), stub.steps);
     try t.expectEqual(@as(f32, 3), stub.guidance);
     try t.expectEqual(@as(usize, 0), stub.negative_len);
@@ -324,8 +328,8 @@ test "a sent size within a smaller host's limits still reaches the engine" {
 const Case = struct { body: []const u8, want: []const u8 };
 
 const refusals = [_]Case{
-    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":2}", .want = "n must be 1" },
-    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":0}", .want = "n must be 1" },
+    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":5}", .want = "n must be from 1 to 4" },
+    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":0}", .want = "n must be from 1 to 4" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"1000x1024\"}", .want = "size 1000 must be a positive multiple of 16" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"2048x2048\"}", .want = "size 2048 is past the 1536 limit a side" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"1552x1024\"}", .want = "size 1552 is past the 1536 limit a side" },
@@ -455,6 +459,22 @@ test "error.Busy from the engine is a 503 with Retry-After" {
     try t.expect(std.mem.indexOf(u8, reply.head, " 503 ") != null);
     try t.expect(std.mem.indexOf(u8, reply.head, "Retry-After:") != null);
     try t.expect(std.mem.indexOf(u8, reply.body, "the engine is busy") != null);
+}
+
+test "wait reason ledger: an images engine's Busy counts as an engine_busy refusal beside the same 503" {
+    var stub: Stub = .{ .inline_ = true, .submit_error = error.Busy };
+    var s: Served = undefined;
+    try s.open(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer s.deinit();
+    const head = try s.readHead();
+    try t.expect(std.mem.indexOf(u8, head, " 503 ") != null);
+    try t.expect(std.mem.indexOf(u8, try s.readRest(), "the engine is busy") != null);
+    s.join(&stub);
+    const counted = s.srv.load.read().refusals;
+    try t.expectEqual(@as(u64, 1), counted[@backingInt(api.load_ledger.reasons.Refusal.engine_busy)]);
+    var total: u64 = 0;
+    for (counted) |n| total += n;
+    try t.expectEqual(@as(u64, 1), total);
 }
 
 test "error.InvalidRequest from the engine is a 400 naming the refusal" {

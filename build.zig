@@ -61,6 +61,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
+    @import("zig/build/test_allocator.zig").checks(b);
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
     if (@import("zig/build/product.zig").requested(b)) |gpu| {
         @import("zig/build/product.zig").build(b, gpu);
@@ -68,6 +69,7 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
+    @import("zig/build/tokenizer_host.zig").steps(b);
     @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
     @import("zig/build/cache_replay.zig").steps(b);
@@ -102,6 +104,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
     server_build.webHostTests(b, test_step);
+    server_build.ollamaHostTests(b, test_step);
+    server_build.launchHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
@@ -117,6 +121,8 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
+    @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
+    @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
     @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
@@ -182,6 +188,7 @@ pub fn build(b: *std.Build) void {
         else => {},
     }
     @import("zig/build/gemma4_backward.zig").tests(b, test_step);
+    @import("zig/build/hy4_flash.zig").tests(b, test_step);
     const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
     gemma4_host_sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-host-empty.metallib", "") });
     const gemma4_contract_host = @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
@@ -200,13 +207,16 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
+    @import("zig/build/device.zig").steps(b, test_step);
     @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
     @import("zig/build/gradient_host.zig").add(b);
+    @import("zig/build/glm_pdl_scan.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
+    @import("zig/build/no_backend_host.zig").steps(b, test_step);
     if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
@@ -251,7 +261,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar, lanes_cpu);
-    grammar_build.hostTests(b, test_step);
+    grammar_build.hostTests(b, test_step, lanes_cpu);
     contract_build.hostTests(b, gemma4_contract_host);
     @import("zig/build/startup_states_timing.zig").step(b);
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
@@ -271,11 +281,12 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
     @import("zig/build/host_ci.zig").steps(b);
-    @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
+    @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
+    @import("zig/build/test_allocator.zig").wire(b);
 }
 
-/// The native Metal server build is owned by the shared Metal target module.
-const nativeServer = metal_build.nativeServer;
+/// The native Metal server build is owned by its own module, like cuda.zig's.
+const nativeServer = @import("zig/build/metal_server.zig").nativeServer;
 
 /// macOS: the metallib, the Metal runtime's test programs and the engine over Metal.
 const metalTargets = metal_build.metalTargets;

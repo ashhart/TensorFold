@@ -121,6 +121,36 @@ test "TF_KV_SHARE's states take slots only with share on, a layout slot and the 
     try std.testing.expect(try shareSlots(true, 1, true) == null);
 }
 
+test "TF_KV_SHARE unset or empty plans as before: no slot, and GLM's copies take what the windows leave" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const env = @import("sys").env;
+    const name = "TF_KV_SHARE";
+    const before = if (std.c.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            std.testing.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    const Glm = struct {
+        pub const share_kept_ppm: u32 = 0;
+        pub const window_rows = 8;
+    };
+    const mib: u64 = 1 << 20;
+    // GLM at TP=3 without the share (327 MiB fixed, no slot), --parallel 8, a 1M window, Jammed XSFP4's 42.0 GiB
+    const l: kv_pool.Layout = .{ .fixed_bytes = 327 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "", .model_type = "g", .lanes = 8, .lanes_fixed = true };
+    for ([_]?[:0]const u8{ null, "", " " }) |v| {
+        _ = if (v) |s| env.setenv(name, s, 1) else env.unsetenv(name);
+        const share = try @import("core").kv_prompts.sharing() > 0;
+        const slots = try shareSlots(share, l.snap_bytes, false);
+        try std.testing.expectEqual(@as(?usize, null), slots);
+        const b = kv_pages.budgetOf(Glm, l, (41 << 30) + 992 * mib, o, 1_048_576, false, true, keptPpm(Glm, share), slots);
+        try std.testing.expect(!b.slots_only);
+        try std.testing.expectEqual(kv_pool.Plan{ .lanes = 8, .snaps = 0, .copied = 1572732928, .pages = 6147 }, try kv_pool.plan(l, b));
+    }
+}
+
 test "CUDA cache default uses the declared request ledger windows and scratch" {
     const GiB: u64 = 1 << 30;
     var counted: Count = .{ .streams = 8, .paged = null, .layout = null };

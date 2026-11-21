@@ -416,7 +416,7 @@ pub const Drafter = struct {
         try x.upload(s.ids, std.mem.sliceAsBytes(ids[0..rows]));
         try x.upload(s.pos, std.mem.sliceAsBytes(pos[0..rows]));
         try x.upload(s.lens, std.mem.sliceAsBytes(lens[0..bs.len]));
-        try x.k.embed.affine(x.s, s.ids, x.m.w.embed_w, x.m.w.embed_s, x.m.w.embed_b, s.h[0], rows, h, .{ .bits = @intCast(x.m.w.embed_bits), .group = cfg.group, .scale = fwd.embedScale(h) });
+        try x.m.w.embed(&x.k.embed, x.s, s.ids, s.h[0], rows, fwd.embedScale(h));
         try x.k.norms.addRmsTail(x.s, s.h[0], null, x.w.layers[0].input_norm, s.hs, s.normed, s.xs, rows, h, c.eps, .{ .round = true });
         var cur: usize = 0;
         for (0..c.layers) |i| {

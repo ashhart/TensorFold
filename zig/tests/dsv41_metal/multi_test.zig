@@ -154,6 +154,8 @@ test "dsv41 metal multi-slot forward: rows of 2, 3 and 4 slots in one launch equ
     bad += try compare(a, f, &.{ 1103, 640, 1100 }, &.{ 1, 4, 2 }, 310);
     bad += try compare(a, f, &.{ 1101, 1104, 1099, 97 }, &.{ 4, 4, 4, 4 }, 320);
     bad += try compare(a, f, &.{ 1101, 1102, 1103, 1104 }, &.{ 1, 1, 1, 1 }, 330);
+    // eight rows of four slots: the FP8 projections on the MMA tile, each slot's rows as alone
+    bad += try compare(a, f, &.{ 1101, 1102, 1103, 1104 }, &.{ 2, 2, 2, 2 }, 335);
     bad += try compare(a, f, &.{ 7, 128, 1101, 1279 - 6 }, &.{ 2, 6, 1, 7 }, 340);
     try testing.expectEqual(@as(usize, 0), bad);
 }

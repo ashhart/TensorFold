@@ -106,6 +106,56 @@ fn matmuls(r: *Rig, set: glue.Set, s: Shape) !void {
     check.pass("b16 matmul [{d}, {d}] ({d} slices): bf16 and fp32 out within float64 tolerance, every entry and row count's bits equal", .{ s.n, s.k, b16.splitK(s.n, s.k) });
 }
 
+/// Rows `n` wide against the same rows padded to `np`: every byte of the first `n` columns equal, the pad zero.
+fn sameCols(name: []const u8, narrow: []const u8, n: usize, padded: []const u8, np: usize, rows: usize) !void {
+    for (0..rows) |row| {
+        const a = narrow[row * n * 2 ..][0 .. n * 2];
+        const b = padded[row * np * 2 ..][0 .. np * 2];
+        try check.expect(std.mem.eql(u8, a, b[0 .. n * 2]), "{s}: row {d} of {d} differs from the uneven rows'", .{ name, row, rows });
+        try check.expect(std.mem.allEqual(u8, b[n * 2 ..], 0), "{s}: row {d} of {d} has a pad column not zero", .{ name, row, rows });
+    }
+}
+
+/// A rank's fused KDA stack [n, 4096] and its f_b view: padded to 16-byte rows, each row count's bytes as uneven.
+fn paddedStack(r: *Rig, set: glue.Set, heads: usize, np: usize) !void {
+    const k = 4096;
+    const most = 2048; // a prompt pass's rows
+    const vn = heads * 128;
+    const fa = 3 * vn;
+    const n = fa + 2 * 128 + heads;
+    const w = try r.bfs(n * k, 0.05);
+    const wp = try r.a.alloc(u16, np * k);
+    @memcpy(wp[0 .. n * k], w);
+    @memset(wp[n * k ..], 0);
+    const dx = try r.dev(std.mem.sliceAsBytes(try r.bfs(most * k, 1.0)));
+    const dw = [2]u64{ try r.dev(std.mem.sliceAsBytes(w)), try r.dev(std.mem.sliceAsBytes(wp)) };
+    const fb = try r.dev(std.mem.sliceAsBytes(try r.bfs(vn * 128, 0.05)));
+    const out = [2]u64{ try r.zeros(most * n * 2), try r.zeros(most * np * 2) };
+    const view = [2]u64{ try r.zeros(most * vn * 2), try r.zeros(most * vn * 2) };
+    const part = try r.zeros(b16.partBytes(b16.rows_from - 1, np, k));
+    const host = try r.a.alloc(u8, most * (n + np) * 2);
+    var counts: usize = 0;
+    var rows: usize = 1;
+    while (rows <= most) : (rows += if (rows < 130) 1 else 137) { // every decode window, then prompt passes to 2,048
+        for (dw, out, [2]usize{ n, np }) |weights, o, width| try b16.matmul(set, r.s, dx, k, weights, o, part, rows, width, k, false);
+        // the view reads the projected rows at column `fa`: `n` apart on the unstaged kernels, `np` apart on the staged
+        for (out, view, [2]usize{ n, np }) |o, v, width| try b16.matmul(set, r.s, o + fa * 2, width, fb, v, part, rows, vn, 128, false);
+        try r.s.synchronize();
+        const a = host[0 .. rows * n * 2];
+        const b = host[rows * n * 2 ..][0 .. rows * np * 2];
+        try (cuda.DeviceBuffer{ .d = r.gpu.d, .ptr = out[0], .len = a.len }).download(0, a);
+        try (cuda.DeviceBuffer{ .d = r.gpu.d, .ptr = out[1], .len = b.len }).download(0, b);
+        try sameCols("padded KDA stack", a, n, b, np, rows);
+        const va = host[0 .. rows * vn * 2];
+        const vb = host[rows * vn * 2 ..][0 .. rows * vn * 2];
+        try (cuda.DeviceBuffer{ .d = r.gpu.d, .ptr = view[0], .len = va.len }).download(0, va);
+        try (cuda.DeviceBuffer{ .d = r.gpu.d, .ptr = view[1], .len = vb.len }).download(0, vb);
+        try check.sameBytes("the f_b view of the padded rows", vb, va);
+        counts += 1;
+    }
+    check.pass("KDA stack [{d}, {d}] padded to {d} and its [{d}, 128] view: {d} row counts from 1 to {d}, every byte as the uneven rows'", .{ n, k, np, vn, counts, most });
+}
+
 /// glue.router (8 K slices) at 300 rows vs float64, fewer rows vs its bytes, unaligned x refused; glue.select too.
 fn routers(r: *Rig, set: glue.Set) !void {
     const m = wide_rows;
@@ -197,6 +247,8 @@ pub fn run(gpu: Gpu) !void {
     const ks = try glue.Kernels.load(mod);
     const set: glue.Set = .{ .glue = &ks };
     for ([_]Shape{ .{ .n = 512, .k = 4096 }, .{ .n = 1280, .k = 1536 }, .{ .n = 1024, .k = 128 } }) |sh| try matmuls(&r, set, sh);
+    try paddedStack(&r, set, 22, 8728); // TP=3's rank 0, then ranks 1 and 2: each to its own eight columns
+    try paddedStack(&r, set, 21, 8344);
     try routers(&r, set);
     try @import("glm_ref_attn.zig").dense(&r, set);
     try @import("glm_ref_attn.zig").sparse(&r, set);

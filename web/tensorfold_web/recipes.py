@@ -6,10 +6,11 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field
+from threading import Event
 
 import httpx
 
-from . import httpread
+from . import bench, httpread
 
 KINDS = {"chat": "Chat front ends", "agent": "Coding agents", "assistant": "Personal agents", "sdk": "Code"}
 CHECK_LABELS = {
@@ -350,10 +351,10 @@ def run_check(check: str, c: Ctx, client: httpx.Client, extra: dict | None = Non
         if check == "chat_stream":
             body = {"model": c.model, "stream": True, "max_tokens": 256,
                     "messages": [{"role": "user", "content": "Reply with the word ready."}]}
-            with client.stream("POST", base + "/v1/chat/completions", json=body, headers=_headers(c.key)) as r:
-                if r.status_code != 200:                 # at most 4 KB and 10 s of it: an error that trickles ends here
-                    return _out(check, False, f"{r.status_code}: {httpread.error_text(r)[:160]}", t0)
-                text, _ = _stream_text(r)
+            reply = bench.stream_once(client, base + "/v1/chat/completions", _headers(c.key), body, Event())
+            if reply.error:
+                return _out(check, False, reply.error[:200], t0)
+            text = reply.text + reply.reasoning
             return _out(check, bool(text.strip()), f"{len(text)} characters streamed" if text else "an empty reply", t0)
         if check == "tool_call":
             body = {"model": c.model, "max_tokens": 1024, "tool_choice": "auto",

@@ -1,9 +1,10 @@
-//! Drama 3's RMS norm rows (d3_rmsnorm with its plain gamma, the gated-norm form) under the contract on CUDA.
+//! Drama 3's kernels under the contract on CUDA: RMS norm rows (d3_rmsnorm, plain gamma) and the compact router.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
+const router_k = @import("contract_drama3_router.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -84,5 +85,33 @@ pub const Norm = struct {
 
     pub fn simulate(self: *Norm, acc: c.Accum, order: g.Order, out: []f64) !void {
         return self.r.?.simulate(acc, order, out);
+    }
+};
+
+/// The drama3 image, its norm and its compact router with the unmasked control, appended to `kernels`.
+pub const Group = struct {
+    a: std.mem.Allocator,
+    mod: cuda.Module,
+    norm: Norm,
+    routers: [2]router_k.Router,
+
+    pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel)) !*Group {
+        const self = try a.create(Group);
+        errdefer a.destroy(self);
+        self.a = a;
+        self.mod = try cuda.Module.load(gpu.d, cuda.kernels.drama3);
+        errdefer self.mod.unload();
+        self.norm = try Norm.init(gpu, s, self.mod);
+        self.routers = .{ try .init(gpu, s, self.mod, false), try .init(gpu, s, self.mod, true) };
+        try kernels.append(a, self.norm.kernel());
+        for (&self.routers) |*r| try kernels.append(a, r.kernel());
+        return self;
+    }
+
+    pub fn destroy(self: *Group) void {
+        self.norm.deinit();
+        for (&self.routers) |*r| r.deinit();
+        self.mod.unload();
+        self.a.destroy(self);
     }
 };

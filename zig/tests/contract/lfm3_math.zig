@@ -14,6 +14,8 @@ pub const Data = struct {
     gain: []u16,
     codes: []u8,
     ids: []u32,
+    /// qk: each row's position, its stream's cache length plus its row in the stream (empty: the row itself).
+    pos: []const u32 = &.{},
 };
 pub fn bf(v: f64) f64 {
     return c.fromBf16(c.toBf16(@floatCast(v)));
@@ -129,7 +131,8 @@ fn qkReference(d: Data, acc: c.Accum, order: g.Order, out: []f64, mag: []f64) vo
                 const frequency = i % 64;
                 const pairs: usize = if (d.kind == .qk_full) 32 else 64;
                 const theta: f64 = if (d.kind == .qk_full) 1e6 else 1e4;
-                const angle = if (frequency < pairs) @as(f64, @floatFromInt(r)) / std.math.pow(f64, theta, @as(f64, @floatFromInt(frequency)) / 64) else 0;
+                const position: usize = if (d.pos.len > 0) d.pos[r] else r;
+                const angle = if (frequency < pairs) @as(f64, @floatFromInt(position)) / std.math.pow(f64, theta, @as(f64, @floatFromInt(frequency)) / 64) else 0;
                 const other = if (i < 64) -normalized[i + 64] else normalized[i - 64];
                 const target = if (part == 0) base + i else d.rows * 2048 + (h * d.rows + r) * 128 + i;
                 out[target] = rotary(normalized[i], other, angle);

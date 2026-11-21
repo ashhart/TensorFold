@@ -133,12 +133,14 @@ pub fn tf_moe_combine_gate(l: *const Launcher, y: CF, wts: CF, shared: CF, out: 
     try l.go(l.moe_combine_gate, dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
 }
 
-pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {
+pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, shared: c_int, shared_tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(picks));
     try a.add(pairs);
     try a.add(experts);
     try a.add(tile);
+    try a.add(shared);
+    try a.add(shared_tile);
     try a.add(ad(members));
     try a.add(ad(items));
     try a.add(capacity);

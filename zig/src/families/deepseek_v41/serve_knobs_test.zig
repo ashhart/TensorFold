@@ -258,3 +258,19 @@ test "KV producer norm/store fusion is separately opt-in" {
     try testing.expect(!(try pk.routerGroupRot(&Fake.get)));
     Fake.pairs = &.{};
 }
+
+test "float linear projections are opt-in" {
+    Fake.pairs = &.{};
+    try testing.expect(!(try pk.floatLinear(&Fake.get)));
+    for ([_][]const u8{ "0", "", " " }) |value| {
+        Fake.pairs = &.{.{ "TF_DSV41_FLOAT_LINEAR", value }};
+        try testing.expect(!(try pk.floatLinear(&Fake.get)));
+    }
+    for ([_][]const u8{ "false", "yes", "2" }) |value| {
+        Fake.pairs = &.{.{ "TF_DSV41_FLOAT_LINEAR", value }};
+        try testing.expectError(error.InvalidEnvironment, pk.floatLinear(&Fake.get));
+    }
+    Fake.pairs = &.{.{ "TF_DSV41_FLOAT_LINEAR", " 1 " }};
+    try testing.expect((try pk.floatLinear(&Fake.get)));
+    Fake.pairs = &.{};
+}

@@ -23,9 +23,19 @@ pub const Held = struct {
     srv: *Server,
     group: RouteGroup,
     lease: ?admission.Lease = null,
+    owned: bool = true, // false once `take` moved the counts and lease out: `release` then does nothing
+
+    /// The counts and lease, moved to a holder that outlives the route (a background response, until it ends).
+    pub fn take(h: *Held) Held {
+        const moved = h.*;
+        h.owned = false;
+        return moved;
+    }
 
     /// Undoes `enter` in reverse order: the lease, the idle window, the load ledger, then the in-progress count.
     pub fn release(h: *Held) void {
+        if (!h.owned) return;
+        h.owned = false;
         if (h.lease) |*lease| lease.release();
         if (h.srv.idle_manager) |m| m.end();
         h.srv.load.leave(h.group);
@@ -70,6 +80,7 @@ pub fn enter(srv: *Server, a: Allocator, key_digest: ?[32]u8, group: RouteGroup,
     if (srv.config.admission.enabled()) switch (srv.admission.acquire(srv.io, srv.config.admission, key_digest)) {
         .accepted => |lease| e.held.lease = lease,
         .rejected => |refusal| {
+            @import("refusals.zig").admitted(srv, refusal.reason); // its 429 carries the code the ledger counts
             e.refusal = .{ .overloaded = refusal };
             return e;
         },

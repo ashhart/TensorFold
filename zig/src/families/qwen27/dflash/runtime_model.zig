@@ -26,6 +26,9 @@ pub const Model = struct {
     pending: mtl.Buffer,
     committed_end: u64 = 0,
     pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode) !*Model {
+        return loadBound(a, io, backend_mod.Target.qwen(target), dir, mode);
+    }
+    pub fn loadBound(a: std.mem.Allocator, io: std.Io, target: backend_mod.Target, dir: []const u8, mode: op.Mode) !*Model {
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
@@ -35,10 +38,14 @@ pub const Model = struct {
         try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
-        return open(a, target, c, shards, mode);
+        return openBound(a, target, c, shards, mode);
     }
     /// The draft model of config `c` from its checkpoint `shards`, prepared for `mode`.
     pub fn open(a: std.mem.Allocator, target: *Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        return openBound(a, backend_mod.Target.qwen(target), c, shards, mode);
+    }
+    pub fn openBound(a: std.mem.Allocator, target: backend_mod.Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const model = try a.create(Model);
         errdefer a.destroy(model);
@@ -50,7 +57,7 @@ pub const Model = struct {
         // q4 drafts read their linears only through prepared copies: those stay in the file until prepare reads them
         const later: ?core.checkpoint_metal.Later = if (mode == .prepared_q4_reference) Backend.linear else null;
         for (shards) |file| try model.checkpoint.addFileSplit(target.device, file, "", null, later);
-        model.backend = try Backend.init(a, target, &model.checkpoint, c);
+        model.backend = try Backend.initBound(a, target, &model.checkpoint, c);
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
@@ -132,10 +139,12 @@ pub const Model = struct {
         costs: []const f64 = &.{},
         overhead_ms: f64 = 0,
         defer_price: bool = true,
+        chain: bool = false,
     };
     /// The lane core prices complete candidate prefixes with its calibrated landing rates.
     pub fn selection(p: Proposal) selector.Options {
         var options = if (p.costs.len > 0) loneSelection(p.nodes) else selector.Options{ .nodes = p.nodes };
+        if (p.chain) options.children = 1;
         options.costs = if (p.defer_price) &.{} else p.costs;
         options.overhead_ms = if (p.defer_price) 0 else p.overhead_ms;
         return options;
@@ -307,9 +316,9 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     while (later.next()) |name| try names.append(local, name.*);
     return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
-fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
+fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });
-    const w = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" })));
+    const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
     return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);

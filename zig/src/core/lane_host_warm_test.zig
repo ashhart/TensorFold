@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const prompt_cache = @import("prompt_cache.zig");
 const Reason = api.Reason;
 const Id = api.Id;
 const Event = api.Event;
@@ -235,6 +236,58 @@ test "a warm_usable store keeps a warm pass's grid mark but not its end off the 
     }
 }
 
+test "a one-snapshot store keeps the warm pass's usable mark over an unusable end; the next request resumes the mark" {
+    const gpa = std.testing.allocator;
+    const pc = api.prompt_cache;
+    const Snaps = struct {
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + 4 * @as(u64, at);
+        }
+        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            return f.save(@ptrCast(@alignCast(owner.?)), at);
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+            return error.BackendRestores;
+        }
+        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            f.drop(saved);
+        }
+    };
+    for ([_]bool{ true, false }) |usable| {
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer core.deinit();
+
+        // The 128-row cut and 192-row warm end, scaled to a grid of 4: the end at 6 is off it.
+
+        // A budget of one snapshot (88 B) fits either state, never both.
+        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 100);
+        defer store.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+        host.cache = &store;
+        try host.start();
+        defer host.stop();
+        const prompt = [_]u32{ 2, 7, 1, 8, 2, 8 };
+        var warm: Box = .{};
+        const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true, .history_len = prompt.len, .born = 4 };
+        try host.engine().submit(1, &warm_request, .{ .ctx = &warm, .event = Box.event });
+        try std.testing.expectEqual(Reason.length, warm.wait());
+        host.engine().drain();
+
+        // The unusable end must not cost the usable mark: a follow-up resumes the grid mark, or nothing.
+        const longer = [_]u32{ 2, 7, 1, 8, 2, 8, 3, 1 };
+        const follow = try store.lookup(gpa, &longer, longer.len, &.{}, &.{}, &.{});
+        defer gpa.free(follow.marks);
+        try std.testing.expectEqual(if (usable) @as(u32, 4) else @as(u32, 0), if (follow.entry) |e| e.at else 0);
+    }
+}
+
 /// Status polls taken at each prompt chunk, the warm pass's apart from the request's.
 const FillPolls = struct {
     engine: Engine = undefined,
@@ -372,4 +425,14 @@ test "a kept warm end supersedes its history at either lookahead and regeneratio
         try std.testing.expectEqual(@as(?u32, 0), got.cached);
         try std.testing.expect(got.same);
     }
+}
+
+test "a host advertises warm turns only beside a kept-state store" {
+    var host: LaneHost = undefined;
+    host.info_ = .{};
+    host.advertiseCache(null);
+    try std.testing.expect(!host.info_.prompt_cache and !host.info_.warm_turns);
+    var store: prompt_cache.Store = undefined;
+    host.advertiseCache(&store);
+    try std.testing.expect(host.info_.prompt_cache and host.info_.warm_turns);
 }

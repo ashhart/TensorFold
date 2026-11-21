@@ -2,6 +2,7 @@
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
+    .{ .name = "flint glue tap fl_tap", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "flint glue embed fl_embed", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "flint glue norm fl_norm", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
     .{ .name = "flint glue swiglu fl_swiglu", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },

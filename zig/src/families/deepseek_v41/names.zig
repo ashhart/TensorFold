@@ -72,6 +72,21 @@ pub fn groupName(spec: GroupSpec, block: []const u8, buf: []u8) ![]const u8 {
     return if (spec.proj == .wo_a) std.fmt.bufPrint(buf, "{s}.{s}.{d}", .{ block, spec.suffix, spec.slice }) else std.fmt.bufPrint(buf, "{s}.{s}", .{ block, spec.suffix });
 }
 
+/// TF_DSV41_FLOAT_LINEAR: the float matrix a pack may keep for a whole projection in place of its EXL3 group.
+pub fn plainOf(spec: GroupSpec) ?NativeSpec {
+    if (spec.split != .whole) return null;
+    const suffix = switch (spec.proj) {
+        .wq_a => "attn.wq_a.weight",
+        .comp_wkv => "attn.compressor.wkv.weight",
+        .comp_wgate => "attn.compressor.wgate.weight",
+        .ix_wk => "attn.indexer.wk.weight",
+        .ix_wq_b => "attn.indexer.wq_b.weight",
+        else => return null,
+    };
+    // `.half` is the indexer weights_proj's own storage rule: bf16 or fp16 in the pack, bf16 values in the forward
+    return NativeSpec.m(suffix, .half, spec.n, spec.k);
+}
+
 /// The release's own projections of a block: whole matrices, each with a `.scale` beside it.
 pub const ReleaseSpec = struct {
     proj: ReleaseProj,

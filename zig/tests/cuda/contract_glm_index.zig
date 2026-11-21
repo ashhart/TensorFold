@@ -28,6 +28,9 @@ fn scoreDepth(_: c.Shape) usize {
 
 const nan_relu = "relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN";
 
+/// A decode window's served shapes: decodeLoop's 2, 4 and 1 tiles a CTA, as cuda_sparse launches Set.dscore.
+const decode_served = [_]c.Shape{ .{ .rows = 8, .n = 4096, .k = dk }, .{ .rows = 16, .n = 51200, .k = dk }, .{ .rows = 4, .n = 131072, .k = dk } };
+
 /// scores: rows x pool columns (k: an index key's width); tokens: rows x K pools a row.
 pub fn spec(comptime which: enum { scores, tokens }) c.Spec {
     return switch (which) {
@@ -48,6 +51,8 @@ pub const Scores = struct {
     fast: ?cuda.Function = null,
     base: u64 = 0,
     wrong_table: bool = false,
+    decode: bool = false, // a decode window's tiles a CTA (glm.index.decodeLoop), as cuda_sparse launches Set.dscore
+    short: bool = false, // the control: the decode tiling is told it has one 64-pool tile fewer
     shape: c.Shape = undefined,
     q: []u16 = &.{},
     w: []u16 = &.{},
@@ -83,8 +88,13 @@ pub const Scores = struct {
             declared.name = "cuda glm tf_glm_index_scores on pages out of order";
             declared.replaces = "tf_glm_scores";
         }
+        if (self.decode) {
+            declared.name = "cuda glm decode scores tf_glm_index_scores on pages out of order";
+            declared.served = &decode_served;
+        }
+        if (self.short) declared.name = "control: GLM decode scores write one tile short";
         if (self.wrong_table) declared.name = "control: GLM paged scores use a swapped table";
-        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table or self.short) .shapes else null };
     }
 
     const vt = g.hooks(Scores);
@@ -102,7 +112,8 @@ pub const Scores = struct {
         const a = self.rig.gpu.gpa;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        self.at = if (shape.rows <= 8) 4100 else 2000;
+        // decode: up to 8,192 visible pools (64 pages)
+        self.at = if (self.decode) @as(usize, @min(shape.n, 8192)) * sparse.pool - shape.rows - 4 else if (shape.rows <= 8) 4100 else 2000;
         self.scale = if (fill == .stress) 0.125 else @floatCast(std.math.pow(f64, dk, -0.5));
         self.wscale = if (fill == .stress) 0.25 else sparse.headScale(heads);
         self.seen = self.visible(shape.rows - 1);
@@ -146,12 +157,14 @@ pub const Scores = struct {
 
     fn launch(self: *Scores, f: cuda.Function, fast: bool, out: u64) !void {
         const rows = self.shape.rows;
-        const nb = self.shape.n / 64;
-        const loop: usize = if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
+        const nb = if (fast and self.short) self.shape.n / 64 - 1 else self.shape.n / 64;
+        const loop: usize = if (fast and self.decode) glm.index.decodeLoop(rows, self.shape.n / 64) else if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
         var a: cuda.Args = .{};
         if (fast) {
             inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(rows)), @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
-            const g2 = glm.index.scoresGrid(rows, nb);
+            var g2 = glm.index.scoresGrid(rows, nb);
+            // cuda_sparse's decode grid: nb tiles in runs of loop
+            if (self.decode) g2[1] = @intCast(@max(1, (nb + loop - 1) / loop));
             try cuda.launch.launch(f, .{ .grid = .{ .x = g2[0], .y = g2[1] }, .block = .{ .x = glm.index.threads } }, self.rig.s, &a);
         } else {
             inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
