@@ -21,7 +21,7 @@ pub const down_32_below = 64;
 
 /// core/affine_mm.metal at 4/64, bf16 out, the column-group kernels after it: affine_mm.names, then ours.
 pub fn source(device: mtl.Device, a: std.mem.Allocator) ![]u8 {
-    const core = try affine_mm.source(device, a, .{});
+    const core = try affine_mm.source(device, a, .{ .exact_nonfinite = true });
     defer a.free(core);
     return std.mem.concat(a, u8, &.{ core, sources.glm_mm_groups });
 }

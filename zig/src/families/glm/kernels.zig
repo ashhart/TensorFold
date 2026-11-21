@@ -321,7 +321,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     jobs[generated.len + 6] = .{ .device = device, .source = igate_src, .names = &.{ moe_route.names[0], "glm_route_logits_one" }, .out = &igate_out };
     const m16_src = try mm_groups.source(device, gpa); // affine_mm.names, then the column-group gathers
     defer gpa.free(m16_src);
-    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true, .glm_m3_fast = m3_fast });
+    const m32_src = try affine_mm.source(device, gpa, .{ .out_f32 = true, .glm_m3_fast = m3_fast, .exact_nonfinite = true });
     defer gpa.free(m32_src);
     var m16_out: [m16_names.len]mtl.Pipeline = undefined;
     const grouped_from: usize = if (m3_fast) affine_mm.names.len else 0;
@@ -395,7 +395,7 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     const softmax_rows_src = comptime sources.ops_softmax ++ sources.glm_softmax_rows;
     jobs[generated.len + 24] = .{ .device = device, .source = softmax_rows_src, .names = &.{"glm_softmax_rows"}, .out = @as(*[1]mtl.Pipeline, &k.softmax_rows) };
 
-    const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true }) else try gpa.dupe(u8, "");
+    const m3_src = if (m3_fast) try affine_mm.source(device, gpa, .{ .glm_m3_fast = true, .exact_nonfinite = true }) else try gpa.dupe(u8, "");
     defer gpa.free(m3_src);
     var m3_out: affine_mm.Pipes = undefined;
     if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
