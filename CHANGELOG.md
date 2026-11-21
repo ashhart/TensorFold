@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: Split Inkling 2 reasoning, text and tool calls in whole and streamed replies; give each request its own call IDs (#4124). Thanks to @ajensenwaud.
+
 - Nemotron on HIP: at `--tp 1`, `--mtp-drafts` takes up to 15, widening a lone stream's verify window up to 16 rows; unset or at 3 or fewer the window stays at four rows, rounds shared by several streams chain at most three drafts a stream, and above `--tp 1` more than three is refused by name (#3613, refs #3394). Thanks to @gilby.
 
 - Cluster: bring-up reports the leader, epoch and view it agreed on and counts only acknowledgments for that view, so a rank that finishes after a peer says goodbye no longer reports a smaller view on slow runners (#4135, fixes #4123). Thanks to @AIFlowML.
