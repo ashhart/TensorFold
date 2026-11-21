@@ -174,12 +174,12 @@ pub const Half = struct {
     fn launch(self: *Half, half: bool, out: u64) !void {
         const d = self.d.?;
         const keep = self.lane.half_below;
-        const keep_fuse = cuda.qmmf.fuse_split_n;
+        const keep_fuse = self.lane.fuse_split_n;
         defer {
             self.lane.half_below = keep;
-            cuda.qmmf.fuse_split_n = keep_fuse;
+            self.lane.fuse_split_n = keep_fuse;
         }
-        if (self.fused) cuda.qmmf.fuse_split_n = if (half) 1 else 0 else self.lane.half_below = if (half) std.math.maxInt(usize) else 0;
+        if (self.fused) self.lane.fuse_split_n = if (half) 1 else 0 else self.lane.half_below = if (half) std.math.maxInt(usize) else 0;
         var w = self.weight;
         if (half and self.kind == .control) w.scale = 1.5;
         try self.lane.matmulOut(self.rig.s, self.x, d.shape.k, d.shape.rows, w, out, self.format, self.part);

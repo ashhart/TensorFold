@@ -16,7 +16,7 @@ pub fn on() !bool {
     return environment.read(bool, name, false);
 }
 
-/// The CUDA lane's threshold, cuda.qmmf.fuse_split_n: min_columns when on, 0 (never) when off.
+/// The Flash Next CUDA lane's threshold: min_columns when on, 0 (never) when off.
 pub fn columns(enabled: bool) usize {
     return if (enabled) min_columns else 0;
 }
@@ -38,7 +38,7 @@ test "unset and blank read off, 0 and 1 read as themselves, and other text is re
 test "off leaves the lane's threshold at 0, so every lane call keeps main's kernel" {
     try std.testing.expectEqual(@as(usize, 0), columns(false));
     try std.testing.expectEqual(min_columns, columns(true));
-    const set = "cuda.qmmf.fuse_split_n = @import(\"fused_split.zig\").columns(try @import(\"fused_split.zig\").on());";
+    const set = "e.batch_k.native_lane.fuse_split_n = fuse_split_n;";
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_prompt.zig"), set) != null);
 }
 
