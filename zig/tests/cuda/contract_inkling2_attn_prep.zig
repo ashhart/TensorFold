@@ -5,6 +5,7 @@ const core = @import("core");
 const ink = @import("inkling2");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_inkling2_attn_ref.zig");
+const M = @import("contract_inkling2_model.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -12,7 +13,6 @@ const g = contract.gates;
 const K = ink.kernels;
 const D = ref.D;
 const heads = ref.heads;
-const kv = ref.kv;
 const R = ref.d_rel;
 const u: f64 = 0x1p-24;
 
@@ -24,9 +24,9 @@ fn depthPrep(_: c.Shape) usize {
     return 4 + 5; // a lane's four squares, then the warp's five butterfly adds
 }
 
-/// rows x 24 heads x 128 (q); k: the first stream's context, so global rows meet tau at 1M positions.
-pub fn prepSpec(global: bool) c.Spec {
-    const name = if (global) "inkling2 attn tf_ink2_prep global (q, rel scaled by tau; k, v into a 4,096-slot ring)" else "inkling2 attn tf_ink2_prep sliding (q, rel, k, v rows into the 3,072-slot ring)";
+/// rows x 24 heads x 128 (q); k: the first stream's context, so global rows meet tau at 1M positions (Mini: 8 kv).
+pub fn prepSpec(global: bool, mini: bool) c.Spec {
+    const name = if (global) M.named("inkling2 attn tf_ink2_prep global (q, rel scaled by tau; k, v into a 4,096-slot ring)", mini) else M.named("inkling2 attn tf_ink2_prep sliding (q, rel, k, v rows into the 3,072-slot ring)", mini);
     const why = "a head's sum of squares only scales it: a bf16 sum's error stays under the bf16 output's rounding";
     return .{ .name = name, .accum = .f32, .depth = depthPrep, .ops = 16, .out = .bf16, .served = &prep_shapes, .nan = .{ .stated = nan_rule }, .sums = .{ .f16 = 100, .bf16 = 0, .why = why } };
 }
@@ -37,11 +37,12 @@ pub const Prep = struct {
     k: *const K.Kernels,
     global: bool,
     tau_off: bool = false, // control: the device runs with alpha 0
+    m: M.Model = M.small,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
     ring: usize = 0,
     streams: usize = 1,
-    raw: [4][]u16 = .{ &.{}, &.{}, &.{}, &.{} }, // q [rows][24][128], k, v [rows][4][128], rel [rows][24][16]
+    raw: [4][]u16 = .{ &.{}, &.{}, &.{}, &.{} }, // q [rows][24][128], k, v [rows][kv][128], rel [rows][24][16]
     scales: [2][]u16 = .{ &.{}, &.{} }, // q_scale [24][128], rel_scale [24][16]
     pos: []usize = &.{},
     stream: []usize = &.{},
@@ -79,8 +80,8 @@ pub const Prep = struct {
     }
 
     pub fn kernel(self: *Prep) g.Kernel {
-        var s = prepSpec(self.global);
-        if (self.tau_off) s.name = "control: inkling2 attn tf_ink2_prep global rows without tau";
+        var s = prepSpec(self.global, self.m.mini);
+        if (self.tau_off) s.name = M.named("control: inkling2 attn tf_ink2_prep global rows without tau", self.m.mini);
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.tau_off) .shapes else null };
     }
 
@@ -88,7 +89,7 @@ pub const Prep = struct {
 
     fn sizes(self: *const Prep) [4]usize {
         const rows = self.shape.rows;
-        const cache = self.streams * kv * self.ring * D;
+        const cache = self.streams * self.m.kv * self.ring * D;
         return .{ rows * heads * D, rows * heads * R, cache, cache };
     }
 
@@ -106,6 +107,7 @@ pub const Prep = struct {
         self.fill = fill;
         const a = self.rig.gpu.gpa;
         const rows = shape.rows;
+        const kv = self.m.kv;
         self.ring = if (self.global) 4096 else K.Layer.sliding(1024, 2048).ring;
         self.streams = if (rows >= 2 and rows <= 128) 2 else 1;
         const n1 = if (self.streams == 2) rows / 2 else 0;
@@ -159,9 +161,9 @@ pub const Prep = struct {
         const sz = self.sizes();
         try self.rig.zero(self.out[2], sz[2] * 2); // slots no row writes stay 0, so a stray write shows
         try self.rig.zero(self.out[3], sz[3] * 2);
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1) };
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = @intCast(self.m.kv), .pos = self.dev[0], .seg_of = self.dev[1], .segs = self.dev[2], .tiles = 0, .n_tiles = 0, .last_pos = @intCast(self.shape.k - 1) };
         const l: K.Layer = .{ .window = if (self.global) 0 else 1024, .ring = @intCast(self.ring), .chunk = 0, .tau = self.global };
-        const cfg: K.Prep = .{ .qk_clip = @floatCast(ref.qk_clip), .rel_clip = @floatCast(ref.rel_clip), .floor = @floatCast(ref.floor_pos), .alpha = if (self.tau_off) @as(f32, 0) else @as(f32, @floatCast(ref.alpha)), .eps = @floatCast(ref.eps) };
+        const cfg: K.Prep = .{ .qk_clip = @floatCast(ref.qk_clip), .rel_clip = @floatCast(ref.rel_clip), .floor = @floatCast(self.m.floor), .alpha = if (self.tau_off) @as(f32, 0) else @as(f32, @floatCast(ref.alpha)), .eps = @floatCast(ref.eps) };
         try K.prep(self.k, self.rig.s, r, l, cfg, self.in[0..4].*, self.in[4..6].*, self.out[0], self.out[1], .{ .k = self.out[2], .v = self.out[3] });
         try self.rig.s.synchronize();
     }
@@ -199,9 +201,10 @@ pub const Prep = struct {
             @memset(@field(self, f), 0);
         }
         const sz = self.sizes();
+        const kv = self.m.kv;
         var x: [D]f64 = undefined;
         for (0..self.shape.rows) |r| {
-            const t: ?f64 = if (self.global) ref.tau(self.pos[r]) else null;
+            const t: ?f64 = if (self.global) ref.tauAt(self.pos[r], self.m.floor) else null;
             for (0..heads) |h| {
                 for (x[0..D], 0..) |*v, i| v.* = ref.bf(self.raw[0][(r * heads + h) * D + i]) * ref.bf(self.scales[0][h * D + i]);
                 self.head(x[0..D], ref.qk_clip, t, (r * heads + h) * D, acc, order);
@@ -354,7 +357,7 @@ pub const Table = struct {
     }
 
     pub fn run(self: *Table) !void {
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0 };
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = ref.kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0 };
         try K.relTable(self.k, self.rig.s, r, self.in[0], self.in[2], self.out);
         try self.rig.s.synchronize();
     }

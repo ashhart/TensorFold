@@ -4,13 +4,13 @@ const cuda = @import("cuda");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_inkling2_ops_ref.zig");
+const M = @import("contract_inkling2_model.zig");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
 const Iv = ref.Iv;
 const Sums = ref.Sums;
 const ops = ref.ops;
-const C = ref.hidden;
 
 /// forward.zig's mixes: attention's (q, k and v queries, bf16 stream), the MLP's (fp32 residual), layer 0's (no query).
 pub const Form = enum { attn, mlp, first };
@@ -23,22 +23,33 @@ fn nq(f: Form) usize {
 }
 
 /// A thread's columns 512 apart, then the block's two shuffle stages.
-fn depth(_: c.Shape) usize {
-    return ref.blockDepth(C, 512);
+fn depth(s: c.Shape) usize {
+    return ref.blockDepth(s.n, 512);
+}
+
+/// A width's served calls: wide, decode, and layer 0's of each (comptime arrays: a spec outlives the call).
+fn servedAt(comptime C: usize) [4][]const c.Shape {
+    return .{
+        &.{ .{ .rows = 17, .n = C, .k = 9 }, .{ .rows = 64, .n = C, .k = 5 }, .{ .rows = 2048, .n = C, .k = 9 }, .{ .rows = 128, .n = C, .k = 1 }, .{ .rows = 32, .n = C, .k = 2 } },
+        &.{ .{ .rows = 1, .n = C, .k = 9 }, .{ .rows = 16, .n = C, .k = 9 }, .{ .rows = 8, .n = C, .k = 5 }, .{ .rows = 2, .n = C, .k = 1 }, .{ .rows = 4, .n = C, .k = 2 } },
+        &.{ .{ .rows = 17, .n = C, .k = 1 }, .{ .rows = 2048, .n = C, .k = 1 }, .{ .rows = 64, .n = C, .k = 1 } },
+        &.{ .{ .rows = 1, .n = C, .k = 1 }, .{ .rows = 16, .n = C, .k = 1 }, .{ .rows = 5, .n = C, .k = 1 } },
+    };
 }
 
 /// Rows x hidden x blocks (completed blocks + the partial): mix_rows takes calls of more than 16 rows, mix the rest.
-pub fn mixSpec(f: Form, narrow: bool, fault: Fault) c.Spec {
-    const wide = &[_]c.Shape{ .{ .rows = 17, .n = C, .k = 9 }, .{ .rows = 64, .n = C, .k = 5 }, .{ .rows = 2048, .n = C, .k = 9 }, .{ .rows = 128, .n = C, .k = 1 }, .{ .rows = 32, .n = C, .k = 2 } };
-    const decode = &[_]c.Shape{ .{ .rows = 1, .n = C, .k = 9 }, .{ .rows = 16, .n = C, .k = 9 }, .{ .rows = 8, .n = C, .k = 5 }, .{ .rows = 2, .n = C, .k = 1 }, .{ .rows = 4, .n = C, .k = 2 } };
-    const one = &[_]c.Shape{ .{ .rows = 17, .n = C, .k = 1 }, .{ .rows = 2048, .n = C, .k = 1 }, .{ .rows = 64, .n = C, .k = 1 } };
-    const one_decode = &[_]c.Shape{ .{ .rows = 1, .n = C, .k = 1 }, .{ .rows = 16, .n = C, .k = 1 }, .{ .rows = 5, .n = C, .k = 1 } };
+pub fn mixSpec(f: Form, narrow: bool, fault: Fault, mini: bool) c.Spec {
+    const all = if (mini) servedAt(M.mini.hidden) else servedAt(M.small.hidden);
+    const wide = all[0];
+    const decode = all[1];
+    const one = all[2];
+    const one_decode = all[3];
     const names = [2][3][]const u8{
         .{ "inkling2 ops tf_ink2_mix_rows attention (3 queries, bf16 stream)", "inkling2 ops tf_ink2_mix_rows MLP (1 query, fp32 residual)", "inkling2 ops tf_ink2_mix_rows layer 0 (no query)" },
         .{ "inkling2 ops tf_ink2_mix attention (3 queries, bf16 stream)", "inkling2 ops tf_ink2_mix MLP (1 query, fp32 residual)", "inkling2 ops tf_ink2_mix layer 0 (no query)" },
     };
     var s: c.Spec = .{
-        .name = names[@intFromBool(narrow)][@backingInt(f)],
+        .name = M.namedAt(&(names[0] ++ names[1]), @as(usize, @intFromBool(narrow)) * 3 + @backingInt(f), mini),
         .accum = .f32,
         .depth = depth,
         .out = .bf16,
@@ -46,7 +57,7 @@ pub fn mixSpec(f: Form, narrow: bool, fault: Fault) c.Spec {
     };
     if (narrow) s.replaces = "tf_ink2_mix_rows";
     if (fault == .short) {
-        s.name = "control: inkling2 ops tf_ink2_mix_rows MLP told one completed block fewer";
+        s.name = M.named("control: inkling2 ops tf_ink2_mix_rows MLP told one completed block fewer", mini);
         s.served = wide[0..2];
     }
     return s;
@@ -58,6 +69,7 @@ pub const Mix = struct {
     form: Form,
     narrow: bool = false,
     fault: Fault = .none,
+    mini: bool = false,
     shape: c.Shape = undefined,
     blocks: []u16 = &.{}, // [n_blocks][rows][C]
     part: []f32 = &.{}, // [rows][C], bf16 values when the form's partial is bf16
@@ -69,7 +81,7 @@ pub const Mix = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Mix) c.Spec {
-        return mixSpec(self.form, self.narrow, self.fault);
+        return mixSpec(self.form, self.narrow, self.fault, self.mini);
     }
 
     pub fn control(self: *const Mix) ?g.Gate {
@@ -87,12 +99,17 @@ pub const Mix = struct {
         self.norm = &.{};
     }
 
+    fn width(self: *const Mix) usize {
+        return if (self.mini) M.mini.hidden else M.small.hidden;
+    }
+
     fn bf16Part(self: *const Mix) bool {
         return self.form != .mlp;
     }
 
     /// Values in [-2, 2) with one in 61 eight times larger, queries in [-1, 1); stress: integers in [-16, 16].
     pub fn prepare(self: *Mix, a: std.mem.Allocator, rig: *rig_.Rig, shape: c.Shape, fill: g.Fill, rng: std.Random) !bool {
+        const C = self.width();
         if (shape.rows == 0 or shape.n != C or shape.k < 1 or shape.k > ops.max_blocks + 1) return false;
         self.free(a);
         self.shape = shape;
@@ -116,7 +133,7 @@ pub const Mix = struct {
             if (nb == 0) ref.plant(f32, self.part, 1, C, ref.asF32);
             if (rows > 1) ref.plant(f32, self.part[C..], @min(rows - 1, 3), C, ref.asF32);
         }
-        var m: ops.MixArgs = .{ .partial = 0, .query = 0, .out = 0, .n_blocks = @intCast(nb), .partial_bf16 = @intFromBool(self.bf16Part()), .nq = @intCast(q), .rows = @intCast(rows), .c = C, .eps = ref.eps };
+        var m: ops.MixArgs = .{ .partial = 0, .query = 0, .out = 0, .n_blocks = @intCast(nb), .partial_bf16 = @intFromBool(self.bf16Part()), .nq = @intCast(q), .rows = @intCast(rows), .c = @intCast(C), .eps = ref.eps };
         for (0..nb) |j| m.blocks[j] = try ref.input(rig, self.blocks[j * rows * C ..][0 .. rows * C]);
         if (self.bf16Part()) {
             const h = try a.alloc(u16, rows * C);
@@ -153,11 +170,12 @@ pub const Mix = struct {
     }
 
     pub fn count(self: *const Mix) usize {
-        return nq(self.form) * self.shape.rows * C;
+        return nq(self.form) * self.shape.rows * self.shape.n;
     }
 
     fn at(self: *const Mix, j: usize, r: usize, col: usize) f64 {
         const nb = self.shape.k - 1;
+        const C = self.shape.n;
         return if (j < nb) ref.bf(self.blocks[(j * self.shape.rows + r) * C + col]) else self.part[r * C + col];
     }
 
@@ -166,6 +184,7 @@ pub const Mix = struct {
         const rows = self.shape.rows;
         const n = self.shape.k;
         const q = nq(self.form);
+        const C = self.shape.n;
         const terms = try a.alloc(Iv, C);
         defer a.free(terms);
         const scratch = try a.alloc(f64, C);
@@ -173,7 +192,7 @@ pub const Mix = struct {
         const h = try a.alloc(Iv, q * C);
         defer a.free(h);
         const d = depth(self.shape);
-        const root = Iv.of(C).rsqrt();
+        const root = Iv.of(@floatFromInt(C)).rsqrt();
         for (0..rows) |r| {
             var rr: [ops.max_blocks + 1]Iv = undefined;
             var w: [ops.max_queries][ops.max_blocks + 1]Iv = undefined;

@@ -59,7 +59,12 @@ pub fn clipFactor(x: []const f64, thr: f64) f64 {
 
 /// The log-scaling factor of a global layer's q and rel at position `pos`: 1 + alpha ln(max((pos + 1) / floor, 1)).
 pub fn tau(pos: usize) f64 {
-    return 1 + alpha * @log(@max(@as(f64, @floatFromInt(pos + 1)) / floor_pos, 1));
+    return tauAt(pos, floor_pos);
+}
+
+/// tau at a model's own log_scaling_n_floor (Mini's is 8,192).
+pub fn tauAt(pos: usize, floor: f64) f64 {
+    return 1 + alpha * @log(@max(@as(f64, @floatFromInt(pos + 1)) / floor, 1));
 }
 
 /// One attention call's host inputs as the device holds them (bf16 bits) and where its rows sit.
@@ -75,6 +80,11 @@ pub const Call = struct {
     ring: usize,
     window: usize, // 0: a global layer, every key from 0
     exact: bool = false, // gate 4's rows: every p is 1 and every sum an integer below 2^24
+    kv: usize = kv, // key heads a rank: Small's 4, Mini's 8
+
+    pub fn perKv(call: *const Call) usize {
+        return heads / call.kv;
+    }
 
     /// The fp32 sums' longest chain at a row: 4 mma (k16) a 64-key tile and its rescale, then the folds.
     fn depth(call: *const Call, pos: usize) f64 {
@@ -92,7 +102,7 @@ pub const Call = struct {
     }
 
     fn keyRow(call: *const Call, which: []const u16, st: usize, kvh: usize, slot: usize) []const u16 {
-        return which[((st * kv + kvh) * call.ring + slot) * D ..][0..D];
+        return which[((st * call.kv + kvh) * call.ring + slot) * D ..][0..D];
     }
 };
 
@@ -141,7 +151,7 @@ fn sigmoid(g: f64) f64 {
 pub fn row(call: *const Call, r: usize, h: usize, ks: *Keys, want: []f64, tol: []f64) void {
     ks.gather(call, r, h);
     const st = call.stream[r];
-    const kvh = h / group;
+    const kvh = h / call.perKv();
     const pos = call.pos[r];
     const qr = call.q[(r * heads + h) * D ..][0..D];
     const z = bf(call.sink[r * heads + h]);
@@ -190,7 +200,7 @@ pub fn row(call: *const Call, r: usize, h: usize, ks: *Keys, want: []f64, tol: [
 /// Row r, head h with every sum in `acc` and `order` over the keys one by one (gate 4), output rounded to bf16.
 pub fn simulate(call: *const Call, r: usize, h: usize, acc: c.Accum, order: contract.gates.Order, p: []f64, col: []f64, out: []f64) void {
     const st = call.stream[r];
-    const kvh = h / group;
+    const kvh = h / call.perKv();
     const pos = call.pos[r];
     const lo = if (call.window > 0) (pos + 1) -| call.window else 0;
     const n = pos + 1 - lo;

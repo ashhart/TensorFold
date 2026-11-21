@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const ref = @import("contract_inkling2_ops_ref.zig");
+const M = @import("contract_inkling2_model.zig");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
@@ -20,12 +21,22 @@ pub const View = enum { out, state };
 /// The served kernel, or the control: every stream reading and writing slot 0's state.
 pub const Fault = enum { none, one_slot };
 
-fn width(f: Form) usize {
-    return if (f == .kv_static or f == .kv_dynamic) ref.kv_width else ref.hidden;
+fn model(mini: bool) M.Model {
+    return if (mini) M.mini else M.small;
 }
 
-fn parts(f: Form) usize {
-    return if (f == .attn or f == .attn_boundary or f == .mlp) 2 else 1;
+fn width(f: Form, mini: bool) usize {
+    return if (f == .kv_static or f == .kv_dynamic) model(mini).kvWidth() else model(mini).hidden;
+}
+
+/// A residual site's input: o_proj's or the experts' fp32 sums, rounded to bf16 once summed over the ranks.
+fn residual(f: Form) bool {
+    return f == .attn or f == .attn_boundary or f == .mlp;
+}
+
+/// Rank partials of a site's input: Small's two at TP=2, Mini's one rank its own.
+fn parts(f: Form, mini: bool) usize {
+    return if (residual(f)) model(mini).ranks else 1;
 }
 
 fn mode(f: Form) i32 {
@@ -49,16 +60,27 @@ const names = [5][2][]const u8{
     .{ "inkling2 ops tf_ink2_conv MLP site (rank partials, bf16(resid + bf16(y)))", "" },
 };
 
+/// Mini at one rank: its residual sites take one fp32 input, rounded to bf16.
+const mini_names = [5][2][]const u8{
+    names[0],
+    names[1],
+    .{ "inkling2 ops tf_ink2_conv attention site (one rank, base + bf16(y))", "inkling2 ops tf_ink2_conv attention site, states and kept inputs" },
+    names[3],
+    .{ "inkling2 ops tf_ink2_conv MLP site (one rank, bf16(resid + bf16(y)))", "" },
+};
+
 fn servedAt(comptime C: usize) []const c.Shape {
     return &.{ .{ .rows = 16, .n = C, .k = 1 }, .{ .rows = 1, .n = C, .k = 1 }, .{ .rows = 64, .n = C, .k = 4 }, .{ .rows = 128, .n = C, .k = 8 }, .{ .rows = 8, .n = C, .k = 8 }, .{ .rows = 2048, .n = C, .k = 1 } };
 }
 
 /// Rows of the call x the site's width x streams (each its rows, its state slot): decode, windows, prompt chunks.
-pub fn convSpec(f: Form, v: View, fault: Fault) c.Spec {
-    const served = if (width(f) == ref.kv_width) servedAt(ref.kv_width) else servedAt(ref.hidden);
+pub fn convSpec(f: Form, v: View, fault: Fault, mini: bool) c.Spec {
+    const kv_site = f == .kv_static or f == .kv_dynamic;
+    const served = if (mini) (if (kv_site) servedAt(M.mini.kvWidth()) else servedAt(M.mini.hidden)) else if (kv_site) servedAt(M.small.kvWidth()) else servedAt(M.small.hidden);
+    const at = @as(usize, @backingInt(f)) * 2 + @backingInt(v);
     var s: c.Spec = .{
-        .name = names[@backingInt(f)][@backingInt(v)],
-        .accum = if (v == .state and parts(f) == 1) .none else .f32, // a plain site keeps its inputs: no sums
+        .name = if (mini) M.namedAt(&flat(mini_names), at, true) else names[@backingInt(f)][@backingInt(v)],
+        .accum = if (v == .state and parts(f, mini) == 1) .none else .f32, // a plain site keeps its inputs: no sums
         .depth = depth,
         .out = if (v == .out and mode(f) != 1) .bf16 else .f32,
         .in_place = v == .state,
@@ -66,11 +88,15 @@ pub fn convSpec(f: Form, v: View, fault: Fault) c.Spec {
         .served = served,
     };
     if (fault == .one_slot) {
-        s.name = "control: inkling2 ops tf_ink2_conv k/v static taps, every stream on slot 0's state";
+        s.name = M.named("control: inkling2 ops tf_ink2_conv k/v static taps, every stream on slot 0's state", mini);
         s.served = served[2..4];
         s.tiles = .{ .{}, .{}, .{} };
     }
     return s;
+}
+
+fn flat(t: [5][2][]const u8) [10][]const u8 {
+    return t[0] ++ t[1] ++ t[2] ++ t[3] ++ t[4];
 }
 
 /// One conv launch over `k` streams' rows: inputs uploaded, the states restored before every launch.
@@ -79,6 +105,7 @@ pub const Conv = struct {
     form: Form,
     view: View = .out,
     fault: Fault = .none,
+    mini: bool = false,
     shape: c.Shape = undefined,
     x: []f32 = &.{}, // [parts][rows][C]
     w: []u16 = &.{}, // static [C][4], dynamic [4][C]
@@ -93,7 +120,7 @@ pub const Conv = struct {
     pub const sums = {};
 
     pub fn spec(self: *const Conv) c.Spec {
-        return convSpec(self.form, self.view, self.fault);
+        return convSpec(self.form, self.view, self.fault, self.mini);
     }
 
     pub fn control(self: *const Conv) ?g.Gate {
@@ -107,18 +134,22 @@ pub const Conv = struct {
         }
     }
 
-    const heads = 4;
+    /// The dynamic taps' heads: a rank's key heads.
+    fn dynHeads(self: *const Conv) usize {
+        return model(self.mini).kv;
+    }
 
     /// Values in [-2, 2); stress: products near 2^16 adding to 2^18 (fp16 overflows), partials near 2^17 cancelling.
     pub fn prepare(self: *Conv, a: std.mem.Allocator, rig: *rig_.Rig, shape: c.Shape, fill: g.Fill, rng: std.Random) !bool {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
+        const heads = self.dynHeads();
         if (shape.rows == 0 or shape.n != C or shape.k == 0) return false;
         self.free(a);
         self.shape = shape;
         const rows = shape.rows;
-        const np = parts(self.form);
+        const np = parts(self.form, self.mini);
         const stress = fill == .stress;
-        const round = np == 2;
+        const round = residual(self.form);
         self.x = try a.alloc(f32, np * rows * C);
         for (0..rows * C) |i| {
             const v = if (stress) ref.int(rng, -256, 256) else rng.float(f32) * 4 - 2;
@@ -176,7 +207,7 @@ pub const Conv = struct {
             .state_stride = @intCast(3 * C),
             .parts = @intCast(np),
             .round_in = @intFromBool(round),
-            .heads = heads,
+            .heads = @intCast(heads),
             .c = @intCast(C),
             .rows = @intCast(rows),
             .mode = mode(self.form),
@@ -192,21 +223,21 @@ pub const Conv = struct {
     }
 
     pub fn count(self: *const Conv) usize {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
         return if (self.view == .out) self.shape.rows * C else self.state.len + self.shape.rows * C;
     }
 
     /// Row t's input at column col: the ranks' partials added in order, rounded to bf16 at the residual sites.
     fn input(self: *const Conv, s: Sums, t: usize, col: usize) Iv {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
         const rows = self.shape.rows;
         var x = Iv.of(self.x[t * C + col]);
-        if (parts(self.form) == 2) x = step(s, x, Iv.of(self.x[(rows + t) * C + col]), false).bf();
+        if (parts(self.form, self.mini) == 2) x = step(s, x, Iv.of(self.x[(rows + t) * C + col]), false).bf() else if (residual(self.form)) x = x.bf();
         return x;
     }
 
     pub fn solve(self: *const Conv, _: std.mem.Allocator, s: Sums, out: []Iv) !void {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
         const hist = out[if (self.view == .state) self.state.len else 0..];
         if (self.view == .state) for (out[0..self.state.len], self.state) |*o, v| {
             o.* = Iv.of(v);
@@ -228,15 +259,16 @@ pub const Conv = struct {
     }
 
     fn tap(self: *const Conv, k: usize, col: usize) Iv {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
         return Iv.of(ref.bf(self.w[if (self.form == .kv_dynamic) k * C + col else col * 4 + k]));
     }
 
     /// The site's output at row t from its three prior inputs h (oldest first) and x.
     fn y(self: *const Conv, s: Sums, t: usize, col: usize, h: [3]Iv, x: Iv) Iv {
-        const C = width(self.form);
+        const C = width(self.form, self.mini);
         var v: Iv = undefined;
         if (self.form == .kv_dynamic) {
+            const heads = self.dynHeads();
             const d = self.dyn[(t * heads + col / (C / heads)) * 4 ..][0..4];
             var w: [4]Iv = undefined;
             for (&w, 0..) |*wk, k| wk.* = self.tap(k, col).add(Iv.of(d[k]));
@@ -259,10 +291,14 @@ pub const Conv = struct {
     }
 };
 
-/// Kept rows x the widest site x the slot's first row in hist: four sites, two 512 wide and two 4,608.
-pub fn rewindSpec(long: bool) c.Spec {
-    const served = &[_]c.Shape{ .{ .rows = 3, .n = ref.hidden, .k = 0 }, .{ .rows = 1, .n = ref.hidden, .k = 5 }, .{ .rows = 2, .n = ref.hidden, .k = 0 }, .{ .rows = 4, .n = ref.hidden, .k = 3 }, .{ .rows = 17, .n = ref.hidden, .k = 5 }, .{ .rows = 128, .n = ref.hidden, .k = 0 } };
-    const name = if (long) "control: inkling2 ops tf_ink2_conv_rewind keeping one row more" else "inkling2 ops tf_ink2_conv_rewind (a slot's states from its backup and kept rows)";
+fn rewindServed(comptime C: usize) []const c.Shape {
+    return &.{ .{ .rows = 3, .n = C, .k = 0 }, .{ .rows = 1, .n = C, .k = 5 }, .{ .rows = 2, .n = C, .k = 0 }, .{ .rows = 4, .n = C, .k = 3 }, .{ .rows = 17, .n = C, .k = 5 }, .{ .rows = 128, .n = C, .k = 0 } };
+}
+
+/// Kept rows x the widest site x the slot's first row in hist: four sites, 512 and 4,608 wide (Mini: 1,024, 2,304).
+pub fn rewindSpec(long: bool, mini: bool) c.Spec {
+    const served = if (mini) rewindServed(M.mini.hidden) else rewindServed(M.small.hidden);
+    const name = if (long) M.named("control: inkling2 ops tf_ink2_conv_rewind keeping one row more", mini) else M.named("inkling2 ops tf_ink2_conv_rewind (a slot's states from its backup and kept rows)", mini);
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .in_place = true, .nan = .{ .stated = "a move: every bit copied, NaN payloads too" }, .served = if (long) served[0..2] else served };
 }
 
@@ -270,6 +306,7 @@ pub fn rewindSpec(long: bool) c.Spec {
 pub const Rewind = struct {
     kern: *const ops.Kernels,
     long: bool = false,
+    mini: bool = false,
     shape: c.Shape = undefined,
     hist: []f32 = &.{},
     backup: []f32 = &.{},
@@ -277,12 +314,16 @@ pub const Rewind = struct {
     dev: [3]u64 = @splat(0),
     out: [4]u64 = @splat(0),
 
-    const widths = [4]usize{ ref.kv_width, ref.kv_width, ref.hidden, ref.hidden };
+    /// The four sites' widths: k, v, attention's, the MLP's.
+    fn widths(self: *const Rewind) [4]usize {
+        const m = model(self.mini);
+        return .{ m.kvWidth(), m.kvWidth(), m.hidden, m.hidden };
+    }
     const slots = 3;
     const slot = 1;
 
     pub fn spec(self: *const Rewind) c.Spec {
-        return rewindSpec(self.long);
+        return rewindSpec(self.long, self.mini);
     }
 
     pub fn control(self: *const Rewind) ?g.Gate {
@@ -303,12 +344,13 @@ pub const Rewind = struct {
     }
 
     pub fn prepare(self: *Rewind, a: std.mem.Allocator, rig: *rig_.Rig, shape: c.Shape, fill: g.Fill, rng: std.Random) !bool {
-        if (shape.rows == 0 or shape.n != ref.hidden) return false;
+        if (shape.rows == 0 or shape.n != model(self.mini).hidden) return false;
         self.free(a);
         self.shape = shape;
         const hr = self.histRows();
         var total: usize = 0;
-        for (widths) |w| total += w;
+        const ws = self.widths();
+        for (ws) |w| total += w;
         self.hist = try ref.f32s(a, rng, hr * total, -4, 4);
         self.backup = try ref.f32s(a, rng, 3 * total, -4, 4);
         if (fill == .nonfinite) {
@@ -318,7 +360,7 @@ pub const Rewind = struct {
         var sites: [4]ops.RewindSite = undefined;
         var h_off: usize = 0;
         var b_off: usize = 0;
-        for (&sites, &self.states, &self.out, widths) |*st, *s, *o, w| {
+        for (&sites, &self.states, &self.out, ws) |*st, *s, *o, w| {
             s.* = try ref.f32s(a, rng, slots * 3 * w, -4, 4);
             o.* = try rig.output(s.len * 4);
             st.* = .{ .state = o.*, .hist = @intCast(h_off * 4), .backup = @intCast(b_off * 4), .c = @intCast(w) };
@@ -332,7 +374,7 @@ pub const Rewind = struct {
     pub fn run(self: *Rewind, rig: *rig_.Rig) !void {
         for (self.states, self.out) |s, o| try ref.restore(rig, o, std.mem.sliceAsBytes(s));
         const n = self.shape.rows + @intFromBool(self.long);
-        try ops.rewind(self.kern, rig.s, self.dev[0], 4, ref.hidden, self.dev[1], self.dev[2], slot, self.shape.k, n);
+        try ops.rewind(self.kern, rig.s, self.dev[0], 4, model(self.mini).hidden, self.dev[1], self.dev[2], slot, self.shape.k, n);
     }
 
     pub fn count(self: *const Rewind) usize {
@@ -348,7 +390,7 @@ pub const Rewind = struct {
         var at: usize = 0;
         var h_off: usize = 0;
         var b_off: usize = 0;
-        for (self.states, widths, 0..) |s, w, site| {
+        for (self.states, self.widths(), 0..) |s, w, site| {
             for (s, 0..) |old, e| {
                 const sl = e / (3 * w);
                 const k = e / w % 3;

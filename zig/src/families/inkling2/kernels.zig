@@ -153,8 +153,14 @@ fn goShared(f: cuda.Function, s: cuda.Stream, grid: cuda.Dim3, threads: u32, sha
     try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads }, .shared = shared }, s, a);
 }
 
+/// Whether heads split into whole groups (query head h reads key head h / (heads / kv_heads)): Small 24/4, Mini 24/8.
+pub fn headsFit(r: Rows) error{Inkling2Heads}!void {
+    if (r.heads == 0 or r.kv_heads == 0 or r.heads % r.kv_heads != 0) return error.Inkling2Heads;
+}
+
 /// q, rel (per head) and k, v (per key head, written to the caches at pos % ring) from the projections' rows.
 pub fn prep(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, c: Prep, raw: [4]u64, scales: [2]u64, q: u64, rel: u64, kv: Cache) !void {
+    try headsFit(r);
     var a: cuda.Args = .{};
     for (raw) |v| a.add(v);
     for (scales) |v| a.add(v);
@@ -176,6 +182,7 @@ pub fn relTable(k: *const Kernels, s: cuda.Stream, r: Rows, rel: u64, proj: u64,
 
 /// Attention into chunk partials (`stride` a row and head; a split call's sub-chunks), then the ordered merge.
 pub fn attend(k: *const Kernels, s: cuda.Stream, r: Rows, l: Layer, stride: u32, slots: usize, q: u64, kv: Cache, tab: u64, part_o: u64, part_ml: u64, sink: u64, gate: u64, out: u64) !void {
+    try headsFit(r);
     if (slotsFor(l, r.last_pos + 1) > stride) return error.Inkling2Partials;
     const scale: f32 = 1.0 / @sqrt(@as(f32, head_dim));
     var a: cuda.Args = .{};
