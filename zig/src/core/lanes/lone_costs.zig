@@ -169,7 +169,6 @@ pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
     s.cost_probe_spacing = @min(carry_most, k.spacing);
 }
 
-
 pub const Pick = struct { counts: []u32, prices: Table, trial: ?u32 };
 
 /// A lone round's drafts, for the engine and a backend alike, after `prepare`: price each width, pick or trial one.
