@@ -46,7 +46,7 @@ pub fn schemas(a: Allocator, tools: []const Value) Allocator.Error!Schemas {
         if (properties == .object) for (properties.object.keys(), properties.object.values()) |k, v| {
             if (v == .object) try kept.put(a, k, v);
         };
-        const name = if (function.get("name")) |n| try tool_specs.pyStr(a, n) else "";
+        const name = try tool_specs.toolName(a, tool);
         try out.put(a, try std.ascii.allocLowerString(a, name), .{ .properties = kept, .root = parameters });
     }
     return out;
@@ -91,6 +91,43 @@ pub fn finite(v: Value) bool {
     };
 }
 
+/// Reject JSON's non-finite keywords outside strings; numeric overflow such as 1e400 keeps its legacy decoded form.
+pub fn finiteJson(text: []const u8) bool {
+    var string = false;
+    var escaped = false;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (string) {
+            if (escaped) {
+                escaped = false;
+            } else if (text[i] == '\\') {
+                escaped = true;
+            } else if (text[i] == '"') {
+                string = false;
+            }
+        } else if (text[i] == '"') {
+            string = true;
+        } else if (std.mem.startsWith(u8, text[i..], "NaN") or std.mem.startsWith(u8, text[i..], "Infinity")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Values admitted after ``finiteJson``: overflow may decode as infinity; NaN never survives the JSON decoder path.
+pub fn finiteDecoded(v: Value) bool {
+    return switch (v) {
+        .float => |f| !std.math.isNan(f),
+        .array => |items| for (items) |item| {
+            if (!finiteDecoded(item)) break false;
+        } else true,
+        .object => |obj| for (obj.values()) |item| {
+            if (!finiteDecoded(item)) break false;
+        } else true,
+        else => true,
+    };
+}
+
 /// ``closed_json``: the arrays and objects ``text`` left open, closed; null unless it only stops short of them.
 pub fn closedJson(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
     var closers: std.ArrayList(u8) = .empty;
@@ -124,11 +161,12 @@ pub fn decode(a: Allocator, value: []const u8, schema: Schema, python: bool) All
     const closed: ?[]const u8 = if (kinds.contains(.array) or kinds.contains(.object)) try closedJson(a, value) else null;
     for ([_]?[]const u8{ value, closed }) |candidate| {
         const text = candidate orelse continue;
+        if (!finiteJson(text)) continue;
         const parsed = switch (try json.parseText(a, text)) {
             .ok => |v| v,
             .err => continue,
         };
-        if (!finite(parsed)) continue;
+        if (!finiteDecoded(parsed)) continue;
         return if (tool_kinds.accepts(kinds, parsed)) parsed else .{ .string = value };
     }
     if (!python) return .{ .string = value };
