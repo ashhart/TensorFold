@@ -43,7 +43,7 @@ pub const Engine = struct {
     }
     fn submit(ptr: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         _ = cast(ptr).calls.fetchAdd(1, .monotonic);
-        if (cast(ptr).bump) |s| s.bump();
+        if (cast(ptr).bump) |s| s.bump(info(ptr));
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{'x'} });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
