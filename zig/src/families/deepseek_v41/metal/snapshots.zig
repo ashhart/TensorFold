@@ -30,8 +30,8 @@ pub const Entry = struct {
 /// The pool and key rows a state of `len` positions has written at a KV source (and the row it may be filling).
 pub fn poolRowsOf(c: *const Config, slot: *const kv.Slot, layer: u32, len: u64) usize {
     const ratio = c.compressRatio(layer);
-    const all = if (slot.regions[layer].owned) kv.poolRows(c, layer, slot.limit) else std.math.divCeil(u32, slot.limit, ratio) catch unreachable;
-    return @min(all, @as(usize, @intCast(len / ratio)) + 1);
+    if (!slot.regions[layer].owned) return @intCast(std.math.divCeil(u64, @min(len, slot.limit), ratio) catch unreachable);
+    return @min(kv.poolRows(c, layer, slot.limit), @as(usize, @intCast(len / ratio)) + 1);
 }
 
 /// Every region's bytes a state of `len` positions reads, as (buffer, bytes) runs in order.
