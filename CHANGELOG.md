@@ -173,7 +173,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: a routed prompt plan keeps the stacked shared expert whole up to the GEMM tile instead of cutting it into 8-row items, and on gfx1151 a prompt pass of 33 rows or more takes the GEMM tile for every expert; decode, lane rounds and the MTP draft head keep the 8-row tile, and outputs keep their bytes (#3521, fixes #3161). Thanks to @AbrahamCete.
 
-- CUDA contract: `df_sumn` is recorded at nvcc 13.3 with 40 registers on sm_120 and sm_121 again, as `glm_cuda_records.zig` holds it; the line #3953 added for it, measured before the kernel gained its dependent-launch wait, read 33 and is removed (refs #3953).
+- CUDA contract: `df_sumn` is recorded at nvcc 13.3 with 40 registers on sm_120 and sm_121 again, as `glm_cuda_records.zig` holds it; the line #3953 added for it, measured before the kernel gained its dependent-launch wait, read 33 and is removed (#4291, refs #3953).
 
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
