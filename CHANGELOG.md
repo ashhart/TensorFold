@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: `tf-h3-image-server` loads the prompt encoder, transformer and decoder once and serves one text-to-image request per input line, keeping the weights resident between pictures (#3718). Thanks to @plotarmordev.
+
 - Server: chat and legacy completions requests take `deadline_s` (seconds, more than 0 and at most 1,000,000; any other value is refused before the engine): at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave and its usage; a reply the engine ended first, or a cancel that came first, keeps its own ending, and without the field nothing changes (#3438). Thanks to @jayleaton.
 
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
