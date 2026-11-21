@@ -12,12 +12,10 @@ pub const Kind = enum {
 pub const Flag = struct {
     name: []const u8,
     kind: Kind = .value,
-    /// argparse's choices; empty: any value of the flag's type.
-    choices: []const []const u8 = &.{},
+    choices: []const []const u8 = &.{}, // argparse's choices; empty: any value of the flag's type.
     /// This binary honours the flag (and lists it in ``capabilities``); the rest are refused as unsupported.
     native: bool = false,
-    /// The values it honours when only some of the choices.
-    native_values: ?[]const []const u8 = null,
+    native_values: ?[]const []const u8 = null, // The values it honours when only some of the choices.
     /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
     path: bool = false,
 };
