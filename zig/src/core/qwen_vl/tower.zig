@@ -1,4 +1,4 @@
-//! A Qwen-VL image tower on Metal (the Qwen3.5 tower at any output width): an image's patches to its merged rows.
+//! A Qwen-VL image tower on Metal (Qwen3.5's at any width, Qwen3-VL's DeepStack opt-in): patches to merged rows.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -10,8 +10,7 @@ const wts = @import("weights.zig");
 
 pub const Ref = wts.Ref;
 
-/// The axial rotary's base (the Qwen3.5 vision config's default).
-const theta: f32 = 10000;
+const theta = grid.axial_theta;
 
 const Kernels = struct {
     lib: mtl.Library,
@@ -133,13 +132,18 @@ pub const Tower = struct {
     }
 
     pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config, max_tokens: u32, factory: anytype) !*Tower {
+        return loadAt(gpa, io, device, dir, wts.prefix, c, max_tokens, factory);
+    }
+
+    /// `loadWith` for a tower whose tensors are named under `prefix` (an HF checkpoint's `model.visual.`).
+    pub fn loadAt(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, prefix: []const u8, c: Config, max_tokens: u32, factory: anytype) !*Tower {
         const t = try gpa.create(Tower);
         errdefer gpa.destroy(t);
         t.gpa = gpa;
         t.c = c;
         t.k = try Kernels.load(gpa, device);
         errdefer t.k.deinit();
-        t.w = try wts.loadWith(gpa, io, factory, dir, c);
+        t.w = try wts.loadAt(gpa, io, factory, dir, prefix, c);
         errdefer t.w.deinit(gpa);
         t.inv = try gpa.alloc(f32, c.headDim() / 4);
         errdefer gpa.free(t.inv);
@@ -175,9 +179,15 @@ pub const Tower = struct {
 
     /// One image's patches ([gh * gw, patch width] fp32, merge order) to merged rows at `out` (bf16, out_hidden wide).
     pub fn image(t: *Tower, queue: mtl.Queue, pixels: []const f32, gh: u32, gw: u32, out: Ref) !void {
+        return t.imageDeep(queue, pixels, gh, gw, out, &.{});
+    }
+
+    /// `image`, and with one output per DeepStack tap (or none), each tap's merged rows like `out`.
+    pub fn imageDeep(t: *Tower, queue: mtl.Queue, pixels: []const f32, gh: u32, gw: u32, out: Ref, deep: []const Ref) !void {
         const c = t.c;
         const M = c.merge;
         const P: u32 = gh * gw;
+        if (deep.len != 0 and deep.len != c.taps().len) return error.DeepStackOutputs;
         if (P == 0 or gh % M != 0 or gw % M != 0 or pixels.len != @as(usize, P) * c.patchWidth()) return error.ImageGrid;
         if (P > t.max_patches) return error.ImageTooLarge;
         const pool = mtl.objc.Pool.push();
@@ -185,7 +195,7 @@ pub const Tower = struct {
         t.tables(pixels, gh, gw);
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        t.encode(e, P, out);
+        t.encode(e, P, out, deep);
         e.end();
         cb.commit();
         cb.wait();
@@ -214,25 +224,34 @@ pub const Tower = struct {
         grid.rotary(cs[0 .. P * hd], sn[0 .. P * hd], gh, gw, t.c.merge, t.inv);
     }
 
-    fn encode(t: *Tower, e: mtl.ComputeEncoder, P: u32, out: Ref) void {
+    fn encode(t: *Tower, e: mtl.ComputeEncoder, P: u32, out: Ref, deep: []const Ref) void {
         const c = t.c;
         const h = c.hidden;
-        const T = P / (c.merge * c.merge);
         t.linear(e, t.patches, t.w.patch_w, t.xn, P, h, c.patchWidth());
         e.setPipeline(t.k.embed);
         for ([_]Ref{ t.xn, t.w.patch_b, t.w.pos, t.taps, t.tap_w }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setValue(h, 5);
         e.setBuffer(t.x.buf, t.x.off, 6);
         e.dispatchThreads(mtl.Size.of(h, P, 1), mtl.Size.of(256, 1, 1));
-        for (t.w.blocks) |b| t.block(e, b, P);
-        t.norm(e, t.x, t.w.norm_w, t.w.norm_b, t.xn, P, h);
-        // the merge: four neighbouring patches' rows, in merge order, are one row of xn read as [T, merged]
-        t.linear(e, t.xn, t.w.fc1_w, t.att, T, c.merged(), c.merged());
-        t.gelu(e, t.att, t.w.fc1_b, T, c.merged(), true);
-        t.linear(e, t.att, t.w.fc2_w, out, T, c.out_hidden, c.merged());
+        for (t.w.blocks, 0..) |b, i| {
+            t.block(e, b, P);
+            if (deep.len != 0) for (c.taps(), t.w.deep, deep) |at, m, o| if (at == i) t.merger(e, m, o, P, true);
+        }
+        t.merger(e, .{ .norm_w = t.w.norm_w, .norm_b = t.w.norm_b, .fc1_w = t.w.fc1_w, .fc1_b = t.w.fc1_b, .fc2_w = t.w.fc2_w, .fc2_b = t.w.fc2_b }, out, P, false);
+    }
+
+    /// The residual's merged rows through `m` to `out`: normed per patch over hidden, or after the shuffle over merged.
+    fn merger(t: *Tower, e: mtl.ComputeEncoder, m: wts.Merger, out: Ref, P: u32, post_shuffle: bool) void {
+        const c = t.c;
+        const T = P / (c.merge * c.merge);
+        // the merge: four neighbouring patches' rows, in merge order, are one row of x or xn read as [T, merged]
+        if (post_shuffle) t.norm(e, t.x, m.norm_w, m.norm_b, t.xn, T, c.merged()) else t.norm(e, t.x, m.norm_w, m.norm_b, t.xn, P, c.hidden);
+        t.linear(e, t.xn, m.fc1_w, t.att, T, c.merged(), c.merged());
+        t.gelu(e, t.att, m.fc1_b, T, c.merged(), true);
+        t.linear(e, t.att, m.fc2_w, out, T, c.out_hidden, c.merged());
         e.setPipeline(t.k.bias);
         e.setBuffer(out.buf, out.off, 0);
-        e.setBuffer(t.w.fc2_b.buf, t.w.fc2_b.off, 1);
+        e.setBuffer(m.fc2_b.buf, m.fc2_b.off, 1);
         e.setValue(c.out_hidden, 2);
         e.dispatchThreads(mtl.Size.of(c.out_hidden, T, 1), mtl.Size.of(256, 1, 1));
     }
