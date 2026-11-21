@@ -8,6 +8,7 @@ const data = @import("masked_value_data.zig");
 const rig = @import("rig.zig");
 const mla = @import("masked_attention_mla.zig");
 const sparse = @import("masked_attention_sparse.zig");
+pub const main_sparse = @embedFile("baselines/glm_sparse_nax_main.metal.txt");
 pub const Kind = enum { glm_dense, glm_nax64, glm_nax32, glm_padding, glm_split, glm_indexed64, glm_indexed32, glm_dsa, kimi, step_full_nax, step_sliding_nax, step_sparse_nax, step_full_scalar, step_sliding_scalar, step_sparse_scalar, qwen4_dense, qwen4_sparse, drama, shared, shared_split, qwen35_pages, lfm3, lfm3_sliding, step_padding_nax, step_padding_scalar, deepseek_pre, h3_padding };
 pub fn geometry(k: Kind) data.Geometry {
     return switch (k) {
@@ -132,6 +133,35 @@ pub fn load(p: anytype) !void {
     const lib = try metal.Library.fromSource(p.rig.device, body, opts);
     defer lib.deinit();
     for (names, 0..) |name, i| p.pipes[i] = try metal.Pipeline.init(p.rig.device, lib, name, false);
+}
+
+fn identityPipes(p: anytype, text: []const u8, names: []const []const u8, pipes: *[3]?metal.Pipeline) !void {
+    var arena = std.heap.ArenaAllocator.init(p.a);
+    defer arena.deinit();
+    const body = try frags.source(p.rig.device, arena.allocator(), text);
+    const lib = try metal.Library.fromSource(p.rig.device, body, metal.CompileOptions.mlx());
+    defer lib.deinit();
+    for (names, 0..) |name, i| pipes[i] = try metal.Pipeline.init(p.rig.device, lib, name, false);
+}
+
+pub fn loadIdentity(p: anytype) !void {
+    var arena = std.heap.ArenaAllocator.init(p.a);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = try std.fmt.allocPrint(a, "#define GLM_HEADS {d}\n{s}", .{ p.geo.heads, src.glm_sparse_nax });
+    defer a.free(plain);
+    const old = try std.fmt.allocPrint(a, "#define GLM_HEADS {d}\n{s}", .{ p.geo.heads, main_sparse });
+    defer a.free(old);
+    const from = "const float p = (sc[i] > NO_SCORE || isnan(sc[i])) ? fast::exp(sc[i] - m[h]) : 0.0f;";
+    const to = "const float p = bfloat((sc[i] > NO_SCORE || isnan(sc[i])) ? fast::exp(sc[i] - m[h]) : 0.0f);";
+    const mine = if (!p.rounding) try a.dupe(u8, plain) else blk: {
+        if (std.mem.count(u8, plain, from) != 1) return error.ControlEditMissing;
+        break :blk try std.mem.replaceOwned(u8, a, plain, from, to);
+    };
+    defer a.free(mine);
+    const names: []const []const u8 = if (p.kind == .glm_split) &.{ "glm_sparse_split", "glm_sparse_combine" } else &.{"glm_sparse_nax"};
+    try identityPipes(p, mine, names, &p.pipes);
+    try identityPipes(p, old, names, &p.base_pipes);
 }
 
 pub fn prepare(p: anytype) !void {
