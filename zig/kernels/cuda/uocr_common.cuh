@@ -31,23 +31,6 @@ __device__ __forceinline__ int warp_min_int(int v) {
   return v;
 }
 
-// A block's sum of every thread's `v` (blockDim.x a multiple of 32, at most 1,024), returned to all of them.
-__device__ __forceinline__ float block_sum(float v, float* part) {
-  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, n = (blockDim.x + 31) >> 5;
-  v = warp_sum(v);
-  if (lane == 0) part[w] = v;
-  __syncthreads();
-  if (w == 0) {
-    float s = lane < n ? part[lane] : 0.0f;
-    s = warp_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  __syncthreads();
-  const float out = part[32];
-  __syncthreads();
-  return out;
-}
-
 // 8 bf16 at p (16-byte aligned) widened.
 __device__ __forceinline__ void load8(const bf16* p, float* out) {
   const uint4 u = *reinterpret_cast<const uint4*>(p);

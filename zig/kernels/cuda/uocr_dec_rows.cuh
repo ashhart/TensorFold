@@ -40,7 +40,7 @@ __device__ __forceinline__ void ud_norm(bf16* R, const bf16* A, const bf16* w, b
     v[i] = x;
     ss += x * x;
   }
-  ss = block_sum(ss, part);
+  ss = tf_common::block_sum_tree(ss, part, blockDim.x >> 5);
   const float inv = 1.0f / sqrtf(ss / (PLANT == 2 ? 256.0f : (float)UD_H) + eps);
 #pragma unroll
   for (int i = 0; i < 5; i++) {
@@ -61,7 +61,7 @@ __device__ __forceinline__ float ud_rope(float x, float partner, int d, const bf
 // The router's norm of a 128-wide row in fp32, (1 + w) scaled, clamped at +-1e4 before and after the scale; bf16 out.
 template <bool KEEP_NAN>
 __device__ __forceinline__ float ud_router_norm(float x, const bf16* w, int d, float eps, float* part) {
-  const float ss = block_sum(x * x, part);
+  const float ss = tf_common::block_sum_tree(x * x, part, blockDim.x >> 5);
   const float n = ud_clamp<KEEP_NAN>(x * (1.0f / sqrtf(ss / (float)UD_RD + eps)));
   return bf(ud_clamp<KEEP_NAN>(n * (1.0f + ld(w + d))));
 }

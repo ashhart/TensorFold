@@ -19,13 +19,13 @@ extern "C" __global__ void __launch_bounds__(256) tf_uocr_layer_norm(const bf16*
   bf16* yr = y + (size_t)blockIdx.x * width;
   float s = 0.0f;
   for (int i = threadIdx.x; i < width; i += blockDim.x) s += ld(xr + i);
-  const float mean = block_sum(s, part) / (float)width;
+  const float mean = tf_common::block_sum_tree(s, part, blockDim.x >> 5) / (float)width;
   float v = 0.0f;
   for (int i = threadIdx.x; i < width; i += blockDim.x) {
     const float d = ld(xr + i) - mean;
     v += d * d;
   }
-  const float inv = 1.0f / sqrtf(block_sum(v, part) / (float)width + eps);
+  const float inv = 1.0f / sqrtf(tf_common::block_sum_tree(v, part, blockDim.x >> 5) / (float)width + eps);
   for (int i = threadIdx.x; i < width; i += blockDim.x) yr[i] = to((ld(xr + i) - mean) * inv * ld(w + i) + ld(b + i));
 }
 
