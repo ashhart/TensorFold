@@ -93,7 +93,6 @@ pub const VideoOffer = struct {
 /// --vision's limits (``Open.vision``); image_tokens_set: the flag given; image_share: --vision-image-share's value.
 pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256, image_share: ImageShare = .request };
 
-
 /// --vision against the checkpoint: given without a tower, refused by name; a tower without it stays unread.
 pub fn gate(requested: bool, tower: bool) error{VisionWithoutTower}!bool {
     if (requested and !tower) return error.VisionWithoutTower;
