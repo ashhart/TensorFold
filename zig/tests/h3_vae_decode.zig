@@ -41,8 +41,12 @@ pub fn main(init: std.process.Init) !void {
     const std24 = decoder.config.latents_std;
     const denorm = try gpa.alloc(f32, latents.len);
     defer gpa.free(denorm);
-    for (0..latents.len / 24) |v| {
-        for (0..24) |c| denorm[v * 24 + c] = latents[v * 24 + c] * std24[c] + mean24[c];
+    // file layout is (C, F, H, W): denormalise per channel
+    const fhw = depth * height * width;
+    for (0..24) |c| {
+        for (0..fhw) |i| {
+            denorm[c * fhw + i] = latents[c * fhw + i] * std24[c] + mean24[c];
+        }
     }
     defer decoder.deinit();
     std.debug.print("decoder loaded, calling frames", .{});

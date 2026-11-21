@@ -180,12 +180,14 @@
   const device float* B [[buffer(2)]],    // [24]
   device float* OUT [[buffer(3)]],        // [V, 24]
   constant uint* P [[buffer(4)]],        // P[0]=V, P[1]=C
-  uint3 at [[thread_position_in_grid]]) {
+  uint at1 [[thread_position_in_grid]]) {
   const uint V = P[0], C = P[1];
-  if (at.x >= C || at.y >= V) return;
+  const uint v = at1 / C;
+  const uint o = at1 % C;
+  if (v >= V || o >= C) return;
   float sum = 0.0f;
-  for (uint i = 0; i < C; i++) sum += IN[at.y * C + i] * W[at.x * C + i];
-  OUT[at.y * C + at.x] = sum + B[at.x];
+  for (uint i = 0; i < C; i++) sum += IN[v * C + i] * W[o * C + i];
+  OUT[v * C + o] = sum + B[o];
 }
 
 // unpatchify + denormalize: token output [voxels, 3*4*16*16] to RGB bytes
