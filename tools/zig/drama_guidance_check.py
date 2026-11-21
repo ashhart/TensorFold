@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from drama_reference_cache_check import TEXTS, serve
@@ -28,6 +29,14 @@ def require_reference(voices, voice):
     path = voices / f"{voice}.json"
     if voice.lower() == "default" or not path.is_file() or not json.loads(path.read_text()).get("references"):
         raise SystemExit(f"--voice {voice!r} must name a catalog voice with a reference in {voices}")
+
+
+def revision(value):
+    """REPO@COMMIT: the checkpoint's Hugging Face commit as the hub API reports it, never a branch such as main."""
+    repo, _, commit = value.rpartition("@")
+    if not repo or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise argparse.ArgumentTypeError(f"{value!r} is not REPO@COMMIT with the full 40-hex commit sha")
+    return {"repo": repo, "commit": commit}
 
 
 def verdict(runs):
@@ -68,6 +77,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", type=Path, required=True, help="tensorfold-native built with this change (CUDA)")
     parser.add_argument("--checkpoint", type=Path, required=True, help="fishaudio/drama-3 checkpoint directory")
+    parser.add_argument("--revision", type=revision, required=True,
+                        help="REPO@COMMIT the checkpoint was downloaded at, e.g. fishaudio/drama-3@<40-hex sha>")
     parser.add_argument("--voices", type=Path, required=True, help="voice catalog directory for --voices")
     parser.add_argument("--voice", required=True, help="a catalog voice in --voices whose reference has over 64 rows")
     parser.add_argument("--out", type=Path, required=True, help="new directory for server logs and results.json")
@@ -85,7 +96,8 @@ def main():
         runs[rows] = {mode: run_mode(args, env, flags, args.out / f"server-rows{rows}-{mode}.log",
                                      plain if mode == "plain" else steps) for mode, flags in MODES.items()}
     problems = verdict(runs)
-    result = {"pass": not problems, "problems": problems, "runs": runs}
+    result = {"pass": not problems, "problems": problems,
+              "checkpoint": {"path": str(args.checkpoint), **args.revision}, "runs": runs}
     (args.out / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"pass": result["pass"], "problems": problems}, indent=2))
     return 0 if not problems else 1

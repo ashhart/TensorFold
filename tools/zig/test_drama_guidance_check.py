@@ -1,4 +1,5 @@
-"""The guidance check's verdict and voice requirement, without a server or GPU."""
+"""The guidance check's verdict, voice requirement and pinned revision, without a server or GPU."""
+import argparse
 import copy
 import json
 from pathlib import Path
@@ -80,6 +81,16 @@ class VoiceTests(unittest.TestCase):
             for voice in ("default", "Default", "bare", "missing"):
                 with self.assertRaises(SystemExit, msg=voice):
                     check.require_reference(voices, voice)
+
+
+class RevisionTests(unittest.TestCase):
+    def test_only_a_full_commit_sha_pins_a_checkpoint(self):
+        commit = "b2b5ee998034b2975720906c815e7fb0e9f007bd"
+        repo = "fishaudio/drama-3"
+        self.assertEqual(check.revision(f"{repo}@{commit}"), {"repo": repo, "commit": commit})
+        for value in (f"{repo}@main", f"{repo}@{commit[:8]}", f"{repo}@{commit.upper()}", commit, f"@{commit}"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                check.revision(value)
 
 
 if __name__ == "__main__":
