@@ -219,7 +219,8 @@ pub fn base(p: *const Pipelines, e: mtl.ComputeEncoder, unembed: Ref, y: Ref, ou
     e.setPipeline(p.base);
     bind(e, &.{ unembed, y, out });
     e.setValue(BaseArgs{ .rows = rows, .vocab = vocabulary_count }, 3);
-    threads(e, @as(usize, rows) * vocabulary_count, 256);
+    std.debug.assert(rows <= 7);
+    groups(e, (@as(usize, vocabulary_count) + 7) / 8, 256);
 }
 /// Folded Phi/beta correction and target-style 30 tanh softcap, restricted to Mini's 200058 logits.
 pub fn finalLogits(p: *const Pipelines, e: mtl.ComputeEncoder, base_values: Ref, phi: Ref, beta: Ref, lambda: Ref, out: Ref) void {
