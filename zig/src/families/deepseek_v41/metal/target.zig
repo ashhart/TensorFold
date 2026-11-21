@@ -287,7 +287,7 @@ pub const Target = struct {
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
         if (images.len > 0) {
-            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, ids.len, t.opt.prompt.chunk, at);
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, @intCast(ids.len), t.opt.prompt.chunk, at);
             t.pr.images = if (s.image_rows) |*r| r else null;
         }
         s.resumed = at;
