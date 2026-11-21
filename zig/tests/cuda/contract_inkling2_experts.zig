@@ -1,4 +1,4 @@
-//! Inkling 2's grouped experts and vision tower (inkling2/experts.cu, vision.cu) under the contract, with controls.
+//! Inkling 2's prompt-chunk experts on core's wide kernel and its vision tower (vision.cu), with controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const ink = @import("inkling2");
@@ -16,8 +16,7 @@ pub const Set = struct {
     ek: ink.experts.Kernels = undefined,
     vk: ink.vision.Kernels = undefined,
     fa: cuda.vit.Attention = undefined,
-    groups: [2]grouped.Group = undefined,
-    projections: [4]grouped.Grouped = undefined,
+    projections: [2]grouped.Grouped = undefined,
     embeds: [2]ref.Gated(vision.Embed) = undefined,
     ropes: [2]ref.Gated(vision.Rope) = undefined,
     adds: [2]ref.Gated(vision.ScaleAdd) = undefined,
@@ -31,15 +30,12 @@ pub const Set = struct {
         set.fa = try cuda.vit.Attention.load(gpu.d);
         errdefer set.fa.unload();
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
-        for (&set.groups, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .wrong_run = i == 1 };
-        const forms = [4]@import("contract_inkling2_experts_ref.zig").Form{ .rows, .rows, .wide, .wide };
-        for (&set.projections, forms, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = &set.ek, .form = f, .fault = if (i == 1) .short else if (i == 3) .swapped else .none };
+        for (&set.projections, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .fault = if (i == 1) .swapped else .none };
         for (&set.embeds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
         for (&set.ropes, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .swapped = i == 1 } };
         for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
         set.attn = .{ .rig = rig, .att = &set.fa };
         set.live = true;
-        for (&set.groups) |*x| try list.append(a, x.kernel());
         for (&set.projections) |*x| try list.append(a, x.kernel());
         for (&set.embeds) |*x| try list.append(a, x.kernel());
         for (&set.ropes) |*x| try list.append(a, x.kernel());
@@ -54,7 +50,6 @@ pub const Set = struct {
         for (&set.ropes) |*x| x.deinit();
         for (&set.embeds) |*x| x.deinit();
         for (&set.projections) |*x| x.deinit();
-        for (&set.groups) |*x| x.deinit();
         set.fa.unload();
         set.vk.unload();
         set.ek.unload();
