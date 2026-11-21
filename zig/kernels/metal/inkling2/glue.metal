@@ -43,14 +43,19 @@ kernel void tf_inkling2_embed_norm(
     out[size_t(row) * 2304 + d] = bfloat(float(weight[d]) * (float(x[d]) * inverse));
 }
 
-struct InkARArgs { uint sources, queries; };
+struct InkARArgs { uint sources, queries, rows; };
+// Threadgroup (q, row): row's sources mixed by query q into out[q * rows + row]; a row has four block slots.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_ar(
-    const device bfloat* blocks [[buffer(0)]], const device float* partial [[buffer(1)]],
-    const device float* queries [[buffer(2)]], device float* out [[buffer(3)]],
-    constant InkARArgs& a [[buffer(4)]], uint t [[thread_position_in_threadgroup]],
-    uint q [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
-  if (q >= a.queries || a.sources == 0 || a.sources > 5) return;
+    const device bfloat* all_blocks [[buffer(0)]], const device float* all_partial [[buffer(1)]],
+    const device float* queries [[buffer(2)]], device float* all_out [[buffer(3)]],
+    constant InkARArgs& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint q = tg.x, row = tg.y;
+  if (q >= a.queries || row >= a.rows || a.sources == 0 || a.sources > 5) return;
+  const device bfloat* blocks = all_blocks + size_t(row) * 4 * 2304;
+  const device float* partial = all_partial + size_t(row) * 2304;
+  device float* out = all_out + (size_t(q) * a.rows + row) * 2304;
   threadgroup float red[2 * 5 * 8], means[5], weights[5];
   for (uint s = 0; s < a.sources; ++s) {
     float ss = 0.0f;
@@ -96,7 +101,7 @@ kernel void tf_inkling2_ar(
     float acc = 0.0f;
     for (uint s = 0; s < a.sources; ++s)
       acc += weights[s] * (ink_value(blocks, partial, s, a.sources, d) * means[s]);
-    out[size_t(q) * 2304 + d] = acc;
+    out[d] = acc;
   }
 }
 
