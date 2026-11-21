@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sampling = @import("sampling.zig").Sampling;
 const rule = @import("gpu_rule.zig");
+const select = @import("gpu_select.zig");
 
 /// Tokens this far (in logits / T) below the row's max never win the race: its noise spans under 19.5.
 pub const never: f32 = 24.0;
@@ -62,32 +63,35 @@ fn markOf(c: rule.Cand) Mark {
 pub fn plan(gpa: Allocator, logits: []const f32, s: Sampling) !Plan {
     const r = rule.rule(s);
     const inv_t = r.inv_t;
-    const order = try gpa.alloc(rule.Cand, logits.len);
-    defer gpa.free(order);
     var m = -std.math.inf(f32);
-    for (order, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    std.mem.sort(rule.Cand, order, {}, rule.better);
+    for (logits) |l| m = @max(m, l * inv_t);
     const min_log = r.min_log;
     var p = Plan{ .inv_t = inv_t, .m = m, .lo = @max(m + min_log, m - never) };
-    if (s.top_k != 0 and s.top_k < logits.len) p.top = markOf(order[s.top_k - 1]);
     const top_p = r.top_p;
-    if (top_p > 0.0 and top_p < 1.0) p.cut = nucleus(logits, p, order, top_p);
+    var kept: [rule.candidates]rule.Cand = undefined;
+    const head = if (top_p > 0.0 and top_p < 1.0) select.top(logits, inv_t, @min(logits.len, rule.candidates), &kept) else kept[0..0];
+    if (s.top_k != 0 and s.top_k < logits.len) {
+        if (s.top_k <= head.len) p.top = markOf(head[s.top_k - 1]) else {
+            const order = try gpa.alloc(rule.Cand, logits.len);
+            defer gpa.free(order);
+            for (order, logits, 0..) |*c, l, i| c.* = .{ .v = l * inv_t, .i = @intCast(i) };
+            p.top = markOf(select.nth(order, s.top_k - 1));
+        }
+    }
+    if (top_p > 0.0 and top_p < 1.0) p.cut = nucleus(logits, p, head, top_p);
     return p;
 }
 
-/// The nucleus's last token: tf_gpu_sample's sequential sum over its 1,024 candidates, extended when it falls short.
-fn nucleus(logits: []const f32, p: Plan, order: []const rule.Cand, top_p: f32) Mark {
+/// The nucleus's last token: tf_gpu_sample's sequential sum over `head`, the order's first 1,024, extended past them.
+pub fn nucleus(logits: []const f32, p: Plan, head: []const rule.Cand, top_p: f32) Mark {
     const norm = mass(logits, p, 1.0, -std.math.inf(f32), start, p.top, end, false);
-    const n = @min(order.len, rule.candidates);
+    const n = head.len;
     var cum: f32 = 0.0;
-    for (order[0..n]) |c| {
+    for (head[0..n]) |c| {
         cum += @exp(c.v - p.m) / norm;
         if (cum >= top_p) return markOf(c);
     }
-    return extend(logits, p, norm, top_p, cum, markOf(order[n - 1]));
+    return extend(logits, p, norm, top_p, cum, markOf(head[n - 1]));
 }
 
 /// The first place past `b` whose prefix reaches top_p, found by bits of key then id; `end` when none can win.
