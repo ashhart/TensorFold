@@ -78,8 +78,8 @@ fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.im
     }
 }
 
-/// What disk states are read under, and the probe's prompt rate: the checkpoint, the drafter, sources, modes, bits.
-pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[]const u8) !struct { id: u64, rate: f64 } {
+/// The checkpoint, drafter, code, policies and loaded control vector that computed a disk state, plus the probe rate.
+pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[]const u8, steering: ?*const api.glp.Glp) !struct { id: u64, rate: f64 } {
     var w = std.hash.Wyhash.init(0x7132);
     try @import("sys").file_identity.current(&w, a, io);
     try disk_identity.checkpoint(&w, a, io, dir);
@@ -89,7 +89,8 @@ pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[
     w.update(std.mem.sliceAsBytes(&words));
     disk_identity.machine(&w, std.mem.span(h.model.device.name()));
     disk_identity.profile(&w, .{ .family = if (h.model.config.moe()) "qwen3_5_moe" else "qwen3_5", .backend = "metal" });
-    return .{ .id = withPolicy(w.final(), h), .rate = p.rate };
+    const base = withPolicy(w.final(), h);
+    return .{ .id = if (steering) |g| withSteering(base, &g.vector.file_sha256, g.alpha) else base, .rate = p.rate };
 }
 
 /// A fixed prompt's state through slot 0 (whole 128-row chunks, a decoded span, a short tail), hashed, and its rate.
@@ -131,9 +132,9 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
 }
 
 /// The store for --learn-conversations under `root`, attached to the cache; the probe seeds its prompt rate.
-pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn) !void {
+pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn, steering: ?*const api.glp.Glp) !void {
     const store = &(h.cache orelse return std.log.warn("Qwen3.8-27B: --learn-conversations needs the prompt cache, which --prompt-cache-gib 0 turned off", .{}));
-    const id = try identity(h, io, a, o.dir, o.drafter);
+    const id = try identity(h, io, a, o.dir, o.drafter, steering);
     const r = try rows.attach(h.gpa, store, .{ .root = o.root, .identity = id.id, .cap = o.cap, .floor = o.floor, .daily = o.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = o.spill, .slots = o.slots, .longest = h.host.info_.context_window });
     r.prefill_rate = id.rate;
     std.log.info("Qwen3.8-27B: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, o.cap >> 20 });
@@ -148,4 +149,13 @@ pub fn withPolicy(legacy: u64, h: anytype) u64 {
         if (h.model.ane) |share| share.columns else 0,
         h.back.chunk, // not frame.capacity: it only sizes buffers and bounds a pass's rows
     });
+}
+
+/// A changed vector file or applied strength cannot reuse conversation states, even if the probe rounds alike.
+pub fn withSteering(base: u64, file_sha256: *const [32]u8, alpha: f32) u64 {
+    var hash = std.hash.Wyhash.init(base);
+    hash.update("qwen-metal-glp-add-v1");
+    hash.update(file_sha256);
+    hash.update(std.mem.asBytes(&alpha));
+    return hash.final();
 }
