@@ -39,7 +39,11 @@ pub const Width = struct { nodes: u32, trial: ?u32 = null };
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
-    try lone_costs.prepare(e, s, .wall);
+    if (!s.prices_seeded) {
+        s.prices_seeded = true;
+        _ = try e.rule.rates(lanes.windows.who(s));
+        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
+    }
     // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
     var buf: [2048]u8 align(16) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&buf);

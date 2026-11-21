@@ -307,7 +307,12 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
     const live = plans.len == 1 and lone_costs.enabled(e, plans[0]);
-    if (live) try lone_costs.prepare(e, plans[0].stream, .backend);
+    if (live and !plans[0].stream.prices_seeded) {
+        const s = plans[0].stream;
+        s.prices_seeded = true;
+        _ = try e.rule.rates(who(s));
+        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
+    }
     var own = untimed;
     var trial: ?u32 = null;
     const counts = if (live) blk: {

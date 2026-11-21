@@ -16,7 +16,6 @@ pub fn detach(e: *Engine, s: *Stream) bool {
         if (x != s) continue;
         _ = e.live.orderedRemove(i);
         e.late.cancel(s);
-        if (e.cfg.lone_cost_tile > 0 or s.clock != null) lone_costs.retain(e, s);
         s.dropRoundState(e.gpa);
         return true;
     }
