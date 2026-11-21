@@ -133,7 +133,7 @@ pub const Ops = struct {
     }
 
     fn pipe(o: *const Ops, k: Kernel) mtl.Pipeline {
-        return o.pipes[@intFromEnum(k)];
+        return o.pipes[@backingInt(k)];
     }
 
     pub fn mix(o: *const Ops, e: mtl.ComputeEncoder, a: MixArgs) !void {

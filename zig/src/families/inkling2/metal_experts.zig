@@ -53,10 +53,8 @@ const Matrix = struct {
 
     fn load(cp: *const ck.Checkpoint, i: usize, comptime name: []const u8, prec: Precision, e: u32, n: u32, k: u32, factor_view: ?View) !Matrix {
         const nv = prec == .nvfp4;
-        const weight = try checked(try tensor(cp, i, name ++ "_weight"), if (nv) .u8 else .f8_e4m3,
-            &.{ e, n, if (nv) k / 2 else k });
-        const scales = try checked(try tensor(cp, i, name ++ "_weight_scale"), if (nv) .f8_e4m3 else .u8,
-            &.{ e, n, k / if (nv) @as(u32, 16) else 32 });
+        const weight = try checked(try tensor(cp, i, name ++ "_weight"), if (nv) .u8 else .f8_e4m3, &.{ e, n, if (nv) k / 2 else k });
+        const scales = try checked(try tensor(cp, i, name ++ "_weight_scale"), if (nv) .f8_e4m3 else .u8, &.{ e, n, k / if (nv) @as(u32, 16) else 32 });
         if (factor_view) |v| {
             const amax = try tensor(cp, i, name ++ "_weight_amax");
             const denominator = try tensor(cp, i, name ++ "_weight_outer_scale_denominator");
@@ -147,10 +145,8 @@ pub const Store = struct {
             const factors = if (precision == .nvfp4) factor_buffer else null;
             layer.* = .{
                 .precision = precision,
-                .gate_up = try Matrix.load(cp, i, "w13", precision, t.experts, 2 * t.expert_inter, t.hidden,
-                    if (factors) |b| .{ .buffer = b, .offset = 2 * i * factor_stride } else null),
-                .down = try Matrix.load(cp, i, "w2", precision, t.experts, t.hidden, t.expert_inter,
-                    if (factors) |b| .{ .buffer = b, .offset = (2 * i + 1) * factor_stride } else null),
+                .gate_up = try Matrix.load(cp, i, "w13", precision, t.experts, 2 * t.expert_inter, t.hidden, if (factors) |b| .{ .buffer = b, .offset = 2 * i * factor_stride } else null),
+                .down = try Matrix.load(cp, i, "w2", precision, t.experts, t.hidden, t.expert_inter, if (factors) |b| .{ .buffer = b, .offset = (2 * i + 1) * factor_stride } else null),
             };
         }
         var compile = mtl.CompileOptions.mlx();
@@ -208,7 +204,7 @@ pub const Store = struct {
     }
 
     fn pipe(s: *const Store, k: Kernel) mtl.Pipeline {
-        return s.pipes[@intFromEnum(k)];
+        return s.pipes[@backingInt(k)];
     }
 
     fn dot(s: *const Store, e: mtl.ComputeEncoder, layer: *const Layer, gate_up: bool, x: View, ids: View, pairs: u32) void {

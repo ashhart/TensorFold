@@ -222,20 +222,24 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe) g.Kernel {
         const wide = p.kind == .head;
-        return .{ .ctx = p, .vt = &vt, .spec = .{
-            .name = p.label,
-            // Gate 4 replays 4x200058 nine times, so the head declares none; plain kinds prove the sums at K 6144.
-            .accum = if (wide) .none else .f32,
-            .depth = depth,
-            .out = if (f32Out(p.kind)) .f32 else .bf16,
-            .replaces = switch (p.kind) {
-                .alone_bf16, .alone_f32 => "each row as its own one-row call",
-                .split_bf16 => "the same rows in one call",
-                else => null,
+        return .{
+            .ctx = p,
+            .vt = &vt,
+            .spec = .{
+                .name = p.label,
+                // Gate 4 replays 4x200058 nine times, so the head declares none; plain kinds prove the sums at K 6144.
+                .accum = if (wide) .none else .f32,
+                .depth = depth,
+                .out = if (f32Out(p.kind)) .f32 else .bf16,
+                .replaces = switch (p.kind) {
+                    .alone_bf16, .alone_f32 => "each row as its own one-row call",
+                    .split_bf16 => "the same rows in one call",
+                    else => null,
+                },
+                .served = servedOf(p.kind),
+                .tiles = if (wide) .{ .{}, .{}, .{} } else .{ .{ .size = 16 }, .{ .size = 16 }, .{ .size = 32 } },
             },
-            .served = servedOf(p.kind),
-            .tiles = if (wide) .{ .{}, .{}, .{} } else .{ .{ .size = 16 }, .{ .size = 16 }, .{ .size = 32 } },
-        } };
+        };
     }
 
     fn opsOf(p: *const Probe) *const ops.Ops {

@@ -31,8 +31,8 @@ pub const Kind = enum {
 
 /// The kinds the suite registers on the production operators.
 pub const kinds = [_]Kind{
-    .q,            .q_in_place, .q_tau,  .q_tau_in_place,  .q_tau_split, .q_tau_far, .rel,
-    .rel_in_place, .rel_tau,    .rel_tau_in_place, .kv,    .kv_ring,     .kv_split,   .kv_dim64,
+    .q,            .q_in_place, .q_tau,            .q_tau_in_place, .q_tau_split, .q_tau_far, .rel,
+    .rel_in_place, .rel_tau,    .rel_tau_in_place, .kv,             .kv_ring,     .kv_split,  .kv_dim64,
     .kv_dim256,
 };
 
@@ -258,19 +258,23 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe) g.Kernel {
         const rows_tile: usize = if (p.kind == .kv_ring or p.kind == .kv_split) 32 else 16;
-        return .{ .ctx = p, .vt = &vt, .spec = .{
-            .name = p.label,
-            .accum = .f32,
-            .depth = depth,
-            .ops = 8,
-            .mids = if (floorOf(p.kind) != null) 1 else 0,
-            .out = .bf16,
-            .replaces = if (p.kind == .kv_split) "the same rows in one call" else if (isInPlace(p.kind)) "the same rows out of place in one call" else null,
-            .served = servedOf(p.kind),
-            .tiles = .{ .{ .size = rows_tile }, .{}, .{} },
-            // Rounding the factor's relative error (sqrt halves it) to bf16 costs one ulp, 100x bound.
-            .sums = .{ .f16 = 100, .bf16 = 0, .why = "output rounding hides bf16 sum error" },
-        } };
+        return .{
+            .ctx = p,
+            .vt = &vt,
+            .spec = .{
+                .name = p.label,
+                .accum = .f32,
+                .depth = depth,
+                .ops = 8,
+                .mids = if (floorOf(p.kind) != null) 1 else 0,
+                .out = .bf16,
+                .replaces = if (p.kind == .kv_split) "the same rows in one call" else if (isInPlace(p.kind)) "the same rows out of place in one call" else null,
+                .served = servedOf(p.kind),
+                .tiles = .{ .{ .size = rows_tile }, .{}, .{} },
+                // Rounding the factor's relative error (sqrt halves it) to bf16 costs one ulp, 100x bound.
+                .sums = .{ .f16 = 100, .bf16 = 0, .why = "output rounding hides bf16 sum error" },
+            },
+        };
     }
 
     fn dim(p: *const Probe) usize {

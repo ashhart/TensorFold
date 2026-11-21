@@ -86,7 +86,11 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe, control_gate: ?c.Gate) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = control_gate, .spec = .{
-            .name = p.label, .accum = .f32, .depth = depth, .out = p.elem(), .tiles = tiles,
+            .name = p.label,
+            .accum = .f32,
+            .depth = depth,
+            .out = p.elem(),
+            .tiles = tiles,
             .served = switch (p.kind) {
                 .bf16_nt => &bf16_nt,
                 .bf16_nn => &bf16_nn,

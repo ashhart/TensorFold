@@ -20,9 +20,10 @@ const dim = 128;
 const scale = 1 / @sqrt(@as(f64, dim));
 const Attn = extern struct { rows: u32, heads: u32, groups: u32, lo: u32, nctx: u32, ring: u32, splits: u32, per: u32, scale: f32 };
 const served = [_]c.Shape{
-    .{ .rows = 8, .n = heads, .k = 65 }, .{ .rows = 8, .n = heads, .k = 0 },
-    .{ .rows = 8, .n = heads, .k = 23 }, .{ .rows = 8, .n = heads, .k = 24 }, .{ .rows = 8, .n = heads, .k = 25 },
-    .{ .rows = 8, .n = heads, .k = 1024 }, .{ .rows = 8, .n = heads, .k = 1170 },
+    .{ .rows = 8, .n = heads, .k = 65 },   .{ .rows = 8, .n = heads, .k = 0 },
+    .{ .rows = 8, .n = heads, .k = 23 },   .{ .rows = 8, .n = heads, .k = 24 },
+    .{ .rows = 8, .n = heads, .k = 25 },   .{ .rows = 8, .n = heads, .k = 1024 },
+    .{ .rows = 8, .n = heads, .k = 1170 },
 };
 
 fn depth(s: c.Shape) usize {
@@ -62,7 +63,11 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe, gate: ?c.Gate) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = gate, .spec = .{
-            .name = p.label, .accum = .f32, .depth = depth, .out = .bf16, .served = &served,
+            .name = p.label,
+            .accum = .f32,
+            .depth = depth,
+            .out = .bf16,
+            .served = &served,
             .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = "BF16 stores hide short positive softmax sums; stress isolates signed value cancellation" },
         } };
     }

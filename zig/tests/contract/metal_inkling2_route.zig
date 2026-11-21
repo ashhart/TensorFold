@@ -37,10 +37,17 @@ const rule = "picks rank by score + bias, NaN above every number, ties to the lo
 const served_shared = [_]c.Shape{
     .{ .rows = 17, .n = 128, .k = 2304 },
     .{ .rows = 128, .n = 128, .k = 2304 },
-    .{ .rows = 6, .n = 96, .k = 128 },   .{ .rows = 16, .n = 384, .k = 4608 }, .{ .rows = 40, .n = 96, .k = 128 },
-    .{ .rows = 33, .n = 384, .k = 1024 }, .{ .rows = 17, .n = 100, .k = 128 },  .{ .rows = 2, .n = 384, .k = 4608 },
-    .{ .rows = 31, .n = 96, .k = 128 },   .{ .rows = 15, .n = 96, .k = 128 },   .{ .rows = 32, .n = 384, .k = 128 },
-    .{ .rows = 5, .n = 512, .k = 128 },   .{ .rows = 3, .n = 384, .k = 4608 },
+    .{ .rows = 6, .n = 96, .k = 128 },
+    .{ .rows = 16, .n = 384, .k = 4608 },
+    .{ .rows = 40, .n = 96, .k = 128 },
+    .{ .rows = 33, .n = 384, .k = 1024 },
+    .{ .rows = 17, .n = 100, .k = 128 },
+    .{ .rows = 2, .n = 384, .k = 4608 },
+    .{ .rows = 31, .n = 96, .k = 128 },
+    .{ .rows = 15, .n = 96, .k = 128 },
+    .{ .rows = 32, .n = 384, .k = 128 },
+    .{ .rows = 5, .n = 512, .k = 128 },
+    .{ .rows = 3, .n = 384, .k = 4608 },
 };
 const served_single = served_shared ++ [_]c.Shape{.{ .rows = 1, .n = 128, .k = 2304 }};
 

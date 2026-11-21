@@ -72,11 +72,20 @@ fn tensor(r: rig_.Ref, comptime esize: usize, first: usize) u.View {
 const served_shared = [_]c.Shape{
     .{ .rows = 17, .n = 2304, .k = 2 },
     .{ .rows = 128, .n = 2304, .k = 4 },
-    .{ .rows = 6, .n = 128, .k = 4 },   .{ .rows = 3, .n = 4608, .k = 1 },  .{ .rows = 16, .n = 4608, .k = 4 },
-    .{ .rows = 40, .n = 128, .k = 8 },  .{ .rows = 17, .n = 1000, .k = 4 }, .{ .rows = 33, .n = 128, .k = 1 },
-    .{ .rows = 2, .n = 4608, .k = 8 },  .{ .rows = 5, .n = 256, .k = 16 },  .{ .rows = 4, .n = 4608, .k = 16 },
-    .{ .rows = 31, .n = 128, .k = 0 },  .{ .rows = 32, .n = 128, .k = 4 },  .{ .rows = 2, .n = 6144, .k = 4 },
-    .{ .rows = 15, .n = 1000, .k = 8 }, .{ .rows = 2, .n = 4608, .k = 0 },
+    .{ .rows = 6, .n = 128, .k = 4 },
+    .{ .rows = 3, .n = 4608, .k = 1 },
+    .{ .rows = 16, .n = 4608, .k = 4 },
+    .{ .rows = 40, .n = 128, .k = 8 },
+    .{ .rows = 17, .n = 1000, .k = 4 },
+    .{ .rows = 33, .n = 128, .k = 1 },
+    .{ .rows = 2, .n = 4608, .k = 8 },
+    .{ .rows = 5, .n = 256, .k = 16 },
+    .{ .rows = 4, .n = 4608, .k = 16 },
+    .{ .rows = 31, .n = 128, .k = 0 },
+    .{ .rows = 32, .n = 128, .k = 4 },
+    .{ .rows = 2, .n = 6144, .k = 4 },
+    .{ .rows = 15, .n = 1000, .k = 8 },
+    .{ .rows = 2, .n = 4608, .k = 0 },
 };
 const served_single = served_shared ++ [_]c.Shape{.{ .rows = 1, .n = 2304, .k = 4 }};
 

@@ -9,17 +9,20 @@ const c = u.c;
 const g = u.g;
 
 pub const Kind = enum { rnn, cell, fold_b, alpha, swiglu };
-pub fn vision(_: Kind) bool { return false; }
-pub fn name(comptime k: Kind) []const u8 { return "inkling2 draft ik2d_" ++ @tagName(k); }
+pub fn vision(_: Kind) bool {
+    return false;
+}
+pub fn name(comptime k: Kind) []const u8 {
+    return "inkling2 draft ik2d_" ++ @tagName(k);
+}
 
 pub const controls = .{
     .{ Kind.rnn, "inkling2 draft RNN control drops Markov bias", "raw[o] = bfloat(s + float(bias[o]));", "raw[o] = bfloat(s);", c.Gate.shapes },
     .{ Kind.cell, "inkling2 draft cell control omits recurrent blend", "state[j] = bfloat(keep + add);", "state[j] = bfloat(keep);", c.Gate.shapes },
     .{ Kind.swiglu, "inkling2 draft SwiGLU control loses up product", "* float(up[i]));", ");", c.Gate.shapes },
     .{
-        Kind.fold_b, "inkling2 draft fold control uses FP16 accumulation",
-        "float s = 0.0f;\n  for (uint k = lane; k < p.width; k += 32) s += float(unembed[ulong(v) * p.width + k]) * float(b[k]);",
-        "half s = 0.0h;\n  for (uint k = lane; k < p.width; k += 32) s = half(float(s) + float(unembed[ulong(v) * p.width + k]) * float(b[k]));",
+        Kind.fold_b,                                                                                                               "inkling2 draft fold control uses FP16 accumulation",
+        "float s = 0.0f;\n  for (uint k = lane; k < p.width; k += 32) s += float(unembed[ulong(v) * p.width + k]) * float(b[k]);", "half s = 0.0h;\n  for (uint k = lane; k < p.width; k += 32) s = half(float(s) + float(unembed[ulong(v) * p.width + k]) * float(b[k]));",
         c.Gate.sums,
     },
 };
@@ -31,8 +34,12 @@ const fold_shapes = [_]c.Shape{ .{ .rows = 9, .n = 1, .k = 2304 }, .{ .rows = 8,
 const alpha_shapes = [_]c.Shape{ .{ .rows = 4, .n = 4, .k = 4 }, .{ .rows = 4, .n = 5, .k = 5 } };
 const swiglu_shapes = [_]c.Shape{ .{ .rows = 8, .n = 9216, .k = 0 }, .{ .rows = 1, .n = 257, .k = 0 } };
 
-fn depth(s: c.Shape) usize { return 2 * s.k + 2 * s.n + 10; }
-fn noDepth(_: c.Shape) usize { return 0; }
+fn depth(s: c.Shape) usize {
+    return 2 * s.k + 2 * s.n + 10;
+}
+fn noDepth(_: c.Shape) usize {
+    return 0;
+}
 
 pub const Probe = struct {
     rig: r.Rig,
@@ -48,7 +55,9 @@ pub const Probe = struct {
     out: r.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, lib: mtl.Library, k: Kind, label: []const u8) !Probe {
-        const pipe = switch (k) { inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2d_" ++ @tagName(tag), false) };
+        const pipe = switch (k) {
+            inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2d_" ++ @tagName(tag), false),
+        };
         return .{ .rig = .{ .a = a, .device = device, .queue = queue }, .arena = .init(a), .pipe = pipe, .kind = k, .label = label };
     }
 
@@ -63,10 +72,20 @@ pub const Probe = struct {
     pub fn kernel(p: *Probe, gate: ?c.Gate) g.Kernel {
         const reducing = p.kind != .swiglu and p.kind != .cell;
         return .{ .ctx = p, .vt = &vt, .control = gate, .spec = .{
-            .name = p.label, .accum = if (reducing) .f32 else .none, .depth = if (reducing) depth else noDepth,
-            .ops = 12, .out = .bf16, .in_place = p.kind == .cell,
+            .name = p.label,
+            .accum = if (reducing) .f32 else .none,
+            .depth = if (reducing) depth else noDepth,
+            .ops = 12,
+            .out = .bf16,
+            .in_place = p.kind == .cell,
             .sums = if (p.kind == .alpha) .{ .f16 = 0, .bf16 = 0, .why = "four positive terms end in one BF16 store" } else .{},
-            .served = switch (p.kind) { .rnn => &rnn_shapes, .cell => &cell_shapes, .fold_b => &fold_shapes, .alpha => &alpha_shapes, .swiglu => &swiglu_shapes },
+            .served = switch (p.kind) {
+                .rnn => &rnn_shapes,
+                .cell => &cell_shapes,
+                .fold_b => &fold_shapes,
+                .alpha => &alpha_shapes,
+                .swiglu => &swiglu_shapes,
+            },
         } };
     }
 
@@ -142,7 +161,11 @@ pub const Probe = struct {
         const rank: u32 = @intCast(p.s.n);
         const width: u32 = @intCast(p.s.k);
         const depth_index: u32 = @intFromBool(p.s.rows != 1);
-        const inputs: usize = switch (p.kind) { .rnn => 7, .cell, .fold_b, .swiglu => 2, .alpha => 1 };
+        const inputs: usize = switch (p.kind) {
+            .rnn => 7,
+            .cell, .fold_b, .swiglu => 2,
+            .alpha => 1,
+        };
         e.setPipeline(p.pipe);
         for (p.refs[0..inputs], 0..) |v, i| e.setBuffer(v.buf, v.off, i);
         e.setBuffer(p.out.buf, p.out.off, inputs);
@@ -167,7 +190,12 @@ pub const Probe = struct {
     }
 
     pub fn count(p: *const Probe) usize {
-        return switch (p.kind) { .rnn => 3 * p.s.n, .cell => 2 * p.s.n, .fold_b => p.s.rows, .alpha, .swiglu => p.s.rows * p.s.n };
+        return switch (p.kind) {
+            .rnn => 3 * p.s.n,
+            .cell => 2 * p.s.n,
+            .fold_b => p.s.rows,
+            .alpha, .swiglu => p.s.rows * p.s.n,
+        };
     }
 
     fn calculate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64, mag: ?[]f64) !void {

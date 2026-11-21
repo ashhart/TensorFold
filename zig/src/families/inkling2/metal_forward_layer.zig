@@ -178,10 +178,17 @@ pub const Run = struct {
         const q = m.weights.cross.?;
         const row = @as(usize, j) * 2;
         try m.loop_ops.mix(r.e, .{
-            .blocks = v(s.bank, 0), .block_stride = plane, .nb = m.plan.bank_blocks,
-            .partial = v(s.bank_h, 0), .partial_f32 = false,
+            .blocks = v(s.bank, 0),
+            .block_stride = plane,
+            .nb = m.plan.bank_blocks,
+            .partial = v(s.bank_h, 0),
+            .partial_f32 = false,
             .queries = .{ f32Row(q.main, row, h), f32Row(q.kv, row, h), f32Row(q.kv, row + 1, h), f32Row(q.main, row + 1, h) },
-            .nq = 4, .out = v(s.msg, 0), .out_stride = plane, .rows = r.n, .hidden = h,
+            .nq = 4,
+            .out = v(s.msg, 0),
+            .out_stride = plane,
+            .rows = r.n,
+            .hidden = h,
         });
     }
 
@@ -195,10 +202,17 @@ pub const Run = struct {
         const q1 = f32Row(query, if (nq == 3) 1 else 0, h);
         const q2 = f32Row(query, if (nq == 3) 2 else 0, h);
         try m.loop_ops.mix(r.e, .{
-            .blocks = v(s.blocks, 0), .block_stride = plane, .nb = nb,
-            .partial = partial, .partial_f32 = slot == 3,
-            .queries = .{ tv(query), q1, q2, tv(query) }, .nq = nq,
-            .out = v(s.mixf, 0), .out_stride = plane, .rows = r.n, .hidden = h,
+            .blocks = v(s.blocks, 0),
+            .block_stride = plane,
+            .nb = nb,
+            .partial = partial,
+            .partial_f32 = slot == 3,
+            .queries = .{ tv(query), q1, q2, tv(query) },
+            .nq = nq,
+            .out = v(s.mixf, 0),
+            .out_stride = plane,
+            .rows = r.n,
+            .hidden = h,
         });
         const plane_bytes = @as(usize, plane) * 4;
         const states: [3]View = .{ v(s.mixf, 0), v(s.mixf, if (nq == 3) plane_bytes else 0), v(s.mixf, if (nq == 3) 2 * plane_bytes else 0) };
@@ -216,13 +230,34 @@ pub const Run = struct {
             gain[i] = tv(c.gain);
         }
         try m.loop_ops.gateDown(r.e, .{
-            .h = states, .msg = msg, .msg_stride = plane, .slots = slots, .gates = gates,
-            .down_w = dw, .down = down, .rows = r.n, .hidden = h, .rank = rank, .eps_unweighted = t.eps,
+            .h = states,
+            .msg = msg,
+            .msg_stride = plane,
+            .slots = slots,
+            .gates = gates,
+            .down_w = dw,
+            .down = down,
+            .rows = r.n,
+            .hidden = h,
+            .rank = rank,
+            .eps_unweighted = t.eps,
         });
         try m.loop_ops.gateMix(r.e, .{
-            .h = states, .msg = msg, .msg_stride = plane, .slots = slots, .gates = gates,
-            .down = down, .forget = forget, .gain = gain, .norms = norms, .out = out,
-            .out_stride = plane, .rows = r.n, .hidden = h, .rank = rank, .eps = t.eps,
+            .h = states,
+            .msg = msg,
+            .msg_stride = plane,
+            .slots = slots,
+            .gates = gates,
+            .down = down,
+            .forget = forget,
+            .gain = gain,
+            .norms = norms,
+            .out = out,
+            .out_stride = plane,
+            .rows = r.n,
+            .hidden = h,
+            .rank = rank,
+            .eps = t.eps,
         });
     }
 

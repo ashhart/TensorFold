@@ -80,13 +80,12 @@ pub const Scratch = struct {
         const taps = @as(usize, @max(t.local.kv, t.global.kv)) * config.conv_taps;
         const loop = t.loop.?;
         return .{
-            r * 4,      r * h * 2,   r * h * 2,        nb * r * h * 2, 3 * r * h * 2, r * h * 2,
-            r * qw * 2, r * kvw * 2, r * kvw * 2,      r * kvw * 2,    r * kvw * 2,   r * relw * 2,
-            r * qw * 2, r * qh * 2,  r * taps * 2,     r * taps * 2,   r * qw * 2,    r * h * 2,
-            r * h * 2,  r * h * 4,   r * t.topk * 4,   r * t.topk * 4, r * h * 2,     r * h * 2,
-            r * h * 2,  r * h * 2,   r * t.unpadded_vocab * 2,
-            ((loop.end - loop.start) / t.block - 1) * r * h * 2, r * h * 2,
-            4 * r * h * 4, 3 * r * h * 4, 3 * r * loop.rank * 2,
+            r * 4,         r * h * 2,             r * h * 2,                nb * r * h * 2,                                      3 * r * h * 2, r * h * 2,
+            r * qw * 2,    r * kvw * 2,           r * kvw * 2,              r * kvw * 2,                                         r * kvw * 2,   r * relw * 2,
+            r * qw * 2,    r * qh * 2,            r * taps * 2,             r * taps * 2,                                        r * qw * 2,    r * h * 2,
+            r * h * 2,     r * h * 4,             r * t.topk * 4,           r * t.topk * 4,                                      r * h * 2,     r * h * 2,
+            r * h * 2,     r * h * 2,             r * t.unpadded_vocab * 2, ((loop.end - loop.start) / t.block - 1) * r * h * 2, r * h * 2,     4 * r * h * 4,
+            3 * r * h * 4, 3 * r * loop.rank * 2,
         };
     }
 

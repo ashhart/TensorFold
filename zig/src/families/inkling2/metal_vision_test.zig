@@ -435,11 +435,11 @@ fn towerSpecs(a: std.mem.Allocator, c: config.Vision) ![]const Named {
     try specs.append(a, .{ .name = "model.visual.proj_in.weight", .dims = try shape(a, &.{ c.proj_hidden, h * 4 }), .scale = 0.2, .bias = 0 });
     try specs.append(a, .{ .name = "model.visual.proj_out.weight", .dims = try shape(a, &.{ c.text_hidden, c.proj_hidden }), .scale = 0.3, .bias = 0 });
     const per_layer = [_]struct { []const u8, usize, usize, f32, f32 }{
-        .{ "ln_1.weight", h, 0, 0.1, 1 },      .{ "ln_1.bias", h, 0, 0.1, 0 },     .{ "ln_2.weight", h, 0, 0.1, 1 },        .{ "ln_2.bias", h, 0, 0.1, 0 },
-        .{ "ls_1.gamma", h, 0, 0.3, 0.6 },     .{ "ls_2.gamma", h, 0, 0.3, 0.6 }, .{ "self_attn.q_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.k_proj.weight", h, h, 0.3, 0 },
-        .{ "self_attn.v_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.out_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.q_proj.bias", h, 0, 0.1, 0 }, .{ "self_attn.k_proj.bias", h, 0, 0.1, 0 },
-        .{ "self_attn.v_proj.bias", h, 0, 0.1, 0 }, .{ "self_attn.out_proj.bias", h, 0, 0.1, 0 }, .{ "mlp.c_fc.weight", ff, h, 0.3, 0 }, .{ "mlp.c_fc.bias", ff, 0, 0.1, 0 },
-        .{ "mlp.c_proj.weight", h, ff, 0.2, 0 }, .{ "mlp.c_proj.bias", h, 0, 0.1, 0 },
+        .{ "ln_1.weight", h, 0, 0.1, 1 },             .{ "ln_1.bias", h, 0, 0.1, 0 },                 .{ "ln_2.weight", h, 0, 0.1, 1 },             .{ "ln_2.bias", h, 0, 0.1, 0 },
+        .{ "ls_1.gamma", h, 0, 0.3, 0.6 },            .{ "ls_2.gamma", h, 0, 0.3, 0.6 },              .{ "self_attn.q_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.k_proj.weight", h, h, 0.3, 0 },
+        .{ "self_attn.v_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.out_proj.weight", h, h, 0.3, 0 }, .{ "self_attn.q_proj.bias", h, 0, 0.1, 0 },   .{ "self_attn.k_proj.bias", h, 0, 0.1, 0 },
+        .{ "self_attn.v_proj.bias", h, 0, 0.1, 0 },   .{ "self_attn.out_proj.bias", h, 0, 0.1, 0 },   .{ "mlp.c_fc.weight", ff, h, 0.3, 0 },        .{ "mlp.c_fc.bias", ff, 0, 0.1, 0 },
+        .{ "mlp.c_proj.weight", h, ff, 0.2, 0 },      .{ "mlp.c_proj.bias", h, 0, 0.1, 0 },
     };
     for (0..c.layers) |l| for (per_layer) |p| {
         const dims: []const usize = if (p[2] == 0) try a.dupe(usize, &.{p[1]}) else try a.dupe(usize, &.{ p[1], p[2] });

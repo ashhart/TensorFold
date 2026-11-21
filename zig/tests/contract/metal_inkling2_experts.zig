@@ -204,8 +204,7 @@ const Probe = struct {
         var i = p.shape.rows;
         while (i != 0) {
             i -= 1;
-            s.encode(pass.e, 0, shifted(p.input, i * row_bytes), shifted(p.route_ids, i * route_bytes),
-                shifted(p.route_weights, i * route_bytes), shifted(out, i * row_bytes), 1) catch |err| {
+            s.encode(pass.e, 0, shifted(p.input, i * row_bytes), shifted(p.route_ids, i * route_bytes), shifted(p.route_weights, i * route_bytes), shifted(out, i * row_bytes), 1) catch |err| {
                 pass.e.end();
                 pass.pool.pop();
                 return err;
@@ -343,8 +342,7 @@ pub const Suite = struct {
         const p = try s.a.create(Probe);
         errdefer s.a.destroy(p);
         const source = if (mutation) |m| try u.mutate(s.a, sources.inkling2_experts, m.from, m.to) else null;
-        p.* = .{ .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .arena = .init(s.a),
-            .format = format, .label = label, .source = source };
+        p.* = .{ .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .arena = .init(s.a), .format = format, .label = label, .source = source };
         errdefer p.deinit();
         try s.held.append(s.a, p);
         errdefer _ = s.held.pop();

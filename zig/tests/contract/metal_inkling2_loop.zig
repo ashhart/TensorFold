@@ -20,7 +20,9 @@ const controls = [_]Control{
 
 const mix_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 1 }, .{ .rows = 3, .n = 96, .k = 8 }, .{ .rows = 2, .n = 128, .k = 0 } };
 const gate_shapes = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 64 }, .{ .rows = 2, .n = 96, .k = 7 }, .{ .rows = 3, .n = 128, .k = 128 } };
-fn noSums(_: c.Shape) usize { return 0; }
+fn noSums(_: c.Shape) usize {
+    return 0;
+}
 
 fn shifted(ref: rig.Ref, offset: usize) loop.View {
     return .{ .buffer = ref.buf, .offset = ref.off + offset };
@@ -53,13 +55,25 @@ const Probe = struct {
     norm: rig.Ref = undefined,
     out: rig.Ref = undefined,
 
-    fn isMix(p: *const Probe) bool { return p.kind == .messages or p.kind == .mix_f32; }
-    fn lanes(p: *const Probe) usize {
-        return switch (p.kind) { .messages => 4, .mix_f32, .qkv, .down => 3, .mlp => 1 };
+    fn isMix(p: *const Probe) bool {
+        return p.kind == .messages or p.kind == .mix_f32;
     }
-    fn plane(p: *const Probe) usize { return p.shape.rows * p.shape.n; }
-    fn slot(p: *const Probe, i: usize) usize { return if (p.kind == .mlp) 3 else i; }
-    fn upload(p: *Probe, data: anytype) !rig.Ref { return p.rig.input(std.mem.sliceAsBytes(data)); }
+    fn lanes(p: *const Probe) usize {
+        return switch (p.kind) {
+            .messages => 4,
+            .mix_f32, .qkv, .down => 3,
+            .mlp => 1,
+        };
+    }
+    fn plane(p: *const Probe) usize {
+        return p.shape.rows * p.shape.n;
+    }
+    fn slot(p: *const Probe, i: usize) usize {
+        return if (p.kind == .mlp) 3 else i;
+    }
+    fn upload(p: *Probe, data: anytype) !rig.Ref {
+        return p.rig.input(std.mem.sliceAsBytes(data));
+    }
 
     fn deinit(p: *Probe) void {
         p.rig.deinit();
@@ -70,7 +84,9 @@ const Probe = struct {
     const vt = g.hooks(Probe);
     fn kernel(p: *Probe, control: bool) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = if (control) .shapes else null, .spec = .{
-            .name = p.name, .accum = .none, .depth = noSums,
+            .name = p.name,
+            .accum = .none,
+            .depth = noSums,
             .out = if (p.isMix()) .f32 else .bf16,
             .served = if (p.isMix()) &mix_shapes else &gate_shapes,
         } };
@@ -148,8 +164,17 @@ const Probe = struct {
             var queries: [4]loop.View = undefined;
             for (&queries, 0..) |*q, i| q.* = shifted(p.z, (i % p.lanes()) * h * 4);
             try p.ops.mix(pass.e, .{
-                .blocks = u.view(p.x), .block_stride = stride, .nb = @intCast(k), .partial = u.view(p.y), .partial_f32 = p.kind == .mix_f32,
-                .queries = queries, .nq = @intCast(p.lanes()), .out = u.view(p.out), .out_stride = stride, .rows = rows, .hidden = @intCast(h),
+                .blocks = u.view(p.x),
+                .block_stride = stride,
+                .nb = @intCast(k),
+                .partial = u.view(p.y),
+                .partial_f32 = p.kind == .mix_f32,
+                .queries = queries,
+                .nq = @intCast(p.lanes()),
+                .out = u.view(p.out),
+                .out_stride = stride,
+                .rows = rows,
+                .hidden = @intCast(h),
             });
         } else {
             var x: [3]loop.View = undefined;
@@ -168,13 +193,33 @@ const Probe = struct {
                 slots[i] = @intCast(p.slot(j));
             }
             try p.ops.gateDown(pass.e, .{
-                .h = x, .msg = u.view(p.y), .msg_stride = stride, .slots = slots, .gates = @intCast(p.lanes()),
-                .down_w = ds, .down = u.view(p.down_buf), .rows = rows, .hidden = @intCast(h), .rank = @intCast(k),
+                .h = x,
+                .msg = u.view(p.y),
+                .msg_stride = stride,
+                .slots = slots,
+                .gates = @intCast(p.lanes()),
+                .down_w = ds,
+                .down = u.view(p.down_buf),
+                .rows = rows,
+                .hidden = @intCast(h),
+                .rank = @intCast(k),
             });
             if (p.kind != .down) try p.ops.gateMix(pass.e, .{
-                .h = x, .msg = u.view(p.y), .msg_stride = stride, .slots = slots, .gates = @intCast(p.lanes()),
-                .down = u.view(p.down_buf), .forget = fs, .gain = gs, .norms = ns, .out = u.view(p.out),
-                .out_stride = stride, .rows = rows, .hidden = @intCast(h), .rank = @intCast(k), .eps = 1e-6,
+                .h = x,
+                .msg = u.view(p.y),
+                .msg_stride = stride,
+                .slots = slots,
+                .gates = @intCast(p.lanes()),
+                .down = u.view(p.down_buf),
+                .forget = fs,
+                .gain = gs,
+                .norms = ns,
+                .out = u.view(p.out),
+                .out_stride = stride,
+                .rows = rows,
+                .hidden = @intCast(h),
+                .rank = @intCast(k),
+                .eps = 1e-6,
             });
         }
         try p.rig.finish(pass);

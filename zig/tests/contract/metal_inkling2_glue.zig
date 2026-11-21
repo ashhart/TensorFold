@@ -50,14 +50,14 @@ fn noSums(_: c.Shape) usize {
 
 // rows, columns, extra softcap pitch. A split needs two rows at least; the one-row shapes are for whole calls.
 const plain_shared = [_]c.Shape{
-    .{ .rows = 6, .n = 128, .k = 0 },   .{ .rows = 3, .n = 4608, .k = 0 }, .{ .rows = 17, .n = 1000, .k = 0 },
-    .{ .rows = 40, .n = 256, .k = 0 },  .{ .rows = 33, .n = 4608, .k = 0 }, .{ .rows = 31, .n = 257, .k = 0 },
-    .{ .rows = 16, .n = 255, .k = 0 },  .{ .rows = 2, .n = 32768, .k = 0 },
+    .{ .rows = 6, .n = 128, .k = 0 },  .{ .rows = 3, .n = 4608, .k = 0 },  .{ .rows = 17, .n = 1000, .k = 0 },
+    .{ .rows = 40, .n = 256, .k = 0 }, .{ .rows = 33, .n = 4608, .k = 0 }, .{ .rows = 31, .n = 257, .k = 0 },
+    .{ .rows = 16, .n = 255, .k = 0 }, .{ .rows = 2, .n = 32768, .k = 0 },
 };
 const plain_single = plain_shared ++ [_]c.Shape{.{ .rows = 1, .n = 4608, .k = 0 }};
 const pitch_shared = [_]c.Shape{
-    .{ .rows = 6, .n = 128, .k = 3 },    .{ .rows = 3, .n = 4608, .k = 8 },  .{ .rows = 17, .n = 1000, .k = 24 },
-    .{ .rows = 40, .n = 256, .k = 1 },   .{ .rows = 33, .n = 4608, .k = 7 }, .{ .rows = 2, .n = 100000, .k = 9 },
+    .{ .rows = 6, .n = 128, .k = 3 },  .{ .rows = 3, .n = 4608, .k = 8 },  .{ .rows = 17, .n = 1000, .k = 24 },
+    .{ .rows = 40, .n = 256, .k = 1 }, .{ .rows = 33, .n = 4608, .k = 7 }, .{ .rows = 2, .n = 100000, .k = 9 },
     .{ .rows = 32, .n = 255, .k = 5 },
 };
 const pitch_single = pitch_shared ++ [_]c.Shape{.{ .rows = 1, .n = 4608, .k = 16 }};
@@ -111,17 +111,21 @@ pub const Probe = struct {
             (if (sp) &pitch_shared else &pitch_single)
         else
             (if (sp) &plain_shared else &plain_single);
-        return .{ .ctx = p, .vt = &vt, .spec = .{
-            .name = p.label,
-            .accum = .none,
-            .depth = noSums,
-            // tanh and the two roundings around it in fp32 (precise::tanh is a few ulps); an fp32 add is one rounding.
-            .ops = if (isSoftcap(p.kind)) 12 else 1,
-            .out = if (isMlp(p.kind)) .bf16 else .f32,
-            .replaces = if (sp) "the same rows in one call" else null,
-            .tiles = .{ .{ .size = 16 }, .{ .size = 256, .step = 1, .min = 1 }, .{} },
-            .served = served,
-        } };
+        return .{
+            .ctx = p,
+            .vt = &vt,
+            .spec = .{
+                .name = p.label,
+                .accum = .none,
+                .depth = noSums,
+                // tanh and its two roundings, in fp32 (precise::tanh is a few ulps); an fp32 add rounds once.
+                .ops = if (isSoftcap(p.kind)) 12 else 1,
+                .out = if (isMlp(p.kind)) .bf16 else .f32,
+                .replaces = if (sp) "the same rows in one call" else null,
+                .tiles = .{ .{ .size = 16 }, .{ .size = 256, .step = 1, .min = 1 }, .{} },
+                .served = served,
+            },
+        };
     }
 
     fn ld(p: *const Probe) usize {

@@ -268,7 +268,7 @@ pub const Ops = struct {
     }
 
     fn pipe(o: *const Ops, k: Kernel) mtl.Pipeline {
-        return o.pipes[@intFromEnum(k)];
+        return o.pipes[@backingInt(k)];
     }
 
     fn attnPipe(o: *const Ops, final: bool, group: u32) mtl.Pipeline {

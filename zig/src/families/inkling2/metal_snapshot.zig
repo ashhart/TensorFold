@@ -155,4 +155,3 @@ test "inkling2 snapshot: live positions wrap a ring in at most two runs" {
     try std.testing.expectEqual(@as(u32, 77), whole[0].count);
     try std.testing.expectEqual(@as(u32, 0), whole[1].count);
 }
-

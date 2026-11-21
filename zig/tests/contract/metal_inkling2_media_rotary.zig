@@ -8,8 +8,12 @@ const c = u.c;
 const g = u.g;
 
 pub const Kind = enum { qk_prep, ctx_store };
-pub fn vision(_: Kind) bool { return false; }
-pub fn name(comptime k: Kind) []const u8 { return "inkling2 draft ik2d_" ++ @tagName(k); }
+pub fn vision(_: Kind) bool {
+    return false;
+}
+pub fn name(comptime k: Kind) []const u8 {
+    return "inkling2 draft ik2d_" ++ @tagName(k);
+}
 
 pub const controls = .{
     .{ Kind.ctx_store, "inkling2 draft context control reverses cached V", "vc[dst] = vraw[src];", "vc[dst] = vraw[src ^ 1u];", c.Gate.shapes },
@@ -21,7 +25,9 @@ const prep_shapes = [_]c.Shape{ .{ .rows = 8, .n = 8, .k = 128 }, .{ .rows = 1, 
 const ctx_shapes = [_]c.Shape{ .{ .rows = 8, .n = 8, .k = 1152 }, .{ .rows = 8, .n = 8, .k = 11 } };
 const Prep = extern struct { rows: u32, pos0: u32, heads_q: u32, heads_kv: u32, eps: f32 };
 const Ctx = extern struct { rows: u32, pos0: u32, ring: u32, groups: u32, eps: f32 };
-fn depth(_: c.Shape) usize { return 12; }
+fn depth(_: c.Shape) usize {
+    return 12;
+}
 
 pub const Probe = struct {
     rig: r.Rig,
@@ -38,7 +44,9 @@ pub const Probe = struct {
     pos: u32 = 0,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, lib: mtl.Library, k: Kind, label: []const u8) !Probe {
-        const pipe = switch (k) { inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2d_" ++ @tagName(tag), false) };
+        const pipe = switch (k) {
+            inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2d_" ++ @tagName(tag), false),
+        };
         return .{ .rig = .{ .a = a, .device = device, .queue = queue }, .arena = .init(a), .pipe = pipe, .kind = k, .label = label };
     }
 
@@ -52,7 +60,10 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe, gate: ?c.Gate) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = gate, .spec = .{
-            .name = p.label, .accum = .f32, .depth = depth, .out = .bf16,
+            .name = p.label,
+            .accum = .f32,
+            .depth = depth,
+            .out = .bf16,
             .served = if (p.kind == .qk_prep) &prep_shapes else &ctx_shapes,
             .sums = .{ .f16 = 0, .bf16 = 0, .why = "128 short positive terms are followed by BF16 norm and RoPE stores" },
         } };
@@ -112,7 +123,9 @@ pub const Probe = struct {
         try p.rig.finish(pass);
     }
 
-    pub fn count(p: *Probe) usize { return p.len(0) + p.len(1); }
+    pub fn count(p: *Probe) usize {
+        return p.len(0) + p.len(1);
+    }
 
     fn calc(p: *Probe, acc: c.Accum, order: g.Order, out: []f64, mag: ?[]f64) void {
         @memset(out, 0);
@@ -148,8 +161,12 @@ pub const Probe = struct {
         }
     }
 
-    pub fn reference(p: *Probe, want: []f64, mag: []f64) !void { p.calc(.none, .sequential, want, mag); }
-    pub fn simulate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void { p.calc(acc, order, out, null); }
+    pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
+        p.calc(.none, .sequential, want, mag);
+    }
+    pub fn simulate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
+        p.calc(acc, order, out, null);
+    }
 
     pub fn bounds(_: *Probe, want: []const f64, mag: []const f64, allow: []f64) !void {
         // A norm result near a BF16 midpoint can move one BF16 ulp; at RoPE the two terms can cancel.

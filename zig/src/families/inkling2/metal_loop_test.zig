@@ -8,10 +8,15 @@ const Mapped = @import("metal_mapped.zig").Mapped;
 const fixture = @import("metal_weights_fixture.zig");
 const t = std.testing;
 
-
-fn tensor(x: ck.Tensor) op.View { return .{ .buffer = x.buffer, .offset = x.offset }; }
-fn view(b: mtl.Buffer, offset: usize) op.View { return .{ .buffer = b, .offset = offset }; }
-fn val(b: u16) f64 { return @as(f32, @bitCast(@as(u32, b) << 16)); }
+fn tensor(x: ck.Tensor) op.View {
+    return .{ .buffer = x.buffer, .offset = x.offset };
+}
+fn view(b: mtl.Buffer, offset: usize) op.View {
+    return .{ .buffer = b, .offset = offset };
+}
+fn val(b: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, b) << 16));
+}
 fn rounded(x: f64) f64 {
     const narrow: f32 = @floatCast(x);
     const bits: u32 = @bitCast(narrow);

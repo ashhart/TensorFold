@@ -72,11 +72,20 @@ pub const Probe = struct {
     pub fn kernel(p: *Probe, control_gate: ?c.Gate) g.Kernel {
         const soft = p.kind == .softmax;
         return .{ .ctx = p, .vt = &vt, .control = control_gate, .spec = .{
-            .name = p.label, .accum = .f32, .depth = depth, .ops = 12, .in_place = soft or p.kind == .add_rms,
+            .name = p.label,
+            .accum = .f32,
+            .depth = depth,
+            .ops = 12,
+            .in_place = soft or p.kind == .add_rms,
             .out = if (soft) .f32 else .bf16,
             .store = if (soft) .bf16 else null,
             .tiles = .{ .{}, .{}, .{ .size = 256 } },
-            .served = switch (p.kind) { .layer_norm => &vision_shapes, .softmax => &softmax_shapes, .mix_rms => &mix_shapes, else => &draft_shapes },
+            .served = switch (p.kind) {
+                .layer_norm => &vision_shapes,
+                .softmax => &softmax_shapes,
+                .mix_rms => &mix_shapes,
+                else => &draft_shapes,
+            },
             .sums = .{ .f16 = if (soft) 0 else 100, .bf16 = 0, .exact = !soft, .why = "BF16 store limits discrimination in normalized outputs; exp terms are not dyadic" },
         } };
     }
@@ -174,7 +183,11 @@ pub const Probe = struct {
                 const src = std.mem.sliceAsBytes(p.res);
                 @memcpy(p.rig.bytes(p.refs[0], src.len), src);
             }
-            const inputs: usize = switch (p.kind) { .rms => 2, .embed_block => 4, else => 3 };
+            const inputs: usize = switch (p.kind) {
+                .rms => 2,
+                .embed_block => 4,
+                else => 3,
+            };
             for (p.refs[0..inputs], 0..) |x, i| e.setBuffer(x.buf, x.off, i);
             e.setBuffer(p.out.buf, p.out.off, inputs);
             const eps: f32 = if (p.kind == .layer_norm) 1e-5 else 1e-6;
@@ -226,7 +239,9 @@ pub const Probe = struct {
                 for (terms) |*x| x.* = @exp(x.* - top);
                 const z = roundSum(terms, acc, order);
                 for (out, terms) |*y, x| y.* = x / z;
-                if (mag) |m| for (m, out) |*x, y| { x.* = @abs(y); };
+                if (mag) |m| for (m, out) |*x, y| {
+                    x.* = @abs(y);
+                };
                 continue;
             }
             if (p.kind == .embed_block and i > 0) {

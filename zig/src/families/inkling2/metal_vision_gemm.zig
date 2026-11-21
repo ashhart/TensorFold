@@ -39,7 +39,7 @@ pub const Gemm = struct {
         for (wanted) |kind| for (0..2) |m| for (0..2) |n| {
             var name: [48]u8 = undefined;
             const text = try std.fmt.bufPrint(&name, "ik2_gemm_{s}_{d}{d}", .{ @tagName(kind), m, n });
-            g.pipes[@intFromEnum(kind)][m][n] = try mtl.Pipeline.init(device, lib, text, false);
+            g.pipes[@backingInt(kind)][m][n] = try mtl.Pipeline.init(device, lib, text, false);
         };
         return g;
     }
@@ -55,7 +55,7 @@ pub const Gemm = struct {
     pub fn run(g: *const Gemm, e: mtl.ComputeEncoder, kind: Kind, a: Ref, b: Ref, d: Ref, s: Shape) void {
         const tn: u32 = (s.n + 127) / 128;
         const tm: u32 = (s.m + 63) / 64;
-        const pipe = g.pipes[@intFromEnum(kind)][@intFromBool(s.m % 64 == 0)][@intFromBool(s.n % 128 == 0)].?;
+        const pipe = g.pipes[@backingInt(kind)][@intFromBool(s.m % 64 == 0)][@intFromBool(s.n % 128 == 0)].?;
         e.setPipeline(pipe);
         e.setBuffer(a.buf, a.off, 0);
         e.setBuffer(b.buf, b.off, 1);

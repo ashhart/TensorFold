@@ -330,7 +330,10 @@ pub const Target = struct {
         const self = of(ptr);
         const lane = try self.laneOf(stream);
         if (position != @as(u64, lane.state.len) + 1) return error.InvalidInklingPosition;
-        const id = switch (feed) { .value => |v| v, .handle => |h| try read(ptr, h) };
+        const id = switch (feed) {
+            .value => |v| v,
+            .handle => |h| try read(ptr, h),
+        };
         const start = lane.state.len;
         const tapping = self.options.drafts and stream.drafts;
         try self.model.forward(&.{.{ .state = &lane.state, .ids = &.{id}, .taps = tapping }});

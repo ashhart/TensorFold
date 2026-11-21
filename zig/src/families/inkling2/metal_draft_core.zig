@@ -182,7 +182,7 @@ pub const Core = struct {
     }
 
     fn pipe(k: *const Core, kern: Kern) mtl.Pipeline {
-        return k.pipes[@intFromEnum(kern)];
+        return k.pipes[@backingInt(kern)];
     }
 
     /// The load-time tables: alpha = bf16(softmax(fuse_weight)) a row, fold_w and fold_b (unembed x hidden_out).

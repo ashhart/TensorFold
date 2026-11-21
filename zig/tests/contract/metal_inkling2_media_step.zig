@@ -19,7 +19,9 @@ const Step = extern struct { vocab: u32, unpadded: u32, rank: u32, cap: f32 };
 const cap: f64 = 30;
 const step = 3;
 const served = [_]c.Shape{ .{ .rows = 8, .n = 8209, .k = 256 }, .{ .rows = 8, .n = 19, .k = 256 }, .{ .rows = 8, .n = 257, .k = 33 } };
-fn depth(s: c.Shape) usize { return (s.k + 31) / 32 + 5; }
+fn depth(s: c.Shape) usize {
+    return (s.k + 31) / 32 + 5;
+}
 
 pub const Probe = struct {
     rig: r.Rig,
@@ -53,7 +55,13 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe, gate: ?c.Gate) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = gate, .spec = .{
-            .name = p.label, .accum = .f32, .depth = depth, .ops = 12, .out = .f32, .store = .bf16, .in_place = true,
+            .name = p.label,
+            .accum = .f32,
+            .depth = depth,
+            .ops = 12,
+            .out = .f32,
+            .store = .bf16,
+            .in_place = true,
             .nan = .{ .stated = "slot-0 NaN survives group selection; other NaNs cannot displace a finite best; pick ignores NaN" },
             .served = &served,
         } };
@@ -118,7 +126,9 @@ pub const Probe = struct {
         try p.rig.finish(pass);
     }
 
-    pub fn count(p: *const Probe) usize { return (p.s.n + 7) / 8; }
+    pub fn count(p: *const Probe) usize {
+        return (p.s.n + 7) / 8;
+    }
 
     fn score(base: f64, bias: f64, dot: f64) f64 {
         return u.bf(cap * std.math.tanh(u.bf(base + u.bf(bias + dot)) / cap));

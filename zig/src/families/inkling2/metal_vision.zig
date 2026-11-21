@@ -246,7 +246,7 @@ pub const Tower = struct {
     }
 
     fn pipe(t: *const Tower, g: Glue) mtl.Pipeline {
-        return t.glue[@intFromEnum(g)];
+        return t.glue[@backingInt(g)];
     }
 
     /// Device bytes the tower owns: scratch and, only for standalone loads, its weight buffers.

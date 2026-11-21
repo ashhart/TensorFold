@@ -59,7 +59,6 @@ pub const Weights = struct {
     }
 };
 
-
 /// Check the size and scalar/vector alignment used by the kernels.
 fn get(c: *const ck.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: ck.DType, dims: []const usize) !Tensor {
     var buf: [160]u8 = undefined;

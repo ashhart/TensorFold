@@ -8,8 +8,12 @@ const c = u.c;
 const g = u.g;
 
 pub const Kind = enum { pack, embed, qkv, heads, bias_gelu, gelu_rows, residual };
-pub fn vision(_: Kind) bool { return true; }
-pub fn name(comptime k: Kind) []const u8 { return "inkling2 vision ik2v_" ++ @tagName(k); }
+pub fn vision(_: Kind) bool {
+    return true;
+}
+pub fn name(comptime k: Kind) []const u8 {
+    return "inkling2 vision ik2v_" ++ @tagName(k);
+}
 
 pub const controls = .{
     .{ Kind.pack, "inkling2 vision pack control writes past payload", "if (i < n) y[i] = bfloat(x[i]);", "if (i < n) y[i] = bfloat(x[i]); if (i == 0) y[n] = bfloat(0);", c.Gate.repeat },
@@ -25,8 +29,12 @@ const r0 = 2;
 const Embed = extern struct { patches: u32, width: u32 };
 const Qkv = extern struct { rows: u32, heads: u32, dim: u32, r0: u32 };
 const Heads = extern struct { rows: u32, r0: u32, heads: u32, dim: u32 };
-fn noDepth(_: c.Shape) usize { return 0; }
-fn four(_: c.Shape) usize { return 4; }
+fn noDepth(_: c.Shape) usize {
+    return 0;
+}
+fn four(_: c.Shape) usize {
+    return 4;
+}
 
 pub const Probe = struct {
     rig: r.Rig,
@@ -47,7 +55,9 @@ pub const Probe = struct {
     tap_weights: []const f32 = &.{},
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, lib: mtl.Library, k: Kind, label: []const u8) !Probe {
-        const pipe = switch (k) { inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2v_" ++ @tagName(tag), false) };
+        const pipe = switch (k) {
+            inline else => |tag| try mtl.Pipeline.init(device, lib, "ik2v_" ++ @tagName(tag), false),
+        };
         return .{ .rig = .{ .a = a, .device = device, .queue = queue }, .arena = .init(a), .pipe = pipe, .kind = k, .label = label };
     }
 
@@ -61,17 +71,31 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe, gate: ?c.Gate) g.Kernel {
         return .{ .ctx = p, .vt = &vt, .control = gate, .spec = .{
-            .name = p.label, .accum = if (p.kind == .embed) .f32 else .none, .depth = if (p.kind == .embed) four else noDepth,
-            .out = if (p.kind == .qkv) .f32 else .bf16, .store = if (p.kind == .qkv) .bf16 else null,
+            .name = p.label,
+            .accum = if (p.kind == .embed) .f32 else .none,
+            .depth = if (p.kind == .embed) four else noDepth,
+            .out = if (p.kind == .qkv) .f32 else .bf16,
+            .store = if (p.kind == .qkv) .bf16 else null,
             .in_place = p.kind == .gelu_rows or p.kind == .residual,
-            .served = switch (p.kind) { .pack => &pack_shapes, .bias_gelu, .gelu_rows => &mlp_shapes, else => &base_shapes },
+            .served = switch (p.kind) {
+                .pack => &pack_shapes,
+                .bias_gelu, .gelu_rows => &mlp_shapes,
+                else => &base_shapes,
+            },
             .sums = .{ .f16 = 0, .bf16 = 0, .why = "four dyadic taps into a rounded BF16 position row" },
         } };
     }
 
-    fn add(p: *Probe, v: r.Ref) void { p.refs[p.nrefs] = v; p.nrefs += 1; }
-    fn input(p: *Probe, v: anytype) !void { p.add(try p.rig.input(std.mem.sliceAsBytes(v))); }
-    fn output(p: *Probe, n: usize) !void { p.add(try p.rig.output(n)); }
+    fn add(p: *Probe, v: r.Ref) void {
+        p.refs[p.nrefs] = v;
+        p.nrefs += 1;
+    }
+    fn input(p: *Probe, v: anytype) !void {
+        p.add(try p.rig.input(std.mem.sliceAsBytes(v)));
+    }
+    fn output(p: *Probe, n: usize) !void {
+        p.add(try p.rig.output(n));
+    }
 
     fn bf(a: std.mem.Allocator, rng: std.Random, n: usize, nf: bool) ![]u16 {
         const v = try a.alloc(u16, n);
@@ -82,7 +106,9 @@ pub const Probe = struct {
 
     fn fp(a: std.mem.Allocator, rng: std.Random, n: usize, nf: bool) ![]f32 {
         const v = try a.alloc(f32, n);
-        for (v) |*x| { x.* = rng.float(f32) * 4 - 2; }
+        for (v) |*x| {
+            x.* = rng.float(f32) * 4 - 2;
+        }
         if (nf) @memcpy(v[0..3], &[_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) });
         return v;
     }
@@ -97,7 +123,12 @@ pub const Probe = struct {
         const rng = prng.random();
         const n = s.rows * s.n;
         const nf = fill == .nonfinite;
-        p.want = try a.alloc(f64, switch (p.kind) { .embed => n + s.n, .qkv => 3 * (s.rows + r0) * s.n, .heads => (s.rows + r0) * s.n, else => n });
+        p.want = try a.alloc(f64, switch (p.kind) {
+            .embed => n + s.n,
+            .qkv => 3 * (s.rows + r0) * s.n,
+            .heads => (s.rows + r0) * s.n,
+            else => n,
+        });
         p.mag = try a.alloc(f64, p.want.len);
         @memset(p.want, 0);
         @memset(p.mag, 0);
@@ -113,9 +144,16 @@ pub const Probe = struct {
                     i.* = rng.uintLessThan(u32, 1024);
                     w.* = if (fill == .stress) 0.25 else @as(f32, @floatFromInt(rng.uintLessThan(u32, 32))) / 32;
                 }
-                try p.input(pe); try p.input(table); try p.input(taps); try p.input(weights); try p.input(cls); try p.input(cpos);
+                try p.input(pe);
+                try p.input(table);
+                try p.input(taps);
+                try p.input(weights);
+                try p.input(cls);
+                try p.input(cpos);
                 try p.output(p.want.len * 2);
-                for (0..s.n) |i| { p.want[i] = u.val(cls[i]) + u.val(cpos[i]); }
+                for (0..s.n) |i| {
+                    p.want[i] = u.val(cls[i]) + u.val(cpos[i]);
+                }
                 p.pe = pe;
                 p.table = table;
                 p.taps = taps;
@@ -127,11 +165,18 @@ pub const Probe = struct {
                 const acc = try fp(a, rng, 3 * n, nf);
                 try p.input(acc);
                 var biases: [3][]u16 = undefined;
-                for (&biases) |*b| { b.* = try bf(a, rng, s.n, false); try p.input(b.*); }
+                for (&biases) |*b| {
+                    b.* = try bf(a, rng, s.n, false);
+                    try p.input(b.*);
+                }
                 const cs = try a.alloc(f32, (s.rows + r0) * dim);
                 const sn = try a.alloc(f32, (s.rows + r0) * dim);
-                for (cs, sn, 0..) |*co, *si, i| { co.* = if ((i / dim) % 2 == 0) 0.75 else 0.25; si.* = if (i % 4 < 2) 0.5 else -0.5; }
-                try p.input(cs); try p.input(sn);
+                for (cs, sn, 0..) |*co, *si, i| {
+                    co.* = if ((i / dim) % 2 == 0) 0.75 else 0.25;
+                    si.* = if (i % 4 < 2) 0.5 else -0.5;
+                }
+                try p.input(cs);
+                try p.input(sn);
                 for (0..3) |_| try p.output(span * 4);
                 p.clear = p.refs[6..9];
                 for (0..3) |k| for (0..s.rows) |i| for (0..s.n) |j| {
@@ -145,7 +190,8 @@ pub const Probe = struct {
             },
             .heads => {
                 const x = try fp(a, rng, n, nf);
-                try p.input(x); try p.output(p.want.len * 2);
+                try p.input(x);
+                try p.output(p.want.len * 2);
                 p.clear = p.refs[1..2];
                 for (0..s.rows) |i| for (0..s.n) |j| {
                     p.want[(i + r0) * s.n + j] = x[((j / dim) * s.rows + i) * dim + j % dim];
@@ -207,8 +253,13 @@ pub const Probe = struct {
         try p.rig.finish(pass);
     }
 
-    pub fn count(p: *const Probe) usize { return p.want.len; }
-    pub fn reference(p: *Probe, want: []f64, mag: []f64) !void { @memcpy(want, p.want); @memcpy(mag, p.mag); }
+    pub fn count(p: *const Probe) usize {
+        return p.want.len;
+    }
+    pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
+        @memcpy(want, p.want);
+        @memcpy(mag, p.mag);
+    }
 
     pub fn bounds(_: *Probe, want: []const f64, mag: []const f64, allow: []f64) !void {
         for (want, mag, allow) |y, m, *b| {

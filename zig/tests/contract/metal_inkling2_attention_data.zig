@@ -104,9 +104,8 @@ pub fn build(a: std.mem.Allocator, cs: Case, rows: usize, pos0: usize, fill: u.g
         }
     }.f;
     const picks = [_]i64{
-        0,                                     1,                                  to_i(pos0),                                 to_i(last), 2047, 2048, 4095, 4096,
-        to_i(lo0) - 1,                         to_i(lo0),                          to_i(firstKey(cs.window, last)) - 1,        to_i(firstKey(cs.window, last)),
-        to_i(pos0) - to_i(cs.extent),          to_i(last) - to_i(cs.extent),
+        0,             1,         to_i(pos0),                          to_i(last),                      2047,                         2048,                         4095, 4096,
+        to_i(lo0) - 1, to_i(lo0), to_i(firstKey(cs.window, last)) - 1, to_i(firstKey(cs.window, last)), to_i(pos0) - to_i(cs.extent), to_i(last) - to_i(cs.extent),
     };
     for (picks) |at| {
         if (at < 0 or at > to_i(last)) continue;
