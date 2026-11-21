@@ -9,7 +9,8 @@ pub const qkv = @embedFile("qkv.metal");
 pub const attention = @embedFile("attention.metal");
 pub const route = @embedFile("route.metal");
 pub const head = @embedFile("head.metal");
+pub const mv_fuse = @embedFile("mv_fuse.metal");
 
 /// The library the runtime compiles: every kernel is named inkling2_*, in this order.
 pub const ops = common ++ "\n" ++ embed_norm ++ "\n" ++ attn_res ++ "\n" ++ conv ++ "\n" ++ qkv ++ "\n" ++
-    attention ++ "\n" ++ route ++ "\n" ++ head;
+    attention ++ "\n" ++ route ++ "\n" ++ head ++ "\n" ++ mv_fuse;

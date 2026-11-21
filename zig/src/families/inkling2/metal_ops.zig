@@ -44,6 +44,7 @@ const Kernel = enum {
     softcap,
     residual_attn,
     residual_mlp,
+    mv_fuse,
 };
 const kernel_count = @typeInfo(Kernel).@"enum".field_names.len;
 
@@ -154,6 +155,9 @@ pub const AttnResArgs = struct {
 };
 /// y [rows][n] = bf16(x [rows][k] w[n][k]^T) (or fp32 when `f32_out`), fp32 chains; a row's bits do not depend on rows.
 pub const LinearArgs = struct { x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool = false };
+/// One existing weight and its existing output. The fused launch writes `y` and allocates nothing.
+pub const Fused = struct { w: View, y: View, n: u32 };
+const FuseArgs = extern struct { k: u32, count: u32, n0: u32, n1: u32, n2: u32, n3: u32, n4: u32, n5: u32, n6: u32, n7: u32 };
 /// Router: logits = x w^T in fp32 (x bf16 [rows][hidden], w bf16 [experts][hidden]); ids u32, weights f32 per row.
 pub const RouteArgs = struct {
     x: View,
@@ -322,6 +326,39 @@ pub const Ops = struct {
     /// x [rows][k] bf16 times w [n][k] bf16: the shared bf16 matvec (rows < 16) or its bit-equal MMA tile.
     pub fn linear(o: *const Ops, e: mtl.ComputeEncoder, a: LinearArgs) !void {
         try o.denseRows(e, a.x, a.w, a.y, a.rows, a.n, a.k, a.f32_out);
+    }
+
+    /// One-row GEMVs that share `x`. Same chains as the split matvec, one launch, the caller's buffers.
+    pub fn linearFused(o: *const Ops, e: mtl.ComputeEncoder, x: View, k: u32, ins: []const Fused) !void {
+        if (ins.len == 0 or ins.len > 8 or k == 0) return error.InvalidInkling2Op;
+        var n = [8]u32{ 0, 0, 0, 0, 0, 0, 0, 0 };
+        var total: u32 = 0;
+        for (ins, 0..) |in, i| {
+            if (in.n == 0) return error.InvalidInkling2Op;
+            n[i] = in.n;
+            total += in.n;
+        }
+        e.setPipeline(o.pipe(.mv_fuse));
+        e.setBuffer(x.buffer, x.offset, 0);
+        for (0..8) |i| {
+            const src = if (i < ins.len) ins[i].w else x;
+            const dst = if (i < ins.len) ins[i].y else x;
+            e.setBuffer(src.buffer, src.offset, @intCast(1 + i));
+            e.setBuffer(dst.buffer, dst.offset, @intCast(9 + i));
+        }
+        e.setValue(FuseArgs{
+            .k = k,
+            .count = @intCast(ins.len),
+            .n0 = n[0],
+            .n1 = n[1],
+            .n2 = n[2],
+            .n3 = n[3],
+            .n4 = n[4],
+            .n5 = n[5],
+            .n6 = n[6],
+            .n7 = n[7],
+        }, 17);
+        e.dispatchGroups(mtl.Size.of(total, 1, 1), mtl.Size.of(32, 1, 1));
     }
 
     fn denseRows(o: *const Ops, e: mtl.ComputeEncoder, x: View, w: View, y: View, rows: u32, n: u32, k: u32, f32_out: bool) !void {

@@ -10,7 +10,7 @@ fn attentionBytes(g: u32) u32 {
 }
 
 pub const records = blk: {
-    var out: [14 + 2 * attn_groups]M = undefined;
+    var out: [15 + 2 * attn_groups]M = undefined;
     const singles = [_]M{
         .{ .name = "inkling2 ops inkling2_embed", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_rms_norm", .threads = 256, .tg_memory = 4 * 8, .reserved = 256 },
@@ -27,6 +27,7 @@ pub const records = blk: {
         .{ .name = "inkling2 ops inkling2_softcap", .threads = 256, .tg_memory = 0, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_residual_attn", .threads = 256, .tg_memory = 0, .reserved = 256 },
         .{ .name = "inkling2 ops inkling2_residual_mlp", .threads = 256, .tg_memory = 0, .reserved = 256 },
+        .{ .name = "inkling2 ops inkling2_mv_fuse", .threads = 32, .tg_memory = 0, .reserved = 32 },
     };
     for (singles, 0..) |s, i| out[i] = s;
     for (0..attn_groups) |gi| {

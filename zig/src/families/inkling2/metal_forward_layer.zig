@@ -37,6 +37,10 @@ fn tv(t: wts.Tensor) View {
     return .{ .buffer = t.buffer, .offset = t.offset };
 }
 
+fn fused(w: wts.Tensor, y: View) ops_mod.Fused {
+    return .{ .w = tv(w), .y = y, .n = @intCast(w.shape[0]) };
+}
+
 /// Rows [first, first + rows) of a bf16 buffer of `width` columns.
 fn rows16(b: mtl.Buffer, first: usize, width: usize) View {
     return v(b, first * width * 2);
@@ -86,6 +90,8 @@ pub const Run = struct {
             return error.GpuFailed;
         }
     }
+
+
 
     /// Drop an uncommitted command buffer on encoding failure.
     pub fn abort(r: *Run) void {
@@ -315,16 +321,56 @@ pub const Run = struct {
         const separate_qkv = global or visit.messages;
         const xk = if (separate_qkv) v(s.xin, plane * 2) else xq;
         const xv = if (separate_qkv) v(s.xin, 2 * plane * 2) else xq;
-        try r.lin(xq, a.wq, v(s.q, 0), n);
-        try r.lin(xk, a.wk, v(s.kraw, 0), n);
-        try r.lin(xv, a.wv, v(s.vraw, 0), n);
-        try r.lin(xq, a.wr, v(s.rel, 0), n);
-        try r.lin(xq, a.gate, v(s.gate, 0), n);
-        try r.lin(xq, a.sink, v(s.sink, 0), n);
-        if (global) {
-            try r.lin(xk, a.k_taps.?, v(s.dynk, 0), n);
-            try r.lin(xv, a.v_taps.?, v(s.dynv, 0), n);
+
+        if (n == 1 and !separate_qkv) {
+            if (global) {
+                try m.ops.linearFused(e, xq, h, &.{
+                    fused(a.wq, v(s.q, 0)),
+                    fused(a.wk, v(s.kraw, 0)),
+                    fused(a.wv, v(s.vraw, 0)),
+                    fused(a.wr, v(s.rel, 0)),
+                    fused(a.gate, v(s.gate, 0)),
+                    fused(a.sink, v(s.sink, 0)),
+                    fused(a.k_taps.?, v(s.dynk, 0)),
+                    fused(a.v_taps.?, v(s.dynv, 0)),
+                });
+            } else {
+                try m.ops.linearFused(e, xq, h, &.{
+                    fused(a.wq, v(s.q, 0)),
+                    fused(a.wk, v(s.kraw, 0)),
+                    fused(a.wv, v(s.vraw, 0)),
+                    fused(a.wr, v(s.rel, 0)),
+                    fused(a.gate, v(s.gate, 0)),
+                    fused(a.sink, v(s.sink, 0)),
+                });
+            }
+        } else if (n == 1) {
+            try m.ops.linearFused(e, xq, h, &.{
+                fused(a.wq, v(s.q, 0)),
+                fused(a.wr, v(s.rel, 0)),
+                fused(a.gate, v(s.gate, 0)),
+                fused(a.sink, v(s.sink, 0)),
+            });
+            if (global) {
+                try m.ops.linearFused(e, xk, h, &.{ fused(a.wk, v(s.kraw, 0)), fused(a.k_taps.?, v(s.dynk, 0)) });
+                try m.ops.linearFused(e, xv, h, &.{ fused(a.wv, v(s.vraw, 0)), fused(a.v_taps.?, v(s.dynv, 0)) });
+            } else {
+                try r.lin(xk, a.wk, v(s.kraw, 0), n);
+                try r.lin(xv, a.wv, v(s.vraw, 0), n);
+            }
+        } else {
+            try r.lin(xq, a.wq, v(s.q, 0), n);
+            try r.lin(xk, a.wk, v(s.kraw, 0), n);
+            try r.lin(xv, a.wv, v(s.vraw, 0), n);
+            try r.lin(xq, a.wr, v(s.rel, 0), n);
+            try r.lin(xq, a.gate, v(s.gate, 0), n);
+            try r.lin(xq, a.sink, v(s.sink, 0), n);
+            if (global) {
+                try r.lin(xk, a.k_taps.?, v(s.dynk, 0), n);
+                try r.lin(xv, a.v_taps.?, v(s.dynv, 0), n);
+            }
         }
+
 
         const hl = st.hist(t, i);
         for (r.items, 0..) |it, idx| {
@@ -382,7 +428,9 @@ pub const Run = struct {
                 .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd.dim))),
             });
         }
+
         try r.lin(v(s.att, 0), a.wo, v(s.o, 0), n);
+
 
         // post-attention convolution, then residual: a block boundary keeps only the attention output as partial
         for (r.items, 0..) |it, idx| {
@@ -427,6 +475,7 @@ pub const Run = struct {
             .topk = t.topk,
             .scale = t.route_scale,
         });
+
     }
 
     /// Layer `i` after its experts: the post-MLP convolution and the residual into the next layer's hidden stream.

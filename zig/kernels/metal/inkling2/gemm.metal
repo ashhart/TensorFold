@@ -33,6 +33,31 @@ inline void gemm_out(const device T* A, const device T* B, device O* D, const de
 
 }  // namespace tfp
 
+// Score products stay a full fp32 dot. The tensor-unit op keeps 10 mantissa bits of an fp32 operand, so an M5
+// would not match the product this tower was measured against.
+template <bool NT>
+inline void ik2_f32_dot(const device float* A, const device float* B, const device int* P, device float* D, uint3 tid) {
+  const int col = int(tid.x), row = int(tid.y), b = int(tid.z);
+  const int m = P[0], n = P[1], K = P[2];
+  if (col >= n || row >= m) return;
+  const int lda = P[3], ldb = P[4], ldd = P[5], sa = P[10], sb = P[11], sd = P[12];
+  const device float* a = A + long(b) * sa + long(row) * lda;
+  const device float* brow = B + long(b) * sb;
+  float s = 0;
+  for (int k = 0; k < K; ++k) {
+    s = fma(a[k], NT ? brow[long(col) * ldb + k] : brow[long(k) * ldb + col], s);
+  }
+  D[long(b) * sd + long(row) * ldd + col] = s;
+}
+
+#define IK2_F32_DOT(NAME, NT)                                                                                      \
+  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                               \
+      const device float* A [[buffer(0)]], const device float* B [[buffer(1)]],                                  \
+      const device int* P [[buffer(2)]], device float* D [[buffer(3)]], uint3 tid [[thread_position_in_grid]]) { \
+    ik2_f32_dot<NT>(A, B, P, D, tid);                                                                              \
+  }
+
+
 #define IK2_GEMM_OUT(NAME, T, O, TB, AM, AN)                                                                       \
   [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
       const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
@@ -56,13 +81,12 @@ IK2_GEMM_OUT(ik2_gemm_bf16f_nt_00, bfloat16_t, float, true, false, false)
 IK2_GEMM_OUT(ik2_gemm_bf16f_nt_01, bfloat16_t, float, true, false, true)
 IK2_GEMM_OUT(ik2_gemm_bf16f_nt_10, bfloat16_t, float, true, true, false)
 IK2_GEMM_OUT(ik2_gemm_bf16f_nt_11, bfloat16_t, float, true, true, true)
-// q k^T per head in fp32
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nt_00, float, false, true, false, false)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nt_01, float, false, true, false, true)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nt_10, float, false, true, true, false)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nt_11, float, false, true, true, true)
-// p v per head in fp32
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nn_00, float, false, false, false, false)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nn_01, float, false, false, false, true)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nn_10, float, false, false, true, false)
-TF_GEMM_NAX_KERNEL(ik2_gemm_f32_nn_11, float, false, false, true, true)
+// q k^T and p v, full fp32. The four edge names stay so the existing pipeline table still resolves.
+IK2_F32_DOT(ik2_gemm_f32_nt_00, true)
+IK2_F32_DOT(ik2_gemm_f32_nt_01, true)
+IK2_F32_DOT(ik2_gemm_f32_nt_10, true)
+IK2_F32_DOT(ik2_gemm_f32_nt_11, true)
+IK2_F32_DOT(ik2_gemm_f32_nn_00, false)
+IK2_F32_DOT(ik2_gemm_f32_nn_01, false)
+IK2_F32_DOT(ik2_gemm_f32_nn_10, false)
+IK2_F32_DOT(ik2_gemm_f32_nn_11, false)
