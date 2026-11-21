@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: `TF_DSV41_CALIB=measure`, off by default, times a draft cost table on the loaded model at start, reports it and prices the draft depth from it, and other values store or read a table; tokens are unchanged, and unset or blank times nothing and keeps the built-in table (#2952, refs #2984). Thanks to @gilby.
+
 - Prompt cache salts preserve every bit of image words after the first key word; a high-bit first word is refused before it can alias text, while salted states remain RAM-only (#3222).
 - Server: `cache_salt` on chat, completions, Responses and Messages, and `serve --cache-salt-per-key`, keep kept prompt states apart by salt or API key; a request without a salt is keyed exactly as before and no reply's tokens change (#3222, fixes #3196).
 
