@@ -4,8 +4,8 @@ const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const serve = @import("hip_serve");
-const engine = @import("engine.zig");
-const Engine = engine.Engine;
+const engine_mod = @import("engine.zig");
+const Engine = engine_mod.Engine;
 const state = @import("../forward/state.zig");
 const mtp = @import("mtp.zig");
 const costs = @import("hip_costs.zig");
@@ -501,7 +501,7 @@ pub const Hip = struct {
         // a resumed lane's ring holds zeros below its resume point: the snapshot keeps no tap rows
         if (count == 0 or start < lane.tapped_from or end > written) return error.RowsNotHeld;
         // the drafter reads a span's newest tap_window rows at most: those must not be overwritten yet
-        if (@max(start, end -| engine.tap_window) < written -| t.rows) return error.RowsNotHeld;
+        if (@max(start, end -| engine_mod.tap_window) < written -| t.rows) return error.RowsNotHeld;
         const row_bytes = t.n * h.e.model().spec.hidden * 2;
         return .{ .buffer = ring.base(), .offset = start, .rows = count, .row_bytes = @intCast(row_bytes), .space = .device, .device = h.e.o.device, .dtype = if (h.e.act == .bf16) .bf16 else .f16 };
     }
