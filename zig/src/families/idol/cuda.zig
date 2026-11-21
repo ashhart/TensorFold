@@ -31,5 +31,6 @@ test {
     _ = decode_reference;
     _ = config;
     _ = host;
+    _ = @import("octree.zig");
     _ = reference;
 }
