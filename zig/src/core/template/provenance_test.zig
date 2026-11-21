@@ -147,7 +147,7 @@ test "provenance property covers every implemented filter" {
     try t.expectEqual(@as(usize, 31), filters.implemented.len);
 }
 
-const str_supported = [_][]const u8{ "capitalize", "count", "endswith", "find", "index", "join", "lower", "lstrip", "removeprefix", "removesuffix", "replace", "rfind", "rindex", "rsplit", "rstrip", "split", "startswith", "strip", "upper" };
+const str_supported = [_][]const u8{ "capitalize", "count", "endswith", "find", "format", "index", "join", "lower", "lstrip", "removeprefix", "removesuffix", "replace", "rfind", "rindex", "rsplit", "rstrip", "split", "startswith", "strip", "upper" };
 
 test "provenance property covers every exposed string dict and list method including refusals" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);

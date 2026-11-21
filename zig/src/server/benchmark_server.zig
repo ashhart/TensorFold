@@ -1,4 +1,4 @@
-//! The benchmark's own serve child: lock, flags, environment, port, readiness and a stop that always reaps.
+//! A command's own serve child, the benchmark's lock, flags and name by default: port, readiness and a stop that reaps.
 const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");
@@ -11,13 +11,36 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
 pub const served_name = ".tensorfold-benchmark";
-const serving_prefix = "[tensorfold] serving " ++ served_name ++ " at http://127.0.0.1:";
 
 /// What the child serves: this executable, the checkpoint directory and the benchmark's settings.
 pub const Plan = struct { exe: []const u8, dir: []const u8, backend: []const u8, tokens: u32, context: ?i64, drafter_dir: ?[]const u8, serial: bool, kv_cache: []const u8 = "bf16" };
 
+/// What a failed start or stop says: the benchmark's words unless a command gives its own.
+pub const Words = struct {
+    log: []const u8 = "Benchmark server could not start; check local checkpoint and directory permissions",
+    spawn: []const u8 = "Could not start the benchmark server; check the TensorFold installation",
+    exited: []const u8 = "Benchmark server exited during startup; check the checkpoint and backend toolchain",
+    timed_out: []const u8 = "Benchmark server startup timed out after",
+    stuck: []const u8 = "Benchmark server did not exit after termination; cleanup is incomplete",
+};
+
 /// ``argv`` replaces the child's command line (tests use a stand-in); ``tail`` gets an exited child's last log lines.
-pub const Options = struct { startup_timeout_s: f64, grace_ms: u32 = 10_000, bench_dir: []const u8, argv: ?[]const []const u8 = null, tail: ?*[]const []const u8 = null };
+pub const Options = struct {
+    startup_timeout_s: f64,
+    grace_ms: u32 = 10_000,
+    bench_dir: []const u8,
+    argv: ?[]const []const u8 = null,
+    tail: ?*[]const []const u8 = null,
+    /// The name the serving line and ``/v1/models`` must show.
+    served: []const u8 = served_name,
+    /// Hold ``bench_dir/.lock`` while the child runs; without it ``bench_dir`` only holds the starting child's log.
+    lock: bool = true,
+    /// The child in a process group of its own, so a terminal's Ctrl-C reaches only this process.
+    own_group: bool = false,
+    /// The child's only API key: TENSORFOLD_API_KEY in its environment and the probes' bearer (none for a benchmark).
+    key: ?[]const u8 = null,
+    words: Words = .{},
+};
 
 /// The startup timeout without --startup-timeout: 600 s, plus 6 s per GB of weights past 20 GB, at most 3600 s.
 pub fn startupTimeout(weight_bytes: u64) f64 {
@@ -46,20 +69,25 @@ pub fn argv(a: Allocator, plan: Plan) ![]const []const u8 {
     return out.items;
 }
 
-/// The parent's variables without the API key, request log, seed salt and upload token; no live line or update check.
+/// Parent variables minus the API key, request log, journal, seed salt and upload token; no live line or update check.
 pub fn environ(a: Allocator, parent: *const std.process.Environ.Map) !std.process.Environ.Map {
     var env = try parent.clone(a);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| _ = env.orderedRemove(k);
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| _ = env.orderedRemove(k);
     try env.put("TENSORFOLD_NO_LIVE", "1");
     try env.put("TENSORFOLD_NO_UPDATE_CHECK", "1");
     try env.put("HF_HUB_OFFLINE", "1");
     return env;
 }
 
-/// The port in serve's ``serving .tensorfold-benchmark at http://127.0.0.1:PORT/v1`` line.
-pub fn servingPort(log: []const u8) ?u16 {
-    const at = std.mem.indexOf(u8, log, serving_prefix) orelse return null;
-    const rest = log[at + serving_prefix.len ..];
+/// The port in serve's first ``serving SERVED at http://127.0.0.1:PORT/v1`` line.
+pub fn servingPort(log: []const u8, served: []const u8) ?u16 {
+    const head = "[tensorfold] serving ";
+    const tail = " at http://127.0.0.1:";
+    var from: usize = 0;
+    const rest = while (std.mem.indexOfPos(u8, log, from, head)) |at| : (from = at + 1) {
+        const after = log[at + head.len ..];
+        if (std.mem.startsWith(u8, after, served) and std.mem.startsWith(u8, after[served.len..], tail)) break after[served.len + tail.len ..];
+    } else return null;
     var n: usize = 0;
     while (n < rest.len and std.ascii.isDigit(rest[n])) n += 1;
     if (n == 0 or !std.mem.startsWith(u8, rest[n..], "/v1")) return null;
@@ -107,37 +135,46 @@ pub const Managed = struct {
     io: std.Io,
     pid: posix.pid_t,
     log: std.Io.File,
-    lock: std.Io.File,
+    lock: ?std.Io.File,
     grace_ms: u32,
+    served: []const u8 = served_name,
+    stuck: []const u8 = (Words{}).stuck,
+    key: ?[]const u8 = null,
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
 
-    /// Spawns the child and waits until it serves the benchmark name; null with ``problem`` set, or "" when stopped.
+    /// Spawns the benchmark's child and waits until it serves its name; null with ``problem`` set, or "" when stopped.
     pub fn start(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, plan: Plan, o: Options, problem: *[]const u8) !?Managed {
+        return spawn(a, io, env, o.argv orelse try argv(a, plan), o, problem);
+    }
+
+    /// Spawns ``child_argv`` and waits until it serves ``o.served``; null with ``problem`` set, or "" when stopped.
+    pub fn spawn(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, child_argv: []const []const u8, o: Options, problem: *[]const u8) !?Managed {
         var rand: [8]u8 = undefined;
         io.random(&rand);
         const log_path = try std.fmt.allocPrint(a, "{s}/.serve-{s}.log", .{ o.bench_dir, std.fmt.bytesToHex(rand, .lower) });
         var child_env = try environ(a, env);
-        const child_argv = o.argv orelse try argv(a, plan);
-        const lock = lockRun(io, o.bench_dir, problem) orelse return null;
+        if (o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
+        const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return null else null;
         const cwd = std.Io.Dir.cwd();
         const log = cwd.createFile(io, log_path, .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch {
-            lock.close(io);
-            problem.* = "Benchmark server could not start; check local checkpoint and directory permissions";
+            if (lock) |l| l.close(io);
+            problem.* = o.words.log;
             return null;
         };
-        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = .{ .file = log }, .stderr = .{ .file = log } }) catch {
+        const group: ?posix.pid_t = if (o.own_group) 0 else null;
+        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = .{ .file = log }, .stderr = .{ .file = log }, .pgid = group }) catch {
             cwd.deleteFile(io, log_path) catch {};
             log.close(io);
-            lock.close(io);
-            problem.* = "Could not start the benchmark server; check the TensorFold installation";
+            if (lock) |l| l.close(io);
+            problem.* = o.words.spawn;
             return null;
         };
         stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
-        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms };
-        const ok = m.ready(a, o.startup_timeout_s, o.tail, problem) catch |e| {
+        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key };
+        const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
             _ = m.stop();
             return e;
         };
@@ -146,7 +183,7 @@ pub const Managed = struct {
         return null;
     }
 
-    fn ready(m: *Managed, a: Allocator, timeout_s: f64, tail: ?*[]const []const u8, problem: *[]const u8) !bool {
+    fn ready(m: *Managed, a: Allocator, timeout_s: f64, tail: ?*[]const []const u8, words: Words, problem: *[]const u8) !bool {
         var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = m.io };
         client.connection_pool.free_size = 0;
         defer client.deinit();
@@ -159,18 +196,18 @@ pub const Managed = struct {
                 return false;
             }
             if (m.exited()) {
-                problem.* = "Benchmark server exited during startup; check the checkpoint and backend toolchain";
+                problem.* = words.exited;
                 if (tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
                 return false;
             }
             if (port == null) {
-                port = servingPort(m.logEnd(&buf));
+                port = servingPort(m.logEnd(&buf), m.served);
                 if (port) |p| m.base_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{p});
             }
-            if (port != null and try probe(a, m.io, &client, m.base_url)) return true;
+            if (port != null and try probe(a, m.io, &client, m.base_url, m.served, m.key)) return true;
             m.io.sleep(.fromMilliseconds(200), .awake) catch {};
         }
-        problem.* = try std.fmt.allocPrint(a, "Benchmark server startup timed out after {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{timeout_s});
+        problem.* = try std.fmt.allocPrint(a, "{s} {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{ words.timed_out, timeout_s });
         return false;
     }
 
@@ -185,20 +222,27 @@ pub const Managed = struct {
         return m.base_url;
     }
 
+    /// The child's last log lines once it has exited on its own, else null.
+    pub fn exitedTail(m: *Managed, a: Allocator) !?[]const []const u8 {
+        if (m.closed or !m.exited()) return null;
+        var buf: [64 << 10]u8 = undefined;
+        return try lastLines(a, m.logEnd(&buf));
+    }
+
     /// TERM, a grace period, KILL, another; always closes the log and the lock. Null when reaped.
     pub fn stop(m: *Managed) ?[]const u8 {
         if (m.closed) return null;
         m.closed = true;
         defer {
             m.log.close(m.io);
-            m.lock.close(m.io);
+            if (m.lock) |l| l.close(m.io);
         }
         if (m.reaped or m.exited()) return null;
         posix.kill(m.pid, .TERM) catch {};
         if (m.waitExit()) return null;
         posix.kill(m.pid, .KILL) catch {};
         if (m.waitExit()) return null;
-        return "Benchmark server did not exit after termination; cleanup is incomplete";
+        return m.stuck;
     }
 
     fn waitExit(m: *Managed) bool {
@@ -287,23 +331,23 @@ fn namesVariable(text: []const u8) bool {
     return false;
 }
 
-/// Ready: ``/health`` not warming and ok, and ``/v1/models`` lists the benchmark name.
-pub fn probe(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8) !bool {
-    const health = try getObject(a, io, client, base_url, "/health") orelse return false;
+/// Ready: ``/health`` not warming and ok, and ``/v1/models`` lists ``served``; ``key`` goes as both requests' bearer.
+pub fn probe(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, served: []const u8, key: ?[]const u8) !bool {
+    const health = try getObject(a, io, client, base_url, "/health", key) orelse return false;
     if (health.get("warming")) |w| if (w == .bool and w.bool) return false;
     const status_ok = if (health.get("status")) |s| s == .string and std.mem.eql(u8, s.string, "ok") else false;
     const ok_true = if (health.get("ok")) |o| o == .bool and o.bool else false;
     if (!status_ok and !ok_true) return false;
-    const models = try getObject(a, io, client, base_url, "/v1/models") orelse return false;
+    const models = try getObject(a, io, client, base_url, "/v1/models", key) orelse return false;
     const data = models.get("data") orelse return false;
     if (data != .array) return false;
-    for (data.array) |d| if (d.get("id")) |id| if (id == .string and std.mem.eql(u8, id.string, served_name)) return true;
+    for (data.array) |d| if (d.get("id")) |id| if (id == .string and std.mem.eql(u8, id.string, served)) return true;
     return false;
 }
 
-fn getObject(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, route: []const u8) !?json.Value {
+fn getObject(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, route: []const u8, key: ?[]const u8) !?json.Value {
     const url = try std.mem.concat(a, u8, &.{ base_url, route });
-    const got = stream.fetch(a, io, client, .{ .url = url, .limit = 64 << 10, .timeout_s = 1 });
+    const got = stream.fetch(a, io, client, .{ .url = url, .limit = 64 << 10, .timeout_s = 1, .token = key });
     if (got.failed != .none or got.status < 200 or got.status > 299) return null;
     return switch (try json.parse(a, got.body)) {
         .ok => |v| if (v == .object) v else null,

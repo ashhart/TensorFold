@@ -30,7 +30,8 @@ tensorfold pull kindlingai/glm-5.3-exlr8-k2-k3-k4@f459f5d0272a529403dd9b3fd32f77
 On the second Mac, pass `--node 1/2`. Every whole file must equal the hub's sha256, every expert file's published hash
 must equal the hub's, and each expert half must equal its xxhash64 before it is written. A pull that stops resumes:
 run the same command again, and it checks what is on disk and fetches only what is missing. Our two Macs took 43
-minutes over a shared uplink, at about 55 MiB/s each.
+minutes over a shared uplink, at about 55 MiB/s each. A gated or private release needs a Hugging Face token, which a
+node pull reads as `pull` does ([models on disk](supported-models.md#models-on-disk)).
 
 ## Serve
 

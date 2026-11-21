@@ -142,8 +142,8 @@ class Conversations:
     def create(self, body: object) -> dict:
         fields = validate(body)
         now = time.time()
-        doc = {"id": uuid.uuid4().hex[:12], "created": now, "updated": now, "messages": fields.get("messages", []),
-               "settings": fields.get("settings", {}), "title": fields.get("title"), "rev": 1}
+        doc = {"id": uuid.uuid4().hex[:12], "created": now, "updated": now, "messages": [], "settings": {},
+               "title": None, **fields, "rev": 1}
         with self._lock, self._db() as db:
             db.execute("insert into conversations (id, created, updated, title, doc) values (?,?,?,?,?)",
                        (doc["id"], now, now, doc["title"], json.dumps(doc)))

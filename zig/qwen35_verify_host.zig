@@ -9,6 +9,7 @@ pub const Trace = struct {
     pub var count: usize = 0;
     pub var prompts: usize = 0;
     pub var grouped: usize = 0;
+    pub var segmented: usize = 0; // segmented launches of two or more parts, apart from the grouped kernels
     fn record(f: cuda.abi.Function, gx: u32, shared: u32, args: ?[*]?*anyopaque) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id == 4) {
@@ -34,6 +35,7 @@ pub const Trace = struct {
         }
         if (id == 8) {
             const segs = @as(*const cuda.qlinear.Segs, @ptrCast(@alignCast(a[2].?))).*;
+            if (segs.count > 1) segmented += 1;
             for (segs.s[0..@intCast(segs.count)]) |seg| {
                 calls[count] = .{ .id = id, .x = x, .xs = xs, .out = seg.p.out, .rows = rows, .sk = seg.p.sk, .row_tiles = 1, .grid = gx, .shared = shared };
                 count += 1;
@@ -83,10 +85,10 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     e.graphs = .empty;
     e.scratch_buf = null;
     e.scratch_capacity = 0;
-    e.scratch_rows = q.engine.max_rows;
     e.verify_rows = q.engine.most_verify;
     e.window_rows = q.engine.most_window;
     e.kit = null;
+    e.scratch_rows = q.engine.grid_rows;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);

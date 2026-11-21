@@ -11,6 +11,13 @@ const prompt = @import("prompt.zig");
 const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
 const tree_ = @import("tree.zig");
+const steps = @import("prompt_steps.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
+const vt = @import("vision_tower.zig");
+const vrows = @import("vision_rows.zig");
+const prep = @import("vision_prep.zig");
+const pick = @import("pick.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -30,7 +37,11 @@ pub const Env = struct {
     s: *const scratch.Scratch,
     model: forward.Model,
     lookup: ?forward.Lookup,
+    /// the vision tower's kernels and weights (null: text only; a prompt with images is refused)
+    vision: ?VisionRefs = null,
 };
+
+pub const VisionRefs = struct { kit: *const vision.Kit, w: *const vw.Weights };
 
 pub const Options = struct {
     slots: u32,
@@ -43,32 +54,10 @@ pub const Options = struct {
     resident: ?*mtl.resident.Resident = null,
 };
 
-/// What the target did, for the tests and the logs.
-pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
+/// What the target did, for the tests and the logs; `most_between`: the most launches between two of a prompt's pieces.
+pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0, pieces: u64 = 0, abandoned: u64 = 0, most_between: u64 = 0 };
 
-/// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
-pub const Slot = struct {
-    kv: kv.Slot,
-    tail: prompt.Tail,
-    hist: std.ArrayList(u32) = .empty,
-    /// the last window: its first position and rows; `open` until its keep
-    base: u64 = 0,
-    rows: u32 = 0,
-    open: bool = false,
-    /// the taps of the last `ring rows` committed positions, position p at row p % ring rows
-    ring: []u16,
-    /// the taps `taps` names after a prompt: its last rows in order
-    ptaps: mtl.Buffer,
-    ptaps_rows: u32 = 0,
-    after_prompt: bool = false,
-    /// the most positions any request wrote here since the slot was last cleared
-    high: u64 = 0,
-    live: bool = false,
-    /// every launch since the request began completed (a release keeps only a whole state)
-    whole: bool = false,
-    /// the rows the last prompt took from kept state
-    resumed: u32 = 0,
-};
+pub const Slot = @import("target_slot.zig").Slot;
 
 pub const Target = struct {
     a: Allocator,
@@ -85,6 +74,11 @@ pub const Target = struct {
     joined: bool = false,
     /// draft trees: the branches' shadow slots and the open tree window (tree.zig)
     tree: tree_.Tree = .{},
+    /// the ViT and aligner, when the environment has a tower
+    tower: ?vt.Tower = null,
+    /// a sampled pick's float64 logits and its ids 0 .. vocab - 1, kept between picks
+    pick_vals: []f64 = &.{},
+    pick_ids: []u64 = &.{},
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -97,6 +91,11 @@ pub const Target = struct {
         errdefer t.b.deinit();
         t.pr = try prompt.Prompt.init(env.device, c, opt.prompt, opt.limit);
         errdefer t.pr.deinit();
+        t.pick_vals = try a.alloc(f64, c.vocab);
+        errdefer a.free(t.pick_vals);
+        t.pick_ids = try a.alloc(u64, c.vocab);
+        errdefer a.free(t.pick_ids);
+        for (t.pick_ids, 0..) |*id, i| id.* = i;
         const slots = try a.alloc(Slot, opt.slots);
         errdefer a.free(slots);
         var made: usize = 0;
@@ -116,6 +115,7 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        if (env.vision) |v| t.tower = vt.Tower.init(a, env.device, env.queue, v.kit, v.w);
         t.joinResident() catch {};
         return t;
     }
@@ -151,6 +151,9 @@ pub const Target = struct {
         s.ptaps.deinit();
         a.free(s.ring);
         s.hist.deinit(a);
+        s.hit.deinit(a);
+        a.free(s.images);
+        if (s.image_rows) |*r| r.deinit();
     }
 
     pub fn deinit(t: *Target) void {
@@ -161,11 +164,14 @@ pub const Target = struct {
             t.ownBuffers(&bufs) catch {};
             for (bufs.items) |b| t.opt.resident.?.remove(b);
         }
+        if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
+        t.a.free(t.pick_vals);
+        t.a.free(t.pick_ids);
         t.a.destroy(t);
     }
 
@@ -180,10 +186,10 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn } };
     }
 
-    fn self(ptr: *anyopaque) *Target {
+    pub fn self(ptr: *anyopaque) *Target {
         return @ptrCast(@alignCast(ptr));
     }
 
@@ -201,66 +207,138 @@ pub const Target = struct {
 
     // prompts ------------------------------------------------------------------------------------------------------
 
+    /// The images of the slot's next prompt, their pixels borrowed until `prefill` returns.
+    pub fn setImages(t: *Target, slot: u32, images: []const vrows.Image) !void {
+        if (slot >= t.slots.len) return error.NoSlot;
+        const s = &t.slots[slot];
+        if (images.len > 0 and t.tower == null) return error.NoVision;
+        const copy = try t.a.dupe(vrows.Image, images);
+        t.a.free(s.images);
+        s.images = copy;
+    }
+
+    fn imagesFn(ptr: *anyopaque, slot: u32, images: []const vrows.Image) anyerror!void {
+        return self(ptr).setImages(slot, images);
+    }
+
     fn resumedFn(ptr: *anyopaque, slot: u32) u64 {
         const t = self(ptr);
         return if (slot < t.slots.len) t.slots[slot].resumed else 0;
     }
 
+    /// `ids` with each image position replaced by its virtual id (the prompt cache's and the Engram hash's view of it).
+    fn withVids(t: *Target, ids: []const u32, images: []const vrows.Image) ![]u32 {
+        const out = try t.a.dupe(u32, ids);
+        errdefer t.a.free(out);
+        for (images) |im| {
+            if (@as(u64, im.at) + im.tokens > ids.len) return error.BadImageSpan;
+            for (0..im.tokens) |p| out[im.at + p] = prep.vid(im.hash, @intCast(p));
+        }
+        return out;
+    }
+
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
+        const st = try t.startPrompt(slot, ids);
+        const s = st.s;
+        const prompt_ids = s.hist.items; // image positions carry their virtual ids
+        if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
+        // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
+        for (t.keepPoints(prompt_ids, s.resumed)) |end| if (end > 0) try t.keepAt(s, end);
+        t.pr.run(t.promptEnv(), &s.kv, &s.tail, prompt_ids) catch |e| return t.fail(e);
+        return t.endPrompt(s, null, smp, draw);
+    }
+
+    /// A prompt's start on a free slot: a kept state that starts it (restored), else the slot cleared; ids recorded.
+    pub fn startPrompt(t: *Target, slot: u32, ids_in: []const u32) !struct { s: *Slot, hit: ?*snapshots.Entry } {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         const c = t.env.c;
-        if (s.live) return error.SlotLive;
-        if (ids.len == 0) return error.EmptyPrompt;
-        if (ids.len >= t.opt.limit) return error.PastLimit;
-        for (ids) |id| if (id >= c.vocab) return error.BadToken;
+        if (s.live or s.filling) return error.SlotLive;
+        if (ids_in.len == 0) return error.EmptyPrompt;
+        if (ids_in.len >= t.opt.limit) return error.PastLimit;
+        const images = s.images;
+        s.images = &.{};
+        defer t.a.free(images);
+        var vids: ?[]u32 = null;
+        defer if (vids) |v| t.a.free(v);
+        if (images.len > 0) {
+            if (t.tower == null) return error.NoVision;
+            vids = try t.withVids(ids_in, images);
+        }
+        const ids: []const u32 = vids orelse ids_in;
+        for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
         s.whole = false;
         s.open = false;
         s.rows = 0;
+        s.hit_on = false;
+        t.pr.forget(&s.tail);
         t.stats.prompts += 1;
-        // a kept state that starts this prompt, else a cleared slot
-        const hit = if (t.cache.on()) t.cache.best(ids) else null;
+        // a kept state that starts this prompt (not one that ends inside an image's span), else a cleared slot
+        var hit = if (t.cache.on()) t.cache.best(ids) else null;
+        if (hit) |e| for (images) |im| if (e.ids.len > im.at and e.ids.len < im.at + im.tokens) {
+            hit = null;
+        };
         const at: u32 = if (hit) |e| @intCast(e.ids.len) else 0;
         if (hit) |e| {
             t.cache.restore(c, e, &s.kv, s.high, s.ring);
             t.stats.hits += 1;
             t.stats.cached_rows += at;
         } else snapshots.clear(c, &s.kv, s.high);
+        if (images.len > 0) {
+            s.image_rows = try vrows.Rows.build(t.a, t.env.device, &t.tower.?, images, @intCast(ids.len), t.opt.prompt.chunk, at);
+            t.pr.images = if (s.image_rows) |*r| r else null;
+        }
         s.resumed = at;
         s.tail.end = at;
         s.tail.done = at;
         s.hist.clearRetainingCapacity();
         try s.hist.appendSlice(t.a, ids);
         s.high = @max(at, ids.len);
-        const n: u32 = @intCast(ids.len);
+        return .{ .s = s, .hit = hit };
+    }
+
+    /// The prompt's rows to `end`, short of its end, with the decoder's cone there: its taps and that state kept.
+    pub fn keepAt(t: *Target, s: *Slot, end: u32) !void {
+        t.pr.run(t.promptEnv(), &s.kv, &s.tail, s.hist.items[0..end]) catch |e| return t.fail(e);
+        t.ringTaps(s, end);
+        t.cache.save(t.env.c, &s.kv, s.hist.items[0..end], s.ring, null) catch {};
+    }
+
+    /// The taps rows the last prompt run wrote, its rows before `end`, into the ring.
+    fn ringTaps(t: *const Target, s: *Slot, end: u32) void {
+        const c = t.env.c;
+        const tr = t.pr.tapRows(c);
+        for (0..t.pr.taps) |i| t.ringPut(s, end - t.pr.taps + i, tr[i * tapWidth(c) ..][0..tapWidth(c)]);
+    }
+
+    /// The prompt's rows are in (`hit`: a kept state's logits, else the prompt head's): taps, choice, the slot live.
+    pub fn endPrompt(t: *Target, s: *Slot, hit: ?[]const f32, smp: ?lanes.Sampling, draw: u64) !u32 {
+        const c = t.env.c;
+        t.pr.images = null;
+        if (s.image_rows) |*r| r.deinit();
+        s.image_rows = null;
+        const n: u32 = @intCast(s.hist.items.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
-        // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
-        const kp = t.keepPoints(ids, at);
-        if (at == n) logits = hit.?.logits.? else {
-            for ([3]u32{ kp[0], kp[1], n }) |end| {
-                if (end == 0) continue;
-                t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids[0..end]) catch |e| return t.fail(e);
-                const tr = t.pr.tapRows(c);
-                for (0..t.pr.taps) |i| t.ringPut(s, end - t.pr.taps + i, tr[i * tapWidth(c) ..][0..tapWidth(c)]);
-                if (end < n) t.cache.save(c, &s.kv, ids[0..end], s.ring, null) catch {};
-            }
+        if (hit) |l| logits = l else {
             const all = t.pr.logits(c);
             logits = all[(t.pr.head - 1) * V ..][0..V];
+            t.ringTaps(s, n);
         }
         t.promptTaps(s, n);
-        const choice = try t.choose(logits, draw, smp);
+        const choice = try pick.choose(t, logits, draw, smp);
         s.base = n;
         s.live = true;
         s.whole = true;
-        if (t.cache.on() and at < n and kp[1] == 0) t.cache.save(c, &s.kv, ids, s.ring, logits) catch {};
+        // a thinking prompt is kept short of its <think> instead (keepPoints)
+        if (t.cache.on() and s.resumed < n and t.keepPoints(s.hist.items, s.resumed)[1] == 0) t.cache.save(c, &s.kv, s.hist.items, s.ring, logits) catch {};
         return choice;
     }
 
     /// Extra kept states (0: none): before the first user turn, and before a thinking prompt's closing <think>.
-    fn keepPoints(t: *const Target, ids: []const u32, at: u32) [2]u32 {
+    pub fn keepPoints(t: *const Target, ids: []const u32, at: u32) [2]u32 {
         const c = t.env.c;
         const n = ids.len;
         var out: [2]u32 = .{ 0, 0 };
@@ -274,7 +352,7 @@ pub const Target = struct {
         return out;
     }
 
-    fn promptEnv(t: *const Target) prompt.Env {
+    pub fn promptEnv(t: *const Target) prompt.Env {
         const e = t.env;
         return .{ .c = e.c, .p = e.p, .tables = e.tables, .model = e.model, .lookup = e.lookup, .queue = e.queue };
     }
@@ -297,29 +375,6 @@ pub const Target = struct {
             const pos = n - s.ptaps_rows + i;
             @memcpy(out[i * w ..][0..w], s.ring[(pos % ringRows(c)) * w ..][0..w]);
         }
-    }
-
-    /// The keyed choice of a logits row over the whole vocabulary (greedy: the first maximum, ties to the lower id).
-    pub fn choose(t: *const Target, row: []const f32, draw: u64, smp: ?lanes.Sampling) !u32 {
-        const s = smp orelse return argmax(row);
-        if (s.temperature <= 0) return argmax(row);
-        const vals = try t.a.alloc(f64, row.len);
-        defer t.a.free(vals);
-        const ids = try t.a.alloc(u64, row.len);
-        defer t.a.free(ids);
-        for (vals, ids, row, 0..) |*v, *id, x, i| {
-            v.* = x;
-            id.* = i;
-        }
-        return @intCast(try lanes.sampling.choose(t.a, vals, ids, draw, s));
-    }
-
-    fn argmax(row: []const f32) u32 {
-        var best: usize = 0;
-        for (row, 0..) |x, i| if (x > row[best]) {
-            best = i;
-        };
-        return @intCast(best);
     }
 
     pub fn fail(t: *Target, e: anyerror) anyerror {
@@ -390,7 +445,7 @@ pub const Target = struct {
         for (group, choices) |g, out| {
             const s = &t.slots[g.slot];
             const n = g.tokens.len;
-            for (0..n) |r| out[r] = try t.choose(lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
+            for (0..n) |r| out[r] = try pick.choose(t, lg[(r0 + r) * V ..][0..V], g.draws[r], g.sampling);
             s.base = g.start;
             s.rows = @intCast(n);
             s.open = true;
@@ -499,6 +554,7 @@ pub const Target = struct {
         const t = self(ptr);
         if (slot >= t.slots.len) return;
         const s = &t.slots[slot];
+        if (s.filling) steps.abandon(t, s);
         if (!s.live) return;
         t.tree.forget(slot);
         s.live = false;
@@ -524,3 +580,19 @@ pub const Target = struct {
         return out.toOwnedSlice(t.a);
     }
 };
+
+test "argmax: the first maximum, NaN rows as the scalar scan" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    const row = try a.alloc(f32, 129280);
+    defer a.free(row);
+    for (0..200) |k| {
+        for (row) |*x| x.* = rnd.floatNorm(f32);
+        if (k % 5 == 1) row[rnd.uintLessThan(usize, row.len)] = 9.0;
+        if (k % 5 == 2) row[rnd.uintLessThan(usize, row.len)] = std.math.nan(f32);
+        if (k % 5 == 3) @memset(row, -std.math.inf(f32));
+        if (k % 5 == 4) row[rnd.uintLessThan(usize, 7)] = std.math.nan(f32);
+        try std.testing.expectEqual(pick.scan(row), pick.argmax(row));
+    }
+}

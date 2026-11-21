@@ -2,6 +2,7 @@
 const std = @import("std");
 const sampling = @import("sampling.zig");
 const grammar = @import("grammar.zig");
+const topk = @import("sampling_row_topk.zig");
 const Sampling = sampling.Sampling;
 
 /// A bf16 word as the f64 the keyed sampler reads.
@@ -9,8 +10,9 @@ pub fn value(word: u16) f64 {
     return @as(f32, @bitCast(@as(u32, word) << 16));
 }
 
-/// The unchanged top-k candidates for the shared fp64 keyed sampler; a `mask` keeps its allowed ones (-inf's draw).
+/// The keyed fp64 draw over the top_k (heap-free for 1..128: sampling_row_topk); a `mask` keeps its allowed ones.
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?Sampling, position: u64, mask: []const u32) !u32 {
+    if (settings) |s| if (try topk.draw(logits, s, position, mask)) |token| return token;
     var best: ?usize = null;
     var allowed: usize = 0;
     for (logits, 0..) |word, id| {
@@ -103,4 +105,23 @@ test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {
     try std.testing.expectEqual(greedy, try draw(gpa, &words, null, 0, &mask));
     @memset(&mask, 0);
     try std.testing.expectError(error.NoAllowedToken, draw(gpa, &words, null, 0, &mask));
+}
+
+test "a sampled top_k up to 128 draws without the heap and picks the full-row token" {
+    const a = std.testing.allocator;
+    var words: [test_vocab]u16 = undefined;
+    var values: [test_vocab]f64 = undefined;
+    var ids: [test_vocab]u64 = undefined;
+    testRow(&words, &values, &ids);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    for ([_]u32{ 1, 20, 128 }) |k| for ([_]u64{ 0, 191 }) |position| {
+        const s: Sampling = .{ .seed = 1234, .temperature = 1, .top_p = 0.95, .top_k = k };
+        const want = try sampling.choose(a, &values, &ids, position, s);
+        try std.testing.expectEqual(want, try draw(failing.allocator(), &words, s, position, &.{}));
+    };
+    try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+}
+
+test {
+    _ = topk;
 }

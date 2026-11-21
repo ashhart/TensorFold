@@ -89,9 +89,11 @@ pub fn counting(m: MemInfo, zones: ?[]const u8) MemInfo {
 
 /// Pinned host-cache room, after the CUDA streams when memory is unified.
 pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64, room: u64, streams: u64, unified: bool) u64 {
-    const text = procText(a, io, "/proc/meminfo") orelse return 0;
-    const zones = procText(a, io, "/proc/zoneinfo");
-    const m = counting(meminfo(text) orelse return 0, zones);
+    const m = if (@import("builtin").os.tag == .windows) windowsMem() orelse return 0 else blk: {
+        const text = procText(a, io, "/proc/meminfo") orelse return 0;
+        const zones = procText(a, io, "/proc/zoneinfo");
+        break :blk counting(meminfo(text) orelse return 0, zones);
+    };
     return hostCacheBudget(asked, m.available, room, streams, unified);
 }
 
@@ -109,6 +111,28 @@ pub fn hostCacheBudget(asked: ?f64, available: u64, room: u64, streams: u64, uni
     }
     return if (unified) automaticCache(left, 8 << 30) else @min(8 << 30, available / 2);
 }
+
+/// What GlobalMemoryStatusEx says about physical memory, in bytes (Windows; null where the call fails).
+fn windowsMem() ?MemInfo {
+    var s: MemoryStatusEx = std.mem.zeroes(MemoryStatusEx);
+    s.dwLength = @sizeOf(MemoryStatusEx);
+    if (GlobalMemoryStatusEx(&s) == 0) return null;
+    return .{ .total = s.ullTotalPhys, .available = s.ullAvailPhys };
+}
+
+const BOOL = c_int;
+const MemoryStatusEx = extern struct {
+    dwLength: u32,
+    dwMemoryLoad: u32,
+    ullTotalPhys: u64,
+    ullAvailPhys: u64,
+    ullTotalPageFile: u64,
+    ullAvailPageFile: u64,
+    ullTotalVirtual: u64,
+    ullAvailVirtual: u64,
+    ullAvailExtendedVirtual: u64,
+};
+extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) BOOL;
 
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
 pub fn procText(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
@@ -230,6 +254,11 @@ pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryU
     return card;
 }
 
+/// The pool's free: on unified Linux at most CUDA's, as MemAvailable counts page cache CUDA can't allocate (#1857).
+pub fn boundFree(host_counts: bool, counted: u64, card_free: u64) u64 {
+    return if (host_counts) @min(counted, card_free) else counted;
+}
+
 test "the memory plan: reserve, cap, and admission that fails closed" {
     const g: u64 = 1 << 30;
     try std.testing.expectEqual(4 * g, try reserveBytes(null, 24 * g, true)); // unified: at least 4 GiB
@@ -286,6 +315,13 @@ test "this host's /proc/meminfo reads whole and parses (Linux)" {
     const text = procText(a, std.testing.io, "/proc/meminfo") orelse return error.Unreadable;
     defer a.free(text);
     try std.testing.expect(meminfo(text) != null);
+}
+
+test "this host's physical memory reads (Windows)" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const m = windowsMem() orelse return error.SkipZigTest;
+    try std.testing.expect(m.total > 0 and m.available <= m.total);
+    try std.testing.expect(hostCacheBytes(std.testing.allocator, std.testing.io, null, 0, 0, false) > 0);
 }
 
 test "meminfo: total and available in bytes" {
@@ -350,6 +386,7 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         return null;
     };
     const available = counting(measured, zones);
+    const free = boundFree(host_counts, available.available, card.free);
     const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
     const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
     const reserve = reserveBytes(reserve_text, available.total, unified) catch {
@@ -360,7 +397,7 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{limit_text orelse ""});
         return null;
     };
-    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified, .parked = available.available - measured.available };
+    return .{ .free = free, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free -| measured.available };
 }
 
 test "the weights' bytes: each file the weight map names once, under a folder too; without an index the folder's own" {
@@ -433,6 +470,13 @@ test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay 
     try std.testing.expectEqual(@as(u64, 32813016 * 1024), m.available);
     try std.testing.expect(parked > 0 and m.available + parked < m.total);
     try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
+}
+
+test "CUDA's free bounds a unified Linux pool only: Windows and discrete cards keep their counts" {
+    const g: u64 = 1 << 30;
+    try std.testing.expectEqual(60 * g, boundFree(true, 115 * g, 60 * g)); // MemAvailable held the page cache
+    try std.testing.expectEqual(96 * g, boundFree(true, 96 * g, 128 * g));
+    try std.testing.expectEqual(40 * g, boundFree(false, 40 * g, 30 * g)); // `counted` is already the card's own
 }
 
 test "CUDA cache default counts streams before taking half the unified room" {

@@ -19,7 +19,7 @@ pub const Chain = struct { slot: usize, p0: usize, tokens: []const u32, images: 
 
 /// What a forward runs on: the model's state, the shared and the recipe's kernels, the weights, the CUDA stream.
 pub fn Engine(comptime R: type) type {
-    return struct { m: *const Model, k: *const Kernels, own: *const R.Kernels, w: *const R.Weights, s: Stream };
+    return struct { m: *const Model, k: *const Kernels, own: *const R.Kernels, w: *const R.Weights, s: Stream, taps: ?recipe.Tap = null };
 }
 
 /// A forward's rows (a prompt chunk, or a round of windows) and the operators a recipe's layers call on them.
@@ -35,6 +35,12 @@ pub fn Pass(comptime R: type) type {
         chains: []const Chain,
         rows: usize,
         prompt: bool,
+        taps: ?recipe.Tap = null, // a check's: the rows a recipe names (its projections'), none when served
+
+        /// Rows [rows, width] at `at` to the check's tap under `stage`; nothing without one.
+        pub fn tap(p: *const P, stage: []const u8, at: u64, width: usize) !void {
+            if (p.taps) |t| try t.at(t.ctx, stage, at, p.rows, width);
+        }
 
         fn part(p: *const P, w: Weight) !u64 {
             if (p.k.lane.partBytes(p.rows, w) > p.m.part_bytes) return error.LanePartTooSmall;
@@ -135,7 +141,7 @@ pub fn forward(comptime R: type, e: Engine(R), chains: []const Chain, prompt: bo
     const m = e.m;
     const rows = try rowsOf(m, chains, prompt, head0, heads);
     try upload(m, e.s, chains, rows);
-    const p: Pass(R) = .{ .m = m, .k = e.k, .own = e.own, .w = e.w, .s = e.s, .g = m.g, .chains = chains, .rows = rows, .prompt = prompt };
+    const p: Pass(R) = .{ .m = m, .k = e.k, .own = e.own, .w = e.w, .s = e.s, .g = m.g, .chains = chains, .rows = rows, .prompt = prompt, .taps = e.taps };
     try R.embed(&p);
     try splice(m.d, e.s, m.s.h, m.g.hidden, chains);
     for (0..m.g.layers) |i| try R.layer(&p, i);

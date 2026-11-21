@@ -76,6 +76,37 @@ test "device profile: a scan saves, reads back whole, and stays until the hardwa
     try t.expectEqual(@as(?profile.Due, .hardware), (try scan.current(a, t.io, file, more, newer, "x", false, false)).scanned);
 }
 
+test "device profile: a changed Mac wired limit refreshes the saved budget" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try folder(a);
+    defer std.Io.Dir.cwd().deleteTree(t.io, root) catch {};
+    const file = try std.fs.path.join(a, &.{ root, ".tensorfold", "device.json" });
+    const mac = try parse.macos(a, "aarch64", fx.m1_max_wired);
+    const bin: scan.Binary = .{ .version = "test", .offer = .{ .version = "test", .backends = &.{"metal"} } };
+    const original = try scan.current(a, t.io, file, mac, bin, "2026-11-13T01:00:00Z", false, true);
+    try t.expect(original.saved and original.support.budget > 0);
+    const unchanged = try scan.current(a, t.io, file, mac, bin, "2026-11-13T02:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, null), unchanged.scanned);
+    try t.expect(scan.fresh(a, t.io, file, mac, bin.version) != null);
+
+    var limited = mac;
+    limited.gpu_wired_limit = bin.offer.margin;
+    const stale = scan.fresh(a, t.io, file, limited, bin.version);
+    const lower = try scan.current(a, t.io, file, limited, bin, "2026-11-13T03:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, .hardware), lower.scanned);
+    try t.expect(stale == null);
+    try t.expect(lower.saved);
+    try t.expectEqual(limited.gpu_wired_limit, lower.doc.machine.gpu_wired_limit);
+    try t.expectEqual(@as(u64, 0), lower.support.budget);
+    try t.expect(scan.fresh(a, t.io, file, limited, bin.version) != null);
+
+    const restored = try scan.current(a, t.io, file, mac, bin, "2026-11-13T04:00:00Z", false, true);
+    try t.expectEqual(@as(?profile.Due, .hardware), restored.scanned);
+    try t.expectEqual(original.support.budget, restored.support.budget);
+}
+
 test "device profile: a driver that does not answer keeps the OS's listing and a quick scan" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
@@ -87,6 +118,33 @@ test "device profile: a driver that does not answer keeps the OS's listing and a
     try t.expectEqualStrings("NVIDIA GeForce RTX 3090", got.doc.machine.gpus[0].name);
     const mac = try scan.current(a, t.io, null, try parse.macos(a, "aarch64", fx.m3_ultra), .{ .version = "1.2.8", .offer = cuda }, "x", false, true);
     try t.expectEqual(profile.Scan.full, mac.doc.scan); // sysctl is a Mac's whole story
+}
+
+test "device profile: exact integer values and nested defaults survive decoding" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text =
+        \\{"schema":1,"scanned_at":"2026-11-13T01:00:00Z","binary_version":"1.2.9",
+        \\ "fingerprint":"fixture","scan":"full",
+        \\ "machine":{"os":"linux","arch":"x86_64","ram":18446744073709551615,
+        \\            "gpus":[{"vendor":"nvidia","name":"Fixture GPU","sm":"12e1"}]},
+        \\ "support":{"budget":18446744073709551615.0,"backend":"cuda","gpu":0,"new_field":[1,2]}}
+    ;
+    const doc = profile.parse(a, text).?;
+    try t.expectEqual(std.math.maxInt(u64), doc.machine.ram);
+    try t.expectEqual(std.math.maxInt(u64), doc.support.budget);
+    try t.expectEqual(@as(?usize, 0), doc.support.gpu);
+    try t.expectEqual(@as(u32, 120), doc.machine.gpus[0].sm);
+    try t.expectEqual(@as(u64, 0), doc.machine.gpus[0].memory);
+    try t.expectEqual(machine.Source.os, doc.machine.gpus[0].source);
+    try t.expectEqualStrings("Fixture GPU", doc.machine.gpus[0].name);
+    try t.expect(doc.support.certain);
+    for ([_][]const u8{ "-1", "1.5", "18446744073709551616", "1e20" }) |invalid| {
+        const bad = try std.mem.replaceOwned(u8, a, text, "18446744073709551615.0", invalid);
+        defer a.free(bad);
+        try t.expect(profile.parse(a, bad) == null);
+    }
 }
 
 test "device profile: the driver's GPUs replace the OS's NVIDIA entries in ordinal order and keep the rest" {

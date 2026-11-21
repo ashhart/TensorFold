@@ -11,6 +11,7 @@ const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const http_conn = @import("http_conn.zig");
 const admission = @import("http_admission.zig");
 const listener_mod = @import("listener.zig");
@@ -31,9 +32,7 @@ const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
-
 pub const Identity = @import("identity.zig").Identity;
-
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
 
@@ -44,8 +43,8 @@ pub const Config = struct {
     sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
-    voices_dir: ?[]const u8 = null,
-    default_voice: []const u8 = "default",
+    /// --voices, --default-voice, --request-voices and --manage-voices; the last two off keep the startup catalog.
+    voice: @import("voice_cli.zig").Config = .{},
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     /// Ids a request may name for background priority by default (--name-priority); each is in model_ids.
@@ -59,6 +58,7 @@ pub const Config = struct {
     loop_guard: bool = false,
     /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
     loop_stop: bool = false,
+    tool_think_close: bool = false, // --tool-think-close: a required or named call closes thinking in time
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
@@ -80,6 +80,7 @@ pub const Config = struct {
     prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    journal: ?*@import("request_journal.zig").Journal = null, // serve owns TENSORFOLD_REQUEST_JOURNAL
     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
     phase_metrics: bool = false,
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
@@ -124,7 +125,6 @@ pub fn namedBackground(config: Config, f: Value) bool {
     for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
     return false;
 }
-
 /// Name the compiled structure with the client's own field when its route carried one (a borrowed static literal).
 pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
     const name = format orelse return;
@@ -138,14 +138,18 @@ pub const Server = struct {
     info: api.Info,
     text: model_text.Text,
     config: Config,
-    voices: []const @import("drama_voice.zig").Voice = &.{},
+    voices: @import("drama_voice_store.zig").Store = .{},
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
+    /// Replies are messages to recipients (`to=self` reasoning, `to=user` answer, a tool's name a call).
+    recipients: bool = false,
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
+    /// The effort a recipient template hears with thinking off: it has no switch, so its lowest level, not its default.
+    off_effort: ?[]const u8 = null,
     thinking_switch: bool = false,
     video_decoder: bool = false, // libtfvideo loaded in `init`: with the video offer it decides video input (#3004)
     eos: []const u32 = &.{},
@@ -155,8 +159,8 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
-    /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
-    ws_cache_bytes: std.atomic.Value(usize) = .init(0),
+    background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
+    ws_cache_bytes: std.atomic.Value(usize) = .init(0), // Responses socket cache bytes (ws_cache.zig)
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
@@ -207,11 +211,10 @@ pub const Server = struct {
             return error.InvalidVisionMarkers;
         };
         srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
-        if (config.voices_dir) |dir| {
-            if (srv.info.speech == null) return error.VoicesRequireSpeech;
-            srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
-        }
-        _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
+        srv.voices = .{ .gpa = gpa, .io = io, .dir = config.voice.dir };
+        if (srv.info.speech == null and (config.voice.dir != null or config.voice.inline_voices or config.voice.manage)) return error.VoicesRequireSpeech;
+        if (config.voice.dir) |dir| try srv.voices.load(dir);
+        _ = try srv.voices.select(srv.arena.allocator(), config.voice.default, "default");
         if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
@@ -229,8 +232,10 @@ pub const Server = struct {
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
         if (minimax) srv.markers = reply_text.mm_markers;
         srv.close_id = text.tokenId(srv.markers.close);
+        srv.recipients = recipient_reply.detect(text);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
+        if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
         // MiniMax-M3's template decides on its own; thinking off closes the block in the prompt (prompt.zig)
         srv.thinking_switch = minimax or std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
@@ -263,10 +268,12 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
+        srv.voices.deinit();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
@@ -556,14 +563,7 @@ fn seedBits(v: Value) u64 {
     if (std.fmt.parseInt(i128, v.int, 10)) |n| return @truncate(@as(u128, @bitCast(n))) else |_| return 0;
 }
 
-/// ``template_late_system``: "system" when the template keeps a later system message in place, else "user".
-fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
-    const probe_text = "tensorfold-late-system-probe";
-    const probe = (try json.parse(a, "[{\"role\": \"system\", \"content\": \"s\"}, {\"role\": \"user\", \"content\": \"u\"}, {\"role\": \"assistant\", \"content\": \"a\"}, {\"role\": \"system\", \"content\": \"tensorfold-late-system-probe\"}, {\"role\": \"user\", \"content\": \"v\"}]")).ok;
-    var problem: []const u8 = "";
-    const rendered = text.render(a, probe, .{ .add_generation_prompt = false }, &problem) catch return "user";
-    return if (std.mem.indexOf(u8, rendered.text, probe_text) != null) "system" else "user";
-}
+const lateSystem = @import("late_system.zig").lateSystem;
 
 /// With image input: whether a user turn holding an image part renders an image placeholder (else a startup warning).
 fn templateImages(srv: *Server) bool {

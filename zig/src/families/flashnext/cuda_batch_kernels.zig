@@ -41,6 +41,7 @@ pub const Forms = struct {
     in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
     readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
     fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
+    readout_fused: bool = false, // TF_FLASHNEXT_READOUT_FUSED
 
     pub fn resolve() Forms {
         return .{
@@ -49,6 +50,7 @@ pub const Forms = struct {
             .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
             .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
             .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
+            .readout_fused = @import("readout_fused.zig").on(),
         };
     }
 };

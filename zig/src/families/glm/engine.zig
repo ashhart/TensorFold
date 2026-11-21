@@ -101,6 +101,7 @@ pub const Engine = struct {
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
+    dflash: ?*@import("metal_dflash_load.zig").Drafter = null, // --drafter: DFlash2 drafts in place of the MTP head
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
@@ -124,6 +125,7 @@ pub const Engine = struct {
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
+        e.dflash = null;
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
@@ -273,6 +275,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         const gpa = e.gpa;
         residency.drop(e);
+        if (e.dflash) |d| d.deinit(); // before the device, kernels and weights it borrows
         if (e.ep) |ep| ep.deinit(gpa);
         if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
@@ -310,7 +313,7 @@ pub const Engine = struct {
     }
 
     pub fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .draft_vocab = e.draft_vocab };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .taps = if (e.dflash) |d| d.taps else null, .draft_vocab = e.draft_vocab };
     }
 
     /// A command buffer ordered after the last one this engine committed.

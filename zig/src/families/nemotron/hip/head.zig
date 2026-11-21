@@ -8,8 +8,8 @@ const pages = @import("pages.zig");
 
 const Tensor = hip.ops.Tensor;
 
-/// Drafts a chain holds at most.
-pub const max_depth = 3;
+/// Drafts a lone stream's chain holds at most.
+pub const max_depth = 15;
 
 /// One stream's work of a head round: its model rows and the token after each, then the drafts chained from the last.
 pub const Job = struct { s: *pages.Stream, hidden: u64, next: []const u32, out: []u32, got: usize = 0 };

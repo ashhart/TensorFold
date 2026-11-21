@@ -8,12 +8,12 @@ const glue = @import("cuda_glue.zig");
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
-const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("living").lesson_route;
 const kept = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
 const worker = @import("cuda_worker.zig");
 const window_marks = @import("cuda_window_marks.zig");
+const adapt = @import("cuda_lesson_trace.zig").adapt;
 
 pub const Delta = enum { none, dense, moe };
 
@@ -58,6 +58,7 @@ pub const Forward = struct {
     pass: ?worker.Pass = null, // a window's jobs to the other rank under one header (null: one a job)
     flight: ?*worker.Flight = null, // a window's jobs out and replies in so far, which its failure reads
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
+    audio: ?*const @import("cuda_audio.zig").Audio = null, // a prompt pass's audio rows, spliced the same way
     page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
@@ -472,6 +473,7 @@ pub const Forward = struct {
         const b = f.b;
         try f.embed(b.p_ids, b.emb, w.rows);
         if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
+        if (f.audio) |a| try a.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
         w.x = b.emb;
     }
 
@@ -585,13 +587,3 @@ pub const Forward = struct {
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }
 };
-
-/// y += scale (x a^T) b over the blocks `route` opens on each row (x and y rows their strides apart, y bf16 or fp32).
-fn adapt(o: kern.Ops, ad: weights.Adapter, x: u64, x_stride: usize, y: u64, y_stride: usize, y_f32: bool, rows: usize, route: *const lesson_route.Route) !void {
-    const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
-    try t.loraIn(x, x_stride, ad.a, ad.xa, rows, ad.in, ad.rank, ad.xn);
-    var r = route.*;
-    if (ad.whole) r.whole = 1;
-    try t.gate(ad.xa, ad.xn, ad.tau, ad.gates, rows, ad.rank, ad.unit, &r, ad.latch, ad.score);
-    try t.loraOut(ad.xa, ad.b, y, y_stride, y_f32, rows, ad.out, ad.rank, ad.scale);
-}

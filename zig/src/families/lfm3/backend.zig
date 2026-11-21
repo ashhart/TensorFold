@@ -10,6 +10,8 @@ const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const be = lanes.backend;
 const prefill_control = @import("prefill_control.zig");
+const steps = @import("prefill_steps.zig");
+const image_rows = @import("image_rows.zig");
 pub const greedy = @import("greedy.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
@@ -23,11 +25,14 @@ pub const Metal = struct {
     images: ?@import("image_rows.zig").Provider = null,
     width: u32 = 1,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
-    /// Prompt positions reached by streams whose prompt pass is stepping, one chunk a call.
-    fills: std.AutoHashMapUnmanaged(*lanes.Stream, usize) = .empty,
     /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
+    /// Streams whose prompt passes are in progress: each one's next row (#3021), images prepared a chunk at a time.
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, Pass) = .empty,
+
+    /// A prompt pass in progress: the next chunk's first row.
+    const Pass = struct { at: usize };
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
@@ -119,30 +124,38 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
-        try self.open(stream, true);
+        const p = try self.opening(stream, true);
         errdefer self.drop(stream);
-        while (!try self.chunk(stream, true, 0)) {}
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream) };
+        while (!try steps.step(r, stream, &p.at, self.options.chunk, true)) {}
+        _ = self.fills.remove(stream);
+        try prefill_control.finished(stream);
     }
 
-    /// One chunk of the prompt pass of at most `max_rows` rows (0: the engine's cut); true once the last row is done.
-    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
-        const self = cast(ptr);
-        if (!self.fills.contains(stream)) try self.open(stream, false);
-        errdefer self.drop(stream);
-        return self.chunk(stream, false, max_rows);
-    }
+    /// One chunk's forward for `steps.step`, and a kept mark's hook.
+    const Run = struct {
+        m: *Metal,
+        cache: *st.Cache,
 
-    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
-        if (self.fills.get(stream)) |at| stream.keepInterruptedPrefill(@intCast(at));
-    }
+        pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
+            const ids = stream.prompt();
+            // images are prepared a chunk at a time so a long vision prompt never needs every row at once
+            const images = if (r.m.images) |provider| try provider.prepare(provider.ctx, stream, at, end) else null;
+            try fwd.runWithImages(r.m.model, &r.m.scratch, &.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last, images);
+        }
 
-    /// The stream's cache and pass position: its kept prefix's state, else the start.
-    fn open(self: *Metal, stream: *lanes.Stream, interruptible: bool) !void {
+        pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
+            if (stream.reuse.hook) |hk| hk.at(hk.ptr, stream, at);
+        }
+    };
+
+    /// The stream's cache made and a kept state restored: its pass from the returned row.
+    fn opening(self: *Metal, stream: *lanes.Stream, whole: bool) !*Pass {
         const ids = stream.prompt();
         if (stream.images.len != 0 and self.images == null) return error.Lfm3VisionNotImplemented;
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidLfmPrompt;
-        if (interruptible) try prefill_control.before(stream, 0);
+        // a step leaves yielding to the lane host, which runs other streams' rounds between chunks
+        if (whole) try prefill_control.before(stream, 0) else if (stream.isCancelled()) return error.Cancelled;
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
         const cache = try self.newCache(capacity);
         errdefer self.gpa.destroy(cache);
@@ -160,41 +173,35 @@ pub const Metal = struct {
             stream.reuse_failed = at == 0;
         }
         prefill_control.completed(stream, at);
-        try self.fills.put(self.gpa, stream, at);
+        try self.fills.put(self.gpa, stream, .{ .at = at });
+        return self.fills.getPtr(stream).?;
     }
 
-    /// Frees a pass that failed or was interrupted.
+    /// A pass that failed: its fill and its cache go, as the whole pass's error left them.
     fn drop(self: *Metal, stream: *lanes.Stream) void {
-        releaseFn(self, stream);
+        _ = self.fills.remove(stream);
+        if (self.caches.fetchRemove(stream)) |entry| {
+            entry.value.deinit();
+            self.gpa.destroy(entry.value);
+        }
     }
 
-    fn chunk(self: *Metal, stream: *lanes.Stream, interruptible: bool, max_rows: u32) !bool {
-        const ids = stream.prompt();
-        const cache = try self.cacheOf(stream);
-        const at = self.fills.get(stream) orelse return error.UnknownLfmStream;
-        if (interruptible) try prefill_control.before(stream, at) else try prefill_control.cancelled(stream, at);
+    /// One chunk a call at the whole pass's cuts: `max_rows`, when a host caps it, narrows the engine's cut.
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
+        const self = cast(ptr);
+        const p = self.fills.getPtr(stream) orelse try self.opening(stream, false);
+        errdefer self.drop(stream);
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream) };
         const rows: usize = if (max_rows == 0) self.options.chunk else @min(self.options.chunk, max_rows);
-        var end: usize = @min(ids.len, at + rows);
-        for (stream.chunks) |boundary| if (boundary > at) {
-            end = @min(end, boundary);
-            break;
-        };
-        for (stream.reuse.marks) |mark| if (mark > at) {
-            end = @min(end, mark);
-            break;
-        };
-        const image_rows = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at, end) else null;
-        try fwd.runWithImages(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last, image_rows);
-        prefill_control.completed(stream, end);
-        if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null)
-            hk.at(hk.ptr, stream, @intCast(end));
-        if (end < ids.len) {
-            self.fills.getPtr(stream).?.* = end;
-            return false;
-        }
-        _ = self.fills.remove(stream);
-        try prefill_control.finished(stream);
-        return true;
+        const done = try steps.step(r, stream, &p.at, rows, false);
+        if (done) _ = self.fills.remove(stream);
+        return done;
+    }
+
+    /// The host cancels between chunks: the last chunk's state is kept (its forward has waited; no prompt work runs).
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        steps.cancel(stream, if (self.fills.get(stream)) |p| p.at else null);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -274,7 +281,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
-        _ = self.fills.remove(stream);
+        _ = self.fills.remove(stream); // a stream that leaves mid-pass
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
@@ -306,51 +313,16 @@ pub const Snaps = struct {
 /// A row's allowed-token bits (structured output): one bit a logit.
 const mask_words = (c.vocab + 31) / 32;
 
-pub fn value(word: u16) f64 {
-    return @as(f32, @bitCast(@as(u32, word) << 16));
-}
+pub const value = lanes.sampling_row.value;
 
-/// The unchanged top-k candidates for the shared fp64 keyed sampler; a `mask` keeps its allowed ones (-inf's draw).
+/// Greedy unmasked rows take greedy.select; the rest core's row draw (lanes.sampling_row) under the LFM error names.
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
     if (mask.len == 0 and (settings == null or settings.?.temperature <= 0)) return greedy.select(logits);
-    var best: ?usize = null;
-    var allowed: usize = 0;
-    for (logits, 0..) |word, id| {
-        const x = value(word);
-        if (!std.math.isFinite(x)) return error.NonfiniteLfmLogits;
-        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
-        allowed += 1;
-        if (best == null or x > value(logits[best.?])) best = id;
-    }
-    if (best == null) return error.NoAllowedLfmToken;
-    const sampling = settings orelse return @intCast(best.?);
-    if (sampling.temperature <= 0) return @intCast(best.?);
-    const k = if (sampling.top_k == 0) allowed else @min(allowed, sampling.top_k);
-    const values = try gpa.alloc(f64, k);
-    defer gpa.free(values);
-    const ids = try gpa.alloc(u64, k);
-    defer gpa.free(ids);
-    var filled: usize = 0;
-    for (logits, 0..) |word, id| {
-        if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
-        const x = value(word);
-        if (k == allowed) {
-            values[filled] = x;
-            ids[filled] = id;
-            filled += 1;
-            continue;
-        }
-        if (filled == k and x <= values[k - 1]) continue;
-        var at = @min(filled, k - 1);
-        while (at > 0 and x > values[at - 1]) : (at -= 1) {
-            values[at] = values[at - 1];
-            ids[at] = ids[at - 1];
-        }
-        values[at] = x;
-        ids[at] = id;
-        filled = @min(filled + 1, k);
-    }
-    return @intCast(try lanes.sampling.choose(gpa, values, ids, position, sampling));
+    return lanes.sampling_row.draw(gpa, logits, settings, position, mask) catch |e| switch (e) {
+        error.NonfiniteLogits => error.NonfiniteLfmLogits,
+        error.NoAllowedToken => error.NoAllowedLfmToken,
+        else => e,
+    };
 }
 
 /// The shared lane facts after the load-time exactness gate succeeds.
@@ -397,6 +369,7 @@ test "candidate selection preserves full-vocabulary keyed draws and tie order" {
     try std.testing.expectEqual(try draw(gpa, words, null, 0, &.{}), try draw(gpa, words, .{ .seed = 7, .temperature = 0 }, 99, &.{}));
     words[0] = 0x7fc0;
     try std.testing.expectError(error.NonfiniteLfmLogits, draw(gpa, words, null, 0, &.{}));
+    try std.testing.expectError(error.NonfiniteLfmLogits, draw(gpa, words, .{ .seed = 7, .temperature = 0.7 }, 0, &.{}));
 }
 
 test "a masked draw is the full-vocabulary draw with the other tokens at -inf" {

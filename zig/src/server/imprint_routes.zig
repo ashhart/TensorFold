@@ -86,6 +86,7 @@ fn reply(a: Allocator, ask: *const Ask) !Value {
         .where => "imprint.resume",
         .load => "imprint.load",
         .forget => "imprint.forget",
+        .flush => "prompt_cache.flush",
     } });
     try o.put(a, "disk", .{ .bool = ask.disk });
     if (ask.op == .forget) {

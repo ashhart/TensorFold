@@ -57,6 +57,45 @@ def test_dry_run_then_clean_bench_keeps_running_and_mixed_series(conf):
         assert {r[0] for r in db.execute("select id from series")} == {"s-mixed"}
 
 
+def test_clean_bench_across_passes_preserves_active_and_unrelated_series(conf):
+    path = conf / "bench.sqlite"
+    with sqlite3.connect(path) as db:
+        series = {
+            "running": {"status": "running", "runs": ["old", "new", None]},
+            "failed-before-run": {"status": "failed", "runs": [None, None]},
+            "existing-orphan": {"status": "done", "runs": ["already-deleted"]},
+        }
+        db.executemany("insert into series values (?, ?, ?)",
+                       [(sid, NOW, json.dumps(doc)) for sid, doc in series.items()])
+
+    assert storage.clean(conf, "bench", 30, dry_run=False, now=NOW)["removed"] == 1
+    with sqlite3.connect(path) as db:
+        assert {row[0] for row in db.execute("select id from series")} == {*series, "s-mixed"}
+
+    assert storage.clean(conf, "bench", 1, dry_run=False, now=NOW)["removed"] == 1
+    with sqlite3.connect(path) as db:
+        assert {row[0] for row in db.execute("select id from runs")} == {"older-running"}
+        assert {row[0] for row in db.execute("select id from series")} == set(series)
+
+
+def test_clean_all_bench_repairs_an_orphan_when_no_runs_match(tmp_path):
+    path = tmp_path / "bench.sqlite"
+    bench.Store(path)
+    with sqlite3.connect(path) as db:
+        db.execute("create table series (id text primary key, created real not null, doc text not null)")
+        db.execute("insert into series values ('orphan', ?, ?)",
+                   (NOW, json.dumps({"status": "done", "runs": ["already-deleted"]})))
+
+    preview = storage.clean(tmp_path, "bench", None, dry_run=True)
+    assert preview == {"kind": "bench", "matched": 0, "removed": 0, "dry_run": True}
+    with sqlite3.connect(path) as db:
+        assert db.execute("select id from series").fetchall() == [("orphan",)]
+
+    assert storage.clean(tmp_path, "bench", None, dry_run=False) == {**preview, "dry_run": False}
+    with sqlite3.connect(path) as db:
+        assert db.execute("select id from series").fetchall() == []
+
+
 def test_clean_everything_of_a_kind(conf):
     assert storage.clean(conf, "conversations", 30, dry_run=False, now=NOW)["removed"] == 1
     assert storage.clean(conf, "usage", None, dry_run=False, now=NOW)["removed"] == 2

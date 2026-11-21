@@ -30,4 +30,8 @@ pub fn hostTests(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build
     const mesh = @import("mesh.zig").module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
     const decl = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/cuda_shard_decl_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "mesh", .module = mesh }} }) }));
     run.step.dependOn(&decl.step);
+    // the Metal drafters' stacked hold: each stream's block at its rows, its sequence apart, eight streams a pass
+    const hold = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/hold_batch.zig"), .target = host, .optimize = .debug }) }));
+    b.step("test-minimax-m3-hold-host", "MiniMax-M3 Metal drafters' stacked hold layout, no GPU").dependOn(&hold.step);
+    all.dependOn(&hold.step);
 }

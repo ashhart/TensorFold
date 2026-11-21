@@ -24,12 +24,19 @@ pub const Current = struct {
     saved: bool = false,
 };
 
+fn rescanReason(old: ?profile.Doc, quick: Machine, version: []const u8, asked: bool, want_full: bool) ?profile.Due {
+    const saved = old orelse return .missing;
+    const fp = machine.fingerprint(quick);
+    if (profile.due(saved, &fp, version, asked, want_full)) |why| return why;
+    if (quick.os == .macos and saved.machine.gpu_wired_limit != quick.gpu_wired_limit) return .hardware;
+    return null;
+}
+
 /// `quick` is this call's own listing (read.quick); `full` asks the driver when the profile is only a quick one.
 pub fn current(a: Allocator, io: std.Io, file: ?[]const u8, quick: Machine, bin: Binary, now: []const u8, asked: bool, full: bool) !Current {
-    const fp = machine.fingerprint(quick);
     const old = if (file) |f| profile.load(a, io, f) else null;
     const ask = full and bin.driver != null and quick.os != .macos;
-    const why = profile.due(old, &fp, bin.version, asked, ask) orelse {
+    const why = rescanReason(old, quick, bin.version, asked, ask) orelse {
         const doc = old.?;
         return .{ .doc = doc, .support = try support.derive(a, doc.machine, bin.offer) };
     };
@@ -41,6 +48,7 @@ pub fn current(a: Allocator, io: std.Io, file: ?[]const u8, quick: Machine, bin:
         kind = .full;
     };
     const s = try support.derive(a, m, bin.offer);
+    const fp = machine.fingerprint(quick);
     const doc: profile.Doc = .{ .scanned_at = now, .binary_version = bin.version, .fingerprint = try a.dupe(u8, &fp), .scan = kind, .machine = m, .support = s };
     var saved = false;
     if (file) |f| {
@@ -52,9 +60,8 @@ pub fn current(a: Allocator, io: std.Io, file: ?[]const u8, quick: Machine, bin:
 
 /// The saved profile when it is current for this machine and binary; null otherwise. Never scans or writes.
 pub fn fresh(a: Allocator, io: std.Io, file: ?[]const u8, quick: Machine, version: []const u8) ?profile.Doc {
-    const fp = machine.fingerprint(quick);
     const old = profile.load(a, io, file orelse return null) orelse return null;
-    return if (profile.due(old, &fp, version, false, false) == null) old else null;
+    return if (rescanReason(old, quick, version, false, false) == null) old else null;
 }
 
 /// The driver's GPUs in its own order (CUDA's ordinals), in place of the OS's listing of that vendor; the rest after.

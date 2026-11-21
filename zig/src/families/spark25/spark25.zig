@@ -6,6 +6,7 @@ pub const forward = @import("forward.zig");
 pub const snap = @import("snap.zig");
 pub const backend = @import("backend.zig");
 pub const native = @import("native.zig");
+pub const cuda_disk = @import("cuda_disk.zig");
 
 test {
     _ = config;
@@ -16,4 +17,5 @@ test {
     _ = backend;
     _ = native;
     _ = @import("prompt_tail.zig"); // which prompt rows the last layer runs
+    _ = cuda_disk;
 }

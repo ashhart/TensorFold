@@ -8,6 +8,7 @@ const affine_k = @import("metal_affine.zig");
 const gather_k = @import("metal_affine_gather.zig");
 const topk_k = @import("metal_topk.zig");
 const ling_route = @import("metal_ling_route.zig");
+const ling_mla = @import("metal_ling_mla.zig");
 const tile_k = @import("metal_tile.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
@@ -249,6 +250,8 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, p.kernel());
         }
     }
+    const bolt_suite = try @import("metal_bolt_main.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer bolt_suite.destroy();
     var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();
@@ -353,6 +356,9 @@ pub fn main(init: std.process.Init) !u8 {
         ling = try ling_route.Route.init(a, device, queue);
         try kernels.append(a, ling.?.kernel());
     }
+    var ling_mla_set = ling_mla.Suite{ .a = a, .device = device, .queue = queue };
+    defer ling_mla_set.deinit();
+    try ling_mla_set.collect(&kernels, o.only);
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
@@ -424,9 +430,30 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var glm_launches = @import("metal_glm_launch.zig").Suite.init(a, device, queue, &kernels);
+    defer glm_launches.deinit();
+    try glm_launches.collect(o.only);
+    var glm_dflash_head: @import("metal_glm_dflash_head.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_dflash_head.deinit();
+    try glm_dflash_head.collect(o.only);
+    var glm_dflash_attention: @import("metal_glm_dflash_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_dflash_attention.deinit();
+    try glm_dflash_attention.collect(o.only);
+    var glm_dflash_topk: @import("metal_glm_dflash_topk.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_dflash_topk.deinit();
+    try glm_dflash_topk.collect(o.only);
+    var glm_dflash_accept: @import("metal_glm_dflash_accept.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_dflash_accept.deinit();
+    try glm_dflash_accept.collect(o.only);
+    var glm_dflash_follow: @import("metal_glm_dflash_follow.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_dflash_follow.deinit();
+    try glm_dflash_follow.collect(o.only);
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);
+    var hy4: @import("metal_hy4.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer hy4.deinit();
+    try hy4.collect(o.only);
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_experts.deinit();
     try nemotron_experts.collect(o.only);
@@ -448,6 +475,9 @@ pub fn main(init: std.process.Init) !u8 {
     var gemma_attention: @import("metal_gemma4_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer gemma_attention.deinit();
     try gemma_attention.collect(o.only);
+    var gemma_glu: @import("metal_gemma4_glu.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer gemma_glu.deinit();
+    try gemma_glu.collect(o.only);
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
@@ -536,6 +566,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol.destroy();
+    const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_decoder.destroy();
+    const idol_vae = try @import("metal_idol_vae.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_vae.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

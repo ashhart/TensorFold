@@ -3,13 +3,14 @@ const std = @import("std");
 const cuda = @import("cuda");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
+const platform = @import("sys");
 
 const Engine = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const recurrent = @import("cuda_recurrent.zig");
 
-/// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
-pub const tap_rows = 2048 + engine.max_rows;
+/// Rows a drafter's tap ring holds a stream behind a forward's rows (Engine.tapRows): its window at most.
+pub const tap_window = 2048;
 
 /// Kept rows a cache may hold pending, and the pending count at which a recorded slot scan writes the state back.
 pub const pend_cap = 48;
@@ -21,7 +22,7 @@ pub fn keepLate() bool {
         var on: ?bool = null;
     };
     if (S.on) |v| return v;
-    const v = if (std.c.getenv("TF_QWEN_KEEP_LATE")) |x| std.mem.eql(u8, std.mem.span(x), "1") else false;
+    const v = platform.environment.read(bool, "TF_QWEN_KEEP_LATE", false) catch false;
     S.on = v;
     return v;
 }
@@ -71,14 +72,18 @@ pub const Paged = struct {
 
 /// TF_QWEN_KV_PAGE_TEST=n: each cache's own buffer read through a table of n-position pages in reverse order (checks).
 pub fn pageTest() !usize {
-    const v = std.c.getenv("TF_QWEN_KV_PAGE_TEST") orelse return 0;
-    return parsePageTest(std.mem.span(v));
+    const n = try platform.environment.read(u64, "TF_QWEN_KV_PAGE_TEST", 0);
+    return if (n == 0) 0 else parsePageTestValue(n);
+}
+
+pub fn parsePageTestValue(n: usize) !usize {
+    if (!validPageTokens(n)) return error.BadQwenPageTest;
+    return n;
 }
 
 pub fn parsePageTest(v: []const u8) !usize {
     const n = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenPageTest;
-    if (!validPageTokens(n)) return error.BadQwenPageTest;
-    return n;
+    return parsePageTestValue(n);
 }
 
 pub fn validPageTokens(n: usize) bool {
@@ -139,7 +144,7 @@ pub const Cache = struct {
     /// A window's log and before in one block (recurrent_workspace.Overlay); runs and adaptive caches have none.
     block: ?DeviceBuffer = null,
     kv: DeviceBuffer,
-    /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
+    /// A drafter's tapped rows (`Engine.taps`), a ring of tapRows(): the row at position p in slot p % tapRows().
     tap: ?DeviceBuffer = null,
     /// The newest verify window's records (qwen35.cuh's LogRow), held until its keep completes.
     log: DeviceBuffer,
@@ -298,7 +303,7 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
+        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = @intCast(e.tapRows()), .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;
@@ -411,6 +416,14 @@ pub const Cache = struct {
 fn freePaged(gpa: std.mem.Allocator, p: *Paged) void {
     p.table.free();
     if (p.own_ids) gpa.free(p.ids);
+}
+
+test "TF_QWEN_KEEP_LATE and TF_QWEN_KV_PAGE_TEST: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_QWEN_KEEP_LATE", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_QWEN_KEEP_LATE", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_QWEN_KEEP_LATE", "on"));
+    try std.testing.expectEqual(@as(?u64, 512), try platform.environment.parse("TF_QWEN_KV_PAGE_TEST", "512"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_QWEN_KV_PAGE_TEST", "0"));
 }
 
 test "KV page dimensions: diagnostic rows fit the signed kernel argument" {

@@ -71,7 +71,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     defer refused.deinit(h.gpa);
     h.lock();
     // a stale device takes no reply (`learn.refuse` ends the queued ones), as in the default loop
-    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h)) {
+    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h) and !h.disk.holding()) {
         rd.vtable.begin_admit(rd.ctx);
         var free = h.info_.lanes - h.admitted.items.len;
         var i: usize = 0;
@@ -295,6 +295,7 @@ fn runFinals(h: *LaneHost) void {
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
+        @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
         var activity = @import("lane_activity.zig").Activity.enter(h.activity);
         defer activity.end();
         ends.takeCancels(h);

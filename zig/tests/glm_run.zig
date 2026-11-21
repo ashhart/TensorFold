@@ -22,6 +22,7 @@ const usage =
     \\GLM_PROMPT_PROFILE=REPS (after the replies: each prompt's first chunk by class, each left out or alone),
     \\GLM_MARGINS=PREFIX (each emitted token's top-two logit margin, f32, to PREFIX.NAME.margins), GLM_MARGINS_VS=PREFIX
     \\(at the first token that differs from GLM_VS's reply, both runs' margins there),
+    \\GLM_STATE_HASH (each reply's caches hashed once its prompt is done: KDA states, conv tails, MLA keys, pooled keys),
     \\GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
     \\each layer's attention input and output and MLP input and output, then the final norm),
     \\GLM_PROMPT=0 (prompts in 16-row decode windows), GLM_CHUNK=N (prompt chunks of N rows), GLM_COPY=N (copy drafts from
@@ -40,11 +41,14 @@ const Collect = struct {
     logits: []u16 = &.{},
     trace_from: []const u8 = &.{}, // the engine's last-row trace, copied into `trace` likewise
     trace: []u8 = &.{},
+    state_of: ?*const glm.engine.Engine = null, // GLM_STATE_HASH: the caches' bytes hashed once the prompt is done
+    state: [4]u64 = @splat(0),
 
     fn prefilled(ctx: *anyopaque) void {
         const c: *Collect = @ptrCast(@alignCast(ctx));
         if (c.logits_from.len > 0) c.logits = c.gpa.dupe(u16, c.logits_from) catch &.{};
         if (c.trace_from.len > 0) c.trace = c.gpa.dupe(u8, c.trace_from) catch &.{};
+        if (c.state_of) |e| c.state = stateHash(e);
     }
     fn tokens(ctx: *anyopaque, t: []const u32) bool {
         const c: *Collect = @ptrCast(@alignCast(ctx));
@@ -57,6 +61,27 @@ const Collect = struct {
         return c.checks > c.cancel_at;
     }
 };
+
+/// The prompt's caches by kind in layer order: KDA states, conv tails, MLA keys, index keys and gates, pooled keys.
+fn stateHash(e: *const glm.engine.Engine) [4]u64 {
+    const c = &e.c;
+    var h: [4]std.hash.Wyhash = .{ .init(1), .init(2), .init(3), .init(4) };
+    const st_bytes = @as(usize, c.kda_heads) * c.kda_dim * c.kda_dim * 4;
+    const cs_bytes = @as(usize, c.conv - 1) * 3 * c.kdaWidth() * 2;
+    for (e.s.kda[0..c.countKind(.kda)]) |k| {
+        h[0].update(k.st[k.cur].addr()[0..st_bytes]);
+        h[1].update(k.cs[k.cur].addr()[0..cs_bytes]);
+    }
+    const n_mla = c.countKind(.mla);
+    for (e.s.mla[0 .. n_mla + @as(usize, if (e.hasMtp()) 1 else 0)], 0..) |m, i| {
+        const rows: usize = if (i < n_mla) e.s.pos else e.s.mtp_pos;
+        h[2].update(m.keys.addr()[0 .. rows * c.kv_lora * 2]);
+        h[2].update(m.ik.addr()[0 .. rows * c.i_dim * 2]);
+        h[2].update(m.ig.addr()[0 .. rows * c.i_dim * 2]);
+        h[3].update(m.pool.addr()[0 .. (rows + c.kpool - 1) / c.kpool * c.i_dim * 2]); // a partial last block too
+    }
+    return .{ h[0].final(), h[1].final(), h[2].final(), h[3].final() };
+}
 
 fn env(name: [:0]const u8, default: []const u8) []const u8 {
     return if (platform.c.getenv(name)) |v| std.mem.span(v) else default;
@@ -192,6 +217,7 @@ pub fn main(init: std.process.Init) !void {
             defer gpa.free(col.logits);
             defer gpa.free(col.trace);
             if (trace_prefix != null and run == 0 and d == depths.items[0]) col.trace_from = e.trace_last.?.addr()[0..trace_bytes];
+            if (platform.c.getenv("GLM_STATE_HASH") != null) col.state_of = e;
             var margins: std.ArrayList(f32) = .empty;
             defer margins.deinit(gpa);
             const want_margins = run == 0 and d == depths.items[0] and (platform.c.getenv("GLM_MARGINS") != null or platform.c.getenv("GLM_MARGINS_VS") != null);
@@ -204,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
             const tps = @as(f64, @floatFromInt(toks.len -| 1)) / @max(r.decode_seconds, 1e-9);
             std.debug.print("{s} depth {d} run {d}: {d} prompt tokens in {d:.2} s ({d:.0} tok/s), {d} tokens at {d:.1} tok/s, {d} rounds, {d}/{d} drafts kept, hash {x:0>16}\n", .{ name, d, run, ids.len, r.prompt_seconds, @as(f64, @floatFromInt(ids.len)) / @max(r.prompt_seconds, 1e-9), toks.len, tps, r.rounds, r.accepted, r.drafted, hash(toks) });
             std.debug.print("  tokens: {any}\n", .{toks[0..@min(toks.len, 48)]});
+            if (col.state_of != null) std.debug.print("  state after the prompt: KDA states {x:0>16}, conv tails {x:0>16}, MLA keys {x:0>16}, pooled keys {x:0>16}\n", .{ col.state[0], col.state[1], col.state[2], col.state[3] });
             if (r.rounds > 0) {
                 const rn: f64 = @floatFromInt(r.rounds);
                 std.debug.print("  a round: {d:.2} ms wall, {d:.2} ms GPU, {d:.2} ms encoding, {d:.2} ms GPU idle between rounds; {d:.2} tokens\n", .{ r.decode_seconds * 1e3 / rn, r.gpu_seconds * 1e3 / rn, r.encode_seconds * 1e3 / rn, r.gap_seconds * 1e3 / @max(rn - 1, 1), @as(f64, @floatFromInt(toks.len -| 1)) / rn });

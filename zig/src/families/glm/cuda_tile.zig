@@ -61,7 +61,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
     }
 }
 
-/// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
+/// Move an uneven fused KDA stack into an eight-aligned buffer (16-byte rows out); pad columns are ignored.
 pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
     for (w.layers) |*l| switch (l.mixer) {
         .kda => |*x| try padOneKdaInput(w, d, s, x),
@@ -77,7 +77,7 @@ pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
 /// One KDA layer's bf16 input rows (the whole stack, or a split stack's rest) moved to an eight-aligned buffer.
 fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
     const np = x.matWidth();
-    if (np == x.width()) return; // already aligned, or the pad is off
+    if (np == x.width()) return; // already aligned
     // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
     const fa: usize = if (x.proj == .split) 3 * x.heads * cuda.kda.dk else 0;
     const src = switch (x.proj) {
@@ -139,9 +139,8 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
     return was -| nb.len;
 }
 
-/// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
+/// Eligible linears tiled in place; a padded KDA input and its views stay row-major bf16 without TF_GLM_KDA_PAD=1.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
-    try padKdaInputs(w, d, s); // pad_to was set at load (Engine.open), so a stack pads only with TF_GLM_KDA_PAD=1
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
     try linears(w, &list);

@@ -172,7 +172,7 @@ pub const Draft = struct {
 
     /// The target's measured window cost, published after the complete reset-cache width sweep.
     pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
-        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (platform.environment.read(bool, "TF_TIMING", false) catch false) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
             d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
             d.n_costs += 1;
@@ -194,11 +194,11 @@ pub const Draft = struct {
     }
 
     /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
-    pub fn streamBytesFor(c: Config, hidden: usize) !usize {
+    pub fn streamBytesFor(c: Config, hidden: usize, tap_rows: usize) !usize {
         var d: Draft = undefined;
         d.c = c;
         d.frame_streams = 1;
-        return c.ringBytes() + engine.tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
+        return c.ringBytes() + tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
     }
 
     fn scratchBytes(d: *Draft) !usize {
@@ -341,7 +341,8 @@ pub const Draft = struct {
         if (rows_) |rs| if (rs.len != n or n > engine.most_window) return error.BadDraftRows;
         if (start < ctx.end) ctx.end = start;
         if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const keep = @min(c.window, engine.tap_rows - engine.most_verify); // the target's ring holds no more behind its newest
+        // the target's ring holds no more behind its newest
+        const keep = @min(c.window, d.e.tapRows() - engine.most_verify);
         if (n > keep) {
             start += n - keep;
             n = keep;
@@ -354,8 +355,8 @@ pub const Draft = struct {
             if (rows_) |rs| {
                 var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
                 for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
             for (d.w.layers, 0..) |l, i| {
@@ -440,7 +441,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .fixed_block = d.c.kind == .dflash2, .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = !(platform.environment.read(bool, "TF_NO_TREES", false) catch false), .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -549,7 +550,7 @@ pub fn factsCopyMatch(d: anytype) i64 {
 
 /// TF_TIMING=1: each call's wall time on stderr.
 pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
-    if (platform.c.getenv("TF_TIMING") == null) return;
+    if (!(platform.environment.read(bool, "TF_TIMING", false) catch false)) return;
     const now = std.Io.Clock.awake.now(io);
     const ns: f64 = @floatFromInt(t0.durationTo(now).toNanoseconds());
     const at: f64 = @floatFromInt(@mod(now.toNanoseconds(), 1_000_000_000_000));
@@ -590,4 +591,10 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
     defer gpa.free(wide);
     const c = try Config.parse(gpa, wide, target);
     try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
+}
+
+test "TF_TIMING: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_TIMING", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_TIMING", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_TIMING", "on"));
 }

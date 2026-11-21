@@ -4,6 +4,9 @@ const std = @import("std");
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
+/// torch.save archives and WAV files: Drama 3's codec and clips, through its `core` shim.
+pub const torch_pth = @import("core/torch_pth.zig");
+pub const wav = @import("core/wav.zig");
 pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
@@ -16,6 +19,8 @@ pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
 /// MOSS-Image's transformer on Metal: a denoiser driven by tf-moss-image, outside the lane engine.
 pub const moss_image = @import("families/moss_image/moss_image.zig");
+/// Idol's denoiser on Metal: driven by tf-idol, outside the lane engine.
+pub const idol = @import("families/idol/idol.zig");
 /// Unlimited-OCR-2 on Metal: document pages to text (its image encoder and decoder).
 pub const uocr = @import("families/uocr/uocr.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
@@ -26,6 +31,7 @@ pub const picture = @import("core/picture/picture.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
+pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
@@ -70,6 +76,8 @@ pub const gemma4 = @import("families/gemma4/gemma4.zig");
 pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
+pub const hy4_flash = @import("families/hy4_flash/serve_metal.zig");
+pub const hy4_contract = @import("families/hy4_flash/contract_exports.zig");
 pub const qwen3_metal = @import("families/qwen3/metal/metal.zig");
 pub const llama = @import("families/llama/llama.zig");
 pub const flint = @import("families/flint/flint.zig");
@@ -83,6 +91,7 @@ test {
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
     _ = @import("families/lfm3/state.zig");
+    _ = @import("families/lfm3/qk_segments_test.zig"); // a shared round's qk in one dispatch (Metal)
     _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/lfm3/image.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
@@ -118,6 +127,7 @@ test {
     _ = @import("families/lfm2_moe/state.zig");
     _ = @import("families/lfm2_moe/dspark_test.zig");
     _ = @import("families/deepseek_v41/metal/glue.zig"); // the launch wrappers' shape refusals, reached by no other test root
+    _ = @import("families/deepseek_v41/metal/vision.zig"); // its config refusals; no other test root reaches it
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");
@@ -152,6 +162,7 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
+pub const recurrent_workspace = @import("core/recurrent_workspace.zig");
 
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");

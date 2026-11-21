@@ -63,6 +63,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
     _ = @import("plain_streams_test.zig");
+    _ = @import("deep_chain_test.zig");
     _ = @import("late_draft_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
@@ -84,6 +85,7 @@ test {
     _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
     _ = @import("depth_probe_test.zig");
+    _ = @import("depth_noise_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");
     _ = @import("depth_floor_test.zig");
@@ -101,5 +103,8 @@ pub const learned_dirs = @import("learned_dirs.zig");
 
 test {
     _ = @import("context_copy_price_test.zig");
+    _ = @import("lone_copy_price_test.zig");
+    _ = @import("lone_copy_sampled_test.zig");
+    _ = @import("copy_price_test.zig");
     _ = @import("sampling_row.zig");
 }

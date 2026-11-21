@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const chat = @import("chat.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
 const tool_lfm2 = @import("tool_lfm2.zig");
@@ -52,9 +53,11 @@ pub const Generation = struct {
     ignore_eos: bool,
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
+    required: bool = false, // tool_choice "required" or a named function: the reply must call a tool
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
+    recipient: ?recipient_reply.Reading = null, // a chat whose reply is messages to recipients (Muse Spark's)
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     kimi: ?@import("kimi_reply.zig").Stream = null,
@@ -72,6 +75,8 @@ pub const Generation = struct {
     lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
     recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
+    deadline_ns: ?i96 = null, // "deadline_s": when the server ends the reply itself
+    deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -151,10 +156,12 @@ pub const Generation = struct {
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
         var thought: []const u8 = "";
-        if (g.thinking) {
-            const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
-            const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
-            const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+        if (g.thinking or g.recipient != null) {
+            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else blk: {
+                const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
+                const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
+                break :blk try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+            };
             thought = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (thought.len > 0) try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), thought);
             answer = split.answer;
@@ -259,6 +266,16 @@ pub const Generation = struct {
                 g.srv.engine.cancel(g.id);
                 g.cancel_sent = true;
             };
+            // a client's cancel came first: the reply ends "cancelled", not at a deadline that passes afterwards
+            if (g.deadline_ns) |d| if (!g.deadline_hit and !g.cancel_sent and g.reason == null and nowNs(g.srv.io) >= d) {
+                m.mutex.lockUncancelable(m.io);
+                const ended_first = m.finished; // still draining a reply the engine already ended: it keeps that end
+                m.mutex.unlock(m.io);
+                if (ended_first) g.deadline_ns = null else {
+                    g.deadline_hit = true;
+                    g.srv.engine.cancel(g.id); // the engine ends the stream: its tokens and usage stay whole
+                }
+            };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
                 const now = nowNs(g.srv.io);
@@ -271,6 +288,7 @@ pub const Generation = struct {
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
+            _ = m.unread.fetchSub(@intCast(tokens.len), .monotonic); // written out: the lane host may run it again
         }
     }
 
@@ -278,13 +296,15 @@ pub const Generation = struct {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
-        const ended: []const u8 = g.reason orelse switch (m.reason) {
+        const natural: []const u8 = g.reason orelse switch (m.reason) {
             .stop => "stop",
             .length => "length",
             .silence => return cx.other("the text engine returned a speech-only finish reason"),
             .cancelled => "cancelled",
             .failed => return cx.other(if (m.message.len > 0) try a.dupe(u8, m.message) else "the reply failed"),
         };
+        // the server ended the reply at its deadline: a late token's EOS, stop string or cap never hides that
+        const ended = if (g.deadline_hit) "deadline" else natural;
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
@@ -303,11 +323,12 @@ pub const Generation = struct {
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
+        const read = g.thinking or g.recipient != null; // the reply's split text is its content
         if (native) |n| {
             const r = reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
-        } else if (g.thinking) {
-            const split = try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
+        } else if (read) {
+            const split = if (g.recipient) |*r| try r.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended) else try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
@@ -317,25 +338,33 @@ pub const Generation = struct {
             reasoning = h.reasoning;
         }
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
-        // the model ended its turn inside a think block that never closed: its reasoning is also its answer (#3687)
-        const recovered = g.recover and reasoning != null and reply_text.pyStrip(content).len == 0 and g.endedOnEos(reason, raw, stopped) and
-            (if (native) |n| n.open_think and n.calls == null else neverClosed(text, g.srv.markers, close_at)) and !try g.callIn(reasoning.?);
-        if (recovered) content = reasoning.?;
+        // Recovery only when reasoning was asked: no tools, no grammar; the unclosed-think EOS text becomes content.
+        const recovered = g.recover and g.thinking and reasons and reasoning != null and
+            reply_text.pyStrip(content).len == 0 and
+            g.endedOnEos(reason, raw, stopped) and
+            !g.required and m.stats.grammar == null and
+            (g.calls == null or !g.calls.?.streamed) and
+            (if (native) |n| n.open_think and n.calls == null else neverClosed(text, g.srv.markers, close_at)) and
+            !try g.callIn(reasoning.?);
+        if (recovered) {
+            log.line("warning: a reply ended inside an unclosed think block on its own end-of-sequence, so its text is returned as the answer too", .{});
+            content = reasoning.?;
+        }
         if (g.sink) |sink| {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
                 try g.emit(sink, try deltaOf(a, "reasoning_content", r[thought.len..]));
-            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
+            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (read) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
             if (rest.len > 0) try g.emit(sink, .{ .string = rest });
             if (g.calls) |*c| {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
-                const final_text = if (g.thinking) content else text;
+                const final_text = if (read) content else text;
                 if (std.mem.eql(u8, reason, "length")) {
                     try c.finishCut(final_text, &out);
-                } else if (close.len > 0 or c.streamed) {
+                } else if (close.len > 0 or c.streamed or g.recipient != null) {
                     try c.finish(final_text, &out);
                 }
                 for (out.items) |d| try g.emit(sink, d);
@@ -394,7 +423,7 @@ pub const Generation = struct {
             .err => {},
         };
         const think_end: ?u32 = if (reasons) g.srv.text.tokenId(g.srv.markers.close) else null;
-        const reply: Reply = .{
+        var reply: Reply = .{
             .content = content,
             .stop_sequence = g.stops.matched(raw),
             .reasoning = reasoning,
@@ -426,6 +455,9 @@ pub const Generation = struct {
         var seed_text: [32]u8 = undefined;
         const seed = if (g.seed) |v| std.fmt.bufPrint(&seed_text, " seed={d}", .{v}) catch unreachable else "";
         const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
+        reply.queued_s = s.queued_seconds;
+        reply.ttft_s = if (g.first_ns != null) ttft_s else null;
+        reply.decode_tps = rate;
         log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
         return reply;
     }

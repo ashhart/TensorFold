@@ -10,6 +10,7 @@ pub const tokenizer = @import("tokenizer");
 pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 
 pub const segments = @import("src/core/segments.zig");
+pub const prompt_tail = @import("src/core/prompt_tail.zig");
 
 pub const checkpoint_host = checkpoint;
 pub const lane_projection = @import("core_lane");
@@ -41,3 +42,4 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("src/core/tree_slots.zig");
+pub const recurrent_workspace = @import("src/core/recurrent_workspace.zig");

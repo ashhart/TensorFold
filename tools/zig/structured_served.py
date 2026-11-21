@@ -1,4 +1,5 @@
 """Structured output on a running tensorfold-native: valid replies, drafted == plain, concurrent == solo, refusals."""
+# Equal means equal token_sha256 (reasoning too); drafted == plain also needs drafts in each mode and none in plain.
 
 from __future__ import annotations
 
@@ -9,6 +10,10 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from conformance import drafted_gate, reply_row, same  # noqa: E402
 
 SCHEMA = {
     "type": "object",
@@ -108,7 +113,8 @@ def main() -> int:
     runs = [(name, prompt, extra, sampled, thinking) for (name, prompt, extra) in CASES + PLAIN
             for sampled in (False, True) for thinking in (False, True)]
     failures = 0
-    alone: dict[tuple, str] = {}
+    alone: dict[tuple, dict] = {}
+    pairs: dict[str, list] = {"greedy": [], "sampled": []}
     print(f"{model}: {len(runs)} runs alone, drafted and plain")
     for name, prompt, extra, sampled, thinking in runs:
         tokens = args.thinking_tokens if thinking else args.tokens
@@ -118,12 +124,17 @@ def main() -> int:
             print(f"FAIL {name} sampled={sampled} thinking={thinking}: HTTP {code}/{code2} {r} {r2}")
             failures += 1
             continue
-        (text, why), (text2, _) = answer(r), answer(r2)
-        ok, same = valid(name, text), text == text2
-        failures += (not ok) + (not same)
-        alone[(name, sampled, thinking)] = text
-        print(f"{'ok  ' if ok and same else 'FAIL'} {name:18} sampled={sampled!s:5} thinking={thinking!s:5} "
-              f"valid={ok!s:5} drafted==plain={same!s:5} {why:6} {text[:60]!r}")
+        text, why = answer(r)
+        drafted, plain = reply_row(code, r), reply_row(code2, r2)
+        ok, equal = valid(name, text), same(plain, drafted) is True
+        failures += (not ok) + (not equal)
+        alone[(name, sampled, thinking)] = drafted
+        pairs["sampled" if sampled else "greedy"].append((plain, drafted))
+        print(f"{'ok  ' if ok and equal else 'FAIL'} {name:18} sampled={sampled!s:5} thinking={thinking!s:5} "
+              f"valid={ok!s:5} drafted==plain={equal!s:5} {why:6} {text[:60]!r}")
+    gate = drafted_gate(pairs)
+    failures += not gate["passed"]
+    print(f"{'ok  ' if gate['passed'] else 'FAIL'} drafted == plain: {gate['line']}")
 
     print(f"all {len(runs)} at once, {args.concurrency} at a time")
     with cf.ThreadPoolExecutor(args.concurrency) as pool:
@@ -137,9 +148,9 @@ def main() -> int:
                 failures += 1
                 print(f"FAIL concurrent {key}: HTTP {code}")
                 continue
-            if answer(r)[0] != alone[key]:
+            if same(alone[key], reply_row(code, r)) is not True:
                 failures += 1
-                print(f"FAIL concurrent {key}: differs from alone: {answer(r)[0][:60]!r}")
+                print(f"FAIL concurrent {key}: differs from alone or unverified: {answer(r)[0][:60]!r}")
             else:
                 together += 1
     print(f"{together} of {len(runs)} concurrent replies equal their run alone")

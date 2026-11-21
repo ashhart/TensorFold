@@ -75,7 +75,7 @@ pub fn full(w: *Writer, doc: profile.Doc, s: Support, version: []const u8, fits:
         try w.writeAll("\n");
         for (s.unavailable) |u| try w.print("  Not here: {s}: {s}\n", .{ u.family, u.reason });
         for (s.notes) |n| try w.print("  Note: {s}\n", .{n});
-        if (s.budget > 0) try w.print("  Memory for model weights: {d:.1} GiB ({s})\n", .{ gibs(s.budget), s.budget_rule }) else try w.print("  Memory for model weights: {s}\n", .{s.budget_rule});
+        if (s.budget_known) try w.print("  Memory for model weights: {d:.1} GiB ({s})\n", .{ gibs(s.budget), s.budget_rule }) else try w.print("  Memory for model weights: {s}\n", .{s.budget_rule});
     } else try w.print("Not supported by tensorfold-native {s}: {s}\n", .{ version, s.reason });
     try w.writeAll(if (fits.len > 0) "Models on disk:\n" else "Models on disk: none in the Hugging Face cache that this build serves\n");
     for (fits) |f| {

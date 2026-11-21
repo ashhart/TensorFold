@@ -19,7 +19,10 @@ pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_ro
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     var f = try opening(b, s, slot);
     defer closing(b, s);
-    while (!try chunk(b, s, &f, 0)) {}
+    while (!(chunk(b, s, &f, 0) catch |err| {
+        if (err == error.Cancelled and slot == 0) leave(b, s);
+        return err;
+    })) {}
 }
 
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
@@ -82,7 +85,10 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     b.runner.images = f.images;
     defer b.runner.images = null;
     b.runner.settleSlot(slot); // a mark's kept state read the slot: its blit lands before this chunk writes it
-    if (s.isCancelled()) return error.Cancelled;
+    if (s.isCancelled()) {
+        s.keepInterruptedPrefill(@intCast(f.at));
+        return error.Cancelled;
+    }
     if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
         if (f.at > f.from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(f.at));
         if (slot == 0) leave(b, s); // and slot 0 stands at it for the next prompt
@@ -138,11 +144,9 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
     if (end == f.rewind) saveRewind(b, f.rewind);
-    if (s.isCancelled()) return error.Cancelled;
     if (mark_bank) |*m| {
         try m.complete(slot, @intCast(end));
         if (s.reuse.hook) |k| for (m.position.rows) |row| {
-            if (s.isCancelled()) return error.Cancelled;
             if (row != 0) k.at(k.ptr, s, m.position.start + row);
         };
     }
@@ -150,6 +154,10 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(end));
     } else if (end == f.checkpoint) {
         if (b.checkpoint_hook) |k| k.at(k.ptr, s, @intCast(end));
+    }
+    if (s.isCancelled()) {
+        s.keepInterruptedPrefill(@intCast(end));
+        return error.Cancelled;
     }
     if (end == ids.len) b.runner.settleSlot(slot); // the stream's first round writes the slot next
     return end == ids.len;
@@ -159,9 +167,16 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
 pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
     const slot = b.slotOf(s) orelse (free(b) orelse return error.NoFreeSlot);
     try ready(b, slot, s);
+    if (b.owners[slot] != s) try b.runner.promise(slot, promiseRows(b, s));
     b.dropTreeOf(slot);
     b.owners[slot] = s;
     return slot;
+}
+
+/// Rows a paged slot promises `s` as it opens: its prompt and one widest pass; its reply's are promised as they come.
+fn promiseRows(b: *const Metal, s: *const lanes.Stream) u32 {
+    const rows = @as(u64, s.prompt().len) + b.runner.model.frame.capacity;
+    return @intCast(@min(rows, b.runner.capacity));
 }
 
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
@@ -174,7 +189,7 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     defer pool.pop();
     if (!b.fills.contains(s)) {
         const slot = try bind(b, s);
-        errdefer b.owners[slot] = null;
+        errdefer drop(b, slot);
         const f = try opening(b, s, slot);
         errdefer closing(b, s);
         try b.fills.put(b.gpa, s, f);
@@ -182,8 +197,9 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const f = b.fills.getPtr(s).?;
     const slot = f.slot;
     const done = chunk(b, s, f, 0) catch |err| {
+        if (err == error.Cancelled and slot == 0) leave(b, s);
         endFill(b, s);
-        b.owners[slot] = null;
+        drop(b, slot);
         return err;
     };
     if (done) endFill(b, s);
@@ -194,6 +210,12 @@ pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
 pub fn cancelPrefill(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
     const b: *Metal = @ptrCast(@alignCast(ptr));
     if (b.fills.get(s)) |f| s.keepInterruptedPrefill(@intCast(f.at));
+}
+
+/// A pass that failed or went back to the queue frees its slot, pages and promise (a standing slot 0's rows stay).
+fn drop(b: *Metal, slot: u32) void {
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0);
+    b.owners[slot] = null;
 }
 
 /// A stepped pass is over, or its stream left mid-pass.
@@ -265,11 +287,23 @@ fn dropRewind(b: *Metal) u32 {
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
-fn leave(b: *Metal, s: *const lanes.Stream) void {
-    const at = b.runner.offsets[0];
+fn leave(b: *Metal, s: *lanes.Stream) void {
+    var at = b.runner.offsets[0];
     const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
     if (!slotResume(b) or !plain(s) or !standsAt(b, at)) return b.standing.deinit(b.gpa);
-    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended }, s.context.items, s.decode_spans);
+    var landed = s.fill_at.load(.monotonic);
+    if (s.reason == .cancelled or s.isCancelled()) {
+        const point = resume_rules.cancelPoint(at, landed, b.standing.rewind_at);
+        if (point > 0 and point < at) {
+            const buf = b.rewind orelse return b.standing.deinit(b.gpa);
+            if (b.draft) |d| d.model.reset() catch return b.standing.deinit(b.gpa);
+            q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), point, buf) catch return b.standing.deinit(b.gpa);
+            at = point;
+            landed = point;
+        }
+        s.keepInterruptedPrefill(at);
+    }
+    b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = landed, .ended = ended }, s.context.items, s.decode_spans);
 }
 
 /// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
@@ -399,6 +433,7 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.dropTreeOf(slot);
     if (b.release_hook) |hook| if (!b.runner.failed and s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
     if (slot == 0) leave(b, s);
+    b.runner.release(slot, slot == 0 and b.standing.tokens.len > 0); // a standing slot 0 keeps its rows for a resume
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
     if (slot == 0) b.promote_due = b.draft != null; // the next backend call moves a stream in, after this reply is out
@@ -433,6 +468,8 @@ pub fn promote(b: *Metal) void {
         };
         b.owners[0] = s;
         b.owners[k] = null;
+        b.runner.release(from, false); // slot 0 holds its rows now, and the stream's promise with them
+        b.runner.promise(0, promiseRows(b, s)) catch {}; // the pages slot `from` gave back hold it
         b.runner.rope[0] = b.runner.rope[k];
         b.runner.rope[k] = .{};
         clearContext(b, from) catch {};
@@ -471,6 +508,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     b.owners[0] = s;
     var handed = false;
     defer if (!handed) unbind(b, s);
+    try b.runner.promise(0, promiseRows(b, s));
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     try d.generation.settle();

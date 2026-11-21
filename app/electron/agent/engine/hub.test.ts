@@ -83,6 +83,17 @@ async function main() {
   assert.equal(good.family, 'Qwen3.5-2B or Qwen3.8-27B')
   assert.equal(good.fileCount, 2)
 
+  const sparkRepo = 'Example/Spark-BF16'
+  const sparkRoutes = repoRoutes(sparkRepo, { modelType: 'spark2_5', quant: null })
+  sparkRoutes[`/${sparkRepo}/resolve/${SHA}/config.json`] = { body: { model_type: 'spark2_5', dtype: 'bfloat16' } }
+  const spark = mockHub(sparkRoutes)
+  const metal = await preflightRepo(sparkRepo, null, context(spark.fetchImpl, { families: { spark2_5: ['bf16', 'mlx-q4g64'] } }))
+  assert.equal(metal.format, 'bf16')
+  assert.equal(metal.verdict, 'ok')
+  const cuda = await preflightRepo(sparkRepo, null, context(spark.fetchImpl, { families: { spark2_5: ['mlx-q4g64'] } }))
+  assert.equal(cuda.format, 'bf16')
+  assert.equal(cuda.verdict, 'format')
+
   const declared = parseCapabilities(JSON.stringify({ schema: 1, engine: 'zig', version: '1.1.0', backends: ['metal'], families: { lfm2_moe: ['mlx-q6g64'], gemma4: ['mlx-q3g64'], gemma4_unified: ['mlx-q8g64'], step5_vl: ['mlx-q2g128'], fish_omni: ['fp8-block128'], glm_moe_dsa: ['exlr8'] }, serve: { flags: {} }, env: [] }))
   for (const [modelType, bits, group] of [['lfm2_moe', 6, 64], ['gemma4', 3, 64], ['gemma4_unified', 8, 64], ['step5_vl', 2, 128]] as const) {
     const repo = `Example/Declared-${modelType}`, hub = mockHub(repoRoutes(repo, { modelType, quant: { bits, group_size: group } }))
@@ -115,9 +126,13 @@ async function main() {
     assert.ok(blocked.calls.filter((url) => url.endsWith('/config.json')).length <= 6, 'same-origin redirect loops are bounded')
   }
 
-  // Installed already.
+  // Installed already, with or without an app-managed selection.
   const installed = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']) }))
   assert.equal(installed.verdict, 'installed')
+  const selected = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => SHA }))
+  assert.equal(selected.verdict, 'installed')
+  const external = await preflightRepo('mlx-community/Qwen3.5-2B-MLX-4bit', null, context(ok.fetchImpl, { installed: new Set(['mlx-community/Qwen3.5-2B-MLX-4bit']), installedRevision: async () => null }))
+  assert.equal(external.verdict, 'installed')
 
   // Unsupported family, and a drafter on its own.
   const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4' }))

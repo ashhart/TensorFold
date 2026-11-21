@@ -105,6 +105,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--api-key-file FILE` | Read keys from a restricted-permission file; a key can be limited to [some routes](api.md#key-scopes). |
 | `--metrics-open` | Allow `/metrics`, `/v1/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
+| `--log-json` | Write the access, `ended` and `refused` lines as one JSON object each, with `event` set to `access`, `ended` or `refused`. `access` is written when the response starts, with the HTTP status and the request id once assigned. `ended` is written only when the client left or the reply failed, with `prompt` and `tokens`. `refused` is written for an error reply, before its `access` line. Long fields are cut so each line still parses. Off keeps the text lines. |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](api.md#admission). |
 | `--max-connections N`, `--max-connections-per-address N`, `--trusted-proxy ADDRESS` | Open connections at most (default 128); from three quarters full, one address's share (default a quarter, 0 off); addresses never counted for that share, as loopback is not, such as a reverse proxy or Docker's bridge gateway. See [admission](api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |
@@ -122,6 +123,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--thinking-reserve N` | With thinking on, let reasoning use up to N tokens beyond a request's `max_tokens`, which then limits the answer (lane engines). |
 | `--loop-guard` | Close reasoning that repeats itself verbatim (a short cycle, or a long passage) where the engine supports it. |
+| `--tool-think-close` | With thinking on, a required or named tool call closes its think block at `max_tokens - max(256, max_tokens / 4)` (or a smaller request `thinking_budget`), so the call fits instead of ending as `length`. Off by default ([API](api.md)). |
 | `--loop-guard-stop` | As `--loop-guard`, but end the reply where the guard fires: the reasoning so far, no answer or tool calls, `finish_reason` `content_filter` and a `reasoning_loop` error ([API](api.md)). |
 | `--no-drafts` | Produce the plain reference through the same engine. |
 | `--drafter DRAFTER` | An external drafter, as a directory or a repo id in the Hugging Face cache, for models that take one (Gemma 4 31B's recipe names its drafter); `none` serves without one. Without the flag, Qwen3.8-27B pairs DFlash2 when the cache holds it (never downloaded, not on HIP): one line names it, and serve runs without it if it does not open. |
@@ -183,6 +185,12 @@ Sampling defaults come from the checkpoint's `generation_config.json`, then serv
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 `TF_Q27_PROFILE=N` makes a native Metal Qwen3.8-27B server log a per-class GPU-time breakdown every N decode rounds (`1` means 64) and add `gpu_seconds` to its replies; it is diagnostic only, and a profiled round runs slower.
+
+## Reading the request journal
+
+With `TENSORFOLD_REQUEST_JOURNAL=PATH` set on `serve`, `tensorfold log list`, `tensorfold log show ID` and
+`tensorfold log follow` read what each request asked, what it got back, its token counts and its timings, while the
+server runs; see [the API's request journal section](api.md#request-journal-and-replay).
 
 ## Other ways to run
 

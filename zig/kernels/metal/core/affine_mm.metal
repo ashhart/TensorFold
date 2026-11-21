@@ -442,12 +442,20 @@ TF_GATHER(32)
 TF_GATHER(64)
 
 // The gathers with each sorted row's output put back at row DST[row] (e.g. the (row, slot) pairs' own order).
+#ifdef TF_AM_MAPPED_EXPERTS
+#define TF_AM_MAP_ARG const device int32_t* EA [[buffer(13)]],
+#define TF_AM_EXPERT(e) EA[e]
+#else
+#define TF_AM_MAP_ARG
+#define TF_AM_EXPERT(e) (e)
+#endif
+
 #define TF_GATHER_SCATTER(BM)                                                                                           \
   [[kernel]] void tf_affine_gather_scatter_##BM(                                                                        \
       const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],                                    \
       const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],                                      \
       const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]], device TF_OUT_T* Y [[buffer(6)]],       \
-      const device int32_t* OFFS [[buffer(7)]], const device int32_t* DST [[buffer(8)]],                              \
+      const device int32_t* OFFS [[buffer(7)]], const device int32_t* DST [[buffer(8)]], TF_AM_MAP_ARG                \
       uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                            \
       uint3 tg [[threadgroup_position_in_grid]]) {                                                                     \
     threadgroup bfloat tile[64 * PAD];                                                                                 \
@@ -455,7 +463,7 @@ TF_GATHER(64)
     int expert, row, rows;                                                                                             \
     if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
     const int col = int(tg.x) * 64;                                                                                    \
-    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
+    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(TF_AM_EXPERT(expert)) * a.n + col, W, S, B, Y, \
                  tile, sb, sg, lane, DST);                                                                             \
   }
 TF_GATHER_SCATTER(32)
@@ -481,7 +489,11 @@ inline bfloat am_swiglu(float g, float u, float limit) {
   const float lim = float(bfloat(limit));
   const bfloat gt = bfloat(metal::min(float(bfloat(g)), lim));
   const bfloat up = bfloat(metal::min(metal::max(float(bfloat(u)), -lim), lim));
+#ifdef TF_GLU_ROUND_SILU
+  const bfloat sl = bfloat(precise::divide(float(gt), 1.0f + precise::exp(-float(gt))));
+#else
   const bfloat sl = gt * am_sigmoid(gt);
+#endif
   return sl * up;
 }
 #endif
@@ -508,7 +520,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
       const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]], device bfloat* Y [[buffer(6)]],          \
       const device int32_t* OFFS [[buffer(7)]], const device int32_t* ORDER [[buffer(8)]],                            \
       const device uint32_t* WU [[buffer(9)]], const device bfloat* SU [[buffer(10)]],                                 \
-      const device bfloat* BU [[buffer(11)]], constant float2& glu [[buffer(12)]],                                     \
+      const device bfloat* BU [[buffer(11)]], constant float2& glu [[buffer(12)]], TF_AM_MAP_ARG                      \
       uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                            \
       uint3 tg [[threadgroup_position_in_grid]]) {                                                                     \
     constexpr int SM = BM / 2;                                                                                         \
@@ -519,7 +531,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
     if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
     const int c0 = int(tg.x) * 32, t = int(sg) * 32 + int(lane), tr = t / 2;                                         \
     const bool up = ((tr >> 4) & 1) != 0;                                                                             \
-    const long wrow = long(expert) * a.n + c0 + (tr >> 5) * 16 + (tr & 15);                                           \
+    const long wrow = long(TF_AM_EXPERT(expert)) * a.n + c0 + (tr >> 5) * 16 + (tr & 15);                             \
     const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);                           \
     const short2 home = frag_home(ushort(lane));                                                                       \
     const AmRows<TM> starts = am_rows<TM>(X, a.k, XS, a.k / TF_GROUP, row, rows, tm, home, ORDER, int(glu.x));       \

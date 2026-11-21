@@ -103,7 +103,9 @@ fn refused(slide: bool, kv_pages: ?[:0]const u8, share: ?[:0]const u8) !void {
     if (kv_pages) |v| _ = env.setenv("TF_QWEN_KV_PAGES", v, 1);
     if (share) |v| _ = env.setenv("TF_QWEN_KV_SHARE", v, 1);
     const o: native.Options = .{ .context = capacity, .drafts = false, .slide = slide };
-    _ = try native.open(t.allocator, t.io, undefined, "/nonexistent", null, o);
+    var d = @import("cuda_sm110_open_test.zig").driver(121);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
+    _ = try native.open(t.allocator, t.io, &ctx, "/nonexistent", null, o);
 }
 
 /// A set switch's refusal needs no model: it stops before the weights load, as the other switch checks do.

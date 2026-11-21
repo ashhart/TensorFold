@@ -19,7 +19,10 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
     const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
-    b.step("compile-h3-host", "Compile the actual H3 tool without compiling or executing shaders").dependOn(&tool.step);
+    const picture_tool = b.addExecutable(.{ .name = "tf-h3-image-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core } } }) });
+    const compile = b.step("compile-h3-host", "Compile the actual H3 tools without compiling or executing shaders");
+    compile.dependOn(&tool.step);
+    compile.dependOn(&picture_tool.step);
     const modulation = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/modulation.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const rounding = b.addRunArtifact(b.addTest(.{ .root_module = modulation, .filters = &.{"modulation bf16:"} }));
     b.step("test-h3-modulation-bf16", "H3's host bf16 rounding against the copy it replaced, no GPU").dependOn(&rounding.step);
@@ -89,4 +92,18 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 /// The core module for the CUDA side's checkpoint (h3/checkpoint.zig).
 pub fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+}
+
+/// H3's clip and picture tools share the maintained Metal family and core checkpoint reader.
+pub fn metalTools(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module) void {
+    const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "h3_kernels", .module = kernels }, .{ .name = "kernel_sources", .module = sources } } });
+    for ([_]struct { name: []const u8, file: []const u8, about: []const u8 }{
+        .{ .name = "tf-h3-dit", .file = "h3_dit.zig", .about = "FastH3's Metal transformer against a case file: velocities, every step, timings" },
+        .{ .name = "tf-h3-image", .file = "h3_image.zig", .about = "MiniMax-H3-Image's Metal transformer on a picture case: six distilled steps, teacher-forced and gated" },
+    }) |tool| {
+        const exe = b.addExecutable(.{ .name = tool.name, .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/{s}", .{tool.file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "h3", .module = model }, .{ .name = "core", .module = core } } }) });
+        b.step(tool.name, tool.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
 }

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const engine = @import("cuda_engine.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 const prompt_cuts = @import("cuda_prompt_cuts.zig");
@@ -23,7 +24,7 @@ pub const Header = extern struct {
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
     flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
+    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -93,7 +94,7 @@ pub const Link = struct {
             a.add(l.buf.ptr);
             a.add(@as(u32, @intCast(16 + ids.len)));
             a.add(w);
-            try cuda.launch.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
+            try cuda_pdl.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
             try l.post(first_bytes);
             if (ids.len > inline_ids) try l.post(64 + ids.len * 4);
             return;
@@ -154,7 +155,7 @@ pub const Leader = struct {
         return @intFromBool(x.e.prompt_logprobs != null);
     }
 
-    /// No stream is left: the other ranks sleep on their lines until the next step instead of spinning in NCCL.
+    /// No stream is left, or rank 0's tower is about to run: the other ranks sleep on their lines until the next step.
     pub fn idle(x: Leader) !void {
         if (x.link.asleep or !cuda.tp_watch.open()) return;
         try x.send(.{ .kind = @backingInt(Kind.idle) }, &.{});
@@ -214,6 +215,13 @@ pub const Leader = struct {
     /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
     pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
         try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
+    }
+
+    /// Rank 0's tower encodes the bound slot's images past `from` with the other ranks asleep (#3614), then their rows.
+    pub fn encode(x: Leader, v: *images_mod.Images, list: []const @import("lanes").stream.Image, from: usize) !void {
+        try x.idle(); // a net plugin may time out an NCCL wait as long as the pass: they wait on their lines instead
+        try v.begin(x.e.slot, list, from); // a refusal leaves every rank as it was, asleep until rank 0's next step
+        try x.images(v);
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
@@ -315,10 +323,10 @@ pub const Leader = struct {
         try x.e.draftBlock(reqs);
     }
 
-    /// Every rank's decode windows on the factored expert form or not (the same bits; load timing picks it).
-    pub fn expertForm(x: Leader, fact: bool) !void {
-        try x.send(.{ .kind = @backingInt(Kind.form), .a = @intFromBool(fact) }, &.{});
-        x.e.m.experts.fact = fact;
+    /// Every rank's expert forms, bit r - 1 for a window of r rows (the same bits; load timing picks them by width).
+    pub fn expertForm(x: Leader, forms: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.form), .a = forms }, &.{});
+        x.e.m.experts.fact = forms;
     }
 
     /// The other ranks leave their loops.
@@ -412,7 +420,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try e.prefillMany(decoded, &firsts);
             },
             .keep => try e.keep(@intCast(h.a)),
-            .form => e.m.experts.fact = h.a != 0,
+            .form => e.m.experts.fact = h.a,
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);

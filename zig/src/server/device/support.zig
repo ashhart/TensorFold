@@ -37,8 +37,10 @@ pub const Support = struct {
     formats: []const []const u8 = &.{},
     unavailable: []const Unavailable = &.{},
     notes: []const []const u8 = &.{},
-    /// Bytes for model weights under the backend's admission rule; 0 when unknown.
+    /// Bytes for model weights under the backend's admission rule.
     budget: u64 = 0,
+    /// Whether the memory inputs needed for the budget were available.
+    budget_known: bool = false,
     budget_rule: []const u8 = "",
 };
 
@@ -93,6 +95,7 @@ fn metal(a: Allocator, m: Machine, o: Offer) !Support {
         .unavailable = out.items,
         .notes = notes.items,
         .budget = limit -| o.margin,
+        .budget_known = m.ram > 0,
         .budget_rule = try std.fmt.allocPrint(a, "the Metal load limit ({d}% of RAM, at most the GPU working set) less a {d} GiB reserve", .{ o.metal_share, o.margin >> 30 }),
     };
 }
@@ -148,6 +151,7 @@ fn cuda(a: Allocator, m: Machine, o: Offer) !Support {
         .unavailable = out.items,
         .notes = notes.items,
         .budget = memory -| reserve,
+        .budget_known = memory > 0,
         .budget_rule = if (g.unified) "system RAM less the CUDA reserve (a tenth, at least 4 GiB); startup grants what is free then" else "device memory less the CUDA reserve (a 32nd, at least 1 GiB)",
     };
 }
@@ -175,6 +179,7 @@ fn vendor(a: Allocator, m: Machine, o: Offer, v: machine.Vendor, name: []const u
             .formats = try formats(a, o.families, &.{}),
             .notes = notes.items,
             .budget = g.memory -| o.margin,
+            .budget_known = g.memory > 0,
             .budget_rule = if (g.memory > 0) "device memory less a 2 GiB reserve" else "unknown: the OS lists no device memory for it",
         };
     }
@@ -237,7 +242,7 @@ pub fn fit(s: Support, families: []const Family, model_type: []const u8, bytes: 
     if (!has(families, model_type)) return .not_served;
     if (s.backend == null) return .not_here;
     for (s.unavailable) |u| if (eql(u.family, model_type)) return .not_here;
-    if (s.budget > 0 and bytes > s.budget) return .too_large;
+    if (s.budget_known and bytes > s.budget) return .too_large;
     return .fits;
 }
 

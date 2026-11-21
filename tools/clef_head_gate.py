@@ -6,7 +6,8 @@
 #   clef_head_gate.py native <tf-clef-test|tf-cuda-test> <model> <cases> <out> [--piece N|whole] [--backend hip|cuda]
 #   clef_head_gate.py compare <cases> <native> <bf16> <fp64> [--report FILE] [--rule strict|margin]
 # The strict rule: per question type, native mean and worst error against FP64 no larger than the reference BF16
-# head's. The margin rule keeps the worst and lets the mean sit up to 10% above the reference's.
+# head's. The margin rule keeps the worst and lets the mean sit up to 10% above the reference's. A question type with
+# no option logits fails compare by name: an empty table would pass.
 # The records are clef_backbone_rows.py's; their schema text comes again from its seeded generator, so each field's
 # instruction and each option's description give the spans, as token ranges of the record by character offsets.
 import argparse, importlib.util, json, math, os, subprocess, sys
@@ -206,6 +207,10 @@ def cmd_compare(a):
               f"{row['bf16_mean']:.3e} | {row['bf16_worst']:.3e} | {'yes' if row['strict'] else 'NO'} | "
               f"{'yes' if row['margin'] else 'NO'} |")
     total = sum(len(p["native"]) for p in pooled.values())
+    unexercised = [names_of[t] for t, p in pooled.items() if not p["native"]]
+    if unexercised:
+        ok = False
+        print(f"unexercised: no option logits for {', '.join(unexercised)} (the cases' fields parsed to no options)")
     print(f"paired: {total} logits, {same} identical to the reference BF16 head's; of the rest native is nearer FP64 in "
           f"{nearer}, farther in {farther}, as near in {total - same - nearer - farther}")
     if a.report:

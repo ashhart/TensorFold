@@ -22,6 +22,13 @@ pub fn typeName(v: Value) []const u8 {
     };
 }
 
+/// Python's ``bool(fields.get(key))`` on the sampling fields.
+pub fn flag(f: Value, key: []const u8) ?bool {
+    const v = f.get(key) orelse return null;
+    if (v == .null) return null;
+    return v.truthy();
+}
+
 /// ``fields.get`` on a body that is not an object fails as Python's AttributeError does.
 pub fn requireObject(cx: *Cx, v: Value) errors.Refused!void {
     if (v != .object) return cx.fail(.other, "'{s}' object has no attribute 'get'", .{typeName(v)});

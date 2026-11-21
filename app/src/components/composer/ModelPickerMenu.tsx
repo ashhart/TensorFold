@@ -13,7 +13,7 @@ import type { Provider, Project, TokenUsageSnapshot } from '../../lib/types'
 import type { RecentModel } from '../../lib/recent-models'
 import { accountLabel, modelDisplayName } from '../../lib/provider-accounts'
 import { modelUsageLabel } from '../../lib/provider-usage'
-import { providerIconName } from '../../lib/provider-model-metadata'
+import { effortDisplayLabel, providerEffortOptions, providerIconName } from '../../lib/provider-model-metadata'
 import type { ProviderUsageSummary } from '../../lib/provider-usage'
 import type { ProviderStatusView } from '../../lib/provider-status'
 import { UsagePill } from './UsagePill'
@@ -25,6 +25,7 @@ import { useEngine } from '../../lib/engine'
 import { statsModelLabel } from '../../lib/turn-stats-line'
 import { filterModelChoices, modelChoiceKey, modelPickerChoices, recentModelChoices, type ModelPickerChoice } from '../../lib/model-picker'
 import { favoriteModelChoices, orderFavoritesFirst, useFavoriteModels } from '../../lib/favorite-models'
+import { useBotComposerSettings } from '../bots/BotComposerSettings'
 
 export interface ModelPickerMenuProps {
   provider: Provider
@@ -161,7 +162,11 @@ function ModelPickerBody({ close, ...props }: ModelPickerMenuProps & { close: ()
 
 export function ModelPickerMenu(props: ModelPickerMenuProps) {
   const tx = useAuthoredText()
-  const { provider, model, providerAccountId, detail, disabled } = props
+  const { provider, model, providerAccountId, disabled } = props
+  const bot = useBotComposerSettings()
+  const detail = bot?.reasoningEffort === undefined ? props.detail
+    : providerEffortOptions(provider, model).some(option => option.value === bot.reasoningEffort)
+      ? effortDisplayLabel(provider, model, bot.reasoningEffort) : undefined
   const { snapshot } = useEngine()
   const { snapshot: learning } = useLearning()
   const trigger = useRef<HTMLButtonElement>(null)

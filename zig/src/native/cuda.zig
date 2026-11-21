@@ -8,6 +8,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const family_memory = @import("cuda_family_memory.zig");
 const pool = family_memory.pool;
+const page_drop = @import("cuda_page_drop.zig");
 const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
@@ -16,6 +17,7 @@ const Allocator = std.mem.Allocator;
 pub const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
+pub const requestStepFor = snaps.requestStepFor;
 const prompt_pages = @import("cuda_prompt_pages.zig");
 const slide_adapter = @import("slide_adapter.zig");
 const cuda_disk = @import("cuda_disk.zig");
@@ -179,7 +181,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
-fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
+    const o = family_memory.familyOpen(F, asked);
+    if (try refusals.place(F, a, o)) |why| { // a rank inside its world, a world the family serves: before admission
+        problem.* = why;
+        return null;
+    }
     if (refusals.family(F, o)) |why| {
         problem.* = why;
         return null;
@@ -201,8 +208,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     if (raised.window != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, raised.switch_name)});
-    if (o.slide) {
-        // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
+    if (o.slide) { // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
@@ -262,6 +268,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         },
     };
+    if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir); // GB10: drop cached shards (#1857)
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -375,8 +382,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
-    h.kv_plan = counted.ledger;
-    // a ledger's plan placed the cache already, beside --parallel full-window requests
+    h.kv_plan = counted.ledger; // a ledger's plan placed the cache already, beside --parallel full-window requests
     const kept = if (host_cache) kv_pages.kept(F, loaded, paged, o, room, held, final_host_budget, true) else if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, 0, false);
     if (h.kv_plan) |*lp| lp.kept = kept;
     const cache = kept.copied;
@@ -463,6 +469,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
         .decode_share = o.decode_share,
+        .default_decode_share = 0.25, // #3397: shares long fills only (past Share.default_arm_rows); short prompts keep main's cells
         .prompt_cache_capacity = cache_capacity,
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
         .logprobs = served.backend.vtable.first_row != null,
@@ -495,6 +502,7 @@ test {
     _ = windows;
     _ = @import("cuda_startup_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
+    _ = page_drop;
     _ = refusals;
     _ = lane_backend;
     _ = snaps;

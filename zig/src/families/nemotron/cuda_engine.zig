@@ -123,6 +123,7 @@ pub const Engine = struct {
     benchmark_group: ?[]const u8 = null,
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
+    audio: ?*@import("cuda_audio.zig").Audio = null, // a Transcribe checkpoint's audio rows for the prompt pass
     snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
     load_pending: ?*weights.PendingLoad = null,
     load_has_weights: bool = false,
@@ -135,7 +136,7 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer if (!keep_owner) gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
-        e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
+        e.trace = (@import("sys").environment.Process{}).get("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
         var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);
@@ -162,6 +163,7 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        if (e.c.salm) try e.k.loadBf16Experts(ctx);
         if (e.c.latent > 0) try e.k.loadLatent();
         if (e.c.ck) try e.k.loadCk(ctx);
         // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
@@ -259,38 +261,7 @@ pub const Engine = struct {
         head: struct { h: *Head, rows: usize, j: usize, vocab: @import("cuda_mtp.zig").Vocab },
     };
 
-    /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
-    pub fn record(e: *Engine, body: Body) !cuda.graph.Exec {
-        const t0 = std.Io.Clock.awake.now(e.io);
-        try cuda.graph.beginCapture(e.stream, .thread_local);
-        e.recordBody(body) catch |err| {
-            if (cuda.graph.endCapture(e.stream)) |g| {
-                var x = g;
-                x.deinit();
-            } else |_| {}
-            return err;
-        };
-        var g = try cuda.graph.endCapture(e.stream);
-        defer g.deinit();
-        const exec = try g.instantiate();
-        try exec.upload(e.stream);
-        try e.stream.synchronize();
-        e.stats.captures += 1;
-        e.stats.capture_ns += @intCast(std.Io.Clock.awake.now(e.io).toNanoseconds() - t0.toNanoseconds());
-        return exec;
-    }
-
-    fn recordBody(e: *Engine, body: Body) !void {
-        switch (body) {
-            .window => |w| {
-                const f = e.forward(null);
-                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot, .untaught = f.untaught }});
-                if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
-                try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
-            },
-            .head => |x| try x.h.level(x.rows, x.j, x.vocab),
-        }
-    }
+    pub const record = seq_graphs.record;
 
     /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
     pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
@@ -336,6 +307,7 @@ pub const Engine = struct {
         e.side.join.deinit();
         if (e.tp) |*g| g.close();
         if (e.vision) |v| v.deinit();
+        if (e.audio) |a| a.deinit();
         e.stream.deinit();
         if (e.benchmark_group) |b| e.gpa.free(b);
         e.gpa.destroy(e);
@@ -421,6 +393,7 @@ pub const Engine = struct {
         f.untaught = e.bound.untaught;
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
+        f.audio = e.audio;
         if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
     }

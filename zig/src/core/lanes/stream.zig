@@ -25,7 +25,6 @@ pub const Reason = enum {
 };
 
 pub const Mode = enum { pipe, drain, verify, exit };
-
 pub const loop_max_period: usize = 8;
 pub const loop_min_run: usize = 256;
 pub const loop_warm_in: usize = 64;
@@ -92,6 +91,7 @@ pub const Reuse = struct {
 pub const MarkHook = struct {
     ptr: *anyopaque,
     at: *const fn (ptr: *anyopaque, s: *Stream, at: u32) void,
+    interrupted: ?*const fn (ptr: *anyopaque, s: *Stream, at: u32) void = null,
 };
 
 /// Drafts the backend holds for the stream's next round; a tree keeps its tokens and parents on the host.
@@ -171,6 +171,7 @@ pub const Stream = struct {
     think_open: bool,
     answer_max: u32,
     answer_from: ?usize = null, // emitted() index after the first `think_end`: the answer starts there
+    think_seen: bool = false, // the think block's length is in srpt's estimate of how long reasoning runs
     loop_guard: bool,
     loop_stop: bool = false,
     loop_period: ?u32 = null,
@@ -381,7 +382,7 @@ pub const Stream = struct {
     /// Keep a completed, resumable prompt prefix before cancellation releases the backend's state.
     pub fn keepInterruptedPrefill(s: *Stream, at: u32) void {
         if (at <= s.cached or at >= s.prompt_len) return;
-        if (s.reuse.hook) |hook| hook.at(hook.ptr, s, at);
+        if (s.reuse.hook) |hook| (hook.interrupted orelse hook.at)(hook.ptr, s, at);
     }
 
     /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.

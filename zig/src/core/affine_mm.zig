@@ -5,11 +5,18 @@ const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 const bf16_round = @import("bf16_round");
 
-/// The gather GLU's SwiGLU: GLM's clipped bf16 form, or mlx-lm's compiled silu(g) * u on bf16 rows (LFM2).
-pub const Glu = enum { clipped, plain };
+/// SwiGLU variants for clipped BF16 intermediates, directly rounded SiLU, and compiled MLX SiLU.
+pub const Glu = enum { clipped, clipped_silu, plain };
 
 /// The weights' bits (2-6 or 8) and group (32, 64 or 128), the output's type and the GLU epilogue.
-pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped };
+pub const Format = struct {
+    bits: u8 = 4,
+    group: u16 = 64,
+    out_f32: bool = false,
+    glu: Glu = .clipped,
+    /// Scatter and GLU gathers read this batch's active-to-global expert map.
+    mapped_experts: bool = false,
+};
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
@@ -17,10 +24,15 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
     const body = try frags.source(device, a, ks.core_affine_mm);
     defer a.free(body);
-    const glu = if (f.glu == .plain) "#define TF_GLU_PLAIN 1\n" else "";
+    const glu = switch (f.glu) {
+        .plain => "#define TF_GLU_PLAIN 1\n",
+        .clipped_silu => "#define TF_GLU_ROUND_SILU 1\n",
+        .clipped => "",
+    };
+    const map = if (f.mapped_experts) "#define TF_AM_MAPPED_EXPERTS 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";
-    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}";
-    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, body });
 }
 
 /// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.
@@ -97,6 +109,12 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
     e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
+/// Scatter gather with compact offsets and an explicit map to the checkpoint's resident expert rows.
+pub fn gatherToMapped(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, dst: anytype, ids: anytype, rows: u32, experts: u32) void {
+    bind(e, 13, ids);
+    gatherTo(e, p, x, sums, q, offsets, y, dst, rows, experts);
+}
+
 /// act: SwiGLU(x W_gate^T, x W_up^T) clipped at `limit`, expert-sorted pairs (`offsets`); pair i: x row order[i]/topk.
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
@@ -117,6 +135,12 @@ pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gat
     e.setValue([2]f32{ @floatFromInt(topk), limit }, 12);
     const tiles = @min(rows, (rows + bm - 1) / bm + experts - 1); // each expert's last tile may be partial
     e.dispatchGroups(mtl.Size.of(gate.n / 32, tiles, 1), mtl.Size.of(32, 2, 2));
+}
+
+/// The GLU gather over a compact active expert list, with no copy of expert weights.
+pub fn gatherGluMapped(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, ids: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
+    bind(e, 13, ids);
+    gatherGlu(e, p, x, sums, gate, up, offsets, order, act, rows, experts, topk, limit);
 }
 
 /// The code at bit `at` of a little-endian bit stream (MLX's packing at every width).

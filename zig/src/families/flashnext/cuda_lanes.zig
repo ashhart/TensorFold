@@ -39,12 +39,12 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_save = snaps.save;
         pub const snap_restore = snaps.restore;
         pub const snap_drop = snaps.drop;
-        pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
+        pub const kept_view = @import("cuda_disk.zig").View(@This()); // their disk image (native/cuda_kept.zig)
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
             const own = of(p);
-            own.kv.pool = try kvl.Pool.init(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count);
+            own.kv.pool = try kvl.Pool.initOn(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count, own.device, own.io);
             own.kv.paged_only = kvl.pagedOnly() and streams > 0;
         }
         pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
@@ -104,7 +104,7 @@ pub fn Namespace(comptime Tri: type) type {
             return bytes.placementWeightBytes(gpa, io, dir, world, rank, drafts);
         }
 
-        /// The tower's weights and one call's scratch, which rank zero holds beside the text weights with --vision.
+        pub const worlds = bytes.worlds; // refused by name before admission and open, which take no others
         pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
             return bytes.visionBytes(a, io, dir);
         }
@@ -149,7 +149,6 @@ pub fn Namespace(comptime Tri: type) type {
 
         const Parts = @import("cuda_lane_parts.zig").Parts;
         const seq_parts = @import("cuda_seq_parts.zig");
-
         const Ops = mtp.Ops(Tri);
         const snaps = @import("cuda_lanes_snap.zig").Snaps(Cuda);
 
@@ -157,6 +156,8 @@ pub fn Namespace(comptime Tri: type) type {
             gpa: std.mem.Allocator,
             context: usize,
             engine: *prompt.Engine,
+            device: ?cuda.abi.Device = null, // the load context's: the page pool's arena maps from pieces on it
+            io: ?std.Io = null, // the load's: the arena's thread maps pieces ahead with it
             vision: ?*@import("cuda_images.zig").Vision = null,
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
@@ -417,6 +418,7 @@ pub fn Namespace(comptime Tri: type) type {
         /// One chunk of the stream's prompt between the other streams' rounds; the first call opens its caches.
         fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const self = of(ptr);
+            if (self.lanes.getPtr(s) == null and self.kv.waits(s.prompt().len + s.max_new, self.lanes.count())) return false;
             const l = if (self.lanes.getPtr(s)) |x| (if (x.filled != null) x else try self.open(s)) else try self.open(s);
             return self.step(s, l, 0);
         }

@@ -276,6 +276,7 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(arena);
     if (cluster.cli.wants(@ptrCast(argv[1..]))) std.process.exit(try cluster.cli.main(init, argv[1..]));
+    if (cluster.validate.wants(@ptrCast(argv[1..]))) std.process.exit(try cluster.validate.main(init, argv[1..]));
     if (checkpoint_cli.wants(@ptrCast(argv[1..]))) std.process.exit(try checkpoint_cli.main(init, argv[1..]));
     const o = try parseArgs(arena, argv);
     cli_chunks = o.chunks;

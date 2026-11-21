@@ -180,6 +180,42 @@ test "device support: a checkpoint on disk fits, is too large, does not run here
     try t.expectEqual(support.Verdict.not_served, support.fit(s, &metal_families, "deepseek_v4", 17 << 30));
 }
 
+test "device support: a reserve that exhausts known memory leaves no room for nonempty weights" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mac = try parse.macos(a, "aarch64", fx.m5_ultra);
+    mac.gpu_wired_limit = metal.margin;
+    const constrained = try support.derive(a, mac, metal);
+    try t.expectEqual(@as(u64, 0), constrained.budget);
+    try t.expectEqual(support.Verdict.too_large, support.fit(constrained, metal.families, "nemotron_h", 1));
+    try t.expectEqual(support.Verdict.fits, support.fit(constrained, metal.families, "nemotron_h", 0));
+
+    const pc: Machine = .{ .os = .linux, .arch = "x86_64", .ram = 16 << 30 };
+    const cuda_cap = try support.derive(a, try driver(pc, a, 86, 1 << 30, false, "NVIDIA GPU"), release);
+    const cuda_unknown = try support.derive(a, try driver(pc, a, 86, 0, false, "NVIDIA GPU"), release);
+    try t.expectEqual(@as(u64, 0), cuda_cap.budget);
+    try t.expectEqual(@as(u64, 0), cuda_unknown.budget);
+    try t.expectEqual(support.Verdict.too_large, support.fit(cuda_cap, release.families, "nemotron_h", 1));
+    try t.expectEqual(support.Verdict.fits, support.fit(cuda_unknown, release.families, "nemotron_h", 1));
+
+    const vendors = [_]struct { name: []const u8, vendor: machine.Vendor }{
+        .{ .name = "hip", .vendor = .amd },
+        .{ .name = "xpu", .vendor = .intel },
+    };
+    for (vendors) |v| {
+        const offer: support.Offer = .{ .version = "test", .backends = &.{v.name}, .families = &cuda_families };
+        var host = pc;
+        var gpus = [_]machine.Gpu{.{ .vendor = v.vendor, .name = "Fixture GPU", .memory = 1 << 30 }};
+        host.gpus = &gpus;
+        const capped = try support.derive(a, host, offer);
+        try t.expectEqual(support.Verdict.too_large, support.fit(capped, offer.families, "nemotron_h", 1));
+        gpus[0].memory = 0;
+        const unknown = try support.derive(a, host, offer);
+        try t.expectEqual(support.Verdict.fits, support.fit(unknown, offer.families, "nemotron_h", 1));
+    }
+}
+
 test "device support: the assumed release kernel set is the one the release build validates" {
     const text = try std.Io.Dir.cwd().readFileAlloc(t.io, "zig/build/cuda.zig", t.allocator, .limited(1 << 20));
     defer t.allocator.free(text);

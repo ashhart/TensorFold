@@ -13,12 +13,13 @@ const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
 const fwd = @import("forward.zig");
+const dflash = @import("metal_dflash_rounds.zig");
 
 /// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
-const one_mac_window_costs = costTable(13.0, 4.1);
-const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
+pub const one_mac_window_costs = costTable(13.0, 4.1);
+pub const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
 /// The acceptance estimates' rate, below the core's 0.15: a stream takes about twice the misses in a row to go plain.
-const depth_rate = 0.08;
+pub const depth_rate = 0.08;
 
 fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
@@ -36,9 +37,11 @@ pub const Backend = struct {
     wins: std.ArrayList(slots_mod.Win) = .empty,
     drafts: std.ArrayList(slots_mod.Draft) = .empty,
     costs: ?timing.Costs = null, // a pair's rank 0: its windows and head step as timed (shared forwards priced the same)
+    rounds: ?*dflash.Rounds = null, // --drafter: DFlash2's per-stream rounds (null: the MTP head drafts)
 
     pub fn deinit(b: *Backend) void {
         if (b.image_owner != null) slot_images.end(b.sl);
+        if (b.rounds) |r| r.deinit();
         b.filling.deinit(b.gpa);
         b.by.deinit(b.gpa);
         b.words.deinit(b.gpa);
@@ -47,11 +50,17 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = chances, .tree = heldRows, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
+        if (b.sl.e.dflash != null) return dflash.facts(b);
+        return b.headFacts();
+    }
+
+    /// The facts without the drafter: the MTP head's own, also what prices its rounds beside DFlash2.
+    pub fn headFacts(b: *const Backend) lanes.Model {
         return .{
             .learn_row_costs = b.sl.e.ep == null and !b.sl.e.device.tensorUnits(), // the table is an M5 Ultra's: others pay more
             .allocate_shared_drafts = b.sl.e.hasMtp(),
@@ -91,7 +100,7 @@ pub const Backend = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn slotOf(b: *Backend, s: *Stream) !u32 {
+    pub fn slotOf(b: *Backend, s: *Stream) !u32 {
         return b.by.get(s) orelse error.UnknownStream;
     }
 
@@ -143,6 +152,7 @@ pub const Backend = struct {
         }
         // the images the restored state does not hold through the tower: the chunks inject their rows
         if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i, s.cached);
+        if (b.rounds) |r| _ = r.begin(i, at, b.by.count(), s.sampling != null); // after restore: drafter starts here
         s.fill_at.store(at, .monotonic);
         return .{ .stream = s, .slot = i, .at = at };
     }
@@ -160,6 +170,9 @@ pub const Backend = struct {
         const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(s.prompt_len), e.c.vocab);
         const chunk_draws: ?*const fwd.Draws = if (draws.n > 0 and at + n == s.prompt_len) &draws else null;
         try b.sl.chunk(i, at, n, chunk_draws);
+        if (b.rounds) |r| if (r.get(i)) |x| { // the chunk's tap rows are in the stream's own ring now
+            x.ctx.committed_end = at + n;
+        };
     }
     pub fn encodeImages(b: *Backend, i: u32, images: []const lanes.stream.Image) !void {
         try slot_images.encode(b.sl, i, images);
@@ -355,6 +368,20 @@ pub const Backend = struct {
         return try b.sl.queueRound(i, from, s.sampling);
     }
 
+    /// Each held draft's chance of landing, DFlash2's chained (false: none, so the per-depth rates stand).
+    fn chances(ptr: *anyopaque, s: *Stream, out: []f64) anyerror!bool {
+        const b = self(ptr);
+        const r = b.rounds orelse return false;
+        return dflash.chancesFor(r, b.by.get(s) orelse return false, out);
+    }
+
+    /// The rows the next round verifies: DFlash2's held chain, cut to its priced prefix (null: the head's own).
+    fn heldRows(ptr: *anyopaque, s: *Stream, _: std.mem.Allocator) anyerror!?lanes.stream.Held {
+        const b = self(ptr);
+        const r = b.rounds orelse return null;
+        return r.heldRows(b.by.get(s) orelse return null);
+    }
+
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
         return self(ptr).sl.ringGet(@intCast(handle));
     }
@@ -383,6 +410,7 @@ pub const Backend = struct {
             @memcpy(o.sampled, picks[row..][0..w.rows()]);
             @memcpy(o.drafts[0..w.held], Engine.u32s(b.sl.slots[win.slot].held, w.held));
             @memcpy(o.drafts[w.held..], w.tokens);
+            if (b.rounds) |r| r.sawWindow(win.slot, @intCast(w.held + w.tokens.len));
             row += w.rows();
         }
     }
@@ -401,6 +429,7 @@ pub const Backend = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const b = self(ptr);
+        if (b.rounds) |r| return dflash.draft(b, r, requests);
         var ones: [st.max_rows]u32 = undefined; // a prompt's first token, the one its head absorbs with
         b.drafts.clearRetainingCapacity();
         if (requests.len > ones.len) return error.DraftOutOfStep;
@@ -418,6 +447,7 @@ pub const Backend = struct {
                 break :blk ones[k .. k + 1];
             } else r.follow;
             try b.drafts.append(b.gpa, .{ .slot = try b.slotOf(r.stream), .prompt = r.rows == null, .follow = follow, .depth = r.depth });
+            if (b.sl.log) std.log.info("glm round: slot {d} source mtp gained {d} drafts {d}", .{ b.drafts.items[b.drafts.items.len - 1].slot, r.follow.len, r.depth });
         }
         try b.sl.checkDrafts(b.drafts.items); // before rank 1 hears of them: it must never fail where rank 0 did not
         try mirror.draftWords(&b.words, b.gpa, b.drafts.items);
@@ -431,6 +461,7 @@ pub const Backend = struct {
         b.finishPrompt(s) catch {};
         const kv = b.by.fetchRemove(s) orelse return;
         mirror.send(b.sl.e, .release, &.{kv.value}) catch |err| std.log.err("glm: the peer missed a release: {s}", .{@errorName(err)});
+        if (b.rounds) |r| r.release(kv.value); // the stream's drafter context and tap route go with it
         b.sl.release(kv.value);
     }
 };
@@ -441,6 +472,7 @@ test "zero grant: GLM Metal MTP resumes after a long priced skip" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    e.dflash = null;
     const objc = @import("metal").objc;
     const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
     defer objc.release(no_arch);
@@ -461,6 +493,7 @@ test "shared head costs: GLM Metal MTP retains costed copy grants" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    e.dflash = null;
     const objc = @import("metal").objc;
     const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
     defer objc.release(no_arch);

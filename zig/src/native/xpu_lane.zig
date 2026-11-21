@@ -130,7 +130,7 @@ pub fn Xpu(comptime S: type) type {
                 .window_costs = self.costs[0..max_rows],
                 .mtp_step_ms = self.mtp_ms,
                 .hidden_rows = self.streams > 1, // a round's windows of several streams, one after another
-                .batch_rows = max_rows * self.streams,
+                .batch_rows = if (@hasDecl(S.Engine, "verifyMulti")) max_rows else max_rows * self.streams,
                 .max_streams = self.streams,
             };
         }
@@ -406,42 +406,50 @@ pub fn Xpu(comptime S: type) type {
             }
         }
 
-        /// Several streams' windows in one forward over the weights (at most 16 rows), each row on its own sequence.
+        /// Several streams' windows in one shared forward (up to 16 rows per sub-batch), each row on its own sequence.
         fn verifyShared(self: *Self, windows: []const be.Window, out: []be.Verified) !void {
             if (comptime !(has_head and @hasDecl(S.Engine, "verifyMulti"))) unreachable;
             const e = self.e;
-            var slots: [8]u32 = undefined;
-            var wins: [8][]const u32 = undefined;
-            var ids: [8][max_rows]u32 = undefined;
-            var lns: [8]*Lane = undefined;
-            var total: usize = 0;
-            for (windows, 0..) |w, i| {
-                if (w.parents != null) return error.TreesNotBuilt;
-                const rows = w.rows();
-                total += rows;
-                if (rows > max_rows or total > max_rows or i >= slots.len) return error.WindowTooWide;
-                const l = try self.bound(w.stream);
-                try self.settle(l, null);
-                for (w.positions, 0..) |p, r| if (p != e.m.pos + 1 + r) return error.PositionMismatch;
-                ids[i][0] = w.pending;
-                if (w.held > 0) {
-                    if (w.held > l.held_n) return error.NoHeldDrafts;
-                    @memcpy(ids[i][1..][0..w.held], l.held[0..w.held]);
-                } else @memcpy(ids[i][1..][0..w.tokens.len], w.tokens);
-                l.start = e.m.pos;
-                l.held_n = 0;
-                slots[i] = e.slotOf(l.seq);
-                wins[i] = ids[i][0..rows];
-                lns[i] = l;
-            }
-            try e.verifyMulti(slots[0..windows.len], wins[0..windows.len]);
-            var base: usize = 0;
-            for (windows, out, 0..) |w, *o, i| {
-                const rows = w.rows();
-                try self.drawRows(base, rows, w.stream.sampling, w.positions, o.sampled);
-                @memcpy(o.drafts, ids[i][1..rows]);
-                lns[i].pending = @intCast(rows);
-                base += rows;
+            var w0: usize = 0;
+            while (w0 < windows.len) {
+                var slots: [8]u32 = undefined;
+                var wins: [8][]const u32 = undefined;
+                var ids: [8][max_rows]u32 = undefined;
+                var lns: [8]*Lane = undefined;
+                var total: usize = 0;
+                var sub_n: usize = 0;
+                while (w0 + sub_n < windows.len and sub_n < slots.len) {
+                    const w = windows[w0 + sub_n];
+                    if (w.parents != null) return error.TreesNotBuilt;
+                    const rows = w.rows();
+                    if (rows > max_rows) return error.WindowTooWide;
+                    if (total + rows > max_rows) break;
+                    const l = try self.bound(w.stream);
+                    try self.settle(l, null);
+                    for (w.positions, 0..) |p, r| if (p != e.m.pos + 1 + r) return error.PositionMismatch;
+                    ids[sub_n][0] = w.pending;
+                    if (w.held > 0) {
+                        if (w.held > l.held_n) return error.NoHeldDrafts;
+                        @memcpy(ids[sub_n][1..][0..w.held], l.held[0..w.held]);
+                    } else @memcpy(ids[sub_n][1..][0..w.tokens.len], w.tokens);
+                    l.start = e.m.pos;
+                    l.held_n = 0;
+                    slots[sub_n] = e.slotOf(l.seq);
+                    wins[sub_n] = ids[sub_n][0..rows];
+                    lns[sub_n] = l;
+                    total += rows;
+                    sub_n += 1;
+                }
+                try e.verifyMulti(slots[0..sub_n], wins[0..sub_n]);
+                var base: usize = 0;
+                for (windows[w0 .. w0 + sub_n], out[w0 .. w0 + sub_n], 0..) |w, *o, i| {
+                    const rows = w.rows();
+                    try self.drawRows(base, rows, w.stream.sampling, w.positions, o.sampled);
+                    @memcpy(o.drafts, ids[i][1..rows]);
+                    lns[i].pending = @intCast(rows);
+                    base += rows;
+                }
+                w0 += sub_n;
             }
         }
 

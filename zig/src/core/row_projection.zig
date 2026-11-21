@@ -204,12 +204,20 @@ test "a strided call writes rows at least a matrix wide" {
     try std.testing.expectEqual([6]i32{ 128, 64, 64, 2, 192, 1 }, c.dims);
 }
 
+// Fake pipelines carry a distinct id in both the real Metal struct and the recording stub's u32.
+fn testPipeline(id: usize) mtl.Pipeline {
+    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") .{ .id = @ptrFromInt(id) } else @intCast(id);
+}
+fn testPipelineId(p: mtl.Pipeline) usize {
+    return if (comptime @typeInfo(mtl.Pipeline) == .@"struct") @intFromPtr(p.id) else @intCast(p);
+}
+
 test "row dispatch selects wide contiguous and strided pipelines from four rows" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
     var p: Pipelines = undefined;
     p.wide = true;
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
-        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = .{ .id = @ptrFromInt(0x1000 + tag * 0x100 + i) };
+        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }
     for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
         const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
@@ -217,10 +225,10 @@ test "row dispatch selects wide contiguous and strided pipelines from four rows"
         for (1..33) |rows| {
             for ([_]bool{ false, true }) |relu2| {
                 const expected = if (rows >= 4) (if (relu2) p.wide_relu2[i] else p.wide_plain[i]) else if (relu2) p.relu2[i] else p.plain[i];
-                try std.testing.expectEqual(expected.id, (try call(&p, w, rows, relu2)).pipeline.id);
+                try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try call(&p, w, rows, relu2)).pipeline));
             }
             const expected = if (rows >= 4) p.wide_strided[i] else p.strided[i];
-            try std.testing.expectEqual(expected.id, (try callStrided(&p, w, rows, 128)).pipeline.id);
+            try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try callStrided(&p, w, rows, 128)).pipeline));
         }
     };
 }
@@ -230,7 +238,7 @@ test "row dispatch without tensor units keeps main's pipelines at every row coun
     var p: Pipelines = undefined;
     p.wide = false;
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
-        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = .{ .id = @ptrFromInt(0x1000 + tag * 0x100 + i) };
+        for (&@field(p, field), 0..) |*pipeline, i| pipeline.* = testPipeline(0x1000 + tag * 0x100 + i);
     }
     for (bit_widths) |bits| for ([_]Sum{ .f32, .bf16 }) |sum| {
         const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = bits, .sum = sum };
@@ -238,9 +246,9 @@ test "row dispatch without tensor units keeps main's pipelines at every row coun
         for (1..33) |rows| {
             for ([_]bool{ false, true }) |relu2| {
                 const expected = if (relu2) p.relu2[i] else p.plain[i];
-                try std.testing.expectEqual(expected.id, (try call(&p, w, rows, relu2)).pipeline.id);
+                try std.testing.expectEqual(testPipelineId(expected), testPipelineId((try call(&p, w, rows, relu2)).pipeline));
             }
-            try std.testing.expectEqual(p.strided[i].id, (try callStrided(&p, w, rows, 128)).pipeline.id);
+            try std.testing.expectEqual(testPipelineId(p.strided[i]), testPipelineId((try callStrided(&p, w, rows, 128)).pipeline));
         }
     };
 }

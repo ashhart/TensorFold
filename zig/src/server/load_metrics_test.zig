@@ -139,3 +139,26 @@ test "the /v1/load object carries every group a host fills, and only server valu
     // as keys: a refusal label such as admission_capacity_exceeded is a server value, shown while parked too
     for ([_][]const u8{ "\"running\":", "\"tokens\":", "\"capacity\":", "\"busy_us\":", "\"fill_unknown\":" }) |key| try std.testing.expect(!has(parked, key));
 }
+
+test "open connections exports gauge name, type and admitted count" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try load_metrics.renderConnections(&out.writer, 3);
+    var help = false;
+    var gauge_type = false;
+    var sample = false;
+    var lines = std.mem.splitScalar(u8, out.written(), '\n');
+    while (lines.next()) |line| {
+        const help_prefix = "# HELP tensorfold:open_connections ";
+        const sample_prefix = "tensorfold:open_connections ";
+        if (std.mem.startsWith(u8, line, help_prefix))
+            help = std.mem.trim(u8, line[help_prefix.len..], " \t").len > 0;
+        if (std.mem.eql(u8, line, "# TYPE tensorfold:open_connections gauge"))
+            gauge_type = true;
+        if (std.mem.startsWith(u8, line, sample_prefix)) {
+            try std.testing.expectEqual(@as(f64, 3), try std.fmt.parseFloat(f64, line[sample_prefix.len..]));
+            sample = true;
+        }
+    }
+    try std.testing.expect(help and gauge_type and sample);
+}

@@ -78,7 +78,7 @@ test "a request's own start off the grid is kept and resumed; without starts the
     var path: [3]u32 = undefined;
     try testing.expect(!s.keep(.of(&prompt), 12, null, &mine, &path).held); // 12 is off the grid of 8
     try testing.expect(s.keep(with(&prompt, &.{12}), 12, null, &mine, &path).held); // the request's own start
-    try testing.expectEqual(@as(u32, 12), s.find(with(&prompt, &.{12})).?.end);
+    try testing.expectEqual(@as(u32, 12), s.find(with(&prompt, &.{12})).?.at());
     try testing.expect(s.find(.of(&prompt)) == null); // a request on the grid never resumes inside its chunk at 12
 }
 
@@ -363,5 +363,5 @@ test "a shared cut planned in one namespace never flags another namespace's stat
     defer f.end(&mine);
     var path: [2]u32 = undefined;
     try testing.expect(s.keep(ns2, 8, null, &mine, &path).held);
-    try testing.expect(!s.find(ns2).?.entry.?.shared); // namespace 2's state is its own conversation's
+    try testing.expect(!s.find(ns2).?.entry().shared); // namespace 2's state is its own conversation's
 }

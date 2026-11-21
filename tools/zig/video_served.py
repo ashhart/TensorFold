@@ -1,4 +1,5 @@
 """Video input served end to end on a running ``tensorfold-native --vision`` (#565's video checks)."""
+# drafted == plain: equal token_sha256, a draft accepted when drafted and none drafted when plain, else it fails.
 
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from conformance import drafted_gate, reply_row  # noqa: E402
 from glm_video_fixtures import load  # noqa: E402
 
 
@@ -117,7 +120,8 @@ def main() -> int:
     code2, r2 = ask(convo, draft=False)
     check("a video request answers", code == 200 and code2 == 200, f"HTTP {code}/{code2} {r.get('error', '')}")
     if code == 200 and code2 == 200:
-        check("drafted equals \"draft\": false with a video", reply(r) == reply(r2), repr(reply(r)[:60]))
+        gate = drafted_gate({"greedy": [(reply_row(code2, r2), reply_row(code, r))]})
+        check("drafted equals \"draft\": false with a video", gate["passed"], gate["line"] + " " + repr(reply(r)[:60]))
     runs = [[user(video(c), text(t))] for c in (a, b) for t in ("What colours appear?", "Does anything move?")]
     alone = [reply(ask(m)[1]) for m in runs]
     with cf.ThreadPoolExecutor(len(runs)) as pool:

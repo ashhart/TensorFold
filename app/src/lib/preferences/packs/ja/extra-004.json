@@ -165,7 +165,7 @@
   "The community page could not open; try again in your browser.": "コミュニティページを開けません。ブラウザーで再試行してください。",
   "The comparison could not finish.": "比較を完了できませんでした。",
   "The comparison stopped before changing the engine.": "エンジンを変える前に比較を停止しました。",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores.": "完全な community-v1 プロトコルを満たしていません。不完全なセルは性能スコアではありません。",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores.": "完全な community-v2 プロトコルを満たしていません。不完全なセルは性能スコアではありません。",
   "The conversation could not be renamed.": "会話の名前を変更できませんでした。",
   "The document worker is not installed.": "ドキュメントワーカーが未インストールです。",
   "The download action could not complete. Try again.": "ダウンロード操作を完了できません。再試行してください。",

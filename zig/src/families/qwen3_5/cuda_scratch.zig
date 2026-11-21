@@ -83,16 +83,16 @@ pub fn scratch(e: anytype, rows: usize, mode: Mode) !usize {
     return t.total;
 }
 
-/// Choose a reservation large enough for the requested rows, bounded by the configured ceiling.
+/// A reservation for the requested rows, bounded by the ceiling: scratch_rows (solo rows at most), never max_rows.
 pub fn growthCapacity(capacity: usize, rows: usize, ceiling: usize) usize {
     if (capacity >= rows) return capacity;
     if (capacity == 0) return rows;
-    return @max(rows, @min(ceiling, max_rows));
+    return @max(rows, ceiling);
 }
 
 /// The main scratch also serves verify forwards, independently of the prompt ceiling.
 fn mainGrowthCeiling(prompt_rows: usize, verify_rows: usize) usize {
-    return @min(max_rows, @max(prompt_rows, verify_rows));
+    return @max(prompt_rows, verify_rows);
 }
 
 /// Refuse a forward that exceeds the scratch capacity committed during startup.
@@ -110,6 +110,14 @@ test "scratch startup capacity refuses rows beyond its reserved ceiling" {
     try std.testing.expectEqual(@as(usize, 40), growthCapacity(0, 40, 512));
     try std.testing.expectEqual(@as(usize, 512), growthCapacity(32, 40, 512));
     try std.testing.expectEqual(@as(usize, 64), growthCapacity(32, 40, 64));
+    // TF_QWEN35_CHUNK_SOLO unset, --context 8192 and more: startup reserves main's 4096 rows, 8192 only when set
+    const solo = @import("cuda_solo.zig");
+    for ([_]usize{ 8192, 262144 }) |context| for ([_]?[]const u8{ null, "8192" }) |raw| {
+        const rows = solo.scratchRows(try solo.rowsOf(raw, false), context);
+        const want: usize = if (raw == null) 4096 else 8192;
+        try std.testing.expectEqual(want, growthCapacity(0, @max(rows, most_verify), mainGrowthCeiling(rows, most_verify)));
+        try std.testing.expectEqual(want, growthCapacity(most_verify, rows, rows)); // the INT8 workspace's growth
+    };
 }
 
 /// Ensure scratch is allocated during startup, before any request forward uses it.
