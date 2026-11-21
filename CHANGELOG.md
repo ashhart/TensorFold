@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the CUDA kernel contract's NVFP4_NZ5 stress fill holds +5s among its 4s and 6s, its float64 reference reads code 0b1000 as 5, and a second planted control goes red at the sums gate, so that gate covers the +5 code; no kernel changes (#3543, refs #2894). Thanks to @Bizuayeu.
+
 - Qwen3.5 on CUDA: EXL3 checkpoints with the mcg codebook marker are admitted alongside mul1 ones, and unknown markers are still refused as an unsupported quantization (#3412). Thanks to @Ch0mpaa.
 
 - CUDA on unified-memory Linux (GB10): the start-up memory budget is at most the free memory CUDA reports, less the same reserve, instead of `/proc/meminfo` alone, and the server first drops the checkpoint's own shards from the page cache, so a checkpoint that was just read is not refused for its own cached pages; discrete cards, Windows, Metal and HIP are unchanged (#3192, part of #1857).
