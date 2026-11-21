@@ -72,6 +72,7 @@ pub const flags = [_]Flag{
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
     .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
+    .{ .name = "--cache-salt-per-key", .kind = .store_true, .native = true },
     .{ .name = "--top-p", .native = true },
     .{ .name = "--top-k", .native = true },
     .{ .name = "--min-p", .native = true },
@@ -169,113 +170,8 @@ pub const flags = [_]Flag{
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "TENSORFOLD_DEVICE_CHECK", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
     (if (builtin.os.tag == .macos) [_][]const u8{"TF_Q27_PROFILE"} else [_][]const u8{});
-pub const Args = struct {
-    admission: @import("request_admission.zig").Limits = .{},
-    connections: @import("connection_cli.zig").Args = .{},
-    model: []const u8 = "",
-    host: []const u8 = "127.0.0.1",
-    port: u16 = 8080,
-    unix_socket: ?[]const u8 = null,
-    name: []const u8 = "",
-    chat_template: ?[]const u8 = null,
-    voices: ?[]const u8 = null,
-    default_voice: []const u8 = "default",
-    alias: []const []const u8 = &.{},
-    name_priority: []const []const u8 = &.{},
-    api_key: []const []const u8 = &.{},
-    allowed_host: []const []const u8 = &.{},
-    allowed_origin: []const []const u8 = &.{},
-    cors_origin: []const []const u8 = &.{},
-    allowed_controls: ?@import("drama_allow.zig").Policy = null,
-    api_key_file: ?[]const u8 = null,
-    metrics_open: bool = false,
-    dashboard: bool = false,
-    log_json: bool = false, // --log-json: access, ended and refused lines as one JSON object each
-    context: ?i64 = null,
-    profile: api.profile.Profile = .stable,
-    max_frames: ?u32 = null,
-    silence: api.speech_guard.Config = .{},
-    cfg: @import("drama_cfg.zig").Flags = .{},
-    voice: @import("voice_cli.zig").Flags = .{},
-    redraw: @import("speech_redraw.zig").Policy = .{},
-    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
-    prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
-    ssd_experts_gib: ?f64 = null,
-    ple_on_ssd: bool = false,
-    fsr_trace: ?[]const u8 = null,
-    decode_share: ?f64 = null, // the reply's share x: the prompt owes 1 - x and only the flag offers the chunk cap (null: env time share only)
-    prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
-    learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
-    learn_dir: ?[]const u8 = null,
-    learn_min_free_gib: f64 = 4,
-    learn_gib: f64 = 32, // disk for learned states, every model and build together
-    learn_conversations: bool = false, // every kept state on disk, not only shared cuts (implies --learn)
-    learn_daily_gib: f64 = 32, // what learned states may write a day, every model together
-    recall: bool = false, // draft copies from Recall's record of earlier requests (its other flags imply it)
-    recall_dir: ?[]const u8 = null, // its directory (null: the tokenizer's own under ~/.cache/tensorfold/recall)
-    recall_gib: f64 = 1.0 / 16.0, // the record's disk; its RAM is about twice as much once full
-    recall_read_only: bool = false, // read the record, add nothing: what gates and benchmarks run with
-    max_tokens: i64 = 4096,
-    temperature: ?f64 = null,
-    prompt_seed: bool = false,
-    top_p: ?f64 = null,
-    top_k: ?i64 = null,
-    min_p: ?f64 = null,
-    instruct_sampling: ?[]const u8 = null, // none, card or name=value pairs: thinking-off sampled chats' set
-    thinking: bool = true,
-    reasoning_effort: ?[]const u8 = null,
-    thinking_budget: i64 = 0,
-    thinking_reserve: i64 = 0,
-    loop_guard: bool = false,
-    loop_guard_stop: bool = false, // the reply ends where the loop guard fires (implies --loop-guard)
-    tool_think_close: bool = false, // a required or named tool call closes thinking in time for the call
-    no_drafts: bool = false,
-    keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
-    idle_unload: i64 = 0, // seconds of idle past the last request before the engine closes (0: never; the next request reloads)
-    compact_auto: bool = false,
-    compact_fraction: ?f64 = null,
-    compact_keep: ?u32 = null,
-    compact_memory: ?[]const u8 = null,
-    drafter: ?[]const u8 = null,
-    drafter_name: ?[]const u8 = null, // retained before hub resolution for the engine's serving line
-    drafter_bits: u8 = 4,
-    rope_yarn: ?f64 = null, // YaRN with this factor over the checkpoint's trained window (Qwen3.5/3.6 on CUDA)
-    record: ?[]const u8 = null, // drafter training rows written under this folder
-    kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
-    prompt_precision: []const u8 = "bf16", // int8: prompt matmuls quantize their inputs to int8 a 64-input group
-    slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
-    slide_drift_gate: bool = false,
-    slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
-    parallel: []const u8 = "auto",
-    parallel_named: bool = false, // --parallel was on the command line: TENSORFOLD_PARALLEL then stays out of the way
-    backend: []const u8 = "auto",
-    device: ?u32 = null,
-    segments: ?u32 = null,
-    loops: ?u32 = null, // passes over a looped model's recurrent block (null: the checkpoint's own)
-    precision: ?api.Precision = null, // an NVFP4 checkpoint's math on CUDA: NVIDIA's own (checkpoint) or full precision
-    mtp_drafts: ?u32 = null,
-    mtp_confidence: ?f64 = null,
-    checkpoint_slots: ?i64 = null,
-    spill_gib: ?f64 = null, // disk for states evicted from the prompt cache, every model together (null or 0: off)
-    tp: u32 = 1,
-    rank: u32 = 0,
-    tp_given: bool = false, // --tp named on the command line (a family's rank aliases fill it otherwise)
-    rank_given: bool = false,
-    master: []const u8 = "",
-    master_port: u16 = 29551,
-    policy: []const u8 = "", // every --policy joined by commas
-    execution_witness: bool = false, // a read-scoped snapshot of the engine, binary, text and settings that serve
-    cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
-    vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
-    vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
-    vision_pdf: bool = false, // with --vision, inline PDF document parts too (pdf.zig)
-    vision_max_images: u32 = 4,
-    vision_max_videos: u32 = 2,
-    vision_image_tokens: u32 = 4096,
-    vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
-    vision_image_share: api.ImageShare = .request, // --vision-image-share: the request's own count, or the fixed share
-    vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
-};
+pub const Args = @import("cli_args.zig").Args;
+
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
 
@@ -479,7 +375,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--decode-share")) {
         out.decode_share = try float(u, a, name, v);
         if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
-    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--tool-think-close")) out.tool_think_close = true else if (is(name, "--execution-witness")) out.execution_witness = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--cache-salt-per-key")) out.cache_salt_per_key = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--tool-think-close")) out.tool_think_close = true else if (is(name, "--execution-witness")) out.execution_witness = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         out.compact_auto = std.mem.eql(u8, v, "auto"); // each occurrence replaces both fields, so the last one wins
         out.compact_fraction = null;
         if (!out.compact_auto) {

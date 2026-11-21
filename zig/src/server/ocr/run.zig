@@ -53,6 +53,11 @@ const Planned = struct { index: u32, origin: Origin, dpi: u32, pixels: u64 };
 
 /// Reads every page of ``sources`` in order into ``sink``; ``a`` is the request arena, ``gone`` says the client left.
 pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype) Step!void {
+    return runSalted(srv, a, sources, sink, fault, gone, 0);
+}
+
+/// The same page loop with the API key's prompt-cache salt, set by the OCR route.
+pub fn runSalted(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype, salt: u64) Step!void {
     try gate(srv, a, fault);
     const reader = srv.info.ocr.?;
     const id = try ids.make(a, "ocr-", 24);
@@ -64,7 +69,7 @@ pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, 
     var enc = budget.Encodes.init(total, pages.len);
     for (pages) |p| {
         if (gone.check()) return error.Cancelled;
-        try onePage(srv, a, reader, id, p, sink, &enc, fault, gone);
+        try onePage(srv, a, reader, id, p, sink, &enc, fault, gone, salt);
     }
 }
 
@@ -151,7 +156,7 @@ fn renderOne(a: Allocator, pa: Allocator, doc: []const u8, index: u32, width: u3
 }
 
 /// One page in its own arena: decode, generate, parse, validate, then the sink while the pixels live.
-fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype) Step!void {
+fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: Planned, sink: PageSink, enc: *budget.Encodes, fault: *Fault, gone: anytype, salt: u64) Step!void {
     var arena = std.heap.ArenaAllocator.init(srv.gpa);
     defer arena.deinit();
     const pa = arena.allocator();
@@ -165,7 +170,7 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
     const h: u32 = @intCast(rgb.height);
     // the budget was planned from the header; pixels that disagree (an EXIF turn keeps the product) fail the request
     if (@min(@as(u64, w) * h, max_page_pixels) != p.pixels) return fault.fail(a, .bad_input, "page {d}: the image's header and its pixels disagree", .{p.index});
-    var pcx: Cx = .{ .a = pa };
+    var pcx: Cx = .{ .a = pa, .cache_salt = salt };
     const got = try generate(srv, &pcx, a, reader, id, p, bytes, fault, gone);
     const parsed = reader.parse(pa, got.content, .{ .width = w, .height = h }, got.frame) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
