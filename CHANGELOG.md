@@ -787,6 +787,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
 - Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states, so it drafts beside an oQ checkpoint of any width, and a head at a width the launches do not read is refused by name (#3251, part of #3061). Thanks to @gilby.
 
+
+- Inkling 2 on CUDA: the family's grouped-expert launches match main's `tf_exl3_grouped_2` bit for bit under the kernel contract, and the vision tower's kernels pass gates 1 to 4 (refs #3476). Thanks to @ajensenwaud.
+
 - Tests: the served-evidence concurrency test pairs its two generated streams in the fake server, so a busy runner can no longer decode them one after the other and turn it red; other conformance fixtures keep their pacing.
 
 - GLM-5.3-Flash on CUDA at tensor-parallel widths where a rank's fused KDA input is not a multiple of eight columns (TP=3, 5, 6 or 7): the stack is padded at load to its own width rounded up to eight columns and stays row-major bf16, so prompt windows take the staged B16 tiles with every byte as before; `TF_GLM_KDA_PAD=1` still tiles the stack for glm_mm (#3697, for #3516). Thanks to @ultradaoto.
