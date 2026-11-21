@@ -21,6 +21,7 @@ pub const Request = struct {
     max_tokens: u32,
     sampling: ?Sampling = null,
     penalties: Penalties = .{},
+    logit_bias: []const lanes.logit_bias.Entry = &.{},
     /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
     eos: []const u32 = &.{},
     stop: ?Stop = null,

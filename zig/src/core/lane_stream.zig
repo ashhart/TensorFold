@@ -44,6 +44,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .eos = r.eos,
         .sampling = r.sampling,
         .penalties = r.penalties,
+        .logit_bias = r.logit_bias,
         .drafts = r.drafts,
         .proposer = job.custom orelse job.proposer.proposer(),
         .recall = recall,

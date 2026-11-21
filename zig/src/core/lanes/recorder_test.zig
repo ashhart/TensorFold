@@ -282,10 +282,12 @@ test "recorded backend preserves both values of first_before_draft, penalties an
         var inner = target.backend();
         inner.first_before_draft = enabled;
         inner.penalties = enabled;
+        inner.logit_bias = enabled;
         inner.chunk_invariant = enabled;
         var recorded = try rec.Recorded.init(inner, &recorder);
         try std.testing.expectEqual(enabled, recorded.backend().first_before_draft);
         try std.testing.expectEqual(enabled, recorded.backend().penalties);
+        try std.testing.expectEqual(enabled, recorded.backend().logit_bias);
         try std.testing.expectEqual(enabled, recorded.backend().chunk_invariant);
     }
 }
