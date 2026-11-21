@@ -78,6 +78,7 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
     try peer.sendHeader(.{ .kind = .ack, .sequence = 2, .object = 1 }, wire.deadline(1000));
     var rank: ranks.Session = .{ .gpa = a, .rank = 0, .link = .{ .fd = pair[0] }, .collective = undefined, .engine = &engine };
     rank.collective.failed = false;
+    rank.collective.release = null;
     var ids = [_]u32{1};
     var head: mtp.Head = undefined;
     head.ids = &ids;
@@ -164,7 +165,9 @@ fn follower(comptime Cuda: type, frames: []const wire.Header, setup: *const fn (
     for (frames) |h| try leader.sendHeader(h, wire.deadline(1000));
     var rank: ranks.Session = .{ .gpa = a, .rank = 1, .link = .{ .fd = pair[0] }, .collective = undefined, .engine = &engine, .drafting = true };
     rank.collective.failed = false;
+    rank.collective.release = null;
     rank.collective.comm = null;
+    rank.collective.parent = null;
     defer rank.seqs.deinit(a);
     defer rank.windows.deinit(a);
     defer rank.saved.deinit(a);

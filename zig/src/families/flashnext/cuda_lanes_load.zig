@@ -25,8 +25,6 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and mode != .modelopt) return error.FlashNextRanksNeedModelopt;
     if (o.tp != 1 and captured != null) return error.FlashNextRanksOnCapturedGlue;
-    // the decode graph captures each layer's collectives; the dense split adds its own until a later stage qualifies it
-    if (@import("cuda_round_graph.zig").enabled() and try @import("cuda_dense_split.zig").appliesDir(gpa, io, dir, o.tp)) return error.DecodeGraphWithDenseSplit;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();

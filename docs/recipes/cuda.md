@@ -379,9 +379,10 @@ transfer. The transport comes from NCCL's own INFO log, written to a private tem
 when startup diagnostics finish. A line before init names that file; GLM's minute wait warnings repeat its path.
 The early report leaves capture active through warm-up. Capture is skipped when `NCCL_DEBUG`, `NCCL_DEBUG_SUBSYS`
 or `NCCL_DEBUG_FILE` is set. NCCL connects peers on first use unless `NCCL_RUNTIME_CONNECT=0`, which GLM sets when
-unset: GLM reports the transport before warm-up if known, otherwise after warm-up or when the ranks are ready.
-Nemotron reports it when its ranks are ready, and DeepSeek and Flash Next say `transport not reported` unless a
-connection was made by then (on DeepSeek the probe makes one). A P2P status other than OK adds one warning naming
+unset, as does Flash Next with both ranks on one host: GLM reports the transport before warm-up if known, otherwise
+after warm-up or when the ranks are ready, and Flash Next on one host after NCCL init. Nemotron reports it when its
+ranks are ready, and DeepSeek and Flash Next on two hosts say `transport not reported` unless a connection was made by
+then (on DeepSeek the probe makes one). A P2P status other than OK adds one warning naming
 what NVML or CUDA reported.
 
 TensorFold never enables peer access itself; NCCL sets up its own peers. The report changes no driver, BIOS or IOMMU
