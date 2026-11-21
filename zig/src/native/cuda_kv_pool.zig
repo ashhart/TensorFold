@@ -4,19 +4,16 @@ const api = @import("engine_api");
 const kv_pool = @import("core").kv_pool;
 const budget = @import("cuda_memory.zig");
 const Allocator = std.mem.Allocator;
-
 pub const Plan = kv_pool.Plan;
 
 /// A family whose other streams take pages (Nemotron's) names their layout; any other allocates a window each (null).
 pub fn layout(loaded: anytype) ?kv_pool.Layout {
     return if (comptime @hasField(@TypeOf(loaded), "layout")) loaded.layout else null;
 }
-
 /// Whether the engine's own sequence takes pages too (GLM's when it pages): the plan sets a window of them aside first.
 pub fn enginePaged(loaded: anytype) bool {
     return if (comptime @hasField(@TypeOf(loaded), "engine_paged")) loaded.engine_paged else false;
 }
-
 /// What the load ledger hears of an engine's KV: its mode and, when paged, the pool it watches.
 pub const Watch = struct {
     mode: ?api.load_ledger.Mode = null, // null: the capacity group stays absent
