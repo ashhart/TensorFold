@@ -149,13 +149,9 @@ struct GateUpArgs {
     int act_mode;
 };
 
-extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
-    const int p = blockIdx.x, blk = blockIdx.y;
-    const int e = a.pick[p];
-    if (e < 0 || e >= a.experts) return;
-    const int lane = threadIdx.x;
-    const int n = blk * 128 + 4 * lane;
-    float gv[4], uv[4];
+// The gate and up splits of pair p summed in order and rotated back (before the scales).
+__device__ __forceinline__ void gateup_sums(const GateUpArgs& a, int p, int n, int lane, float (&gv)[4],
+                                            float (&uv)[4]) {
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         float sg = 0.f, su = 0.f;
@@ -168,6 +164,24 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
     }
     fwht128(gv, lane);
     fwht128(uv, lane);
+}
+
+// The activations rotated into the down projection's inputs.
+__device__ __forceinline__ void gateup_store(const GateUpArgs& a, int p, int n, int lane, float (&v)[4]) {
+    fwht128(v, lane);
+    half* o = a.xd + (size_t)p * a.n + n;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+}
+
+extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
+    const int p = blockIdx.x, blk = blockIdx.y;
+    const int e = a.pick[p];
+    if (e < 0 || e >= a.experts) return;
+    const int lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    float gv[4], uv[4];
+    gateup_sums(a, p, n, lane, gv, uv);
     float v[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -185,10 +199,34 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
         }
         v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
     }
-    fwht128(v, lane);
-    half* o = a.xd + (size_t)p * a.n + n;
+    gateup_store(a, p, n, lane, v);
+}
+
+// act_mode 3, Inkling 2's softcapped SwiGLU: gate_cap tanh(g / gate_cap) sigmoid(g) up_cap tanh(u / up_cap), fp32.
+struct CappedArgs {
+    GateUpArgs g;
+    float gate_cap, up_cap;
+};
+
+extern "C" __global__ void tf_exl3_gateup_capped(const CappedArgs c) {
+    const GateUpArgs& a = c.g;
+    const int p = blockIdx.x, blk = blockIdx.y;
+    const int e = a.pick[p];
+    if (e < 0 || e >= a.experts) return;
+    const int lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    float gv[4], uv[4];
+    gateup_sums(a, p, n, lane, gv, uv);
+    float v[4];
 #pragma unroll
-    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+    for (int j = 0; j < 4; ++j) {
+        const float g = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
+        const float u = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);
+        const float act =
+            c.gate_cap * tanhf(g / c.gate_cap) * (1.f / (1.f + expf(-g))) * c.up_cap * tanhf(u / c.up_cap);
+        v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
+    }
+    gateup_store(a, p, n, lane, v);
 }
 
 // Program (member row, 128-block of the width): down epilogue and combine in one launch, the same bits as the two.
