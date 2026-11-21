@@ -8,6 +8,12 @@ const Record = struct {
     const Broadcast = struct { send: u64, recv: u64, count: usize, ty: cuda.nccl.DataType, root: c_int };
     var sent: [64]Broadcast = undefined;
     var posts: usize = 0;
+    var materialize = false;
+    var drop_pack = false;
+    var pack_calls: usize = 0;
+    var mine: usize = 0;
+    var spans: []const glm.shard.Span = &.{};
+    var selected: []const usize = &.{};
     var copies: [3]cuda.abi.Memcpy2D = undefined;
     var copied: usize = 0;
     var starts: usize = 0;
@@ -23,6 +29,13 @@ const Record = struct {
         if (posts == sent.len) return 1;
         sent[posts] = .{ .send = send, .recv = recv, .count = count, .ty = ty, .root = root };
         posts += 1;
+        if (materialize and @as(usize, @intCast(root)) != mine) {
+            const span = spans[@intCast(root)];
+            const out: [*]u16 = @ptrFromInt(recv);
+            for (selected, 0..) |src, row| for (0..span.len()) |col| {
+                out[row * span.len() + col] = @intCast(1 + src * 17 + span.lo + col);
+            };
+        }
         return 0;
     }
     fn start() callconv(.c) c_int {
@@ -35,8 +48,21 @@ const Record = struct {
     }
     fn copy2d(p: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         if (copied == copies.len) return 1;
+        if (materialize) for (0..p.height) |row| {
+            const src: [*]const u8 = @ptrFromInt(p.src + row * p.src_pitch);
+            const dst: [*]u8 = @ptrFromInt(p.dst + row * p.dst_pitch);
+            @memcpy(dst[0..p.width], src[0..p.width]);
+        };
         copies[copied] = p.*;
         copied += 1;
+        return 0;
+    }
+    fn copy(dst: u64, src: u64, bytes: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        const omit = drop_pack and pack_calls == 0;
+        pack_calls += 1;
+        if (materialize and !omit) {
+            @memcpy(@as([*]u8, @ptrFromInt(dst))[0..bytes], @as([*]const u8, @ptrFromInt(src))[0..bytes]);
+        }
         return 0;
     }
     fn alloc(out: *u64, bytes: usize) callconv(.c) cuda.abi.Result {
@@ -214,5 +240,74 @@ test "GLM logit gather: startup byte counts cover both stages before admission, 
             try t.expectEqual(Record.allocated, Record.freed);
             try t.expectEqual(before, cuda.usage(false).device);
         }
+    };
+}
+
+test "GLM logit gather: indexed rows use one block per rank, preserve row order and detect a missing copy" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemcpyDtoDAsync_v2 = Record.copy;
+    d.api.cuMemcpy2DAsync_v2 = Record.copy2d;
+    var lib: cuda.nccl.Library = undefined;
+    lib.api.ncclBroadcast = Record.broadcast;
+    lib.api.ncclGroupStart = Record.start;
+    lib.api.ncclGroupEnd = Record.end;
+    const indices = [_]usize{ 6, 0, 3 };
+    Record.materialize = true;
+    defer Record.materialize = false;
+    for ([_]usize{ 2, 3 }) |world| for (0..world) |mine| for ([_]bool{ false, true }) |bad| {
+        var spans: [3]glm.shard.Span = undefined;
+        for (spans[0..world], 0..) |*span, rank| span.* = .{ .lo = rank * 17 / world, .hi = (rank + 1) * 17 / world };
+        const span = spans[mine];
+        var logits: [8 * 17]u16 = undefined;
+        for (0..8) |row| for (0..span.len()) |col| {
+            logits[row * span.len() + col] = @intCast(1 + row * 17 + span.lo + col);
+        };
+        var stage: [3 * 17]u16 = @splat(0xeeee);
+        var full: [3 * 17]u16 = @splat(0xdddd);
+        var sampler: glm.sampler.Sampler = undefined;
+        sampler.d = &d;
+        sampler.vocab = 17;
+        sampler.rows = 3;
+        sampler.stage = .{ .d = &d, .ptr = @intFromPtr(&stage), .len = @sizeOf(@TypeOf(stage)) };
+        const stream: cuda.Stream = .{ .d = &d, .handle = null };
+        Record.posts = 0;
+        Record.copied = 0;
+        Record.pack_calls = 0;
+        Record.starts = 0;
+        Record.ends = 0;
+        Record.mine = mine;
+        Record.spans = spans[0..world];
+        Record.selected = &indices;
+        Record.drop_pack = bad;
+        try sampler.gatherIndexed(stream, .{ .nccl = .{ .lib = &lib, .comm = null } }, spans[0..world], mine, @intFromPtr(&logits), &indices, @intFromPtr(&full));
+        try t.expectEqual(world, Record.posts);
+        try t.expectEqual(world, Record.copied);
+        try t.expectEqual(@as(usize, 1), Record.starts);
+        try t.expectEqual(@as(usize, 1), Record.ends);
+        var want: [3 * 17]u16 = undefined;
+        for (indices, 0..) |src, row| for (0..17) |col| {
+            want[row * 17 + col] = @intCast(1 + src * 17 + col);
+        };
+        try t.expectEqual(!bad, std.mem.eql(u16, &want, &full));
+        for (spans[0..world], 0..) |part, rank| {
+            try t.expectEqual(indices.len * part.len(), Record.sent[rank].count);
+            try t.expectEqual(@as(c_int, @intCast(rank)), Record.sent[rank].root);
+        }
+        Record.drop_pack = false;
+        Record.posts = 0;
+        Record.copied = 0;
+        Record.pack_calls = 0;
+        @memset(&full, 0xdddd);
+        try sampler.gatherIndexed(stream, .local, spans[0..world], mine, @intFromPtr(&logits), &indices, @intFromPtr(&full));
+        try t.expectEqual(@as(usize, 0), Record.posts);
+        for (0..3) |row| for (0..17) |col| {
+            try t.expectEqual(if (col >= span.lo and col < span.hi) want[row * 17 + col] else @as(u16, 0xdddd), full[row * 17 + col]);
+        };
+        Record.copied = 0;
+        Record.pack_calls = 0;
+        try sampler.gatherIndexed(stream, .{ .nccl = .{ .lib = &lib, .comm = null } }, spans[0..world], mine, 0, &.{}, 0);
+        try t.expectEqual(@as(usize, 0), Record.posts);
+        try t.expectEqual(@as(usize, 0), Record.pack_calls);
+        try t.expectError(error.IndexedGatherExtent, sampler.gatherIndexed(stream, .local, spans[0..world], mine, 0, &.{ 0, 1, 2, 3 }, 0));
     };
 }
