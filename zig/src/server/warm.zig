@@ -27,6 +27,21 @@ const Pass = struct {
     }
 };
 
+/// Whether the client sends reasoning back: its latest assistant message has `reasoning_content`.
+pub fn echoesReasoning(messages: Value) bool {
+    if (messages != .array) return false;
+    var i = messages.array.len;
+    while (i > 0) {
+        i -= 1;
+        const m = messages.array[i];
+        if (m != .object) continue;
+        const role = m.get("role") orelse continue;
+        if (role != .string or !std.mem.eql(u8, role.string, "assistant")) continue;
+        return m.get("reasoning_content") != null;
+    }
+    return false;
+}
+
 /// Forgets begun (POST /v1/imprint/forget, the prompt cache flush), process-wide: a request reads it as it begins.
 pub var forgets: std.atomic.Value(u64) = .init(0);
 
@@ -63,13 +78,13 @@ pub fn forgetting(srv: *Server) void {
 }
 
 /// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
-pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) void {
+pub fn reply(srv: *Server, input: chat.Input, message: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) void {
     if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
     if (forgets.load(.seq_cst) != began) return; // a forget began while it ran: its next turn starts cold
-    start(srv, input, message, thinking, effort, prompt_len, began) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+    start(srv, input, message, reasoning, thinking, effort, prompt_len, began) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
 }
 
-fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) !void {
+fn start(srv: *Server, input: chat.Input, sent: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) !void {
     const p = try srv.gpa.create(Pass);
     p.* = .{ .gpa = srv.gpa, .io = srv.io, .arena = .init(srv.gpa), .request = undefined };
     var handed = false;

@@ -214,7 +214,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     if (p.choices > 1) return @import("choices.zig").run(srv, a, observed, gone, is_chat, p, raw);
     if (srv.config.journal != null or srv.config.request_log_replies) p.input.trace = &trace;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .forgets = warm.forgets.load(.seq_cst) };
+    var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .forgets = warm.forgets.load(.seq_cst) };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -359,7 +359,7 @@ pub const Run = struct {
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
         const sent: Value = .{ .object = message };
-        warm.reply(r.srv, r.plan.input, sent, reply.thinking, reply.effort, reply.prompt_tokens, r.forgets);
+        warm.reply(r.srv, r.plan.input, sent, reply.reasoning, reply.thinking, reply.effort, reply.prompt_tokens, r.forgets);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {
