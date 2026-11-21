@@ -23,6 +23,7 @@ pub fn Family(comptime name: []const u8) type {
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = be.prompt_rows;
         pub const snap_lookahead: u32 = 0;
+        pub const kept_view = @import("cuda_disk.zig"); // the disk store's image (native/cuda_kept.zig)
         pub const share_grid: u32 = be.prompt_rows;
         pub const window_rows: u32 = be.max_window;
         pub const attach = native.attach;

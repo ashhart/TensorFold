@@ -1,8 +1,8 @@
 //! The MTP head's block-FP8 routed experts: E4M3 weights, BF16 128x128 weight_scale_inv, packed for Fp8Experts (W8A16).
 const std = @import("std");
+const core = @import("core");
 const cuda = @import("cuda");
 const experts = @import("cuda_modelopt_experts.zig");
-const wt = @import("cuda_prompt_wt.zig");
 const fx = cuda.experts.Fp8Experts;
 
 const blk = fx.block;
@@ -78,15 +78,9 @@ pub fn packExpert(a: std.mem.Allocator, store: anytype, prefix: []const u8, i: u
 /// One projection's E4M3 weight [n, k]; its BF16 weight_scale_inv [n/128, k/128] widened (exactly) into `scale`.
 fn part(store: anytype, prefix: []const u8, i: usize, name: []const u8, n: usize, k: usize, scale: []f32) ![]const u8 {
     var buf: [512]u8 = undefined;
-    const w = try store.get(try std.fmt.bufPrint(&buf, "{s}.experts.{d}.{s}.weight", .{ prefix, i, name }));
-    if (!w.is(.f8_e4m3, &.{ n, k }) or w.bytes.len != n * k) return error.UnexpectedTensor;
-    const s = try store.get(try std.fmt.bufPrint(&buf, "{s}.experts.{d}.{s}.weight_scale_inv", .{ prefix, i, name }));
-    if (!s.is(.bf16, &.{ n / blk, k / blk }) or s.bytes.len != 2 * scale.len) return error.UnexpectedTensor;
-    for (scale, 0..) |*v, j| {
-        v.* = wt.promote(std.mem.readInt(u16, s.bytes[2 * j ..][0..2], .little));
-        if (!std.math.isFinite(v.*)) return error.UnsupportedQuantization;
-    }
-    return w.bytes;
+    const h = try core.quant.fp8.read(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.{s}", .{ prefix, i, name }), n, k, .bf16, null);
+    try core.quant.fp8.widen(h.scale_inv, scale, true);
+    return h.weight.bytes;
 }
 
 test {

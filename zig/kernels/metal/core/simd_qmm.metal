@@ -43,11 +43,38 @@ inline float tf_sq_pre(int s) { return as_type<float>(uint(127 - 4 * s) << 23); 
   if (lane == 0) FL[t * G + g] = all ? 1u : 0u;
 }
 
+// Floats before the prepass's halves: R rows' group sums, rows padded to pairs and 16 bytes.
+inline size_t tf_sq_sum_words(int R, int G) { return (size_t((R + 1) & ~1) * G + 3) & ~size_t(3); }
+
+// Each row's group sums at XS[row * G + g] by the tiles' tree; with H, X as half after them, row pairs interleaved.
+template <bool H>
+[[kernel]] void tf_sq_prep(const device uint4* X [[buffer(0)]],
+                           constant TfSqArgs& a [[buffer(4)]],
+                           device float* XS [[buffer(7)]],
+                           uint lane [[thread_index_in_simdgroup]],
+                           uint3 tg [[threadgroup_position_in_grid]]) {
+  const int K = a.K, R = a.R, G = K / 64, g = int(tg.x), row = int(tg.y) * 32 + int(lane);
+  if (row >= ((R + 1) & ~1)) return;
+  const float one = a.one;
+  device half* XH = (device half*)(XS + tf_sq_sum_words(R, G));
+  float c[8];
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    const uint4 v = row < R ? X[size_t(row) * (K / 8) + 8 * g + i] : uint4(0);  // the pad row is zeros
+    c[i] = tf_sq_sum8(v, one);
+    if (H)
+      #pragma unroll
+      for (int s = 0; s < 8; s++) XH[((size_t(row) / 2) * K + 64 * g + 8 * i + s) * 2 + (row % 2)] = half(tf_sq_bf8(v, s));
+  }
+  const float p0 = fma(c[1], one, c[0]), p1 = fma(c[3], one, c[2]), p2 = fma(c[5], one, c[4]), p3 = fma(c[7], one, c[6]);
+  if (row < R) XS[size_t(row) * G + g] = fma(fma(p3, one, p2), one, fma(p1, one, p0));
+}
+
 // R rows in 8-row tiles, NT 8-column tiles; K chunks c, c + SGS, ... summed by a fixed tree; loops unrolled (+15-20%).
 template <int S, int NT, int RT, bool H>
 inline void tf_sq_tiles(const device uint4* X, const device uint* W, const device bfloat* SC, const device bfloat* BI,
-                        constant TfSqArgs& a, device bfloat* OUT, const device uint* FL, uint sgi, uint sgs, uint lane,
-                        uint3 tg, threadgroup float* red) {
+                        constant TfSqArgs& a, device bfloat* OUT, const device uint* FL, const device float* XS, uint sgi,
+                        uint sgs, uint lane, uint3 tg, threadgroup float* red) {
   const int K = a.K, N = a.N, R = a.R, G = K / 64, SGS = int(sgs);
   const float one = a.one;
   const int sg = int(sgi);
@@ -57,6 +84,7 @@ inline void tf_sq_tiles(const device uint4* X, const device uint* W, const devic
   const int nb = int(tg.x) * (8 * NT);
   const int rb = int(tg.y) * (8 * RT);
   const device uint2* W2 = (const device uint2*)W;
+  const device uint4* XH = H ? (const device uint4*)(XS + tf_sq_sum_words(R, G)) : nullptr;
   int wrow[NT];
   #pragma unroll
   for (int t = 0; t < NT; t++) wrow[t] = min(nb + 8 * t + fm, N - 1);
@@ -80,6 +108,10 @@ inline void tf_sq_tiles(const device uint4* X, const device uint* W, const devic
       float xs0[RT], xs1[RT];
       #pragma unroll
       for (int rt = 0; rt < RT; rt++) {
+        if (H) {  // the prepass's sums; X is read below, on the fp32 path only
+          xs0[rt] = XS[size_t(xr0[rt]) * G + g]; xs1[rt] = XS[size_t(xr1[rt]) * G + g];
+          continue;
+        }
         xa[rt] = X[size_t(xr0[rt]) * (K / 8) + 8 * g + fm];
         xb[rt] = X[size_t(xr1[rt]) * (K / 8) + 8 * g + fm];
         float v = tf_sq_sum8(xa[rt], one), u = tf_sq_sum8(xb[rt], one);
@@ -96,13 +128,20 @@ inline void tf_sq_tiles(const device uint4* X, const device uint* W, const devic
       // H, tiles tf_sq_fits marked: codes q 2^-12 (0x3400 | q less 0.25) times half X; exact, P 2^-12 of fp32's
       const bool fast = H && FL[(rb / 16) * G + g] != 0u;
       if (fast) {
+        uint4 hq0[RT], hq1[RT];  // the prepass's halves: (row xr0, row xr0 + 1) at each of this lane's 8 inputs
+        #pragma unroll
+        for (int rt = 0; rt < RT; rt++) {
+          const size_t at = ((size_t(xr0[rt]) / 2) * K + 64 * g + 8 * fm) / 4;
+          hq0[rt] = XH[at]; hq1[rt] = XH[at + 1];
+        }
         #pragma unroll
         for (int s = 0; s < 8; s++) {
           simdgroup_matrix<half, 8, 8> bm[RT];
           #pragma unroll
           for (int rt = 0; rt < RT; rt++) {
-            bm[rt].thread_elements()[0] = half(tf_sq_bf8(xa[rt], s));
-            bm[rt].thread_elements()[1] = half(tf_sq_bf8(xb[rt], s));
+            const half2 v = as_type<half2>(s < 4 ? hq0[rt][s] : hq1[rt][s - 4]);
+            bm[rt].thread_elements()[0] = v.x;
+            bm[rt].thread_elements()[1] = v.y;
           }
           #pragma unroll
           for (int t = 0; t < NT; t++) {
@@ -113,7 +152,13 @@ inline void tf_sq_tiles(const device uint4* X, const device uint* W, const devic
             for (int rt = 0; rt < RT; rt++) simdgroup_multiply_accumulate(P[rt][t], am, bm[rt], P[rt][t]);
           }
         }
-      } else
+      } else {
+      if (H)
+        #pragma unroll
+        for (int rt = 0; rt < RT; rt++) {
+          xa[rt] = X[size_t(xr0[rt]) * (K / 8) + 8 * g + fm];
+          xb[rt] = X[size_t(xr1[rt]) * (K / 8) + 8 * g + fm];
+        }
       #pragma unroll
       for (int s = 0; s < 8; s++) {
         const float ps = tf_sq_pre(s);
@@ -132,6 +177,7 @@ inline void tf_sq_tiles(const device uint4* X, const device uint* W, const devic
           #pragma unroll
           for (int rt = 0; rt < RT; rt++) simdgroup_multiply_accumulate(P[rt][t], am, bm[rt], P[rt][t]);
         }
+      }
       }
       #pragma unroll
       for (int t = 0; t < NT; t++) {
@@ -191,10 +237,10 @@ template <int S, int NT, int RT>
                           uint lane [[thread_index_in_simdgroup]],
                           uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup float red[S > 1 ? S * RT * NT * 64 : 1];
-  tf_sq_tiles<S, NT, RT, false>(X, W, SC, BI, a, OUT, nullptr, sgi, sgs, lane, tg, red);
+  tf_sq_tiles<S, NT, RT, false>(X, W, SC, BI, a, OUT, nullptr, nullptr, sgi, sgs, lane, tg, red);
 }
 
-// tf_sq_mma's bits through half operands where tf_sq_fits's words (FL) allow.
+// tf_sq_mma's bits through half operands where tf_sq_fits's words (FL) allow, X's sums and halves from tf_sq_prep_h.
 template <int S, int NT, int RT>
 [[kernel]] void tf_sq_mmh(const device uint4* X [[buffer(0)]],
                           const device uint* W [[buffer(1)]],
@@ -203,25 +249,20 @@ template <int S, int NT, int RT>
                           constant TfSqArgs& a [[buffer(4)]],
                           device bfloat* OUT [[buffer(5)]],
                           const device uint* FL [[buffer(6)]],
+                          const device float* XS [[buffer(7)]],
                           uint sgi [[simdgroup_index_in_threadgroup]],
                           uint sgs [[simdgroups_per_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]],
                           uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup float red[S > 1 ? S * RT * NT * 64 : 1];
-  tf_sq_tiles<S, NT, RT, true>(X, W, SC, BI, a, OUT, FL, sgi, sgs, lane, tg, red);
+  tf_sq_tiles<S, NT, RT, true>(X, W, SC, BI, a, OUT, FL, XS, sgi, sgs, lane, tg, red);
 }
 
-// tf_sq_mma's bits with P adjacent K chunks a simdgroup, summed by the tree's first levels in registers: wider tiles.
-template <int S, int NT, int RT, int P>
-[[kernel]] void tf_sq_mmp(const device uint4* X [[buffer(0)]],
-                          const device uint* W [[buffer(1)]],
-                          const device bfloat* SC [[buffer(2)]],
-                          const device bfloat* BI [[buffer(3)]],
-                          constant TfSqArgs& a [[buffer(4)]],
-                          device bfloat* OUT [[buffer(5)]],
-                          uint sgi [[simdgroup_index_in_threadgroup]],
-                          uint lane [[thread_index_in_simdgroup]],
-                          uint3 tg [[threadgroup_position_in_grid]]) {
+// tf_sq_mma's bits with P adjacent K chunks a simdgroup, the tree's first levels in registers; XP: tf_sq_prep_s's sums.
+template <int S, int NT, int RT, int P, bool XP>
+inline void tf_sq_pairs(const device uint4* X, const device uint* W, const device bfloat* SC, const device bfloat* BI,
+                        constant TfSqArgs& a, device bfloat* OUT, const device float* XS, uint sgi, uint lane, uint3 tg,
+                        threadgroup float* red) {
   constexpr int SG = S / P;
   const int K = a.K, N = a.N, R = a.R, G = K / 64;
   const float one = a.one;
@@ -231,7 +272,6 @@ template <int S, int NT, int RT, int P>
   const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
   const int nb = int(tg.x) * (8 * NT);
   const int rb = int(tg.y) * (8 * RT);
-  threadgroup float red[SG > 1 ? SG * RT * NT * 64 : 1];
   const device uint2* W2 = (const device uint2*)W;
   int wrow[NT];
   #pragma unroll
@@ -263,6 +303,10 @@ template <int S, int NT, int RT, int P>
       for (int rt = 0; rt < RT; rt++) {
         xa[rt] = X[size_t(xr0[rt]) * (K / 8) + 8 * g + fm];
         xb[rt] = X[size_t(xr1[rt]) * (K / 8) + 8 * g + fm];
+        if (XP) {
+          xs0[rt] = XS[size_t(xr0[rt]) * G + g]; xs1[rt] = XS[size_t(xr1[rt]) * G + g];
+          continue;
+        }
         float v = tf_sq_sum8(xa[rt], one), u = tf_sq_sum8(xb[rt], one);
         v = fma(simd_shuffle_xor(v, ushort(2)), one, v); u = fma(simd_shuffle_xor(u, ushort(2)), one, u);
         v = fma(simd_shuffle_xor(v, ushort(4)), one, v); u = fma(simd_shuffle_xor(u, ushort(4)), one, u);
@@ -347,6 +391,36 @@ template <int S, int NT, int RT, int P>
     const int row = rb + 8 * rt + (lq & 2) * 2 + (l % 2) * 2 + e, n = nb + 8 * t + (lq & 4) + ((l / 2) % 4);
     if (row < R && n < N) OUT[size_t(row) * N + n] = bfloat(v[0]);
   }
+}
+
+template <int S, int NT, int RT, int P>
+[[kernel]] void tf_sq_mmp(const device uint4* X [[buffer(0)]],
+                          const device uint* W [[buffer(1)]],
+                          const device bfloat* SC [[buffer(2)]],
+                          const device bfloat* BI [[buffer(3)]],
+                          constant TfSqArgs& a [[buffer(4)]],
+                          device bfloat* OUT [[buffer(5)]],
+                          uint sgi [[simdgroup_index_in_threadgroup]],
+                          uint lane [[thread_index_in_simdgroup]],
+                          uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float red[S / P > 1 ? S / P * RT * NT * 64 : 1];
+  tf_sq_pairs<S, NT, RT, P, false>(X, W, SC, BI, a, OUT, nullptr, sgi, lane, tg, red);
+}
+
+// tf_sq_mmp with X's group sums from tf_sq_prep_s.
+template <int S, int NT, int RT, int P>
+[[kernel]] void tf_sq_mmx(const device uint4* X [[buffer(0)]],
+                          const device uint* W [[buffer(1)]],
+                          const device bfloat* SC [[buffer(2)]],
+                          const device bfloat* BI [[buffer(3)]],
+                          constant TfSqArgs& a [[buffer(4)]],
+                          device bfloat* OUT [[buffer(5)]],
+                          const device float* XS [[buffer(7)]],
+                          uint sgi [[simdgroup_index_in_threadgroup]],
+                          uint lane [[thread_index_in_simdgroup]],
+                          uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float red[S / P > 1 ? S / P * RT * NT * 64 : 1];
+  tf_sq_pairs<S, NT, RT, P, true>(X, W, SC, BI, a, OUT, XS, sgi, lane, tg, red);
 }
 
 // 1-2 rows over the same weight loads: each lane runs one chunk of NR outputs with the MMA kernel's chains.
@@ -451,7 +525,10 @@ TF_SQ_MMA(8, 1, 1) TF_SQ_MMA(8, 2, 1) TF_SQ_MMA(8, 4, 1) TF_SQ_MMA(8, 1, 2) TF_S
 TF_SQ_MMA(16, 1, 1) TF_SQ_MMA(16, 2, 1) TF_SQ_MMA(16, 4, 1) TF_SQ_MMA(16, 1, 2) TF_SQ_MMA(16, 2, 2)
 TF_SQ_MMA(32, 1, 1) TF_SQ_MMA(32, 2, 1) TF_SQ_MMA(32, 1, 2)
 #define TF_SQ_MMP(S, NT, RT, P) template [[host_name("tf_sq_mmp_" #S "_" #NT "_" #RT "_" #P)]] [[kernel]] decltype(tf_sq_mmp<S, NT, RT, P>) tf_sq_mmp<S, NT, RT, P>;
-TF_SQ_MMP(16, 4, 2, 2)
+#define TF_SQ_MMX(S, NT, RT, P) template [[host_name("tf_sq_mmx_" #S "_" #NT "_" #RT "_" #P)]] [[kernel]] decltype(tf_sq_mmx<S, NT, RT, P>) tf_sq_mmx<S, NT, RT, P>;
+TF_SQ_MMP(16, 4, 2, 2) TF_SQ_MMX(16, 4, 2, 2)
+template [[host_name("tf_sq_prep_s")]] [[kernel]] decltype(tf_sq_prep<false>) tf_sq_prep<false>;
+template [[host_name("tf_sq_prep_h")]] [[kernel]] decltype(tf_sq_prep<true>) tf_sq_prep<true>;
 #define TF_SQ_SCALAR(S, NR, XB, RS) template [[host_name("tf_sq_scalar_" #S "_" #NR "_" #RS)]] [[kernel]] decltype(tf_sq_scalar<S, NR, XB, RS>) tf_sq_scalar<S, NR, XB, RS>;
 TF_SQ_SCALAR(8, 1, 32, 1) TF_SQ_SCALAR(8, 2, 32, 1) TF_SQ_SCALAR(8, 1, 16, 2) TF_SQ_SCALAR(8, 2, 16, 2)
 TF_SQ_SCALAR(16, 1, 32, 1) TF_SQ_SCALAR(16, 2, 32, 1) TF_SQ_SCALAR(16, 1, 16, 2) TF_SQ_SCALAR(16, 2, 16, 2)

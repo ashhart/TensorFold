@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const exlr8 = @import("exlr8");
 const pull = @import("pull.zig");
+const Auth = @import("pull_auth.zig").Auth;
 const ranged = @import("pull_parts.zig");
 const single = @import("pull_file.zig");
 const runs = @import("pull_runs.zig");
@@ -18,14 +19,16 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
     const at = std.mem.indexOfScalar(u8, spec, '@');
     const repo = if (at) |i| spec[0..i] else spec;
     const revision = if (at) |i| spec[i + 1 ..] else "main";
-    const endpoint = pull.envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
+    const auth = try Auth.init(a, io, env, err_out) orelse return 1;
     var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
-    const sha = pull.resolveRevision(a, &client, out, endpoint, repo, revision) catch |e| {
+    const sha = pull.resolveRevision(a, &client, out, auth, repo, revision) catch |e| {
+        if (e == error.HubDenied) return auth.refuse(err_out, repo);
         try err_out.print("{s}@{s}: the hub did not name a commit ({t})\n", .{ repo, revision, e });
         return 1;
     };
-    const entries = pull.listTree(a, &client, endpoint, repo, sha) catch |e| {
+    const entries = pull.listTree(a, &client, auth, repo, sha) catch |e| {
+        if (e == error.HubDenied) return auth.refuse(err_out, repo);
         try err_out.print("{s}@{s}: the hub's file tree is unreachable ({t})\n", .{ repo, revision, e });
         return 1;
     };
@@ -48,7 +51,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
     }
     try out.print("[tensorfold] EXLR8 {s}, profile {s}, node {d}/{d} (halves {d}-{d} of every expert) into {s}\n", .{ repo, o.profile, o.node.rank, o.node.ranks, o.node.first(), o.node.end() - 1, o.dir });
     try out.flush();
-    const files = fetchWhole(a, io, &client, out, err_out, endpoint, repo, sha, o.dir, whole.items) catch |e| {
+    const files = fetchWhole(a, io, &client, out, err_out, auth, repo, sha, o.dir, whole.items) catch |e| {
+        if (e == error.HubDenied) return auth.refuse(err_out, repo);
         try err_out.print("  a whole file failed ({t}); pull again to resume\n", .{e});
         return 1;
     };
@@ -65,14 +69,15 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
     defer p.deinit(io);
     const targets = try a.alloc(runs.Target, p.targets.items.len);
     for (targets, p.targets.items) |*t, pt| t.* = .{
-        .url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ endpoint, repo, sha, pt.rel }),
+        .url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, pt.rel }),
         .path = try std.fs.path.join(a, &.{ o.dir, pt.rel }),
         .size = pt.size,
     };
     const todo = try p.missing(a, io, targets);
     try out.print("  {d} width files, {d} halves ({d:.2} GiB); {d} of {d} runs to fetch\n", .{ targets.len, p.units.items.len, gib(p.expert_bytes), todo.len, p.runs.items.len });
     try out.flush();
-    runs.fetch(a, io, targets, todo, p.check(), out) catch |e| {
+    runs.fetch(a, io, targets, todo, p.check(), auth, out) catch |e| {
+        if (e == error.HubDenied) return auth.refuse(err_out, repo);
         try err_out.print("  the expert halves failed ({t}); pull again to fetch only what is missing\n", .{e});
         return 1;
     };
@@ -101,7 +106,7 @@ fn gib(n: u64) f64 {
 }
 
 /// Every file the node needs whole, each equal to the hub's sha256 (LFS) or git blob sha1; returns how many.
-pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, sha: []const u8, dir: []const u8, whole: []const single.Entry) !u32 {
+pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, auth: Auth, repo: []const u8, sha: []const u8, dir: []const u8, whole: []const single.Entry) !u32 {
     const w = std.Io.Dir.cwd();
     const tmp = try std.fs.path.join(a, &.{ dir, ".pull" });
     try w.createDirPath(io, tmp);
@@ -111,21 +116,21 @@ pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.
         const final = try std.fs.path.join(a, &.{ dir, e.path });
         if (std.fs.path.dirname(final)) |parent| try w.createDirPath(io, parent);
         if (try present(a, io, final, e)) continue;
-        const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ endpoint, repo, sha, e.path });
+        const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, e.path });
         if (e.sha256 != null) {
             // the storage link, not the hub's: pieces then skip a redirect each
-            const link = try runs.resolve(a, client, url);
+            const link = try runs.resolve(a, client, auth, url);
             try big.append(a, .{ .url = link, .path = try std.fmt.allocPrint(a, "{s}.part", .{final}), .size = e.size });
             try big_entries.append(a, e);
             continue;
         }
-        const got = try single.downloadRetrying(a, io, client, out, url, tmp, e);
+        const got = try single.downloadRetrying(a, io, client, auth, out, url, tmp, e);
         try w.rename(try std.fs.path.join(a, &.{ tmp, got }), w, final, io);
     }
     if (big.items.len > 0) {
         try out.print("  {d} whole files in {d} MiB pieces\n", .{ big.items.len, whole_piece >> 20 });
         try out.flush();
-        try ranged.fetch(a, io, big.items, whole_piece, out);
+        try ranged.fetch(a, io, big.items, whole_piece, auth, out);
         for (big.items, big_entries.items) |f, e| {
             const d = try ranged.digest(a, io, f.path, f.size);
             if (!std.mem.eql(u8, &d, &e.sha256.?)) {

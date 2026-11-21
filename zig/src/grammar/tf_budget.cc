@@ -37,6 +37,9 @@ using Names = std::unordered_map<std::vector<int32_t>, int32_t, VecHash>;
 // The chart's parent sets loop (left recursion), or a replayed path was refused: no budget mask then.
 struct Uncovered {};
 
+// Exploring took all the work it may: the grammar is refused, with no mask from the states walked so far.
+struct Spent {};
+
 int32_t Find(Names& names, std::vector<int32_t>&& key, bool add) {
   auto it = names.find(key);
   if (it != names.end()) return it->second;
@@ -121,10 +124,13 @@ class Probe;
 // One grammar's states: named by their chart, their byte steps, token successors and fewest tokens to complete.
 class Tables {
  public:
-  Tables(Grammar g, std::shared_ptr<const Trie> trie) : grammar(std::move(g)), trie(std::move(trie)) {}
+  Tables(Grammar g, std::shared_ptr<const Trie> trie, Limits limits)
+      : grammar(std::move(g)), trie(std::move(trie)), limits(limits) {}
 
   Grammar grammar;
   std::shared_ptr<const Trie> trie;
+  Limits limits;
+  int64_t work = 0;                             // the steps Explore has taken of limits.work
   Names items, parents, states;
   std::vector<uint8_t> done, explored;          // per state: the reply is complete there; its tokens were walked
   std::vector<uint16_t> next;                   // per state and byte
@@ -133,6 +139,7 @@ class Tables {
   std::vector<int32_t> need, worst;             // fewest tokens to complete; the most any one token leaves
   int32_t most = 0;
   bool ok = false;
+  bool spent = false;  // exploring passed limits.work: refused, never masked in part
   std::once_flag once;
 
   // The state named by `key` ({complete, items...}), -1 unknown, kUnknown past kMaxStates.
@@ -155,6 +162,9 @@ class Tables {
 
  private:
   bool Covered() const;
+  void Drop();
+  void Spend(int64_t n);
+  bool Advance(Probe& p, uint8_t b);
   void Place(Probe& p, int32_t c);
   void Need();
 };
@@ -179,6 +189,12 @@ class Probe : public EarleyParser {
   }
 
   const std::vector<uint8_t>& Path() const { return path_; }
+
+  // The states in the latest row: those a byte is scanned against and those waiting on a rule.
+  int64_t Row() {
+    return static_cast<int64_t>(scanable_state_history_[scanable_state_history_.size() - 1].size() +
+                                rule_id_to_completable_states_[rule_id_to_completable_states_.size() - 1].size());
+  }
 
   // The latest row's key: whether the reply is complete, then its states' names; false when one is unknown.
   bool Key(Tables& t, bool add, std::vector<int32_t>& key) {
@@ -241,6 +257,20 @@ bool Tables::Covered() const {
   return true;
 }
 
+// Count n steps of exploring, Spent past limits.work. No clock is read: a grammar's count is the same on every machine.
+void Tables::Spend(int64_t n) {
+  work += n;
+  if (work > limits.work) throw Spent{};
+}
+
+// One byte into the probe, counted: a parser step costs about what 64 walk steps do, and 4 more for each row state.
+bool Tables::Advance(Probe& p, uint8_t b) {
+  Spend(64 + 4 * p.Row());
+  if (!p.Step(b)) return false;
+  Spend(4 * p.Row());
+  return true;
+}
+
 // Put the probe at state c by the bytes it was first reached with.
 void Tables::Place(Probe& p, int32_t c) {
   std::vector<uint8_t> want;
@@ -251,7 +281,7 @@ void Tables::Place(Probe& p, int32_t c) {
   while (keep < have.size() && keep < want.size() && have[keep] == want[keep]) keep++;
   p.Back(have.size() - keep);
   for (size_t k = keep; k < want.size(); k++)
-    if (!p.Step(want[k])) throw Uncovered{};
+    if (!Advance(p, want[k])) throw Uncovered{};
 }
 
 // Breadth first from the root: each state's tokens walked once, its byte steps probed as the walk first needs them.
@@ -263,6 +293,7 @@ void Tables::Explore() {
     if (!probe.Key(*this, true, key)) return;
     std::deque<int32_t> queue{State(std::move(key), true)};
     std::vector<uint8_t> queued(1, 1);
+    std::vector<int32_t> ends;  // the state each token of one walk ends in
     while (!queue.empty()) {
       int32_t c = queue.front();
       queue.pop_front();
@@ -270,6 +301,7 @@ void Tables::Explore() {
       size_t base = 0;
       const auto& vocab = trie->info.GetSortedDecodedVocab();
       auto step = [&](int32_t y, uint8_t b, size_t i, size_t d) -> int32_t {
+        Spend(1);
         size_t at = static_cast<size_t>(y) * 256 + b;
         if (next[at] != kOpen) return Decode(next[at]);
         if (!placed) {
@@ -282,18 +314,19 @@ void Tables::Explore() {
         while (keep < have && keep < d && probe.Path()[base + keep] == static_cast<uint8_t>(s[keep])) keep++;
         probe.Back(have - keep);
         for (size_t k = keep; k < d; k++)
-          if (!probe.Step(static_cast<uint8_t>(s[k]))) throw Uncovered{};
+          if (!Advance(probe, static_cast<uint8_t>(s[k]))) throw Uncovered{};
         int32_t out = -1;
-        if (probe.Step(b)) {
+        if (Advance(probe, b)) {
           if (!probe.Key(*this, true, key)) throw Uncovered{};
           out = State(std::move(key), true, y, b);
         }
         next[at] = Encode(out);
         return out;
       };
-      std::vector<int32_t> out;
+      ends.clear();
       trie->Walk(c, step, [&](size_t, int32_t y) {
-        out.push_back(y);
+        Spend(1);
+        ends.push_back(y);
         if (y < 0) return;
         if (static_cast<size_t>(y) >= queued.size()) queued.resize(y + 1, 0);
         if (!queued[y]) {
@@ -301,15 +334,25 @@ void Tables::Explore() {
           queue.push_back(y);
         }
       });
-      std::sort(out.begin(), out.end());
-      out.erase(std::unique(out.begin(), out.end()), out.end());
-      succ[c] = std::move(out);
+      std::sort(ends.begin(), ends.end());
+      // copied at its own size: moved, every state would keep the room `ends` has for one entry a token
+      succ[c].assign(ends.begin(), std::unique(ends.begin(), ends.end()));
       explored[c] = 1;
     }
-    Need();
-    ok = true;
+  } catch (const Spent&) {
+    spent = true;  // partial tables would loosen masks where main's are exact: none go live
+    return Drop();
   } catch (const Uncovered&) {
+    return Drop();
   }
+  Need();
+  ok = true;
+}
+
+// A grammar with no masks keeps none of what exploring it named.
+void Tables::Drop() {
+  items = {}, parents = {}, states = {};
+  done = {}, explored = {}, next = {}, from = {}, succ = {};
 }
 
 // Fewest tokens to complete, backwards from complete states; an unexplored state counts as one token from it.
@@ -347,9 +390,9 @@ void Tables::Need() {
   }
 }
 
-bool Ready(Tables& t) {
+int Ready(Tables& t) {
   std::call_once(t.once, [&] { t.Explore(); });
-  return t.ok;
+  return t.ok ? 1 : t.spent ? 2 : 0;
 }
 
 std::shared_ptr<Tables> Cache::Get(const xgrammar::CompiledGrammar& g) {
@@ -360,10 +403,15 @@ std::shared_ptr<Tables> Cache::Get(const xgrammar::CompiledGrammar& g) {
     recent_.splice(recent_.begin(), recent_, it);
     return it->second;
   }
-  auto t = std::make_shared<Tables>(g.GetGrammar(), trie_);
+  auto t = std::make_shared<Tables>(g.GetGrammar(), trie_, limits_);
   recent_.emplace_front(g, t);
   if (recent_.size() > 8) recent_.pop_back();
   return t;
+}
+
+void Cache::Limit(Limits limits) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  limits_ = limits;
 }
 
 struct Follower::State {
@@ -413,7 +461,7 @@ void Follower::Rollback(int n) { s_->taken.resize(s_->taken.size() - std::min<si
 int Follower::Mask(int32_t* words, int n, int left) {
   Tables& t = *s_->t;
   if (left < 1) return 0;
-  if (!Ready(t)) return 1;
+  if (Ready(t) != 1) return 1;
   if (left - 1 >= t.most) return 0;
   if (!s_->Sync()) return 1;
   if (!s_->probe.Key(t, false, s_->key)) return 0;

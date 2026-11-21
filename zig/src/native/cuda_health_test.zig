@@ -34,7 +34,7 @@ pub fn check(comptime Host: type, comptime readiness: anytype, comptime serve: a
     try std.testing.expect(h.health == null);
     try std.testing.expect(h.startup_phase == null);
     readiness(h, Family);
-    try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 2 }, null);
+    try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 2 }, null, 0);
     try std.testing.expectEqual(@as(usize, 2), family.notes);
     try std.testing.expectEqual(Phase.calibration, family.phases[0]);
     try std.testing.expectEqual(Phase.ready, family.phases[1]);
@@ -86,7 +86,7 @@ fn eager(comptime Host: type, comptime serve: anytype) !void {
     h.* = .{ .gpa = gpa, .gpu = null, .family = &probe, .release = Probe.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .served = .{ .backend = backend.backend(), .facts = facts, .stream_bytes = 0, .prepare = .{ .ctx = &probe, .run = Probe.run } } };
     Probe.opening = true;
     defer Probe.opening = false;
-    try serve(h, std.testing.io, facts, 64, .{ .lanes = 1 }, null);
+    try serve(h, std.testing.io, facts, 64, .{ .lanes = 1 }, null, 0);
     defer {
         h.host.stop();
         h.core.deinit();
@@ -142,7 +142,7 @@ pub fn context(comptime H: type, comptime serve: anytype) !void {
     defer backend.deinit();
     var dummy: u8 = 0;
     var h: H = .{ .gpa = a, .gpu = &gpu, .family = &dummy, .release = undefined, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
-    try serve(&h, std.testing.io, .{}, 1, .{ .lanes = 1 }, null);
+    try serve(&h, std.testing.io, .{}, 1, .{ .lanes = 1 }, null, 0);
     defer {
         h.host.stop();
         h.core.deinit();
@@ -189,7 +189,7 @@ fn failedStartup(comptime Host: type, comptime readiness: anytype, comptime serv
     const facts: lanes.Model = .{ .exact_width = 8 };
     h.* = .{ .gpa = a, .gpu = null, .family = &family, .release = Family.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .served = .{ .backend = backend.backend(), .facts = facts, .stream_bytes = 0, .prepare = .{ .ctx = &family, .run = Family.prepare } } };
     readiness(h, Family);
-    try std.testing.expectError(error.InjectedCalibration, serve(h, std.testing.io, facts, 8, .{ .lanes = 2 }, null));
+    try std.testing.expectError(error.InjectedCalibration, serve(h, std.testing.io, facts, 8, .{ .lanes = 2 }, null, 0));
     try std.testing.expectEqual(@as(usize, 2), family.count);
     try std.testing.expectEqualSlices(Phase, &.{ .calibration, .failed }, &family.phases);
 }

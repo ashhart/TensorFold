@@ -74,19 +74,28 @@ fn versionName(s: []const u8) bool {
     return nameOk(s, 32, "+");
 }
 
+/// Bytes after `https://` and `host`, both matched without case. The path is not part of this.
+fn afterHttpsHost(url: []const u8, host: []const u8) ?[]const u8 {
+    const mark = "https://";
+    if (url.len < mark.len + host.len) return null;
+    if (!std.ascii.eqlIgnoreCase(url[0..mark.len], mark)) return null;
+    if (!std.ascii.eqlIgnoreCase(url[mark.len .. mark.len + host.len], host)) return null;
+    return url[mark.len + host.len ..];
+}
+
 /// Whether `url` is one named package's JSON on PyPI, npm or crates.io, with no query; a name is 64 bytes at most.
 pub fn registry(url: []const u8) bool {
     if (std.mem.indexOfAny(u8, url, "?#") != null) return false;
-    if (std.mem.startsWith(u8, url, "https://pypi.org/pypi/")) {
-        var parts = std.mem.splitScalar(u8, url["https://pypi.org/pypi/".len..], '/');
+    if (afterHttpsHost(url, "pypi.org")) |rest| if (std.mem.startsWith(u8, rest, "/pypi/")) {
+        var parts = std.mem.splitScalar(u8, rest["/pypi/".len..], '/');
         const name = parts.next() orelse return false;
         const second = parts.next() orelse return false;
-        if (std.mem.eql(u8, second, "json")) return packageName(name) and parts.next() == null;
+        if (std.mem.eql(u8, second, "json")) return packageName(name) and parts.next() == null; // path exact
         const third = parts.next() orelse return false;
         return packageName(name) and versionName(second) and std.mem.eql(u8, third, "json") and parts.next() == null;
-    }
-    if (std.mem.startsWith(u8, url, "https://registry.npmjs.org/")) {
-        var rest = url["https://registry.npmjs.org/".len..];
+    };
+    if (afterHttpsHost(url, "registry.npmjs.org")) |at| if (std.mem.startsWith(u8, at, "/")) {
+        var rest = at[1..];
         if (std.mem.startsWith(u8, rest, "@")) {
             const slash = std.mem.indexOfScalar(u8, rest, '/') orelse std.ascii.findIgnoreCase(rest, "%2f") orelse return false;
             if (!packageName(rest[1..slash])) return false;
@@ -95,15 +104,15 @@ pub fn registry(url: []const u8) bool {
         var parts = std.mem.splitScalar(u8, rest, '/');
         const name = parts.next() orelse return false;
         const after = parts.next();
-        if (after) |v| if (!(std.mem.eql(u8, v, "latest") or versionName(v))) return false;
+        if (after) |v| if (!(std.mem.eql(u8, v, "latest") or versionName(v))) return false; // path exact
         return packageName(name) and parts.next() == null;
-    }
-    if (std.mem.startsWith(u8, url, "https://crates.io/api/v1/crates/")) {
-        var parts = std.mem.splitScalar(u8, url["https://crates.io/api/v1/crates/".len..], '/');
+    };
+    if (afterHttpsHost(url, "crates.io")) |rest| if (std.mem.startsWith(u8, rest, "/api/v1/crates/")) {
+        var parts = std.mem.splitScalar(u8, rest["/api/v1/crates/".len..], '/');
         const name = parts.next() orelse return false;
         if (parts.next()) |v| if (!versionName(v)) return false;
         return packageName(name) and parts.next() == null;
-    }
+    };
     return false;
 }
 
@@ -132,4 +141,22 @@ test "a request reads only what it was shown, and registry json for one package"
     try std.testing.expect(!s.allows(a, "https://evil.example/"));
     for ([_][]const u8{ "https://pypi.org/pypi/httpx/json", "https://pypi.org/pypi/httpx/0.28.1/json", "https://registry.npmjs.org/react", "https://registry.npmjs.org/react/latest", "https://registry.npmjs.org/@types/node/22.0.0", "https://registry.npmjs.org/@scope%2Fpkg", "https://crates.io/api/v1/crates/serde", "https://crates.io/api/v1/crates/serde/1.0.210" }) |u| try std.testing.expect(registry(u));
     for ([_][]const u8{ "https://pypi.org/pypi/httpx/json?x=1", "https://pypi.org/pypi/httpx", "https://pypi.org/simple/httpx/", "https://registry.npmjs.org/react/latest/extra", "https://registry.npmjs.org/a%2Fb", "https://crates.io/api/v1/crates/serde/1.0/download", "https://pypi.org/pypi/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/json", "http://pypi.org/pypi/httpx/json" }) |u| try std.testing.expect(!registry(u));
+}
+
+test "pypi registry json allows a host whose letters differ" {
+    try std.testing.expect(registry("https://PyPI.org/pypi/httpx/json"));
+    try std.testing.expect(registry("https://PyPI.org/pypi/httpx/0.28.1/json"));
+    try std.testing.expect(!registry("https://pypi.org/pypi/httpx/JSON"));
+    try std.testing.expect(!registry("https://pypi.org/pypi/httpx/0.28.1/JSON"));
+    try std.testing.expect(!registry("https://pypi.org/PYPI/httpx/json"));
+}
+
+test "npm registry allows a host whose letters differ" {
+    try std.testing.expect(registry("https://Registry.npmjs.org/react"));
+    try std.testing.expect(registry("https://Registry.npmjs.org/react/latest"));
+}
+
+test "crates registry allows a host whose letters differ" {
+    try std.testing.expect(registry("https://Crates.io/api/v1/crates/serde"));
+    try std.testing.expect(registry("https://Crates.io/api/v1/crates/serde/1.0.210"));
 }

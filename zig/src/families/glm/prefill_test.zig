@@ -252,13 +252,13 @@ test "glm prefill: an image handoff failure invalidates the old owner before cha
     second.images = &images;
     var io: Images = .{ .image_owner = &first };
     const input = @import("prompt_images.zig");
-    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1));
+    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1, second.cached));
     try std.testing.expect(io.image_owner == null and !io.inject);
     io.fail = false;
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expect(io.image_owner == &first and io.inject);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
 }
 test "glm prefill: a resumed image prompt sends the tower only the images its restored state does not hold" {
@@ -283,7 +283,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     for ([_]u32{ 0, 3, 5 }, [_]usize{ 2, 1, 1 }) |cached, n| {
         var io: Images = .{};
         s.cached = cached;
-        try input.prepare(&io, &s, 0);
+        try input.prepare(&io, &s, 0, s.cached);
         try std.testing.expectEqual(@as(usize, 1), io.writes);
         try std.testing.expectEqual(n, io.sent.len);
         try std.testing.expectEqual(images[2 - n].at, io.sent[0].at);
@@ -292,7 +292,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     // kept past every image: no tower run, and another prompt's rows stay its own
     var io: Images = .{ .image_owner = &other };
     s.cached = 7;
-    try input.prepare(&io, &s, 0);
+    try input.prepare(&io, &s, 0, s.cached);
     try std.testing.expectEqual(@as(usize, 0), io.writes);
     try std.testing.expect(io.image_owner == &other);
 }
@@ -484,10 +484,10 @@ test "glm prefill: the flag share keeps every CUDA chunk start on the grid while
     @memset(tokens, 7);
     var s = try Stream.init(a, .{ .id = "grid", .prompt = tokens, .max_new = 4, .chunks = &.{ 2048, 4096 } });
     defer s.deinit(a);
-    var hint: u32 = hostfill.capRows(&host); // the host's prefill_step hint: 0 for a gated-off family
+    var hint: u32 = hostfill.capRows(&host, s.prompt_len -| s.cached); // the host's prefill_step hint: 0 for a gated-off family
     try std.testing.expectEqual(@as(u32, 0), hint);
     while (!try fill.step(&f, &s, hint)) {
-        hint = hostfill.capRows(&host);
+        hint = hostfill.capRows(&host, s.prompt_len -| s.cached);
         try std.testing.expectEqual(@as(u32, 0), hint); // every step arrives uncapped: l.fill rides the grid
     }
     try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048; BadChunk never raised
@@ -507,7 +507,7 @@ test "glm prefill: a family that opts into chunk invariance gets the cap, and GL
     defer dec.deinit(a);
     try core.addStream(&dec);
     defer core.backend.release(&dec);
-    const hint = hostfill.capRows(&host);
+    const hint = hostfill.capRows(&host, dec.prompt_len -| dec.cached);
     try std.testing.expectEqual(hostfill.decode_cap_rows, hint); // opted in: the cap now reaches the driver
     const tokens = try a.alloc(u32, 5000);
     defer a.free(tokens);

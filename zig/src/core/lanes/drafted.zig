@@ -31,6 +31,7 @@ pub const Drafted = struct {
     firsts: std.ArrayList(u32) = .empty,
     /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
     held_on_target: bool = false,
+    first_rows: bool = false,
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -71,7 +72,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .decoding_rows = x.target.decoding_rows, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .decoding_rows = x.target.decoding_rows, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -80,7 +81,14 @@ pub const Drafted = struct {
         break :blk tables;
     };
 
-    fn vtableFor(planned: bool, steps: bool, cancels: bool) *const be.Backend.VTable {
+    const row_tables: [8]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned, cancellable[0], cancellable[1], cancellable[2], cancellable[3] };
+        for (&tables) |*v| v.first_row = firstRow;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool, rows: bool) *const be.Backend.VTable {
+        if (rows) return &row_tables[@as(usize, @intFromBool(cancels)) * 4 + @as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
@@ -101,6 +109,7 @@ pub const Drafted = struct {
         m.allocate_shared_drafts = true;
         m.drafts = @min(d.depth, if (target.exact_width > 1) target.exact_width - 1 else 0);
         m.mtp_step_ms = d.step_ms;
+        m.fixed_draft_block = d.fixed_block;
         m.draft_prior = d.prior;
         m.plain_guard = d.plain_guard;
         m.draft_streams = d.batched;
@@ -204,6 +213,10 @@ pub const Drafted = struct {
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return self(ptr).target.first(s, position);
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!@import("logprob.zig").Row {
+        return self(ptr).target.firstRow(s);
     }
 
     fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
@@ -311,6 +324,7 @@ pub const Drafted = struct {
                 pending = tok.*;
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
+                    // right after this stream's own prompt pass: a target keeping one pass's taps refuses another's
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
                     try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok), .propose = r.depth > 0 });
                     lane.rows = true;
@@ -342,6 +356,15 @@ pub const Drafted = struct {
         const grown = try x.drafter.tree(s, gpa) orelse return null;
         lane.tree_first = if (grown.tokens) |t| (if (t.len > 0) t[0] else null) else null;
         return grown;
+    }
+
+    /// A stream another driver decoded on the drafter's own state (a lone driver): the next draft absorbs and holds.
+    pub fn adopt(x: *Drafted, s: *Stream) !void {
+        if (!x.lanes.contains(s)) {
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+        }
+        x.lanes.putAssumeCapacity(s, .{ .rows = true });
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {

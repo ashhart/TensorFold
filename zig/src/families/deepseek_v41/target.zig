@@ -85,7 +85,7 @@ pub const GpuTarget = struct {
         if (slot < t.max_new.len) t.max_new[slot] = null;
         // a failed prompt leaves the slot empty on every rank, its pages and reservation back
         errdefer if (t.sessions != null) t.abandon(slot);
-        const at: usize = if (t.sessions) |ss| @intCast(try ss.resume_(ids, max_new)) else 0;
+        const at: usize = if (t.sessions) |ss| @intCast((try @import("request_admission.zig").resumeRequest(ss, ids, max_new orelse 0)).at) else 0;
         const rest = ids[at..];
         if (t.own_prefill and t.prompt_tail == .verify) {
             // the rows before the last token prefill; the last token is the pending row of the first verify window
@@ -160,10 +160,11 @@ pub const GpuTarget = struct {
         const ss = t.sessions orelse return .{};
         if (planned) |a| {
             const r = try ss.resumePlanned(ids, a.need, a.hit, a.spills);
+            if (r.damaged) try @import("request_admission.zig").afterMiss(ss, ids, max_new orelse 0);
             return .{ .at = r.at, .damaged = r.damaged };
         }
         const before = ss.stats.damaged;
-        const at = try ss.resume_(ids, max_new);
+        const at = (try @import("request_admission.zig").resumeRequest(ss, ids, max_new orelse 0)).at;
         return .{ .at = at, .damaged = ss.stats.damaged != before };
     }
 
@@ -180,7 +181,10 @@ pub const GpuTarget = struct {
         // the next round's piece of this prompt read ahead behind this one, up to the prompt's last token
         const last = ids.len - 1;
         if (end < last) try t.f.prefillAhead(ids[end..@min(last, end + (end - start))]);
-        try t.f.prefill(ids[start..end]);
+        t.f.prefill(ids[start..end]) catch |err| {
+            if (err == error.PoolExhausted) t.abandon(slot);
+            return err;
+        };
         const End = struct {
             target: *GpuTarget,
             slot: u32,
@@ -191,7 +195,10 @@ pub const GpuTarget = struct {
                 try e.target.handTaps(e.slot);
             }
         };
-        try @import("piece_handoff.zig").finish(End{ .target = t, .slot = slot }, pf.state(t.f).mode == .full, save and end >= ced.session_min);
+        @import("piece_handoff.zig").finish(End{ .target = t, .slot = slot }, pf.state(t.f).mode == .full, save and end >= ced.session_min) catch |err| {
+            if (err == error.PoolExhausted) t.abandon(slot);
+            return err;
+        };
     }
 
     fn finish(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32 {

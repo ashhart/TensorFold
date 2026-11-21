@@ -213,11 +213,15 @@ test "a cancelled local run saves its receipt, exits 130 and never publishes" {
     stop.request(.INT);
     const argv = try runArgs(&r, try f.url(a, ""), out);
     try std.testing.expectEqual(@as(u8, 130), try r.command(argv));
-    try std.testing.expect(f.count() == 0 and !r.has("Public upload preview"));
+    // The manifest and thinking fetches race the stop, so their count is not progress-independent.
+    try std.testing.expectEqual(@as(usize, 0), posts(f, "/submissions"));
+    try std.testing.expect(!r.has("Public upload preview"));
     stop.reset();
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
-    try std.testing.expectEqualStrings("cancelled", v.get("samples").?.array[0].get("error_code").?.string);
+    const samples = v.get("samples").?.array;
+    try std.testing.expectEqual(@as(usize, 1), samples.len);
+    try std.testing.expectEqualStrings("cancelled", samples[0].get("error_code").?.string);
 }
 
 test "attach and managed checks refuse before any request, and parse errors exit 2" {
@@ -292,8 +296,8 @@ pub fn managedWorld(a: std.mem.Allocator, chat_trickles: bool) !*fake.Fake {
     return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
         .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\": [{\"id\": \".tensorfold-benchmark\"}]}")}) },
-        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
-        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{if (chat_trickles) trickle.items else try fake.reply(a, true, 4, 15)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, false, 4, "")}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{if (chat_trickles) trickle.items else try fake.apart(a, true, 4, "")}) },
     }));
 }
 
@@ -302,8 +306,8 @@ pub fn draftedWorld(a: std.mem.Allocator, speculative: []const u8) !*fake.Fake {
     return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
         .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\": [{\"id\": \".tensorfold-benchmark\"}]}")}) },
-        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, false, 4, 15, speculative)}) },
-        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, true, 4, 15, speculative)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, false, 4, speculative)}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.apart(a, true, 4, speculative)}) },
     }));
 }
 

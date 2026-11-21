@@ -54,7 +54,9 @@ pub const Cache = struct {
         h.update(std.mem.asBytes(&version));
         for (sources) |s| h.update(s);
         h.update(&pack_digest);
-        h.update(std.mem.asBytes(&[_]u32{ key.rank, key.world, key.o_groups, @intFromBool(key.dspark), @intCast(key.blocks.len) }));
+        // canon's split is outside `sources`, so the key holds its result
+        const own = try @import("partition.zig").outputGroups(key.o_groups, key.rank, key.world);
+        h.update(std.mem.asBytes(&[_]u32{ key.rank, key.world, key.o_groups, @intFromBool(key.dspark), @intCast(key.blocks.len), own.lo, own.len }));
         h.update(std.mem.sliceAsBytes(key.blocks));
         var d: [32]u8 = undefined;
         h.final(&d);

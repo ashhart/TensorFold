@@ -8,6 +8,7 @@ pub const checkpoint = @import("checkpoint.zig");
 pub const weights = @import("weights.zig");
 pub const attention = @import("attention.zig");
 pub const attention_plan = @import("attention_plan.zig");
+pub const attention_join = @import("attention_join.zig");
 /// The tail attention's rewrite and check before M5, as the runner builds it (tf-qwen27-attention-precision reads it).
 pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
@@ -30,11 +31,8 @@ pub const moe_gpu = @import("moe_gpu.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
-pub const prompt_glue = @import("prompt_glue.zig");
-pub const prompt_gpu = @import("prompt_gpu.zig");
-pub const prompt_state = @import("prompt_state.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
-pub const prompt_state_gpu = @import("prompt_state_gpu.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
@@ -63,10 +61,9 @@ test {
     _ = model;
     _ = quant_gpu;
     _ = @import("quant_rows_test.zig");
+    _ = @import("prompt_tail.zig");
     _ = round_plan;
     _ = attention;
-    _ = prompt_glue;
-    _ = prompt_state;
     _ = prompt_marks;
     _ = config;
     _ = affine;
@@ -75,6 +72,7 @@ test {
     _ = weights;
     _ = @import("weights_test.zig");
     _ = @import("geometry_test.zig");
+    _ = @import("slot_pages_test.zig");
 }
 
 pub const residency = @import("residency.zig");

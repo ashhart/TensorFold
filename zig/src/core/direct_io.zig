@@ -78,7 +78,8 @@ fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread:
         if (n == 0) return error.EndOfFile;
         if (n > @as(isize, @intCast(ask))) return error.ReadFailed;
         const next = at + @as(usize, @intCast(n));
-        if (next <= got) return error.ReadFailed;
+        // only an aligned retry can make no progress: it read the same tail again, so the file ends inside the span
+        if (next <= got) return error.EndOfFile;
         got = next;
     }
     return buf[@intCast(offset - lo)..][0..len];
@@ -202,4 +203,13 @@ test "a short direct read is retried from the aligned boundary" {
     try std.testing.expectEqual(@as(u64, 0), boundary.offs[0]);
     try std.testing.expectEqual(@as(u64, 4096), boundary.offs[1]);
     try std.testing.expectEqual(@as(u8, @intCast(4096 % 251)), wide[4096]);
+}
+
+test "a direct read past the end of the file is a short file, not a failed read" {
+    // Linux O_DIRECT on a 100-byte file: the aligned retry returns the same 100 bytes (seen on ext4)
+    var tail: Script = .{ .plan = &.{ 100, 100 } };
+    var got: [101]u8 = undefined;
+    try std.testing.expectError(error.EndOfFile, direct(&tail, &got, 0));
+    try std.testing.expect(!tail.bad);
+    try std.testing.expectEqual(@as(usize, 2), tail.calls);
 }

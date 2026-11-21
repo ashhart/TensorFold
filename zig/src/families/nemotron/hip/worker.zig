@@ -3,6 +3,7 @@ const std = @import("std");
 const hip = @import("hip");
 const serve = @import("hip_serve");
 const lanes = @import("lanes.zig");
+const pages_ = @import("pages.zig");
 
 const protocol = serve.protocol;
 const Hip = lanes.Hip;
@@ -33,11 +34,15 @@ pub const Worker = struct {
 
     /// prefill: id, resumed at, snapshot slot, page count, the pages, prompt length, the prompt.
     pub fn prefill(w: *Worker, f: *Follower, m: []const u32) !void {
+        // rank 0's counts are checked against the message before either is used to slice it
+        if (m.len < 6 or m[4] > m.len - 6 or m[5 + m[4]] > m.len - 6 - m[4]) return error.ShortMessage;
         const table = m[5..][0..m[4]];
         const prompt = m[6 + m[4] ..][0..m[5 + m[4]]];
         f.close(m[1]);
         const l = try w.h.make();
         errdefer w.h.free(l);
+        // the resume is a row of the prompt inside the stream, and the pages fit its table and this rank's pool
+        if (m[2] > prompt.len or m[2] > l.s.cap or !w.fits(l, 0, table)) return error.ShortMessage;
         l.id = m[1];
         try l.s.set(0, table);
         if (m[3] != protocol.no_snapshot) try w.h.prefix.putSlot(m[3], l);
@@ -52,16 +57,14 @@ pub const Worker = struct {
 
     /// verify: the window count, then each window's id, rows and tokens; every rank runs the same round.
     pub fn verify(w: *Worker, f: *Follower, m: []const u32) !void {
+        if (m.len < 2) return error.ShortMessage;
         const n = m[1];
         var ls: [64]*Lane = undefined;
         var toks: [64][]const u32 = undefined;
         if (n > ls.len) return error.WindowTooWide;
         var at: usize = 2;
         for (0..n) |i| {
-            if (at + 2 > m.len or m[at + 1] > lanes.max_window or at + 2 + m[
-                at +
-                    1
-            ] > m.len) return error.WindowTooWide;
+            if (at + 2 > m.len or m[at + 1] > w.h.e.window or at + 2 + m[at + 1] > m.len) return error.WindowTooWide;
             ls[i] = try f.lane(m[at]);
             toks[i] = m[at + 2 ..][0..m[at + 1]];
             at += 2 + m[at + 1];
@@ -71,15 +74,23 @@ pub const Worker = struct {
 
     /// keep: id, rows of the last window kept.
     pub fn keep(w: *Worker, f: *Follower, m: []const u32) !void {
+        if (m.len < 3) return error.ShortMessage;
         try w.h.keepRows(try f.lane(m[1]), m[2]);
     }
 
-    pub fn pages(_: *Worker, l: *Lane, first: usize, ids: []const u32) !void {
+    /// Whether rank 0's table from page `first` on fits the lane's table and this rank's pool.
+    fn fits(w: *const Worker, l: *const Lane, first: usize, ids: []const u32) bool {
+        return protocol.pagesFit(first, ids, l.s.ids.items.len, pages_.pagesFor(l.s.cap), w.h.e.pool.count);
+    }
+
+    pub fn pages(w: *Worker, l: *Lane, first: usize, ids: []const u32) !void {
+        if (!w.fits(l, first, ids)) return error.ShortMessage;
         try l.s.set(first, ids);
     }
 
     /// Slot `slot` takes the stream's Mamba state and last row.
     pub fn snap(w: *Worker, l: *Lane, slot: u32) !void {
+        if (!protocol.slotFits(slot, w.h.prefix.slots.slots.items.len)) return error.ShortMessage;
         try w.h.prefix.takeSlot(slot, l);
     }
 

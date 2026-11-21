@@ -9,6 +9,7 @@ pub const execution = @import("execution.zig");
 pub const session = @import("session.zig");
 pub const selector = @import("selector.zig");
 test {
+    _ = @import("runtime_target.zig");
     _ = config;
     _ = weights;
     _ = operators;

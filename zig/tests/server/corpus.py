@@ -152,7 +152,7 @@ def response_cases() -> list[tuple[str, str, list[Any]]]:
         ("responses", "post-with-id", [post("/v1/responses/resp_x", {"input": "x"})]),
     ]
     refusals = {"include": {"input": "x", "include": ["reasoning.bogus"]}, "truncation": {"input": "x", "truncation": "auto"},
-                "background": {"input": "x", "background": True}, "empty-input": {"input": []}, "item-type": {"input": [{"type": "bogus"}]},
+                "background": {"input": "x", "background": True, "stream": True}, "empty-input": {"input": []}, "item-type": {"input": [{"type": "bogus"}]},
                 "tool-type": {"input": "x", "tools": [{"type": "web_search"}]}, "metadata": {"input": "x", "metadata": {str(i): "v" for i in range(17)}},
                 "not-json": b"{", "list-body": b"[1]", "format": {"input": "x", "text": {"format": {"type": "bogus"}}},
                 "content-part": {"input": [{"role": "user", "content": [{"type": "input_file"}]}]}, "role": {"input": [{"role": "robot", "content": "x"}]},

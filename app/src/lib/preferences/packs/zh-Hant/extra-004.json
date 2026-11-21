@@ -164,7 +164,7 @@
   "The community page could not open; try again in your browser." : "無法打開社區頁面；請在瀏覽器中重試。",
   "The comparison could not finish." : "比較無法完成。",
   "The comparison stopped before changing the engine." : "比較在更改引擎前已停止。",
-  "The complete community-v1 protocol was not satisfied; incomplete cells are not performance scores." : "未滿足完整 community-v1 協議；不完整單元格不是性能評分。",
+  "The complete community-v2 protocol was not satisfied; incomplete cells are not performance scores." : "未滿足完整 community-v2 協議；不完整單元格不是性能評分。",
   "The conversation could not be renamed." : "無法重命名對話。",
   "The document worker is not installed." : "未安裝文檔工作者。",
   "The download action could not complete. Try again." : "下載操作無法完成。請重試。",

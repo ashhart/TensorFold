@@ -25,11 +25,11 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught) if (store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame)) |l| {
+    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught) if (@import("lane_cache_queue.zig").lookup(h, job)) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
-        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .snap_at = l.snap_at, .hook = .{ .ptr = job, .at = Job.kept } };
+        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .snap_at = l.snap_at, .hook = .{ .ptr = job, .at = Job.kept, .interrupted = Job.interrupted } };
     } else |_| {};
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");
@@ -59,6 +59,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .loop_guard = r.loop_guard,
         .loop_stop = r.loop_stop,
         .chunks = r.chunks,
+        .message_starts = r.message_starts,
         .history_len = r.history_len,
         .shared_prefixes = r.shared_prefixes,
         .reuse = reuse,

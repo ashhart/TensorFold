@@ -8,7 +8,7 @@ const models = @import("model.zig");
 const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
-pub const eos = @import("eos.zig");
+pub const eos = @import("checkpoint_eos"); // a shared module: std-only families read it too
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
 
@@ -37,6 +37,7 @@ pub const IdTable = struct {
     tokens: std.ArrayList(?[]const u8) = .empty,
 
     pub fn put(t: *IdTable, id: u32, token: []const u8) Allocator.Error!void {
+        if (id > models.max_id) return error.OutOfMemory; // loaders refuse such a file first; `id + 1` must never wrap
         if (id >= t.tokens.items.len) try t.tokens.appendNTimes(t.allocator, null, id + 1 - t.tokens.items.len);
         t.tokens.items[id] = token;
     }
@@ -262,7 +263,7 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
+    /// encodeText through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
     fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
         const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
         if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
@@ -512,7 +513,8 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         if (content.len == 0) continue;
         if (steps.flag(item, "special", false)) try t.specials.put(keep, try keep.dupe(u8, content), {});
         if (ids.contains(content)) continue;
-        const id = t.model.id(&t.vocab, content) orelse if (max) |m| (if (m >= t.model.size or t.model.size == 0) m + 1 else t.model.size) else t.model.size;
+        const id = t.model.id(&t.vocab, content) orelse if (max) |m| (if (m >= t.model.size or t.model.size == 0) (if (m < std.math.maxInt(u32) - 1) m + 1 else return error.InvalidTokenizer) else t.model.size) else t.model.size;
+        if (id > models.max_id) return error.InvalidTokenizer;
         max = @max(max orelse id, id);
         try ids.put(content, id);
     }
@@ -559,6 +561,26 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         for (tokens.items) |token| bits[token.id / 64] |= @as(u64, 1) << @as(u6, @intCast(token.id % 64));
         t.added_ids = bits;
     }
+}
+
+/// A vocabulary id of 2^32 - 2, set without its 64 GiB dense entry, then added tokens: new ids 2^32 - 1, then 2^32.
+fn addPastLastId(added: []const u8) !void {
+    var t = try parse(std.testing.allocator, "{\"model\":{\"type\":\"WordLevel\",\"unk_token\":\"a\",\"vocab\":{\"a\":0}}}");
+    defer t.deinit();
+    t.vocab.getPtr("a").?.* = std.math.maxInt(u32) - 1;
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const list = try std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), added, .{});
+    try std.testing.expectError(error.InvalidTokenizer, addTokens(&t, t.arena.?.allocator(), scratch.allocator(), list));
+}
+
+// In a child: if addTokens' u32 `m + 1` is unchecked, a safe build panics and only this test fails
+test "an added token whose new id would be 2^32 - 1 or more is refused, not wrapped" {
+    const isolate = @import("sys").isolate;
+    const lists = [_][]const u8{ "[{\"content\":\"a\"},{\"content\":\"b\"},{\"content\":\"c\"}]", "[{\"content\":\"a\"},{\"content\":\"b\",\"special\":true}]" };
+    var outcomes: [lists.len]isolate.Outcome = undefined;
+    for (lists, &outcomes) |added, *outcome| outcome.* = try isolate.run(addPastLastId, .{added});
+    try std.testing.expectEqualSlices(isolate.Outcome, &.{ .passed, .passed }, &outcomes);
 }
 
 test {

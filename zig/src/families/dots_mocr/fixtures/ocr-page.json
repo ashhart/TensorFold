@@ -1,0 +1,18 @@
+{
+  "source": "page.png",
+  "image_sha256": "f6905514142023b2f1703f6378b1d3c94009dab50c7df47090664f5a50f2c8ab",
+  "original": [
+    1240,
+    1754
+  ],
+  "frame": [
+    1232,
+    1764
+  ],
+  "prompt_sha256": "c06a55ac6420f7b725306c52be3c5fe0822c0ae80b2a8565fc07607d9d0f5308",
+  "max_new_tokens": 4096,
+  "eos_reached": true,
+  "output_tokens": 521,
+  "output_ids_sha256": "aa73dee38ef230aa659d0d84e6c70523c832bc37321934cf58beb8629f9c32d8",
+  "text_sha256": "1594dfe55d7c95aedd96ddd08b0588a31cae0f1277a361b3e8c0d9158d4c6345"
+}

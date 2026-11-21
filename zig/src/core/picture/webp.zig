@@ -42,7 +42,7 @@ fn load(io: std.Io, a: Allocator) error{ NoWebpLibrary, WebpLibraryVersion }!Fns
 }
 
 fn find(io: std.Io, a: Allocator) Loaded {
-    if (std.c.getenv(env)) |named| return open(std.mem.span(named)) orelse .missing;
+    if ((@import("sys").environment.Process{}).get(env)) |named| return open(named) orelse .missing;
     var seen_wrong = false;
     if (std.process.executableDirPathAlloc(io, a)) |exe| {
         defer a.free(exe);

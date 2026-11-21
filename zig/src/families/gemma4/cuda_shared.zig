@@ -35,29 +35,30 @@ pub fn shufflePages(x: anytype, seed: u64) void {
     if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
 }
 
-/// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+/// The idle server's line (TF_KV_SHARE: the store holds pages).
 pub fn report(x: anytype) void {
-    if (@import("builtin").is_test) return;
-    const p = x.pool orelse return;
-    const c = p.census();
-    const ok = p.idle() and (x.prompts != null or c.free == c.total); // TF_KV_SHARE: the store holds pages
-    std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+    core.kv_prompts.idleLine(&(x.pool orelse return), x.prompts != null);
 }
 
-pub fn reach(x: anytype, l: anytype, end: usize) !void {
-    const p = if (x.pool) |*p| p else return;
-    const n = pagesOf(end);
-    if (n <= l.lease.ids.items.len) return;
-    const Map = struct {
-        x: @TypeOf(x),
+/// A slot's table entries from `from` on, for the pool's `cover` and `keepPages`.
+fn Map(comptime X: type) type {
+    return struct {
+        x: X,
         slot: usize,
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const m: *@This() = @ptrCast(@alignCast(ctx));
             try fwd.pages.map(m.x.m, m.x.s, m.slot, ids[from..], from);
         }
     };
-    var map: Map = .{ .x = x, .slot = l.slot };
-    try p.cover(&l.lease, n, .{ .ctx = &map, .write = Map.write });
+}
+
+pub fn reach(x: anytype, l: anytype, end: usize) !void {
+    const p = if (x.pool) |*p| p else return;
+    const n = pagesOf(end);
+    if (n <= l.lease.ids.items.len) return;
+    const M = Map(@TypeOf(x));
+    var map: M = .{ .x = x, .slot = l.slot };
+    try p.cover(&l.lease, n, .{ .ctx = &map, .write = M.write });
 }
 
 /// Restore rings while begin protects its found state, before a promise can reclaim the snapshot.
@@ -107,7 +108,7 @@ pub fn opening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
     var adopted = false;
     errdefer if (!adopted) for (adopt.items) |id| x.pool.?.release(id);
     const pr = if (s.images.len == 0) x.prompts else null;
-    const plan: core.kv_prompts.Plan = if (pr) |p| try p.begin(prompt, s.history_len, s.shared_prefixes, s, &adopt) else .{};
+    const plan: core.kv_prompts.Plan = if (pr) |p| try p.begin(.of(prompt), s.history_len, s.shared_prefixes, s, &adopt) else .{};
     var l: Lane = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .marks = plan.marks, .shared = pr != null };
     errdefer {
         x.m.caps[slot] = 0;
@@ -129,11 +130,10 @@ pub fn opening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
         s.cached = plan.from;
         l.fill = plan.from;
     } else l.fill = x.resumeAt(s, &l, prompt.len);
-    if (s.sampling) |sp| if (sp.temperature > 0) {
-        const rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+    if (cuda.sample.ruleFor(s.sampling)) |rule| {
         try x.upload(l.rule, std.mem.asBytes(&rule));
         l.sampled = true;
-    };
+    }
     if (s.images.len > 0) try x.encodeImages(s, &l);
     try x.lanes.put(x.gpa, s, l);
     x.free[slot] = false;
@@ -145,19 +145,9 @@ pub fn marked(x: anytype, s: *Stream, l: anytype, at: usize) !void {
     const pr = x.prompts orelse return;
     if (!l.shared) return;
     if (std.mem.indexOfScalar(u32, l.marks, @intCast(at)) != null) {
-        const n = at / fwd.pages.tokens;
-        const path = try x.gpa.alloc(u32, n);
-        defer x.gpa.free(path);
-        const mine = try x.gpa.dupe(u32, l.lease.ids.items[0..n]);
-        defer x.gpa.free(mine);
-        const shared = pr.keep(s.prompt(), @intCast(at), s, mine, path);
-        if (shared == n) l.kept += 1;
-        if (!std.mem.eql(u32, mine[0..shared], path[0..shared])) {
-            try fwd.pages.map(x.m, x.s, l.slot, path[0..shared], 0);
-            for (path[0..shared], 0..) |id, i| x.pool.?.share(&l.lease, i, id);
-            // Remapping a prefix must not shorten the already covered writable suffix.
-            x.m.caps[l.slot] = l.lease.ids.items.len * fwd.pages.tokens;
-        }
+        const M = Map(@TypeOf(x));
+        var map: M = .{ .x = x, .slot = l.slot };
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, .of(s.prompt()), at, s, fwd.pages.tokens, .{ .ctx = &map, .write = M.write })) l.kept += 1;
     }
     if (at == s.prompt().len) pr.report(at, s.cached, l.kept);
 }
@@ -178,11 +168,10 @@ pub fn legacyOpening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
     const l = got.value_ptr;
     l.sampled = false;
     l.mark = null;
-    if (s.sampling) |sp| if (sp.temperature > 0) {
-        const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+    if (cuda.sample.ruleFor(s.sampling)) |r| {
         try x.upload(l.rule, std.mem.asBytes(&r));
         l.sampled = true;
-    };
+    }
     s.cached = 0;
     if (s.images.len > 0) try x.encodeImages(s, l);
     l.fill = x.resumeAt(s, l, p.len);

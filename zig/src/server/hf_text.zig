@@ -111,7 +111,7 @@ pub const HfText = struct {
             };
             t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
-        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
+        if (template_override == null) t.source = @import("hf_text_parse.zig").builtIn(model_config, t.source) orelse t.source;
         // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
         if (t.native_deepseek) {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
@@ -287,7 +287,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,
@@ -324,7 +324,7 @@ pub const HfText = struct {
 
     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
         const t = self(ctx);
-        const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+        const ids = t.tok.encode(a, if (@import("hf_hy4.zig").active(&t.tok)) @import("hf_hy4.zig").spelling(s) orelse s else s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
     }
@@ -336,22 +336,22 @@ pub const HfText = struct {
     fn encodeMaskedFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error![]u32 {
         return self(ctx).tok.encodeMasked(a, s, spans) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
-                "normalized added tokens cannot be matched safely through this normalizer with request text"
-            else if (err == error.UnsafeAddedTokenMask)
-                "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
-            else
-                "the tokenizer cannot encode this prompt with request byte provenance";
+            problem.* = switch (err) {
+                error.UnsafeNormalizedAddedTokenMask => "normalized added tokens cannot be matched safely through this normalizer with request text",
+                error.UnsafeAddedTokenMask => "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely",
+                error.RegexBudget => "the tokenizer's split pattern needs more work on this prompt than a prompt of its length is allowed",
+                else => "the tokenizer cannot encode this prompt with request byte provenance",
+            };
             return error.Template;
         };
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        return self(ctx).tok.decode(a, ids, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        return @import("hf_hy4.zig").mapped(&self(ctx).tok, a, self(ctx).tok.decode(a, ids, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}"));
     }
 
     fn tokenIdFn(ctx: *anyopaque, piece: []const u8) ?u32 {
-        return self(ctx).tok.specialTokenId(piece);
+        return self(ctx).tok.specialTokenId(if (@import("hf_hy4.zig").active(&self(ctx).tok)) @import("hf_hy4.zig").spelling(piece) orelse piece else piece);
     }
 
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
@@ -437,7 +437,7 @@ pub const HfText = struct {
         if (t.clear_thinking) |clear| try context.put(a, "clear_thinking", .{ .bool = options.clear_thinking orelse clear });
         var diag: template.Diag = .{};
         const tools: std.json.Value = if (options.tools) |tl| try toStd(a, tl) else .null;
-        const out = template.renderProvenanceGlobals(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag) catch |e| {
+        const out = template.renderMarked(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag, options.message_starts) catch |e| {
             if (e == error.OutOfMemory) return error.OutOfMemory;
             problem.* = diag.msg;
             return error.Template;

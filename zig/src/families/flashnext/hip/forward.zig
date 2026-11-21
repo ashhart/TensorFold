@@ -18,7 +18,7 @@ pub const Host = struct {
     staging: hip.HostBuffer,
     /// Bytes of `staging` this forward used: the stream is synchronized before a forward starts again.
     used: usize = 0,
-    tables: *const tables.Tables,
+    tables: *tables.Tables,
 
     /// `bytes` copied through the staging into fresh arena memory, queued on the stream.
     pub fn put(h: *Host, o: Ops, bytes: []const u8) !u64 {
@@ -48,10 +48,13 @@ pub fn at(t: Tensor, n: usize) Tensor {
 }
 
 /// One call's rows: their tokens, the position of the first, and whether they are a window (else a prompt's).
-pub const Call = struct { tokens: []const u32, pos: usize, window: bool };
+pub const Call = struct { tokens: []const u32, pos: usize, window: bool, marks: []const Mark = &.{} };
 
 /// One stream's rows in a forward: its caches, its tokens and the position of its first row.
-pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize };
+pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize, marks: []const Mark = &.{} };
+
+/// A kept row inside a prompt chunk (a multiple of 64): its linear and n-gram state to `side`, as a chunk ending there.
+pub const Mark = struct { row: usize, side: u64 };
 
 /// The final mixer's rows (rows, hidden) for the head, and the residual streams (rows, wide) before it.
 pub const Out = struct { mixed: Tensor, streams: Tensor };
@@ -197,6 +200,7 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
     for (segs) |g| {
         const n = g.tokens.len;
         for (g.tokens, 0..) |tok, r| {
+            if (tok >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
             for (0..d.streams) |k| ids[(row + r) * d.streams + k] = @intCast(tok);
             pos[row + r] = @intCast(g.pos + r);
             ends[row + r] = @intCast(g.pos + r + 1);
@@ -317,6 +321,13 @@ fn ple(
             tail,
             o.stream,
         );
+        for (call.marks) |mk| try hip.raw.copy(
+            .{ .r = host.d, .ptr = @ptrFromInt(c.sideTail(mk.side)), .len = tail },
+            0,
+            cin + mk.row * d.wide() * m.act.size(),
+            tail,
+            o.stream,
+        );
         c.history = ngram.after(c.history, call.tokens);
     }
 }
@@ -341,6 +352,11 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         g.c.cin.base()
     else
         try o.arena.take((g.c.layout.tail_rows + g.tokens.len) * d.wide() * m.act.size());
+    // a window's words go up inside the round: a graph holds the copy, so every replay sends this round's own
+    if (window) if (m.gdn) |s| for (segs) |g| {
+        const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+        try p.send(o.stream);
+    };
     for (m.layers, 0..) |layer, i| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);
@@ -353,7 +369,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
                     host,
                     g.c,
                     at(h, off * d.wide()),
-                    .{ .tokens = g.tokens, .pos = g.pos, .window = window },
+                    .{ .tokens = g.tokens, .pos = g.pos, .window = window, .marks = g.marks },
                     cin,
                     in,
                     off,

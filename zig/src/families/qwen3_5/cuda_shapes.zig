@@ -1,5 +1,6 @@
 //! Captured launch geometry, separate from the live counts read through the staged device tables.
 const std = @import("std");
+const cuda = @import("cuda");
 const Round = @import("cuda_round.zig");
 
 pub const Shape = struct {
@@ -13,56 +14,87 @@ pub const Shape = struct {
     rows: bool = false, // a readout piece: every row through the last layer and the final norm, no head
     paged: bool = false,
     mt2: bool = false,
+    join: bool = false, // a paged forward whose streams share pages (Seg.share): the rows kernels' join variants
+    unread: bool = false, // a prompt chunk nothing reads: its last layer stops at the state writes
+    /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
+    part: @import("cuda_stage_forward.zig").Part = .whole,
 
     pub fn init(rows: usize, segments: usize, record: bool, taps: bool, slots: u8) Shape {
         std.debug.assert(rows > 0 and rows <= @as(usize, if (record) Round.most_verify else Round.max_rows) and segments > 0 and segments <= rows);
-        const bucket: usize = if (rows == 1) 1 else std.mem.alignForward(usize, rows, 16);
+        const bucket: usize = if (rows == 1) 1 else if (rows <= 4) 4 else if (rows <= 8) 8 else std.mem.alignForward(usize, rows, 16);
         const windows = std.math.ceilPowerOfTwo(usize, segments) catch unreachable;
         return .{ .total = @intCast(if (record) bucket else rows), .nseg = @intCast(if (record) windows else segments), .record = record, .prompt = !record, .taps = taps, .slots = slots };
     }
 
-    pub fn key(s: Shape) u32 {
+    pub fn key(s: Shape) u64 {
         // captured shapes only: a window bucket's rows fit the low byte
-        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30;
+        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31 | @as(u64, @intFromBool(s.join)) << 32;
     }
 };
 
-/// The measured FP8 row-tile envelope: 8,192+ cached tokens, one row included; limits and prompt tiles unchanged.
+/// The measured FP8 row-tile envelope: 8,192+ cached tokens; 2-16 rows through 131,071 cached; prompt tiles unchanged.
 pub fn useMt2(qualified: bool, fp8: bool, prompt: bool, rows: usize, segments: usize, cached: usize) bool {
     return qualified and fp8 and !prompt and segments == 1 and rows > 0 and
-        cached >= 8192 and (rows == 1 or (rows <= 16 and cached < 65536));
+        cached >= 8192 and (rows == 1 or (rows <= 16 and cached <= 131071));
 }
 
 test "MT2 dispatch keeps context boundaries and graph identities separate" {
     const before = Shape.init(16, 1, true, false, 1);
     var after = before;
     after.mt2 = true;
-    try std.testing.expectEqual(@as(u32, 1) << 29, before.key() ^ after.key());
-    for ([_]usize{ 8192, 32768, 65535 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
-    for ([_]usize{ 0, 8191, 65536, 131071 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
+    try std.testing.expectEqual(@as(u64, 1) << 29, before.key() ^ after.key());
+    for ([_]usize{ 8192, 32768, 65535, 65536, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 16, 1, n));
+    for ([_]usize{ 0, 8191, 131072 }) |n| try std.testing.expect(!useMt2(true, true, false, 16, 1, n));
     for ([_]usize{ 0, 1, 512, 8191 }) |n| try std.testing.expect(!useMt2(true, true, false, 1, 1, n));
-    for ([_]usize{ 8192, 32768, 131071 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
+    for ([_]usize{ 8192, 32768, 131071, 131072, 262144 }) |n| try std.testing.expect(useMt2(true, true, false, 1, 1, n));
     try std.testing.expect(!useMt2(false, true, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, false, false, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, true, 16, 1, 8192));
     try std.testing.expect(!useMt2(true, true, false, 16, 2, 8192));
     try std.testing.expect(!useMt2(true, true, false, 17, 1, 8192));
+    try std.testing.expect(!useMt2(true, true, false, 17, 1, 65536));
+}
+
+test "Qwen stage: the head piece keys its own graph, apart from the layers' and the whole model's" {
+    for ([_]usize{ 1, 5, 16, 64 }) |rows| for ([_]u8{ 1, 16 }) |slots| for (0..4) |bits| {
+        var whole = Shape.init(rows, 1, true, false, slots);
+        whole.paged = bits & 1 != 0;
+        whole.mt2 = bits & 2 != 0;
+        var layers = whole;
+        layers.part = .layers;
+        var head = whole;
+        head.part = .head;
+        try std.testing.expectEqual(@as(u64, 1) << 31, head.key() ^ whole.key());
+        try std.testing.expectEqual(@as(u64, 1) << 31, head.key() ^ layers.key());
+    };
+}
+
+test "one-row and 2-8-row windows take the smaller buckets" {
+    try std.testing.expectEqual(@as(u16, 1), Shape.init(1, 1, true, false, 1).total);
+    for ([_]usize{ 2, 3, 4 }) |rows| try std.testing.expectEqual(@as(u16, 4), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 5, 6, 7, 8 }) |rows| try std.testing.expectEqual(@as(u16, 8), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 9, 16 }) |rows| try std.testing.expectEqual(@as(u16, 16), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 17, 32 }) |rows| try std.testing.expectEqual(@as(u16, 32), Shape.init(rows, 1, true, false, 1).total);
+    const four = Shape.init(4, 4, true, false, 1);
+    try std.testing.expectEqual(@as(u16, 4), four.total);
+    try std.testing.expectEqual(@as(u8, 4), four.nseg);
 }
 
 test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
     const gpa = std.testing.allocator;
-    var keys: std.AutoHashMapUnmanaged(u32, Shape) = .empty;
+    var keys: std.AutoHashMapUnmanaged(u64, Shape) = .empty;
     defer keys.deinit(gpa);
     var distinct: std.AutoHashMapUnmanaged(Shape, void) = .empty;
     defer distinct.deinit(gpa);
     const variants = [_]u8{ 1, 2, 4, 8, 16 }; // every slot count a window's register peak gives
     for (1..Round.most_window + 1) |peak| try std.testing.expect(std.mem.indexOfScalar(u8, &variants, @intCast(Round.variant(peak))) != null);
     for (1..Round.most_verify + 1) |rows| for (1..@min(rows, Round.max_segs) + 1) |segments| for ([_]bool{ false, true }) |taps| {
-        for (variants) |slots| for (0..8) |bits| {
+        for (variants) |slots| for (0..16) |bits| {
             var s = Shape.init(rows, segments, true, taps, slots);
             s.hidden = bits & 1 != 0;
             s.paged = bits & 2 != 0;
             s.mt2 = bits & 4 != 0;
+            s.join = bits & 8 != 0;
             try distinct.put(gpa, s, {});
             const got = try keys.getOrPut(gpa, s.key());
             if (got.found_existing) try std.testing.expectEqual(got.value_ptr.*, s) else got.value_ptr.* = s;
@@ -70,4 +102,25 @@ test "every captured verify shape keys its own graph: a shape after another neve
     };
     try std.testing.expectEqual(distinct.count(), keys.count());
     try std.testing.expect(keys.count() > 1000);
+}
+
+/// One shape's launches (the engine's `launchShape`): uncaptured for a prompt chunk or the exact path, else replayed.
+pub fn launch(e: anytype, shape: Shape) !void {
+    // a prompt chunk's GEMMs (a window's rows keep one-row steps' bits) dwarf its launches: never captured
+    if (e.learning != null or e.pockets.any() or shape.prompt) return e.body(shape);
+    const gop = try e.graphs.getOrPut(e.gpa, shape.key());
+    if (!gop.found_existing) {
+        errdefer _ = e.graphs.remove(shape.key());
+        // captured, nothing runs: the replay below is this shape's first run
+        try cuda.graph.beginCapture(e.stream, .thread_local);
+        e.body(shape) catch |err| {
+            var broken = cuda.graph.endCapture(e.stream) catch return err;
+            broken.deinit();
+            return err;
+        };
+        var captured = try cuda.graph.endCapture(e.stream);
+        defer captured.deinit();
+        gop.value_ptr.* = try captured.instantiate();
+    }
+    try gop.value_ptr.launchOn(e.stream);
 }

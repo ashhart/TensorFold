@@ -12,19 +12,20 @@ Qualify each checkpoint with its CUDA contract and matched main, policy-off, pol
 
 ## GLM on CUDA
 
-`TF_GLM_COPIES=1` on rank 0 opts GLM into the same four-match root/context copies, within its existing eight-row
-verify window. Unset or 0 keeps GLM's current suffix policy, widths and head policy. Other values refuse by name
+`TF_GLM_COPIES=1` on rank 0 opts GLM into the same four-match root/context copies, within its 32-row verify window.
+Unset or 0 keeps GLM's current suffix policy and head policy. Other values refuse by name
 before weights load. `--no-drafts` and request-local `"draft": false` stay plain. Followers execute rank 0's existing
 commands, including partial keeps and zero-depth head absorption; no CUDA kernel or target arithmetic changes.
 
-Copies use the shared cost allocator, with GLM's existing two-GB10 EXL3 target-window and shared-row tables as seeds.
-The stream's own accepted/rejected copies update their landing estimate, and an expensive offer can receive zero rows.
+Copies use the shared cost allocator. With MTP they are priced by the windows timed at load
+([window prices](glm-5.3-flash-cuda.md#window-prices)); with DFlash2, or when the scratch context is too small to time,
+they use GLM's existing two-GB10 EXL3 target-window and shared-row tables as seeds. The stream's own accepted/rejected copies update their landing estimate, and an expensive offer can receive zero rows.
 With the opt-in, `--mtp-confidence` caps the head's probability prefix using the shared confidence rule while copied
 rows remain costed. The allocator can choose plain instead of a head proposal. The default confidence path is unchanged.
 No row-cost learner is added here; live learned target costs belong to the lane core (#2111).
 
-The seed tables came from an older DFlash2 profile. They do not establish total round cost at a new checkpoint,
-context, rank topology or concurrency. Keep the default off until exact TP=2 whole-model replies and measured cost
+Load timing covers short contexts and one stream, and the seed tables came from an older DFlash2 profile, so neither
+establishes total round cost at a new checkpoint, long context, rank layout or high concurrency. Keep the default off until exact TP=2 whole-model replies and measured cost
 pass: baseline/OFF/ON/ON/OFF, greedy and seeded chat/code, one and eight streams, short/32K/64K context, cold prompts
 and separately labelled resumed turns. Retain exact rendered prompt IDs, emitted token arrays/hashes, actual verify,
 partial-keep and head-absorption times by rows, complete round/request times, proposals/acceptance/zero grants, load

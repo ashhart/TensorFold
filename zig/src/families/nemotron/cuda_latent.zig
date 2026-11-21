@@ -87,12 +87,13 @@ pub fn partFloats(c: Config, rows: usize) usize {
 
 /// TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD into `c`: both or neither; a world must hold whole shares.
 pub fn place(c: *Config) !void {
-    const r = std.c.getenv("TF_NEMOTRON_RANK");
-    const w = std.c.getenv("TF_NEMOTRON_WORLD");
+    const env = @import("sys").environment;
+    const r = try env.read(?u64, "TF_NEMOTRON_RANK", null);
+    const w = try env.read(?u64, "TF_NEMOTRON_WORLD", null);
     if (r == null and w == null) return;
     if (r == null or w == null) return error.NoRank;
-    c.rank = std.fmt.parseInt(usize, std.mem.span(r.?), 10) catch return error.NoRank;
-    c.world = std.fmt.parseInt(usize, std.mem.span(w.?), 10) catch return error.NoRank;
+    c.rank = @intCast(r.?);
+    c.world = @intCast(w.?);
     if (c.world < 1 or c.rank >= c.world) return error.NoRank;
     if (c.world == 1) return;
     if (c.latent == 0) {
@@ -339,8 +340,8 @@ fn routed(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, rows: usize,
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
     const items = kern.maxItems(pairs, t.routed.experts, 16);
-    try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
+    try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, pairs, 16, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, pairs, 16, -1);
 }
 
 /// The shared expert's (row, share) pairs into `out` (partials' second region), on `s`'s fixed plan where it has one.
@@ -350,8 +351,8 @@ fn sharedRows(o: kern.Ops, t: Tables, s: Scratch, hidden: u64, rows: usize, own:
     const sp = s.shared_plan orelse s.plan;
     if (s.shared_plan == null) try o.plan(s.sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
-    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, -1);
+    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, rows * own, 16, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, rows * own, 16, -1);
 }
 
 /// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.

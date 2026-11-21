@@ -149,3 +149,17 @@ test "proposal rows: mixed plans roles and queues partition and scatter by origi
     try t.expectError(error.ProposalRowAlias, p.scatter(u32, &out, &out));
     try t.expectEqualSlices(u32, &before, &out);
 }
+
+test "proposal rows: GPU reductions reject nonfinite maxima log-sums and signed sentinel columns" {
+    const compact: r.Scores = .{ .vocab = 11, .logical = 3, .stride = 8, .ids = &.{ 0, 3, 7 } };
+    for ([_]i32{ -1, 3, std.math.maxInt(i32) }) |col|
+        try t.expectError(error.ProposalNonfinite, compact.pickBest(.{ 1, 2, @bitCast(col), 0 }));
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |bad| {
+        try t.expectError(error.ProposalNonfinite, compact.pickBest(.{ bad, 2, @bitCast(@as(i32, 1)), 0 }));
+        try t.expectError(error.ProposalNonfinite, compact.pickBest(.{ 1, bad, @bitCast(@as(i32, 1)), 0 }));
+    }
+    for (compact.ids.?, 0..) |id, col|
+        try t.expectEqual(id, try compact.pickBest(.{ 1, 2, @bitCast(@as(i32, @intCast(col))), 0 }));
+    const full: r.Scores = .{ .vocab = 11, .logical = 11, .stride = 16 };
+    try t.expectEqual(@as(u32, 10), try full.pickBest(.{ 1, 2, @bitCast(@as(i32, 10)), 0 }));
+}

@@ -45,7 +45,16 @@ pub fn index(e: *Emitter, L: u32, qn: Arg, iw: Arg, qnorm: ?Norm) !void {
     const IH: i64 = e.cfg.index_heads;
     const ID: i64 = e.cfg.index_dim;
     const qi = try e.buf("L.qi", .{}, .bf16, &.{ n, IH * ID });
-    try e.fusedNorm("qi", &.{.{ .w = try e.fmt("L{d}.attn.ix_wq_b", .{L}), .x = qn, .y = qi, .k = e.cfg.q_lora, .n = @intCast(IH * ID) }}, qnorm);
+    const wq = try e.fmt("L{d}.attn.ix_wq_b", .{L});
+    if (e.w.plain(wq)) {
+        // RMS_FOLD hands this path unnormed rows and no fused norm to fold into: the norm takes its own launch
+        var x = qn;
+        if (qnorm) |nm| {
+            x = try e.buf("L.qn", .{}, .bf16, &.{ n, e.cfg.q_lora });
+            try e.rms(qn, nm.w, x, e.cfg.q_lora);
+        }
+        try e.plain(.{ .w = wq, .x = x, .y = qi, .k = e.cfg.q_lora, .n = @intCast(IH * ID) });
+    } else try e.fusedNorm("qi", &.{.{ .w = wq, .x = qn, .y = qi, .k = e.cfg.q_lora, .n = @intCast(IH * ID) }}, qnorm);
     try e.rope(qi, IH, ID, ID - 64);
     const reindex = e.cfg.mode(L) == .reindex;
     const src = if (reindex) e.cfg.kvSource(L).? else L;

@@ -10,7 +10,8 @@ namespace tf {
 namespace rocm {
 
 // Dec reads the words and group terms, Act the rows of x, T (a matrix-core Dot) multiplies and Epi stores.
-template <class Dec, class Act, class T, class Epi>
+// SKEW stages x and the codes in unpadded rows (less LDS, so three blocks a WGP on RDNA3.5); the sums are the same.
+template <class Dec, class Act, class T, class Epi, bool SKEW = false>
 __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
 #if TF_DEVICE_WMMA_GFX11
     if (!Dec::take_item(a, blockIdx.z)) return;
@@ -18,9 +19,12 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
     band_tile(bx, by);
     const int m0 = by * kGemmM;
     if (m0 >= a.m) return;
-    constexpr int kLdw = kGemmLd / 2;
-    __shared__ __attribute__((aligned(16))) uint32_t xs[2][kGemmM * kLdw];
-    __shared__ __attribute__((aligned(16))) uint32_t ws[2][kGemmN * kLdw];
+    // Rows padded to 20 words, or with SKEW unpadded, a pair 16 bytes on in 8-row groups: 8 readers on 8 bank groups.
+    constexpr int kLdw = SKEW ? kGemmK / 2 : kGemmLd / 2;
+    constexpr int kGroupW = SKEW ? 8 * kLdw + 12 : 8 * kLdw;
+    auto rowat = [](int r) { return SKEW ? (r >> 3) * kGroupW + (r & 7) * kLdw + (((r >> 1) & 3) << 2) : r * kLdw; };
+    __shared__ __attribute__((aligned(16))) uint32_t xs[2][kGemmM / 8 * kGroupW];
+    __shared__ __attribute__((aligned(16))) uint32_t ws[2][kGemmN / 8 * kGroupW];
     __shared__ float sx[2][kGemmM];
     __shared__ float sc[3][kGemmN];
     __shared__ float bi[3][kGemmN];
@@ -70,7 +74,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
         term[1] = Dec::term(a, base + group_of(st1));
     };
     auto stash = [&]<int J>(std::integral_constant<int, J>, int st, int buf) {
-        u32x4* dst = reinterpret_cast<u32x4*>(ws[buf] + line * kLdw + side * 8);
+        u32x4* dst = reinterpret_cast<u32x4*>(ws[buf] + rowat(line) + side * 8);
         auto decode = [&]<int S>(std::integral_constant<int, S>) {
 #pragma unroll
             for (int v = 0; v < 2; ++v) {
@@ -85,7 +89,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
         };
         if (side == 0) decode(std::integral_constant<int, 0>{}); else decode(std::integral_constant<int, 1>{});
         if (xhalf == J && xlive) {
-            u32x4* xdst = reinterpret_cast<u32x4*>(xs[buf] + xrow * kLdw);
+            u32x4* xdst = reinterpret_cast<u32x4*>(xs[buf] + rowat(xrow));
 #pragma unroll
             for (int v = 0; v < 4; ++v) xdst[v] = xreg[v];
         }
@@ -96,7 +100,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
     };
     auto sumx = [&](int st, int buf) {
         if (group_start(st)) run = 0.f;
-        const u32x4* src = reinterpret_cast<const u32x4*>(xs[buf] + line * kLdw);
+        const u32x4* src = reinterpret_cast<const u32x4*>(xs[buf] + rowat(line));
 #pragma unroll
         for (int v = 0; v < 4; ++v) {
             const u32x4 u = src[v];
@@ -156,13 +160,13 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
             for (int t = 0; t < 2; ++t) {
                 bf16x16 bf[4];
 #pragma unroll
-                for (int nt = 0; nt < 4; ++nt) bf[nt] = frag16(ws[cur] + (wn * 64 + nt * 16 + rl) * kLdw + t * 8);
+                for (int nt = 0; nt < 4; ++nt) bf[nt] = frag16(ws[cur] + (wn * 8 + nt * 2) * kGroupW + rowat(rl) + t * 8);
                 // A group's first product starts from zero on a uniform branch, not a select per accumulator.
                 const bool first = t == 0 && group_start(s);
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt) {
                     if (mt == 1 && !live1) continue;
-                    const bf16x16 af = frag16(xs[cur] + (wm * 32 + mt * 16 + rl) * kLdw + t * 8);
+                    const bf16x16 af = frag16(xs[cur] + (wm * 4 + mt * 2) * kGroupW + rowat(rl) + t * 8);
                     if (first) {
 #pragma unroll
                         for (int nt = 0; nt < 4; ++nt) d[mt][nt] = T::mma(af, bf[nt], zero);

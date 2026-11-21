@@ -94,9 +94,7 @@ pub const Prompt = struct {
         // DeltaNet at the chunk's rows, storing only the last row's recurrent state (in row 0)
         const gs = r.roles.get("q4_gdn@gdn|8") orelse return error.NoSite;
         const f = try Run.variantText(r.arena, gs.v); // the embedded text when the run is checked-in, else the recorded file
-        const from = "SO[((size_t(r) * NV + hv)";
-        if (std.mem.count(u8, f, from) != 1) return error.GdnPatch;
-        const patched = try std.mem.replaceOwned(u8, r.arena, f, from, "if (r == R - 1) SO[((size_t(0) * NV + hv)");
+        const patched = try @import("gdn_source.zig").last(r.arena, f);
         const dlib = try r.ownResource(try mtl.Library.fromSource(r.device, patched, mtl.CompileOptions.mlx()));
         p.gdn = gs.v.*;
         p.gdn.pipe = try r.ownResource(try mtl.Pipeline.init(r.device, dlib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{gs.v.name}, 0), false));

@@ -18,6 +18,7 @@ import { BotVmControls } from './bots/BotVmControls'
 import { BotRecipes } from './bots/BotRecipes'
 import { BotToolScopeEditor } from './bots/BotToolScopeEditor'
 import { BotRoutineSetup } from './bots/BotRoutineSetup'
+import { BotReasoningEffort, effortForBotModel } from './bots/BotReasoningEffort'
 import { inspectBotToolScope } from '../../shared/bot-tool-policy'
 
 const EMPTY_BOTS: AgentPreset[] = []
@@ -64,7 +65,7 @@ export function Bots() {
     const first = models[0]
     const now = Date.now()
     setError(null)
-    setDraft({ id: `bot_${crypto.randomUUID()}`, name: template.name, role: template.role, instructions: template.instructions, lane: template.lane, providerId: first?.provider.id ?? '', providerAccountId: first?.group.accountId ?? null, model: first?.group.models[0] ?? '', approvalScope: 'readonly', executionTarget: 'workspace', paused: false, archivedAt: null, createdAt: now, updatedAt: now })
+    setDraft({ id: `bot_${crypto.randomUUID()}`, name: template.name, role: template.role, instructions: template.instructions, lane: template.lane, providerId: first?.provider.id ?? '', providerAccountId: first?.group.accountId ?? null, model: first?.group.models[0] ?? '', reasoningEffort: effortForBotModel(settings?.reasoningEffort ?? 'medium', first?.provider, first?.group.models[0]), approvalScope: 'readonly', executionTarget: 'workspace', paused: false, archivedAt: null, createdAt: now, updatedAt: now })
   }
   const saveBot = async (bot: AgentPreset) => {
     setBusyId(bot.id); setError(null)
@@ -105,10 +106,11 @@ export function Bots() {
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Responsibility")}</span><Input maxLength={240} value={draft.role} onChange={(event) => setDraft({ ...draft, role: event.target.value })} placeholder={tx("What should this bot help with?")} /></label>
           </div>
           <label className="block space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Instructions")}</span><textarea rows={5} maxLength={16_000} value={draft.instructions ?? ''} onChange={(event) => setDraft({ ...draft, instructions: event.target.value })} className="w-full resize-y rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] leading-relaxed text-ink outline-none focus:border-accent" placeholder={tx("Describe its job, what a good answer looks like, and when it should ask you.")} /><span className="block text-[12px] text-ink-2">{tx("Keep passwords and API keys in Settings. Instructions cannot grant permissions.")}</span></label>
-          <label className="block space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Model")}</span><select required value={draftChoice} onChange={(event) => { const [providerId, providerAccountId, model] = JSON.parse(event.target.value); setDraft({ ...draft, providerId, providerAccountId, model }) }} className="h-10 w-full min-w-0 rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink">
+          <label className="block space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Model")}</span><select required value={draftChoice} onChange={(event) => { const [providerId, providerAccountId, model] = JSON.parse(event.target.value); setDraft({ ...draft, providerId, providerAccountId, model, reasoningEffort: effortForBotModel(draft.reasoningEffort, providers.find((provider) => provider.id === providerId), model) }) }} className="h-10 w-full min-w-0 rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink">
             {draftModelMissing && <option value={draftChoice}>{draft.model ? tx("Unavailable: {value0}", { value0: draft.model }) : tx("Choose a model source in Settings")}</option>}
             {draftModels.map(({ provider, group }) => <optgroup key={`${provider.id}:${group.id}`} label={`${isExternalProvider(provider) ? 'External' : 'Local'} · ${group.label}`}>{group.models.map((model) => <option key={model} value={choiceValue(provider.id, group.accountId, model)}>{modelDisplayName(provider, model)}</option>)}</optgroup>)}
           </select><span className="block text-[12px] text-ink-2">{draft.executionTarget === 'vm' ? tx("A bot VM needs a model on this Mac with Cortheon off. Guest files stay out of external model services.") : tx("API models keep permissions under TensorFold control. External models follow the app’s planning policy.")}</span></label>
+          <BotReasoningEffort provider={providers.find((provider) => provider.id === draft.providerId)} model={draft.model} value={draft.reasoningEffort} defaultEffort={settings?.reasoningEffort} onChange={(reasoningEffort) => setDraft({ ...draft, reasoningEffort })} />
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Permissions")}</span><select value={draft.approvalScope ?? 'readonly'} onChange={(event) => setDraft({ ...draft, approvalScope: event.target.value as AgentPreset['approvalScope'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="readonly">{tx("Read only")}</option><option value="review">{tx("Review actions with workspace rules")}</option></select></label>
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">{tx("Execution")}</span><select value={draft.executionTarget ?? 'workspace'} onChange={(event) => setDraft({ ...draft, executionTarget: event.target.value as AgentPreset['executionTarget'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="workspace">{localTarget}</option>{botVmSupported(api.platform) && <option value="vm">{tx("Separate Linux VM")}</option>}</select></label>

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from . import (
     living,
+    machine,
 )
 from . import settings as settings_mod
 from .gate import Busy
@@ -55,6 +56,8 @@ def build(cat, eng, gate, s, save_settings):
             if why:
                 eng.note(f"{copy} serves without learning: {why}")
             return result
+        if entry and entry.backends == ["cuda"] and machine.detect().backend != "cuda":
+            raise RuntimeError(f"{entry.name} is available on CUDA only")
         here = bool(entry and cat.native_here(entry))
         result = eng.start(model, native_model=here, drafter=entry.drafter if here and entry else None)
         if not here:

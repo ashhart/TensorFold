@@ -109,7 +109,7 @@ fn encode(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: 
 pub const Stream = struct { context: op.Context, anchor: u32 };
 
 /// Every stream's block stacked in one pass, weights read once; each stream attends to its own context.
-fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, streams: []const Stream, frame: u64, block: u32, given: []const u32) !Output {
+pub fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, streams: []const Stream, frame: u64, block: u32, given: []const u32) !Output {
     const c = g.config;
     const n: u32 = @intCast(streams.len);
     const rows = n * block;

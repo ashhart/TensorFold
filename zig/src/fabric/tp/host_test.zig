@@ -12,8 +12,8 @@ fn addr(b: []u8) collective.DevicePtr {
 
 const n = 96;
 
-const Calls = struct {
-    fn go(c: Collective, rank: u32, _: void) !void {
+pub const Calls = struct {
+    pub fn go(c: Collective, rank: u32, _: void) !void {
         const world = c.world();
         inline for (.{ DType.f32, DType.bf16, DType.i32, DType.f16 }) |t| {
             const bytes = n * t.size();
@@ -49,8 +49,8 @@ test "every call on two, three and four in-process ranks equals the reference" {
     try host.run(4, {}, Calls.go);
 }
 
-const Pairwise = struct {
-    fn go(c: Collective, rank: u32, _: void) !void {
+pub const Pairwise = struct {
+    pub fn go(c: Collective, rank: u32, _: void) !void {
         var mine: [64]u8 = @splat(@intCast(rank + 1));
         var got: [64]u8 = undefined;
         // pairs (0, 1), (2, 3), ...: two ranks trade, as the GPU checks pair them at any even world
@@ -74,8 +74,8 @@ test "exchange, send and recv between two ranks, and in pairs of four" {
     try host.run(4, {}, Pairwise.go);
 }
 
-const Desync = struct {
-    fn go(c: Collective, rank: u32, _: void) !void {
+pub const Desync = struct {
+    pub fn go(c: Collective, rank: u32, _: void) !void {
         var a: [64]u8 = @splat(0);
         var b: [128]u8 = undefined;
         // the ranks disagree on the count: both see it instead of hanging
@@ -88,8 +88,8 @@ test "a desynchronised call is refused on every rank" {
     try host.run(2, {}, Desync.go);
 }
 
-const Aborts = struct {
-    fn go(c: Collective, rank: u32, _: void) !void {
+pub const Aborts = struct {
+    pub fn go(c: Collective, rank: u32, _: void) !void {
         var a: [16]u8 = @splat(0);
         var b: [32]u8 = undefined;
         if (rank == 1) {
@@ -108,8 +108,8 @@ test "abort frees a rank waiting in a collective" {
     try host.run(2, {}, Aborts.go);
 }
 
-const VarGather = struct {
-    fn go(c: Collective, rank: u32, refuse: u32) !void {
+pub const VarGather = struct {
+    pub fn go(c: Collective, rank: u32, refuse: u32) !void {
         const world = c.world();
         const stride = 200;
         const whole = refuse & (@as(u32, 1) << @intCast(rank)) != 0;
@@ -142,8 +142,8 @@ test "a variable-length all-gather moves each rank's length, and the ranks agree
     }
 }
 
-const VarDesync = struct {
-    fn go(c: Collective, rank: u32, _: void) !void {
+pub const VarDesync = struct {
+    pub fn go(c: Collective, rank: u32, _: void) !void {
         var a: [64]u8 = @splat(0);
         var b: [128]u8 = undefined;
         const lens = [2]i32{ 8, if (rank == 0) 8 else 16 };
@@ -154,4 +154,32 @@ const VarDesync = struct {
 
 test "lengths that differ between ranks are refused on every rank" {
     try host.run(2, {}, VarDesync.go);
+}
+
+const Spawns = struct {
+    made: u32 = 0,
+    fail_at: u32,
+
+    pub fn start(s: *Spawns, comptime f: anytype, args: anytype) !std.Thread {
+        defer s.made += 1;
+        if (s.made == s.fail_at) return error.PlantedThreadFailure;
+        return std.Thread.spawn(.{}, f, args);
+    }
+};
+
+const Freed = struct {
+    fn go(c: Collective, _: u32, freed: *std.atomic.Value(u32)) !void {
+        c.barrier() catch |err| if (err == error.Aborted) {
+            _ = freed.fetchAdd(1, .acq_rel);
+        };
+    }
+};
+
+test "a failed spawn aborts and joins the ranks already running before it returns" {
+    for ([_]u32{ 0, 1, 3 }) |at| {
+        var freed: std.atomic.Value(u32) = .init(0);
+        var spawns: Spawns = .{ .fail_at = at };
+        try std.testing.expectError(error.PlantedThreadFailure, host.runSpawning(4, .{}, &freed, Freed.go, &spawns));
+        try std.testing.expectEqual(at, freed.load(.acquire));
+    }
 }

@@ -24,6 +24,7 @@ test "draft sources: HIP Nemotron checkpoint head and explicit zero" {
     var b: n.lanes.Hip = undefined;
     b.e = &e;
     b.costs = .{};
+    e.window = 4;
     e.plan.rows = 16;
     e.plan.slots = 4;
     e.o.policy.mtp.drafts = 3;

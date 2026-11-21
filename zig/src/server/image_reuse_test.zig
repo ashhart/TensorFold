@@ -83,6 +83,8 @@ const Harness = struct {
     dummy: u8 = 0,
     strip: bool, // the planted control: requests reach the cache without their image key
     stripped: api.Request = undefined,
+    force_mark: bool = false,
+    extra_mark: [1]u32 = .{0},
     cancel_at: ?usize = null, // the next image pass is cancelled at this prompt chunk
 
     fn init(gpa: Allocator, a: Allocator, o: Options) !*Harness {
@@ -146,6 +148,10 @@ const Harness = struct {
     /// A prompt chunk of an image pass: the planted cancellation, as a client leaving mid-prompt does.
     fn hook(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
         const h: *Harness = @ptrCast(@alignCast(ctx));
+        if (h.force_mark) {
+            s.reuse.marks = &h.extra_mark;
+            h.force_mark = false;
+        }
         const at = h.cancel_at orelse return;
         if (s.images.len == 0 or chunk != at) return;
         h.cancel_at = null;
@@ -400,7 +406,9 @@ test "image reuse: a cancelled image pass and an evicting cache leave later turn
     try t.expectEqual(@as(usize, 12), retried.rows);
     try expectFresh(a, small, a1, retried);
     try t.expectEqual(@as(usize, 1), h.store.entries.items.len);
-    // b's conversation takes the cache's room: a's next turn runs its picture again, never b's state
+    // An actual keep, rather than reservation alone, takes the room: a's later turn must read its picture.
+    h.extra_mark[0] = h.store.entries.items[0].at;
+    h.force_mark = true;
     _ = try h.ask(a, try conv(a, &.{ system, ub }));
     try t.expectEqual(@as(usize, 1), h.store.entries.items.len);
     const a2 = try conv(a, &.{ system, ua, ok, try say(a, "More detail.") });

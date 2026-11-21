@@ -135,3 +135,43 @@ test "turn starts: native metadata reaches six chat histories and a one-slot kep
         try t.expectEqual(@as(usize, if (minimum == 1) 6 else 1), f.saves);
     }
 }
+
+// A minimal reasoning wrapper exercises production Jinja/tokenization without a checkpoint or borrowed template.
+const reasoning_template =
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n" ++
+    "{% if m.role == 'assistant' %}<think>\n{{ m.reasoning_content | default('') }}\n</think>\n\n{% endif %}" ++
+    "{{ m.content }}<|im_end|>\n{% endfor %}" ++
+    "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n{% endif %}";
+
+test "turn starts: dropped reasoning shares the user end but not the reply endpoint" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var files = try fixture.Fixture.init(alloc, 0);
+    defer files.deinit();
+    try files.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = reasoning_template });
+    var problem: []const u8 = "";
+    const hf = try HfText.load(alloc, t.io, files.path, null, alloc, &problem);
+    defer hf.deinit();
+    var f: Fake = .{ .minimum = 1 };
+    const srv = try Server.init(alloc, t.io, f.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    const user = try message(alloc, "user", "A long document and its question.");
+    var initial = [_]json.Value{user};
+    var cx: errors.Cx = .{ .a = alloc };
+    const prompt = @import("prompt.zig");
+    const before = try prompt.prepare(srv, &cx, .{ .messages = .{ .array = &initial }, .fields = .null }, true, null);
+    try t.expectEqual(before.history_len, before.user_end);
+    try t.expect(before.history_len > 0 and before.history_len < before.ids.len);
+    var endpoints: [2][]const u32 = undefined;
+    for ([_]bool{ false, true }, 0..) |kept, i| {
+        const reply = try message(alloc, "assistant", "Fixed reply.");
+        if (kept) try reply.object.put(alloc, "reasoning_content", .{ .string = "Retained reasoning." });
+        var messages = [_]json.Value{ user, reply, try message(alloc, "user", "Next question?") };
+        const later = try prompt.prepare(srv, &cx, .{ .messages = .{ .array = &messages }, .fields = .null }, true, null);
+        try t.expectEqualSlices(u32, before.ids[0..before.history_len], later.ids[0..before.history_len]);
+        endpoints[i] = later.ids;
+    }
+    const same = std.mem.indexOfDiff(u32, endpoints[0], endpoints[1]).?;
+    try t.expect(same >= before.history_len and same < endpoints[1].len);
+}

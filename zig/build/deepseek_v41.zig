@@ -41,6 +41,7 @@ pub fn checks(
             .{ .name = "metal", .module = metal },
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "core", .module = core },
+            .{ .name = "engram_hash_core", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }) },
         },
     }) });
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
@@ -169,6 +170,7 @@ pub fn checks(
             .{ .name = "metal", .module = metal },
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "core", .module = core },
+            .{ .name = "engram_hash_core", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }) },
         },
     }), .filters = &.{"index one-shot select"} });
     const probe_run = b.addRunArtifact(probe);

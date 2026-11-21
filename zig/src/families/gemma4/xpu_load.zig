@@ -50,6 +50,13 @@ fn bf16(d: *Dev, c: *const Checkpoint, name: []const u8) !*anyopaque {
     return d.upload(t.bytes);
 }
 
+/// A 4-bit table as stored has `cfg.vocab` rows of `dim` values: dim / 8 words, dim / 64 scales and biases a row.
+fn tableRows(c: *const Checkpoint, comptime name: []const u8, dim: usize) !void {
+    const s = (try c.get(name ++ ".scales")).bytes.len;
+    if (s != cfg.vocab * (dim / 64) * 2 or (try c.get(name ++ ".biases")).bytes.len != s) return error.UnexpectedShape;
+    if ((try c.get(name ++ ".weight")).bytes.len != cfg.vocab * (dim / 8) * 4) return error.UnexpectedShape;
+}
+
 fn named(comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.allocPrint(alloc, fmt, args) catch @panic("out of memory");
 }
@@ -130,6 +137,8 @@ fn invFreq(comptime n: usize, theta: f64, dim: f64, rotated: usize) [n]f32 {
 pub fn load(d: *Dev, repack: ze.H, c: *const Checkpoint) !Model {
     var m: Model = undefined;
     const lm = plan.prefix;
+    try tableRows(c, lm ++ "embed_tokens", cfg.hidden); // g4_embed and g4_ple_tok read row id of these tables unchecked
+    try tableRows(c, lm ++ "embed_tokens_per_layer", cfg.ple_all);
     const stage = try d.alloc_(512 << 20);
     const et = try c.get(lm ++ "embed_tokens.weight");
     m.embed_w = try d.upload(et.bytes);

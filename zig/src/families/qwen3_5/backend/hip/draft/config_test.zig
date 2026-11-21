@@ -69,9 +69,22 @@ test "a tap past the target's layers is refused, and so is no tap or a negative 
     _ = try Config.parse(gpa, last, q27);
 }
 
+test "a tap layer named twice is refused, as the ring would hold one residual in two taps" {
+    try refused(error.BadDraftConfig, "[5, 19, 33, 47, 61]", "[5, 19, 33, 19, 61]");
+    try refused(error.BadDraftConfig, "[5, 19, 33, 47, 61]", "[5, 5]");
+    const one = try edited("[5, 19, 33, 47, 61]", "[61]");
+    defer gpa.free(one);
+    try std.testing.expectEqualSlices(u32, &.{61}, (try Config.parse(gpa, one, q27)).tapLayers());
+}
+
 test "a window past the HIP tap ring is refused, the ring's own width accepted" {
     try refused(error.UnsupportedDraftConfig, "\"sliding_window\": 2048", "\"sliding_window\": 2049");
     try refused(error.UnsupportedDraftConfig, "\"sliding_window\": 2048", "\"sliding_window\": 15");
+}
+
+test "the ring holds the window and a whole block more" {
+    const c = try Config.parse(gpa, stock, q27);
+    try std.testing.expect(c.ringRows() >= c.window + c.block);
 }
 
 test "shapes the kernels do not run are refused" {

@@ -62,13 +62,44 @@ pub fn forwards(r: anytype, widest: usize, streams: usize, batch_rows: usize, ou
     }
 }
 
-/// `r.time(&.{w})` (one forward's mean ms) of a lone window of each width to `widest` rows.
+/// `r.time(&.{w})` (one forward's mean ms) of a lone window of each width to `widest` rows, pooled across tile steps.
 pub fn windows(r: anytype, widest: usize, out: *Costs) !void {
     out.windows = 0;
     for (1..out.window.len + 1) |w| {
         if (w > widest) break;
         out.window[out.windows] = .{ .width = @intCast(w), .ms = try r.time(&.{w}) };
         out.windows += 1;
+    }
+    poolWindowRows(out.window[0..out.windows]);
+}
+
+/// Pools rising added-row ms within each 4-row regime so a tile step never prices an earlier draft under a later one.
+pub fn poolWindowRows(ws: []Cost) void {
+    if (ws.len <= 2) return;
+    std.debug.assert(ws.len <= 16);
+    var sums: [16]f64 = undefined;
+    var counts: [16]f64 = undefined;
+    var m: usize = 0;
+    var first: usize = 0;
+    for (ws[0 .. ws.len - 1], ws[1..], 2..) |a, b, r| {
+        if ((r - 1) % window == 0) first = m + 1;
+        sums[m] = b.ms - a.ms;
+        counts[m] = 1;
+        m += 1;
+        while (m > first + 1 and sums[m - 2] * counts[m - 1] < sums[m - 1] * counts[m - 2]) {
+            sums[m - 2] += sums[m - 1];
+            counts[m - 2] += counts[m - 1];
+            m -= 1;
+        }
+    }
+    var at: usize = 1;
+    for (sums[0..m], counts[0..m]) |s, k| {
+        const base = ws[at - 1].ms;
+        const n: usize = @intFromFloat(k);
+        for (0..n) |j| {
+            ws[at].ms = base + s / k * @as(f64, @floatFromInt(j + 1));
+            at += 1;
+        }
     }
 }
 
@@ -129,4 +160,25 @@ test "lone widths to the widest, shared totals the streams can hold" {
     try std.testing.expectEqual(@as(usize, 4), c.shareds);
     try std.testing.expectEqual(@as(u32, 12), c.shared[3].width);
     try std.testing.expectEqual(@as(usize, 3), f.calls.items[f.calls.items.len - 1]);
+}
+
+test "windows pools a rising added-row step across tile boundaries while leaving concave rows alone" {
+    const Script = struct {
+        ms: []const f64,
+        fn time(s: @This(), widths: []const usize) !f64 {
+            return s.ms[widths[0] - 1];
+        }
+    };
+    var c: Costs = .{};
+    try windows(Script{ .ms = &.{ 10, 13, 15, 16 } }, 4, &c);
+    try std.testing.expectEqual(@as(usize, 4), c.windows);
+    for ([_]f64{ 10, 13, 15, 16 }, 0..) |want, i| try std.testing.expectApproxEqAbs(want, c.window[i].ms, 1e-12);
+
+    try windows(Script{ .ms = &.{ 10, 11, 14, 15 } }, 4, &c);
+    try std.testing.expectEqual(@as(usize, 4), c.windows);
+    for ([_]f64{ 10, 12, 14, 15 }, 0..) |want, i| try std.testing.expectApproxEqAbs(want, c.window[i].ms, 1e-12);
+
+    try windows(Script{ .ms = &.{ 10, 11, 14, 15, 21, 22, 25, 26 } }, 8, &c);
+    try std.testing.expectEqual(@as(usize, 8), c.windows);
+    for ([_]f64{ 10, 12, 14, 15, 21, 23, 25, 26 }, 0..) |want, i| try std.testing.expectApproxEqAbs(want, c.window[i].ms, 1e-12);
 }

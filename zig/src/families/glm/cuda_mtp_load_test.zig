@@ -52,6 +52,8 @@ const Fake = struct {
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
         d.api.cuLaunchKernel = launch;
+        d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(launch);
+        d.func_name = null;
         return d;
     }
 };

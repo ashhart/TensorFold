@@ -47,9 +47,8 @@ pub const Prof = struct {
     }
 
     /// TF_GLM_PROF=1 asks for it.
-    pub fn wanted() bool {
-        const v = std.c.getenv("TF_GLM_PROF") orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "1");
+    pub fn wanted() !bool {
+        return @import("sys").environment.read(bool, "TF_GLM_PROF", false);
     }
 
     pub fn beginPrompt(p: *Prof, s: cuda.Stream, label: []const u8, meta: prompt_trace.Meta, layers: usize, pieces: usize) !void {

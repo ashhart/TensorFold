@@ -10,6 +10,9 @@ pub const Error = error{ UnsupportedModel, InvalidTokenizer, UnknownTokenMissing
 
 pub const Merge = struct { rank: u32, id: u32 };
 
+/// The highest token id a tokenizer file may name: the id table is dense, so a file's largest id sizes an allocation.
+pub const max_id: u32 = (1 << 24) - 1;
+
 pub const Model = struct {
     kind: Kind,
     unk_token: ?[]const u8 = null,
@@ -208,6 +211,7 @@ pub fn load(keep: Allocator, scratch: Allocator, scanner: *std.json.Scanner, voc
                 };
                 const value = (try nextCount(scanner)) orelse return error.InvalidTokenizer;
                 const at: u32 = std.math.cast(u32, value) orelse return error.InvalidTokenizer;
+                if (at > max_id) return error.InvalidTokenizer;
                 try vocab.put(token, at);
                 try tokens.put(at, token);
             }

@@ -302,3 +302,32 @@ test "whole and streamed chat replies agree on GLM calls and on the envelopes ar
     try expectAgree(a, "<tool_call>lookup</tool_call>", 2000);
     try expectAgree(a, "<tool_call>lookup<arg_key>q</arg_key></tool_call>", 2000);
 }
+
+test "a GLM value that runs into the next pair or never closes is text, whole and streamed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // #2801: a value that runs into the next pair, and a last value the envelope ends before its closer
+    const replies = [_][]const u8{
+        "<tool_call>lookup<arg_key>q</arg_key><arg_value>a<arg_key>n</arg_key><arg_value>1</arg_value></tool_call>",
+        "<tool_call>lookup<arg_key>q</arg_key><arg_value>a</tool_call>",
+    };
+    for (replies) |reply| {
+        const tokens = try TestText.encode(undefined, a, reply, false);
+        const body = try std.fmt.allocPrint(a, "{s},\"max_tokens\":2000", .{chat_tools});
+        for ([_]bool{ false, true }) |batched| {
+            var backend: CallEngine = .{ .tokens = tokens, .batched = batched };
+            const whole_reply = try sendWith(backend.engine(), .chat, try std.mem.concat(a, u8, &.{ body, ",\"stream\":false}" }), .{});
+            const stream_reply = try sendWith(backend.engine(), .chat, try std.mem.concat(a, u8, &.{ body, ",\"stream\":true}" }), .{});
+            try std.testing.expectEqual(@as(?u16, 200), whole_reply.status);
+            try std.testing.expect(stream_reply.opened and stream_reply.status == null);
+            // not the deltas: a stream may send the call's first pieces before the slip is visible
+            try std.testing.expectEqual(@as(usize, 0), whole_reply.calls);
+            try std.testing.expectEqual(.stop, whole_reply.finish.?);
+            const window = whole_reply.text.len; // Seen keeps this many of the reply's first bytes
+            try std.testing.expectEqualStrings(reply[0..@min(window, reply.len)], whole_reply.content());
+            try std.testing.expectEqual(.stop, stream_reply.finish.?);
+            try std.testing.expectEqualStrings(whole_reply.content(), stream_reply.content());
+        }
+    }
+}

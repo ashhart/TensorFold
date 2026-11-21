@@ -12,8 +12,8 @@ fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.c
     return c;
 }
 
-/// The serving drafts switch wins; unset keeps the literal family facts, including their existing cost tables.
-pub fn apply(base: lanes.Model, enabled: bool) lanes.Model {
+/// The serving drafts switch wins; unset keeps the family's facts. `measured`: timed prices, so no seed tables.
+pub fn apply(base: lanes.Model, enabled: bool, measured: bool) lanes.Model {
     if (!enabled or !base.mtp) return base;
     var m = base;
     m.root_copies = true;
@@ -21,8 +21,10 @@ pub fn apply(base: lanes.Model, enabled: bool) lanes.Model {
     m.copy_match = 4;
     m.own_copy_rates = true;
     m.plain_guard = true;
-    m.window_costs = &window_costs;
-    m.shared_costs = &shared_costs;
+    if (!measured) m.window_costs = &window_costs;
+    if (!measured) m.shared_costs = &shared_costs;
+    m.window_costs_lone = false; // every copy pays for its rows, in shared rounds too
+    m.shared_drafts = 0;
     // Keep head confidence in the backend's probabilities so every copy still pays its target-window cost.
     m.draft_confidence = null;
     return m;

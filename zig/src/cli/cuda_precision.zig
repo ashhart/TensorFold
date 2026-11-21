@@ -22,7 +22,7 @@ fn round16(x: f64) f64 {
 
 /// A checkpoint matrix [n, k] as stored: bf16, e4m3 times one scale, or NVFP4 codes, block scales and one scale.
 const Matrix = struct {
-    kind: enum { bf16, fp8, nvfp4 },
+    kind: core.modelopt.part.Kind,
     w: []const u8,
     blocks: []const u8 = &.{},
     scale: f64 = 1,
@@ -30,23 +30,16 @@ const Matrix = struct {
     n: usize,
     k: usize,
 
+    /// `pre`'s part by its weight's dtype through core's ModelOpt reader; FP8 needs its input_scale (NVIDIA's W8A8).
     fn open(ck: *core.Checkpoint, pre: []const u8) !Matrix {
         var buf: [192]u8 = undefined;
         const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{pre}));
-        switch (w.dtype) {
-            .bf16 => return .{ .kind = .bf16, .w = w.bytes, .n = w.dim(0), .k = w.dim(1) },
-            .f8_e4m3 => return .{ .kind = .fp8, .w = w.bytes, .scale = try one(ck, &buf, pre, "weight_scale"), .in_scale = try one(ck, &buf, pre, "input_scale"), .n = w.dim(0), .k = w.dim(1) },
-            .u8 => {
-                const b = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{pre}));
-                return .{ .kind = .nvfp4, .w = w.bytes, .blocks = b.bytes, .scale = try one(ck, &buf, pre, "weight_scale_2"), .n = w.dim(0), .k = w.dim(1) * 2 };
-            },
-            else => return error.UnsupportedQuantization,
-        }
-    }
-
-    fn one(ck: *core.Checkpoint, buf: []u8, pre: []const u8, leaf: []const u8) !f64 {
-        const t = try ck.get(try std.fmt.bufPrint(buf, "{s}.{s}", .{ pre, leaf }));
-        return @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, t.bytes[0..4], .little))));
+        const kind = core.modelopt.part.kindOf(w.dtype) orelse return error.UnsupportedQuantization;
+        // a missing FP8 input_scale is refused by name; NVFP4's is not read (main never did)
+        const p = try core.modelopt.part.read(ck, pre, .{ .kind = kind, .act = if (kind == .fp8) .required else .skip });
+        const in_scale: ?f64 = if (p.act) |x| x else null;
+        const blocks: []const u8 = if (p.blocks) |b| b.bytes else &.{};
+        return .{ .kind = p.kind, .w = p.weight.bytes, .blocks = blocks, .scale = p.scale, .in_scale = in_scale, .n = p.n, .k = p.k };
     }
 
     /// Row r's values in fp64 over inputs [c0, c0 + out.len).

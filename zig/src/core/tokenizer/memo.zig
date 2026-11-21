@@ -1,11 +1,19 @@
-//! Token ids of long text segments between added tokens: a chat's earlier messages are tokenized once, not each render.
+//! Token ids of text segments between added tokens: a chat's earlier messages are tokenized once, not each render.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Segments shorter than this are tokenized each time: their lookup would cost about what their encode does.
-pub const min_bytes = 1024;
+pub const min_bytes = 64;
 
 const Entry = struct { text: []u8, first: bool, ids: []u32, previous: ?u64 = null, next: ?u64 = null };
+/// Bytes a kept segment costs beyond its text and ids: its entry and its key in the map.
+pub const overhead = @sizeOf(Entry) + @sizeOf(u64);
+
+/// A segment's bytes against the cap: its text, its ids and the fixed `overhead`; null past usize.
+pub fn bytes(text: usize, ids: usize) ?usize {
+    const id_bytes = std.math.mul(usize, ids, @sizeOf(u32)) catch return null;
+    return std.math.add(usize, text, std.math.add(usize, id_bytes, overhead) catch return null) catch null;
+}
 
 /// A bounded segment cache; successful reads refresh recency under the same lock as saves and eviction.
 pub const Memo = struct {
@@ -46,8 +54,7 @@ pub const Memo = struct {
 
     /// Copies a completed segment; concurrent duplicate saves retain the existing copy and refresh its recency.
     pub fn put(m: *Memo, text: []const u8, first: bool, ids: []const u32) void {
-        const id_bytes = std.math.mul(usize, ids.len, @sizeOf(u32)) catch return;
-        const size = std.math.add(usize, text.len, id_bytes) catch return;
+        const size = bytes(text.len, ids.len) orelse return;
         if (size > m.cap) return;
         const k = key(text, first);
         m.lock();
@@ -99,7 +106,7 @@ pub const Memo = struct {
     fn remove(m: *Memo, k: u64) void {
         m.unlink(k);
         const e = m.map.fetchRemove(k).?.value;
-        m.held -= e.text.len + e.ids.len * @sizeOf(u32);
+        m.held -= bytes(e.text.len, e.ids.len).?;
         free(m.gpa, e);
     }
 
@@ -127,7 +134,7 @@ test {
 
 test "a kept segment comes back only for the same text and first flag, and the oldest goes past the cap" {
     const gpa = std.testing.allocator;
-    const m = try Memo.create(gpa, 60);
+    const m = try Memo.create(gpa, 60 + overhead);
     defer m.destroy();
     var ids: std.ArrayList(u32) = .empty;
     defer ids.deinit(gpa);
@@ -135,7 +142,23 @@ test "a kept segment comes back only for the same text and first flag, and the o
     try std.testing.expect(!try m.append("abcd", true, gpa, &ids));
     try std.testing.expect(try m.append("abcd", false, gpa, &ids));
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, ids.items);
-    m.put("0123456789012345678901234567890123456789", false, &.{ 3, 4, 5 }); // 52 bytes: "abcd" (12) goes
+    m.put("0123456789012345678901234567890123456789", false, &.{ 3, 4, 5 }); // 52 bytes and an overhead: "abcd" goes
     try std.testing.expect(!try m.append("abcd", false, gpa, &ids));
-    try std.testing.expectEqual(@as(usize, 52), m.held);
+    try std.testing.expectEqual(52 + overhead, m.held);
+}
+
+test "each kept segment counts its entry against the cap, so short segments cannot outgrow it" {
+    const gpa = std.testing.allocator;
+    const payload = min_bytes + 16 * @sizeOf(u32); // a segment's text and ids alone
+    const m = try Memo.create(gpa, 10 * payload);
+    defer m.destroy();
+    var text: [min_bytes]u8 = @splat('x');
+    for (0..20) |i| {
+        text[0] = @intCast(i);
+        m.put(&text, false, &(@as([16]u32, @splat(@intCast(i)))));
+    }
+    // ten segments' text and ids no longer fit: their entries and keys count too
+    try std.testing.expect(m.map.count() < 10);
+    try std.testing.expectEqual(10 * payload / bytes(min_bytes, 16).?, m.map.count());
+    try std.testing.expect(m.held <= m.cap);
 }

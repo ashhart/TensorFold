@@ -7,6 +7,7 @@ const ck = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const frags = @import("../../core/frags.zig");
 const weights = @import("weights.zig");
+const contracts = @import("contracts.zig");
 
 pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant" };
 pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant };
@@ -29,6 +30,8 @@ pub const Model = struct {
     inv: mtl.Buffer,
     /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
     shared_queue: bool,
+    /// Qwen3 embeddings alone normalize each projected Q and K head before RoPE.
+    head_norm: ?mtl.Pipeline = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         return loadOn(gpa, io, dir, null);
@@ -36,16 +39,22 @@ pub const Model = struct {
 
     /// As `load`, on `queue` when given (the model then never releases it).
     pub fn loadOn(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, queue: ?mtl.Queue) !*Model {
+        return loadPrepared(gpa, io, dir, try cfg.Config.read(gpa, io, dir), queue, weights.load);
+    }
+
+    /// The same dense forward, with a family-validated geometry and checkpoint reader.
+    pub fn loadPrepared(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, config: cfg.Config, queue: ?mtl.Queue, comptime read_weights: anytype) !*Model {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.gpa = gpa;
-        m.config = try cfg.Config.read(gpa, io, dir);
+        m.config = config;
+        m.head_norm = null;
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         // prompt chunks' GEMM and attention run on Metal 4 tensor units: an M5 or later
-        if (!m.device.tensorUnits()) return error.LlamaNeedsTensorUnits;
+        if (!contracts.available(m.device)) return error.LlamaNeedsTensorUnits;
         m.shared_queue = queue != null;
         m.queue = queue orelse try m.device.queue();
         errdefer if (!m.shared_queue) m.queue.deinit();
@@ -54,10 +63,10 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFile(m.device, path, "");
-        m.weights = try weights.load(gpa, &m.checkpoint, &m.config);
+        m.weights = try read_weights(gpa, &m.checkpoint, &m.config);
         errdefer m.weights.deinit(gpa);
         {
-            const src = try std.fmt.allocPrint(gpa, "#define LL_DH {d}\n{s}", .{ cfg.head_dim, ks.llama_glue });
+            const src = try contracts.glueSource(gpa);
             defer gpa.free(src);
             const lib = try mtl.Library.fromSource(m.device, src, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
             defer lib.deinit();
@@ -70,10 +79,7 @@ pub const Model = struct {
         }
         errdefer for (m.glue) |p| p.deinit();
         {
-            const body = try frags.source(m.device, gpa, ks.llama_attention_nax);
-            defer gpa.free(body);
-            const c = m.config;
-            const src = try std.fmt.allocPrint(gpa, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define KVH {d}\n#define SCALE {e}f\n{s}", .{ cfg.head_dim, c.heads, c.group(), c.kv_heads, c.scale(), body });
+            const src = try contracts.attentionSourceHeads(m.device, gpa, m.config.heads, m.config.kv_heads);
             defer gpa.free(src);
             const lib = try mtl.Library.fromSource(m.device, src, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -87,7 +93,7 @@ pub const Model = struct {
         }
         errdefer m.sample_full.deinit();
         {
-            const body = try frags.source(m.device, gpa, ks.llama_gemm);
+            const body = try contracts.gemmSource(m.device, gpa);
             defer gpa.free(body);
             const lib = try mtl.Library.fromSource(m.device, body, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -111,6 +117,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.head_norm) |p| p.deinit();
         m.inv.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();
         m.sample_full.deinit();

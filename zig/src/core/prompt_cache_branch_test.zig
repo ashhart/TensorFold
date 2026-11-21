@@ -74,7 +74,7 @@ test "a state resumed once and then extended is still superseded: a conversation
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 
-test "a reply's end born with its request's length supersedes none of its states: a regenerate and an edit resume the history" {
+test "a reply end supersedes its equal-born history under pressure: regeneration still equals a fresh pass" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -90,12 +90,13 @@ test "a reply's end born with its request's length supersedes none of its states
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
     const reply = t1 ++ seq(6, 500); // the reply decoded after it
     _ = f.pass(&s, &reply, .{ .from = 20 });
-    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{})); // 126 more: the oldest goes, not the history
-    try std.testing.expect(s.find(&x, &.{}, &.{}) == null);
-    const y = seq(20, 300); // an unrelated prompt: the reply's end is no later turn, so it supersedes nothing either
+    // The redundant history goes before another conversation.
+    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{}));
+    try std.testing.expect(s.find(&x, &.{}, &.{}) != null);
+    const y = seq(20, 300); // an unrelated prompt now needs one newest state
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &y));
-    try std.testing.expect(s.find(&z, &.{}, &.{}) == null);
-    try std.testing.expectEqual(@as(u32, 13), try request(&f, &s, a, &t1)); // regenerated
+    try std.testing.expect(s.find(&z, &.{}, &.{}) != null);
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1)); // regenerated without its old history
     const edited = t1 ++ seq(6, 600) ++ seq(5, 700) ++ seq(7, 1000); // the reply edited, then the next user turn
     try std.testing.expectEqual(@as(u32, 13), try request(&f, &s, a, &edited));
     try std.testing.expect(s.held <= s.budget);
@@ -128,13 +129,13 @@ test "a later turn still supersedes the history and the reply's end: both go bef
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 
-test "a warm pass's lookup counts with its request's length: room for its mark frees an older state, not the history" {
+test "a warm pass frees its equal-born redundant history before another conversation's newest" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = .waits, .min_prompt = 0, .min_gap = 3 }, 470); // fake bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = .waits, .min_prompt = 0, .min_gap = 3 }, 470);
     defer s.deinit();
     const x = seq(20, 100); // another conversation's history, the least recently used state
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
@@ -142,13 +143,14 @@ test "a warm pass's lookup counts with its request's length: room for its mark f
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
     const reply = t1 ++ seq(6, 500);
     _ = f.pass(&s, reply[0..25], .{ .from = 20 });
-    try std.testing.expect(s.keepBorn(&reply, 20, 25, null, &.{}, &.{})); // the reply's end, its lookahead token in the reply
+    // The reply's end, including its lookahead token.
+    try std.testing.expect(s.keepBorn(&reply, 20, 25, null, &.{}, &.{}));
     const warm = reply ++ seq(3, 900); // the reply as sent and the next turn's opening: its mark at 28 needs 128 more
     const l = try s.lookupRewind(a, &warm, 20, warm.len, 0, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 25), l.entry.?.at);
     try std.testing.expectEqualSlices(u32, &.{28}, l.marks);
-    try std.testing.expect(s.find(&x, &.{}, &.{}) == null); // the older state made the room
-    try std.testing.expectEqual(@as(u32, 13), (s.find(&t1, &.{}, &.{}) orelse return error.HistoryEvicted).at);
+    try std.testing.expect(s.find(&x, &.{}, &.{}) != null); // another conversation's newest stays
+    try std.testing.expect(s.find(&t1, &.{}, &.{}) == null); // its redundant history made the room
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 

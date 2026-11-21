@@ -150,7 +150,7 @@ fn expertCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, k: 
     // up: relu^2 through experts.Grouped, then fp32 sums by the same kernels with no activation
     try y.fill8(0xff, s.handle); // a call that writes nothing fails rather than pass on old bytes
     const call = if (prompt) &ex_.Grouped.prompt else &ex_.Grouped.decode;
-    try call(g, s, .up, .{ .x = dx.ptr, .stride = l.dims, .slots = slots }, l, plan, y.ptr, bound, -1);
+    try call(g, s, .up, .{ .x = dx.ptr, .stride = l.dims, .slots = slots }, l, plan, y.ptr, bound, pairs, tile, -1);
     try s.synchronize();
     try compare(gpu, try std.fmt.bufPrint(&name, "iq2 up relu^2 {s} {d} rows x {d}", .{ form, rows, slots }), y, ref_up, .relu2, tolerance(.relu2));
     try y.fill8(0xff, s.handle);
@@ -160,7 +160,7 @@ fn expertCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, k: 
     // down from pair rows, fp32 and bf16
     inline for (.{ .{ ex_.Epi.down_f32, ggml.Out.f32 }, .{ ex_.Epi.down_bf16, ggml.Out.bf16 } }) |c| {
         try y.fill8(0xff, s.handle);
-        try call(g, s, c[0], .{ .x = dh.ptr, .stride = l.width }, l, plan, y.ptr, bound, -1);
+        try call(g, s, c[0], .{ .x = dh.ptr, .stride = l.width }, l, plan, y.ptr, bound, pairs, tile, -1);
         try s.synchronize();
         try compare(gpu, try std.fmt.bufPrint(&name, "iq2 down {t} {s} {d} rows x {d}", .{ c[1], form, rows, slots }), y, ref_down, c[1], tolerance(c[1]));
     }
@@ -256,8 +256,8 @@ pub fn bench(gpu: Gpu) !void {
         for (0..2) |warm| {
             try t0.record(s);
             for (0..reps) |_| for (ps) |p| {
-                if (pi != 1) try g.decode(s, .up, .{ .x = x.ptr, .stride = dims, .slots = 9 }, l, p, h.ptr, bound, -1);
-                if (pi != 0) try g.decode(s, .down_f32, .{ .x = h.ptr, .stride = width }, l, p, y.ptr, bound, -1);
+                if (pi != 1) try g.decode(s, .up, .{ .x = x.ptr, .stride = dims, .slots = 9 }, l, p, h.ptr, bound, 9, 16, -1);
+                if (pi != 0) try g.decode(s, .down_f32, .{ .x = h.ptr, .stride = width }, l, p, y.ptr, bound, 9, 16, -1);
             };
             try t1.record(s);
             try t1.synchronize();
@@ -299,9 +299,9 @@ pub fn bench(gpu: Gpu) !void {
         defer t2.deinit();
         for (0..2) |warm| {
             try t0.record(s);
-            try g.prompt(s, .up, .{ .x = xp.ptr, .stride = dims, .slots = 9 }, l, pp, hp.ptr, pb, -1);
+            try g.prompt(s, .up, .{ .x = xp.ptr, .stride = dims, .slots = 9 }, l, pp, hp.ptr, pb, pairs, 64, -1);
             try t1.record(s);
-            try g.prompt(s, .down_bf16, .{ .x = hp.ptr, .stride = width }, l, pp, yp.ptr, pb, -1);
+            try g.prompt(s, .down_bf16, .{ .x = hp.ptr, .stride = width }, l, pp, yp.ptr, pb, pairs, 64, -1);
             try t2.record(s);
             try t2.synchronize();
             if (warm == 0) continue;

@@ -37,7 +37,7 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: Sampling, position: u32, i
     return race(logits, try plan(gpa, logits, s), s.seed, position, ids);
 }
 
-/// tf_uniform kept below 1: its top value rounds to 1.0, a score of +inf that would win from anywhere in the vocabulary.
+/// Keep tf_uniform below 1: its top value rounds to 1.0, a +inf score that would win from anywhere in the vocabulary.
 pub fn raceUniform(seed: u64, position: u32, id: u32) f32 {
     return @min(rule.uniform24(seed, position, id), below_one);
 }
@@ -111,7 +111,7 @@ fn extend(logits: []const f32, p: Plan, norm: f32, top_p: f32, cum: f32, b: Mark
     return .{ .key = key, .id = id };
 }
 
-/// The kernel's mass(): exp(v - m) / norm over tokens at or above `lo`, after `b`, inside `top` and `cut`, in its order.
+/// The kernel's mass(): exp(v - m) / norm over tokens >= `lo`, after `b`, inside `top` and `cut`, in its order.
 fn mass(logits: []const f32, p: Plan, norm: f32, lo: f32, b: Mark, top: Mark, cut: Mark, strict: bool) f32 {
     var lanes: [1024]f32 = @splat(0.0);
     for (logits, 0..) |l, i| {

@@ -1,11 +1,15 @@
 # Building native release archives
 
 The release owner chooses `MAJOR.MINOR.PATCH`. No new release number is set here.
-Use the pinned Zig in `.zig-version`, a Mac with the Xcode macOS SDK, and qualified CUDA fatbins:
+Use the pinned Zig in `.zig-version`, a Mac with the Xcode macOS SDK, and qualified CUDA fatbins.
+The release build also needs the [pinned XGrammar checkout](../zig/src/platform/grammar_library.zig) with its submodules.
 
 ```sh
-zig build dist -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins -j2
-zig build dist-smoke -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins -j2
+git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar /absolute/path/to/xgrammar
+zig build dist -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins \
+  -Dxgrammar=/absolute/path/to/xgrammar -j2
+zig build dist-smoke -Dversion=MAJOR.MINOR.PATCH -Ddist-fatbins=/absolute/path/to/fatbins \
+  -Dxgrammar=/absolute/path/to/xgrammar -j2
 ```
 
 `dist` builds all three native servers and writes archives and companion SHA-256 files to `zig-out/dist/`.
@@ -32,41 +36,18 @@ Python packages or model weights. There is no Python dependency in the packaging
 
 ## CUDA box inputs
 
-The CUDA box produces one flat directory, supplied as `-Ddist-fatbins=DIR`, with
-`zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,120,121`: Ampere (sm_80 and sm_86), RTX 50-series and
-RTX PRO Blackwell (sm_120), and GB10 (sm_121). `dist` refuses a file that lacks an image for any of the four. All of
-these files are required:
-
-```text
-DIR/
-  gdn.fatbin
-  probe.fatbin
-  qmm_group.fatbin
-  qmm_prefill.fatbin
-  experts.fatbin
-  experts_prefill.fatbin
-  experts_pack.fatbin
-  prefill_attention.fatbin
-  scan_rows.fatbin
-  nemotron_ops.fatbin
-  torch_argmax.fatbin
-  torch_topk.fatbin
-  torch_pointwise.fatbin
-  torch_indexing.fatbin
-  torch_movement.fatbin
-  torch_nemotron_constants.fatbin
-```
-
-Build this input on the CUDA box with the same pinned Zig and qualified nvcc:
+Build the release inputs on the CUDA box with the pinned Zig version and a qualified nvcc.
 
 ```sh
-zig build fatbins -Dtarget=x86_64-linux-gnu -Dnvcc=/path/to/nvcc -Dsm=121
-# Input for the Mac release builder is the resulting zig-out/fatbin/ directory.
+zig build fatbins -Dtarget=x86_64-linux-gnu -Dnvcc=/path/to/nvcc -Dsm=80,86,120,121
 ```
 
-`-Dsm` chooses the GPU SASS targets, independently of the Linux host CPU. The existing build defaults to SM121.
-Use another list only after qualifying those GPUs. The same fatbins are embedded into the x86_64 and aarch64
-servers; they contain GPU machine code, not host CPU code. Missing input files fail the build.
+Pass the complete `zig-out/fatbin/` directory to `-Ddist-fatbins` on the Mac release builder.
+The [CUDA kernel catalog](../zig/build/cuda_kernels.zig) lists the required files. `dist` requires each
+fatbin to contain SASS for Ampere (sm_80 and sm_86), RTX 50 and RTX PRO Blackwell (sm_120), and GB10 (sm_121).
+
+For local development, `-Dsm` can select the test GPU, independently of the Linux host CPU.
+The same release fatbins are embedded into the x86_64 and aarch64 servers.
 The release build does not install or download nvcc, create cubins, or run a GPU.
 
 The captured Triton set is a separate optional input, supplied as `-Ddist-cuda-aot=DIR`:

@@ -4,19 +4,20 @@ const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const platform = @import("sys");
 
 const Engine = engine.Engine;
 const Cache = caches.Cache;
 
 /// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
-pub const window_rows: u32 = engine.max_rows;
+pub const window_rows: u32 = engine.grid_rows;
 
 /// TF_QWEN_KV_PAGES unset: a window each, dense or MoE, as on main, until #2043 closes the page cost.
 pub const unset_pages: usize = 0;
 
-/// TF_QWEN_KV_PAGES=n: n-position pages from one pool, --parallel a cap (0 or unset: a window each, as on main).
+/// TF_QWEN_KV_PAGES=n: n-position pages from one pool, --parallel a cap (0, empty or unset: a window each, as on main).
 pub fn paging() !usize {
-    return pagingOf(@import("core").profile.get(.TF_QWEN_KV_PAGES));
+    return pagingOf(@import("core").profile.given(.TF_QWEN_KV_PAGES));
 }
 
 pub fn pagingOf(v: ?[]const u8) !usize {
@@ -193,8 +194,7 @@ pub const Pages = struct {
 
     /// TF_QWEN_POOL_LOG=1: the pool's census after a prompt pass (the agent replay's memory readings).
     pub fn log(p: *const Pages, prompt: usize, cached: usize) void {
-        const v = std.c.getenv("TF_QWEN_POOL_LOG") orelse return;
-        if (!std.mem.eql(u8, std.mem.span(v), "1")) return;
+        if (!(platform.environment.read(bool, "TF_QWEN_POOL_LOG", false) catch false)) return;
         const n = p.pool.census();
         std.log.info("qwen3_5 pool after a prompt of {d} (resumed at {d}): {d} pages leased, {d} held by the prompt cache, {d} free of {d}", .{ prompt, cached, n.leased, n.kept, n.free, n.total });
     }
@@ -244,8 +244,42 @@ test "Qwen pages default: unset or 0 keeps windows, a set size pages" {
     try std.testing.expectError(error.BadQwenKvPages, pagingOf(""));
 }
 
+test "TF_QWEN_KV_PAGES: unset, empty or whitespace-only text keeps windows, a size keeps its meaning, other text is refused" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_QWEN_KV_PAGES";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(unset_pages, try paging());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(unset_pages, try paging());
+    }
+    for ([_][:0]const u8{ "0", "256", "128" }, [_]usize{ 0, 256, 128 }) |v, n| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(n, try paging());
+    }
+    for ([_][:0]const u8{ "on", " 256", "256 ", "2147483648" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectError(error.BadQwenKvPages, paging());
+    }
+}
+
 test "Qwen pages default: TF_QWEN_KV_PAGES_ALL unset keeps the engine's stream a window, as on main; 1 pages it" {
     try std.testing.expect(!pagedOnlyOf(null));
     try std.testing.expect(pagedOnlyOf("1"));
     for ([_][]const u8{ "0", "", "true", "01", " 1 " }) |v| try std.testing.expect(!pagedOnlyOf(v));
+}
+
+test "TF_QWEN_POOL_LOG: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_QWEN_POOL_LOG", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_QWEN_POOL_LOG", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_QWEN_POOL_LOG", "on"));
 }

@@ -90,7 +90,7 @@ pub fn within(io: Io, deadline: Io.Timestamp, seconds: i64) Io.Timestamp {
     return if (one.nanoseconds < deadline.nanoseconds) one else deadline;
 }
 
-fn remaining(io: Io, deadline: Io.Timestamp, f: *Failure) Error!i64 {
+pub fn remaining(io: Io, deadline: Io.Timestamp, f: *Failure) Error!i64 {
     const left = Io.Clock.awake.now(io).durationTo(deadline).toMilliseconds();
     if (left <= 0) return fail(f, "image download timed out");
     return left;
@@ -225,85 +225,22 @@ fn readInto(a: std.mem.Allocator, io: Io, r: *Io.Reader, data: *std.ArrayList(u8
     }
 }
 
-/// A TCP connection to the checked address on port 443, its connect bounded by `ms` (std's connect has no timeout).
-fn connect(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
-    // the socket calls below are libc's on Linux and macOS; a Windows server refuses image URLs by name
-    return if (comptime @import("builtin").os.tag == .windows) fail(f, "image URLs are not supported on Windows yet") else connectPosix(addr, ms, f);
-}
-
-fn connectPosix(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
-    const c = std.c;
-    const failed = "image download failed or timed out";
-    var storage: c.sockaddr.storage = undefined;
-    var len: c.socklen_t = undefined;
-    switch (addr) {
-        .ip4 => |v| {
-            const sa: *c.sockaddr.in = @ptrCast(@alignCast(&storage));
-            sa.* = std.mem.zeroes(c.sockaddr.in);
-            sa.family = c.AF.INET;
-            sa.port = std.mem.nativeToBig(u16, 443);
-            sa.addr = @bitCast(v.bytes);
-            len = @sizeOf(c.sockaddr.in);
-        },
-        .ip6 => |v| {
-            const sa: *c.sockaddr.in6 = @ptrCast(@alignCast(&storage));
-            sa.* = std.mem.zeroes(c.sockaddr.in6);
-            sa.family = c.AF.INET6;
-            sa.port = std.mem.nativeToBig(u16, 443);
-            sa.addr = v.bytes;
-            len = @sizeOf(c.sockaddr.in6);
-        },
-    }
-    const fd = c.socket(@as(c_uint, storage.family), c.SOCK.STREAM, 0);
-    if (fd < 0) return fail(f, failed);
-    errdefer _ = c.close(fd);
-    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
-    const flags = c.fcntl(fd, c.F.GETFL);
-    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
-    if (flags < 0 or c.fcntl(fd, c.F.SETFL, flags | nonblock) < 0) return fail(f, failed);
-    if (c.connect(fd, @ptrCast(&storage), len) != 0) {
-        if (c.errno(@as(c_int, -1)) != .INPROGRESS) return fail(f, failed);
-        var pfd = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.OUT, .revents = 0 }};
-        if (c.poll(&pfd, 1, @intCast(@min(ms, std.math.maxInt(c_int)))) != 1) return fail(f, failed);
-        var err: c_int = 0;
-        var err_len: c.socklen_t = @sizeOf(c_int);
-        if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, &err, &err_len) != 0 or err != 0) return fail(f, failed);
-    }
-    if (c.fcntl(fd, c.F.SETFL, flags) < 0) return fail(f, failed);
-    const tv: c.timeval = .{ .sec = @intCast(@divTrunc(ms, 1000)), .usec = @intCast(@mod(ms, 1000) * 1000) };
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(c.timeval));
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.SNDTIMEO, &tv, @sizeOf(c.timeval));
-    return .{ .socket = .{ .handle = fd, .address = addr } };
-}
-
 var trust: @import("media_fetch_tls.zig").Trust = .{};
 
-/// The network: every address the host resolves to checked public, then TLS verified for the host on the first.
+/// Every lookup address is checked public before TCP and host-verified TLS use the first working address.
 const Network = struct {
     fn request(_: Network, a: std.mem.Allocator, io: Io, u: Url, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure) Error!Got {
-        const unresolved = "image host could not be resolved";
-        var first: ?net.IpAddress = null;
-        if (net.IpAddress.parseIp4(u.host, 443)) |literal| {
-            if (!publicIp(literal)) return fail(f, "image URLs must resolve only to public internet addresses");
-            first = literal;
-        } else |_| {
-            const name = net.HostName.init(std.mem.trimEnd(u8, u.host, ".")) catch return fail(f, unresolved);
-            var results: [32]net.HostName.LookupResult = undefined;
-            var q: Io.Queue(net.HostName.LookupResult) = .init(&results);
-            name.lookup(io, &q, .{ .port = 443 }) catch return fail(f, unresolved);
-            while (q.getOneUncancelable(io)) |r| switch (r) {
-                .address => |addr| {
-                    if (!publicIp(addr)) return fail(f, "image URLs must resolve only to public internet addresses");
-                    if (first == null) first = addr;
-                },
-                .canonical_name => {},
-            } else |_| {}
-        }
-        const addr = first orelse return fail(f, unresolved);
-        try trust.ensure(io, f);
-        const stream = try connect(addr, try remaining(io, deadline, f), f);
+        const stream = try @import("media_fetch_net.zig").openVia(a, io, u.host, deadline, f, Network{});
         defer stream.close(io);
         return @import("media_fetch_tls.zig").request(&trust, a, io, stream, u, max_bytes, deadline, media_types, f);
+    }
+
+    pub fn prepare(_: Network, io: Io, f: *Failure) Error!void {
+        try trust.ensure(io, f);
+    }
+
+    pub fn connect(_: Network, addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
+        return @import("media_fetch_net.zig").connect(addr, ms, f);
     }
 };
 
@@ -467,4 +404,5 @@ test "responses as images_http._request reads them: redirects, types, lengths, e
 
 test {
     _ = @import("media_fetch_tls.zig");
+    _ = @import("media_fetch_net.zig");
 }

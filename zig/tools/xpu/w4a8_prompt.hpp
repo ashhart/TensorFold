@@ -204,7 +204,10 @@ public:
             const GRF hAH = r46, hAL = r47, hBB = r43;
             const Subregister st = r45.d(0), nst = r45.d(1);
             Label lBias;
-            shl(1, t.d(0), Gs, 1);
+            add(1, t.d(0), Gs, 7);
+            and_(1, t.d(0), t.d(0), -8);
+            sel(1 | ge, t.d(0), t.d(0), 32);
+            shl(1, t.d(0), t.d(0), 1);
             add(1, t.d(0), t.d(0), -1);
             add(1, t.d(1), M, -1);
             header(hAH, Ahi, t.d(0), t.d(1), 16, 32, 1);

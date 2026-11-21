@@ -1,6 +1,6 @@
 //! Behavioral hash, rollback, selected-row dequantization and per-copy signed-sqrt gate regressions.
 const std = @import("std");
-const hash = @import("engram_hash.zig");
+const hash = @import("engram_hash_core");
 const engram = @import("engram.zig");
 const mtl = @import("metal");
 const View = engram.View;

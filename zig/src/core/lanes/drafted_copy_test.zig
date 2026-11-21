@@ -47,6 +47,7 @@ const Watch = struct {
     var streams: [4]?*sm.Stream = @splat(null);
     var wasted: u32 = 0;
     var copies: u32 = 0;
+    var wide: u32 = 0; // copy windows verified in rounds of three streams
 
     fn slot(s: *sm.Stream) usize {
         for (&streams, 0..) |*x, i| if (x.* == null or x.* == s) {
@@ -65,19 +66,21 @@ const Watch = struct {
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         for (windows) |w| if (w.held == 0 and w.tokens.len > 0) {
             copies += 1;
+            wide += @intFromBool(windows.len >= 3);
             if (at[slot(w.stream)] == w.positions[0]) wasted += 1;
         };
         return inner_verify(ptr, windows, out);
     }
 };
 
-const Run = struct { tokens: [3][64]u32 = undefined, lens: [3]usize = @splat(0), wasted: u32 = 0, copies: u32 = 0 };
+const Run = struct { tokens: [3][64]u32 = undefined, lens: [3]usize = @splat(0), wasted: u32 = 0, copies: u32 = 0, wide: u32 = 0 };
 
-fn run(n: usize, drafts: bool, copy_first: bool) !Run {
+fn run(n: usize, drafts: bool, copy_first: bool, plain_streams: u32) !Run {
     Watch.at = @splat(null);
     Watch.streams = @splat(null);
     Watch.wasted = 0;
     Watch.copies = 0;
+    Watch.wide = 0;
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var head: dt.FakeDrafter = .{ .facts_ = .{ .depth = 4, .step_ms = 0.5, .batched = true, .copy_first = copy_first } };
@@ -95,7 +98,7 @@ fn run(n: usize, drafts: bool, copy_first: bool) !Run {
     Watch.inner_verify = verified.verify;
     verified.verify = Watch.verify;
     seen.vtable = &verified;
-    const m: @import("config.zig").Model = .{ .exact_width = 16, .gpu_tokens = true, .hidden_rows = true, .batch_rows = 32, .max_streams = 4 };
+    const m: @import("config.zig").Model = .{ .exact_width = 16, .gpu_tokens = true, .hidden_rows = true, .batch_rows = 32, .max_streams = 4, .plain_streams = plain_streams };
     var cfg = try Config.init(gpa, if (drafts) wrapped.facts(m) else m, 16, 15);
     defer cfg.deinit(gpa);
     var clock: fake.FixedClock = .{};
@@ -107,7 +110,7 @@ fn run(n: usize, drafts: bool, copy_first: bool) !Run {
     defer for (streams[0..n]) |*s| s.deinit(gpa);
     for (streams[0..n]) |*s| try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
-    var out: Run = .{ .wasted = Watch.wasted, .copies = Watch.copies };
+    var out: Run = .{ .wasted = Watch.wasted, .copies = Watch.copies, .wide = Watch.wide };
     for (streams[0..n], 0..) |*s, i| {
         out.lens[i] = s.emitted().len;
         @memcpy(out.tokens[i][0..out.lens[i]], s.emitted());
@@ -117,14 +120,58 @@ fn run(n: usize, drafts: bool, copy_first: bool) !Run {
 
 test "a copy ahead takes the round: with copy_first no hold is asked for it, and replies equal one-token decode" {
     for ([_]usize{ 1, 3 }) |n| {
-        const plain = try run(n, false, false);
-        const before = try run(n, true, false);
-        const after = try run(n, true, true);
+        const plain = try run(n, false, false, 0);
+        const before = try run(n, true, false, 0);
+        const after = try run(n, true, true, 0);
         for (0..n) |i| {
             try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], before.tokens[i][0..before.lens[i]]);
             try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], after.tokens[i][0..after.lens[i]]);
         }
         try std.testing.expect(before.copies > 0 and after.copies > 0);
         try std.testing.expectEqual(@as(u32, 0), after.wasted);
+    }
+}
+
+test "plain_streams: rounds that wide verify no copy, narrower ones still copy; replies equal one-token decode" {
+    const plain = try run(3, false, false, 0);
+    const wide = try run(3, true, false, 3);
+    const narrow = try run(3, true, false, 4);
+    for (0..3) |i| {
+        try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], wide.tokens[i][0..wide.lens[i]]);
+        try std.testing.expectEqualSlices(u32, plain.tokens[i][0..plain.lens[i]], narrow.tokens[i][0..narrow.lens[i]]);
+    }
+    try std.testing.expectEqual(@as(u32, 0), wide.wide);
+    try std.testing.expect(narrow.wide > 0);
+}
+
+/// A row policy that keeps every window as planned (a family's trim in place of the built-in allocation).
+const KeepAll = struct {
+    const trim = @import("trim.zig");
+    fn choose(_: *anyopaque, _: []const trim.Window, _: bool, _: std.mem.Allocator, _: []trim.Choice) anyerror!void {}
+    fn commit(_: *anyopaque, _: trim.Commit) anyerror!void {}
+    const vtable: trim.Trim.VTable = .{ .choose = choose, .commit = commit };
+};
+
+test "plain_streams: a family's row policy keeps copies below the switch, and none from it on" {
+    const win = @import("windows.zig");
+    const copied = [_]u32{ 5, 6, 7, 8, 9, 10, 11 };
+    var cfg = try Config.init(gpa, .{ .exact_width = 16, .hidden_rows = true, .batch_rows = 32, .plain_streams = 3 }, 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var keep: u8 = 0;
+    e.trim = .{ .ptr = &keep, .vtable = &KeepAll.vtable };
+    var streams: [3]sm.Stream = undefined;
+    for (&streams) |*s| s.* = try sm.Stream.init(gpa, .{ .id = "copied", .prompt = &.{ 1, 2 }, .max_new = 64 });
+    defer for (&streams) |*s| s.deinit(gpa);
+    for ([_]usize{ 2, 3 }) |n| {
+        _ = e.arena.reset(.retain_capacity);
+        var plans: [3]win.Plan = undefined;
+        for (plans[0..n], streams[0..n]) |*p, *s| p.* = .{ .stream = s, .position = 2, .kind = .copy, .tokens = &copied };
+        try win.allocate(&e, plans[0..n]);
+        for (plans[0..n]) |p| try std.testing.expectEqual(@as(usize, if (n < 3) copied.len else 0), p.count());
     }
 }

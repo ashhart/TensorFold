@@ -16,7 +16,7 @@ const geo = cfg.spark4b;
 const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 = 0 };
 /// The q, k and v preparation's constants (glue.metal's sp_prep_args).
 const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, ring: u32, rot: u32, stride: u32 };
-/// The bf16 row projection's constants (glue.metal's sp_mv_args).
+/// The bf16 row projection's constants (core/bf16_matvec.metal's tf_bf16_mv_args).
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 /// The decode attention's constants (glue.metal's sp_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, ring: u32, window: u32, blocks: u32, chunk: u32, first: u32, scale: f32 };

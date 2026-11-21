@@ -1,0 +1,203 @@
+{
+ "reference": {
+  "transformers": "5.20.0",
+  "tokenizers": "0.23.3",
+  "jinja2": "3.1.6",
+  "files": "thinkingmachines/Inkling-2-Small@2ad1157016e1aac77b6ff1b770e7c05229403134: tokenizer.json, tokenizer_config.json, chat_template.jinja",
+  "call": "apply_chat_template(messages, tokenize=False, add_generation_prompt=True[, reasoning_effort=E]); tok(prompt, add_special_tokens=False)"
+ },
+ "chat": [
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>"
+  },
+  {
+   "user": "Café naïve — 你好 🌍 ñandú",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Café naïve — 你好 🌍 ñandú<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 120967, 149946, 5169, 290, 150220, 220, 11739, 23643, 220, 114925, 155662, 276, 5180, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Café naïve — 你好 🌍 ñandú<|end_message|>"
+  },
+  {
+   "user": "def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 1719, 149983, 7, 87, 8, 25, 198, 149862, 150583, 149924, 145054, 17, 220, 196994, 152397, 68014, 197, 1160, 7, 69, 7, 18, 8, 8, 198, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|end_message|>"
+  },
+  {
+   "user": "It's 1234567 DON'T stop;  we'll see ...\r\nnext?",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>It's 1234567 DON'T stop;  we'll see ...\r\nnext?<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 1256, 6, 82, 220, 70904, 81554, 22, 199445, 6, 51, 151292, 26, 220, 149961, 6, 359, 150294, 197017, 68247, 2157, 30, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>It's 1234567 DON'T stop;  we'll see ...\r\nnext?<|end_message|>"
+  },
+  {
+   "user": "a",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>a<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 64, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>a<|end_message|>"
+  },
+  {
+   "user": "  two  spaces  and trailing  ",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>  two  spaces  and trailing  <|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 220, 150103, 220, 156465, 220, 149880, 162610, 279, 149859, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>  two  spaces  and trailing  <|end_message|>"
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 100887, 150881, 36, 184537, 149881, 150103, 167608, 13, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>"
+  },
+  {
+   "user": "Literal markers: <|end_message|> and <|message_user|> inside text.",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Literal markers: <|end_message|> and <|message_user|> inside text.<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 89246, 175691, 25, 220, 200010, 149880, 220, 200000, 153200, 150311, 13, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Literal markers: <|end_message|> and <|message_user|> inside text.<|end_message|>"
+  },
+  {
+   "user": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word <|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 31496, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 151290, 220, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word <|end_message|>"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "none"
+  },
+  {
+   "user": "Café naïve — 你好 🌍 ñandú",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Café naïve — 你好 🌍 ñandú<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 120967, 149946, 5169, 290, 150220, 220, 11739, 23643, 220, 114925, 155662, 276, 5180, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Café naïve — 你好 🌍 ñandú<|end_message|>",
+   "effort": "none"
+  },
+  {
+   "user": "def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 1719, 149983, 7, 87, 8, 25, 198, 149862, 150583, 149924, 145054, 17, 220, 196994, 152397, 68014, 197, 1160, 7, 69, 7, 18, 8, 8, 198, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|end_message|>",
+   "effort": "none"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.1<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 16, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.1<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "minimal"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 17, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "low"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.7<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 22, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.7<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "medium"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "high"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 68436, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "xhigh"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 68436, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": "max"
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.5<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 20, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.5<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": 0.5
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 68436, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": 0.99
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0.1<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 16, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0.1<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": 0.1
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "prompt": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "ids": [200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 32269, 11, 149904, 6, 359, 150323, 220, 70904, 68358, 150879, 0, 200010],
+   "decoded": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Hello, I'll go 12345 times!<|end_message|>",
+   "effort": 0
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "prompt": "<|message_system|><|content_text|>You are terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>",
+   "ids": [200002, 200004, 1735, 149914, 172044, 13, 200010, 200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 13, 24, 200010, 200000, 200004, 100887, 150881, 36, 184537, 149881, 150103, 167608, 13, 200010],
+   "decoded": "<|message_system|><|content_text|>You are terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>",
+   "system": "You are terse."
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "prompt": "<|message_system|><|content_text|>You are terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>",
+   "ids": [200002, 200004, 1735, 149914, 172044, 13, 200010, 200002, 200004, 34182, 279, 154554, 150628, 25, 220, 15, 200010, 200000, 200004, 100887, 150881, 36, 184537, 149881, 150103, 167608, 13, 200010],
+   "decoded": "<|message_system|><|content_text|>You are terse.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Explain MoE routing in two sentences.<|end_message|>",
+   "system": "You are terse.",
+   "effort": "none"
+  }
+ ],
+ "raw": [
+  {
+   "text": "Hello world",
+   "ids": [32269, 150770],
+   "decoded": "Hello world"
+  },
+  {
+   "text": "I'll 12345 ÄÖÜ",
+   "ids": [40, 6, 359, 220, 70904, 68358, 154050, 5208, 5214],
+   "decoded": "I'll 12345 ÄÖÜ"
+  },
+  {
+   "text": "\n\n  \t x",
+   "ids": [68014, 149859, 197, 149924],
+   "decoded": "\n\n  \t x"
+  },
+  {
+   "text": "<|endoftext|>plain",
+   "ids": [199999, 2550],
+   "decoded": "<|endoftext|>plain"
+  },
+  {
+   "text": "日本語のテキスト",
+   "ids": [90626, 22912, 6084, 2804, 2064, 3527, 3529],
+   "decoded": "日本語のテキスト"
+  },
+  {
+   "text": "é combining",
+   "ids": [108114, 172469],
+   "decoded": "é combining"
+  }
+ ]
+}

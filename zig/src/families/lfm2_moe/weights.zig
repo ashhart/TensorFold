@@ -3,6 +3,7 @@ const std = @import("std");
 const ck = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
 const c = @import("config.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 
 pub const Tensor = ck.Tensor;
 pub const Linear = row.Weights;
@@ -38,23 +39,16 @@ fn tensor(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, dt
     return expect(ckpt, try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix }), dtype, shape);
 }
 
-/// `count` matrices [n, k] (count 0: one matrix of rank 2) of `bits`-wide codes as the row kernels read them.
-fn affine(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, count: usize, n: usize, k: usize, bits: u8) !Linear {
+/// `stack` matrices [n, k] (1: one matrix of rank 2) of `bits`-wide codes as the row kernels read them.
+fn affine(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, stack: usize, n: usize, k: usize, bits: u8) !Linear {
     var buf: [256]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
-    const lead: []const usize = if (count == 0) &.{} else &.{count};
-    var shape: [3]usize = undefined;
-    @memcpy(shape[0..lead.len], lead);
-    const r = lead.len + 2;
-    shape[lead.len] = n;
-    shape[lead.len + 1] = k * bits / 32;
-    const w = try tensor(ckpt, name, ".weight", .u32, shape[0..r]);
-    shape[lead.len + 1] = k / c.group;
-    const s = try tensor(ckpt, name, ".scales", .bf16, shape[0..r]);
-    const b = try tensor(ckpt, name, ".biases", .bf16, shape[0..r]);
-    const out: Linear = .{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = b.buffer, .b_off = b.offset, .n = n, .k = k, .group = c.group, .bits = bits };
-    try out.validate();
-    return out;
+    const t = try mlx_affine.read(ckpt, name, .{ .stack = stack, .n = n, .k = k, .bits = bits, .group = c.group });
+    if (t.weight.offset % 4 != 0 or t.scales.offset % 4 != 0 or t.biases.offset % 4 != 0) {
+        std.log.err("{s}: LFM2 affine tensors not 4-byte aligned", .{name});
+        return error.UnexpectedLfmTensor;
+    }
+    return row.affine(t);
 }
 
 fn experts(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize, bits: u8, repeat: usize) !row.Experts {
@@ -66,7 +60,7 @@ fn experts(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n
 pub fn load(ckpt: *const ck.Checkpoint, config: *const c.Config) !Weights {
     const bits = config.bits;
     var w = Weights{
-        .embedding = try affine(ckpt, "model.", "embed_tokens", 0, c.vocab, c.hidden, config.embed_bits),
+        .embedding = try affine(ckpt, "model.", "embed_tokens", 1, c.vocab, c.hidden, config.embed_bits),
         .norm = try tensor(ckpt, "model.", "embedding_norm.weight", .bf16, &.{c.hidden}),
         .blocks = undefined,
     };
@@ -76,15 +70,15 @@ pub fn load(ckpt: *const ck.Checkpoint, config: *const c.Config) !Weights {
         block.operator_norm = try tensor(ckpt, p, "operator_norm.weight", .bf16, &.{c.hidden});
         block.ffn_norm = try tensor(ckpt, p, "ffn_norm.weight", .bf16, &.{c.hidden});
         block.mixer = if (config.attention[i]) .{ .attention = .{
-            .q = try affine(ckpt, p, "self_attn.q_proj", 0, c.query_heads * c.head_dim, c.hidden, bits),
-            .k = try affine(ckpt, p, "self_attn.k_proj", 0, c.kv_heads * c.head_dim, c.hidden, bits),
-            .v = try affine(ckpt, p, "self_attn.v_proj", 0, c.kv_heads * c.head_dim, c.hidden, bits),
-            .out = try affine(ckpt, p, "self_attn.out_proj", 0, c.hidden, c.query_heads * c.head_dim, bits),
+            .q = try affine(ckpt, p, "self_attn.q_proj", 1, c.query_heads * c.head_dim, c.hidden, bits),
+            .k = try affine(ckpt, p, "self_attn.k_proj", 1, c.kv_heads * c.head_dim, c.hidden, bits),
+            .v = try affine(ckpt, p, "self_attn.v_proj", 1, c.kv_heads * c.head_dim, c.hidden, bits),
+            .out = try affine(ckpt, p, "self_attn.out_proj", 1, c.hidden, c.query_heads * c.head_dim, bits),
             .q_norm = try tensor(ckpt, p, "self_attn.q_layernorm.weight", .bf16, &.{c.head_dim}),
             .k_norm = try tensor(ckpt, p, "self_attn.k_layernorm.weight", .bf16, &.{c.head_dim}),
         } } else .{ .conv = .{
-            .in = try affine(ckpt, p, "conv.in_proj", 0, 3 * c.hidden, c.hidden, bits),
-            .out = try affine(ckpt, p, "conv.out_proj", 0, c.hidden, c.hidden, bits),
+            .in = try affine(ckpt, p, "conv.in_proj", 1, 3 * c.hidden, c.hidden, bits),
+            .out = try affine(ckpt, p, "conv.out_proj", 1, c.hidden, c.hidden, bits),
             .weight = try tensor(ckpt, p, "conv.conv.weight", .bf16, &.{ c.hidden, c.conv_taps, 1 }),
         } };
         block.ffn = if (config.moe(i)) .{ .moe = .{
@@ -94,9 +88,9 @@ pub fn load(ckpt: *const ck.Checkpoint, config: *const c.Config) !Weights {
             .up = try experts(ckpt, p, "feed_forward.switch_mlp.up_proj", c.moe_intermediate, c.hidden, bits, c.topk),
             .down = try experts(ckpt, p, "feed_forward.switch_mlp.down_proj", c.hidden, c.moe_intermediate, bits, 1),
         } } else .{ .dense = .{
-            .gate = try affine(ckpt, p, "feed_forward.gate_proj", 0, c.intermediate, c.hidden, bits),
-            .up = try affine(ckpt, p, "feed_forward.up_proj", 0, c.intermediate, c.hidden, bits),
-            .down = try affine(ckpt, p, "feed_forward.down_proj", 0, c.hidden, c.intermediate, bits),
+            .gate = try affine(ckpt, p, "feed_forward.gate_proj", 1, c.intermediate, c.hidden, bits),
+            .up = try affine(ckpt, p, "feed_forward.up_proj", 1, c.intermediate, c.hidden, bits),
+            .down = try affine(ckpt, p, "feed_forward.down_proj", 1, c.hidden, c.intermediate, bits),
         } };
     }
     return w;

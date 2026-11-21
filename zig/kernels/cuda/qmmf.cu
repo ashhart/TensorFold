@@ -65,7 +65,10 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
+    qmm_frag::grid_launch();  // a dependent launch: the body waits after its prologue's weight loads
+#define TF_QMMF_WFIRST
 #include "qmmf_body.cuh"
+#undef TF_QMMF_WFIRST
 }
 
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
@@ -85,6 +88,8 @@ TF_SHARED_DOWN(tf_qmmf_shared64, 64, 64)
 template <bool F32>
 __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__ out, long long total, int SK,
                               float scale) {
+    qmm_frag::grid_launch();
+    qmm_frag::grid_wait();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= total) return;
     float acc = part[i];
@@ -244,3 +249,45 @@ template __global__ void reduce_kernel<true>(const float* __restrict__, void* __
 template __global__ void reduce_kernel<false>(const float* __restrict__, void* __restrict__, long long, int, float);
 
 }
+
+#if defined(TF_NATIVE_FP_DECODE)
+// tf-cuda-test native-fp: e2m1_pairs == fp4pair on all words, codes x e4m3 scales; out: misses, first, checks
+extern "C" __global__ void tf_qmmf_native_fp4_check(unsigned long long* __restrict__ out) {
+#if TF_FP_NATIVE
+    const unsigned long long n = 1ull << 33, step = 1ull * gridDim.x * blockDim.x;
+    unsigned long long bad = 0, first = ~0ull, seen = 0;
+    for (unsigned long long i = 1ull * blockIdx.x * blockDim.x + threadIdx.x; i < n; i += step) {
+        const uint32_t w = static_cast<uint32_t>(i >> 1);
+        const int q = static_cast<int>(i & 1);
+        uint32_t b0, b1;
+        tf_common::e2m1_pairs(w, q, b0, b1);
+        ++seen;
+        if (b0 != tf_common::fp4pair(w, 8 * q) || b1 != tf_common::fp4pair(w, 8 * q + 4)) {
+            ++bad;
+            first = i < first ? i : first;
+        }
+    }
+    const unsigned long long t = 1ull * blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < 16 * 256) {
+        const uint32_t c = static_cast<uint32_t>(t >> 8), s = static_cast<uint32_t>(t & 255);
+        const uint32_t hw = tf_common::e2m1x2(c | (c << 4)), sw = tf_common::fp4pair(c | (c << 16), 0);
+        const float sf = tf_common::e4m3f(s);
+        const uint32_t sp = tf_common::fp8pair_unit(s | (s << 8), 0x7B807B80u);
+        const float h = __uint_as_float(hw << 16) * sf, g = __uint_as_float(sw << 16) * sf;
+        ++seen;
+        // fp32 products compare as bits (NaN scale included); so do the bf16x2 products by the e4m3 scale pair
+        if (__float_as_uint(h) != __float_as_uint(g) || tf_common::mul2(hw, sp) != tf_common::mul2(sw, sp)) {
+            ++bad;
+            first = ((1ull << 40) + t) < first ? (1ull << 40) + t : first;
+        }
+    }
+    if (bad) {
+        atomicAdd(&out[0], bad);
+        atomicMin(&out[1], first);
+    }
+    atomicAdd(&out[2], seen);
+#else
+    if (blockIdx.x == 0 && threadIdx.x < 3) out[threadIdx.x] = ~0ull;
+#endif
+}
+#endif

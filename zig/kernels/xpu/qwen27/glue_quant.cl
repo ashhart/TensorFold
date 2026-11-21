@@ -64,14 +64,22 @@ static void q8_block(half8 xv, int K, int g, global char *A8, global float *SA, 
     SA[(long)g * MS + t] = s;
     const float a = s * (float)qs * (1.0f / 128.0f);
     const half hi = convert_half_rte(a * ASC);
-    AHI[(long)t * (K / 128) + g] = hi;
-    ALO[(long)t * (K / 128) + g] = convert_half_rte(a * ASC - (float)hi);
+    const int gp = Q27_GSTRIDE(K / 128);
+    AHI[(long)t * gp + g] = hi;
+    ALO[(long)t * gp + g] = convert_half_rte(a * ASC - (float)hi);
   }
 }
 static void quant_row(local const half *hl, int K, global char *A8, global float *SA, int MS, global half *AHI,
                       global half *ALO, int t) {
-  for (int g = get_sub_group_id(); g < K / 128; g += get_num_sub_groups())
+  const int ng = K / 128, gp = Q27_GSTRIDE(ng), nsg = get_num_sub_groups();
+  for (int g = get_sub_group_id(); g < ng; g += nsg)
     q8_block(vload8(0, hl + g * 128 + get_sub_group_local_id() * 8), K, g, A8, SA, MS, AHI, ALO, t);
+  if (get_sub_group_local_id() == 0) {
+    for (int g = ng + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
+    }
+  }
 }
 
 // Output of a kernel that stored row t in local memory: rotate 128-blocks if rot, then W4A8 (A8) or row sums per gs.
@@ -81,8 +89,8 @@ static void out_rows(local const half *hl, int K, global half *H, int t, int rot
     rowsums(hl, K, AHI, ALO, t, gs);
     return;
   }
-  const int lane = get_sub_group_local_id();
-  for (int g = get_sub_group_id(); g < K / 128; g += get_num_sub_groups()) {
+  const int lane = get_sub_group_local_id(), ng = K / 128, gp = Q27_GSTRIDE(ng), nsg = get_num_sub_groups();
+  for (int g = get_sub_group_id(); g < ng; g += nsg) {
     half8 xv = vload8(0, hl + g * 128 + lane * 8);
     if (rot) {
       xv = rot128_reg(xv);
@@ -97,8 +105,14 @@ static void out_rows(local const half *hl, int K, global half *H, int t, int rot
     s = sub_group_reduce_add(s) * (1.0f / 128);
     if (lane == 0) {
       const half hi = convert_half_rte(s * ASC);
-      AHI[(long)t * (K / 128) + g] = hi;
-      ALO[(long)t * (K / 128) + g] = convert_half_rte(s * ASC - (float)hi);
+      AHI[(long)t * gp + g] = hi;
+      ALO[(long)t * gp + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+  if (lane == 0) {
+    for (int g = ng + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
     }
   }
 }
@@ -125,28 +139,41 @@ static void q4_block(half8 xv, int K, int g, global uint *A4, global float *SA, 
     SA[(long)g * MS + t] = s;
     const float a = s * (float)qs * (1.0f / 128.0f);
     const half hi = convert_half_rte(a * ASC);
-    AHI[(long)t * (K / 128) + g] = hi;
-    ALO[(long)t * (K / 128) + g] = convert_half_rte(a * ASC - (float)hi);
+    const int gp = Q27_GSTRIDE(K / 128);
+    AHI[(long)t * gp + g] = hi;
+    ALO[(long)t * gp + g] = convert_half_rte(a * ASC - (float)hi);
   }
 }
 // Quantization alone, row X fp16 [T, K]: one group of 128 per row, in registers (rot: block rotated first).
 KERNEL(128) void quant_a4(global const half *X, global uint *A4, global float *SA, global half *AHI, global half *ALO,
                           int K, int MS, int rot) {
-  const int t = get_group_id(0);
-  for (int g = get_sub_group_id(); g < K / 128; g += get_num_sub_groups()) {
+  const int t = get_group_id(0), ng = K / 128, gp = Q27_GSTRIDE(ng), nsg = get_num_sub_groups();
+  for (int g = get_sub_group_id(); g < ng; g += nsg) {
     half8 xv = vload8(0, X + (long)t * K + g * 128 + get_sub_group_local_id() * 8);
     if (rot) xv = rot128_reg(xv);
     q4_block(xv, K, g, A4, SA, MS, AHI, ALO, t);
+  }
+  if (get_sub_group_local_id() == 0) {
+    for (int g = ng + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
+    }
   }
 }
 
 KERNEL(128) void quant_a8(global const half *X, global char *A8, global float *SA, global half *AHI, global half *ALO,
                           int K, int MS, int rot) {
-  const int t = get_group_id(0);
-  for (int g = get_sub_group_id(); g < K / 128; g += get_num_sub_groups()) {
+  const int t = get_group_id(0), ng = K / 128, gp = Q27_GSTRIDE(ng), nsg = get_num_sub_groups();
+  for (int g = get_sub_group_id(); g < ng; g += nsg) {
     half8 xv = vload8(0, X + (long)t * K + g * 128 + get_sub_group_local_id() * 8);
     if (rot) xv = rot128_reg(xv);
     q8_block(xv, K, g, A8, SA, MS, AHI, ALO, t);
+  }
+  if (get_sub_group_local_id() == 0) {
+    for (int g = ng + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[(long)t * gp + g] = 0.0h;
+      ALO[(long)t * gp + g] = 0.0h;
+    }
   }
 }
 
@@ -209,6 +236,99 @@ KERNEL(256) void argmax(global const float *PV, global const int *PI, global int
     for (int i = 1; i < 256; i++)
       if (bv[i] > best || (bv[i] == best && bi[i] < idx)) { best = bv[i]; idx = bi[i]; }
     OUT[row] = idx;
+  }
+}
+
+// Top-K of fp16 logits rows [R, V] (K <= 64, V <= 262144), exact, ties to the lower id, in two kernels.
+static inline int tk_better(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }
+
+// Group-wide best (v, i) by value then lower id, the winner to all work-items; rv, ri: local float[16] and int[16].
+static void tk_best(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_min(*v == bv ? *i : 0x7fffffff);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (tk_better(rv[s], ri[s], bv, bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+// topk_part, grid (ceil(V / 1024), R): K best of 1024 ids to PV, PI [R, 256, 64]; PF = 1 if any is not finite.
+KERNEL(256) void topk_part(global const half *L, int V, int K, global float *PV, global int *PI, global int *PF) {
+  local float rv[16];
+  local int ri[16];
+  local int rf[16];
+  const int lid = get_local_id(0), seg = get_group_id(0), row = get_group_id(1);
+  float v[4];
+  int id[4];
+  int bad = 0;
+  for (int j = 0; j < 4; j++) {
+    id[j] = seg * 1024 + lid + 256 * j;
+    v[j] = -INFINITY;
+    if (id[j] < V) {
+      const float x = (float)L[(long)row * V + id[j]];
+      bad |= !isfinite(x);
+      v[j] = isnan(x) ? -INFINITY : x;
+    } else id[j] = 0x7fffffff;
+  }
+  for (int k = 0; k < min(K, 64); k++) {
+    float mv = v[0];
+    int mi = id[0], mj = 0;
+    for (int j = 1; j < 4; j++)
+      if (tk_better(v[j], id[j], mv, mi)) { mv = v[j]; mi = id[j]; mj = j; }
+    float bv = mv;
+    int bi = mi;
+    tk_best(&bv, &bi, rv, ri);
+    if (mi == bi && (bi != 0x7fffffff || lid == 0)) { // a short group pads with (-inf, sentinel), from one item
+      v[mj] = -INFINITY;
+      id[mj] = 0x7fffffff;
+      PV[((long)row * 256 + seg) * 64 + k] = mv;
+      PI[((long)row * 256 + seg) * 64 + k] = mi;
+    }
+  }
+  const int any = sub_group_reduce_max(bad);
+  if (get_sub_group_local_id() == 0) rf[get_sub_group_id()] = any;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < 16; s++) f |= rf[s];
+    PF[row * 256 + seg] = f;
+  }
+}
+
+// topk_merge, grid (R): merges NS lists into OUT [R, 132] words: 64 values (fp32 bits), 64 ids, the not-finite flag.
+KERNEL(256) void topk_merge(global const float *PV, global const int *PI, global const int *PF, int K, int NS,
+                            global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  local int rf[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  const int any = sub_group_reduce_max(live ? PF[row * 256 + lid] : 0);
+  if (get_sub_group_local_id() == 0) rf[get_sub_group_id()] = any;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < 16; s++) f |= rf[s];
+    OUT[row * 132 + 128] = f;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : 0x7fffffff;
+    float bv = v;
+    int bi = i;
+    tk_best(&bv, &bi, rv, ri);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
   }
 }
 

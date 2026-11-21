@@ -180,8 +180,8 @@ fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?V
     return current;
 }
 
-/// The fragment with its percent escapes decoded, or null when one is not a hex pair.
-fn percentDecode(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
+/// The text with its percent escapes decoded, or null when one is not a hex pair.
+pub fn percentDecode(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
     if (std.mem.indexOfScalar(u8, text, '%') == null) return text;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;

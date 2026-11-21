@@ -435,6 +435,28 @@ def test_stream_errors_and_cut_streams_are_not_successes(events, error):
     assert (rep.error is None) if error is None else (error in rep.error)
 
 
+def test_stream_mixed_line_endings_do_not_split_json_text():
+    import json
+    import threading
+
+    import httpx
+
+    text = "first\u0085second\u2028third\u2029fourth"
+    event = json.dumps({"choices": [{"delta": {"content": text}}]}, ensure_ascii=False).encode()
+
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"data: " + event + b"\r"
+            yield b"\n\r"
+            yield b"\ndata: [DONE]\r\r"
+            raise AssertionError("the reader requested bytes after DONE")
+
+    transport = httpx.MockTransport(lambda _r: httpx.Response(200, stream=Stream()))
+    with httpx.Client(transport=transport) as client:
+        reply = bench.stream_once(client, "http://engine/v1/chat/completions", {}, {}, threading.Event())
+    assert reply.text == text and reply.error is None
+
+
 def test_an_engine_elsewhere_is_judged_by_its_address():
     import socket
 

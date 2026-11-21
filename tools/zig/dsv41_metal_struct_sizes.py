@@ -12,10 +12,14 @@ JOINS = [
     ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal", "csa2_rows.metal"], None),
     ("index-kv-join", ["kv.metal", "index_exl3.metal", "index_exl3_nax.metal"], None),
     ("route-defines", ["route.metal"], "#define TF_DSV41_E 384\n#define TF_DSV41_TOPK 6\n"),
+    ("experts-units-join", ["experts_mma.metal", "experts_units.metal"], None),
 ]
-JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "csa2_rows.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal"}
+JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "csa2_rows.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal", "experts_units.metal"}
+# The sources `sources.zig` embeds as `segs_h ++ @embedFile(...)`: the slot table's record first.
+SEGS_PREPEND = {"csa2_attn.metal", "fused.metal", "compress.metal", "cand.metal", "index.metal"}
 
 STRUCT_DEF = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{")
+TEMPLATE_DEF = re.compile(r"\btemplate\s*<[^>]*>\s*struct\s+([A-Za-z_]\w*)\s*\{")
 KERNEL = re.compile(r"(?:\[\[\s*kernel[^\]]*\]\]\s*|\bkernel\s+)void\s+([A-Za-z_]\w*)\s*\(")
 ARG = re.compile(r"\b(?:constant|device)\s+(?:const\s+)?([A-Za-z_]\w*)\s*[&*]")
 LAYOUT = re.compile(r"^\s*\|\s*\[sizeof=(\d+),")
@@ -28,10 +32,12 @@ def unit_texts(directory):
     for name, parts, prefix in JOINS:
         body = "".join(open(os.path.join(directory, p), encoding="utf-8").read() for p in parts)
         texts[name] = (prefix or "") + body
+    segs = open(os.path.join(directory, "segs.h"), encoding="utf-8").read()
     for entry in sorted(os.listdir(directory)):
         if not entry.endswith(".metal") or entry in JOIN_ONLY:
             continue
-        texts[entry[:-6]] = open(os.path.join(directory, entry), encoding="utf-8").read()
+        body = open(os.path.join(directory, entry), encoding="utf-8").read()
+        texts[entry[:-6]] = (segs if entry in SEGS_PREPEND else "") + body
     return texts
 
 
@@ -128,7 +134,7 @@ def main(argv):
             if unit not in layouts:
                 continue
             text = open(os.path.join(directory, source), encoding="utf-8").read()
-            for name in STRUCT_DEF.findall(text):
+            for name in set(STRUCT_DEF.findall(text)) - set(TEMPLATE_DEF.findall(text)):
                 if name not in layouts[unit]:
                     failures.setdefault(unit, f"no record layout for struct {name} ({source})")
                     continue
@@ -146,7 +152,7 @@ def main(argv):
         for unit, text in texts.items():
             if unit not in layouts:
                 continue
-            defined = set(STRUCT_DEF.findall(text))
+            defined = set(STRUCT_DEF.findall(text)) - set(TEMPLATE_DEF.findall(text))
             asserted = set(re.findall(r"static_assert\s*\(\s*sizeof\s*\(\s*([A-Za-z_]\w*)\s*\)", text))
             for name in sorted(kernel_arg_structs(text, defined) - asserted):
                 print(f"FAIL {unit}: kernel argument struct `{name}` has no "

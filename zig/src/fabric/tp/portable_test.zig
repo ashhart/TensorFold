@@ -4,6 +4,10 @@ test {
     _ = @import("reference.zig");
     _ = @import("config.zig");
     _ = @import("host_test.zig");
+    _ = @import("device_test.zig");
+    _ = @import("tcp_test.zig");
+    _ = @import("stage_test.zig");
+    _ = @import("stage_hip_test.zig");
     _ = @import("roce_guard.zig");
     _ = @import("bootstrap.zig");
     _ = @import("fate_test.zig");

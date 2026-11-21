@@ -49,6 +49,7 @@ pub fn check(srv: *Server, cx: *Cx, id: u32, which: Which, before: []const Earli
                 probed += @intFromBool(back);
             } else held = held and back;
         }
+        if (held and !try @import("slide_correction.zig").absent(srv, cx, f.asked, gone)) held = false;
         r.* = .{ .fact = f, .recalled = held and 2 * probed >= probes, .was = cameBack(before, f) };
         srv.slide.checked(f.id, r.recalled);
     }
@@ -63,6 +64,7 @@ fn cameBack(before: []const Earlier, f: Earlier) bool {
 
 /// Whether `reply` to wording `w` brings back `fact`, judged as its own lesson judged it (short answer, else words).
 fn bringsBack(fact: []const u8, w: slide_graph.Answer, reply: []const u8) bool {
+    if (w.reject_old and @import("slide_correction.zig").oldReturned(w.question, w.old, w.old_short, reply)) return false;
     if (w.short.len > 0) return wording.recallsShort(fact, w.question, w.short, reply);
     if (w.answer.len > 0) return wording.recalls(fact, w.question, w.answer, reply);
     return wording.tells(fact, w.question, "", reply);

@@ -9,6 +9,13 @@ fn partial(comptime name: []const u8, comptime sg: usize) []const u8 {
         args ++ ") nemotron_attn_partial" ++ args ++ ";\n";
 }
 
+/// group_norm_xs.metal's template at MP rows, under the function name the hosts look up.
+fn groupNorm(comptime name: []const u8, comptime mp: usize) []const u8 {
+    const args = std.fmt.comptimePrint("<{d}>", .{mp});
+    return @embedFile("group_norm_xs.metal") ++ "template [[host_name(\"" ++ name ++ "\")]] [[kernel]] decltype(nemotron_group_norm_xs" ++
+        args ++ ") nemotron_group_norm_xs" ++ args ++ ";\n";
+}
+
 pub const Kernel = struct { key: []const u8, function: [:0]const u8, source: []const u8 };
 
 pub const all = [_]Kernel{
@@ -52,18 +59,28 @@ pub const all = [_]Kernel{
     .{ .key = "up_relu2_1_0", .function = "custom_kernel_nemotron_lane_up_relu2_090709f730e8c237_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_1_0.metal") },
     .{ .key = "up_relu2_2_0", .function = "custom_kernel_nemotron_lane_up_relu2_6b2e65a73d7027d0_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_2_0.metal") },
     .{ .key = "up_relu2_2_1", .function = "custom_kernel_nemotron_lane_up_relu2_d68559363a899336_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_2_1.metal") },
-    .{ .key = "group_norm_xs_16", .function = "custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_16.metal") },
-    .{ .key = "group_norm_xs_32", .function = "custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_32.metal") },
-    .{ .key = "group_norm_xs_48", .function = "custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_48.metal") },
-    .{ .key = "group_norm_xs_64", .function = "custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_64.metal") },
-    .{ .key = "group_norm_xs_80", .function = "custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_80.metal") },
-    .{ .key = "group_norm_xs_96", .function = "custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_96.metal") },
-    .{ .key = "group_norm_xs_112", .function = "custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_112.metal") },
-    .{ .key = "group_norm_xs_128", .function = "custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_128.metal") },
+    .{ .key = "group_norm_xs_16", .function = "custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 16) },
+    .{ .key = "group_norm_xs_32", .function = "custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 32) },
+    .{ .key = "group_norm_xs_48", .function = "custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 48) },
+    .{ .key = "group_norm_xs_64", .function = "custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 64) },
+    .{ .key = "group_norm_xs_80", .function = "custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 80) },
+    .{ .key = "group_norm_xs_96", .function = "custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 96) },
+    .{ .key = "group_norm_xs_112", .function = "custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 112) },
+    .{ .key = "group_norm_xs_128", .function = "custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 128) },
     .{ .key = "add_norm_xs", .function = "custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float", .source = @embedFile("add_norm_xs.metal") },
     .{ .key = "add_norm_moe_xs", .function = "custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float", .source = @embedFile("add_norm_moe_xs.metal") },
     .{ .key = "router", .function = "custom_kernel_nemotron_router_84d0c5e2f26dd05a__2688_128_8_16_bfloat16_t_bfloat16_t_int32_tc_bfloat16_t", .source = @embedFile("router.metal") },
     .{ .key = "route", .function = "custom_kernel_nemotron_route_8776d7e9b3d3f6f3__128_6_bfloat16_t_float_floatc_uint32_t_float", .source = @embedFile("route.metal") },
+    .{ .key = "add_norm_moe_xs_bolt", .function = "tf_nemotron_add_norm_moe_xs_bolt", .source = @embedFile("add_norm_moe_xs.metal") }, // hand-authored <4096,512,1> instantiation
+    .{ .key = "add_norm_xs_bolt", .function = "tf_nemotron_add_norm_xs_bolt", .source = @embedFile("add_norm_xs.metal") }, // hand-authored <4096,512> instantiation
+    .{ .key = "group_norm_xs_bolt_16", .function = "tf_nemotron_group_norm_xs_bolt_16", .source = @embedFile("group_norm_xs_bolt.metal") }, // hand-authored: Bolt mamba inner 8192
+    .{ .key = "group_norm_xs_bolt_32", .function = "tf_nemotron_group_norm_xs_bolt_32", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_48", .function = "tf_nemotron_group_norm_xs_bolt_48", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_64", .function = "tf_nemotron_group_norm_xs_bolt_64", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_80", .function = "tf_nemotron_group_norm_xs_bolt_80", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_96", .function = "tf_nemotron_group_norm_xs_bolt_96", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_112", .function = "tf_nemotron_group_norm_xs_bolt_112", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_128", .function = "tf_nemotron_group_norm_xs_bolt_128", .source = @embedFile("group_norm_xs_bolt.metal") },
     .{ .key = "mamba_conv", .function = "custom_kernel_nemotron_mamba_conv_83552c1c128bdbca__4096_8_128_4_10304_4096_bfloat16_t_bfloat16_t_float_float_int32_t_int32_t_int32_t_int32_t_bfloat16_t_bfloat16_t", .source = @embedFile("mamba_conv.metal") },
     .{ .key = "mamba_scan", .function = "custom_kernel_nemotron_mamba_scan_52242b2ed609b53e__64_64_8_128_4096_10304_10240_524288_bfloat16_t_bfloat16_t_float_float_float_float_floatc_int32_tc_int32_t_int32_t_int32_t_bfloat16_t_float", .source = @embedFile("mamba_scan.metal") },
     .{ .key = "expert_up", .function = "custom_kernel_nemotron_rows_expert_up_3c904b6b27dccc2b__2688_1856_64_4_2_6_bfloat16_t_uint32_t_int32_t_int32_t_int32_t_int32_tc_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t", .source = @embedFile("expert_up.metal") },

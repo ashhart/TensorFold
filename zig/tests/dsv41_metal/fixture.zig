@@ -16,6 +16,9 @@ pub fn config() Config {
     return .{
         .format = .release_fp8,
         .vocab = 256,
+        .user = 199,
+        .assistant = 200,
+        .think_open = 201,
         .hidden = 256,
         .layers = 5,
         .heads = 4,
@@ -234,7 +237,8 @@ pub const Rig = struct {
         r.c = c;
         try r.c.validate();
         r.device = try mtl.Device.init();
-        r.queue = try r.device.queue();
+        // Metal 3 unless TF_METAL4=1: the timing harnesses sample Metal 3 encoders, and metal4_test compares the two
+        r.queue = try pkg.boot.openQueue(r.device, false);
         r.p = try pkg.pipelines.Pipelines.load(a, r.device, &r.c);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
