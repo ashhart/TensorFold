@@ -91,8 +91,6 @@ pub const Run = struct {
         }
     }
 
-
-
     /// Drop an uncommitted command buffer on encoding failure.
     pub fn abort(r: *Run) void {
         if (!r.open) return;
@@ -371,7 +369,6 @@ pub const Run = struct {
             }
         }
 
-
         const hl = st.hist(t, i);
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
@@ -431,7 +428,6 @@ pub const Run = struct {
 
         try r.lin(v(s.att, 0), a.wo, v(s.o, 0), n);
 
-
         // post-attention convolution, then residual: a block boundary keeps only the attention output as partial
         for (r.items, 0..) |it, idx| {
             const b: usize = r.base[idx];
@@ -475,7 +471,6 @@ pub const Run = struct {
             .topk = t.topk,
             .scale = t.route_scale,
         });
-
     }
 
     /// Layer `i` after its experts: the post-MLP convolution and the residual into the next layer's hidden stream.
