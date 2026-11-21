@@ -36,8 +36,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     ctl.setCwd(b.path("."));
     const ctl_dir = ctl.addOutputDirectoryArg("ocloc-controls");
     _ = files.addCopyFile(ctl_dir.path(b, "contract_controls.bin"), b.fmt("{s}/contract_controls.bin", .{device}));
-    for (sources) |src| {
-        if (std.mem.eql(u8, src.name, "glue") or std.mem.eql(u8, src.name, "contract_controls")) continue;
+    for (contract_images) |src| {
         _ = files.addCopyFile(object(b, ocloc, device, src), b.fmt("{s}/{s}.bin", .{ device, src.name }));
     }
     const install = b.addInstallDirectory(.{
@@ -92,8 +91,7 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             const dir = run.addOutputDirectoryArg(b.fmt("ocloc-{s}-run", .{pair[0]}));
             _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{pair[0]})), b.fmt("{s}.bin", .{pair[0]}));
         }
-        for (sources) |src| {
-            if (!std.mem.eql(u8, src.name, "decode") and !std.mem.eql(u8, src.name, "contract_attn_upstream")) continue;
+        for (contract_images[0..2]) |src| {
             _ = files.addCopyFile(object(b, ocloc, device, src), b.fmt("{s}.bin", .{src.name}));
         }
     }
@@ -123,11 +121,9 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 }
 
 const Source = struct { name: []const u8, path: []const u8 };
-const sources = [_]Source{
-    .{ .name = "glue", .path = "zig/kernels/xpu/qwen27/glue.cl" },
+const contract_images = [_]Source{
     .{ .name = "decode", .path = "zig/kernels/xpu/qwen27/decode.cl" },
     .{ .name = "contract_attn_upstream", .path = "zig/kernels/xpu/contract_attn_upstream.cl" },
-    .{ .name = "contract_controls", .path = "zig/kernels/xpu/contract_controls.cl" },
     .{ .name = "contract_gate_controls", .path = "zig/kernels/xpu/contract_gate_controls.cl" },
 };
 
@@ -137,9 +133,7 @@ fn object(b: *std.Build, ocloc: []const u8, device: []const u8, src: Source) std
     const opts = "-cl-std=CL3.0 -cl-intel-256-GRF-per-thread -I zig/kernels/xpu/qwen27";
     run.addArgs(&.{ "-device", device, "-options", opts, "-output_no_suffix", "-output", src.name, "-out_dir" });
     run.setCwd(b.path("."));
-    for ([_][]const u8{ "shape.h", "glue_attn.cl", "glue_quant.cl" }) |part| {
-        run.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
-    }
+    run.addFileInput(b.path("zig/kernels/xpu/qwen27/shape.h"));
     const dir = run.addOutputDirectoryArg(b.fmt("ocloc-contract-{s}", .{src.name}));
     return dir.path(b, b.fmt("{s}.bin", .{src.name}));
 }
