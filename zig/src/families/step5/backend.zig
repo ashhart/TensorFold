@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
+const steps = @import("prefill_steps.zig");
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
 
@@ -25,6 +26,7 @@ pub const Metal = struct {
     scratch: st.Scratch, // decode rounds
     prompt: st.Scratch, // prompt chunks
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
     follow: ?mtl.ResidencySet.Follow = null,
     held: u64 = 0, // bytes the streams' caches hold
     room: ?Room = null, // the prompt cache, which takes what the streams leave of the budget
@@ -46,6 +48,12 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        var fills = self.fills.valueIterator();
+        while (fills.next()) |f| {
+            self.gpa.free(f.spans);
+            if (f.rows) |r| r.deinit();
+        }
+        self.fills.deinit(self.gpa);
         self.scratch.deinit();
         self.prompt.deinit();
         self.gpa.destroy(self);
@@ -80,7 +88,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -95,39 +103,41 @@ pub const Metal = struct {
         return cache.logits.slice(u16, self.model.config.vocab);
     }
 
-    /// Run `ids` at the cache's end, MTP absorbing rows with a known next; a stream's pass keeps at its marks.
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, images: []const fwd.Span, stream: ?*lanes.Stream) !void {
+    /// Run one prompt chunk at the cache's end, MTP absorbing rows with a known next.
+    fn runChunk(self: *Metal, cache: *st.Cache, ids: []const u32, at: usize, end: usize, images: []const fwd.Span) !void {
         const c = &self.model.config;
-        const base = cache.len;
-        var at: usize = 0;
-        while (at < ids.len) {
-            var end = @min(ids.len, at + st.prompt_rows);
-            if (stream) |sm| {
-                if (sm.isCancelled()) return error.Cancelled;
-                for (sm.chunks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-                for (sm.reuse.marks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-            }
-            const s = if (end - at > st.window_rows) &self.prompt else &self.scratch;
-            const n = end - at;
-            try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid }, .images = images });
-            const start = cache.len;
-            cache.len += n;
-            const last: [*]const u8 = s.hid.contents() + (n - 1) * c.hidden * 4;
-            @memcpy(cache.hidden.contents()[0 .. c.hidden * 4], last[0 .. c.hidden * 4]);
-            const known = if (end < ids.len) n else n - 1; // rows whose next token is in ids
-            if (c.mtp > 0 and known > 0) try fwd.mtp(self.model, s, cache, 0, .{ .buf = s.hid }, ids[at + 1 .. at + 1 + known], start);
-            if (stream) |sm| lanes.prefill_widths.completed(self.gpa, sm, end - at);
-            at = end;
-            if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
-        }
+        const n = end - at;
+        const s = if (n > st.window_rows) &self.prompt else &self.scratch;
+        try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid }, .images = images });
+        const start = cache.len;
+        cache.len += n;
+        const last: [*]const u8 = s.hid.contents() + (n - 1) * c.hidden * 4;
+        @memcpy(cache.hidden.contents()[0 .. c.hidden * 4], last[0 .. c.hidden * 4]);
+        const known = if (end < ids.len) n else n - 1;
+        if (c.mtp > 0 and known > 0) try fwd.mtp(self.model, s, cache, 0, .{ .buf = s.hid }, ids[at + 1 .. at + 1 + known], start);
     }
 
+    const Fill = struct { pass: steps.Fill, spans: []fwd.Span = &.{}, rows: ?mtl.Buffer = null };
+
+    const Run = struct {
+        m: *Metal,
+        cache: *st.Cache,
+        spans: []const fwd.Span,
+
+        pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
+            try r.m.runChunk(r.cache, stream.prompt(), at, end, r.spans);
+        }
+
+        pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
+            if (stream.reuse.hook) |k| k.at(k.ptr, stream, at);
+        }
+    };
+
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
+        while (!try prefillStepFn(ptr, stream, 0)) {}
+    }
+
+    fn opening(self: *Metal, stream: *lanes.Stream) !*Fill {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidStep5Prompt;
         const capacity = ids.len + stream.max_new + 1;
@@ -138,29 +148,60 @@ pub const Metal = struct {
         }
         self.held += need;
         errdefer self.held -= need;
-        if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
+        if (stream.reuse.saved) |saved| {
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (self.held + snap.bytes > self.options.budget) snap.free();
         }
-        // kept states give way first
         if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
-        try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
+        try self.caches.put(self.gpa, stream, cache);
         errdefer _ = self.caches.remove(stream);
         stream.cached = 0;
-        if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+        if (stream.reuse.saved) |saved| {
             const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < ids.len) {
                 if (snapshot.restore(self.gpa, self.model.queue, &self.model.config, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        var rows: ?mtl.Buffer = null;
-        defer if (rows) |r| r.deinit();
-        const spans = try self.encodeImages(stream.images, cache.len, &rows);
-        defer self.gpa.free(spans);
-        try self.feed(cache, ids[cache.len..], spans, stream);
+        var f: Fill = .{ .pass = .{ .at = cache.len } };
+        errdefer self.gpa.free(f.spans);
+        errdefer if (f.rows) |r| r.deinit();
+        f.spans = try self.encodeImages(stream.images, cache.len, &f.rows);
+        try self.fills.put(self.gpa, stream, f);
+        stream.fill_at.store(@intCast(cache.len), .monotonic);
+        return self.fills.getPtr(stream).?;
+    }
+
+    fn closing(self: *Metal, stream: *lanes.Stream) void {
+        const entry = self.fills.fetchRemove(stream) orelse return;
+        self.gpa.free(entry.value.spans);
+        if (entry.value.rows) |r| r.deinit();
+    }
+
+    fn drop(self: *Metal, stream: *lanes.Stream) void {
+        self.closing(stream);
+        if (self.caches.fetchRemove(stream)) |entry| {
+            self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
+            entry.value.deinit();
+            self.gpa.destroy(entry.value);
+        }
+    }
+
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+        const self = cast(ptr);
+        const f = self.fills.getPtr(stream) orelse try self.opening(stream);
+        errdefer self.drop(stream);
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .spans = f.spans };
+        const done = try steps.step(r, stream, &f.pass, st.prompt_rows);
+        if (done) self.closing(stream);
+        return done;
+    }
+
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        if (self.fills.get(stream)) |f| stream.keepInterruptedPrefill(@intCast(f.pass.at));
     }
 
     /// The tower's rows for every image piece past `from`, into one buffer, as spans over their placeholders.
@@ -206,7 +247,7 @@ pub const Metal = struct {
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
-        try self.feed(&cache, &ids, &.{}, null);
+        try self.runChunk(&cache, &ids, 0, ids.len, &.{});
         try fwd.run(self.model, &self.scratch, &cache, &.{ids[0]}, .{ .all = true, .hidden = .{ .buf = cache.hidden } });
         if (self.model.vision) |v| {
             const rows = try self.model.device.buffer(169 * @as(usize, c.hidden) * 2, mtl.ResourceOptions.private);
@@ -362,6 +403,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        self.closing(stream);
         if (self.caches.fetchRemove(stream)) |entry| {
             self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
             entry.value.deinit();

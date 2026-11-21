@@ -14,4 +14,5 @@ test {
     _ = graph;
     _ = text;
     _ = plan;
+    _ = @import("hip_backend.zig");
 }

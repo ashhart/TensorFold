@@ -132,7 +132,7 @@ def request_body(entry, replacement=None):
     if redacted(body):
         raise ReplayError('the request has redacted media; supply the original with --body FILE')
     prepared = entry['prepared']
-    if 'seed' not in body and prepared and prepared.get('seed') is not None:
+    if body.get('seed') is None and prepared and prepared.get('seed') is not None:
         body['seed'] = prepared['seed']
     return body
 

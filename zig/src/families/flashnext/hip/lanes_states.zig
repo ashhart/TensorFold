@@ -10,16 +10,13 @@ const pc = @import("engine_api").prompt_cache;
 const Fx = lanes.Fx;
 const Lane = lanes.Lane;
 
-/// A prompt chunk's kept rows not saved yet: its marks, the row at its end, and the prompt's report after the last.
+/// A prompt chunk's kept rows not saved yet: its marks and the row at its end.
 pub const Keeps = struct {
     lane: *Lane,
     s: *Stream,
     marks: [cache.max_window]lanes.Marked,
     n: usize,
     live: ?usize,
-    last: bool,
-    from: usize,
-    kept0: u64,
 };
 
 /// The keeps a prompt chunk left (Fx.keeps) saved, before any step that writes a stream's caches or window.
@@ -27,15 +24,13 @@ pub fn settle(f: *Fx) void {
     const k = f.keeps orelse return;
     f.keeps = null;
     if (f.lanes.get(k.s) != k.lane) return; // its stream gone without a release: nothing to save from
-    const st = if (f.store) |*st| st else return;
-    const prompt = k.s.prompt();
+    const hook = k.s.reuse.hook orelse return;
     for (k.marks[0..k.n]) |mk| {
         f.marked = mk;
-        _ = st.keep(prompt, @intCast(mk.at), k.lane, &.{}, &.{});
+        hook.at(hook.ptr, k.s, @intCast(mk.at));
     }
     f.marked = null; // a kept row at the chunk's end saves the live caches
-    if (k.live) |at| _ = st.keep(prompt, @intCast(at), k.lane, &.{}, &.{});
-    if (k.last) st.report(prompt.len, @intCast(k.from), st.counts.kept - k.kept0);
+    if (k.live) |at| hook.at(hook.ptr, k.s, @intCast(at));
 }
 
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {
@@ -51,13 +46,17 @@ pub fn bytes(ptr: *anyopaque, at: u32) u64 {
 }
 
 pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+    const stream: *Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const f = Fx.of(ptr);
-    const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+    const lane = f.lanes.get(stream) orelse return error.UnknownStream;
     const head = if (lane.head) |*h| h else null;
     const saved = if (f.marked) |mk| if (mk.at == at)
         try snapshot.saveMarked(f.gpa, f.copy(), f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio, mk.side, mk.history)
     else
-        return error.SnapshotNotAtMark else try snapshot.save(f.gpa, f.copy(), f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio);
+        return error.SnapshotNotAtMark else if ((if (lane.fill) |fill| fill.at else stream.prompt_len) != at)
+        return error.NotAtMark
+    else
+        try snapshot.save(f.gpa, f.copy(), f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio);
     saved.slot = f.next_slot;
     f.next_slot += 1;
     if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
@@ -66,8 +65,9 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
 
 /// Every rank resumes from the state, or every rank starts the prompt over; a group that cannot do either stops.
 pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
+    const stream: *Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const f = Fx.of(ptr);
-    const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+    const lane = f.lanes.get(stream) orelse return error.UnknownStream;
     const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
     // a follower that got the step waits for every rank's word on it: a rank 0 that cannot send stops too
     if (f.link != null) f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot }) catch |err| {

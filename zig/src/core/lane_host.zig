@@ -287,7 +287,7 @@ pub const LaneHost = struct {
         if (emitted.len > job.delivered) {
             if (job.stream.logprobs != null) emit(job, .{ .logprobs = job.stream.rows.items[job.delivered..emitted.len] });
             emit(job, .{ .tokens = emitted[job.delivered..] });
-            status.noteDecoded(h, emitted.len - job.delivered, job.delivered == 0);
+            status.noteDecoded(h, job, emitted.len);
             job.delivered = emitted.len;
         }
     }

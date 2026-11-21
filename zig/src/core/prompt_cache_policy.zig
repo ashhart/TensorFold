@@ -59,6 +59,11 @@ pub fn own(e: *const pc.Entry, skip: ?*pc.Entry, prompt: []const u32) bool {
     return std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
 }
 
+fn extends(short: *const pc.Entry, long: *const pc.Entry) bool {
+    return long.tokens.len > short.tokens.len and std.mem.eql(u32, long.tokens[0..short.tokens.len], short.tokens) and
+        @import("cache_modes.zig").equal(short.decode_spans, long.decode_spans, short.at);
+}
+
 /// Only live continuations make a prefix a branch point or a superseded state.
 pub fn extended(s: *const pc.Store, e: *const pc.Entry) bool {
     if (s.links_lost) return extendedScan(s, e);
@@ -72,15 +77,13 @@ pub fn continuedLater(s: *const pc.Store, e: *const pc.Entry) bool {
         for (e.ext.items) |o| if (!o.expired and o.born > e.born) return true;
         return false;
     }
-    for (s.entries.items) |o| if (!o.expired and o.born > e.born and o.tokens.len > e.tokens.len and
-        std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
+    for (s.entries.items) |o| if (!o.expired and o.born > e.born and extends(e, o)) return true;
     return false;
 }
 
 /// `extended` over every entry, for a store whose links an allocation failure left incomplete.
 pub fn extendedScan(s: *const pc.Store, e: *const pc.Entry) bool {
-    for (s.entries.items) |o| if (!o.expired and o != e and (o.born > e.born or (o.born == e.born and !e.rewind)) and o.tokens.len > e.tokens.len and
-        std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
+    for (s.entries.items) |o| if (!o.expired and o != e and (o.born > e.born or (o.born == e.born and !e.rewind)) and extends(e, o)) return true;
     return false;
 }
 
@@ -89,7 +92,7 @@ pub fn link(s: *pc.Store, x: *pc.Entry) void {
     for (s.entries.items) |o| {
         if (o == x or o.tokens.len == x.tokens.len) continue;
         const short, const long = if (o.tokens.len < x.tokens.len) .{ o, x } else .{ x, o };
-        if (long.born < short.born or !std.mem.eql(u32, long.tokens[0..short.tokens.len], short.tokens)) continue;
+        if (long.born < short.born or !extends(short, long)) continue;
         short.ext.append(s.gpa, long) catch {
             s.links_lost = true;
         };

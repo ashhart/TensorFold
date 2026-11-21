@@ -125,7 +125,10 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
         c.conv = @intCast(o.get("short_conv_kernel_size").?.integer);
         if (o.get("gate_lower_bound")) |v| c.lower_bound = @floatCast(v.float);
         c.full_attn = std.StaticBitSet(128).empty;
-        for (o.get("full_attn_layers").?.array.items) |v| c.full_attn.set(@intCast(v.integer - 1));
+        for (o.get("full_attn_layers").?.array.items) |v| {
+            if (v != .integer or v.integer < 1 or v.integer > c.layers) return error.BadConfig;
+            c.full_attn.set(@intCast(v.integer - 1));
+        }
     }
     if (c.layers > 128) return error.TooManyLayers;
     return c;

@@ -85,6 +85,11 @@ pub const Backend = struct {
         return null;
     }
 
+    fn startProgress(s: *Stream, at: u32) void {
+        s.cached = at;
+        s.fill_at.store(at, .monotonic);
+    }
+
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const b = self(ptr);
         const e = b.e;
@@ -103,24 +108,15 @@ pub const Backend = struct {
             if (k.at < prompt.len) {
                 try fl.restore(e, i, k.id);
                 at = k.at;
-                s.cached = at;
             } else s.reuse_failed = true;
         }
-        var next: usize = 0;
-        var mark: usize = 0;
-        while (at < prompt.len) {
-            if (s.isCancelled()) return error.Cancelled;
-            while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
-            while (mark < s.reuse.marks.len and s.reuse.marks[mark] <= at) mark += 1;
-            var end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
-            if (mark < s.reuse.marks.len) end = @min(end, s.reuse.marks[mark]); // a mark ends a chunk: its state is kept there
-            const n = @min(end - at, gpu.prompt_rows);
-            if (try fl.chunk(e, i, at, n, false)) |t| b.first[i] = t;
-            lanes.prefill_widths.completed(b.gpa, s, n);
-            at += n;
-            s.fill_at.store(at, .monotonic); // fl.chunk waits on rank 0: `at` is landed progress
-            if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
-        }
+        startProgress(s, at);
+        try drivePrompt(b, e, i, s, at, &b.first[i]);
+    }
+
+    fn chunkPrompt(b: *Backend, e: *eng.Engine, i: u32, at: u32, n: u32) !?u32 {
+        _ = b;
+        return fl.chunk(e, i, at, n, false);
     }
 
     /// The prompt cache's functions: a stream's state at a mark, kept on both Macs by id.
@@ -277,3 +273,72 @@ pub const Backend = struct {
         return @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds)) / 1e6;
     }
 };
+
+fn drivePrompt(b: anytype, e: anytype, i: u32, s: *Stream, initial: u32, first: *u32) !void {
+    var at = initial;
+    errdefer if (s.isCancelled()) s.keepInterruptedPrefill(at);
+    const prompt = s.prompt();
+    var next: usize = 0;
+    var mark: usize = 0;
+    while (at < prompt.len) {
+        if (s.isCancelled()) return error.Cancelled;
+        while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
+        while (mark < s.reuse.marks.len and s.reuse.marks[mark] <= at) mark += 1;
+        var end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
+        if (mark < s.reuse.marks.len) end = @min(end, s.reuse.marks[mark]); // a mark ends a chunk: its state is kept there
+        const n = @min(end - at, gpu.prompt_rows);
+        if (try b.chunkPrompt(e, i, at, n)) |t| first.* = t;
+        lanes.prefill_widths.completed(b.gpa, s, n);
+        at += n;
+        s.fill_at.store(at, .monotonic); // the chunk waits on rank 0: `at` is landed progress
+        if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+    }
+}
+
+test "glm_dsa prefill: cancellation keeps a completed prefix for exact resume" {
+    _ = Backend.prefill;
+    const Fake = struct {
+        gpa: std.mem.Allocator = std.testing.allocator,
+        stopped: bool = false,
+
+        fn chunkPrompt(f: *@This(), _: void, _: u32, _: u32, _: u32) !?u32 {
+            f.stopped = true;
+            return null;
+        }
+        fn cancelled(ctx: *anyopaque) bool {
+            const f: *@This() = @ptrCast(@alignCast(ctx));
+            return f.stopped;
+        }
+    };
+    const Kept = struct {
+        at: u32 = 0,
+        fn interrupted(ctx: *anyopaque, _: *Stream, at: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ctx));
+            k.at = at;
+        }
+    };
+    var f: Fake = .{};
+    var kept: Kept = .{};
+    const ids = [_]u32{ 3, 1, 4, 1 };
+    var s = try Stream.init(std.testing.allocator, .{ .id = "stopped", .prompt = &ids, .max_new = 1, .chunks = &.{2}, .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.interrupted, .interrupted = Kept.interrupted } } });
+    defer s.deinit(std.testing.allocator);
+    s.cancel_check = .{ .ptr = &f, .check = Fake.cancelled };
+    var first: u32 = 0;
+    try std.testing.expectError(error.Cancelled, drivePrompt(&f, {}, 0, &s, 0, &first));
+    try std.testing.expectEqual(@as(u32, 2), kept.at);
+}
+
+test "glm_dsa prefill: a restored row seeds landed progress" {
+    const ids: [2049]u32 = @splat(1);
+    var resumed = try Stream.init(std.testing.allocator, .{ .id = "resumed", .prompt = &ids, .max_new = 1 });
+    defer resumed.deinit(std.testing.allocator);
+    Backend.startProgress(&resumed, 2048);
+    try std.testing.expectEqual(@as(u32, 2048), resumed.cached);
+    try std.testing.expectEqual(@as(u32, 2048), resumed.fill_at.load(.monotonic));
+
+    var fresh = try Stream.init(std.testing.allocator, .{ .id = "fresh", .prompt = &ids, .max_new = 1 });
+    defer fresh.deinit(std.testing.allocator);
+    Backend.startProgress(&fresh, 0);
+    try std.testing.expectEqual(@as(u32, 0), fresh.cached);
+    try std.testing.expectEqual(@as(u32, 0), fresh.fill_at.load(.monotonic));
+}

@@ -63,9 +63,10 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
     out.fill_run = if (run == 0) 1 else run;
 }
 
-/// `n` tokens delivered now; marks older than the window drop.
-pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
+/// `job` has delivered through `emitted` rows now; marks older than the window drop.
+pub fn noteDecoded(h: *LaneHost, job: *LaneHost.Job, emitted: usize) void {
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
+    if (h.trace) |t| t.line(.{ .t0_ns = now, .t1_ns = now, .kind = .decode, .id = job.id, .stream = job.seq, .rows_from = job.delivered, .rows_to = emitted });
     h.mutex.lockUncancelable(h.io);
     defer h.unlock();
     var keep: usize = 0;
@@ -75,8 +76,9 @@ pub fn noteDecoded(h: *LaneHost, n: usize, first: bool) void {
         keep += 1;
     }
     h.decoded.shrinkRetainingCapacity(keep);
+    const n = emitted - job.delivered;
     h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
-    @import("lane_host_load.zig").decoded(h, n, first);
+    @import("lane_host_load.zig").decoded(h, n, job.delivered == 0);
 }
 
 /// Each started stream's context and generated tokens, for the next status read.
