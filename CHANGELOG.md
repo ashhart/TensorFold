@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 as well as 4, with gates 1 to 4, a planted control for each wider width, and gate-5 records on the four RDNA chips (#3163, part of #3061). Thanks to @gilby.
+
 - Qwen3.8-27B on Intel GPUs: decode and verify attention (`attn_decode`) runs on a (rows, heads, slices) grid, so the tree rows of one key slice run back to back; each work group's arithmetic is unchanged, so replies keep their tokens, and the XPU kernel contract holds `attn_decode` with `attn_merge` to the previous kernels' bytes, with a planted control for the launch order (#2595, refs #2543). Thanks to @SergiioB.
 
 - Server: every image takes a fixed share of the visual-token budget, `--vision-image-tokens / --vision-max-images` (1,024 tokens at the defaults), whatever the request's image count, so a turn that adds an image no longer re-sizes earlier ones and the prompt cache can resume from the first image; a lone image gets that share, not the whole budget, and a budget that leaves no share is refused by name, naming the image and both flags (#2717, fixes #2510). Thanks to @devopsfortunato.
