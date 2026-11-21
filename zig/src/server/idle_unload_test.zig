@@ -169,9 +169,7 @@ pub const Harness = struct {
         h.tick_seen.set(h.io);
     }
 
-    /// Waits for an event its source always reaches: the ticker sets `tick_seen` every
-    /// interval until it stops, and the fake's callbacks set theirs on the manager's
-    /// own path. No wall-clock cut-off: a loaded host only takes longer, never fails.
+    /// Waits for an event its source always sets (the ticker, the fake's callbacks): a loaded host is slower, not red.
     pub fn waitEvent(self: *Harness, event: *std.Io.Event) !void {
         event.waitUncancelable(self.io);
     }
@@ -215,9 +213,7 @@ pub const Harness = struct {
         m.cond.broadcast(self.io);
     }
 
-    /// Waits for the unload publish on the manager's own condition: `expire` parks the
-    /// deadline in the past, so the timer's close and broadcast always come. A zero
-    /// `timeout_ms` is a one-shot check; a loaded host only takes longer, never fails.
+    /// Waits on the manager's condition for the unload `expire` makes due; a zero `timeout_ms` checks once.
     pub fn waitParked(self: *Harness, timeout_ms: u32) !void {
         const m = self.man.?;
         m.mutex.lockUncancelable(self.io);
