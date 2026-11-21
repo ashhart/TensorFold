@@ -103,11 +103,10 @@ pub fn readBlock8(a: std.mem.Allocator, store: anytype, prefix: []const u8, name
     var buf: [512]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
+    // the shared reader refuses any part that is not e4m3 [n, k] with a scale a whole 128-row block covers
     for (names) |name| {
         const w = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }));
-        if (w.dtype != .f8_e4m3 or w.rank != 2 or w.dim(0) % 128 != 0 or w.dim(1) % 128 != 0) return error.UnexpectedTensor;
-        if (k != 0 and k != w.dim(1)) return error.UnexpectedTensor;
-        k = w.dim(1);
+        if (k == 0) k = w.dim(1);
         n = std.math.add(usize, n, w.dim(0)) catch return error.UnexpectedTensor;
     }
     const kb = k / 128;

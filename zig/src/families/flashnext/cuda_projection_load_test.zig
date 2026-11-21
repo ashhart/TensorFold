@@ -558,10 +558,13 @@ test "block FP8: the loader refuses the shapes and the planes it cannot splice, 
         // a tail the scratch cannot hold is refused before it is read, though this store could serve it whole
         try std.testing.expectError(error.UnexpectedTensor, source.loadBlock8(a, d, &fake, "m", &.{ ".q", ".k", ".idx" }, 384 + tail_rows, block_k));
     }
-    for ([_]Bad{ .tail_dtype, .tail_cols, .tail_short }) |bad| {
-        fake.bad = bad;
-        try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, 256));
-    }
+    // the dtype and the count decide at the width the tail is read at; a short tensor is caught by the count
+    fake.bad = .tail_dtype;
+    try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows));
+    fake.bad = .tail_cols;
+    try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, 256));
+    fake.bad = .tail_short;
+    try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows));
     fake.bad = .none;
     try std.testing.expectError(error.UnexpectedTensor, source.readTail(a, &fake, "m", &.{".idx"}, block_k, 512));
     // the plane builder's own guards: whole 128-row blocks, a k of scale blocks, and lengths that agree
