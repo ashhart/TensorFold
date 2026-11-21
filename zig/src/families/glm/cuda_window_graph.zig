@@ -84,9 +84,10 @@ fn sequence(h: *kg.Hash, r: fw.Rank, st: anytype, rows: usize) void {
             const scored = dsa_block.sparseRows(a, st.pos, rows);
             h.fixed(@intFromBool(scored));
             if (!scored) continue;
-            const np_max = sparse.poolBucket(st.pos, rows, c.pk_rows - 2);
+            const g = a.index.geom;
+            const np_max = sparse.poolBucket(st.pos, rows, c.pk_rows - 2, g);
             h.fixed(np_max);
-            h.values(&[_]u64{(sparse.scoreColumns(st.pos, rows, np_max) + 63) / 64});
+            h.values(&[_]u64{(sparse.scoreColumns(st.pos, rows, np_max, g) + 63) / 64});
         },
     };
 }

@@ -5,6 +5,7 @@ const fw = @import("cuda_forward.zig");
 const weights = @import("cuda_weights.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const wg = @import("cuda_window_graph.zig");
+const sparse_mod = @import("cuda_sparse.zig");
 const kg = @import("cuda").keyed_graph;
 
 const dense_limit = 2048;
@@ -18,6 +19,7 @@ const Model = struct {
     fn init(m: *Model) void {
         var mla: dsa_block.Layer = undefined;
         mla.dense_limit = dense_limit;
+        mla.index.geom = .{};
         m.layers[0].mixer = .{ .kda = undefined };
         m.layers[1].mixer = .{ .mla = mla };
         m.w = undefined;
@@ -133,4 +135,28 @@ fn shared(m: *Model, segs: []const fw.Seg, slots: []const u32) wg.SharedKey {
     var rows: usize = 0;
     for (segs) |g| rows += g.rows;
     return .init(&f, slots, rows);
+}
+
+test "GLM graphs: eager index geometry determines the pool bucket and score grid" {
+    var m: Model = undefined;
+    m.init();
+    var s: Seq = undefined;
+    s.init(0x10000, 5000);
+    const pooled = key(&m, &s, 0, 3);
+    const np_max = s.caches[0].pk_rows - 2;
+    const ix = &m.layers[1].mixer.mla.index;
+    try t.expectEqual(@as(usize, 2048), sparse_mod.poolBucket(s.st.pos, 3, np_max, ix.geom));
+    ix.geom.pool = 1;
+    try t.expectEqual(@as(usize, 8192), sparse_mod.poolBucket(s.st.pos, 3, np_max, ix.geom));
+    const unpooled = key(&m, &s, 0, 3);
+    try t.expect(!sameSlot(pooled, unpooled));
+    ix.geom = .{};
+    const bucket = sparse_mod.poolBucket(s.st.pos, 3, np_max, ix.geom);
+    try t.expectEqual(@as(usize, 1250), sparse_mod.scoreColumns(s.st.pos, 3, bucket, ix.geom));
+    ix.geom.topk = 1536;
+    try t.expectEqual(bucket, sparse_mod.poolBucket(s.st.pos, 3, np_max, ix.geom));
+    try t.expectEqual(@as(usize, 1536), sparse_mod.scoreColumns(s.st.pos, 3, bucket, ix.geom));
+    const wider = key(&m, &s, 0, 3);
+    try t.expect(sameSlot(pooled, wider));
+    try t.expect(!std.meta.eql(pooled, wider));
 }
