@@ -138,7 +138,7 @@ test "fragmentation: no free consecutive run, a run lane waits, a pieces lane op
             defer r.deinit(t.allocator);
             const x = &p.lanes[0];
             for (x.lease.state.items) |id| try t.expect(id % 2 == 1);
-            try expectPlaced(r.items, p.arena.ptr, l.pageBytes(), x.lease.state.items);
+            try expectPlaced(r.items, p.arena.buf.ptr, l.pageBytes(), x.lease.state.items);
             try t.expect(p.close(&seq));
         }
         i = 0;
@@ -165,7 +165,7 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
         dr.* = try p.draft(s, 1024);
         var r = try ranges(t.allocator, s, dr);
         defer r.deinit(t.allocator);
-        try expectPlaced(r.items, p.arena.ptr, l.pageBytes(), p.lanes[j].lease.state.items);
+        try expectPlaced(r.items, p.arena.buf.ptr, l.pageBytes(), p.lanes[j].lease.state.items);
         try all.appendSlice(t.allocator, r.items);
         try t.expectEqual(@as(usize, 48), dr.stream_blocks.len);
         try t.expectEqual(dr.stream_blocks[0], dr.streams.ptr);
@@ -181,7 +181,7 @@ test "two lanes with the head: every piece inside its own lane's state pages, no
     var ids: std.ArrayList(u32) = .empty;
     defer ids.deinit(t.allocator);
     for (p.lanes) |x| try ids.appendSlice(t.allocator, x.lease.state.items);
-    try expectPlaced(all.items, p.arena.ptr, l.pageBytes(), ids.items);
+    try expectPlaced(all.items, p.arena.buf.ptr, l.pageBytes(), ids.items);
     for (&seqs, &drafts) |*s, *dr| {
         dr.deinit();
         try t.expect(p.close(s));
