@@ -141,9 +141,6 @@ const row_tiles = [_]u32{ 16, 32, 64 };
 /// What a call writes: bf16 rows, or the fp32 sums unrounded (a tensor-parallel rank's partial rows).
 pub const Out = enum { bf16, f32 };
 
-/// Output columns from which a split-K cluster call takes the fused form, the cluster's bits; 0, the default: never.
-pub var fuse_split_n: usize = 0;
-
 fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function {
     var set: [7]Function = undefined;
     inline for (row_tiles, 0..) |bm, ti| inline for (.{ false, true }, 0..) |cl, ci| {
@@ -188,6 +185,8 @@ pub const Lane = struct {
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
+    /// Output columns from which this lane fuses a split-K cluster call; 0 keeps its original schedule.
+    fuse_split_n: usize = 0,
     fuse_s: [2][2][2]Function = undefined, // by halfModeIndex, Out, row tile 16 then 32: the fused form at decode rows
     prompt: ?[2][2]Function = null, // Out, then plain / fused; loadPrompt() fills it on sm_12x
     prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls, loadPrompt() fills it on sm_12x
@@ -295,7 +294,7 @@ pub const Lane = struct {
         const rows_t = (m + bm - 1) / bm;
         const hm = halfModeIndex(w.mode);
         // fuse_split_n: a cluster call this wide on the fused form (row tile 64: the fused instance), one block a tile
-        const fs = fuse_split_n != 0 and p.cluster and w.n >= fuse_split_n and hm != null;
+        const fs = l.fuse_split_n != 0 and p.cluster and w.n >= l.fuse_split_n and hm != null;
         const half = hm != null and p.bm == 16 and !p.fused and !fs and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
         const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) l.half[hm.?][@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const cols: usize = if (prompt) 128 else if (half) 32 else bn;
