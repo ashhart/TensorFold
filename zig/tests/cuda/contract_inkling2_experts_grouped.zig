@@ -17,7 +17,6 @@ fn i32s(v: usize) i32 {
 pub const Grouped = struct {
     rig: rig_.Rig,
     k: *const ink.experts.Kernels,
-    form: ref.Form,
     fault: ref.Fault = .none,
     fix: ?ref.Fixture = null,
     tp: [2]u64 = .{ 0, 0 },
@@ -45,7 +44,7 @@ pub const Grouped = struct {
     }
 
     pub fn kernel(self: *Grouped) g.Kernel {
-        return .{ .spec = ref.spec(self.form, self.fault), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
+        return .{ .spec = ref.spec(self.fault), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
     }
 
     const vt = g.hooks(Grouped);
