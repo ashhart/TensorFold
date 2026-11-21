@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lanes: #3728's lone-stream copy pricing is taken out again: on an M3 Ultra it made Qwen3.8-27B with the DFlash2 drafter verify drafted rows that did not land, so drafted decode on long prompts is back to 1.2.10's speed, with the same tokens (#4078).
+
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
 - Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#PR).
 - Hardening: cluster launch, session restore, the app's shell policy, Hub pulls, Web pairing and media downloads fail closed on malformed input (#4381).
