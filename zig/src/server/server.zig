@@ -59,8 +59,7 @@ pub const Config = struct {
     /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
     loop_stop: bool = false,
     tool_think_close: bool = false, // --tool-think-close: a required or named call closes thinking in time
-    /// Seconds the idle keepalive runs after the last request ends (0: off).
-    keep_warm_s: i64 = 900,
+    keep_warm_s: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
     idle_unload_s: i64 = 0,
     dashboard: bool = false,
@@ -191,6 +190,7 @@ pub const Server = struct {
     cortheon: ?*cortheon.State = null,
     /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
     recall: ?*api.recall_store.Store = null,
+    witness: ?*@import("witness.zig").State = null, // serve owns GET /v1/execution/witness state; null: off
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {

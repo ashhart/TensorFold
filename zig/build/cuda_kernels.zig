@@ -159,6 +159,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
+    .{ .name = "idol_decoder", .flags = glue }, // ours: Idol's decoders' stem, to_kv, head norms and attention
     .{ .name = "inkling2_attn", .src = "inkling2/attention", .flags = &.{"-O3"} }, // ours: Inkling 2's relative-bias attention
     .{ .name = "inkling2_pattn", .src = "inkling2/prompt_attention", .flags = &.{"-O3"} }, // ours: Inkling 2's global-layer prompt attention
     .{ .name = "inkling2_ops", .src = "inkling2/ops", .flags = glue }, // ours: Inkling 2's residual mix, convs, router, SwiGLU
