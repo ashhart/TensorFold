@@ -1,5 +1,6 @@
 //! Inkling 2's reply blocks split into reasoning, visible text and tool calls, as vLLM's Inkling parser reads them.
 const std = @import("std");
+const json_cut = @import("tool_json_cut.zig");
 
 /// The release's block markers (special tokens in tokenizer_config.json).
 pub const markers = struct {
@@ -79,7 +80,7 @@ pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool) !Reply {
         .content = content.items,
         .calls = calls.items,
     };
-    if (state == .tool) out.cut = name(payload.items);
+    if (state == .tool) out.cut = try name(a, payload.items);
     if (finished and state == .header and header.items.len > 0) out.content = try std.mem.concat(a, u8, &.{ content.items, header.items });
     const blank = std.mem.trim(u8, out.content, " \t\r\n").len == 0;
     if (blank and (out.calls.len > 0 or out.cut != null)) out.content = "";
@@ -93,72 +94,17 @@ fn call(a: std.mem.Allocator, payload: []const u8) !Call {
     if (doc.value != .object) return .{ .name = "", .arguments = "{}" };
     const n = doc.value.object.get("name") orelse std.json.Value{ .null = {} };
     const own = if (n == .string) try a.dupe(u8, n.string) else "";
-    return .{ .name = own, .arguments = try a.dupe(u8, member(payload, "args") orelse "{}") };
+    const args = json_cut.find(try json_cut.members(a, std.mem.trimStart(u8, payload, " \t\r\n")), "args");
+    return .{ .name = own, .arguments = try a.dupe(u8, if (args) |m| m.value else "{}") };
 }
 
-/// The verbatim value of a top-level member of a JSON object known to parse.
-fn member(raw: []const u8, key: []const u8) ?[]const u8 {
-    var depth: usize = 0;
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        switch (raw[i]) {
-            '{', '[' => depth += 1,
-            '}', ']' => depth -|= 1,
-            '"' => {
-                const close = stringEnd(raw, i) orelse return null;
-                const s = raw[i + 1 .. close];
-                i = close;
-                if (depth != 1 or !std.mem.eql(u8, s, key)) continue;
-                var j = close + 1;
-                while (j < raw.len and (raw[j] == ' ' or raw[j] == ':' or raw[j] == '\n' or raw[j] == '\t')) j += 1;
-                return valueSpan(raw, j);
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn stringEnd(raw: []const u8, open: usize) ?usize {
-    var j = open + 1;
-    while (j < raw.len) : (j += 1) {
-        if (raw[j] == '\\') j += 1 else if (raw[j] == '"') return j;
-    }
-    return null;
-}
-
-fn valueSpan(raw: []const u8, start: usize) ?[]const u8 {
-    if (start >= raw.len) return null;
-    if (raw[start] != '{' and raw[start] != '[') {
-        var j = start;
-        if (raw[j] == '"') return raw[start .. (stringEnd(raw, j) orelse return null) + 1];
-        while (j < raw.len and raw[j] != ',' and raw[j] != '}') j += 1;
-        return std.mem.trimEnd(u8, raw[start..j], " \t\r\n");
-    }
-    var depth: usize = 0;
-    var j = start;
-    while (j < raw.len) : (j += 1) {
-        switch (raw[j]) {
-            '{', '[' => depth += 1,
-            '}', ']' => {
-                depth -= 1;
-                if (depth == 0) return raw[start .. j + 1];
-            },
-            '"' => j = stringEnd(raw, j) orelse return null,
-            else => {},
-        }
-    }
-    return null;
-}
-
-/// The name of a cut tool block, when its payload already holds a whole "name" string.
-fn name(payload: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, payload, "\"name\"") orelse return null;
-    var j = at + 6;
-    while (j < payload.len and (payload[j] == ' ' or payload[j] == ':')) j += 1;
-    if (j >= payload.len or payload[j] != '"') return null;
-    const close = stringEnd(payload, j) orelse return null;
-    return payload[j + 1 .. close];
+/// The name of a cut tool block, when its payload already holds a whole top-level "name" string.
+fn name(a: std.mem.Allocator, payload: []const u8) !?[]const u8 {
+    const body = std.mem.trimStart(u8, payload, " \t\r\n");
+    if (body.len == 0 or body[0] != '{') return null;
+    const m = json_cut.find(try json_cut.members(a, body), "name") orelse return null;
+    if (m.cut or m.value.len < 2 or m.value[0] != '"') return null;
+    return m.value[1 .. m.value.len - 1];
 }
 
 const t = std.testing;

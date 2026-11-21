@@ -56,10 +56,10 @@ fn valueEnd(s: []const u8) ?usize {
 }
 
 /// A member of a written object: its key, its value as far as written, and whether the cut came inside the value.
-const Member = struct { key: []const u8, value: []const u8, cut: bool };
+pub const Member = struct { key: []const u8, value: []const u8, cut: bool };
 
 /// The members the object text `body` (from its `{`) writes before the cut, in order.
-fn members(a: Allocator, body: []const u8) Allocator.Error![]const Member {
+pub fn members(a: Allocator, body: []const u8) Allocator.Error![]const Member {
     var out: std.ArrayList(Member) = .empty;
     var i = skip(body, 1);
     while (i < body.len and body[i] == '"') {
@@ -91,7 +91,7 @@ fn skip(s: []const u8, from: usize) usize {
 }
 
 /// The first written member named `key`.
-fn find(ms: []const Member, key: []const u8) ?Member {
+pub fn find(ms: []const Member, key: []const u8) ?Member {
     for (ms) |m| if (std.mem.eql(u8, m.key, key)) return m;
     return null;
 }
