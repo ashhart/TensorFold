@@ -1,4 +1,4 @@
-inkling2-mini-mtp 54 f962cd87735ebbd1af0639f7513f99eed98b61d8a30b083fb33fc1bb1c3a70d1
+inkling2-mini-mtp 54 f962cd87735ebbd1af0639f7513f99eed98b61d8a30b083fb33fc1bb1c3a70d1 release=thinkingmachines/Inkling-2-Mini revision=unavailable-full-commit-SHA-absent-from-supplied-inputs published=2026-11-20 license=apache-2.0
 fuse_weight BF16 4x4
 layers.{L}.dflare_norm.weight BF16 2304 0-2
 layers.{L}.input_layernorm.weight BF16 2304 0-2

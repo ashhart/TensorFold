@@ -1,6 +1,6 @@
-inkling2-mini-model 1244 dfcec4225659aceabe432e4daadb4e6291f3718e2015d412f97f60200de32141
-model.llm.attn_res.attn_queries.{L} F32 3x2304 4,10,16,22
+inkling2-mini-model 1244 dfcec4225659aceabe432e4daadb4e6291f3718e2015d412f97f60200de32141 release=thinkingmachines/Inkling-2-Mini revision=unavailable-full-commit-SHA-absent-from-supplied-inputs published=2026-11-20 license=apache-2.0
 model.llm.attn_res.attn_queries.{L} F32 2304 0-3,5-9,11-15,17-21
+model.llm.attn_res.attn_queries.{L} F32 3x2304 4,10,16,22
 model.llm.attn_res.mlp_queries.{L} F32 2304 0-23
 model.llm.attn_res.output_query F32 2304
 model.llm.embed.weight BF16 201024x2304

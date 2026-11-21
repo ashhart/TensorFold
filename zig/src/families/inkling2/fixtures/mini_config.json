@@ -1,4 +1,11 @@
 {
+  "_fixture_provenance": {
+    "release": "thinkingmachines/Inkling-2-Mini",
+    "revision": null,
+    "revision_status": "full commit SHA absent from the supplied published metadata",
+    "published": "2026-11-20",
+    "license": "apache-2.0"
+  },
   "dtype": "bfloat16",
   "architectures": [
     "Inkling2LoopForConditionalGeneration"
