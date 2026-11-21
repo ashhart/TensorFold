@@ -155,7 +155,6 @@ pub const usage =
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
-    \\  qwen3-asr-contract        Qwen3-ASR's conv taps, conv flatten and head-64 attention through gates 1-4, controls red
     \\  glm-exl3 | glm-exl3-items  GLM's EXL3 routed experts, decode and prompt, against float64, and the item plan's decode against the plain decode, byte for byte (synthetic)
     \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
