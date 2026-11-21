@@ -42,7 +42,19 @@ pub const Scratch = struct {
 };
 
 /// The kernels the block runs: the captured Triton set, the grouped NVFP4 experts, the plan, and glm_ops.
-pub const Kernels = struct { set: glue.Set, experts: *const experts.Kernels, exl3: *const exl3.Kernels, put_slot: cuda.Function, prof: ?*prof_mod.Prof = null };
+pub const Kernels = struct {
+    set: glue.Set,
+    experts: *const experts.Kernels,
+    exl3: *const exl3.Kernels,
+    put_slot: cuda.Function,
+    prof: ?*prof_mod.Prof = null,
+    direct: bool = false, // TF_GLM_MOE_DIRECT=1 (opt-in): see `direct`
+};
+
+/// TF_GLM_MOE_DIRECT=1: a decode window's EXL3 experts on flat picks, their slot rows summed in place (no copies).
+fn direct(k: Kernels, l: Layer, rows: usize, prompt: bool) bool {
+    return k.direct and !prompt and l.exl3 != null and l.top_k == exl3.top_k and rows <= exl3.chunk_rows;
+}
 
 /// forward.moe_block: out [rows][dims] fp32 partial; `prompt`: 64-pair items, the prompt kernels, bf16 slot rows.
 pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool, out: u64) !void {
@@ -57,12 +69,14 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const shared_id: i32 = @intCast(l.count);
     var stamp = prof_mod.span(k.prof, stream, .router);
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
-    try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm);
+    const flat = direct(k, l, rows, prompt);
+    try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm, if (flat) s.x3.picks else null);
     stamp.end();
     stamp = prof_mod.span(k.prof, stream, .experts);
     defer stamp.end();
     if (k.prof) |p| p.mark(stream, .router);
     defer if (k.prof) |p| p.mark(stream, .routed);
+    if (flat) return exl3.runDirect(k.exl3, stream, l.exl3.?, s.x3, x, x_stride, rows, l.count, d, l.routed.width, l.routed.limit);
     if (l.exl3) |w| return exl3.run(k.exl3, k.experts, stream, w, s.x3, s.plan, x, x_stride, s.pick, slots, rows, l.count, d, l.routed.width, l.routed.limit, prompt, s.ey, s.eact);
     const plan: experts.Plan = .{ .route = s.plan, .slots = slots, .experts = l.count + 1, .prompt = prompt, .fact = !prompt and k.experts.factored(rows) and l.routed.format == .nvfp4 };
     try experts.route(k.experts, stream, s.pick, rows * slots, plan);
@@ -82,6 +96,11 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
     try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
     try projection.matmul(k.set, stream, l.shared_down, s.sact + lo * l.shared * 2, l.shared, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
+    if (direct(k, l, hi, prompt)) { // body ran these rows direct: a decode window, filled whole (forward.ffn)
+        if (lo != 0) return error.BadWindow;
+        const y = try exl3.directOut(l.exl3.?, s.x3, hi, l.count, d, l.routed.width, l.routed.limit);
+        return glue.combineTail(k.set, stream, y, s.sy, s.wts, out, n, d, slots);
+    }
     var a: cuda.Args = .{};
     a.add(s.sy + lo * d * 4);
     a.add(s.ey + lo * slots * d * eb);
