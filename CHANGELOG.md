@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: with `TF_ROCE=1`, the RoCE all-gather pairs each peer's stripes with the HCA on that peer's IPv4 /24 (the rule `fabric/tp` uses, now one copy for both) when every rank's plan holds, so three GB10s cabled as a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL; a switch or two ranks keep the same-numbered pairs, and a `TF_ROCE_HCA` of more than two names is refused by name instead of cut to two (#3518, fixes #3411). Thanks to @ultradaoto.
 
+
+
 - DeepSeek-V4.1 on CUDA: opt-in `TF_DSV41_COPY_DRAFTER=1` turns on the lookup planner with a copy drafter that ranks matches within a length band by how much continuation they offer, offers 8 drafts and widens to 15 after a round that keeps every copy, and offers a copy only when it is expected to keep at least as many tokens as the other drafter; it is refused when `TF_DSV41_LOOKUP` is off or blank, and unset leaves `TF_DSV41_LOOKUP_PLAN=1` as it was (#2638). Thanks to @christopherowen.
 
 - CUDA: a resumed prompt encodes only the images its kept state does not hold (Gemma 4, Qwen3.5 and Flash Next on one rank), so a follow-up turn skips the vision tower for images the restored prefix already holds; a resume never cuts an image, and at `--tp 2` Flash Next keeps encoding every image as before (#3164).
