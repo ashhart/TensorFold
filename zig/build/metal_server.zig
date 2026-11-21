@@ -102,7 +102,16 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const flint_draft_host = b.step("test-flint-draft-host", "Flint draft config, taps and first-token metadata without devices");
     for ([_]*std.Build.Module{ engine, api.import_table.get("lanes").? }) |module|
         flint_draft_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{"Flint DFlash2"} })).step);
-    b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
+    const native_tests = b.step("test-native", "The Metal engines module's host-side tests");
+    native_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
+    const capabilities = b.createModule(.{ .root_source_file = b.path("zig/src/native/inkling2_capabilities_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    for (engines.import_table.keys(), engines.import_table.values()) |name, module| capabilities.addImport(name, module);
+    capabilities.addImport("native_metal", engines);
+    const capability_run = b.addRunArtifact(b.addTest(.{ .root_module = capabilities }));
+    const capability_step = b.step("test-inkling2-metal-capabilities", "Inkling native Metal checkpoint-format capabilities");
+    capability_step.dependOn(&capability_run.step);
+    native_tests.dependOn(capability_step);
+    test_step.?.dependOn(&capability_run.step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
         .target = target,

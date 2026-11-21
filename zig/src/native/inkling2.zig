@@ -82,8 +82,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     } else null;
     errdefer if (drafter) |d| d.deinit();
     var ram: u64 = 0;
-    var len: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
+    if (@import("builtin").os.tag.isDarwin()) {
+        var len: usize = @sizeOf(u64);
+        if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
+    }
     const scratch: u64 = st.scratchBytes(st.batch_rows) + st.scratchBytes(st.prompt_rows);
     const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() + dspark.Drafter.scoreBytes(0) else 0;
     const budget = cacheBudget(ram, model.device.maxWorkingSet(), @import("sys").getenv("INKLING2_LOAD_LIMIT_GB"), resident) catch {
@@ -204,6 +206,65 @@ test "Inkling native admission keeps DSpark opt-in and refuses learned modes" {
     try std.testing.expect(contextProblem(-1, 10) != null);
     try std.testing.expect(contextProblem(11, 10) != null);
     try std.testing.expect(contextProblem(10, 10) == null);
+}
+
+test "Inkling native open publishes the exact admission refusal" {
+    var problem: []const u8 = "not published";
+    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop", .learn_conversations = true };
+    try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expectEqualStrings("inkling2_loop: learned disk states are not implemented; serve without --learn and --learn-conversations", problem);
+}
+
+test "Inkling native open releases DSpark when the later context admission refuses (TF_INKLING2_METAL_DIR, TF_INKLING2_DSPARK_DIR)" {
+    const dir = @import("sys").getenv("TF_INKLING2_METAL_DIR") orelse return error.SkipZigTest;
+    const drafter_dir = @import("sys").getenv("TF_INKLING2_DSPARK_DIR") orelse return error.SkipZigTest;
+    var problem: []const u8 = "not published";
+    var o: api.Open = .{ .dir = dir, .model_type = "inkling2_loop", .context = 0, .drafter = drafter_dir };
+    try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expectEqualStrings("inkling2_loop: --context must be at least one token, and the selected context must fit the Metal state budget", problem);
+    o.context = std.math.maxInt(i64);
+    problem = "not published";
+    try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expectEqualStrings("inkling2_loop: --context exceeds the largest window this Mac can afford beside the checkpoint and DSpark state", problem);
+    // Null skips errdefer; omitting explicit deinit leaks allocations caught by std.testing.allocator.
+}
+
+test "Inkling native open unwinds DSpark when the later Host allocation fails (TF_INKLING2_METAL_DIR, TF_INKLING2_DSPARK_DIR)" {
+    const Fault = struct {
+        drafter_allocated: bool = false,
+        host_failed: bool = false,
+
+        fn allocator(f: *@This()) std.mem.Allocator {
+            return .{ .ptr = f, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            const f: *@This() = @ptrCast(@alignCast(ctx));
+            if (f.drafter_allocated and len == @sizeOf(Host)) {
+                f.host_failed = true;
+                return null;
+            }
+            const memory = std.testing.allocator.rawAlloc(len, alignment, ra) orelse return null;
+            if (len == @sizeOf(dspark.Drafter)) f.drafter_allocated = true;
+            return memory;
+        }
+        fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+            return std.testing.allocator.rawResize(memory, alignment, len, ra);
+        }
+        fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(memory, alignment, len, ra);
+        }
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ra);
+        }
+    };
+    const dir = @import("sys").getenv("TF_INKLING2_METAL_DIR") orelse return error.SkipZigTest;
+    const drafter_dir = @import("sys").getenv("TF_INKLING2_DSPARK_DIR") orelse return error.SkipZigTest;
+    var fault: Fault = .{};
+    var problem: []const u8 = "";
+    const o: api.Open = .{ .dir = dir, .model_type = "inkling2_loop", .context = 1, .lanes = 1, .drafter = drafter_dir };
+    try std.testing.expectError(error.OutOfMemory, open(std.testing.allocator, fault.allocator(), std.testing.io, o, &problem));
+    try std.testing.expect(fault.drafter_allocated and fault.host_failed);
+    // Removing errdefer leaks DSpark and its weights in std.testing.allocator.
 }
 
 test "Inkling native load limit clamps before integer conversion" {
