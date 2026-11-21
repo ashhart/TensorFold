@@ -263,7 +263,6 @@ pub const openDrafter = drafter_open.openDrafter;
 
 pub const finishDrafterOpen = drafter_open.finishDrafterOpen;
 pub const explain = @import("cuda_native_explain.zig").explain;
-
 fn release(p: *anyopaque) void {
     @as(*Lanes, @ptrCast(@alignCast(p))).deinit();
 }
