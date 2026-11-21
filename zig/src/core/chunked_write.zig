@@ -1,21 +1,12 @@
-//! Bounded-chunk output writes for large buffers.
-//!
-//! XNU rejects a single write request larger than INT_MAX bytes with EINVAL
-//! (bsd/vfs/vfs_vnops.c vn_write). Qwen3.5 logits buffers reach 4+ GB, so a
-//! one-shot writeFile fails there. Chunking keeps every request bounded while
-//! preserving byte order and partial-write semantics.
+//! XNU rejects individual writes larger than INT_MAX.
 const std = @import("std");
 
 /// Upper bound for a single write request, well under XNU's INT_MAX cap.
 pub const max_write_bytes: usize = 1 << 28; // 256 MiB
 
-/// Errors surfaced at the project writer boundary.
 pub const Error = error{ OutputWriteFailed, OutOfMemory };
 
-/// Write `bytes` to `sink`, splitting into bounded requests.
-/// The sink decides how a slice reaches storage; the loop only bounds size.
-/// A sink writeAll returning OutOfMemory passes through; any other error is
-/// surfaced as OutputWriteFailed at this boundary.
+/// Write bytes to a sink in bounded requests.
 pub fn writeChunked(
     sink: anytype,
     bytes: []const u8,
