@@ -8,6 +8,8 @@ const tool_dsml = @import("tool_dsml.zig");
 const tool_dsml_stream = @import("tool_dsml_stream.zig");
 const tool_glm_cut = @import("tool_glm_cut.zig");
 const tool_json_cut = @import("tool_json_cut.zig");
+const tool_minimax = @import("tool_minimax.zig");
+const tool_json_close = @import("tool_json_close.zig");
 const tool_glm_stream = @import("tool_glm_stream.zig");
 const tool_params = @import("tool_params.zig");
 const tool_policy = @import("tool_policy.zig");
@@ -53,7 +55,7 @@ pub const Streamer = struct {
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
-    state: enum { outside, call, buffered, function, value, closing, glm, dsml, abort } = .outside,
+    state: enum { outside, call, buffered, function, value, closing, glm, dsml, minimax, abort } = .outside,
     index: i64 = -1,
     args_open: bool = false,
     lead: bool = false,
@@ -69,6 +71,7 @@ pub const Streamer = struct {
     buffered_close: []const u8 = "",
     glm: tool_glm_stream.Glm = .{},
     dsml: tool_dsml_stream.Dsml = .{},
+    json_closer: tool_json_close.Closer = .{ .at = 0 },
     code: reply_code.Scanner = .{},
     finished: bool = false,
 
@@ -76,8 +79,7 @@ pub const Streamer = struct {
         var s: Streamer = .{ .a = a, .schemas = try tool_params.schemas(a, tools), .tools = tools };
         for (tools) |tool| {
             if (tool != .object) continue;
-            const spec = if (tool.get("function")) |f| (if (f == .object) f else tool) else tool;
-            const name = if (spec.get("name")) |n| (if (n.truthy()) try tool_specs.pyStr(a, n) else "") else "";
+            const name = try tool_specs.toolName(a, tool);
             if (name.len == 0) continue;
             try s.known.put(a, try std.ascii.allocLowerString(a, name), name);
         }
@@ -174,9 +176,20 @@ pub const Streamer = struct {
                         if (tool_dsml.openedBy(text[start..])) |sp| {
                             s.dsml_seen = true;
                             s.pos = start + sp.open.len;
-                            s.dsml = .{ .sp = sp, .start = start, .at = s.pos };
+                            s.dsml = .{ .sp = sp, .start = start, .at = s.pos, .output_start = out.items.len, .index_start = s.index, .streamed_start = s.streamed };
                             s.state = .dsml;
                             break;
+                        }
+                        const mm = tool_minimax.open[1..];
+                        if (start > 0 and text[start - 1] == ']' and std.mem.startsWith(u8, text[start..], mm)) {
+                            s.buffered_start = start - 1;
+                            s.pos = start + mm.len;
+                            s.state = .minimax;
+                            break;
+                        }
+                        if (start > 0 and text[start - 1] == ']' and text[start..].len < mm.len and std.mem.startsWith(u8, mm, text[start..])) {
+                            s.searched = start;
+                            return;
                         }
                         if (std.mem.startsWith(u8, text[start..], "<tool_call>")) {
                             s.buffered_start = start;
@@ -255,9 +268,13 @@ pub const Streamer = struct {
                 },
                 .buffered => {
                     const tail = s.buffered_close;
-                    const from = @max(s.pos, s.dsml_searched -| (tail.len - 1));
-                    const end = std.ascii.findIgnoreCasePos(text, from, tail) orelse {
-                        s.dsml_searched = text.len;
+                    const json_envelope = std.mem.eql(u8, tail, "</tool_call>");
+                    const found: ?usize = if (json_envelope) s.json_closer.next(text) else blk: {
+                        const from = @max(s.pos, s.dsml_searched -| (tail.len - 1));
+                        break :blk std.ascii.findIgnoreCasePos(text, from, tail);
+                    };
+                    const end = found orelse {
+                        if (!json_envelope) s.dsml_searched = text.len;
                         return;
                     };
                     s.pos = end + tail.len;
@@ -266,8 +283,26 @@ pub const Streamer = struct {
                     const parsed = try tool_parse.parse(s.a, text[s.buffered_start..s.pos], s.tools, null);
                     if (parsed.calls) |calls| try s.emitCalls(calls, out);
                 },
+                .minimax => {
+                    if (s.buffered_start > text.len or !std.mem.startsWith(u8, text[s.buffered_start..], tool_minimax.open)) {
+                        s.pos = @min(s.buffered_start, text.len);
+                        s.searched = s.pos;
+                        s.code.jumpTo(s.pos);
+                        s.state = .outside;
+                        continue;
+                    }
+                    const end = std.mem.indexOfPos(u8, text, s.buffered_start + tool_minimax.open.len, tool_minimax.close) orelse return;
+                    s.pos = end + tool_minimax.close.len;
+                    s.searched = s.pos;
+                    s.state = .outside;
+                    const converted = try tool_minimax.dsml(s.a, text[s.buffered_start..s.pos], s.tools);
+                    const parsed = try tool_parse.parse(s.a, converted, s.tools, null);
+                    if (parsed.calls) |calls| try s.emitCalls(calls, out);
+                },
                 .function => {
-                    if (opening(rest, "<parameter=")) |m| {
+                    while (s.pos < text.len and space(text[s.pos])) s.pos += 1;
+                    const between = text[s.pos..];
+                    if (opening(between, "<parameter=")) |m| {
                         const key = reply_text.pyStrip(m.name);
                         s.value_schema = try tool_params.schemaOf(&s.schemas, s.current, key, s.a);
                         s.typed = try typedSchema(s.a, s.value_schema);
@@ -281,7 +316,7 @@ pub const Streamer = struct {
                         s.held = "";
                         continue;
                     }
-                    if (closing(rest, "</function>")) |n| {
+                    if (closing(between, "</function>")) |n| {
                         try out.append(s.a, try s.args(if (s.args_open) "}" else "{}"));
                         s.pos += n;
                         s.state = .closing;
@@ -341,6 +376,7 @@ pub const Streamer = struct {
             return false;
         }
         s.state = .buffered;
+        s.json_closer = .{ .at = s.buffered_start + "<tool_call>".len };
         return true;
     }
 
@@ -363,6 +399,13 @@ pub const Streamer = struct {
         switch (try tool_dsml_stream.feed(s, text, out)) {
             .wait => return false,
             .outside => return true,
+            .invalid => {
+                out.items.len = s.dsml.output_start;
+                s.index = s.dsml.index_start;
+                s.streamed = s.dsml.streamed_start;
+                s.state = .abort;
+                return false;
+            },
             .rejected => {
                 s.dsml_start = s.dsml.start;
                 s.dsml_close = s.dsml.sp.close;
