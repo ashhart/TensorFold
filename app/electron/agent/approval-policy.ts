@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { commandPolicyText } from './command-policy'
+import { classifyCommandTokens } from './command-policy'
 import { webFetchHost } from './web-fetch-vetting'
 
 export interface ApprovalPolicyScope {
@@ -409,7 +409,7 @@ function hashedPolicyScope(tool: string, args: Record<string, unknown>, label: s
 
 export function commandClass(command: string): string {
   const rawText = command.trim()
-  const text = commandPolicyText(rawText)
+  const text = classifyCommandTokens(rawText)
   const compact = text.toLowerCase()
   if (!text) return 'empty-command'
   if (isSystemControlCommand(compact)) return 'system-control'
