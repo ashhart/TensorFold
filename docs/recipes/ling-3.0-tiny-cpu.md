@@ -51,13 +51,13 @@ Exact mode (default):
 ling-cpu-decode ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
-Fast mode (requires a dot-product build; uses integer SDOT, 8x4 repacked weights cached next to the GGUF as `.tf_repack8.v4`, and head-parallel fast attention):
+Fast mode (requires a dot-product build; uses integer SDOT, weights repacked eight rows at a time and cached next to the GGUF as `.tf_repack8.v5`, and head-parallel fast attention):
 
 ```bash
 ling-cpu-decode --fast ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
-On a `.tf_repack8.v4` cache hit, `--fast` verifies the cache header, entry table bounds, and the GGUF's size, inode, mtime, and ctime against the header without re-hashing the GGUF or re-scanning raw quantized scales. The cache is built from validated blocks and stores the GGUF's SHA-256 in its header; any change to the file's stat identity (or removing the cache file) triggers a rebuild.
+On a `.tf_repack8.v5` cache hit, `--fast` verifies the cache header, entry table bounds, and the GGUF's size, inode, mtime, and ctime against the header without re-hashing the GGUF or re-scanning raw quantized scales. The cache is built from validated blocks and stores the GGUF's SHA-256 in its header; any change to the file's stat identity (or removing the cache file) triggers a rebuild.
 
 The arguments are the GGUF, the prompt's token IDs separated by commas (`PROMPT_IDS=ID,ID,...`), the number of tokens
 to generate, and the thread count (1 to 8, default 1). The output has this shape:
@@ -77,15 +77,20 @@ llama.cpp's `llama-tokenize` on the same file.
   whole experts only, so 1 to 8 threads give the same token IDs. Activations round to BF16 where the reference
   model does.
 - **Prompt rows.** The prompt runs 8 rows a call; whole, chunked and one-row prompts give the same logits.
-- **Speed.** Modest: exact mode decodes every 4-bit block to F32 inside each dot, which is slower than integer-dot
-  kernels. On an eight-core board: [board numbers: tokens a second at 1 and 4 threads]. The integer-dot path that
-  trades exactness for speed is a separate change.
+- **Fast mode is not exact.** `--fast` rounds activations to 8-bit integers for SDOT, so each projection differs from
+  the exact one by about 0.4% relative (1.4% at worst), and the fast attention rounds at the BF16 boundary. Its token
+  IDs can differ from exact mode's after some tokens; it is opt-in for that reason.
 - **Threads.** Persistent workers share each projection's rows and each token's eight routed experts, so more threads
   help up to the number of fast cores. Rows are claimed in chunks, so a slower core takes fewer, but an expert on a
   slow core is still waited for: start with the count of the board's fastest cores and try one more or fewer. Workers
   spin between projections and sleep only when idle, so while decoding each thread keeps a core busy; leave a core
-  free if the board has other work. The engine does not pin threads to cores; on a board with mixed cores,
-  `taskset -c LIST ling-cpu-decode ...` keeps the run on the cores in `LIST`.
+  free if the board has other work. The engine does not pin threads itself. On a board with mixed cores, run it under
+  `taskset -c LIST` with `LIST` set to the fast cores (on the Qualcomm board measured below, `taskset -c 0,3,5,7` with
+  4 threads); the cores with the highest `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` are the fast ones.
+
+## Measured
+
+FIGURES_AT_FINAL_HEAD
 
 ## Checks
 
