@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Cluster: bring-up reports the leader, epoch and view it agreed on and counts only acknowledgments for that view, so a rank that finishes after a peer says goodbye no longer reports a smaller view on slow runners (#4135, fixes #4123). Thanks to @AIFlowML.
+
 - Ling-3.0-tiny on Metal: a bf16 forward diagnostic runs all 24 layers of the published checkpoint on kernels that already exist, with no new GPU kernel source; `zig build test-ling-forward`, given `TF_LING_CHECKPOINT` and a Python with torch and safetensors (`TF_LING_PYTHON`), checks whole, chunked and resumed runs byte for byte and reports the distance from float64. Nothing is served yet (#3919, part of #1247). Thanks to @ThinkOffApp.
 
 - Tests: the Web loopback startup test sets its fixture ready before probing, so its health, model-list and relay checks no longer depend on warm-up timing (#3753, fixes #3752). Thanks to @AIFlowML.
