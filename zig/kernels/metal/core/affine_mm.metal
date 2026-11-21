@@ -276,7 +276,10 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
       if (simd_any(raw[m][0] || raw[m][1])) {
         frag<bfloat> r0, r1;
         TF_UNROLL
-        for (short e = 0; e < 8; e++) r0[e] = b0[e] - OFF, r1[e] = b1[e] - OFF;
+        for (short e = 0; e < 8; e++) {
+          r0[e] = bfloat(b0[e] - OFF);
+          r1[e] = bfloat(b1[e] - OFF);
+        }
         if (q % (TF_GROUP / 16) == 0) {
           am_first(exact[m][0], exact[m][1], a[m], r0, r1);
         } else {
