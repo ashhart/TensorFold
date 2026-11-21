@@ -13,6 +13,7 @@ pub const vision = @import("vision.zig");
 
 test {
     _ = config;
+    _ = @import("model.zig");
     _ = backend;
     _ = budget;
     _ = snapshot;
