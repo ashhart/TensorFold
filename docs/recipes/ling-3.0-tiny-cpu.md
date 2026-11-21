@@ -59,7 +59,7 @@ Fast mode (requires a dot-product build; uses integer SDOT, weights repacked eig
 ling-cpu-decode --fast ~/models/Ling-3.0-tiny-Q4_K_M.gguf "$PROMPT_IDS" 32 4
 ```
 
-The first `--fast` run builds the cache from validated blocks; on the board below that took 137 s before the first
+The first `--fast` run builds the cache from validated blocks; on the board below that took about two minutes (111 to 137 s) before the first
 token. On every later run `--fast` checks the cache before using it: the header and the GGUF's size, inode, mtime and
 ctime, the bounds of every table entry, the SHA-256 of the whole GGUF against the one stored at build time, and the
 SHA-256 of the cache's table and payload. Any mismatch rebuilds the cache. These checks read the GGUF and the cache in
@@ -103,18 +103,18 @@ llama.cpp's `llama-tokenize` on the same file.
 
 On an eight-core Qualcomm board (four fast cores, dot product, no i8mm), `taskset -c 0,3,5,7`, with the 37-token prompt
 whose IDs are in the PR description and 32 generated tokens. Each figure is from a run timed by the tool on an otherwise
-idle board; model opening is not included.
+idle board. Exact mode opens the model in under a tenth of a second, so the first-token time is the prompt.
 
 Exact mode, one run each; every run below generated the same 32 IDs:
 
-| Build | Threads | Decode tokens/s | Prompt s |
+| Build | Threads | Decode tokens/s | First token s |
 | --- | --- | --- | --- |
-| baseline | 1 | 1.68 | 35.0 |
-| baseline | 4 | 5.26 | 5.5 |
-| baseline | 8 | 0.69 | 14.7 |
-| `+dotprod` | 1 | 1.96 | 11.5 |
-| `+dotprod` | 4 | 5.30 | 5.2 |
-| `+dotprod` | 8 | 0.71 | 14.6 |
+| baseline | 1 | 1.73 | 26.6 |
+| baseline | 4 | 4.93 | 5.7 |
+| baseline | 8 | 0.68 | 14.6 |
+| `+dotprod` | 1 | 1.95 | 11.5 |
+| `+dotprod` | 4 | 5.29 | 5.6 |
+| `+dotprod` | 8 | 0.69 | 14.7 |
 
 Fast mode, `+dotprod+sha2` build, four threads, in the shape of `llama-bench -p 512 -n 128`: 38.4 tokens a second reading
 the 512-token prompt and 21.2 generating 128 tokens (means of three runs, cache warm, opening excluded). These are not
