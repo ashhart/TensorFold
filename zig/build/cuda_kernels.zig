@@ -168,7 +168,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
     // ours: Inkling 2's grouped experts
     .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
-    // ours: Inkling 2's vision tower glue and attention
+    // ours: Inkling 2's vision tower glue
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
