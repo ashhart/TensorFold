@@ -249,7 +249,7 @@ pub const ModelOpt = struct {
 
     pub fn prepare(self: *ModelOpt, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         _ = seed;
-        if (self.phase == .prompt and shape.rows < 32 and fill != .stress) return false;
+        if (self.phase == .prompt and shape.rows < 32 and fill != .stress and fill != .nonfinite) return false;
         if (shape.n != 2304 or shape.k != 1152 or shape.rows == 0 or shape.rows > 2048) return false;
         self.drop();
         self.shape = shape;
@@ -334,7 +334,7 @@ pub const ModelOpt = struct {
     pub fn run(self: *ModelOpt) !void {
         const route_weights = if (self.fault == .wrong_combine) self.pick else self.weights;
         const caps = if (self.fault == .wrong_act) ink.experts.Caps{ .gate = 8, .up = 25 } else ink.experts.Caps{ .gate = 4, .up = 25 };
-        if (self.stress and self.phase == .prompt and self.shape.rows < 32) return self.runPrompt(caps);
+        if (self.phase == .prompt and self.shape.rows < 32) return self.runPrompt(caps);
         try mo.run(self.k, self.rig.s, self.l, caps, self.dev_x, self.shape.n, self.pick, route_weights, self.shape.rows, slots, self.out, self.scratch);
     }
 
@@ -414,17 +414,7 @@ pub const ModelOpt = struct {
         a.add(x);
         a.add(@as(i32, @intCast(stride)));
         a.add(@as(i32, @intCast(pair_slots)));
-        a.add(p.codes);
-        a.add(p.scales);
-        a.add(p.amax);
-        a.add(p.denominator);
-        a.add(@as(i64, experts));
-        a.add(@as(i64, p.n));
-        a.add(@as(i64, p.k));
-        a.add(@as(i32, if (self.format == .nvfp4) 16 else 32));
-        a.add(@as(i32, @backingInt(self.format)));
-        a.add(row0);
-        a.add(step);
+        a.add(mo.weight(p, self.l, row0, step));
         a.add(@as(i32, @intCast(p.k / 32)));
         a.add(@as(i32, @intCast(outputs / 32)));
         for ([_]u64{ plan.items, plan.item_count, plan.members, out }) |v| a.add(v);

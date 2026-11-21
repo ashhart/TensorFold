@@ -25,7 +25,7 @@ pub const Layer = struct {
     w2: Projection,
 };
 
-const Weight = extern struct {
+pub const Weight = extern struct {
     codes: u64,
     scales: u64,
     amax: u64,
@@ -115,7 +115,7 @@ fn i32d(v: usize) i32 {
     return @intCast(v);
 }
 
-fn weight(p: Projection, l: Layer, row0: i32, row_step: i32) Weight {
+pub fn weight(p: Projection, l: Layer, row0: i32, row_step: i32) Weight {
     return .{
         .codes = p.codes,
         .scales = p.scales,
