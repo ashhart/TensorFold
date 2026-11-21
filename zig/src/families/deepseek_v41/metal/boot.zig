@@ -113,7 +113,7 @@ pub const Boot = struct {
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .identity = try identity(a, io, dir, b.device, b.ds != null) });
     }
 
     /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
@@ -148,6 +148,21 @@ pub const Boot = struct {
         if (n >= pipelines.max_rows) return error.DsparkBlock;
         if (n == 0 or n == checkpoint) return .{ .wide = checkpoint, .narrow = 0 };
         return if (n > checkpoint) .{ .wide = n, .narrow = checkpoint } else .{ .wide = n, .narrow = 0 };
+    }
+
+    /// What a stored cost table is specific to: the chip, the config, the weight index and whether DSpark is loaded.
+    fn identity(a: Allocator, io: std.Io, dir: []const u8, device: mtl.Device, drafts: bool) !u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.span(device.name()));
+        h.update(&.{@intFromBool(drafts)});
+        for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+            const path = try std.fs.path.join(a, &.{ dir, name });
+            defer a.free(path);
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch continue;
+            defer a.free(bytes);
+            h.update(bytes);
+        }
+        return h.final() | 1;
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {
