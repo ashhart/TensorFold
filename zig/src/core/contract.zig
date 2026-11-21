@@ -14,6 +14,7 @@ pub const limits = @import("contract/limits.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
 pub const registry = @import("contract/registry.zig");
+pub const h3_image_records = @import("contract/h3_image_records.zig");
 pub const cubin = @import("contract/cubin.zig");
 pub const hsaco = @import("contract/hsaco.zig");
 pub const hip_records = @import("contract/hip_records.zig");
@@ -25,6 +26,7 @@ pub const zebin = @import("contract/zebin.zig");
 pub const zeinfo = @import("contract/zeinfo.zig");
 test {
     _ = vulkan_records;
+    _ = h3_image_records;
 }
 test {
     _ = xpu_records;
