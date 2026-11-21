@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/prompt_cache/flush` drops the prompt states the server keeps for resuming conversations, in RAM and on disk when it keeps them there (`--prompt-cache-disk`, `--learn-conversations` or `--spill-gib`), once no request is running, so replies in flight are unchanged; it needs a full or `[admin]` key when API keys are on (a loopback caller without keys), answers 503 if requests have not ended within 10 minutes and 501 on an engine without the prompt cache, and leaves `--learn`'s shared-prefix states on disk (#3210, fixes #3183).
+
 - CUDA: opt-in TF_DSV41_FLOAT_LINEAR runs DeepSeek-V4.1 backbone projections kept as float matrices on the plain path; with it unset, such a pack is still refused (#4076). Thanks to @BadAd84.
 
 - Docs: the README's build section says that a Linux `zig build native` compiles for the build machine's CPU, and that `-Dcpu=baseline` or `-Dcpu=x86_64_v3` builds a binary for another machine, with thanks to @Nipale-ai (#3179; #3301).
