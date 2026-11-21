@@ -555,6 +555,30 @@ those files. `tiny_config.json` and the tensor tables
 `0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
 model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
 
+## Inkling 2 Mini fixtures and loop references
+
+`mini_config.json`, `mini_model_header.txt` and `mini_mtp_header.txt` in
+`zig/src/families/inkling2/fixtures/` come from the 2026-11-20 published snapshot of
+[thinkingmachines/Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini), under the Apache License 2.0
+stated on its model card (see [the license text](LICENSES/Apache-2.0.txt)). The config is the published `config.json` plus
+its explicit `_fixture_provenance` annotation; the folded tables contain only metadata from the model and MTP safetensors
+headers, no tensor data or weights. `tools/zig/inkling2_fixtures.py` rebuilds all three from the Mini release, or from its
+extracted headers. None of the supplied config, generation config, quantization config, model card, tensor headers or
+Mini specification records the release's full Hugging Face commit SHA. The fixtures therefore mark it unavailable rather
+than deriving a revision from their digests.
+
+The Mini loop host/reference implementations in `zig/src/families/inkling2/loop.zig`, `loop_model.zig`, `loop_engine.zig`,
+`loop_math_cuda.zig`, the CUDA and Metal loop kernels and the stored-expert implementations in `modelopt.zig` and
+`zig/kernels/cuda/inkling2/modelopt.cu` are independent TensorFold implementations of the supplied math-only Mini
+specification. Its primary reference is huggingface/transformers PR #51050 at head `6173a2f6`: the Mini configuration and
+forward pass in `models/inkling2_loop/modular_inkling2_loop.py` and `modeling_inkling2_loop.py`, with the temporary
+NVFP4/MXFP8 expert dequantization in `core_model_loading.py` and the checkpoint mappings in `conversion_mapping.py`.
+ModelOpt here names the checkpoint format and that Transformers arithmetic; no NVIDIA Model Optimizer source was used or
+vendored. The specification also records Neywa-Labs/mlx-vlm at `fd6404fb` as its second reading of the loop and DSpark
+implementation (`mlx_vlm/models/inkling2/` and `mlx_vlm/speculative/drafters/inkling2_dspark/`). Transformers is Apache-2.0;
+mlx-vlm is MIT (see [`LICENSES/MIT.txt`](LICENSES/MIT.txt)). No reference source code is vendored. The supplied materials
+give only these two abbreviated reference heads, not their full commit SHAs.
+
 ## Inkling 2 attention kernels
 
 `zig/kernels/cuda/inkling2/attention.cu`, `zig/kernels/cuda/inkling2/prompt_attention.cu` and
