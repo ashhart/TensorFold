@@ -51,7 +51,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // The launch sequence includes main's moved delta scan and MTP's retained-row tap argument.
-    // #3723's sequence: the norms' add flags come from the schedule (main's values on the plain one)
-    try std.testing.expectEqualStrings("2099ef3b0a28d63d079b65d191a9c3be7e7c0ff93fb9b53ec9d6a6e61565220d", &hash(out.items));
+    // main's moved delta scan and MTP's retained-row tap argument, with #3723's schedule-driven norm add flags
+    try std.testing.expectEqualStrings("5a19a37c0a41a05ae57d0f13c62cc077cf1c65211a47bf03db51e316c55a0c92", &hash(out.items));
 }
