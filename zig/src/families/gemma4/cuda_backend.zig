@@ -558,7 +558,7 @@ pub const Gemma = struct {
 };
 
 /// tf_round_bf16_argmax's pick among `mask`'s allowed tokens: the first largest; a non-finite logit is an error.
-fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
+pub fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
     var best: f32 = 0;
     var id: ?u32 = null;
     for (row, 0..) |bits, t| {
@@ -573,25 +573,6 @@ fn pickAllowed(row: []const u16, mask: []const u32) !u32 {
     return id orelse error.InvalidGrammarMasks;
 }
 
-test "a greedy pick under a grammar: the first largest allowed token, refusals by name" {
-    const bf = struct {
-        fn of(f: f32) u16 {
-            return @intCast(@as(u32, @bitCast(f)) >> 16);
-        }
-    }.of;
-    var row: [64]u16 = @splat(bf(0.5));
-    row[3] = bf(9);
-    row[40] = bf(2);
-    row[41] = bf(2);
-    var mask = [2]u32{ 0, (1 << 8) | (1 << 9) }; // tokens 40 and 41
-    try std.testing.expectEqual(@as(u32, 40), try pickAllowed(&row, &mask));
-    mask[0] = 1 << 3;
-    try std.testing.expectEqual(@as(u32, 3), try pickAllowed(&row, &mask));
-    try std.testing.expectError(error.InvalidGrammarMasks, pickAllowed(&row, &.{ 0, 0 }));
-    row[10] = 0xFF80; // -inf, even where the grammar refuses it
-    try std.testing.expectError(error.NonFiniteLogits, pickAllowed(&row, &mask));
-}
-
 test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tokens and costed copy grants" {
     var m: fwd.Model = undefined;
     m.slots = 16;
@@ -601,4 +582,8 @@ test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tok
     b.priority_copies = true;
     try lanes.shared_draft_check.check(b.facts(), true);
     try @import("cuda_head_cost_test.zig").check(b.facts());
+}
+
+test {
+    _ = @import("cuda_greedy_test.zig");
 }
