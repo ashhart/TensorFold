@@ -40,19 +40,19 @@ test "the rendezvous sets NCCL_COMM_ID from --master once, keeps an equal one, r
     };
     const O = struct { tp: u32, master: ?[]const u8, master_port: u16 };
     var f: Fake = .{};
-    try fromMaster(O{ .tp = 2, .master = "10.0.0.7", .master_port = 29583 }, &f, &f);
-    try std.testing.expectEqualStrings("10.0.0.7:29583", f.set.?);
-    f = .{ .have = "10.0.0.7:29583" };
-    try fromMaster(O{ .tp = 2, .master = "10.0.0.7", .master_port = 29583 }, &f, &f);
+    try fromMaster(O{ .tp = 2, .master = "192.0.2.7", .master_port = 29583 }, &f, &f);
+    try std.testing.expectEqualStrings("192.0.2.7:29583", f.set.?);
+    f = .{ .have = "192.0.2.7:29583" };
+    try fromMaster(O{ .tp = 2, .master = "192.0.2.7", .master_port = 29583 }, &f, &f);
     try std.testing.expect(f.set == null);
-    f = .{ .have = "10.0.0.8:29583" };
-    try std.testing.expectError(error.RendezvousDisagree, fromMaster(O{ .tp = 2, .master = "10.0.0.7", .master_port = 29583 }, &f, &f));
+    f = .{ .have = "192.0.2.8:29583" };
+    try std.testing.expectError(error.RendezvousDisagree, fromMaster(O{ .tp = 2, .master = "192.0.2.7", .master_port = 29583 }, &f, &f));
     f = .{};
     var long: [400]u8 = undefined;
     @memset(&long, 'h');
     try std.testing.expectError(error.MasterTooLong, fromMaster(O{ .tp = 2, .master = &long, .master_port = 29583 }, &f, &f));
     f = .{};
-    try fromMaster(O{ .tp = 1, .master = "10.0.0.7", .master_port = 29583 }, &f, &f);
+    try fromMaster(O{ .tp = 1, .master = "192.0.2.7", .master_port = 29583 }, &f, &f);
     try fromMaster(O{ .tp = 2, .master = null, .master_port = 29583 }, &f, &f);
     try std.testing.expect(f.set == null);
 }
