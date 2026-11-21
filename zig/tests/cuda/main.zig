@@ -147,6 +147,33 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     return rest[i];
 }
 
+fn compileInkling2Contracts() !void {
+    const shape: @import("core").contract.spec.Shape = .{ .rows = 1, .n = 2304, .k = 2 };
+    const a: std.mem.Allocator = undefined;
+    const gpu: check.Gpu = undefined;
+    const stream: cuda.Stream = undefined;
+    var list: std.ArrayList(@import("core").contract.gates.Kernel) = .empty;
+    const set = try @import("contract_inkling2.zig").Set.init(gpu, stream, a, &list);
+    set.deinit();
+    var rig: @import("contract_rig.zig").Rig = undefined;
+    const rng: std.Random = undefined;
+    var mix: @import("contract_inkling2_ops_mix.zig").Mix = undefined;
+    _ = try mix.prepare(a, &rig, shape, .random, rng);
+    try mix.run(&rig);
+    _ = try mix.replaced(&rig);
+    const sums: @import("contract_inkling2_ops_ref.zig").Sums = undefined;
+    const solved: []@import("contract_inkling2_ops_ref.zig").Iv = undefined;
+    try mix.solve(a, sums, solved);
+    var modelopt: @import("contract_inkling2_modelopt.zig").ModelOpt = undefined;
+    _ = try modelopt.prepare(shape, .random, 0);
+    try modelopt.run();
+    _ = try modelopt.check(.shapes);
+    _ = modelopt.count();
+    const want: []f64 = undefined;
+    const mag: []f64 = undefined;
+    try modelopt.reference(want, mag);
+}
+
 fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
@@ -154,6 +181,7 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
     g.kind = .chain;
     const kernels = [_]@import("core").contract.gates.Kernel{g.kernel()};
     for (kernels) |k| _ = try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 0, .k = 0 }, .random, 0);
+    try compileInkling2Contracts();
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
