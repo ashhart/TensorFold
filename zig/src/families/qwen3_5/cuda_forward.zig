@@ -232,7 +232,7 @@ test "prompt MoE precision: every prompt piece through 128 and admitted verify w
 }
 
 /// The same scan selected by body, exposed for host launch-contract fixtures.
-pub fn deltaScan(e: *E.Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+pub fn deltaScan(e: anytype, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
     const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
         1 => e.fns.gdn_slots_1,
         2 => e.fns.gdn_slots_2,

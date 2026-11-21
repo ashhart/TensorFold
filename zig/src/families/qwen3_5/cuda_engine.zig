@@ -471,7 +471,6 @@ pub const Engine = struct {
         if (rows == 1 and !undo) sg.before = 0;
         return sg;
     }
-
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const total = ids.len;
@@ -548,7 +547,6 @@ pub const Engine = struct {
         if (e.held) |h| return h.hold(st, shape, total); // rank 0 with rounds in flight: its head runs at `land`
         try e.land(parts, keep, total);
     }
-
     /// A forward's kept rows after its launches: the draws, logits or rows `keep` asks for, read back.
     pub fn land(e: *Engine, parts: []const Part, keep: Keep, total: usize) !void {
         const g = e.g;
@@ -584,26 +582,19 @@ pub const Engine = struct {
         // a readout piece waits for nothing: the queue's work is done only once a later forward has waited
         if (keep != .rows) recurrent.completed(e);
     }
-
     pub const Shape = @import("cuda_shapes.zig").Shape;
-
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
-
     /// The same scan selected by body, exposed for host launch-contract fixtures.
     pub const deltaScan = @import("cuda_forward.zig").deltaScan;
-
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
     pub const body = @import("cuda_forward.zig").body;
-
     pub const routedRows = routed.rows;
-
     /// Row `i`'s logits from the newest forward that kept logits.
     pub fn rowLogits(e: *const Engine, i: usize) []const u16 {
         return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
     }
 };
-
 test {
     _ = @import("cuda_engine_test.zig");
 }
