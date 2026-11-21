@@ -18,14 +18,14 @@ from fake_served_api import fake  # noqa: E402
 TOOLS = HERE.parent
 
 
-def concurrent(fault=None):
+def concurrent(fault=None, levels="2"):
     """Each cell's ``alone`` and ``serial`` counts from a two-stream greedy run with ``--alone --serial``.
 
     512 tokens keep each stream ~0.1 s long at the fake's token gap, so the two streams overlap on a slow runner too
     (20 Nov: at 64 tokens a hosted Windows runner decoded them one after the other and main went red)."""
     with tempfile.TemporaryDirectory() as folder, fake(False, fault, pair_streams=True) as url:
         out = Path(folder) / "out.json"
-        subprocess.run([sys.executable, str(TOOLS / "bench_concurrent.py"), url, "fake", "--levels", "2", "--reps",
+        subprocess.run([sys.executable, str(TOOLS / "bench_concurrent.py"), url, "fake", "--levels", levels, "--reps",
                         "1", "--temperatures", "0", "--tokens", "512", "--alone", "--serial", "--output", str(out)],
                        capture_output=True, text=True, timeout=120, check=True)
         return [(c["alone"], c["serial"]) for c in json.loads(out.read_text())["cells"]]
@@ -48,6 +48,13 @@ class ConcurrentEvidenceTests(unittest.TestCase):
             self.assertNotIn("vacuous", alone)
             self.assertNotIn("vacuous", serial)
             self.assertGreater(serial["accepted"], 0)
+
+    def test_one_stream_cannot_prove_concurrent_equality(self):
+        for alone, serial in concurrent(levels="1"):
+            self.assertEqual((alone["equal"], alone["unequal"], alone["failed"]), (1, 0, 0))
+            self.assertIn("fewer than two observed decode spans", alone.get("vacuous", ""))
+            self.assertNotIn("vacuous", serial)
+
 
     def test_a_server_serving_one_at_a_time_is_named(self):
         for alone, _ in concurrent("serial"):

@@ -158,7 +158,8 @@ pub const Decoder = struct {
     }
 
     /// Prefill a prompt: `image_rows` (bf16 [image tokens, 1280]) at its image tokens, the token embeddings elsewhere.
-    pub fn prefill(d: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16) !void {
+    pub fn prefill(d: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16, cancel: ?@import("lanes").stream.CancelCheck) !void {
+        if (cancel) |c| if (c.check(c.ptr)) return error.Cancelled;
         const n = p.len();
         if (n == 0 or n > d.cap) return error.UocrPromptTooLong;
         var images: usize = 0;
@@ -173,6 +174,7 @@ pub const Decoder = struct {
         var s0: usize = 0;
         const embed: [*]const u16 = @ptrCast(@alignCast(d.w.embed.addr()));
         while (s0 < n) {
+            if (cancel) |c| if (c.check(c.ptr)) return error.Cancelled;
             const r = @min(d.rows, n - s0);
             const x = d.scratch.host(u16, .x, r * H);
             for (0..r) |i| {
@@ -188,6 +190,22 @@ pub const Decoder = struct {
             d.len = s0;
         }
         if (tr) |t| t.copyOut(d.trace, d.trace_parts, n);
+    }
+
+    test "uocr: cancelled decoder prefill stops before device work" {
+        const Stop = struct {
+            fn yes(_: *anyopaque) bool {
+                return true;
+            }
+        };
+        var ids: [1]u32 = .{1};
+        var p: prompt_mod.Prompt = undefined;
+        p.ids = &ids;
+        var d: Decoder = undefined;
+        d.cap = 0;
+        var stopped = false;
+        const cancel: @import("lanes").stream.CancelCheck = .{ .ptr = &stopped, .check = Stop.yes };
+        try std.testing.expectError(error.Cancelled, d.prefill(p, &.{}, cancel));
     }
 
     /// One decode step for token `id` at the next position, with its coordinates from prompt.Step.

@@ -2,7 +2,7 @@
 const std = @import("std");
 const gate = @import("release_refusal");
 const env = @import("policy_env");
-const expected = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
+const expected = "DeepSeek-V4.1 is not served by this release's CUDA server; its native Metal path remains experimental";
 fn check(value: ?[:0]const u8) !void {
     env.value = value;
     defer env.value = null;

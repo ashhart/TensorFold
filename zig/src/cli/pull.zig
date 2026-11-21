@@ -83,7 +83,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     };
     const kind = configKind(a, config_bytes);
     const model_type = kind.model_type;
-    if (kind.drafter) {
+    if (kind.kind == .lilicorr) {
+        try err_out.print("{s}: LiLiCorr drafter ({s}); this build has no LiLiCorr drafter backend; refusing before download\n", .{ repo, model_type });
+        return 1;
+    } else if (kind.kind == .dflash2) {
         try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, model_type });
     } else if (hub.family(model_type)) |family| {
         try out.print("{s}: {s} ({s})\n", .{ repo, family.title, family.model_type });
@@ -242,14 +245,22 @@ fn lfsDigest(oid: []const u8) ?[32]u8 {
     return parseHex(32, if (std.mem.startsWith(u8, oid, "sha256:")) oid[7..] else oid);
 }
 
-/// config.json's model_type, copied from the raw bytes' parse, and whether it is a DFlash2 drafter (`serve --drafter`).
-fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, drafter: bool } {
-    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .drafter = false };
+/// config.json's model_type and draft architecture, copied before any cache directory or weight request.
+fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, kind: enum { model, dflash2, lilicorr } } {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .kind = .model };
     defer parsed.deinit();
-    if (parsed.value != .object) return .{ .model_type = "unknown", .drafter = false };
+    if (parsed.value != .object) return .{ .model_type = "unknown", .kind = .model };
     const t = parsed.value.object.get("model_type");
     const model_type = if (t != null and t.? == .string) a.dupe(u8, t.?.string) catch "unknown" else "unknown";
-    return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };
+    if (hasArchitecture(parsed.value, "LiLiCorrDraftModel")) return .{ .model_type = model_type, .kind = .lilicorr };
+    return .{ .model_type = model_type, .kind = if (parsed.value.object.get("dflash_config") != null) .dflash2 else .model };
+}
+
+fn hasArchitecture(config: std.json.Value, wanted: []const u8) bool {
+    const architectures = config.object.get("architectures") orelse return false;
+    if (architectures != .array) return false;
+    for (architectures.array.items) |architecture| if (architecture == .string and std.mem.eql(u8, architecture.string, wanted)) return true;
+    return false;
 }
 
 fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {

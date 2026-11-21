@@ -133,6 +133,17 @@ python3 tools/bench_fill.py http://127.0.0.1:8080 MODEL --corpus FILE --long 655
 `FILE` is any text long enough for `--long` tokens. The report gives `reply_s` (sent to last token), `long_ttft_s`,
 `both_done_s` and the reply's largest gaps for each order, plus `alone` for the sum to compare `both_done_s` with. `exact`
 is true only when every reply's `token_sha256` equals its run alone; the tool exits 1 when it isn't, or when `cold` isn't.
+Each order also keeps `long_native_prefill_wall_s`, `long_server_ttft_s`, `long_wall_s` and the actual
+`long_prefill_widths`. Native prefill wall covers the host's whole prompt pass, including time between its chunks; it is
+not device-kernel time, server TTFT or first visible client TTFT. `--lead` and overlapping HTTP requests are offered-load
+cues, not proof that prefill and decode mixed.
+
+For a native mixed-load verdict, start the server with `TF_LANE_TRACE=fill-trace.jsonl` and pass `--trace
+fill-trace.jsonl`. The opt-in trace's `decode` lines name the request and its committed output rows. `mixed_load` is
+`verified_mixed` only when owned reply commits fall between the long request's contiguous cold fills in both arrival
+orders. It is `verified_serialized` when complete evidence has commits but none between fills, `not_long` at 512 rows or
+fewer, `invalid` for malformed evidence, and `unknown` when fills or owned decode events are absent. Legacy `round`
+lines and client timings cannot qualify it. With `--trace`, any verdict other than `verified_mixed` exits 1.
 
 ## Sequential agent eviction traces
 

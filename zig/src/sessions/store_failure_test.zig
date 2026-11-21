@@ -253,9 +253,19 @@ test "Ownership rollback: a restore or park the tier thread cannot queue leaves 
     try d.by_key.put(a, key, 0);
     const slot = try pool.newSlot(8);
     defer _ = slot.releaseAll() catch {};
+    slot.reserve(1);
+    try slot.ensure(ids.len);
+    _ = try slot.truncate(0);
+    try std.testing.expectEqual(@as(u32, 1), slot.over);
+    const reserved = pool.reserved;
     var full = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
     s.runner.?.gpa = full.allocator(); // the tier queue's append fails while its thread runs
     try std.testing.expectError(error.OutOfMemory, s.beginRestore(filed, slot));
+    try std.testing.expectEqual(@as(u32, 0), slot.len);
+    try std.testing.expectEqual(@as(u32, 1), slot.over);
+    try std.testing.expectEqual(@as(?u32, 1), slot.quota);
+    try std.testing.expectEqual(reserved, pool.reserved);
+    try slot.ensure(ids.len);
     const restores = s.pending.items.len;
     s.pending.clearRetainingCapacity(); // if the rollback regresses this holds the freed job: dropped unread, so deinit cannot wait on it
     var held: Plain = .{};

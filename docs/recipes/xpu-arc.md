@@ -1,7 +1,6 @@
 # Intel Arc (XPU): Nemotron 3.5 Lightning
 
-Status: experimental. One checkpoint, one card class, one request at a time. Everything below was measured on the setup in
-[Tested setup](#tested-setup); nothing is claimed for other cards.
+Status: each checkpoint remains separately qualified and the broader backend is experimental. Nemotron runs on one Arc Pro B70 with one or more streams; the table below also records LFM3 on Iris Xe. Every measurement belongs to its named [tested setup](#tested-setup); nothing is claimed for other cards or unlisted checkpoints.
 
 The Intel GPU backend runs OpenCL C kernels compiled to SPIR-V (`ocloc`) through Level Zero, on the same loader table as the
 Qwen3.8-27B XPU runner (`zig/src/xpu/ze.zig`), and has no CUDA or Metal code in its path. The token-id CLI is a separate

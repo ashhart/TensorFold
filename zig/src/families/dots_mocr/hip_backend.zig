@@ -129,9 +129,17 @@ pub const Backend = struct {
         return l.local[0..n];
     }
 
+    fn cancelledPrefix(h: *Backend, s: *lanes.Stream, at: usize) !void {
+        if (!s.isCancelled()) return;
+        if (h.store.usable(@intCast(at), s.chunks)) s.keepInterruptedPrefill(@intCast(at));
+        return error.Cancelled;
+    }
+
     fn step(h: *Backend, s: *lanes.Stream) !bool {
-        if (s.isCancelled()) return error.Cancelled;
-        const l = h.map.get(s) orelse try h.begin(s);
+        const existing = h.map.get(s);
+        if (existing == null and s.isCancelled()) return error.Cancelled;
+        const l = existing orelse try h.begin(s);
+        try cancelledPrefix(h, s, if (l.fill) |filled| filled.at else 0);
         if (l.fill == null) return true;
         const f = &l.fill.?;
         const prompt = s.prompt();
@@ -156,7 +164,7 @@ pub const Backend = struct {
             if (f.cut(to)) if (s.reuse.hook) |hook| hook.at(hook.ptr, s, @intCast(to));
         }
         if (f.at < prompt.len) return false;
-        if (s.isCancelled()) return error.Cancelled;
+        try cancelledPrefix(h, s, f.at);
         l.first = try h.firstDraw(s, l, &.{});
         l.fill = null;
         return true;
@@ -263,3 +271,31 @@ pub const Backend = struct {
         if (h.map.fetchRemove(s)) |entry| h.drop(entry.value);
     }
 };
+
+test "dots prefill cancellation keeps a completed prefix for exact resume" {
+    const Kept = struct {
+        at: u32 = 0,
+        fn interrupted(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const k: *@This() = @ptrCast(@alignCast(ctx));
+            k.at = at;
+        }
+        fn cancelled(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    var kept: Kept = .{};
+    var s = try lanes.Stream.init(std.testing.allocator, .{
+        .id = "stopped",
+        .prompt = &.{ 3, 1, 4, 1, 5, 9 },
+        .max_new = 1,
+        .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.interrupted } },
+        .cancel_check = .{ .ptr = &kept, .check = Kept.cancelled },
+    });
+    defer s.deinit(std.testing.allocator);
+    var h: Backend = undefined;
+    h.store = api.prompt_cache.Store.init(std.testing.allocator, undefined, .{}, 0);
+    defer h.store.deinit();
+    try std.testing.expectEqual(@as(u32, 0), kept.at);
+    try std.testing.expectError(error.Cancelled, Backend.cancelledPrefix(&h, &s, 2));
+    try std.testing.expectEqual(@as(u32, 2), kept.at);
+}

@@ -163,7 +163,7 @@
       "size_bytes": null,
       "speed_hint": "medium",
       "workspace_bytes": 6442450944,
-      "format": "mlx-q4g64",
+      "format": "mlx-q4g32",
       "native": true
     },
     {
