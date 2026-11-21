@@ -309,9 +309,15 @@ pub const Stage = struct {
 };
 
 fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
+    // Darwin pread rejects nbyte > INT_MAX with EINVAL, so clamp each call to INT_MAX.
+    return readAllBounded(fd, dest, at, @intCast(std.math.maxInt(i32)));
+}
+
+fn readAllBounded(fd: platform.c.fd_t, dest: []u8, at: usize, max_chunk: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const want = @min(dest.len - done, max_chunk);
+        const n = platform.c.pread(fd, dest.ptr + done, want, @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
@@ -345,6 +351,26 @@ fn readParallel(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
 /// One tensor's bytes: small ones on this thread, large ones on 8.
 fn readInto(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     return if (dest.len >= parallel_bytes) readParallel(fd, dest, at) else readAll(fd, dest, at);
+}
+
+test "readAllBounded reads across multiple pread chunks and detects EOF" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixture(gpa, &tmp);
+    defer gpa.free(path);
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
+    try std.testing.expect(fd >= 0);
+    defer _ = platform.c.close(fd);
+    var head: [8]u8 = undefined;
+    try readAllBounded(fd, &head, 0, 3);
+    const header_len = std.mem.readInt(u64, &head, .little);
+    var got: [10]u8 = undefined;
+    try readAllBounded(fd, &got, 8 + header_len + 4, 3);
+    const want = [_]u8{ 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+    try std.testing.expectEqualSlices(u8, &want, &got);
+    var past: [8]u8 = undefined;
+    try std.testing.expectError(error.ShortRead, readAllBounded(fd, &past, 8 + header_len + 26, 3));
 }
 
 /// A three-tensor safetensors file in `tmp`, each data byte its own offset; returns its path.
