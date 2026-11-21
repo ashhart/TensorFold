@@ -175,7 +175,7 @@ pub const Decoder = struct {
         if (wrapper.value.object.get("latents_mean")) |v| {
             if (v == .array) {
                 const arr = v.array;
-                const mean = try arena.alloc(f32, arr.items.len);
+                const mean = try std.heap.page_allocator.alloc(f32, arr.items.len);
                 for (arr.items, 0..) |item, i| {
                     if (item == .float) mean[i] = @floatCast(item.float);
                     if (item == .integer) mean[i] = @floatFromInt(item.integer);
@@ -186,7 +186,7 @@ pub const Decoder = struct {
         if (wrapper.value.object.get("latents_std")) |v| {
             if (v == .array) {
                 const arr = v.array;
-                const std_arr = try arena.alloc(f32, arr.items.len);
+                const std_arr = try std.heap.page_allocator.alloc(f32, arr.items.len);
                 for (arr.items, 0..) |item, i| {
                     if (item == .float) std_arr[i] = @floatCast(item.float);
                     if (item == .integer) std_arr[i] = @floatFromInt(item.integer);
@@ -298,7 +298,7 @@ pub const Decoder = struct {
 
         std.debug.print("canvas ready", .{});
         const chunk = (self.config.clip_length + self.config.temporal_ratio - 1) / self.config.temporal_ratio;
-        const token_overlap = (self.config.temporal_ratio - (self.config.token_drop % chunk)) % chunk;
+        const token_overlap = (chunk - (self.config.token_drop % chunk)) % chunk;
         var clip_start: usize = 0;
         while (clip_start < depth) {
             const clip_depth = @min(chunk + token_overlap, depth - clip_start);
@@ -392,7 +392,7 @@ pub const Decoder = struct {
         const pq_b = try self.device.buffer(self.post_quant_b.len * 4, mtl.ResourceOptions.shared);
         @memcpy(pq_b.slice(f32, self.post_quant_b.len), self.post_quant_b);
         const pq_out = try self.device.buffer(voxels * 24 * 4, mtl.ResourceOptions.shared);
-        e.setPipeline(self.p[5]);
+        e.setPipeline(self.p[4]);
         e.setBuffer(pq_in, 0, 0);
         e.setBuffer(pq_w, 0, 1);
         e.setBuffer(pq_b, 0, 2);
@@ -415,6 +415,22 @@ pub const Decoder = struct {
         e.dispatchThreads(mtl.Size.of(dim, voxels, 1), mtl.Size.of(64, 1, 1));
         e.end();
         cb.commit(); cb.wait();
+        if (getenv("DUMP_PQ") != null and depth == 7) {
+            const pival = pq_in.slice(f32, voxels * 24);
+            std.debug.print("PQIN host[0]={d:.4} [1]={d:.4} lat[0]={d:.4}", .{ pival[0], pival[1], latents[0] });
+            const pp3 = try std.fmt.allocPrintSentinel(gpa, "zig-pqin.f32", .{}, 0);
+            defer gpa.free(pp3);
+            const fpq3 = fopen(pp3, "wb") orelse return error.CannotWrite;
+            _ = fwrite(pq_in.slice(f32, voxels * 24).ptr, 4, voxels * 24, fpq3);
+            _ = fclose(fpq3);
+        }
+        if (getenv("DUMP_PQ") != null and depth == 7) {
+            const pp2 = try std.fmt.allocPrintSentinel(gpa, "zig-pq.f32", .{}, 0);
+            defer gpa.free(pp2);
+            const fpq = fopen(pp2, "wb") orelse return error.CannotWrite;
+            _ = fwrite(pq_out.slice(f32, voxels * 24).ptr, 4, voxels * 24, fpq);
+            _ = fclose(fpq);
+        }
 
         const tokens_host = try gpa.alloc(f32, voxels * dim);
         @memcpy(tokens_host, tokens.slice(f32, voxels * dim));

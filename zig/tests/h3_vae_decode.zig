@@ -110,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     }
+    std.debug.print("MEAN24[0]={d:.4} STD24[0]={d:.4} denorm[0]={d:.4} latents[0]={d:.4}", .{ mean24[0], std24[0], denorm[0], latents[0] });
     const pixels = try decoder.frames(gpa, denorm, depth, height, width);
     std.debug.print("frames done", .{});
     defer gpa.free(pixels);
