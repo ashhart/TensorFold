@@ -1,4 +1,4 @@
-//! Inkling 2's CUDA kernels under the contract: attention, glue, drafter, experts and tower, each with controls.
+//! Inkling 2's CUDA kernels under the contract: attention, glue, experts and tower, each with controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -9,6 +9,7 @@ pub const Set = struct {
     gpa: std.mem.Allocator,
     attn: @import("contract_inkling2_attn.zig").Set = .{},
     ops: @import("contract_inkling2_ops.zig").Set = .{},
+    experts: @import("contract_inkling2_experts.zig").Set = .{},
 
     /// The set, its kernels appended to `list`.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -18,10 +19,14 @@ pub const Set = struct {
         try set.attn.init(gpu, s, a, list);
         errdefer set.attn.deinit();
         try set.ops.init(gpu, s, a, list);
+        errdefer set.ops.deinit();
+        try set.experts.init(gpu, s, a, list);
+        errdefer set.experts.deinit();
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.experts.deinit();
         set.ops.deinit();
         set.attn.deinit();
         set.gpa.destroy(set);
