@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview on two GB10s: `--tp 2` on CUDA serves it from the measured 5.0 bpw ExLlamaV3 pack (`ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw`), each rank holding half of every projection, the full layers running to a 1,048,576-token context, and rank 0 serving with kept prompt states while rank 1 follows; another pack, a GPU other than sm_121 or any world but two ranks is refused by name, and every `/v1/models` entry's capabilities gain `reasoning_optional` (#2522). Thanks to @ajensenwaud.
+
 - TensorFold Web: the packaged stand-in reports 1.3.2, matching the engine version, so the Web checks pass on main again (#4346).
 
 - Flash Next on XPU: prompt and decode passes run on Xe2 DPAS tile kernels with prompt chunks sized to the solo stream and MTP chains that stop when draft confidence falls, keeping replies bit-exact across chunk sizes (#3603, refs #3583). Thanks to @supernovae.
