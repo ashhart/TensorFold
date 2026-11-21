@@ -1,9 +1,9 @@
 //! Inkling 2's reply blocks (inkling_reply.zig) as reasoning, content and calls, in whole and streamed replies.
 const std = @import("std");
 const json = @import("json");
-const reply_text = @import("reply_text.zig");
 const split = @import("inkling_reply.zig");
 const chat = @import("chat.zig");
+const Result = @import("kimi_reply.zig").Result;
 const Value = json.Value;
 
 /// Inkling 2's replies end their sampling with this marker; a tokenizer that holds it speaks the block format.
@@ -12,7 +12,7 @@ pub fn is(text: anytype) bool {
 }
 
 /// The reply so far (ids past the prompt, specials spelled out) split as vLLM's Inkling parser splits it.
-pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Error!@import("kimi_reply.zig").Result {
+pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Error!Result {
     const raw = try g.srv.text.decode(g.a, ids);
     if (!g.chat) return .{ .content = g.stops.visible(raw, !finished), .reasoning = "", .calls = null, .reasoning_tokens = 0 };
     const r = try split.split(g.a, raw, finished);
@@ -38,9 +38,14 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) std.mem.Allocator.Erro
     };
 }
 
-/// A streamed reply's new reasoning and content; calls wait for the finished split.
+/// A streamed reply's new reasoning and content, split only past the text the last step read; calls wait.
 pub fn stream(g: anytype, sink: chat.Sink) chat.Failure!void {
-    const ids = reply_text.stripTrailing(g.collected.items, g.srv.eos);
-    const r = try read(g, ids, false);
-    try @import("chat_kimi.zig").emitDeltas(g, sink, r, false);
+    const all = g.visible.text.items; // the reply's decode so far, append-only (chat_generation.zig decodes it)
+    if (!g.chat) return @import("chat_kimi.zig").emitDeltas(g, sink, .{ .content = g.stops.visible(all, true), .reasoning = "", .calls = null, .reasoning_tokens = 0 }, true);
+    if (g.inkling == null) g.inkling = .{ .a = g.a };
+    const s = &g.inkling.?;
+    try s.feed(all, true);
+    const r = try s.result(all, false);
+    const shown: Result = .{ .content = g.stops.visible(r.content, true), .reasoning = g.stops.visible(r.reasoning, true), .calls = null, .reasoning_tokens = 0 };
+    try @import("chat_kimi.zig").emitDeltas(g, sink, shown, s.fed == all.len);
 }

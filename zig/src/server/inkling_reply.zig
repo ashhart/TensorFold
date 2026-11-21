@@ -48,43 +48,95 @@ fn next(s: State, m: Marker) ?State {
 
 /// Split one reply (specials spelled out) into `a`; unfinished, it holds back an open header that may name a tool.
 pub fn split(a: std.mem.Allocator, reply: []const u8, finished: bool) !Reply {
-    var reasoning: std.ArrayList(u8) = .empty;
-    var content: std.ArrayList(u8) = .empty;
-    var header: std.ArrayList(u8) = .empty;
-    var payload: std.ArrayList(u8) = .empty;
-    var calls: std.ArrayList(Call) = .empty;
-    var state: State = .header;
-    var i: usize = 0;
-    while (i < reply.len) {
-        if (reply[i] == '<') if (markerAt(reply[i..])) |hit| if (next(state, hit.m)) |to| {
-            i += hit.len;
-            if (state == .tool and to == .content) try calls.append(a, try call(a, payload.items));
-            if (state == .header and (hit.m == .end or hit.m == .end_sampling)) try content.appendSlice(a, header.items);
-            if (to == .header or state == .header) header.clearRetainingCapacity();
-            if (to == .tool) payload.clearRetainingCapacity();
-            state = to;
-            continue;
-        };
-        const stop = std.mem.indexOfScalarPos(u8, reply, i + 1, '<') orelse reply.len;
-        const piece = reply[i..stop];
-        switch (state) {
-            .header => try header.appendSlice(a, piece),
-            .content => try content.appendSlice(a, piece),
-            .reasoning => try reasoning.appendSlice(a, piece),
-            .tool => try payload.appendSlice(a, piece),
+    var s: Stream = .{ .a = a };
+    try s.feed(reply, false);
+    return s.result(reply, finished);
+}
+
+/// The split kept across a stream's steps: each step reads only the text past `fed`.
+pub const Stream = struct {
+    a: std.mem.Allocator,
+    state: State = .header,
+    reasoning: std.ArrayList(u8) = .empty,
+    content: std.ArrayList(u8) = .empty,
+    header: std.ArrayList(u8) = .empty,
+    payload: std.ArrayList(u8) = .empty,
+    calls: std.ArrayList(Call) = .empty,
+    fed: usize = 0,
+    cut: ?[]const u8 = null, // the open tool block's name, once its payload holds it whole
+
+    /// Read `reply`, which only grows, past `fed`; `hold` keeps back an end that may still become a marker.
+    pub fn feed(s: *Stream, reply: []const u8, hold: bool) !void {
+        const a = s.a;
+        var i = s.fed;
+        while (i < reply.len) {
+            if (reply[i] == '<') {
+                if (markerAt(reply[i..])) |hit| if (next(s.state, hit.m)) |to| {
+                    i += hit.len;
+                    if (s.state == .tool and to == .content) try s.calls.append(a, try call(a, s.payload.items));
+                    if (s.state == .header and (hit.m == .end or hit.m == .end_sampling)) try s.content.appendSlice(a, s.header.items);
+                    if (to == .header or s.state == .header) s.header.clearRetainingCapacity();
+                    if (to == .tool) s.payload.clearRetainingCapacity();
+                    if (to == .tool) s.cut = null;
+                    s.state = to;
+                    continue;
+                };
+                if (hold and opens(reply[i..])) break;
+            }
+            const stop = std.mem.indexOfScalarPos(u8, reply, i + 1, '<') orelse reply.len;
+            try s.open().appendSlice(a, reply[i..stop]);
+            i = stop;
         }
-        i = stop;
+        s.fed = i;
     }
-    var out: Reply = .{
-        .reasoning = std.mem.trimEnd(u8, reasoning.items, " \t\r\n"),
-        .content = content.items,
-        .calls = calls.items,
-    };
-    if (state == .tool) out.cut = try name(a, payload.items);
-    if (finished and state == .header and header.items.len > 0) out.content = try std.mem.concat(a, u8, &.{ content.items, header.items });
-    const blank = std.mem.trim(u8, out.content, " \t\r\n").len == 0;
-    if (blank and (out.calls.len > 0 or out.cut != null)) out.content = "";
-    return out;
+
+    fn open(s: *Stream) *std.ArrayList(u8) {
+        return switch (s.state) {
+            .header => &s.header,
+            .content => &s.content,
+            .reasoning => &s.reasoning,
+            .tool => &s.payload,
+        };
+    }
+
+    /// The split of `reply` so far, a held end read as text in the open block, as `split` reads it.
+    pub fn result(s: *Stream, reply: []const u8, finished: bool) !Reply {
+        const a = s.a;
+        const tail = reply[s.fed..];
+        var reasoning = s.reasoning.items;
+        var content = s.content.items;
+        var header = s.header.items;
+        var payload = s.payload.items;
+        if (tail.len > 0) {
+            const held = switch (s.state) {
+                .header => &header,
+                .content => &content,
+                .reasoning => &reasoning,
+                .tool => &payload,
+            };
+            held.* = try std.mem.concat(a, u8, &.{ held.*, tail });
+        }
+        if (s.state == .tool and s.cut == null) s.cut = try name(a, payload);
+        var out: Reply = .{
+            .reasoning = std.mem.trimEnd(u8, reasoning, " \t\r\n"),
+            .content = content,
+            .calls = s.calls.items,
+        };
+        if (s.state == .tool) out.cut = s.cut;
+        if (finished and s.state == .header and header.len > 0) out.content = try std.mem.concat(a, u8, &.{ content, header });
+        const blank = std.mem.trim(u8, out.content, " \t\r\n").len == 0;
+        if (blank and (out.calls.len > 0 or out.cut != null)) out.content = "";
+        return out;
+    }
+};
+
+/// Whether `s` (from a `<`) is a marker's start cut short, so later text may complete it.
+fn opens(s: []const u8) bool {
+    inline for (comptime std.enums.values(Marker)) |m| {
+        const text = @field(markers, @tagName(m));
+        if (s.len < text.len and std.mem.startsWith(u8, text, s)) return true;
+    }
+    return false;
 }
 
 /// How many of `ids` lie inside thinking blocks, reading the markers' token ids as `split` reads their text.
@@ -211,4 +263,23 @@ test "inkling2 reply: thinking tokens are the ids inside thinking blocks" {
     };
     try t.expectEqual(@as(usize, 3), thinkingTokens(Ids{}, &.{ 1, 2, 70, 71, 72, 3, 1, 80 }));
     try t.expectEqual(@as(usize, 0), thinkingTokens(Ids{}, &.{ 1, 80, 81 }));
+}
+
+test "inkling2 reply: a stream fed a byte at a time splits each prefix as the whole split does" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = "<|message_model|><|content_thinking|>a <|content_text|>b<|end_message|><|message_model|><|content_text|>" ++
+        "x <|content_te y<|end_message|><|message_model|>f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"k\":1}}" ++
+        "<|end_message|><|message_model|>g<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{\"q\":\"<|\"";
+    var s: Stream = .{ .a = a };
+    for (1..reply.len + 1) |n| {
+        try s.feed(reply[0..n], true);
+        const got = try s.result(reply[0..n], false);
+        const want = try split(a, reply[0..n], false);
+        try t.expectEqualStrings(want.reasoning, got.reasoning);
+        try t.expectEqualStrings(want.content, got.content);
+        try t.expectEqual(want.calls.len, got.calls.len);
+        try t.expectEqualStrings(want.cut orelse "-", got.cut orelse "-");
+    }
 }
