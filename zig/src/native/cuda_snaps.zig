@@ -229,7 +229,7 @@ test "request starts: one family's switch turns only that family on; Qwen starts
             const opted = switched and on < names.len and std.mem.eql(u8, F.request_starts_switch, names[on]);
             const default_on = switched and @hasDecl(F, "request_starts_default_on") and F.request_starts_default_on;
             const invariant = @hasDecl(F, "snap_cut_invariant") and F.snap_cut_invariant;
-            const on_now = opted or default_on or invariant; // every non-opted arm leaves the switch unset, so default-on families run in each arm
+            const on_now = opted or default_on or invariant; // unset arms leave default-on and invariant families on
             const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else if (@hasDecl(F, "prompt_rows")) F.prompt_rows else 0;
             try std.testing.expect(!switched or grid > 0);
             try std.testing.expectEqual(if (on_now) grid else 0, requestStep(F));
