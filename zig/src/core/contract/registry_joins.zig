@@ -13,6 +13,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("modelopt_lane_records.zig").cuda ++
     @import("nvfp4_fact_records.zig").cuda ++
     @import("nvfp4_experts32_records.zig").cuda ++
+    @import("stored_experts_records.zig").cuda ++
     @import("experts_bf16_records.zig").cuda ++
     @import("lane_half_records.zig").cuda ++
     @import("pocket_records.zig").cuda ++
@@ -34,6 +35,7 @@ pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("qwen_served_records.zig").cuda_132 ++
     @import("flashnext_tile_records.zig").cuda_132 ++
     @import("nvfp4_fact_records.zig").cuda_132 ++
+    @import("stored_experts_records.zig").cuda_132 ++
     @import("experts_bf16_records.zig").cuda_132 ++
     @import("pocket_records.zig").cuda_132 ++
     @import("minimax_cuda_records.zig").cuda_132 ++

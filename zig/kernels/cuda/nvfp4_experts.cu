@@ -165,7 +165,8 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, int
                                           const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                           const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
                                           const int* __restrict__ items, const int* __restrict__ members,
-                                          void* __restrict__ out, int N, float limit, int skip) {
+                                          void* __restrict__ out, int N, float limit, int skip,
+                                          float limit2 = 0.f) {
   TF_RING_STORAGE Ring<M, WARPS, uint4> ring;
   const int it = unit / NB, cb = unit - it * NB;
   const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
@@ -192,7 +193,7 @@ __device__ __forceinline__ void unit_full(int unit, int lane, int gq, int t, int
 #pragma unroll
         for (int q = 0; q < 4; ++q) acc[m][0][j][q] *= g;
     }
-    epilogue<EPI, M, 1>(acc, 0, out, N, cb * COLS + 2 * t, pr0, pr1, v0, v1, limit);
+    epilogue<EPI, M, 1>(acc, 0, out, N, cb * COLS + 2 * t, pr0, pr1, v0, v1, limit, limit2);
   }
 }
 
@@ -362,7 +363,7 @@ template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false>
 __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                              const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                              int NB, const int* __restrict__ members, void* __restrict__ out, int N,
-                                             float limit, int cbt, int e, int first, int cnt) {
+                                             float limit, int cbt, int e, int first, int cnt, float limit2 = 0.f) {
   using P = Prompt4<M, RT, WM, WN>;
   constexpr int STAGES = P::STAGES;
   extern __shared__ uint4 sm[];
@@ -494,7 +495,7 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
       const int m0 = base + 16 * r + gq, m1 = m0 + 8;
       const bool v0 = m0 < cnt, v1 = m1 < cnt;
       const int p0 = v0 ? __ldg(members + first + m0) : 0, p1 = v1 ? __ldg(members + first + m1) : 0;
-      epilogue<EPI, M, TA>(acc, r, out, N, cb * COLS + 2 * t, p0, p1, v0, v1, limit);
+      epilogue<EPI, M, TA>(acc, r, out, N, cb * COLS + 2 * t, p0, p1, v0, v1, limit, limit2);
     }
   }
 }
@@ -504,7 +505,7 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                             int NB, const int* __restrict__ items, const int* __restrict__ counts,
                                             const int* __restrict__ members, void* __restrict__ out, int N,
-                                            float limit, int skip) {
+                                            float limit, int skip, float limit2 = 0.f) {
   static_assert(RT == 4, "the dispatch below spells out 0 .. 4 row tiles");
   const int nbt = (NB + WN - 1) / WN, it = blockIdx.x / nbt, cbt = blockIdx.x - it * nbt;
   if (it >= __ldg(counts)) return;
@@ -512,7 +513,8 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
   if (e == skip) return;  // an expert the family computes itself, left alone as the decode form does
   const int nt = max(0, min(RT, (cnt - 16 * RT * ((threadIdx.x >> 5) / WN) + 15) >> 4));
 #define TF_TILES(NT) \
-  prompt_tiles<M, EPI, RT, WM, WN, NT, FACT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
+  prompt_tiles<M, EPI, RT, WM, WN, NT, FACT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, \
+                                             first, cnt, limit2)
   switch (nt) {
     case 4: TF_TILES(4); break;
     case 3: TF_TILES(3); break;
@@ -568,3 +570,26 @@ TF_NVFP4_PROMPT(tf_nvfp4_prompt_down, 1, 3, 8)
   }
 TF_NVFP4_FACT(tf_nvfp4_fact_swiglu, 2, 2, 4)
 TF_NVFP4_FACT(tf_nvfp4_fact_down_f32, 1, 0, 8)
+
+// Soft-capped SwiGLU gate-up (Inkling 2 Mini): the decode units of nvfp4_expert_kernel<2, 2, 4> and the prompt tiles of
+// tf_nvfp4_prompt_swiglu, with experts.cuh's epilogue 4 over the gate's and the up's caps.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_nvfp4_softcap(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
+                     const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
+                     const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
+                     float gate_cap, float up_cap, int skip) {
+  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
+  const int units = __ldg(counts) * NB;
+  for (int unit = blockIdx.x * 4 + (threadIdx.x >> 5); unit < units; unit += gridDim.x * 4)
+    tf_nvfp4_experts::unit_full<2, 4, 4>(unit, lane, gq, t, threadIdx.x >> 5, X, x_stride, slots, W, scale, KG, NB,
+                                         items, members, out, N, gate_cap, skip, up_cap);
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+    tf_nvfp4_prompt_softcap(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
+                            const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
+                            const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out,
+                            int N, float gate_cap, float up_cap, int skip) {
+  tf_nvfp4_experts::prompt_body<2, 4, 4, 1, 4>(X, x_stride, slots, W, scale, KG, NB, items, counts, members, out, N,
+                                               gate_cap, skip, up_cap);
+}
