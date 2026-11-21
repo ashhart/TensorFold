@@ -1,5 +1,4 @@
 //! GLM-5.3-Flash's per-rank CUDA memory: forward Buffers (shared by sequences) and a sequence's State, an arena each.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const exl3 = @import("cuda_exl3.zig");
@@ -15,7 +14,6 @@ const pair_layout = @import("cuda_pair_layout.zig");
 const glue = @import("cuda_glue.zig");
 const mlp = @import("cuda_mlp.zig");
 const kda_block = @import("cuda_kda_block.zig");
-
 /// A prompt chunk's rows (decode.PREFILL_ROWS).
 pub const prefill_rows = 2048;
 /// A decode window's rows (Engine's max_rows).
@@ -28,12 +26,10 @@ pub const dense_reach = 2560;
 pub const index_ring = 2 * prefill_rows;
 /// A solo prompt pass's rows (TF_GLM_CHUNK_SOLO): a whole ring, which a rebase at a grid point leaves it.
 pub const solo_rows = index_ring;
-
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
     buf: cuda.DeviceBuffer,
     used: usize = 0,
-
     fn take(a: *Arena, bytes: usize) u64 {
         const at = std.mem.alignForward(usize, a.used, 256);
         a.used = at + bytes;
@@ -41,7 +37,6 @@ const Arena = struct {
         return a.buf.ptr + at;
     }
 };
-
 /// Allocates `sizes` (bytes) in one zeroed device buffer and hands out each field's address in order.
 fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
     var total: usize = 0;
@@ -52,13 +47,11 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
     for (sizes, out) |n, *p| p.* = a.take(n);
     return a;
 }
-
 /// Rows a KV page holds: one dense latent chunk (latent.chunk), and the keys of its 128 pools.
 pub const page_rows = @import("cuda_cache_shape.zig").page_rows;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
 pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
-
 /// The DSA (MLA) layers among the loaded ones; the MTP layer's caches come after theirs.
 pub fn mlaLayers(w: *const weights.Weights) usize {
     var nd: usize = 0;
