@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Core: exact runtime LoRA overlays (adapter config, target and identity checks); not yet wired to a flag (#4384).
+
 - Hardening: cluster launch, session restore, the app's shell policy, Hub pulls, Web pairing and media downloads fail closed on malformed input (#4381).
 
 
