@@ -53,7 +53,7 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_dsp_mix(const uint16_t
     }
 }
 
-// resid (bf16) += the ranks' fp32 partials in rank order (nparts 0: none); out = RMSNorm of the unrounded sum * w.
+// Unlike core's add-norms: resid stays bf16 (+= fp32 partials in rank order); out = RMSNorm of the unrounded sum * w.
 extern "C" __global__ void __launch_bounds__(512) tf_ink2_dsp_addnorm(uint16_t* __restrict__ resid, const float* __restrict__ parts,
                                                                       int nparts, long long part_stride, const uint16_t* __restrict__ w,
                                                                       uint16_t* __restrict__ out, int C, float eps) {
@@ -226,7 +226,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_ink2_dsp_merge(const float*
     out[rh * kD + d] = tobf(acc / l);
 }
 
-// silu(gate) * up in fp32 (IEEE exp and division), rounded once: gu bf16 [rows][2I] (gates, then ups).
+// silu(gate) * up in fp32, rounded once: torch's g / (1 + expf(-g)), not core's tf_exp. gu bf16 [rows][2I].
 extern "C" __global__ void __launch_bounds__(256) tf_ink2_dsp_silu(const uint16_t* __restrict__ gu, uint16_t* __restrict__ out, int I) {
     using namespace ink2d;
     const size_t row = blockIdx.y;
