@@ -57,7 +57,7 @@ __device__ __forceinline__ void ud_route(const bf16* RQ, const float* KB, const 
     own += cand ? 1.0f : 0.0f;
   }
   // no candidate on the query's page among the remote blocks: every remote block is one
-  if (block_sum(own, part) == 0.0f) {
+  if (tf_common::block_sum_tree(own, part, blockDim.x >> 5) == 0.0f) {
     for (int c = t; c < nrem; c += 256) score[c] = ud_score(q, KB + (size_t)c * UD_RD);
   }
   __syncthreads();
@@ -223,7 +223,7 @@ __device__ __forceinline__ void ud_attend(const bf16* Q, const bf16* K, const bf
     sc[i] = e;
     mass += e;
   }
-  mass = block_sum(mass, part);
+  mass = tf_common::block_sum_tree(mass, part, blockDim.x >> 5);
   for (int i = t; i < total; i += NT) sc[i] = sc[i] / mass;
   __syncthreads();
   // P x V: warp w over every 8th key, then the warps' sums added in warp order
