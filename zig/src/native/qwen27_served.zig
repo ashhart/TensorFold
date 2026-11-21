@@ -381,6 +381,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     residency.end();
     errdefer q.residency.drop(h); // decided before cache sizing and the worker starts
+    h.back.sn_features = h.sn_mtp != null; // before a wrapper takes the backend's table
     if ((h.sn_mtp != null or !o.drafts) and copies_value == null) h.back.copies = false;
     if (h.sn_mtp) |m| {
         try m.warmup(io);
