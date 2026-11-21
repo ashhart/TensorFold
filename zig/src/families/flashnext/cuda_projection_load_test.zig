@@ -430,7 +430,7 @@ test "block FP8: a projection's FP8 parts and its BF16 tail are the stored bytes
     defer freeBlocky(a, &fake);
     try std.testing.expectEqual(@as(usize, 2), source.block8Parts(&fake, "m", &.{ ".q", ".k", ".idx" }));
     try std.testing.expectEqual(@as(usize, 0), source.block8Parts(&fake, "m", &.{ ".idx", ".q" }));
-    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" });
+    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }, null);
     defer head.deinit(a);
     try std.testing.expectEqual(@as(usize, 384), head.n);
     try std.testing.expectEqual(block_k, head.k);
@@ -540,13 +540,14 @@ test "block FP8: the loader refuses the shapes and the planes it cannot splice, 
     const a = std.testing.allocator;
     var fake = try blocky(a);
     defer freeBlocky(a, &fake);
+    var why: core.modelopt.Why = .{};
     for ([_]Bad{ .weight_dtype, .rows, .cols, .scale_shape }) |bad| {
         fake.bad = bad;
-        try std.testing.expectError(error.UnexpectedTensor, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }));
+        try std.testing.expectError(error.UnexpectedTensor, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }, &why));
     }
     fake.bad = .scale_nan;
     fake.parts[0].inv[0] = std.math.nan(f32);
-    try std.testing.expectError(error.UnsupportedQuantization, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }));
+    try std.testing.expectError(error.UnsupportedQuantization, source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }, &why));
     fake.bad = .none;
     fake.parts[0].inv[0] = 1.0;
     {
@@ -576,7 +577,7 @@ test "block FP8: the loader refuses the shapes and the planes it cannot splice, 
 fn blockTrial(a: std.mem.Allocator) !void {
     var fake = try blocky(a);
     defer freeBlocky(a, &fake);
-    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" });
+    var head = try source.readBlock8(a, &fake, "m", &.{ ".q", ".k" }, null);
     defer head.deinit(a);
     const tail = try source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows);
     a.free(tail);

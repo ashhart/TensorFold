@@ -99,7 +99,7 @@ pub fn block8Parts(store: anytype, prefix: []const u8, names: []const []const u8
 }
 
 /// A projection's leading block-FP8 parts: e4m3 codes [n, k] and fp32 scales [n / 128, k / 128], stacked in order.
-pub fn readBlock8(a: std.mem.Allocator, store: anytype, prefix: []const u8, names: []const []const u8) !Block8 {
+pub fn readBlock8(a: std.mem.Allocator, store: anytype, prefix: []const u8, names: []const []const u8, why: ?*core.modelopt.Why) !Block8 {
     var buf: [512]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -119,7 +119,7 @@ pub fn readBlock8(a: std.mem.Allocator, store: anytype, prefix: []const u8, name
     for (names) |name| {
         defer store.release();
         const pn = (try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }))).dim(0);
-        const h = try core.quant.fp8.read(store, try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, name }), pn, k, .f32, null);
+        const h = try core.quant.fp8.read(store, try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, name }), pn, k, .f32, why);
         if (h.weight.bytes.len != pn * k) return error.UnexpectedTensor;
         @memcpy(codes[row * k ..][0 .. pn * k], h.weight.bytes);
         try core.quant.fp8.widen(h.scale_inv, sinv[(row / 128) * kb ..][0 .. (pn / 128) * kb], true);
@@ -151,7 +151,7 @@ pub fn readTail(a: std.mem.Allocator, store: anytype, prefix: []const u8, names:
 pub fn loadBlock8(a: std.mem.Allocator, d: *cuda.Driver, store: anytype, prefix: []const u8, names: []const []const u8, n: usize, k: usize) !wt.Q4 {
     const heads = block8Parts(store, prefix, names);
     if (heads == 0) return error.UnexpectedTensor;
-    var head = try readBlock8(a, store, prefix, names[0..heads]);
+    var head = try readBlock8(a, store, prefix, names[0..heads], null);
     defer head.deinit(a);
     if (head.k != k or head.n > n) return error.UnexpectedTensor;
     const nt = n - head.n;
