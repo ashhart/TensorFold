@@ -17,39 +17,36 @@ const LimitedSink = struct {
 };
 
 test "chunked writes respect the cap and preserve order" {
-    const cap = cw.max_write_bytes; // requests never exceed the real cap
+    const cap = 64; // injected cap: the test never allocates the production 256 MiB
     var sink = LimitedSink{ .buf = .empty, .cap = cap };
     defer sink.buf.deinit(testing.allocator);
 
-    const total = cap + 1;
-    const data = try testing.allocator.alloc(u8, total);
-    defer testing.allocator.free(data);
-    for (data, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
+    var data: [cap + 1]u8 = undefined;
+    for (&data, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
 
-    try cw.writeChunked(&sink, data);
-    try testing.expectEqual(total, sink.buf.items.len);
-    try testing.expect(std.mem.eql(u8, sink.buf.items, data));
+    try cw.writeChunked(&sink, &data, cap);
+    try testing.expectEqual(data.len, sink.buf.items.len);
+    try testing.expect(std.mem.eql(u8, sink.buf.items, &data));
 }
 
-test "old single-write path fails the same sink when over the limit" {
-    const cap = 64;
-    var sink = LimitedSink{ .buf = .empty, .cap = cap };
+test "a sink-refused request fails through the writer without flattening" {
+    var sink = LimitedSink{ .buf = .empty, .cap = 16 };
     defer sink.buf.deinit(testing.allocator);
 
-    var big: [cap + 1]u8 = undefined;
+    var big: [33]u8 = undefined;
     @memset(&big, 1);
-    try testing.expectError(error.WriteTooLarge, sink.writeAll(&big));
+    try testing.expectError(error.WriteTooLarge, cw.writeChunked(&sink, &big, 32));
 }
 
 test "empty and exact-cap buffers pass through" {
     var sink = LimitedSink{ .buf = .empty, .cap = 16 };
     defer sink.buf.deinit(testing.allocator);
 
-    try cw.writeChunked(&sink, "");
+    try cw.writeChunked(&sink, "", 16);
     try testing.expectEqual(@as(usize, 0), sink.buf.items.len);
 
     const exact = [_]u8{ 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
-    try cw.writeChunked(&sink, &exact);
+    try cw.writeChunked(&sink, &exact, 16);
     try testing.expect(std.mem.eql(u8, sink.buf.items, &exact));
 }
 
