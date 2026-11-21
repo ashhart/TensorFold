@@ -44,6 +44,13 @@ Memory, estimated from the config and not measured:
 - The sliding layers are visited 40 times; their rings hold about 160 MiB a stream.
 - So one GPU or one Mac holds the model, and no slice below needs more than one rank.
 
+## Upstream references
+
+- The loop's reference code is not released: it is in Transformers' open pull request huggingface/transformers#51050 (head `6173a2f6` on 2026-11-20), on top of the released `inkling2` model.
+- That pull request dequantizes the NVFP4 and MXFP8 experts on load and marks this as temporary. So it runs the stored experts with float activations, not with the activation quantization `hf_quant_config.json` asks for. Decision 2 is whether that is the reference.
+- llama.cpp merged the model on 2026-11-20 (ggml-org/llama.cpp#32694), so it is one candidate for the standard server on both backends. vLLM is another on NVIDIA.
+- No speed for a DGX Spark or for Apple silicon was found published; the receipt's baseline has to be measured on the claimant's machine.
+
 ## Slices
 
 Each slice is one pull request with its own tests. "Needs" names what must land or be decided first.
