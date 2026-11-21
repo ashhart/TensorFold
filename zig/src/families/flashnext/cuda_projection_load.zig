@@ -327,4 +327,5 @@ pub fn loadStitchedCut(a: std.mem.Allocator, d: *const cuda.Driver, store: anyty
 
 test {
     _ = @import("cuda_projection_load_test.zig");
+    _ = @import("cuda_projection_tail_test.zig");
 }

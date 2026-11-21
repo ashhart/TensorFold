@@ -95,8 +95,8 @@ pub fn fp8gPlanes(gpa: std.mem.Allocator, codes: []const u8, scale_inv: []const 
     const kb = k / 128;
     if (nh == 0 or k % 128 != 0 or codes.len != try std.math.mul(usize, nh, k) or scale_inv.len != ((nh + 127) / 128) * kb)
         return error.UnexpectedTensor;
-    // one scale a 128-row block: a tail row may not share its block with an FP8 row, and a tail is whole blocks
-    if (nt != 0 and (nh % 128 != 0 or nt % 128 != 0)) return error.UnexpectedTensor;
+    // one scale a 128-row block: a tail row may not share its block with an FP8 row, its own rows may be partial
+    if (nt != 0 and nh % 128 != 0) return error.UnexpectedTensor;
     const all = try gpa.alloc(u8, try std.math.mul(usize, n, k));
     defer gpa.free(all);
     @memcpy(all[0 .. nh * k], codes);

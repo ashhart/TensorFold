@@ -441,9 +441,8 @@ test "block FP8: a projection's FP8 parts and its BF16 tail are the stored bytes
     const tail = try source.readTail(a, &fake, "m", &.{".idx"}, block_k, tail_rows);
     defer a.free(tail);
     try std.testing.expectEqualSlices(u8, fake.tail, tail);
-    // the served tail is whole 128-row blocks, or the plane builder above could not splice it
+    // the scratch holds the widest tail a block-FP8 projection carries: the attention indexer's own rows
     try std.testing.expectEqual(@as(usize, 640), @import("cuda_prompt_wt.zig").tail_n);
-    try std.testing.expectEqual(@as(usize, 0), @import("cuda_prompt_wt.zig").tail_n % 128);
     try std.testing.expect(@import("cuda_prompt_wt.zig").tail_n <= @import("cuda_prompt_wt.zig").proj_n);
 
     // the lane's planes: the packed codes and per-64-input scale tiles of those stored rows, then the tail's zeros
@@ -571,9 +570,8 @@ test "block FP8: the loader refuses the shapes and the planes it cannot splice, 
     try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv, 256, 192, 0));
     try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes[1..], fake.parts[0].inv, 256, block_k, 0));
     try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv[1..], 256, block_k, 0));
-    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes, fake.parts[0].inv, 256, block_k, 64));
-    // 192 rows cannot lead a 128-row tail: the last head block would carry the tail's rows
-    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes[0 .. 192 * block_k], fake.parts[0].inv[0..2], 192, block_k, 128));
+    // 192 rows cannot lead a 128-row tail: the last head block would carry the tail's rows, and its scales are whole
+    try std.testing.expectError(error.UnexpectedTensor, projection.fp8gPlanes(a, fake.parts[0].codes[0 .. 192 * block_k], fake.parts[0].inv[0..4], 192, block_k, 128));
 }
 
 fn blockTrial(a: std.mem.Allocator) !void {
