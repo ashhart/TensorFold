@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM2-MoE on Metal: prefill runs one chunk a call with decode rounds between chunks, so a new prompt no longer stalls other streams' replies; the backend declares `prefill_step` and `cancel_prefill` beside `reports_fill` (#3058).
+
 - Tools: `tools/comfyui_runtime` installs the offline ComfyUI MOSS sampler on a GB10: it checks the release CLI and the pinned native source, builds only `moss-image-cuda`, and switches to a new runtime only after integrity and run checks, keeping the active one when setup fails; a separate offline tool writes fused BF16 checkpoint metadata without changing tensor payloads (#2737).
 
 - LFM3 on Metal: a new prompt is filled a chunk at a time between other streams' decode rounds instead of stalling them for its whole prefill, and a pass can be cancelled keeping the state at the last chunk's end; chunks are cut exactly as before, so replies are unchanged (#3088, part of #3021).
