@@ -20,6 +20,7 @@ const Server = server_mod.Server;
 const Mailbox = @import("mailbox.zig").Mailbox;
 const StopHook = @import("stop_hook.zig").StopHook;
 const engine_refusal = @import("engine_refusal.zig");
+const witness_reply = @import("witness_reply.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -52,6 +53,8 @@ pub const Input = struct {
     image_bytes: images.ByteLimits = .{},
     /// With a known window, the reply may fill all the room the prompt leaves; max_tokens otherwise.
     fill_room: bool = false,
+    /// ``"execution_witness": true``: the reply binds the witness, its prompt, resolved request and tokens.
+    execution_witness: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -94,6 +97,7 @@ pub const Reply = struct {
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
     reasoning_recovered: bool = false, // ended at its end token in an unclosed think block: content repeats it
+    execution_witness: ?Value = null, // the reply binding, when the request asked (witness_reply.zig)
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -271,6 +275,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
+    const bound = if (input.execution_witness and srv.witness != null) try witness_reply.admit(srv, a, &request, stops_opt.strings) else null;
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => refusals.count(srv, .engine_busy, cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{})),
         error.Closed => refusals.count(srv, .engine_unavailable, cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{})),
@@ -291,10 +296,13 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         gen.loop(gone) catch |e| break :blk e;
         break :blk gen.finish(cx, prepared.prompt_len, received, prepared.thinking, prepared.reasoning, effort, prepared.sampled, prepared.drafts);
     };
-    if (result) |r| {
-        if (input.trace) |trace| trace.timed(r);
-    } else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
-    return result;
+    var reply = result catch |e| {
+        logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
+        return e;
+    };
+    if (input.trace) |trace| trace.timed(reply);
+    if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
+    return reply;
 }
 
 /// The ``ended`` line of a submitted reply that ends without one: its client left, or it failed.

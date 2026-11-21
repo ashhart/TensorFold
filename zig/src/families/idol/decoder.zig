@@ -66,6 +66,8 @@ pub const Decoder = struct {
     consts: Ref,
     levels_ready: bool = false,
 
+    pub const seconds = mtl.clock.seconds;
+
     /// The decoders of snapshot folder `dir`, with scratch for up to `max_anchors` anchors.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, max_anchors: usize) !*Decoder {
         if (!device.tensorUnits()) {

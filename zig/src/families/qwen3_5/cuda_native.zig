@@ -29,7 +29,8 @@ pub const vision = @import("cuda_vision.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const linked = slide.linked;
 pub const model_type = "qwen3_5";
-pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
+/// MLX's 4-bit tables, EXL3; ModelOpt's MIXED_PRECISION (nvidia/Qwen3.8-27B-NVFP4) and single-format NVFP4.
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3", "modelopt-mixed", "modelopt-nvfp4" };
 pub const default_context: i64 = 32768;
 /// A plain BF16 checkpoint's preflight counts its text tensors, not the tower and MTP in its shards.
 pub const textWeightBytes = @import("cuda_bf16_bytes.zig").textWeightBytes;

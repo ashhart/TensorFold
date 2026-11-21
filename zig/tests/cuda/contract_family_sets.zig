@@ -26,6 +26,7 @@ pub const Sets = struct {
     a: std.mem.Allocator,
     joint_schema: *@import("contract_joint_schema.zig").Set,
     idol: *@import("contract_idol.zig").Set,
+    idol_decoder: *@import("contract_idol_decoder.zig").Set,
     flashnext_exl3: *@import("contract_flashnext_exl3.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
@@ -72,6 +73,8 @@ pub const Sets = struct {
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
+        errdefer idol.deinit();
+        const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
         const flashnext_exl3 = try @import("contract_flashnext_exl3.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
@@ -92,10 +95,12 @@ pub const Sets = struct {
             .flashnext_exl3 = flashnext_exl3,
             .muse = muse,
             .a = a,
+            .idol_decoder = idol_decoder,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.idol_decoder.deinit();
         sets.flashnext_exl3.deinit();
         sets.idol.deinit();
         sets.joint_schema.deinit();
