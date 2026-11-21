@@ -161,6 +161,12 @@ pub const Level = struct {
     counts: []const u32,
 };
 
+pub fn root(gpa: std.mem.Allocator, points: usize) !Level {
+    const coords = try gpa.dupe([3]u32, &.{.{ 0, 0, 0 }});
+    errdefer gpa.free(coords);
+    return .{ .coords = coords, .counts = try gpa.dupe(u32, &.{@intCast(points)}) };
+}
+
 /// The 8 children of every parent, split by probs and draws, kept where they got points (parent-major, i + 2j + 4k).
 pub fn descend(gpa: std.mem.Allocator, parents: Level, probs: []const f32, level: u5, draws: *Draws, splits: ?[]u32) !Level {
     std.debug.assert(probs.len == parents.coords.len * P);
@@ -265,5 +271,11 @@ test "descend frees finalized coordinates when count finalization fails" {
     var d: Draws = .{ .native = std.Random.DefaultPrng.init(1) };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3, .resize_fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, descend(failing.allocator(), parents, &probs, 2, &d, null));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "root releases coordinates when counts allocation fails" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, root(failing.allocator(), 1));
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

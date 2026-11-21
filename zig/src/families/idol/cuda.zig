@@ -32,5 +32,6 @@ test {
     _ = config;
     _ = host;
     _ = @import("octree.zig");
+    _ = @import("decode_trace.zig");
     _ = reference;
 }
