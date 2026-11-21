@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: DFlash2 decoding skips inactive draft rows and their tap capture, and the tap mean writes into its ring in place, cutting sampling overhead without changing verified tokens (#4257). Thanks to @gilby.
+
 - Nemotron and LFM2 MoE on CUDA: the prompt cache keeps a state at each message start by default, so an agent's next request resumes from where its last message began instead of reading the conversation again, within the existing prompt-cache budget and slots (#3696, part of #3617).
 
 - DeepSeek-V4.1 on CUDA (`dsv41-cuda`, a source build): structured output runs on the lane core's token grammars with drafts on: `response_format`, the `guided_*` fields, `tool_choice: "required"` or a named function, and strict tools under `tool_choice: "auto"`; a grammar's stop token ends the reply with `finish_reason` `stop` even with `ignore_eos` (#3026, closes #1664, from #1665). Thanks to @nuk3s.
